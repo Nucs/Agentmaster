@@ -9,6 +9,28 @@
 
 namespace Agentmaster
 {
+    void SessionRegistry::_notify(const SessionInfo& snapshot, HookEvent cause)
+    {
+        std::vector<RegistryObserver> observers;
+        {
+            std::lock_guard guard{ _mtx };
+            observers = _observers;
+        }
+        for (auto& ob : observers)
+        {
+            if (ob)
+            {
+                try
+                {
+                    ob(snapshot, cause);
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+    }
+
     std::wstring SessionRegistry::Upsert(SessionInfo info)
     {
         auto id = info.id;
@@ -23,16 +45,7 @@ namespace Agentmaster
             _sessions[id] = std::move(info);
             snapshot = _sessions[id];
         }
-        if (_observer)
-        {
-            try
-            {
-                _observer(snapshot, HookEvent::Unknown);
-            }
-            catch (...)
-            {
-            }
-        }
+        _notify(snapshot, HookEvent::Unknown);
         return id;
     }
 
@@ -135,15 +148,9 @@ namespace Agentmaster
             triggerAdvance = (msg.event == HookEvent::Stop && next == SessionState::WaitingForInput);
         }
 
-        if (found && _observer)
+        if (found)
         {
-            try
-            {
-                _observer(snapshot, msg.event);
-            }
-            catch (...)
-            {
-            }
+            _notify(snapshot, msg.event);
         }
         if (triggerAdvance && _advance)
         {
@@ -170,23 +177,14 @@ namespace Agentmaster
             mutate(it->second);
             snapshot = it->second;
         }
-        if (_observer)
-        {
-            try
-            {
-                _observer(snapshot, HookEvent::Unknown);
-            }
-            catch (...)
-            {
-            }
-        }
+        _notify(snapshot, HookEvent::Unknown);
         return true;
     }
 
-    void SessionRegistry::SetObserver(RegistryObserver observer)
+    void SessionRegistry::AddObserver(RegistryObserver observer)
     {
         std::lock_guard guard{ _mtx };
-        _observer = std::move(observer);
+        _observers.push_back(std::move(observer));
     }
 
     void SessionRegistry::SetAdvanceHandler(AdvanceHandler handler)

@@ -137,7 +137,7 @@ static void TestRegistry()
     std::atomic<int> advanced{ 0 };
     std::wstring lastAdvancedId;
 
-    reg.SetObserver([&](const SessionInfo&, HookEvent) { observed.fetch_add(1); });
+    reg.AddObserver([&](const SessionInfo&, HookEvent) { observed.fetch_add(1); });
     reg.SetAdvanceHandler([&](const std::wstring& id) { advanced.fetch_add(1); lastAdvancedId = id; });
 
     reg.Upsert(MakeSession(L"s1"));

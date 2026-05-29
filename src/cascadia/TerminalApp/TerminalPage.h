@@ -46,6 +46,7 @@ namespace Agentmaster
 namespace winrt::TerminalApp::implementation
 {
     struct TerminalSettingsCache;
+    class AgentManagerContent; // Agentmaster: the Manager tab's content (IPaneContent)
 
     inline constexpr uint32_t DefaultRowsToScroll{ 3 };
     inline constexpr std::wstring_view TabletInputServiceKey{ L"TabletInputService" };
@@ -265,6 +266,9 @@ namespace winrt::TerminalApp::implementation
         // forward-declared in this header (HooksBridge's dtor joins its listener threads).
         std::shared_ptr<::Agentmaster::SessionRegistry> _sessionRegistry{ nullptr };
         std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
+        // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
+        // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
+        std::unordered_map<std::wstring, winrt::weak_ref<TerminalApp::Tab>> _claudeTabs;
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
@@ -347,6 +351,9 @@ namespace winrt::TerminalApp::implementation
         void _OpenAgentManagerTab(); // Agentmaster
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
+        void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
+        void _KillClaudeSession(winrt::hstring sessionId); // Agentmaster: close a session's tab (confirm)
+        void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 

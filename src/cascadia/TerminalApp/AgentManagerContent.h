@@ -1,19 +1,32 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Agentmaster: content for the pinned, leftmost "Agent Manager" tab.
-//
-// Implemented as an IPaneContent, exactly like ScratchpadContent / SettingsPaneContent,
-// so it plugs into Windows Terminal's pane/tab model with no IDL/projection changes.
-// The C1 "Linked Lenses" layout (Triage Board + Explorer Tree + Flight Plan) is built
-// inside GetRoot(); this scaffold renders a placeholder until M6.
-// See doc/agentmaster/IMPLEMENTATION.md.
+// Agentmaster: content for the pinned, leftmost "Agent Manager" tab — the C1 "Linked
+// Lenses" UI (DESIGN §9). Three regions over ONE shared model (the SessionRegistry):
+//   * Triage Board (top)        — sessions as cards in hook-driven state columns
+//   * Explorer Tree (bottom-left) — the M working directories -> their N sessions
+//   * Flight Plan (bottom-right) — the selected session's prompt queue + Autopilot
+// with bidirectional selection sync. Built imperatively (no IDL/XAML markup, like
+// ScratchpadContent). The views are snapshot-driven: on any registry change we rebuild
+// from SessionRegistry::Snapshot() on the UI thread.
 
 #pragma once
 #include "winrt/TerminalApp.h"
 #include "BasicPaneEvents.h"
+#include "AgentMaster/SessionModels.h"
+
+#include <winrt/Windows.System.h>
 
 #include <functional>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+namespace Agentmaster
+{
+    class SessionRegistry;
+}
 
 namespace winrt::TerminalApp::implementation
 {
@@ -22,16 +35,16 @@ namespace winrt::TerminalApp::implementation
     public:
         AgentManagerContent();
 
-        // Agentmaster: the page sets this so the Manager UI can launch a Claude session.
-        // Args: (workingDir, title); empty workingDir => the page picks a default.
-        void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler);
+        // Wiring from the page (called right after construction).
+        void SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry);
+        void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (workingDir, title)
+        void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
+        void SetKillHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> close tab
 
+        // IPaneContent
         winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
-
         void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings& settings);
-
         winrt::Windows::Foundation::Size MinimumSize();
-
         void Focus(winrt::Windows::UI::Xaml::FocusState reason = winrt::Windows::UI::Xaml::FocusState::Programmatic);
         void Close();
         winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(BuildStartupKind kind) const;
@@ -47,11 +60,48 @@ namespace winrt::TerminalApp::implementation
         // See BasicPaneEvents for most generic event definitions
 
     private:
-        void _AppendStatus(const winrt::hstring& line);
+        void _BuildLayout();
+        void _Refresh();
+        void _RebuildBoard(const std::vector<::Agentmaster::SessionInfo>& sessions);
+        void _RebuildTree(const std::vector<::Agentmaster::SessionInfo>& sessions);
+        void _RebuildPlan(const std::vector<::Agentmaster::SessionInfo>& sessions);
+
+        void _SelectSession(const std::wstring& id);
+        void _SetScope(const std::wstring& dir);
+        std::optional<::Agentmaster::SessionInfo> _Selected(const std::vector<::Agentmaster::SessionInfo>& sessions) const;
+
+        // Action-bar handlers (operate on _selectedId / _selectedPromptId).
+        void _OnLaunch();
+        void _OnAddPrompt();
+        void _OnSendNow();
+        void _OnMovePrompt(int delta);
+        void _OnDeletePrompt();
+        void _OnAutopilotChanged(int index);
+
+        // Build one session card for the Triage Board.
+        winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
+
+        std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
+        winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
+
+        std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
+        std::function<void(winrt::hstring)> _activateHandler;
+        std::function<void(winrt::hstring)> _killHandler;
+
+        std::wstring _selectedId;
+        std::wstring _scopeDir; // board filter: empty == all directories
+        std::wstring _selectedPromptId;
+        std::unordered_set<std::wstring> _collapsedDirs;
+        bool _suppressAutopilotEvent{ false };
 
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _boardHost{ nullptr }; // horizontal columns
+        winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _treeHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBlock _status{ nullptr };
-        std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
+        winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
     };
 }

@@ -671,13 +671,8 @@ namespace winrt::TerminalApp::implementation
         // Route keys the content didn't handle back to the page (as other content panes do).
         managerPane->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
 
-        // Agentmaster: let the Manager UI launch Claude sessions through the page.
-        managerPane->SetSpawnHandler([weakThis = get_weak()](winrt::hstring dir, winrt::hstring title) {
-            if (auto self = weakThis.get())
-            {
-                self->_SpawnClaudeSession(dir, title);
-            }
-        });
+        // Agentmaster: wire the Manager UI to the engine (registry + spawn/activate/kill).
+        _WireAgentManagerContent(managerPane);
 
         const auto resultPane = std::make_shared<Pane>(*managerPane);
         _managerTab = _CreateNewTabFromPane(resultPane, 0); // 0 == leftmost
@@ -705,7 +700,7 @@ namespace winrt::TerminalApp::implementation
         // Observer: record every state change to a log file (and the debugger). This is
         // M5's verification surface; the M6 Triage Board will render the same registry on
         // the UI thread. NOTE: this runs on a bridge thread, so it must touch no XAML.
-        _sessionRegistry->SetObserver([](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent ev) {
+        _sessionRegistry->AddObserver([](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent ev) {
             wchar_t line[600];
             ::swprintf(line,
                        600,
@@ -804,7 +799,12 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        _CreateNewTabFromPane(pane);
+        const auto tab = _CreateNewTabFromPane(pane);
+        if (tab)
+        {
+            // Map sessionId -> tab so the Manager can Activate (jump) / Kill it.
+            _claudeTabs[spec.sessionId] = winrt::make_weak(tab);
+        }
 
         // Register the session and bind its stdin injector (used by the Autopilot in M7).
         // Correctness Rule #3: the injector is bound to THIS session's id, not "the
@@ -823,6 +823,71 @@ namespace winrt::TerminalApp::implementation
 
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[spawn] " + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L" cmd=" + spec.commandline + L"\n");
+    }
+
+    // Agentmaster: wire a freshly-created Manager content to the engine. Idempotently
+    // ensures the engine exists, then hands the content the registry + the spawn / activate
+    // / kill callbacks (all routed back through the page on the UI thread).
+    void TerminalPage::_WireAgentManagerContent(const winrt::com_ptr<AgentManagerContent>& content)
+    {
+        if (!content)
+        {
+            return;
+        }
+        _InitAgentmasterEngine();
+        content->SetRegistry(_sessionRegistry);
+
+        const auto weakThis = get_weak();
+        content->SetSpawnHandler([weakThis](winrt::hstring dir, winrt::hstring title) {
+            if (auto self = weakThis.get())
+            {
+                self->_SpawnClaudeSession(dir, title);
+            }
+        });
+        content->SetActivateHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_ActivateClaudeSession(id);
+            }
+        });
+        content->SetKillHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_KillClaudeSession(id);
+            }
+        });
+    }
+
+    // Agentmaster: jump to (focus) a session's terminal tab. This is the Explorer Tree's
+    // "Activate" — it NEVER injects into the connection (Correctness Rule #2).
+    void TerminalPage::_ActivateClaudeSession(winrt::hstring sessionId)
+    {
+        const auto it = _claudeTabs.find(std::wstring{ sessionId });
+        if (it == _claudeTabs.end())
+        {
+            return;
+        }
+        if (const auto tab = it->second.get())
+        {
+            if (const auto& item = tab.TabViewItem())
+            {
+                _tabView.SelectedItem(item);
+            }
+        }
+    }
+
+    // Agentmaster: close a session's tab through the normal confirm flow.
+    void TerminalPage::_KillClaudeSession(winrt::hstring sessionId)
+    {
+        const auto it = _claudeTabs.find(std::wstring{ sessionId });
+        if (it == _claudeTabs.end())
+        {
+            return;
+        }
+        if (const auto tab = it->second.get())
+        {
+            _HandleCloseTabRequested(tab);
+        }
     }
 
     void TerminalPage::_OnFirstLayout(const IInspectable& /*sender*/, const IInspectable& /*eventArgs*/)
@@ -4025,12 +4090,7 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: content for the pinned, leftmost Manager tab (C1 "Linked Lenses").
             const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
             managerPane->GetRoot().KeyDown({ get_weak(), &TerminalPage::_KeyDownHandler });
-            managerPane->SetSpawnHandler([weakThis = get_weak()](winrt::hstring dir, winrt::hstring title) {
-                if (auto self = weakThis.get())
-                {
-                    self->_SpawnClaudeSession(dir, title);
-                }
-            });
+            _WireAgentManagerContent(managerPane);
             content = *managerPane;
         }
         else if (paneType == L"settings")

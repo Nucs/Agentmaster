@@ -61,8 +61,10 @@ namespace Agentmaster
         // delivered to the observer afterwards. Returns false if the id is unknown.
         bool Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
 
-        // Wiring (set once at startup).
-        void SetObserver(RegistryObserver observer);
+        // Wiring. Multiple observers may register (e.g. a logger, the Triage Board UI, the
+        // scheduler); each is invoked on every change, outside the lock. The advance handler
+        // is single (the Autopilot).
+        void AddObserver(RegistryObserver observer);
         void SetAdvanceHandler(AdvanceHandler handler);
 
         // Bind / clear a session's stdin injector.
@@ -75,13 +77,16 @@ namespace Agentmaster
         int64_t LastHumanInputUnixMs(const std::wstring& id) const;
 
     private:
+        // Snapshot the observer list under the lock, then invoke each outside it.
+        void _notify(const SessionInfo& snapshot, HookEvent cause);
+
         mutable std::mutex _mtx;
         // insertion-ordered storage so the UI shows a stable order
         std::vector<std::wstring> _order;
         std::unordered_map<std::wstring, SessionInfo> _sessions;
         std::unordered_map<std::wstring, Injector> _injectors;
         std::unordered_map<std::wstring, int64_t> _lastHumanInput;
-        RegistryObserver _observer;
+        std::vector<RegistryObserver> _observers;
         AdvanceHandler _advance;
     };
 }

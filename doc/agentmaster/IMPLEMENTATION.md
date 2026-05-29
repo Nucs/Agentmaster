@@ -84,7 +84,11 @@ sessions and drives the Triage Board + Autopilot.
   hooks recipe). Wired into `TerminalPage` (`_InitAgentmasterEngine`, `_SpawnClaudeSession`)
   and the Manager UI (Launch button). 67/67 standalone checks pass incl. a live pipe
   round-trip (`AgentMaster/tests/`).
-- **M6** C1 UI: Triage Board + Explorer Tree + Flight Plan, selection-synced.
+- **M6** ✅ C1 "Linked Lenses" UI (`AgentManagerContent`): Triage Board + Explorer Tree +
+  Flight Plan, built imperatively, snapshot-driven from the registry (cross-thread refresh
+  via DispatcherQueue), bidirectional selection + directory scope; Explorer `Enter`=Activate
+  / `Del`=kill (never injects — Rule #2); Flight Plan queue editing (add/reorder/delete/Send
+  now) + per-session Autopilot mode selector. Compiles clean; runtime check pending deploy.
 - **M7** Autopilot scheduler (queue + Stop trigger + guards + approval policy).
 - **M8** Persistence, plan templates, apply-to-many.
 

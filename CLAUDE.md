@@ -43,8 +43,15 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   Launch button in the Manager tab. State transitions log to
   `%LOCALAPPDATA%\Agentmaster\hooks.log` (the M6 Triage Board will render the registry).
   **67/67** standalone checks pass incl. a live pipe round-trip (`AgentMaster/tests/`).
-- **Next: M6** — the C1 "Linked Lenses" UI (Triage Board + Explorer Tree + Flight Plan)
-  binding to the registry. Then M7 (Autopilot scheduler), M8 (persistence/templates).
+- **M6 ✅** — the C1 "Linked Lenses" UI (`AgentManagerContent`): a Triage Board (state
+  columns), an Explorer Tree (M dirs → N sessions), and a Flight Plan (per-session prompt
+  queue + Autopilot mode), built imperatively and snapshot-driven from the registry
+  (cross-thread refresh via `DispatcherQueue`). Bidirectional selection + directory scope;
+  Explorer `Enter`=Activate / `Del`=kill (never injects — Rule #2); Flight Plan
+  add/reorder/delete/Send-now. Compiles clean (lib); runtime check pending deploy.
+- **Next: M7** — the Autopilot scheduler on the registry's advance seam (turn-complete
+  trigger, question-guard, approval policy, throttle, backstops, idempotent sends). Then M8
+  (persistence/templates/apply-to-many).
 - Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
