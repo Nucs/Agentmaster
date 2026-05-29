@@ -99,7 +99,7 @@ sessions and drives the Triage Board + Autopilot.
 - **M8** ✅ Persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
   `AgentMaster/Persistence`): a tiny dependency-free JSON value/parser/printer; sessions
   (queue + autopilot + metadata) and named plan templates (de)serialize to JSON under
-  `%LOCALAPPDATA%\Agentmaster\` (restore preserves `Sent` statuses — no replay). UI to save
+  `%USERPROFILE%\.agentmaster\` (restore preserves `Sent` statuses — no replay). UI to save
   a session's queue as a template, apply a template to the selected session, or broadcast
   it to every session in a directory; sessions autosave on every registry change. 102/102
   checks pass (incl. JSON + round-trips + template apply). Live session relaunch / WT

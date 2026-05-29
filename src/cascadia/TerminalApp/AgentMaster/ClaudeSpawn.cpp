@@ -260,16 +260,31 @@ try {
 
     std::wstring AgentmasterStateDir()
     {
-        std::wstring base = GetEnvW(L"LOCALAPPDATA");
-        if (base.empty())
+        // CRITICAL: this path must resolve to the SAME real location for both this app
+        // (which may be MSIX-packaged) AND the EXTERNAL claude.exe we spawn — the spawn
+        // passes this path to `claude --settings` and the hook forwarder script lives here.
+        // A packaged app's %LOCALAPPDATA% is redirected to the package's LocalCache, so a
+        // path string under %LOCALAPPDATA% would point an external process at an empty real
+        // folder. %USERPROFILE% is NOT redirected, so anchor under it (mirrors ~/.claude).
+        std::wstring base = GetEnvW(L"USERPROFILE");
+        std::wstring dir;
+        if (!base.empty())
         {
-            base = GetEnvW(L"TEMP");
+            dir = base + L"\\.agentmaster";
         }
-        if (base.empty())
+        else
         {
-            base = L".";
+            std::wstring fallback = GetEnvW(L"LOCALAPPDATA");
+            if (fallback.empty())
+            {
+                fallback = GetEnvW(L"TEMP");
+            }
+            if (fallback.empty())
+            {
+                fallback = L".";
+            }
+            dir = fallback + L"\\Agentmaster";
         }
-        std::wstring dir = base + L"\\Agentmaster";
         try
         {
             std::filesystem::create_directories(std::filesystem::path{ dir });

@@ -41,7 +41,7 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   forwarder. Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule
   #1). Wired into `TerminalPage` (`_InitAgentmasterEngine`, `_SpawnClaudeSession`) and a
   Launch button in the Manager tab. State transitions log to
-  `%LOCALAPPDATA%\Agentmaster\hooks.log` (the M6 Triage Board will render the registry).
+  `%USERPROFILE%\.agentmaster\hooks.log` (the M6 Triage Board will render the registry).
   **67/67** standalone checks pass incl. a live pipe round-trip (`AgentMaster/tests/`).
 - **M6 ✅** — the C1 "Linked Lenses" UI (`AgentManagerContent`): a Triage Board (state
   columns), an Explorer Tree (M dirs → N sessions), and a Flight Plan (per-session prompt
@@ -57,7 +57,7 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   the per-session mode selector, a confirm banner, and a Pause-Autopilot toggle.
 - **M8 ✅** — persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
   `AgentMaster/Persistence`): a dependency-free JSON value/parser/printer; sessions and
-  named plan templates (de)serialize to JSON under `%LOCALAPPDATA%\Agentmaster\` (restore
+  named plan templates (de)serialize to JSON under `%USERPROFILE%\.agentmaster\` (restore
   preserves `Sent` — no replay). UI to save a session's queue as a template, apply it, or
   broadcast it to a whole directory; sessions autosave on every change.
 - **All milestones M0–M8 are code-complete; `TerminalAppLib` compiles clean and the engine
@@ -173,7 +173,16 @@ also works and handles deploy.)
   it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
   `OpenConsoleProxy.dll` is loaded. Our distinct `Agentmaster` identity sidesteps this.
 - **Don't `taskkill`** to clear deploy locks, and never touch the running **Store**
-  Windows Terminal (that's the live session). Pause and ask instead.
+  Windows Terminal (that's the live session). Pause and ask instead. (When closing *our*
+  dev instance to relink, filter by `ExecutablePath -like 'K:\source\Agentmaster\*'` so the
+  Store WT is spared.)
+- **MSIX virtualizes a packaged app's `%LOCALAPPDATA%`** to the package LocalCache, but the
+  spawned **`claude.exe` is external** and resolves paths against the real filesystem. So
+  the hooks files + `--settings` path **must** live somewhere un-virtualized that both
+  agree on — Agentmaster uses **`%USERPROFILE%\.agentmaster`** (`AgentmasterStateDir()`).
+  Using `%LOCALAPPDATA%` here silently breaks hooks for spawned sessions (the app writes to
+  LocalCache; Claude reads the empty real path). Verified live: with the fix, a spawned
+  session's `SessionStart`/`UserPromptSubmit` reach the registry (`~/.agentmaster/hooks.log`).
 
 ## Correctness rules (do not regress)
 
