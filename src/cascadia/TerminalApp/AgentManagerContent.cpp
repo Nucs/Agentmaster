@@ -972,6 +972,7 @@ namespace winrt::TerminalApp::implementation
             s.queue.push_back(std::move(p));
         });
         _addPromptBox.Text(L"");
+        _Refresh();
     }
 
     void AgentManagerContent::_OnSendNow()
@@ -980,46 +981,76 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const auto promptId = _selectedPromptId;
+
+        // "Send now" sends what's in the compose box (and records it in the Flight Plan as a
+        // Sent item) so typing + Send is one intuitive action. With an empty box it instead
+        // sends the selected (or first Pending) already-queued prompt.
+        std::wstring composed = _addPromptBox ? std::wstring{ _addPromptBox.Text() } : std::wstring{};
+
         std::wstring textToSend;
-        std::wstring sentId;
-        _registry->Update(_selectedId, [&](SessionInfo& s) {
-            QueuedPrompt* target = nullptr;
-            if (!promptId.empty())
+        if (!composed.empty())
+        {
+            std::wstring label = composed.substr(0, 56);
+            std::replace(label.begin(), label.end(), L'\n', L' ');
+            std::replace(label.begin(), label.end(), L'\r', L' ');
+            _registry->Update(_selectedId, [&](SessionInfo& s) {
+                QueuedPrompt p;
+                p.id = ::Agentmaster::NewSessionId();
+                p.label = label;
+                p.text = composed;
+                p.status = PromptStatus::Sent; // it's being sent right now
+                p.attempts = 1;
+                s.queue.push_back(std::move(p));
+            });
+            textToSend = composed;
+            if (_addPromptBox)
             {
-                for (auto& p : s.queue)
+                _addPromptBox.Text(L"");
+            }
+        }
+        else
+        {
+            const auto promptId = _selectedPromptId;
+            _registry->Update(_selectedId, [&](SessionInfo& s) {
+                QueuedPrompt* target = nullptr;
+                if (!promptId.empty())
                 {
-                    if (p.id == promptId)
+                    for (auto& p : s.queue)
                     {
-                        target = &p;
-                        break;
+                        if (p.id == promptId)
+                        {
+                            target = &p;
+                            break;
+                        }
                     }
                 }
-            }
-            if (!target)
-            {
-                for (auto& p : s.queue)
+                if (!target)
                 {
-                    if (p.status == PromptStatus::Pending)
+                    for (auto& p : s.queue)
                     {
-                        target = &p;
-                        break;
+                        if (p.status == PromptStatus::Pending)
+                        {
+                            target = &p;
+                            break;
+                        }
                     }
                 }
-            }
-            if (target)
-            {
-                textToSend = target->text;
-                sentId = target->id;
-                target->status = PromptStatus::Sent;
-            }
-        });
+                if (target)
+                {
+                    textToSend = target->text;
+                    target->status = PromptStatus::Sent;
+                    target->attempts += 1;
+                }
+            });
+        }
+
         if (!textToSend.empty())
         {
-            // Inject + submit. (Multiline bodies submit on the first CR for now; M7 uses
-            // bracketed paste for true multi-line prompts.)
+            // Inject + submit. (Multiline bodies submit on the first CR for now; bracketed
+            // paste for true multi-line prompts is a follow-up.)
             _registry->Inject(_selectedId, textToSend + L"\r");
         }
+        _Refresh();
     }
 
     void AgentManagerContent::_OnMovePrompt(int delta)
@@ -1044,6 +1075,7 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         });
+        _Refresh();
     }
 
     void AgentManagerContent::_OnDeletePrompt()
@@ -1058,6 +1090,7 @@ namespace winrt::TerminalApp::implementation
             q.erase(std::remove_if(q.begin(), q.end(), [&](const QueuedPrompt& p) { return p.id == pid; }), q.end());
         });
         _selectedPromptId.clear();
+        _Refresh();
     }
 
     void AgentManagerContent::_OnAutopilotChanged(int index)
