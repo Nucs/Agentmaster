@@ -24,7 +24,8 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 - **Flight Plan / Autopilot:** queue prompts; on **turn-complete** (`Stop` hook) the next
   prompt is auto-sent. Approvals and clarifying-questions are handled separately.
 
-Deep plan: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
+Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
+Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
 Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 
 ## Status
