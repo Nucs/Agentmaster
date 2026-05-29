@@ -748,6 +748,7 @@ namespace winrt::TerminalApp::implementation
             sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
             sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
             sv.MaxHeight(380);
+            sv.AllowFocusOnInteraction(false); // scrollbar drags mustn't steal focus from the box either
             sv.Content(_pathListHost);
 
             _pathPanelBorder = Border{};
@@ -1524,6 +1525,12 @@ namespace winrt::TerminalApp::implementation
         btn.Background(SolidColorBrush{ Colors::Transparent() });
         btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
         btn.Padding(Thickness{ 8, 5, 8, 5 });
+        // The list is click-only and must NOT take focus from the cwd box. If a row grabbed
+        // focus, the box's LostFocus could race ahead of this Click and tear down the popup
+        // (and this very button) before the pick registers — so clicking a row would appear
+        // to do nothing. Keeping focus on the box also keeps the popup open across picks.
+        btn.IsTabStop(false);
+        btn.AllowFocusOnInteraction(false);
         const auto captured = fullPath;
         btn.Click([this, captured](const IInspectable&, const RoutedEventArgs&) { _PickPath(captured); });
         return btn;
