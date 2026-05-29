@@ -43,12 +43,17 @@ namespace Agentmaster
     std::vector<SessionInfo> DeserializeSessions(std::wstring_view text);
     std::wstring SerializeTemplates(const std::vector<PlanTemplate>& templates);
     std::vector<PlanTemplate> DeserializeTemplates(std::wstring_view text);
+    // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
+    std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
+    std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
 
     // ---- disk (state dir; best-effort) ----
     void SaveSessions(const std::vector<SessionInfo>& sessions);
     std::vector<SessionInfo> LoadSessions();
     void SaveTemplates(const std::vector<PlanTemplate>& templates);
     std::vector<PlanTemplate> LoadTemplates();
+    void SaveRecentDirs(const std::vector<std::wstring>& dirs);
+    std::vector<std::wstring> LoadRecentDirs();
 
     // ---- templates: build + apply ----
     // Capture a session's current queue as a reusable template.

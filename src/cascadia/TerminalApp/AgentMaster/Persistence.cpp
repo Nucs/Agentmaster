@@ -414,6 +414,40 @@ namespace Agentmaster
         return out;
     }
 
+    std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        auto arr = json::Value::MkArr();
+        for (const auto& d : dirs)
+        {
+            arr.Push(json::Value::MkStr(d));
+        }
+        root.Set(L"dirs", std::move(arr));
+        return json::Dump(root);
+    }
+
+    std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text)
+    {
+        std::vector<std::wstring> out;
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return out;
+        }
+        if (const auto* arr = parsed->Find(L"dirs"); arr && arr->type == json::Value::Type::Arr)
+        {
+            for (const auto& dv : arr->arr)
+            {
+                if (dv.type == json::Value::Type::Str)
+                {
+                    out.push_back(dv.AsStr());
+                }
+            }
+        }
+        return out;
+    }
+
     // ---- disk ----
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
@@ -431,6 +465,14 @@ namespace Agentmaster
     std::vector<PlanTemplate> LoadTemplates()
     {
         return DeserializeTemplates(ReadAllUtf8(AgentmasterStateDir() + L"\\templates.json"));
+    }
+    void SaveRecentDirs(const std::vector<std::wstring>& dirs)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json", SerializeRecentDirs(dirs));
+    }
+    std::vector<std::wstring> LoadRecentDirs()
+    {
+        return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
     }
 
     // ---- templates apply ----

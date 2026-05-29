@@ -16,6 +16,7 @@
 #include "AgentMaster/SessionModels.h"
 
 #include <winrt/Windows.System.h>
+#include <winrt/Windows.UI.Xaml.Controls.Primitives.h> // Popup (the path-picker drop-down)
 
 #include <vector>
 
@@ -85,6 +86,17 @@ namespace winrt::TerminalApp::implementation
         void _OnApplyTemplate(bool toWholeDirectory);
         void _RefreshTemplateCombo();
 
+        // Launch path-picker drop-down (a Popup anchored under the cwd box). Opens on user
+        // focus of the box; shows the recent dirs (excluding the current one) over the
+        // subfolders of the current path; clicking a row drives the box and re-lists.
+        void _OpenPathPicker();
+        void _ClosePathPicker();
+        void _RebuildPathPicker();
+        void _PickPath(const std::wstring& dir);
+        void _PushRecentDir(const std::wstring& dir);
+        std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current) const;
+        winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
+
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
 
@@ -111,6 +123,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _pathPanelBorder{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _pathListHost{ nullptr };
+        std::vector<std::wstring> _recentDirs; // MRU of launched working dirs (persisted)
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };

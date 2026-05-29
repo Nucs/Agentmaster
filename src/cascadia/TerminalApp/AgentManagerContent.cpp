@@ -154,6 +154,140 @@ namespace
         b.Child(t);
         return b;
     }
+
+    // ---- path helpers for the Launch path-picker drop-down -------------------
+    // Plain Win32 + STL (the same toolbox the rest of the engine uses). FindFirstFileW /
+    // GetFileAttributesW / CompareStringOrdinal are already in scope via pch (this TU
+    // already calls ::GetEnvironmentVariableW with MAX_PATH).
+
+    // Normalize for case-insensitive equality: unify separators and drop a trailing one
+    // (but keep the "C:\" drive-root form intact).
+    std::wstring NormPath(std::wstring s)
+    {
+        for (auto& ch : s)
+        {
+            if (ch == L'/')
+            {
+                ch = L'\\';
+            }
+        }
+        while (s.size() > 3 && s.back() == L'\\')
+        {
+            s.pop_back();
+        }
+        return s;
+    }
+
+    bool PathEq(const std::wstring& a, const std::wstring& b)
+    {
+        const auto na = NormPath(a);
+        const auto nb = NormPath(b);
+        return ::CompareStringOrdinal(na.c_str(), -1, nb.c_str(), -1, TRUE) == CSTR_EQUAL;
+    }
+
+    bool IsDir(const std::wstring& d)
+    {
+        if (d.empty())
+        {
+            return false;
+        }
+        const DWORD a = ::GetFileAttributesW(d.c_str());
+        return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+
+    std::wstring JoinDir(const std::wstring& base, const std::wstring& leaf)
+    {
+        std::wstring b = base;
+        while (b.size() > 3 && (b.back() == L'\\' || b.back() == L'/'))
+        {
+            b.pop_back();
+        }
+        if (b.empty())
+        {
+            return leaf;
+        }
+        if (b.back() != L'\\' && b.back() != L'/')
+        {
+            b += L'\\';
+        }
+        return b + leaf;
+    }
+
+    // The directory one level up, if there is a sensible one (drive-letter paths). A drive
+    // root ("C:\") returns nullopt; so does a bare/relative token.
+    std::optional<std::wstring> ParentDir(const std::wstring& dir)
+    {
+        std::wstring b = dir;
+        while (b.size() > 3 && (b.back() == L'\\' || b.back() == L'/'))
+        {
+            b.pop_back();
+        }
+        if (b.size() <= 3)
+        {
+            return std::nullopt; // "C:\" or shorter: no parent to navigate to
+        }
+        const auto pos = b.find_last_of(L"\\/");
+        if (pos == std::wstring::npos || pos == 0)
+        {
+            return std::nullopt;
+        }
+        if (pos <= 2 && b.size() >= 2 && b[1] == L':')
+        {
+            return b.substr(0, 2) + L"\\"; // parent is the drive root
+        }
+        return b.substr(0, pos);
+    }
+
+    // The immediate subdirectories of `dir` (leaf names only), case-insensitively sorted.
+    // Skips ".", "..", and SYSTEM dirs (e.g. $Recycle.Bin, System Volume Information).
+    std::vector<std::wstring> EnumSubdirs(const std::wstring& dir)
+    {
+        std::vector<std::wstring> out;
+        if (dir.empty())
+        {
+            return out;
+        }
+        std::wstring pattern = dir;
+        while (pattern.size() > 3 && (pattern.back() == L'\\' || pattern.back() == L'/'))
+        {
+            pattern.pop_back();
+        }
+        if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/')
+        {
+            pattern += L'\\';
+        }
+        pattern += L'*';
+
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return out;
+        }
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                continue;
+            }
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM)
+            {
+                continue;
+            }
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..")
+            {
+                continue;
+            }
+            out.push_back(name);
+        } while (::FindNextFileW(h, &fd));
+        ::FindClose(h);
+
+        std::sort(out.begin(), out.end(), [](const std::wstring& a, const std::wstring& b) {
+            return ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+        });
+        return out;
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -163,6 +297,7 @@ namespace winrt::TerminalApp::implementation
         _root = Grid{};
         _dispatcher = DispatcherQueue::GetForCurrentThread();
         _templates = ::Agentmaster::LoadTemplates(); // persisted plan templates (M8)
+        _recentDirs = ::Agentmaster::LoadRecentDirs(); // MRU for the Launch path-picker
 
         try
         {
@@ -319,6 +454,62 @@ namespace winrt::TerminalApp::implementation
                     _cwdBox.Text(winrt::hstring{ up, n });
                 }
             }
+            // Path-picker drop-down. Open it only on *user* focus (Pointer/Keyboard) so the
+            // dropdown doesn't pop every time the tab is programmatically activated.
+            _cwdBox.GotFocus([this](const IInspectable&, const RoutedEventArgs&) {
+                if (_cwdBox)
+                {
+                    const auto fs = _cwdBox.FocusState();
+                    if (fs == FocusState::Pointer || fs == FocusState::Keyboard)
+                    {
+                        _OpenPathPicker();
+                    }
+                }
+            });
+            _cwdBox.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
+                if (_pathPopup && _pathPopup.IsOpen())
+                {
+                    _RebuildPathPicker();
+                }
+            });
+            // Close only when focus truly left (not when a row button briefly takes it):
+            // defer the check a tick, and bail if the box has refocused itself (after a pick).
+            {
+                auto weak = get_weak();
+                auto disp = _dispatcher;
+                _cwdBox.LostFocus([weak, disp](const IInspectable&, const RoutedEventArgs&) {
+                    if (!disp)
+                    {
+                        return;
+                    }
+                    disp.TryEnqueue([weak]() {
+                        auto self = weak.get();
+                        if (!self || !self->_pathPopup || !self->_pathPopup.IsOpen())
+                        {
+                            return;
+                        }
+                        if (self->_cwdBox && self->_cwdBox.FocusState() != FocusState::Unfocused)
+                        {
+                            return; // regained focus (e.g. after clicking a row) — stay open
+                        }
+                        self->_ClosePathPicker();
+                    });
+                });
+            }
+            _cwdBox.KeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+                if (e.Key() == VirtualKey::Escape)
+                {
+                    if (_pathPopup && _pathPopup.IsOpen())
+                    {
+                        _ClosePathPicker();
+                        e.Handled(true);
+                    }
+                }
+                else if (e.Key() == VirtualKey::Enter)
+                {
+                    _ClosePathPicker();
+                }
+            });
             bar.Children().Append(_cwdBox);
 
             auto launch = Button{};
@@ -525,6 +716,38 @@ namespace winrt::TerminalApp::implementation
 
             Grid::SetRow(bottom, 2);
             _root.Children().Append(bottom);
+        }
+
+        // ---- Launch path-picker drop-down (a Popup anchored under the cwd box) ----
+        // Parented into _root (top-left aligned) so its offset is _root-relative; it renders
+        // in the overlay above the board. A fixed dark theme keeps the list readable over
+        // whatever the app theme is.
+        {
+            _pathListHost = StackPanel{};
+            _pathListHost.Spacing(0);
+
+            auto sv = ScrollViewer{};
+            sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            sv.MaxHeight(380);
+            sv.Content(_pathListHost);
+
+            _pathPanelBorder = Border{};
+            _pathPanelBorder.Background(Fill(0xFF, 0x20, 0x20, 0x20));
+            _pathPanelBorder.BorderBrush(Fill(0x90, 0x80, 0x80, 0x80));
+            _pathPanelBorder.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            _pathPanelBorder.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+            _pathPanelBorder.Padding(Thickness{ 4, 4, 4, 6 });
+            _pathPanelBorder.Width(380);
+            _pathPanelBorder.RequestedTheme(ElementTheme::Dark);
+            _pathPanelBorder.Child(sv);
+
+            _pathPopup = winrt::Windows::UI::Xaml::Controls::Primitives::Popup{};
+            _pathPopup.HorizontalAlignment(HorizontalAlignment::Left);
+            _pathPopup.VerticalAlignment(VerticalAlignment::Top);
+            _pathPopup.Child(_pathPanelBorder);
+            Grid::SetRow(_pathPopup, 0);
+            _root.Children().Append(_pathPopup);
         }
     }
 
@@ -944,6 +1167,8 @@ namespace winrt::TerminalApp::implementation
         if (_spawnHandler)
         {
             const auto dir = _cwdBox ? _cwdBox.Text() : winrt::hstring{};
+            _PushRecentDir(std::wstring{ dir }); // remember it as "recently selected"
+            _ClosePathPicker();
             _spawnHandler(dir, winrt::hstring{});
         }
     }
@@ -1201,5 +1426,191 @@ namespace winrt::TerminalApp::implementation
                 _registry->Update(s.id, [&](SessionInfo& ss) { ::Agentmaster::AppendTemplateToQueue(ss.queue, tmpl); });
             }
         }
+    }
+
+    // ---- Launch path-picker drop-down ---------------------------------------
+
+    std::vector<std::wstring> AgentManagerContent::_CollectRecentDirs(const std::wstring& current) const
+    {
+        std::vector<std::wstring> out;
+        auto add = [&](const std::wstring& d) {
+            if (d.empty() || out.size() >= 5)
+            {
+                return;
+            }
+            if (!current.empty() && PathEq(d, current))
+            {
+                return; // exclude the path that's currently in the box
+            }
+            for (const auto& e : out)
+            {
+                if (PathEq(e, d))
+                {
+                    return; // dedup
+                }
+            }
+            out.push_back(d);
+        };
+
+        for (const auto& d : _recentDirs)
+        {
+            add(d);
+        }
+        // Supplement from live sessions (most-recently-active first) so the list is useful
+        // even before anything has been launched this run.
+        if (out.size() < 5 && _registry)
+        {
+            auto snap = _registry->Snapshot();
+            std::sort(snap.begin(), snap.end(), [](const SessionInfo& a, const SessionInfo& b) {
+                return a.lastActivityUnixMs > b.lastActivityUnixMs;
+            });
+            for (const auto& s : snap)
+            {
+                add(s.workingDir);
+            }
+        }
+        return out;
+    }
+
+    void AgentManagerContent::_PushRecentDir(const std::wstring& dir)
+    {
+        if (dir.empty())
+        {
+            return;
+        }
+        _recentDirs.erase(std::remove_if(_recentDirs.begin(), _recentDirs.end(), [&](const std::wstring& e) { return PathEq(e, dir); }), _recentDirs.end());
+        _recentDirs.insert(_recentDirs.begin(), dir);
+        if (_recentDirs.size() > 10)
+        {
+            _recentDirs.resize(10);
+        }
+        ::Agentmaster::SaveRecentDirs(_recentDirs);
+    }
+
+    Button AgentManagerContent::_MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText)
+    {
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(8);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        row.Children().Append(Text(glyph, 13, false, 0.7));
+        // Recents show their full path (displayText empty); folders show just the leaf —
+        // the section header already states which directory they live in.
+        row.Children().Append(Text(displayText.empty() ? winrt::hstring{ fullPath } : displayText, 13, false, 1.0));
+
+        auto btn = Button{};
+        btn.Content(row);
+        btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        btn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        btn.Background(SolidColorBrush{ Colors::Transparent() });
+        btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        btn.Padding(Thickness{ 8, 5, 8, 5 });
+        const auto captured = fullPath;
+        btn.Click([this, captured](const IInspectable&, const RoutedEventArgs&) { _PickPath(captured); });
+        return btn;
+    }
+
+    void AgentManagerContent::_RebuildPathPicker()
+    {
+        if (!_pathListHost)
+        {
+            return;
+        }
+        _pathListHost.Children().Clear();
+
+        auto sectionLabel = [](const winrt::hstring& s) {
+            auto lbl = Text(s, 11, true, 0.5);
+            lbl.Margin(Thickness{ 6, 8, 6, 2 });
+            return lbl;
+        };
+
+        const std::wstring current = _cwdBox ? std::wstring{ _cwdBox.Text() } : std::wstring{};
+
+        // RECENT (up to 5, current excluded).
+        const auto recents = _CollectRecentDirs(current);
+        if (!recents.empty())
+        {
+            _pathListHost.Children().Append(sectionLabel(L"RECENT"));
+            for (const auto& d : recents)
+            {
+                _pathListHost.Children().Append(_MakePathRow(d, L"\x21BB", winrt::hstring{}));
+            }
+        }
+
+        // SUBFOLDERS of the current path (+ a parent up-nav).
+        if (!current.empty())
+        {
+            _pathListHost.Children().Append(sectionLabel(winrt::hstring{ L"SUBFOLDERS OF " } + winrt::hstring{ current }));
+
+            if (const auto parent = ParentDir(current))
+            {
+                _pathListHost.Children().Append(_MakePathRow(*parent, L"\x2191", winrt::hstring{ L".. (parent)" }));
+            }
+
+            if (IsDir(current))
+            {
+                const auto subs = EnumSubdirs(current);
+                for (const auto& leaf : subs)
+                {
+                    _pathListHost.Children().Append(_MakePathRow(JoinDir(current, leaf), L"\x25B8", winrt::hstring{ leaf }));
+                }
+                if (subs.empty())
+                {
+                    _pathListHost.Children().Append(Text(L"(no subfolders)", 12, false, 0.5));
+                }
+            }
+            else
+            {
+                _pathListHost.Children().Append(Text(L"(path not found)", 12, false, 0.5));
+            }
+        }
+
+        if (_pathListHost.Children().Size() == 0)
+        {
+            _pathListHost.Children().Append(Text(L"Type a path or pick a recent directory.", 12, false, 0.6));
+        }
+    }
+
+    void AgentManagerContent::_OpenPathPicker()
+    {
+        if (!_pathPopup || !_cwdBox)
+        {
+            return;
+        }
+        if (_pathPanelBorder)
+        {
+            _pathPanelBorder.Width(std::max<double>(380.0, _cwdBox.ActualWidth()));
+        }
+        try
+        {
+            const auto xform = _cwdBox.TransformToVisual(_root);
+            const auto pt = xform.TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
+            _pathPopup.HorizontalOffset(static_cast<double>(pt.X));
+            _pathPopup.VerticalOffset(static_cast<double>(pt.Y) + 2.0);
+        }
+        catch (...)
+        {
+        }
+        _RebuildPathPicker();
+        _pathPopup.IsOpen(true);
+    }
+
+    void AgentManagerContent::_ClosePathPicker()
+    {
+        if (_pathPopup)
+        {
+            _pathPopup.IsOpen(false);
+        }
+    }
+
+    void AgentManagerContent::_PickPath(const std::wstring& dir)
+    {
+        if (!_cwdBox)
+        {
+            return;
+        }
+        _cwdBox.Text(winrt::hstring{ dir }); // fires TextChanged -> _RebuildPathPicker (popup open)
+        _cwdBox.Select(static_cast<int32_t>(dir.size()), 0); // caret to end
+        _cwdBox.Focus(FocusState::Programmatic); // keep the box focused so the popup stays open
     }
 }
