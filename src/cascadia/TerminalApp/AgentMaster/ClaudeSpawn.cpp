@@ -268,6 +268,60 @@ try {
         return std::wstring{ buf };
     }
 
+    bool ClaudeConversationExists(std::wstring_view sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        // Claude stores transcripts under <config>/projects/<encoded-cwd>/<session-id>.jsonl.
+        // The config dir is CLAUDE_CONFIG_DIR if set, else ~/.claude.
+        std::wstring base = GetEnvW(L"CLAUDE_CONFIG_DIR");
+        if (base.empty())
+        {
+            const std::wstring home = GetEnvW(L"USERPROFILE");
+            if (home.empty())
+            {
+                return false;
+            }
+            base = home + L"\\.claude";
+        }
+        const std::wstring projects = base + L"\\projects";
+        const std::wstring leaf = std::wstring{ sessionId } + L".jsonl";
+
+        // Session ids are unique UUIDs, so rather than reproduce Claude's cwd->dir encoding we
+        // just look for <session-id>.jsonl inside any project directory.
+        const std::wstring pattern = projects + L"\\*";
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        bool found = false;
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                continue;
+            }
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..")
+            {
+                continue;
+            }
+            const std::wstring candidate = projects + L"\\" + name + L"\\" + leaf;
+            const DWORD attr = ::GetFileAttributesW(candidate.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                found = true;
+                break;
+            }
+        } while (::FindNextFileW(h, &fd));
+        ::FindClose(h);
+        return found;
+    }
+
     std::wstring AgentmasterStateDir()
     {
         // CRITICAL: this path must resolve to the SAME real location for both this app

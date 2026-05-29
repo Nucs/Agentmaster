@@ -799,7 +799,13 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        const std::wstring resumeId = restored ? restored->id : std::wstring{};
+        // Resume ONLY if Claude actually has a saved conversation for this id. A session that
+        // was opened but never received a prompt has no transcript, so `claude --resume <id>`
+        // would fail with "No conversation found" and the tab would die (exit code 1). Such a
+        // session is re-launched fresh instead — keeping its working dir + Flight Plan, with a
+        // new conversation id. (Correctness Rule #6: restore == resume, never replay.)
+        const bool wantResume = restored && !restored->id.empty() && ::Agentmaster::ClaudeConversationExists(restored->id);
+        const std::wstring resumeId = wantResume ? restored->id : std::wstring{};
         const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId);
 
         // Child environment: CCMGR_SESSION_ID + CCMGR_HOOK_PIPE so hook events correlate
@@ -856,8 +862,9 @@ namespace winrt::TerminalApp::implementation
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
         });
 
+        const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      (restored ? L"[resume] " : L"[spawn] ") + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+                                      tag + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
     }
 
     // Agentmaster: on startup, re-launch every persisted session (claude --resume) with its

@@ -72,6 +72,14 @@ namespace Agentmaster
     // A fresh lowercase hyphenated UUID (CoCreateGuid).
     std::wstring NewSessionId();
 
+    // True iff Claude has a resumable conversation transcript for `sessionId` — i.e. a file
+    // <claude-config>/projects/<encoded-cwd>/<sessionId>.jsonl exists. Session ids are unique
+    // UUIDs, so we search across all project dirs instead of reproducing Claude's cwd
+    // encoding. Restore uses this to choose `--resume` vs. a fresh start: a session that was
+    // opened but never received a prompt has NO transcript, and `claude --resume <id>` on it
+    // fails with "No conversation found" (the tab would die with exit code 1).
+    bool ClaudeConversationExists(std::wstring_view sessionId);
+
     // Write the shared forwarder + hooks settings into `stateDir`. Idempotent (overwrites
     // so they always match the running build). Returns {settingsPath, forwarderPath} in
     // backslash form. Throws nothing meaningful for the caller; returns empty paths on I/O
