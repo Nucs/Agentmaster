@@ -30,49 +30,40 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 
 ## Status
 
-- **M0–M4.1 ✅** — fork mapped; scaffold in; baseline + incremental builds green;
-  `AgentManagerContent` wired into `_MakePane`; the **pinned, non-closable "Agent Manager"
-  tab opens at index 0 on startup**; the app ships under its **own package identity**
-  (`Agentmaster`, not `WindowsTerminalDev`) and is **deployed & verified running**.
-- **M5 ✅** — the native session engine (`src/cascadia/TerminalApp/AgentMaster/`): a
-  thread-safe **`SessionRegistry`** (single source of truth), a **`HooksBridge`** local
-  named-pipe server, and a **`ClaudeSpawn`** recipe that launches `claude.exe` on a ConPTY
-  with `--settings` hooks + `CCMGR_SESSION_ID`/`CCMGR_HOOK_PIPE`, plus a PowerShell
-  forwarder. Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule
-  #1). Wired into `TerminalPage` (`_InitAgentmasterEngine`, `_SpawnClaudeSession`) and a
-  Launch button in the Manager tab. State transitions log to
-  `%USERPROFILE%\.agentmaster\hooks.log` (the M6 Triage Board will render the registry).
-  **67/67** standalone checks pass incl. a live pipe round-trip (`AgentMaster/tests/`).
-- **M6 ✅** — the C1 "Linked Lenses" UI (`AgentManagerContent`): a Triage Board (state
-  columns), an Explorer Tree (M dirs → N sessions), and a Flight Plan (per-session prompt
-  queue + Autopilot mode), built imperatively and snapshot-driven from the registry
-  (cross-thread refresh via `DispatcherQueue`). Bidirectional selection + directory scope;
-  Explorer `Enter`=Activate / `Del`=kill (never injects — Rule #2); Flight Plan
-  add/reorder/delete/Send-now. Compiles clean (lib); runtime check pending deploy.
-- **M7 ✅** — the Autopilot scheduler (`AgentMaster/Scheduler`): a pure, fully unit-tested
-  `DecideAdvance()` + a worker thread on the registry's advance seam. Turn-complete →
-  auto-send next Pending (Full) / one-click confirm (SemiAuto) / Held by the question-guard
-  (transient) / skipped for Manual gate; backstops: pause-on-human-input, maxAutoSends,
-  stopOnError, global Pause-all; idempotent sends (atomic mark-Sent before inject). UI adds
-  the per-session mode selector, a confirm banner, and a Pause-Autopilot toggle.
-- **M8 ✅** — persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
-  `AgentMaster/Persistence`): a dependency-free JSON value/parser/printer; sessions and
-  named plan templates (de)serialize to JSON under `%USERPROFILE%\.agentmaster\` (restore
-  preserves `Sent` — no replay). UI to save a session's queue as a template, apply it, or
-  broadcast it to a whole directory; sessions autosave on every change.
-- **Session restore ✅ (live):** on startup `TerminalPage::_RestoreClaudeSessions()`
-  re-launches every persisted session with **`claude --resume <id>`** in its working dir —
-  resuming the real conversation — and reloads its Flight Plan + autopilot. So closing and
-  reopening returns to the same state. **`Kill`** is the explicit discard (removes it from
-  the registry + `sessions.json`); closing the app or a tab without Kill keeps it for next
-  launch. Verified live.
-- **All milestones M0–M8 are complete, built, deployed, and verified running.** Engine
-  passes **103/103** standalone checks (`AgentMaster/tests/`).
-- Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
-  bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight
-  Plan; remove a session from persistence when its tab is closed via the X (today only
-  `Kill` discards); prevent splitting the Manager tab.
-- Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+**All milestones M0–M8 + session restore are complete, built, deployed under the
+`Agentmaster` identity, and verified running.** The engine passes **103/103** standalone
+checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
+deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
+forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
+reopen (traces in `~/.agentmaster/hooks.log`).
+
+What works, by area:
+- **Engine (M5, `AgentMaster/`).** Thread-safe `SessionRegistry` (single source of truth;
+  multiple observers), `HooksBridge` (local named-pipe server `\\.\pipe\agentmaster.<pid>`),
+  `ClaudeSpawn` (spawn/`--resume` recipe + the shared hooks config + PowerShell forwarder).
+  Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1).
+- **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Flight Plan,
+  imperative and snapshot-driven from the registry (cross-thread refresh via
+  `DispatcherQueue`), bidirectional selection + directory scope. Explorer `Enter`=Activate /
+  `Del`=kill (never injects — Rule #2). Flight Plan: compose box, Add / Send now / ↑↓ /
+  Delete / Focus / Kill. `Focus()` focuses the cwd `TextBox`.
+- **Autopilot (M7, `Scheduler`).** Pure `DecideAdvance()` + a worker thread on the registry
+  advance seam. Turn-complete → auto-send next Pending (Full) / one-click confirm (SemiAuto)
+  / Held by the question-guard (transient) / skip Manual gate. Backstops: pause-on-human-
+  input, maxAutoSends, stopOnError, global Pause-all. Idempotent (atomic mark-Sent before
+  inject).
+- **Persistence + restore (M8, `Json.h`/`Persistence`).** Sessions + named plan templates
+  (de)serialize to JSON under `%USERPROFILE%\.agentmaster\`; sessions autosave on change.
+  On startup `_RestoreClaudeSessions()` re-launches each saved session via
+  `claude --resume <id>` in its working dir and reloads its Flight Plan + autopilot — so
+  **close == reopen**. `Kill` is the explicit discard (drops it from the registry +
+  `sessions.json`); `Sent` prompts are never replayed. Templates: save a session's queue,
+  apply it, or broadcast to a whole directory.
+
+Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
+bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
+discard a session when its tab is closed via the X (today only `Kill` discards); prevent
+splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
 
@@ -85,9 +76,20 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   deliberately **distinct from `WindowsTerminalDev`** so it coexists with real Windows
   Terminal. ⚠️ There is a **separate `K:\source\windowsterminal` checkout on this machine
   that owns the `WindowsTerminalDev` identity** — never reuse that identity here (see Gotchas).
-- Our additions: `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}`,
-  `src/cascadia/TerminalApp/AgentMaster/`, `Package-Dev.appxmanifest` (identity),
-  `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
+- Our additions (all marked `Agentmaster`):
+  - `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}` — the Manager tab content (C1 UI).
+  - `src/cascadia/TerminalApp/AgentMaster/` — the engine (plain C++, no WinRT; the `.cpp`
+    are `<PrecompiledHeader>NotUsing`): `SessionModels.h`, `HookEvents.h`, `HookWire.h`,
+    `SessionRegistry.{h,cpp}`, `HooksBridge.{h,cpp}`, `ClaudeSpawn.{h,cpp}`,
+    `Scheduler.{h,cpp}`, `Json.h`, `Persistence.{h,cpp}`, and `tests/` (standalone harness,
+    not in the msbuild — run `tests/run-m5-tests.bat`).
+  - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore) and
+    `TabManagement.cpp`; registrations in `TerminalAppLib.vcxproj`.
+  - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
+- **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
+  `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
+  `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
+  `templates.json` (saved plans). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas (MSIX).
 
 ## Integration points (1.24 pluggable pane-content model)
 
@@ -100,6 +102,17 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   sets the tab's `CloseButtonVisibility = Never` (non-closable) and is tracked in the
   `_managerTab` member (nulled on close in `TabManagement.cpp`, mirroring `_settingsTab`).
 - Tab placement primitive: `_CreateNewTabFromPane(pane, insertPosition)` (`TabManagement.cpp`).
+- **Engine wiring (`TerminalPage`):** `_InitAgentmasterEngine()` (from `_OnFirstLayout`,
+  before the Manager tab) creates the `SessionRegistry` + `HooksBridge` + `Scheduler` and
+  wires the registry's observer/advance seams. `_WireAgentManagerContent()` hands the
+  content the registry + spawn/activate/kill/pause/confirm callbacks.
+  `_LaunchClaudeSession(dir, title, restored)` builds a claude `ConptyConnection`
+  (cmdline/cwd/env ours) and opens it as a normal terminal tab via `_MakePane(args, …,
+  existingConnection)`; `_SpawnClaudeSession` = fresh, `_RestoreClaudeSessions()` = resume
+  the persisted set. `sessionId → Tab` lives in `_claudeTabs` for Activate/Kill.
+- **Shared stdin:** the registry holds a per-session injector bound to that session's
+  `ConptyConnection::WriteInput`, so the user's keystrokes and the scheduler's prompts both
+  reach the same `claude.exe` stdin (Correctness Rule #3 binds the injector to the id).
 
 ## Building FAST
 
@@ -138,6 +151,17 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
 5. **Optional — MSBuildCache** for clean-rebuild / branch-switch cache hits: add
    `-p:MsBuildCacheEnabled=true` (uses file copies, not hardlinks).
 
+6. **Compile-check without relinking the exe.** `TerminalAppLib` is a **static lib**, so you
+   can validate code changes (and catch all our compile errors) while the app is still
+   running — build just the lib (after `vcvars64.bat`):
+   ```
+   msbuild src\cascadia\TerminalApp\TerminalAppLib.vcxproj /m /p:Configuration=Debug /p:Platform=x64 /p:SolutionDir=K:\source\Agentmaster\
+   ```
+   `/p:SolutionDir=` (trailing `\`) is **required** when building a `.vcxproj` directly —
+   otherwise `$(SolutionDir)build\rules\*.targets` imports fail (MSB4019). The full exe link
+   is `msbuild OpenConsole.slnx /m /p:Configuration=Debug /p:Platform=x64 /t:Terminal\CascadiaPackage`
+   (~3–3.5 min on this box; SolutionDir is implicit for the `.slnx`).
+
 ## Deploy & run
 
 A packaged app can't be launched by running `WindowsTerminal.exe` directly (WT #926/#4043);
@@ -153,13 +177,22 @@ Launch any of these ways:
 - Start menu: **“Agentmaster”**
 - `Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"`
 
-**Fast inner loop** (the loose layout is live, so binaries update in place):
+**Inner loop.** The loose layout is live (binaries update in place), but you **cannot
+relink `WindowsTerminal.exe` while the app is running** — it locks the exe. So: close *our*
+dev instance (spare the Store WT), rebuild, relaunch.
 ```powershell
-pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore   # rebuild
-agentmaster                                            # relaunch — NO re-register needed
+# 1. close ONLY our dev instance (path filter spares the Store WT — see Gotchas)
+Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
+  ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | % { Stop-Process -Id $_.ProcessId -Force }
+# 2. build (full exe link)
+pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64
+# 3. relaunch
+Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"   # or: agentmaster
 ```
 Re-register **only** when `Package-Dev.appxmanifest` changes. (VS F5 on `CascadiaPackage`
-also works and handles deploy.)
+also builds + deploys.) Runtime/session state lives in `%USERPROFILE%\.agentmaster\`; tail
+`hooks.log` to confirm the engine is live (`[engine] bridge listening …`) and that spawned
+sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
 
 ## Gotchas (learned the hard way)
 
@@ -170,9 +203,15 @@ also works and handles deploy.)
   `Invoke-OpenConsoleBuild` has the same latent bug — it only "works" because VS already
   restored.)
 - **`Grid`/`Panel` has no `Focus(FocusState)`** in this XAML projection — only
-  `Control`-derived types do. `IPaneContent::Focus` must focus a `Control` child
-  (`ScratchpadContent` focuses its `TextBox`); the Manager's `Focus()` is a no-op until
-  M6 gives it a real focusable control. (This caused error C2039.)
+  `Control`-derived types do (this caused error C2039). `IPaneContent::Focus` must focus a
+  `Control` child; `AgentManagerContent::Focus` focuses its cwd `TextBox`.
+- **Building a `.vcxproj` directly needs `/p:SolutionDir=K:\source\Agentmaster\`** (trailing
+  `\`), else `$(SolutionDir)build\rules\*.targets` imports fail with MSB4019. The `.slnx`
+  build sets it implicitly. (See Building FAST #6.)
+- **Imperative XAML name clashes:** a `using namespace winrt::Windows::UI;` pulls the nested
+  `Text` namespace into scope and collides with a `Text(...)` helper (C2872/C2882) — prefer
+  narrow `using`-declarations (`Color`/`ColorHelper`/`Colors`). The `.cpp` can't run-time
+  test here, so the compiler is the safety net; build the lib (#6) after UI edits.
 - **Never reuse the `WindowsTerminalDev` package identity.** It belongs to the separate
   `K:\source\windowsterminal` checkout; registering the same identity tries to *replace*
   it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
@@ -199,6 +238,10 @@ also works and handles deploy.)
 3. **Bind queue → sessionId**, never "the selected session" at send time.
 4. **Idempotent sends:** mark `Sent` atomically + persist; survive restart without replay.
 5. **Backstops:** stop-on-error, maxAutoSends, global pause/kill, pause-on-human-input.
+6. **Restore = resume, not replay.** Startup re-launches persisted sessions with
+   `claude --resume <id>` (same id ⇒ hooks still correlate); queues reload with statuses
+   intact. Only `Kill` discards a session from persistence.
+7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).
 
 ## Conventions
 
