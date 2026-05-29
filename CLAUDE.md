@@ -27,22 +27,42 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 Deep plan: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
 Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 
+## Status
+
+- **M0–M4.1 ✅** — fork mapped; scaffold in; baseline + incremental builds green;
+  `AgentManagerContent` wired into `_MakePane`; the **pinned, non-closable "Agent Manager"
+  tab opens at index 0 on startup**; the app ships under its **own package identity**
+  (`Agentmaster`, not `WindowsTerminalDev`) and is **deployed & verified running**.
+- **Next: M5** — `SessionRegistry` + spawn `claude.exe` on a ConPTY + the Claude Code
+  hooks bridge (live state). Then M6 (C1 UI), M7 (Autopilot scheduler), M8 (persistence).
+- Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+
 ## Repo facts
 
 - Forked from `microsoft/terminal` @ `v1.24.2372`; work branch **`agentmaster`**.
 - Build entry: **`OpenConsole.slnx`** (slnx format). No git submodules in 1.24
   (`doc/building.md` is stale on that point).
 - Toolchain: VS 2022 + C++/UWP workloads + Windows SDK 10.0.22621/26100.
+- **Package identity = `Agentmaster`** (PFN `Agentmaster_8wekyb3d8bbwe`), set in
+  `src/cascadia/CascadiaPackage/Package-Dev.appxmanifest` (the Debug branding). It is
+  deliberately **distinct from `WindowsTerminalDev`** so it coexists with real Windows
+  Terminal. ⚠️ There is a **separate `K:\source\windowsterminal` checkout on this machine
+  that owns the `WindowsTerminalDev` identity** — never reuse that identity here (see Gotchas).
 - Our additions: `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}`,
-  `src/cascadia/TerminalApp/AgentMaster/`, `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
+  `src/cascadia/TerminalApp/AgentMaster/`, `Package-Dev.appxmanifest` (identity),
+  `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
 
 ## Integration points (1.24 pluggable pane-content model)
 
 - New tab content implements **`IPaneContent`** (like `ScratchpadContent` — no `.idl`).
-- Dispatch by type string in `TerminalPage::_MakePane` (`TerminalPage.cpp:3815`).
-- Tab placement: `_CreateNewTabFromPane(pane, insertPosition)` (`TabManagement.cpp:215`);
-  track our tab like `_settingsTab`.
-- Compiled in `src/cascadia/TerminalApp/TerminalAppLib.vcxproj`.
+  Ours: `AgentManagerContent`, compiled via `src/cascadia/TerminalApp/TerminalAppLib.vcxproj`.
+- Content dispatch by type string in `TerminalPage::_MakePane` (`TerminalPage.cpp`): we add
+  an `else if (paneType == L"agentManager")` branch → `make_self<AgentManagerContent>()`.
+- The Manager tab is opened by **`TerminalPage::_OpenAgentManagerTab()`**, called from
+  `_OnFirstLayout` *before* startup terminal tabs, so it lands at index 0 (leftmost). It
+  sets the tab's `CloseButtonVisibility = Never` (non-closable) and is tracked in the
+  `_managerTab` member (nulled on close in `TabManagement.cpp`, mirroring `_settingsTab`).
+- Tab placement primitive: `_CreateNewTabFromPane(pane, insertPosition)` (`TabManagement.cpp`).
 
 ## Building FAST
 
@@ -75,13 +95,53 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
 
 4. **Iterate incrementally.** The cold build (restore + cppwinrt projection) is the
    expensive one; afterwards `-NoRestore` rebuilds (our edits touch only `TerminalApp`)
-   are quick thanks to MSBuild's up-to-date check.
+   are quick thanks to MSBuild's up-to-date check. Reference incremental times on this box:
+   first ~236s, code-change rebuilds ~165–290s.
 
 5. **Optional — MSBuildCache** for clean-rebuild / branch-switch cache hits: add
    `-p:MsBuildCacheEnabled=true` (uses file copies, not hardlinks).
 
-To run/debug after building: F5 on `CascadiaPackage` in VS, or deploy the built appx
-layout (see `doc/building.md`).
+## Deploy & run
+
+A packaged app can't be launched by running `WindowsTerminal.exe` directly (WT #926/#4043);
+it must be deployed. Deploy the **loose layout** (what VS F5 does) — no signing/cert/admin:
+
+```powershell
+# one-time per machine (or after the manifest changes): register the loose layout
+Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
+```
+
+Launch any of these ways:
+- execution alias: **`agentmaster`**
+- Start menu: **“Agentmaster”**
+- `Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"`
+
+**Fast inner loop** (the loose layout is live, so binaries update in place):
+```powershell
+pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore   # rebuild
+agentmaster                                            # relaunch — NO re-register needed
+```
+Re-register **only** when `Package-Dev.appxmanifest` changes. (VS F5 on `CascadiaPackage`
+also works and handles deploy.)
+
+## Gotchas (learned the hard way)
+
+- **`nuget.exe` can't parse `.slnx`.** The bundled `dep\nuget\nuget.exe` errors with
+  "file type was not recognized" on `OpenConsole.slnx`, and a bare `packages.config`
+  restore needs `-PackagesDirectory`. The wrapper restores `dep\nuget\packages.config`
+  into `packages\` and is non-fatal; use `-NoRestore` once packages exist. (Stock
+  `Invoke-OpenConsoleBuild` has the same latent bug — it only "works" because VS already
+  restored.)
+- **`Grid`/`Panel` has no `Focus(FocusState)`** in this XAML projection — only
+  `Control`-derived types do. `IPaneContent::Focus` must focus a `Control` child
+  (`ScratchpadContent` focuses its `TextBox`); the Manager's `Focus()` is a no-op until
+  M6 gives it a real focusable control. (This caused error C2039.)
+- **Never reuse the `WindowsTerminalDev` package identity.** It belongs to the separate
+  `K:\source\windowsterminal` checkout; registering the same identity tries to *replace*
+  it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
+  `OpenConsoleProxy.dll` is loaded. Our distinct `Agentmaster` identity sidesteps this.
+- **Don't `taskkill`** to clear deploy locks, and never touch the running **Store**
+  Windows Terminal (that's the live session). Pause and ask instead.
 
 ## Correctness rules (do not regress)
 
