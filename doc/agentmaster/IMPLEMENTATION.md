@@ -102,8 +102,12 @@ sessions and drives the Triage Board + Autopilot.
   `%USERPROFILE%\.agentmaster\` (restore preserves `Sent` statuses — no replay). UI to save
   a session's queue as a template, apply a template to the selected session, or broadcast
   it to every session in a directory; sessions autosave on every registry change. 102/102
-  checks pass (incl. JSON + round-trips + template apply). Live session relaunch / WT
-  layout-restore is a documented future step.
+  checks pass (incl. JSON + round-trips + template apply). **Session restore is live:** on
+  startup `_RestoreClaudeSessions()` re-launches every persisted session with
+  `claude --resume <id>` in its working dir (resuming the actual conversation) and reloads
+  its Flight Plan + autopilot, so reopening the app returns to the closed-in state. `Kill`
+  is the explicit discard (drops it from persistence). Verified live (`[restore]`/`[resume]`
+  /`SessionStart` in `~/.agentmaster/hooks.log`).
 
 ## Build & run
 

@@ -754,10 +754,21 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
     }
 
-    // Agentmaster: launch a real claude.exe on a ConPTY in `workingDir`, wired for hooks,
-    // as a normal terminal tab — and register it so its hook-driven state is tracked. Both
-    // the user (keystrokes) and the orchestrator (Autopilot, M7) write the same stdin.
+    // Agentmaster: launch a fresh Claude session (the Manager's "Launch session").
     void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title)
+    {
+        _LaunchClaudeSession(workingDir, title, std::nullopt);
+    }
+
+    // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a
+    // normal terminal tab, and register it so its hook-driven state is tracked. Both the
+    // user (keystrokes) and the orchestrator (Autopilot) write the same stdin.
+    //
+    // If `restored` is set, this RESUMES that conversation (claude --resume <id>) and
+    // restores its Flight Plan + autopilot from persistence (DESIGN §13) — so closing and
+    // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
+    // Sent (never replayed, Correctness Rule #4).
+    void TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -788,7 +799,8 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName());
+        const std::wstring resumeId = restored ? restored->id : std::wstring{};
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId);
 
         // Child environment: CCMGR_SESSION_ID + CCMGR_HOOK_PIPE so hook events correlate
         // back to this session's registry record (HOOKS.md).
@@ -829,14 +841,14 @@ namespace winrt::TerminalApp::implementation
             _claudeTabs[spec.sessionId] = winrt::make_weak(tab);
         }
 
-        // Register the session and bind its stdin injector (used by the Autopilot in M7).
-        // Correctness Rule #3: the injector is bound to THIS session's id, not "the
-        // selected session".
-        ::Agentmaster::SessionInfo info;
+        // Register the session (restoring its queue + autopilot if resuming) and bind its
+        // stdin injector. Correctness Rule #3: the injector is bound to THIS session's id.
+        ::Agentmaster::SessionInfo info = restored ? *restored : ::Agentmaster::SessionInfo{};
         info.id = spec.sessionId;
         info.title = ttl;
         info.workingDir = dir;
-        info.state = ::Agentmaster::SessionState::Idle;
+        info.state = ::Agentmaster::SessionState::Idle; // hooks re-establish the real state
+        info.pendingConfirmPromptId.clear();
         _sessionRegistry->Upsert(info);
 
         _sessionRegistry->SetInjector(spec.sessionId, [connection](const std::wstring& text) {
@@ -845,7 +857,27 @@ namespace winrt::TerminalApp::implementation
         });
 
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      L"[spawn] " + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L" cmd=" + spec.commandline + L"\n");
+                                      (restored ? L"[resume] " : L"[spawn] ") + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+    }
+
+    // Agentmaster: on startup, re-launch every persisted session (claude --resume) with its
+    // Flight Plan + autopilot restored, so the app reopens to the state it was closed in.
+    void TerminalPage::_RestoreClaudeSessions()
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const auto saved = ::Agentmaster::LoadSessions();
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) from sessions.json\n");
+        for (const auto& s : saved)
+        {
+            if (s.id.empty() || s.workingDir.empty())
+            {
+                continue;
+            }
+            _LaunchClaudeSession(winrt::hstring{ s.workingDir }, winrt::hstring{ s.title }, s);
+        }
     }
 
     // Agentmaster: wire a freshly-created Manager content to the engine. Idempotently
@@ -920,12 +952,22 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: close a session's tab through the normal confirm flow.
     void TerminalPage::_KillClaudeSession(winrt::hstring sessionId)
     {
-        const auto it = _claudeTabs.find(std::wstring{ sessionId });
-        if (it == _claudeTabs.end())
+        const std::wstring id{ sessionId };
+        const auto it = _claudeTabs.find(id);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (it != _claudeTabs.end())
         {
-            return;
+            _claudeTabs.erase(it);
         }
-        if (const auto tab = it->second.get())
+        // Kill is the explicit "discard" action: drop it from the registry so it is no
+        // longer persisted and won't be restored on the next launch. (Closing the app, or a
+        // tab, without Kill leaves the session persisted so it resumes next time.)
+        if (_sessionRegistry)
+        {
+            _sessionRegistry->Remove(id);
+            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        }
+        if (tab)
         {
             _HandleCloseTabRequested(tab);
         }
@@ -952,6 +994,10 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: the Manager tab is always present and leftmost (tab 0),
             // created before startup terminal tabs so they append after it.
             _OpenAgentManagerTab();
+
+            // Agentmaster: re-launch persisted sessions (claude --resume) so the app reopens
+            // to the exact state it was closed in (DESIGN §13).
+            _RestoreClaudeSessions();
 
             if (_startupConnection)
             {

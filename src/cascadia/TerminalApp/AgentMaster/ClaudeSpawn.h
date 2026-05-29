@@ -53,7 +53,9 @@ namespace Agentmaster
     std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath);
 
     // Assemble the claude command line. `settingsPath` should be forward-slash form.
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId);
+    // resume=false: a fresh session  -> claude --settings "<f>" --session-id <id>
+    // resume=true : resume an existing conversation -> claude --resume <id> --settings "<f>"
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume);
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
@@ -76,7 +78,9 @@ namespace Agentmaster
     // failure.
     std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir);
 
-    // Build a complete spawn spec for a new session and ensure the shared hook files exist.
-    // `pipeName` is the live HooksBridge pipe (HookPipeName(pid)).
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName);
+    // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
+    // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
+    // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh
+    // id is generated. The id is always exported as CCMGR_SESSION_ID for hook correlation.
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId = L"");
 }

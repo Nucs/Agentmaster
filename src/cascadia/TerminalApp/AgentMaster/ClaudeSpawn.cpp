@@ -223,8 +223,18 @@ try {
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume)
     {
+        if (resume)
+        {
+            // Resume the existing conversation by id; --resume implies the session id.
+            std::wstring cmd = L"claude --resume ";
+            cmd += sessionId;
+            cmd += L" --settings \"";
+            cmd += settingsPath;
+            cmd += L"\"";
+            return cmd;
+        }
         std::wstring cmd = L"claude --settings \"";
         cmd += settingsPath;
         cmd += L"\" --session-id ";
@@ -332,13 +342,15 @@ try {
         return { settingsPath, forwarderPath };
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
         spec.title = std::wstring{ title };
         spec.pipeName = std::wstring{ pipeName };
-        spec.sessionId = NewSessionId();
+
+        const bool resume = !resumeSessionId.empty();
+        spec.sessionId = resume ? std::wstring{ resumeSessionId } : NewSessionId();
 
         const auto stateDir = AgentmasterStateDir();
         auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir);
@@ -346,7 +358,7 @@ try {
         spec.forwarderPath = forwarderPath;
 
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume);
 
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
         spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);

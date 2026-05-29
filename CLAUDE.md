@@ -60,13 +60,18 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   named plan templates (de)serialize to JSON under `%USERPROFILE%\.agentmaster\` (restore
   preserves `Sent` — no replay). UI to save a session's queue as a template, apply it, or
   broadcast it to a whole directory; sessions autosave on every change.
-- **All milestones M0–M8 are code-complete; `TerminalAppLib` compiles clean and the engine
-  passes 102/102 standalone checks (`AgentMaster/tests/`).** The remaining step is the full
-  exe **link + deploy + live runtime check** (see "Deploy & run") — deferred while a prior
-  dev instance held the build output lock.
+- **Session restore ✅ (live):** on startup `TerminalPage::_RestoreClaudeSessions()`
+  re-launches every persisted session with **`claude --resume <id>`** in its working dir —
+  resuming the real conversation — and reloads its Flight Plan + autopilot. So closing and
+  reopening returns to the same state. **`Kill`** is the explicit discard (removes it from
+  the registry + `sessions.json`); closing the app or a tab without Kill keeps it for next
+  launch. Verified live.
+- **All milestones M0–M8 are complete, built, deployed, and verified running.** Engine
+  passes **103/103** standalone checks (`AgentMaster/tests/`).
 - Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
   bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight
-  Plan; relaunch persisted sessions / WT layout restore; prevent splitting the Manager tab.
+  Plan; remove a session from persistence when its tab is closed via the X (today only
+  `Kill` discards); prevent splitting the Manager tab.
 - Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts

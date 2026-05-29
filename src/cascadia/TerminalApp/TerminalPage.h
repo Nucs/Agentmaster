@@ -35,8 +35,11 @@ namespace winrt::Microsoft::Terminal::Settings
 }
 
 // Agentmaster: the native session-management engine (plain C++; see
-// src/cascadia/TerminalApp/AgentMaster/). Forward-declared so TerminalPage can hold it by
-// shared_ptr without pulling the engine headers into this widely-included header.
+// src/cascadia/TerminalApp/AgentMaster/). The engine classes are forward-declared so
+// TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
+// because restore passes a SessionInfo by value.
+#include "AgentMaster/SessionModels.h"
+#include <optional>
 namespace Agentmaster
 {
     class SessionRegistry;
@@ -353,6 +356,8 @@ namespace winrt::TerminalApp::implementation
         void _OpenAgentManagerTab(); // Agentmaster
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
+        void _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // Agentmaster
+        void _RestoreClaudeSessions(); // Agentmaster: re-launch persisted sessions (claude --resume)
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
         void _KillClaudeSession(winrt::hstring sessionId); // Agentmaster: close a session's tab (confirm)
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
