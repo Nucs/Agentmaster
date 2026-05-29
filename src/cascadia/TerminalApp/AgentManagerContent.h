@@ -93,6 +93,7 @@ namespace winrt::TerminalApp::implementation
         void _ClosePathPicker();
         void _RebuildPathPicker();
         void _PickPath(const std::wstring& dir);
+        void _NormalizeCwdBox(); // platform-sensitive NormPath of the cwd box (on commit / blur / pick / launch)
         void _PushRecentDir(const std::wstring& dir);
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current) const;
         winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);

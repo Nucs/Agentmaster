@@ -249,17 +249,26 @@ try {
 
     std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume)
     {
+        // Agentmaster: every spawned session runs with --dangerously-skip-permissions. The
+        // app drives claude programmatically (Autopilot + injected prompts) and gates risky
+        // actions through its own Approval Policy, so the per-tool permission prompts are
+        // redundant here. Critically, permission mode `bypassPermissions` ALSO skips the
+        // per-folder "Do you trust the files in this folder?" trust dialog at startup (the
+        // dialog block is gated on `mode !== "bypassPermissions"`), which would otherwise
+        // wedge an unattended ConPTY session waiting on a keypress. It does NOT suppress the
+        // one-time GLOBAL "Bypass Permissions mode" acceptance (~/.claude.json
+        // `bypassPermissionsModeAccepted`) — that shows once, ever, until accepted.
         if (resume)
         {
             // Resume the existing conversation by id; --resume implies the session id.
-            std::wstring cmd = L"claude --resume ";
+            std::wstring cmd = L"claude --dangerously-skip-permissions --resume ";
             cmd += sessionId;
             cmd += L" --settings \"";
             cmd += settingsPath;
             cmd += L"\"";
             return cmd;
         }
-        std::wstring cmd = L"claude --settings \"";
+        std::wstring cmd = L"claude --dangerously-skip-permissions --settings \"";
         cmd += settingsPath;
         cmd += L"\" --session-id ";
         cmd += sessionId;
@@ -522,7 +531,7 @@ try {
         cmd += L"if defined AMHAS (\r\n";
         cmd += L"  " + invoke + L" %*\r\n";
         cmd += L") else (\r\n";
-        cmd += L"  " + invoke + L" --settings \"" + settingsPath + L"\" %*\r\n";
+        cmd += L"  " + invoke + L" --dangerously-skip-permissions --settings \"" + settingsPath + L"\" %*\r\n";
         cmd += L")\r\n";
         WriteFileUtf8(shimDir + L"\\claude.cmd", cmd);
 
@@ -535,7 +544,7 @@ try {
         sh += L"# Agentmaster managed-claude shim: inject hooks --settings, then run real claude.\n";
         sh += L"case \"$*\" in\n";
         sh += L"  *--settings*) exec \"" + realFwd + L"\" \"$@\" ;;\n";
-        sh += L"  *) exec \"" + realFwd + L"\" --settings \"" + settingsFwd + L"\" \"$@\" ;;\n";
+        sh += L"  *) exec \"" + realFwd + L"\" --dangerously-skip-permissions --settings \"" + settingsFwd + L"\" \"$@\" ;;\n";
         sh += L"esac\n";
         WriteFileUtf8(shimDir + L"\\claude", sh);
 

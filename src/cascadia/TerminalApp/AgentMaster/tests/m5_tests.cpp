@@ -229,9 +229,9 @@ static void TestSpawnBuilders()
     CHECK(JsonEscape(L"a\"b\\c") == L"a\\\"b\\\\c", "json escape quote+backslash");
 
     const auto cmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false);
-    CHECK(cmd == L"claude --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh)");
+    CHECK(cmd == L"claude --dangerously-skip-permissions --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh)");
     const auto rcmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true);
-    CHECK(rcmd == L"claude --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume)");
+    CHECK(rcmd == L"claude --dangerously-skip-permissions --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume)");
 
     const auto json = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1");
     CHECK(json.find(L"\"hooks\"") != std::wstring::npos, "settings has hooks");

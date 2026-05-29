@@ -29,7 +29,7 @@ namespace Agentmaster
     struct ClaudeSpawnSpec
     {
         std::wstring sessionId; // lowercase hyphenated UUID (== --session-id == CCMGR_SESSION_ID)
-        std::wstring commandline; // e.g. claude --settings "<file>" --session-id <uuid>
+        std::wstring commandline; // e.g. claude --dangerously-skip-permissions --settings "<file>" --session-id <uuid>
         std::wstring workingDir; // the M axis
         std::wstring title; // display title
         std::wstring pipeName; // \\.\pipe\agentmaster.<pid>
@@ -53,8 +53,11 @@ namespace Agentmaster
     std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath);
 
     // Assemble the claude command line. `settingsPath` should be forward-slash form.
-    // resume=false: a fresh session  -> claude --settings "<f>" --session-id <id>
-    // resume=true : resume an existing conversation -> claude --resume <id> --settings "<f>"
+    // Always includes --dangerously-skip-permissions: the app gates risk via its own Approval
+    // Policy, and `bypassPermissions` mode also skips the startup "trust this folder" dialog
+    // that would otherwise wedge an unattended ConPTY session (see ClaudeSpawn.cpp).
+    // resume=false: a fresh session  -> claude --dangerously-skip-permissions --settings "<f>" --session-id <id>
+    // resume=true : resume an existing conversation -> claude --dangerously-skip-permissions --resume <id> --settings "<f>"
     std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume);
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).

@@ -527,15 +527,19 @@ namespace winrt::TerminalApp::implementation
                     }
                     disp.TryEnqueue([weak]() {
                         auto self = weak.get();
-                        if (!self || !self->_pathPopup || !self->_pathPopup.IsOpen())
+                        if (!self || !self->_cwdBox)
                         {
                             return;
                         }
-                        if (self->_cwdBox && self->_cwdBox.FocusState() != FocusState::Unfocused)
+                        if (self->_cwdBox.FocusState() != FocusState::Unfocused)
                         {
-                            return; // regained focus (e.g. after clicking a row) — stay open
+                            return; // regained focus (e.g. after clicking a row) — leave it alone
                         }
+                        // Focus truly left the box: close the picker (if open) and normalize
+                        // what's there. Closing first means the normalize's TextChanged won't
+                        // bother rebuilding the (now-closed) picker.
                         self->_ClosePathPicker();
+                        self->_NormalizeCwdBox();
                     });
                 });
             }
@@ -551,6 +555,7 @@ namespace winrt::TerminalApp::implementation
                 else if (e.Key() == VirtualKey::Enter)
                 {
                     _ClosePathPicker();
+                    _NormalizeCwdBox(); // commit: normalize what the user typed
                 }
             });
             bar.Children().Append(_cwdBox);
@@ -1620,6 +1625,7 @@ namespace winrt::TerminalApp::implementation
     {
         if (_spawnHandler)
         {
+            _NormalizeCwdBox(); // launch with — and remember — a normalized path
             const auto dir = _cwdBox ? _cwdBox.Text() : winrt::hstring{};
             _PushRecentDir(std::wstring{ dir }); // remember it as "recently selected"
             _ClosePathPicker();
@@ -2063,14 +2069,34 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Normalize the Launch path box in place. Platform-sensitive via NormPath (Windows: flip
+    // '/'->'\' and trim insignificant trailing separators; POSIX: trim trailing '/'). Called
+    // on commit (Enter), blur, list-pick, and launch — deliberately NOT per-keystroke, which
+    // would eat a trailing separator the user types to descend into a folder.
+    void AgentManagerContent::_NormalizeCwdBox()
+    {
+        if (!_cwdBox)
+        {
+            return;
+        }
+        const std::wstring cur{ _cwdBox.Text() };
+        const std::wstring norm = NormPath(cur);
+        if (norm != cur)
+        {
+            _cwdBox.Text(winrt::hstring{ norm });
+            _cwdBox.Select(static_cast<int32_t>(norm.size()), 0); // caret to end
+        }
+    }
+
     void AgentManagerContent::_PickPath(const std::wstring& dir)
     {
         if (!_cwdBox)
         {
             return;
         }
-        _cwdBox.Text(winrt::hstring{ dir }); // fires TextChanged -> _RebuildPathPicker (popup open)
-        _cwdBox.Select(static_cast<int32_t>(dir.size()), 0); // caret to end
+        const std::wstring norm = NormPath(dir); // selecting from the list normalizes too
+        _cwdBox.Text(winrt::hstring{ norm }); // fires TextChanged -> _RebuildPathPicker (popup open)
+        _cwdBox.Select(static_cast<int32_t>(norm.size()), 0); // caret to end
         _cwdBox.Focus(FocusState::Programmatic); // keep the box focused so the popup stays open
     }
 }
