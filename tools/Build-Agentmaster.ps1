@@ -54,8 +54,16 @@ if (-not (Get-Command msbuild.exe -ErrorAction SilentlyContinue)) {
 }
 
 if (-not $NoRestore) {
-    & "$root\dep\nuget\nuget.exe" restore "$root\OpenConsole.slnx"
-    & "$root\dep\nuget\nuget.exe" restore "$root\dep\nuget\packages.config"
+    # NOTE: the bundled dep\nuget\nuget.exe is too old to parse the .slnx solution
+    # format (it errors with "The file type was not recognized"), and a bare
+    # packages.config restore can't locate the output folder. Package versions are
+    # centralized in dep\nuget\packages.config, so restore that straight into the
+    # repo's packages\ folder. Non-fatal: on an incremental build packages already
+    # exist, and msbuild will restore PackageReference projects itself.
+    & "$root\dep\nuget\nuget.exe" restore "$root\dep\nuget\packages.config" -PackagesDirectory "$root\packages"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "nuget restore returned $LASTEXITCODE (continuing; packages may already be present). Use -NoRestore to skip."
+    }
 }
 
 $mFlag = if ($MaxCpu -gt 0) { "/m:$MaxCpu" } else { '/m' }
