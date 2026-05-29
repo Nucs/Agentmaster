@@ -508,12 +508,18 @@ try {
 
         // claude.cmd — covers cmd.exe, PowerShell and pwsh (all honor PATHEXT for .CMD). If
         // the caller already passed --settings, pass straight through (don't double-wire).
+        // Detect an existing --settings via a substring replace on a quoted capture of the
+        // args (NOT `echo %*|findstr`, which a `&`/`|`/`<`/`>` in the args would break). If
+        // the user already passed --settings, run untouched; else prepend ours. (A literal
+        // `!` in args is the one delayed-expansion edge we accept for this dev convenience.)
         std::wstring cmd;
         cmd += L"@echo off\r\n";
-        cmd += L"setlocal\r\n";
+        cmd += L"setlocal EnableDelayedExpansion\r\n";
         cmd += L"rem Agentmaster managed-claude shim: inject hooks --settings, then run real claude.\r\n";
-        cmd += L"echo %* | findstr /I /C:\"--settings\" >nul 2>&1\r\n";
-        cmd += L"if %errorlevel%==0 (\r\n";
+        cmd += L"set \"AMARGS=%*\"\r\n";
+        cmd += L"set \"AMHAS=\"\r\n";
+        cmd += L"if defined AMARGS if not \"!AMARGS:--settings=!\"==\"!AMARGS!\" set \"AMHAS=1\"\r\n";
+        cmd += L"if defined AMHAS (\r\n";
         cmd += L"  " + invoke + L" %*\r\n";
         cmd += L") else (\r\n";
         cmd += L"  " + invoke + L" --settings \"" + settingsPath + L"\" %*\r\n";

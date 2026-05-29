@@ -751,6 +751,53 @@ namespace winrt::TerminalApp::implementation
             4);
         _hooksBridge->Start();
 
+        // Agentmaster (B+D+C — observe & control sessions we did NOT Launch): make a
+        // hand-typed `claude` in any `+` tab self-wire for hooks and get adopted.
+        //  * publish the live pipe to bridge.json (a forwarder that didn't inherit
+        //    CCMGR_HOOK_PIPE can still find it);
+        //  * export CCMGR_HOOK_PIPE on OUR process and prepend a transparent `claude` PATH
+        //    shim — every `+` tab inherits our live env (ConptyConnection regenerates from
+        //    the current process block), so a bare `claude` there runs the shim, which adds
+        //    `--settings <ourHooks>`. Launch's direct CreateProcessW("claude …") resolves
+        //    claude.exe (no PATHEXT) and bypasses the .cmd shim — so no double-wiring.
+        try
+        {
+            ::Agentmaster::WriteBridgeDiscovery(pipeName);
+            const auto stateDir = ::Agentmaster::AgentmasterStateDir();
+            const auto hookFiles = ::Agentmaster::MaterializeSharedHookFiles(stateDir);
+            // Resolve real claude + author the shim BEFORE touching PATH (so it never finds
+            // our own shim), then prepend the shim dir.
+            const auto shimDir = ::Agentmaster::MaterializeClaudeShim(stateDir, hookFiles.first);
+            ::SetEnvironmentVariableW(L"CCMGR_HOOK_PIPE", pipeName.c_str());
+            if (!shimDir.empty())
+            {
+                std::wstring path;
+                const DWORD need = ::GetEnvironmentVariableW(L"PATH", nullptr, 0);
+                if (need > 1)
+                {
+                    path.resize(need);
+                    const DWORD got = ::GetEnvironmentVariableW(L"PATH", path.data(), need);
+                    path.resize(got);
+                }
+                const std::wstring newPath = shimDir + L";" + path;
+                ::SetEnvironmentVariableW(L"PATH", newPath.c_str());
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[engine] claude shim on PATH: " + shimDir + L"\n");
+            }
+        }
+        CATCH_LOG();
+
+        // Adoption seam: a hook for a session we didn't Launch -> try to bind it to its
+        // hosting ConPTY so it becomes fully managed (observe + control).
+        {
+            const auto weakThis = get_weak();
+            _sessionRegistry->SetAdoptionHandler([weakThis](const std::wstring& id, const std::wstring& cwd, const std::wstring& tabToken) {
+                if (auto self = weakThis.get())
+                {
+                    self->_AdoptExternalSession(winrt::hstring{ id }, winrt::hstring{ cwd }, winrt::hstring{ tabToken });
+                }
+            });
+        }
+
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
     }
 
@@ -854,6 +901,7 @@ namespace winrt::TerminalApp::implementation
         info.title = ttl;
         info.workingDir = dir;
         info.state = ::Agentmaster::SessionState::Idle; // hooks re-establish the real state
+        info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.pendingConfirmPromptId.clear();
         _sessionRegistry->Upsert(info);
 
@@ -978,6 +1026,116 @@ namespace winrt::TerminalApp::implementation
         {
             _HandleCloseTabRequested(tab);
         }
+    }
+
+    // Agentmaster: a hook arrived for a session we did NOT Launch — a `claude` the user typed
+    // into a `+` tab, wired by the PATH shim. The registry has already adopted it (observe-
+    // only, external=true); promote it to full control by finding the live ConPTY whose
+    // WT_SESSION equals `tabToken` and binding a stdin injector to it (Correctness Rule #3:
+    // the injector is bound to THIS session's id). Best-effort: a claude hosted outside this
+    // app (no matching connection) stays observe-only. Runs on the UI thread (XAML walk).
+    winrt::fire_and_forget TerminalPage::_AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken)
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+
+        if (!_sessionRegistry)
+        {
+            co_return;
+        }
+
+        const std::wstring id{ sessionId };
+
+        // Give the adopted card a readable title (its working dir's leaf) if it has none.
+        std::wstring ttl;
+        try
+        {
+            ttl = std::filesystem::path{ std::wstring{ cwd } }.filename().wstring();
+        }
+        catch (...)
+        {
+        }
+        if (!ttl.empty())
+        {
+            _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
+                if (s.title.empty())
+                {
+                    s.title = ttl;
+                }
+            });
+        }
+
+        const auto lower = [](std::wstring s) {
+            for (auto& c : s)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            return s;
+        };
+        const std::wstring token = lower(std::wstring{ tabToken });
+        if (token.empty())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no tabToken)\n");
+            co_return;
+        }
+
+        // Find the live ConPTY whose WT_SESSION == token, then bind it.
+        for (const auto& projectedTab : _tabs)
+        {
+            const auto tabImpl = _GetTabImpl(projectedTab);
+            if (!tabImpl)
+            {
+                continue;
+            }
+            TerminalConnection::ITerminalConnection match{ nullptr };
+            tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+                if (match)
+                {
+                    return;
+                }
+                const auto content = pane->GetContent();
+                if (!content)
+                {
+                    return;
+                }
+                const auto term = content.try_as<TerminalApp::TerminalPaneContent>();
+                if (!term)
+                {
+                    return;
+                }
+                const auto ctrl = term.GetTermControl();
+                if (!ctrl)
+                {
+                    return;
+                }
+                const auto conn = ctrl.Connection();
+                if (!conn)
+                {
+                    return;
+                }
+                if (lower(::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId())) == token)
+                {
+                    match = conn;
+                }
+            });
+
+            if (match)
+            {
+                const auto connection = match;
+                _sessionRegistry->SetInjector(id, [connection](const std::wstring& text) {
+                    const auto* begin = reinterpret_cast<const char16_t*>(text.data());
+                    connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
+                });
+                _claudeTabs[id] = winrt::make_weak(projectedTab);
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
+                co_return;
+            }
+        }
+
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no connection for " + token + L")\n");
     }
 
     void TerminalPage::_OnFirstLayout(const IInspectable& /*sender*/, const IInspectable& /*eventArgs*/)

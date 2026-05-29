@@ -360,6 +360,7 @@ namespace winrt::TerminalApp::implementation
         void _RestoreClaudeSessions(); // Agentmaster: re-launch persisted sessions (claude --resume)
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
         void _KillClaudeSession(winrt::hstring sessionId); // Agentmaster: close a session's tab (confirm)
+        winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);

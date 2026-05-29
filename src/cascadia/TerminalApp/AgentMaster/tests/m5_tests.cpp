@@ -124,9 +124,21 @@ static void TestWire()
         m.cwd = L"K:/ui";
         m.permissionRequest = true;
         m.tool = L"Bash";
+        m.tabToken = L"wt-9f3";
         auto rt = ParseWireLine(BuildWireLine(m));
         CHECK(rt.has_value(), "round-trip parses");
         CHECK(rt && rt->event == HookEvent::Notification && rt->sessionId == L"sid-xyz" && rt->cwd == L"K:/ui" && rt->permissionRequest && rt->tool == L"Bash", "round-trip fields");
+        CHECK(rt && rt->tabToken == L"wt-9f3", "round-trip tabToken (WT_SESSION)");
+    }
+    {
+        // 7-field line: the trailing tabToken (WT_SESSION) parses.
+        auto m = ParseWireLine(L"SessionStart\tsid\tK:/api\t0\t0\tBash\twt-guid-123");
+        CHECK(m && m->tabToken == L"wt-guid-123", "wire tabToken parsed");
+    }
+    {
+        // Backward-compat: a 6-field line (pre-tabToken forwarder) still parses; token empty.
+        auto m = ParseWireLine(L"Stop\tabc\tK:/api\t1\t0\tBash");
+        CHECK(m && m->tabToken.empty(), "missing tabToken ok");
     }
     {
         CHECK(HookPipeName(1234) == L"\\\\.\\pipe\\agentmaster.1234", "pipe name format");
@@ -175,6 +187,27 @@ static void TestRegistry()
     reg.OnHookEvent(Msg(L"ghost", HookEvent::SessionStart));
     CHECK(reg.Count() == 2, "SessionStart auto-creates");
 
+    // Adoption seam (observe+control of a session we did NOT Launch): a SessionStart for a
+    // brand-new id fires the adoption handler with cwd + tabToken, and flags the record
+    // external. A later hook for the same id must NOT re-adopt.
+    int adopted = 0;
+    std::wstring adoptId, adoptCwd, adoptTab;
+    reg.SetAdoptionHandler([&](const std::wstring& aid, const std::wstring& acwd, const std::wstring& atab) {
+        adopted++;
+        adoptId = aid;
+        adoptCwd = acwd;
+        adoptTab = atab;
+    });
+    HookMessage ext = Msg(L"ext-1", HookEvent::SessionStart);
+    ext.cwd = L"K:/ext";
+    ext.tabToken = L"wt-77";
+    reg.OnHookEvent(ext);
+    CHECK(adopted == 1, "adoption handler fired for new session");
+    CHECK(adoptId == L"ext-1" && adoptCwd == L"K:/ext" && adoptTab == L"wt-77", "adoption carried id+cwd+tabToken");
+    CHECK(reg.Get(L"ext-1") && reg.Get(L"ext-1")->external, "adopted session flagged external");
+    reg.OnHookEvent(Msg(L"ext-1", HookEvent::UserPromptSubmit));
+    CHECK(adopted == 1, "no re-adoption for an already-known session");
+
     // Injector seam.
     std::wstring injected;
     reg.SetInjector(L"s1", [&](const std::wstring& t) { injected = t; });
@@ -215,6 +248,9 @@ static void TestSpawnBuilders()
     CHECK(fwd.find(L"NamedPipeClientStream") != std::wstring::npos, "forwarder uses NamedPipeClientStream");
     CHECK(fwd.find(L"CCMGR_SESSION_ID") != std::wstring::npos, "forwarder reads CCMGR_SESSION_ID");
     CHECK(fwd.find(L"CCMGR_HOOK_PIPE") != std::wstring::npos, "forwarder reads CCMGR_HOOK_PIPE");
+    CHECK(fwd.find(L"session_id") != std::wstring::npos, "forwarder falls back to payload session_id");
+    CHECK(fwd.find(L"WT_SESSION") != std::wstring::npos, "forwarder emits WT_SESSION tabToken");
+    CHECK(fwd.find(L"bridge.json") != std::wstring::npos, "forwarder falls back to bridge.json discovery");
 
     const auto id = NewSessionId();
     CHECK(id.size() == 36, "uuid length 36");
@@ -390,6 +426,7 @@ static void TestPersistence()
         s.workingDir = L"K:/api";
         s.state = SessionState::WaitingForInput;
         s.lastActivityUnixMs = 123456789;
+        s.external = true; // adopted session: must survive the round-trip
         QueuedPrompt a;
         a.id = L"p1";
         a.label = L"add tests";
@@ -418,6 +455,7 @@ static void TestPersistence()
             const auto& r = back[0];
             CHECK(r.id == L"sid-1" && r.title == L"My Task" && r.workingDir == L"K:/api", "session metadata");
             CHECK(r.state == SessionState::WaitingForInput, "session state");
+            CHECK(r.external, "external flag preserved");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
             CHECK(r.queue.size() == 2 && r.queue[1].gate == PromptGate::Manual && r.queue[1].guardPattern == L"answers-a-question:ok", "prompt gate+guard preserved");

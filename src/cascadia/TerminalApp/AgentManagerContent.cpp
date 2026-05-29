@@ -1136,6 +1136,14 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_RebuildTree(const std::vector<SessionInfo>& sessions)
     {
+        // While an in-place rename editor is live, leave the tree untouched so the frequent
+        // hook-driven refreshes can't steal its focus or discard typed text. Commit/cancel
+        // clears _renamingId and rebuilds. (_OnRenameSession nulls _renameBox to bootstrap
+        // the one rebuild that creates the editor.)
+        if (!_renamingId.empty() && _renameBox)
+        {
+            return;
+        }
         _treeHost.Children().Clear();
 
         // Ordered, de-duplicated working directories. Paths that differ only by case (on
@@ -1208,6 +1216,40 @@ namespace winrt::TerminalApp::implementation
                 {
                     continue;
                 }
+                const auto id = s.id;
+
+                // In-place rename editor for this row (see _renameBox note in the header).
+                // Editing inline sidesteps the XAML-Islands trap where a text box inside a
+                // ContentDialog receives no keypresses.
+                if (!_renamingId.empty() && _renamingId == id)
+                {
+                    auto box = TextBox{};
+                    box.Text(s.title);
+                    box.Margin(Thickness{ 16, 0, 0, 4 });
+                    box.KeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+                        if (e.Key() == VirtualKey::Enter)
+                        {
+                            _CommitRename();
+                            e.Handled(true);
+                        }
+                        else if (e.Key() == VirtualKey::Escape)
+                        {
+                            _CancelRename();
+                            e.Handled(true);
+                        }
+                    });
+                    box.LostFocus([this](const IInspectable&, const RoutedEventArgs&) { _CommitRename(); });
+                    // Focus + select-all once it is actually in the tree (Loaded) so the first
+                    // keystroke replaces the old name.
+                    box.Loaded([box](const IInspectable&, const RoutedEventArgs&) {
+                        box.Focus(FocusState::Programmatic);
+                        box.SelectAll();
+                    });
+                    _renameBox = box;
+                    _treeHost.Children().Append(box);
+                    continue;
+                }
+
                 const bool selected = (s.id == _selectedId);
 
                 auto row = StackPanel{};
@@ -1228,10 +1270,25 @@ namespace winrt::TerminalApp::implementation
                 rowBtn.Background(Fill(selected ? 0x40 : 0x00, 0x80, 0x80, 0x80));
                 rowBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
 
-                const auto id = s.id;
-                rowBtn.Click([this, id](const IInspectable&, const RoutedEventArgs&) { _SelectSession(id); });
+                // Single click = select; double click (within the OS threshold) = Activate
+                // (jump to the live tab). A Button swallows DoubleTapped, so we time the
+                // successive clicks ourselves.
+                rowBtn.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+                    const auto nowTick = ::GetTickCount64();
+                    const bool dbl = (id == _lastTreeClickId) && (nowTick - _lastTreeClickTick) <= ::GetDoubleClickTime();
+                    _lastTreeClickId = id;
+                    _lastTreeClickTick = nowTick;
+                    if (dbl && _activateHandler)
+                    {
+                        _activateHandler(winrt::hstring{ id });
+                    }
+                    else
+                    {
+                        _SelectSession(id);
+                    }
+                });
                 // Enter = Activate (jump to live tab) — NEVER inject (Correctness Rule #2).
-                // Delete = kill (the page runs the close-confirm flow).
+                // Delete = confirm-guarded delete; F2 = rename.
                 rowBtn.KeyDown([this, id](const IInspectable&, const KeyRoutedEventArgs& e) {
                     const auto key = e.Key();
                     if (key == VirtualKey::Enter)
@@ -1244,15 +1301,160 @@ namespace winrt::TerminalApp::implementation
                     }
                     else if (key == VirtualKey::Delete)
                     {
-                        if (_killHandler)
-                        {
-                            _killHandler(winrt::hstring{ id });
-                        }
+                        _OnDeleteSession(id);
+                        e.Handled(true);
+                    }
+                    else if (key == VirtualKey::F2)
+                    {
+                        _OnRenameSession(id);
                         e.Handled(true);
                     }
                 });
+                // Right-click (or context key / long-press) menu: Rename / Delete.
+                rowBtn.ContextFlyout(_MakeSessionMenu(id));
                 _treeHost.Children().Append(rowBtn);
             }
+        }
+    }
+
+    // ---- Explorer-tree session actions (right-click menu, rename, delete) ----
+
+    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id)
+    {
+        MenuFlyout menu;
+        auto disp = _dispatcher;
+        auto weak = get_weak();
+
+        // Both items defer one tick: a MenuFlyout restores focus to its target as it closes,
+        // which would otherwise yank focus out of the freshly-shown rename editor / dialog.
+        MenuFlyoutItem rename;
+        rename.Text(L"Rename\x2026");
+        rename.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_OnRenameSession(id); } });
+            }
+            else if (auto self = weak.get())
+            {
+                self->_OnRenameSession(id);
+            }
+        });
+        menu.Items().Append(rename);
+
+        MenuFlyoutItem del;
+        del.Text(L"Delete\x2026");
+        del.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_OnDeleteSession(id); } });
+            }
+            else if (auto self = weak.get())
+            {
+                self->_OnDeleteSession(id);
+            }
+        });
+        menu.Items().Append(del);
+
+        return menu;
+    }
+
+    void AgentManagerContent::_OnRenameSession(const std::wstring& id)
+    {
+        if (id.empty())
+        {
+            return;
+        }
+        _renamingId = id;
+        _renameBox = nullptr; // bootstrap: force the next rebuild to create + focus the editor
+        _Refresh();
+    }
+
+    void AgentManagerContent::_CommitRename()
+    {
+        if (_renamingId.empty())
+        {
+            return;
+        }
+        const auto id = _renamingId;
+        std::wstring name = _renameBox ? std::wstring{ _renameBox.Text() } : std::wstring{};
+        // Trim surrounding whitespace; an empty/whitespace name keeps the old title.
+        const auto first = name.find_first_not_of(L" \t\r\n");
+        const auto last = name.find_last_not_of(L" \t\r\n");
+        name = (first == std::wstring::npos) ? std::wstring{} : name.substr(first, last - first + 1);
+
+        _renamingId.clear();
+        _renameBox = nullptr;
+        if (_registry && !name.empty())
+        {
+            _registry->Update(id, [&](SessionInfo& s) { s.title = name; });
+        }
+        _Refresh();
+    }
+
+    void AgentManagerContent::_CancelRename()
+    {
+        if (_renamingId.empty())
+        {
+            return;
+        }
+        _renamingId.clear();
+        _renameBox = nullptr;
+        _Refresh();
+    }
+
+    void AgentManagerContent::_OnDeleteSession(const std::wstring& id)
+    {
+        if (id.empty())
+        {
+            return;
+        }
+
+        // A clear accept/cancel warning before the irreversible discard. A buttons-only
+        // ContentDialog is XAML-Islands-safe; set XamlRoot + theme like TerminalWindow does
+        // (the dialog's PopupRoot is outside our tree, so it won't inherit either on its own).
+        std::wstring title;
+        if (_registry)
+        {
+            if (const auto s = _registry->Get(id))
+            {
+                title = s->title;
+            }
+        }
+        const winrt::hstring body = title.empty() ?
+            winrt::hstring{ L"This closes the session's tab and removes it from the saved fleet. This can't be undone." } :
+            winrt::hstring{ L"\x201C" + title + L"\x201D will be closed and removed from the saved fleet. This can't be undone." };
+
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(L"Delete session?"));
+        dialog.Content(winrt::box_value(body));
+        dialog.PrimaryButtonText(L"Delete");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+        if (_root)
+        {
+            try
+            {
+                dialog.XamlRoot(_root.XamlRoot());
+                dialog.RequestedTheme(_root.ActualTheme());
+            }
+            catch (...)
+            {
+            }
+        }
+        auto kill = _killHandler;
+        const winrt::hstring hid{ id };
+        dialog.PrimaryButtonClick([kill, hid](const ContentDialog&, const ContentDialogButtonClickEventArgs&) {
+            if (kill)
+            {
+                kill(hid);
+            }
+        });
+        try
+        {
+            dialog.ShowAsync();
+        }
+        catch (...)
+        {
         }
     }
 

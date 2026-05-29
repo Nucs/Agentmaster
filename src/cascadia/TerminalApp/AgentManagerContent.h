@@ -108,6 +108,14 @@ namespace winrt::TerminalApp::implementation
         void _OnSplitterMoved(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e, bool vertical);
         void _OnSplitterReleased(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
 
+        // Explorer-tree session actions: right-click context menu (Rename / Delete with a
+        // confirm warning) + double-click to activate.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id);
+        void _OnRenameSession(const std::wstring& id); // begin an in-place rename of the row
+        void _CommitRename(); // apply the in-place editor's text to the session title
+        void _CancelRename(); // discard the in-place editor (Esc)
+        void _OnDeleteSession(const std::wstring& id); // confirm (ContentDialog) then kill
+
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
@@ -161,5 +169,16 @@ namespace winrt::TerminalApp::implementation
         double _dragOrigin{ 0 }; // root-relative pointer coord on the drag axis at press
         double _dragSizeA{ 0 }; // first track's px size at drag start
         double _dragSizeB{ 0 }; // second track's px size at drag start
+
+        // ---- Explorer-tree interactions ----
+        // Button swallows DoubleTapped, so we synthesize a double-click by timing successive
+        // clicks on the same row (GetDoubleClickTime threshold) -> Activate; single -> select.
+        std::wstring _lastTreeClickId;
+        unsigned long long _lastTreeClickTick{ 0 };
+        // In-place rename: a TextBox swapped into the row being renamed. A ContentDialog can't
+        // host a text box in XAML Islands (it receives no keypresses), so we edit inline like
+        // the tab renamer; while the editor is live the tree skips rebuilds to keep focus+text.
+        std::wstring _renamingId;
+        winrt::Windows::UI::Xaml::Controls::TextBox _renameBox{ nullptr };
     };
 }
