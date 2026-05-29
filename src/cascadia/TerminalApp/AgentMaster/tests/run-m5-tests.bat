@@ -13,5 +13,6 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-m5_tests.exe
+REM Explicit ".\" so it launches even when NoDefaultCurrentDirectoryInExePath is set.
+.\m5_tests.exe
 exit /b %errorlevel%

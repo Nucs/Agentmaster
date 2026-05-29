@@ -95,6 +95,11 @@ namespace Agentmaster
         std::wstring branch; // git branch / worktree
         SessionState state{ SessionState::Idle };
         int64_t lastActivityUnixMs{ 0 };
+        // True for a session ADOPTED from a claude we did NOT launch (typed into a `+` tab,
+        // not Launched by the Manager). It is observe-only until the app correlates it to its
+        // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is
+        // (re)launched as a managed session on restore. Persisted so the card survives reopen.
+        bool external{ false };
         // Transient runtime flag (not persisted): set from the most recent Stop hook's
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
@@ -112,5 +117,15 @@ namespace Agentmaster
     {
         std::wstring name;
         std::vector<QueuedPrompt> prompts; // status is reset to Pending (with fresh ids) on apply
+    };
+
+    // Persisted geometry for the Manager tab's draggable pane splitters (C1 "Linked
+    // Lenses"). Each value is the FIRST track's share of the two tracks its splitter
+    // divides, kept within (0,1) — the second track takes the remainder. Defaults match the
+    // original 2:3 star ratios so first run looks unchanged.
+    struct ManagerLayout
+    {
+        double boardFraction{ 0.4 }; // Triage Board height / (Board + Bottom)      [root rows]
+        double treeFraction{ 0.4 }; // Explorer Tree width / (Tree + Flight Plan)   [bottom cols]
     };
 }

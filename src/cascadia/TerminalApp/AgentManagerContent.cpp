@@ -17,6 +17,9 @@ using namespace winrt::Windows::Foundation;
 using winrt::Windows::UI::Color;
 using winrt::Windows::UI::ColorHelper;
 using winrt::Windows::UI::Colors;
+using winrt::Windows::UI::Core::CoreCursor;
+using winrt::Windows::UI::Core::CoreCursorType;
+using winrt::Windows::UI::Core::CoreWindow;
 using namespace winrt::Windows::UI::Text; // FontWeights
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Controls;
@@ -31,6 +34,17 @@ namespace
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
+    }
+
+    // Set the window pointer cursor (used by the resize splitters: a ↔/↕ on hover, Arrow on
+    // exit). There is no per-element cursor in this XAML projection (ProtectedCursor is only
+    // reachable from a subclass), so we drive the CoreWindow cursor like the rest of the app.
+    void ApplyCursor(CoreCursorType type)
+    {
+        if (const auto w = CoreWindow::GetForCurrentThread())
+        {
+            w.PointerCursor(CoreCursor{ type, 0 });
+        }
     }
 
     Color StateColor(SessionState s)
@@ -316,6 +330,7 @@ namespace winrt::TerminalApp::implementation
         _dispatcher = DispatcherQueue::GetForCurrentThread();
         _templates = ::Agentmaster::LoadTemplates(); // persisted plan templates (M8)
         _recentDirs = ::Agentmaster::LoadRecentDirs(); // MRU for the Launch path-picker
+        _layout = ::Agentmaster::LoadLayout(); // persisted splitter geometry (pane sizes)
 
         try
         {
@@ -432,6 +447,11 @@ namespace winrt::TerminalApp::implementation
             cd.Width(GridLengthHelper::FromValueAndType(v, GridUnitType::Star));
             return cd;
         };
+        auto autoCol = []() {
+            ColumnDefinition cd;
+            cd.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            return cd;
+        };
 
         const auto panelBorder = Fill(0x40, 0x80, 0x80, 0x80);
 
@@ -446,9 +466,14 @@ namespace winrt::TerminalApp::implementation
             return b;
         };
 
-        _root.RowDefinitions().Append(autoRow()); // toolbar
-        _root.RowDefinitions().Append(starRow(2)); // board
-        _root.RowDefinitions().Append(starRow(3)); // bottom
+        // Rows: toolbar (auto) · board (★) · splitter (auto) · bottom (★). The two ★ rows are
+        // seeded from the persisted fraction and are what the horizontal splitter resizes.
+        _boardRow = starRow(_layout.boardFraction);
+        _bottomRow = starRow(1.0 - _layout.boardFraction);
+        _root.RowDefinitions().Append(autoRow()); // 0: toolbar
+        _root.RowDefinitions().Append(_boardRow); // 1: board
+        _root.RowDefinitions().Append(autoRow()); // 2: splitter
+        _root.RowDefinitions().Append(_bottomRow); // 3: bottom
 
         // ---- Toolbar ----
         {
@@ -593,11 +618,16 @@ namespace winrt::TerminalApp::implementation
             _root.Children().Append(b);
         }
 
-        // ---- Bottom: Explorer Tree | Flight Plan (row 2) ----
+        // ---- Bottom: Explorer Tree | Flight Plan (row 3) ----
         {
             auto bottom = Grid{};
-            bottom.ColumnDefinitions().Append(starCol(2));
-            bottom.ColumnDefinitions().Append(starCol(3));
+            // Columns: tree (★) · splitter (auto) · plan (★). The two ★ cols are seeded from
+            // the persisted fraction and are what the vertical splitter resizes.
+            _treeCol = starCol(_layout.treeFraction);
+            _planCol = starCol(1.0 - _layout.treeFraction);
+            bottom.ColumnDefinitions().Append(_treeCol); // 0: tree
+            bottom.ColumnDefinitions().Append(autoCol()); // 1: splitter
+            bottom.ColumnDefinitions().Append(_planCol); // 2: plan
 
             // Explorer Tree
             {
@@ -728,12 +758,26 @@ namespace winrt::TerminalApp::implementation
                 wrap.Children().Append(outer);
 
                 auto b = section(wrap);
-                Grid::SetColumn(b, 1);
+                Grid::SetColumn(b, 2);
                 bottom.Children().Append(b);
             }
 
-            Grid::SetRow(bottom, 2);
+            // Vertical splitter between Tree and Flight Plan (drag = resize ↔).
+            {
+                auto vbar = _MakeSplitter(true);
+                Grid::SetColumn(vbar, 1);
+                bottom.Children().Append(vbar);
+            }
+
+            Grid::SetRow(bottom, 3);
             _root.Children().Append(bottom);
+        }
+
+        // ---- Horizontal splitter between Triage Board and the bottom (drag = resize ↕) ----
+        {
+            auto hbar = _MakeSplitter(false);
+            Grid::SetRow(hbar, 2);
+            _root.Children().Append(hbar);
         }
 
         // ---- Launch path-picker drop-down (a Popup anchored under the cwd box) ----
@@ -831,6 +875,194 @@ namespace winrt::TerminalApp::implementation
         const auto id = s.id;
         card.Click([this, id](const IInspectable&, const RoutedEventArgs&) { _SelectSession(id); });
         return card;
+    }
+
+    // ---- Resizable splitters ------------------------------------------------
+
+    Border AgentManagerContent::_MakeSplitter(bool vertical)
+    {
+        // A thin grab-bar in its own auto-sized grid track. The near-transparent fill keeps
+        // the whole bar hit-testable; a centered grip line + hover highlight signal it is
+        // draggable, and the OS cursor flips to the resize arrow while the pointer is over it.
+        const auto idleGrip = Fill(0x40, 0x80, 0x80, 0x80);
+        const auto hotGrip = Fill(0x90, 0xC0, 0xC0, 0xC0);
+
+        auto grip = Border{};
+        grip.Background(idleGrip);
+        grip.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
+
+        auto bar = Border{};
+        if (vertical)
+        {
+            bar.Width(10);
+            bar.VerticalAlignment(VerticalAlignment::Stretch);
+            grip.Width(2);
+            grip.HorizontalAlignment(HorizontalAlignment::Center);
+            grip.VerticalAlignment(VerticalAlignment::Stretch);
+            grip.Margin(Thickness{ 0, 10, 0, 10 });
+        }
+        else
+        {
+            bar.Height(10);
+            bar.HorizontalAlignment(HorizontalAlignment::Stretch);
+            grip.Height(2);
+            grip.VerticalAlignment(VerticalAlignment::Center);
+            grip.HorizontalAlignment(HorizontalAlignment::Stretch);
+            grip.Margin(Thickness{ 10, 0, 10, 0 });
+        }
+        bar.Background(Fill(0x01, 0x80, 0x80, 0x80)); // ~invisible, yet hit-testable
+        bar.Child(grip);
+
+        const auto cursorType = vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth;
+
+        bar.PointerEntered([this, grip, cursorType, hotGrip](const IInspectable&, const PointerRoutedEventArgs&) {
+            ApplyCursor(cursorType);
+            grip.Background(hotGrip);
+        });
+        bar.PointerExited([this, grip, idleGrip](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (_dragKind == DragKind::None) // mid-drag the pointer may leave the thin bar — keep it hot
+            {
+                ApplyCursor(CoreCursorType::Arrow);
+                grip.Background(idleGrip);
+            }
+        });
+        bar.PointerPressed([this, vertical, grip, hotGrip](const IInspectable& s, const PointerRoutedEventArgs& e) {
+            grip.Background(hotGrip);
+            _OnSplitterPressed(s, e, vertical);
+        });
+        bar.PointerMoved([this, vertical, cursorType](const IInspectable&, const PointerRoutedEventArgs& e) {
+            if (_dragKind == DragKind::None)
+            {
+                ApplyCursor(cursorType); // re-assert the resize cursor while hovering (covers post-release)
+                return;
+            }
+            _OnSplitterMoved(e, vertical);
+        });
+        bar.PointerReleased([this, grip, idleGrip](const IInspectable& s, const PointerRoutedEventArgs& e) {
+            _OnSplitterReleased(s, e);
+            grip.Background(idleGrip);
+        });
+        bar.PointerCaptureLost([this, grip, idleGrip](const IInspectable& s, const PointerRoutedEventArgs& e) {
+            _OnSplitterReleased(s, e);
+            grip.Background(idleGrip);
+        });
+        return bar;
+    }
+
+    void AgentManagerContent::_OnSplitterPressed(const IInspectable& sender, const PointerRoutedEventArgs& e, bool vertical)
+    {
+        if (!_root)
+        {
+            return;
+        }
+        _dragKind = vertical ? DragKind::Cols : DragKind::Rows;
+        // Pin the two tracks' sizes + the pointer's root-relative coord at press; the move
+        // handler derives everything from these fixed values, so the boundary tracks the
+        // cursor 1:1 with no feedback from the live re-layout. Track ActualWidth/Height is the
+        // exact star-space allotment, so star weights set to pixels land pixel-perfect.
+        const auto pos = e.GetCurrentPoint(_root).Position();
+        if (vertical)
+        {
+            _dragOrigin = pos.X;
+            _dragSizeA = _treeCol ? _treeCol.ActualWidth() : 0.0;
+            _dragSizeB = _planCol ? _planCol.ActualWidth() : 0.0;
+        }
+        else
+        {
+            _dragOrigin = pos.Y;
+            _dragSizeA = _boardRow ? _boardRow.ActualHeight() : 0.0;
+            _dragSizeB = _bottomRow ? _bottomRow.ActualHeight() : 0.0;
+        }
+        if (const auto el = sender.try_as<UIElement>())
+        {
+            el.CapturePointer(e.Pointer());
+        }
+        ApplyCursor(vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth);
+        e.Handled(true);
+    }
+
+    void AgentManagerContent::_OnSplitterMoved(const PointerRoutedEventArgs& e, bool vertical)
+    {
+        if (_dragKind == DragKind::None || !_root)
+        {
+            return;
+        }
+        const auto pos = e.GetCurrentPoint(_root).Position();
+        const double cur = vertical ? static_cast<double>(pos.X) : static_cast<double>(pos.Y);
+        const double total = _dragSizeA + _dragSizeB;
+        constexpr double minPx = 80.0; // never let a pane shrink below this
+        if (total < (minPx * 2.0) + 1.0)
+        {
+            return; // not enough room to split sensibly — leave the panes alone
+        }
+        const double newA = std::clamp(_dragSizeA + (cur - _dragOrigin), minPx, total - minPx);
+        const double newB = total - newA;
+        const auto star = [](double v) { return GridLengthHelper::FromValueAndType(v, GridUnitType::Star); };
+        if (vertical)
+        {
+            if (_treeCol)
+            {
+                _treeCol.Width(star(newA));
+            }
+            if (_planCol)
+            {
+                _planCol.Width(star(newB));
+            }
+        }
+        else
+        {
+            if (_boardRow)
+            {
+                _boardRow.Height(star(newA));
+            }
+            if (_bottomRow)
+            {
+                _bottomRow.Height(star(newB));
+            }
+        }
+        e.Handled(true);
+    }
+
+    void AgentManagerContent::_OnSplitterReleased(const IInspectable& sender, const PointerRoutedEventArgs& e)
+    {
+        if (_dragKind == DragKind::None)
+        {
+            return; // a capture-lost echo of our own release, or a stray event — nothing to do
+        }
+        const bool vertical = (_dragKind == DragKind::Cols);
+        _dragKind = DragKind::None; // clear BEFORE releasing capture so the re-entrant CaptureLost no-ops
+
+        if (const auto el = sender.try_as<UIElement>())
+        {
+            el.ReleasePointerCaptures();
+        }
+
+        // Persist the new split as a fraction read straight from the star weights we just
+        // applied (synchronous + exact, unlike ActualWidth which trails by a layout pass).
+        // a/t is correct whether the weights are the seed FRACTIONS (sum == 1.0, e.g. a stray
+        // click with no drag) or post-drag PIXELS (sum in the hundreds); guard only t == 0.
+        const auto fraction = [](double a, double b) {
+            const double t = a + b;
+            return t > 0.0 ? std::clamp(a / t, 0.1, 0.9) : 0.4;
+        };
+        if (vertical)
+        {
+            if (_treeCol && _planCol)
+            {
+                _layout.treeFraction = fraction(_treeCol.Width().Value, _planCol.Width().Value);
+            }
+        }
+        else
+        {
+            if (_boardRow && _bottomRow)
+            {
+                _layout.boardFraction = fraction(_boardRow.Height().Value, _bottomRow.Height().Value);
+            }
+        }
+        ::Agentmaster::SaveLayout(_layout);
+
+        ApplyCursor(CoreCursorType::Arrow);
+        e.Handled(true);
     }
 
     void AgentManagerContent::_RebuildBoard(const std::vector<SessionInfo>& sessions)

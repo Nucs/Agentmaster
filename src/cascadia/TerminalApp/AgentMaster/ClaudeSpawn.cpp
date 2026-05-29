@@ -139,60 +139,84 @@ namespace Agentmaster
         return LR"PSHOOK(param([string]$Event = "")
 $ErrorActionPreference = "SilentlyContinue"
 try {
-  $sid  = $env:CCMGR_SESSION_ID
-  $pipe = $env:CCMGR_HOOK_PIPE
-  if ([string]::IsNullOrEmpty($sid) -or [string]::IsNullOrEmpty($pipe)) { return }
-
   $raw = ""
   try { $raw = [Console]::In.ReadToEnd() } catch { }
+
+  $j = $null
+  if (-not [string]::IsNullOrEmpty($raw)) {
+    try { $j = $raw | ConvertFrom-Json } catch { $j = $null }
+  }
+
+  # Session id: prefer the env we inject at Launch; otherwise take it from the hook payload
+  # so a session we did NOT launch (a hand-typed `claude` in a `+` tab) still correlates.
+  $sid = $env:CCMGR_SESSION_ID
+  if ([string]::IsNullOrEmpty($sid) -and $j -ne $null -and $j.session_id) { $sid = [string]$j.session_id }
+  if ([string]::IsNullOrEmpty($sid)) { return }
+
+  # Pipe: prefer the inherited env; otherwise the bridge discovery file (covers a shell that
+  # did not inherit CCMGR_HOOK_PIPE).
+  $pipe = $env:CCMGR_HOOK_PIPE
+  if ([string]::IsNullOrEmpty($pipe)) {
+    try {
+      $disc = Join-Path $env:USERPROFILE ".agentmaster\bridge.json"
+      if (Test-Path -LiteralPath $disc) {
+        $b = (Get-Content -LiteralPath $disc -Raw) | ConvertFrom-Json
+        if ($b.pipe) { $pipe = [string]$b.pipe }
+      }
+    } catch { }
+  }
+  if ([string]::IsNullOrEmpty($pipe)) { return }
 
   $cwd = ""
   $isQ = "0"
   $perm = "0"
   $tool = ""
-  if (-not [string]::IsNullOrEmpty($raw)) {
-    try {
-      $j = $raw | ConvertFrom-Json
-      if ($j.cwd) { $cwd = [string]$j.cwd }
-      if ($j.tool_name) { $tool = [string]$j.tool_name }
-      if ($Event -eq "Notification") {
-        $m = ""
-        if ($j.message) { $m = [string]$j.message }
-        if ($m -match "(?i)permission|approve|allow|grant") { $perm = "1" }
-      }
-      if ($Event -eq "Stop") {
-        $tp = ""
-        if ($j.transcript_path) { $tp = [string]$j.transcript_path }
-        if ((-not [string]::IsNullOrEmpty($tp)) -and (Test-Path -LiteralPath $tp)) {
-          $tail = @(Get-Content -LiteralPath $tp -Tail 60 -ErrorAction SilentlyContinue)
-          for ($i = $tail.Length - 1; $i -ge 0; $i--) {
-            $obj = $null
-            try { $obj = $tail[$i] | ConvertFrom-Json } catch { continue }
-            if ($obj.type -eq "assistant" -and $obj.message -and $obj.message.content) {
-              $txt = ""
-              foreach ($c in $obj.message.content) {
-                if ($c.type -eq "text" -and $c.text) { $txt = [string]$c.text }
-              }
-              $txt = $txt.TrimEnd()
-              if ($txt.EndsWith("?")) { $isQ = "1" }
-              break
+  if ($j -ne $null) {
+    if ($j.cwd) { $cwd = [string]$j.cwd }
+    if ($j.tool_name) { $tool = [string]$j.tool_name }
+    if ($Event -eq "Notification") {
+      $m = ""
+      if ($j.message) { $m = [string]$j.message }
+      if ($m -match "(?i)permission|approve|allow|grant") { $perm = "1" }
+    }
+    if ($Event -eq "Stop") {
+      $tp = ""
+      if ($j.transcript_path) { $tp = [string]$j.transcript_path }
+      if ((-not [string]::IsNullOrEmpty($tp)) -and (Test-Path -LiteralPath $tp)) {
+        $tail = @(Get-Content -LiteralPath $tp -Tail 60 -ErrorAction SilentlyContinue)
+        for ($i = $tail.Length - 1; $i -ge 0; $i--) {
+          $obj = $null
+          try { $obj = $tail[$i] | ConvertFrom-Json } catch { continue }
+          if ($obj.type -eq "assistant" -and $obj.message -and $obj.message.content) {
+            $txt = ""
+            foreach ($c in $obj.message.content) {
+              if ($c.type -eq "text" -and $c.text) { $txt = [string]$c.text }
             }
+            $txt = $txt.TrimEnd()
+            if ($txt.EndsWith("?")) { $isQ = "1" }
+            break
           }
         }
       }
-    } catch { }
+    }
   }
 
-  $server = "."
+  # The hosting terminal's WT_SESSION GUID (inherited from the ConPTY). Lets the app correlate
+  # an adopted session back to its connection to bind a stdin injector.
+  $tab = $env:WT_SESSION
+  if ($null -eq $tab) { $tab = "" }
+
   $name = $pipe
   $bs = $pipe.LastIndexOf("\")
   if ($bs -ge 0) { $name = $pipe.Substring($bs + 1) }
 
-  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool) -join "`t"
+  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab) -join "`t"
 
-  $client = New-Object System.IO.Pipes.NamedPipeClientStream($server, $name, [System.IO.Pipes.PipeDirection]::Out)
+  $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::Out)
   try {
-    $client.Connect(2000)
+    # A bounded connect: with the app running the local pipe answers in <50ms; a stale
+    # discovery file fails in ~1s rather than stalling the Claude turn.
+    $client.Connect(1000)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($line + "`n")
     $client.Write($bytes, 0, $bytes.Length)
     $client.Flush()
@@ -394,6 +418,133 @@ try {
             return { std::wstring{}, std::wstring{} };
         }
         return { settingsPath, forwarderPath };
+    }
+
+    std::wstring ResolveRealClaude()
+    {
+        const std::wstring path = GetEnvW(L"PATH");
+        if (path.empty())
+        {
+            return {};
+        }
+        // Try the common Windows launcher extensions, in the order the shim can invoke them
+        // most cleanly (.exe runs directly; .cmd/.bat need `call`).
+        static const wchar_t* const exts[] = { L".exe", L".cmd", L".bat" };
+        size_t start = 0;
+        while (start <= path.size())
+        {
+            size_t sc = path.find(L';', start);
+            if (sc == std::wstring::npos)
+            {
+                sc = path.size();
+            }
+            std::wstring dir = path.substr(start, sc - start);
+            start = sc + 1;
+            // Trim surrounding quotes / whitespace, skip empties.
+            while (!dir.empty() && (dir.front() == L'"' || dir.front() == L' '))
+            {
+                dir.erase(dir.begin());
+            }
+            while (!dir.empty() && (dir.back() == L'"' || dir.back() == L' '))
+            {
+                dir.pop_back();
+            }
+            if (dir.empty())
+            {
+                continue;
+            }
+            if (dir.back() != L'\\' && dir.back() != L'/')
+            {
+                dir.push_back(L'\\');
+            }
+            for (const auto* e : exts)
+            {
+                const std::wstring cand = dir + L"claude" + e;
+                const DWORD attr = ::GetFileAttributesW(cand.c_str());
+                if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                {
+                    return cand;
+                }
+            }
+        }
+        return {};
+    }
+
+    std::wstring MaterializeClaudeShim(const std::wstring& stateDir, const std::wstring& settingsPath)
+    {
+        // Resolve the real claude FIRST (PATH is still un-mutated here, so this never finds
+        // our own shim). If claude isn't installed, there is nothing to shim.
+        const std::wstring real = ResolveRealClaude();
+        if (real.empty())
+        {
+            return {};
+        }
+
+        const std::wstring shimDir = stateDir + L"\\shim";
+        try
+        {
+            std::filesystem::create_directories(std::filesystem::path{ shimDir });
+        }
+        catch (...)
+        {
+            return {};
+        }
+
+        // Pick the invocation form by the real launcher's extension (ASCII, case-insensitive).
+        std::wstring ext;
+        if (const auto dot = real.find_last_of(L'.'); dot != std::wstring::npos)
+        {
+            ext = real.substr(dot);
+            for (auto& c : ext)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+        }
+        const bool needsCall = (ext == L".cmd" || ext == L".bat");
+        const std::wstring invoke = needsCall ? (L"call \"" + real + L"\"") : (L"\"" + real + L"\"");
+
+        // claude.cmd — covers cmd.exe, PowerShell and pwsh (all honor PATHEXT for .CMD). If
+        // the caller already passed --settings, pass straight through (don't double-wire).
+        std::wstring cmd;
+        cmd += L"@echo off\r\n";
+        cmd += L"setlocal\r\n";
+        cmd += L"rem Agentmaster managed-claude shim: inject hooks --settings, then run real claude.\r\n";
+        cmd += L"echo %* | findstr /I /C:\"--settings\" >nul 2>&1\r\n";
+        cmd += L"if %errorlevel%==0 (\r\n";
+        cmd += L"  " + invoke + L" %*\r\n";
+        cmd += L") else (\r\n";
+        cmd += L"  " + invoke + L" --settings \"" + settingsPath + L"\" %*\r\n";
+        cmd += L")\r\n";
+        WriteFileUtf8(shimDir + L"\\claude.cmd", cmd);
+
+        // Extensionless POSIX `claude` for git-bash / MSYS. cmd/PowerShell ignore it (not on
+        // PATHEXT); only a *nix-style shell picks it up. Best-effort (forward-slash paths).
+        const std::wstring realFwd = ToForwardSlashes(real);
+        const std::wstring settingsFwd = ToForwardSlashes(settingsPath);
+        std::wstring sh;
+        sh += L"#!/bin/sh\n";
+        sh += L"# Agentmaster managed-claude shim: inject hooks --settings, then run real claude.\n";
+        sh += L"case \"$*\" in\n";
+        sh += L"  *--settings*) exec \"" + realFwd + L"\" \"$@\" ;;\n";
+        sh += L"  *) exec \"" + realFwd + L"\" --settings \"" + settingsFwd + L"\" \"$@\" ;;\n";
+        sh += L"esac\n";
+        WriteFileUtf8(shimDir + L"\\claude", sh);
+
+        return shimDir;
+    }
+
+    void WriteBridgeDiscovery(std::wstring_view pipeName)
+    {
+        const auto dir = AgentmasterStateDir();
+        std::wstring json = L"{ \"pid\": ";
+        json += std::to_wstring(static_cast<unsigned long>(::GetCurrentProcessId()));
+        json += L", \"pipe\": \"";
+        json += JsonEscape(pipeName);
+        json += L"\" }\n";
+        WriteFileUtf8(dir + L"\\bridge.json", json);
     }
 
     ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId)

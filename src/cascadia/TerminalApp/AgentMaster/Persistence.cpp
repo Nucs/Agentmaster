@@ -290,6 +290,7 @@ namespace Agentmaster
         o.Set(L"branch", json::Value::MkStr(s.branch));
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
+        o.Set(L"external", json::Value::MkBool(s.external));
         auto q = json::Value::MkArr();
         for (const auto& p : s.queue)
         {
@@ -309,6 +310,7 @@ namespace Agentmaster
         s.branch = v.StrAt(L"branch");
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
+        s.external = v.BoolAt(L"external", false);
         if (const auto* q = v.Find(L"queue"); q && q->type == json::Value::Type::Arr)
         {
             for (const auto& pv : q->arr)
@@ -448,6 +450,33 @@ namespace Agentmaster
         return out;
     }
 
+    std::wstring SerializeLayout(const ManagerLayout& layout)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        root.Set(L"boardFraction", json::Value::MkNum(layout.boardFraction));
+        root.Set(L"treeFraction", json::Value::MkNum(layout.treeFraction));
+        return json::Dump(root);
+    }
+
+    ManagerLayout DeserializeLayout(std::wstring_view text)
+    {
+        ManagerLayout layout; // defaults stand in for a missing/corrupt field
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return layout;
+        }
+        // Keep each fraction inside a sane band so a hand-edited/corrupt file can never
+        // collapse a pane to nothing. The out-of-band test also rejects NaN.
+        auto sane = [](double v, double fallback) {
+            return (v > 0.05 && v < 0.95) ? v : fallback;
+        };
+        layout.boardFraction = sane(parsed->NumAt(L"boardFraction", layout.boardFraction), layout.boardFraction);
+        layout.treeFraction = sane(parsed->NumAt(L"treeFraction", layout.treeFraction), layout.treeFraction);
+        return layout;
+    }
+
     // ---- disk ----
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
@@ -473,6 +502,14 @@ namespace Agentmaster
     std::vector<std::wstring> LoadRecentDirs()
     {
         return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
+    }
+    void SaveLayout(const ManagerLayout& layout)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\layout.json", SerializeLayout(layout));
+    }
+    ManagerLayout LoadLayout()
+    {
+        return DeserializeLayout(ReadAllUtf8(AgentmasterStateDir() + L"\\layout.json"));
     }
 
     // ---- templates apply ----

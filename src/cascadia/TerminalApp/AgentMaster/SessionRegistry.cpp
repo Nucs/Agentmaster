@@ -104,6 +104,7 @@ namespace Agentmaster
         SessionInfo snapshot;
         bool found = false;
         bool triggerAdvance = false;
+        bool adopted = false; // this call CREATED the record (a session we didn't launch)
 
         {
             std::lock_guard guard{ _mtx };
@@ -122,8 +123,12 @@ namespace Agentmaster
                 created.id = msg.sessionId;
                 created.workingDir = msg.cwd;
                 created.state = SessionState::Idle;
+                // Mark it external/observe-only; the adoption handler (fired below, outside
+                // the lock) tries to bind it to its ConPTY for full control.
+                created.external = true;
                 _order.push_back(msg.sessionId);
                 it = _sessions.emplace(msg.sessionId, std::move(created)).first;
+                adopted = true;
             }
 
             auto& s = it->second;
@@ -151,6 +156,16 @@ namespace Agentmaster
         if (found)
         {
             _notify(snapshot, msg.event);
+        }
+        if (adopted && _adopt)
+        {
+            try
+            {
+                _adopt(msg.sessionId, msg.cwd, msg.tabToken);
+            }
+            catch (...)
+            {
+            }
         }
         if (triggerAdvance && _advance)
         {
@@ -191,6 +206,12 @@ namespace Agentmaster
     {
         std::lock_guard guard{ _mtx };
         _advance = std::move(handler);
+    }
+
+    void SessionRegistry::SetAdoptionHandler(AdoptionHandler handler)
+    {
+        std::lock_guard guard{ _mtx };
+        _adopt = std::move(handler);
     }
 
     void SessionRegistry::SetInjector(const std::wstring& id, Injector injector)

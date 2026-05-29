@@ -86,6 +86,24 @@ namespace Agentmaster
     // failure.
     std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir);
 
+    // Resolve the real `claude` launcher on PATH (searched as claude.exe/.cmd/.bat, in that
+    // order). MUST be called BEFORE the shim dir is prepended to PATH so it never resolves to
+    // our own shim. Returns the full path, or empty if claude is not found on PATH.
+    std::wstring ResolveRealClaude();
+
+    // Write a transparent `claude` PATH shim (claude.cmd for cmd/PowerShell + an
+    // extensionless POSIX `claude` for git-bash) into <stateDir>\shim. Each forwards all args
+    // to the real claude, injecting `--settings <settingsPath>` UNLESS the caller already
+    // passed --settings. Prepending the returned dir to PATH makes a HAND-TYPED `claude` in
+    // any shell self-wire for hooks, so a `+`-tab session is adopted into observe+control.
+    // Returns the shim dir, or empty if no real claude was found (caller then skips the PATH
+    // prepend). `settingsPath` should be in backslash form.
+    std::wstring MaterializeClaudeShim(const std::wstring& stateDir, const std::wstring& settingsPath);
+
+    // Publish the live bridge pipe to <stateDir>\bridge.json ({pid,pipe}) so a forwarder
+    // whose process did not inherit CCMGR_HOOK_PIPE can still discover the bridge.
+    void WriteBridgeDiscovery(std::wstring_view pipeName);
+
     // Build a complete spawn spec and ensure the shared hook files exist. `pipeName` is the
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh

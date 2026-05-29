@@ -46,6 +46,9 @@ namespace Agentmaster
     // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
+    // Manager-tab splitter geometry (pane sizes survive close/reopen). Deserialize clamps.
+    std::wstring SerializeLayout(const ManagerLayout& layout);
+    ManagerLayout DeserializeLayout(std::wstring_view text);
 
     // ---- disk (state dir; best-effort) ----
     void SaveSessions(const std::vector<SessionInfo>& sessions);
@@ -54,6 +57,8 @@ namespace Agentmaster
     std::vector<PlanTemplate> LoadTemplates();
     void SaveRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> LoadRecentDirs();
+    void SaveLayout(const ManagerLayout& layout);
+    ManagerLayout LoadLayout();
 
     // ---- templates: build + apply ----
     // Capture a session's current queue as a reusable template.

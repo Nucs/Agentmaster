@@ -32,6 +32,12 @@ namespace Agentmaster
     // WaitingForInput. The handler decides whether to dequeue + inject the next prompt.
     using AdvanceHandler = std::function<void(const std::wstring& sessionId)>;
 
+    // The adoption seam: invoked once, OUTSIDE the lock, when OnHookEvent creates a record
+    // for a session that was NOT pre-registered (i.e. a hand-typed `claude`, not a Manager
+    // Launch). The app layer uses `tabToken` (the hosting connection's WT_SESSION) to find
+    // that ConPTY and bind a stdin injector, promoting the session to full observe+control.
+    using AdoptionHandler = std::function<void(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& tabToken)>;
+
     // Per-session stdin writer, bound to that session's ConptyConnection by the app layer.
     using Injector = std::function<void(const std::wstring& text)>;
 
@@ -66,6 +72,8 @@ namespace Agentmaster
         // is single (the Autopilot).
         void AddObserver(RegistryObserver observer);
         void SetAdvanceHandler(AdvanceHandler handler);
+        // Single handler (the app layer). See AdoptionHandler.
+        void SetAdoptionHandler(AdoptionHandler handler);
 
         // Bind / clear a session's stdin injector.
         void SetInjector(const std::wstring& id, Injector injector);
@@ -88,5 +96,6 @@ namespace Agentmaster
         std::unordered_map<std::wstring, int64_t> _lastHumanInput;
         std::vector<RegistryObserver> _observers;
         AdvanceHandler _advance;
+        AdoptionHandler _adopt;
     };
 }

@@ -115,6 +115,11 @@ namespace Agentmaster::json
             const auto* m = Find(key);
             return m ? m->AsBool(def) : def;
         }
+        double NumAt(std::wstring_view key, double def = 0) const
+        {
+            const auto* m = Find(key);
+            return m ? m->AsNum(def) : def;
+        }
     };
 
     namespace detail

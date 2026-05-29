@@ -100,6 +100,14 @@ namespace winrt::TerminalApp::implementation
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
 
+        // Draggable pane splitters (resize + on-hover cursor + persisted sizes).
+        // `vertical` == a vertical bar dividing the bottom COLUMNS (↔, resizes Tree/Plan);
+        // `!vertical` == a horizontal bar dividing the root ROWS (↕, resizes Board/Bottom).
+        winrt::Windows::UI::Xaml::Controls::Border _MakeSplitter(bool vertical);
+        void _OnSplitterPressed(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e, bool vertical);
+        void _OnSplitterMoved(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e, bool vertical);
+        void _OnSplitterReleased(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
+
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
@@ -133,5 +141,25 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;
+
+        // ---- Resizable splitters (persisted geometry) ----
+        // The definitions each splitter resizes + the panes they bound (read for live size).
+        ::Agentmaster::ManagerLayout _layout;
+        winrt::Windows::UI::Xaml::Controls::RowDefinition _boardRow{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::RowDefinition _bottomRow{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ColumnDefinition _treeCol{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ColumnDefinition _planCol{ nullptr };
+        // Drag state. One splitter drags at a time; sizes are pinned at PointerPressed so the
+        // boundary tracks the cursor 1:1 (no feedback loop from the live re-layout).
+        enum class DragKind
+        {
+            None,
+            Rows, // dragging the horizontal bar (Board vs Bottom)
+            Cols // dragging the vertical bar (Tree vs Flight Plan)
+        };
+        DragKind _dragKind{ DragKind::None };
+        double _dragOrigin{ 0 }; // root-relative pointer coord on the drag axis at press
+        double _dragSizeA{ 0 }; // first track's px size at drag start
+        double _dragSizeB{ 0 }; // second track's px size at drag start
     };
 }

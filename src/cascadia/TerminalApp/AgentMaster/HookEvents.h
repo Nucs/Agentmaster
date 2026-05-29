@@ -112,6 +112,11 @@ namespace Agentmaster
         // Drives NeedsApproval / ApprovalPolicy rather than the prompt queue.
         bool permissionRequest{ false };
         std::wstring tool; // associated tool name, when applicable
+        // The hosting terminal's WT_SESSION GUID (plain, no braces), echoed by the forwarder
+        // from $env:WT_SESSION. Lets the app correlate a session we did NOT launch (a
+        // hand-typed `claude` in a `+` tab) back to its ConPTY connection so it can bind a
+        // stdin injector — i.e. ADOPT it into full observe+control. Empty when unavailable.
+        std::wstring tabToken;
     };
 
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current

@@ -453,6 +453,47 @@ static void TestPersistence()
     }
 }
 
+static void TestManagerLayout()
+{
+    std::wprintf(L"Manager layout (splitter geometry persistence):\n");
+    auto approx = [](double a, double b) { return (a > b ? a - b : b - a) < 1e-9; };
+
+    // Round-trip of in-band fractions.
+    {
+        ManagerLayout in;
+        in.boardFraction = 0.55;
+        in.treeFraction = 0.62;
+        const auto out = DeserializeLayout(SerializeLayout(in));
+        CHECK(approx(out.boardFraction, 0.55), "layout boardFraction round-trip");
+        CHECK(approx(out.treeFraction, 0.62), "layout treeFraction round-trip");
+    }
+
+    // Empty / unparseable text -> defaults (no throw, no zero that would vanish a pane).
+    {
+        const auto out = DeserializeLayout(L"");
+        CHECK(approx(out.boardFraction, 0.4) && approx(out.treeFraction, 0.4), "layout defaults on empty");
+        const auto out2 = DeserializeLayout(L"not json at all");
+        CHECK(approx(out2.boardFraction, 0.4) && approx(out2.treeFraction, 0.4), "layout defaults on garbage");
+    }
+
+    // Out-of-band values are rejected back to the default (a corrupt file can't collapse a pane).
+    {
+        const auto out = DeserializeLayout(L"{\"boardFraction\":0.99,\"treeFraction\":0.0}");
+        CHECK(approx(out.boardFraction, 0.4), "layout rejects too-large board -> default");
+        CHECK(approx(out.treeFraction, 0.4), "layout rejects zero tree -> default");
+        const auto out2 = DeserializeLayout(L"{\"boardFraction\":-3,\"treeFraction\":0.5}");
+        CHECK(approx(out2.boardFraction, 0.4), "layout rejects negative board -> default");
+        CHECK(approx(out2.treeFraction, 0.5), "layout keeps in-band tree alongside a bad board");
+    }
+
+    // A missing field keeps its default; a present in-band field is honored.
+    {
+        const auto out = DeserializeLayout(L"{\"treeFraction\":0.3}");
+        CHECK(approx(out.boardFraction, 0.4), "layout missing board -> default");
+        CHECK(approx(out.treeFraction, 0.3), "layout present tree honored");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -462,6 +503,7 @@ int wmain()
     TestSpawnBuilders();
     TestScheduler();
     TestPersistence();
+    TestManagerLayout();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");

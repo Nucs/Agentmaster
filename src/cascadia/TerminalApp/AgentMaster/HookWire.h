@@ -7,10 +7,11 @@
 //
 // One hook invocation -> one UTF-8, newline-terminated, TAB-separated record:
 //
-//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \n
+//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \n
 //
-// Fields after `sessionId` are optional (older/edge forwarders may omit them). `cwd` and
-// `tool` are assumed free of TAB/newline (true for Windows paths and Claude tool names).
+// Fields after `sessionId` are optional (older/edge forwarders may omit them). `cwd`,
+// `tool` and `tabToken` are assumed free of TAB/newline (true for Windows paths, Claude
+// tool names, and the plain WT_SESSION GUID).
 // We deliberately avoid JSON on the wire so the bridge needs no JSON dependency; the
 // forwarder (which DOES have PowerShell's ConvertFrom-Json) does the parsing and emits
 // these few flat fields.
@@ -49,6 +50,8 @@ namespace Agentmaster
         s.push_back(m.permissionRequest ? L'1' : L'0');
         s.push_back(kWireFieldSep);
         s.append(m.tool);
+        s.push_back(kWireFieldSep);
+        s.append(m.tabToken);
         return s;
     }
 
@@ -105,6 +108,10 @@ namespace Agentmaster
         if (fields.size() > 5)
         {
             m.tool = std::wstring{ fields[5] };
+        }
+        if (fields.size() > 6)
+        {
+            m.tabToken = std::wstring{ fields[6] };
         }
         return m;
     }
