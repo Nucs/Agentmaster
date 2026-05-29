@@ -7,7 +7,7 @@ if errorlevel 1 (
   exit /b 2
 )
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests"
-cl /std:c++20 /EHsc /nologo /W3 /Fe:m5_tests.exe m5_tests.cpp ole32.lib
+cl /std:c++20 /EHsc /nologo /W3 /Fe:m5_tests.exe m5_tests.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ole32.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

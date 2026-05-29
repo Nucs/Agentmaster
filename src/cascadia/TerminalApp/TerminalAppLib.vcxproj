@@ -176,6 +176,8 @@
     <ClInclude Include="AgentMaster\HooksBridge.h" />
     <ClInclude Include="AgentMaster\ClaudeSpawn.h" />
     <ClInclude Include="AgentMaster\Scheduler.h" />
+    <ClInclude Include="AgentMaster\Json.h" />
+    <ClInclude Include="AgentMaster\Persistence.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
@@ -302,6 +304,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\Scheduler.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\Persistence.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SnippetsPaneContent.cpp">

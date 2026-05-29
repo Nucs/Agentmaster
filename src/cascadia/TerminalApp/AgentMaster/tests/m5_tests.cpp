@@ -24,12 +24,15 @@
 #include <string>
 #include <thread>
 
-// Unity-include the implementation TUs (their pch include is compiled out).
-#include "../SessionRegistry.cpp"
-#include "../HooksBridge.cpp"
-#include "../ClaudeSpawn.cpp"
+// Headers only; the engine .cpp TUs are compiled separately and linked (see
+// run-m5-tests.bat) so each keeps its own anonymous-namespace helpers.
+#include "../ClaudeSpawn.h"
 #include "../HookWire.h"
+#include "../HooksBridge.h"
+#include "../Json.h"
+#include "../Persistence.h"
 #include "../Scheduler.h" // DecideAdvance (pure)
+#include "../SessionRegistry.h"
 
 using namespace Agentmaster;
 
@@ -348,6 +351,106 @@ static void TestScheduler()
     }
 }
 
+static void TestPersistence()
+{
+    std::wprintf(L"Persistence (JSON + sessions + templates):\n");
+
+    // JSON round-trip of a small document.
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"a", json::Value::MkStr(L"he\"llo\n"));
+        o.Set(L"n", json::Value::MkNum(42));
+        o.Set(L"b", json::Value::MkBool(true));
+        auto arr = json::Value::MkArr();
+        arr.Push(json::Value::MkNum(1));
+        arr.Push(json::Value::MkStr(L"two"));
+        o.Set(L"arr", std::move(arr));
+        const auto text = json::Dump(o);
+        const auto rt = json::Parse(text);
+        CHECK(rt.has_value(), "json parses its own dump");
+        CHECK(rt && rt->StrAt(L"a") == L"he\"llo\n", "json string escape round-trip");
+        CHECK(rt && rt->I64At(L"n") == 42, "json number round-trip");
+        CHECK(rt && rt->BoolAt(L"b") == true, "json bool round-trip");
+        CHECK(rt && rt->Find(L"arr") && rt->Find(L"arr")->arr.size() == 2, "json array round-trip");
+    }
+
+    // enum round-trips.
+    CHECK(SessionStateFromString(ToString(SessionState::NeedsApproval)) == SessionState::NeedsApproval, "state enum round-trip");
+    CHECK(AutopilotModeFromString(ToString(AutopilotMode::SemiAuto)) == AutopilotMode::SemiAuto, "mode enum round-trip");
+    CHECK(PromptStatusFromString(ToString(PromptStatus::Held)) == PromptStatus::Held, "status enum round-trip");
+    CHECK(PromptGateFromString(ToString(PromptGate::Manual)) == PromptGate::Manual, "gate enum round-trip");
+
+    // Session round-trip (queue + autopilot preserved, incl. Sent status — no replay).
+    {
+        SessionInfo s;
+        s.id = L"sid-1";
+        s.title = L"My Task";
+        s.workingDir = L"K:/api";
+        s.state = SessionState::WaitingForInput;
+        s.lastActivityUnixMs = 123456789;
+        QueuedPrompt a;
+        a.id = L"p1";
+        a.label = L"add tests";
+        a.text = L"please add unit tests";
+        a.status = PromptStatus::Sent;
+        a.sentAtUnixMs = 999;
+        QueuedPrompt b;
+        b.id = L"p2";
+        b.label = L"commit";
+        b.text = L"commit it";
+        b.gate = PromptGate::Manual;
+        b.guardPattern = L"answers-a-question:ok";
+        s.queue = { a, b };
+        s.autopilot.mode = AutopilotMode::Full;
+        s.autopilot.throttleMs = 750;
+        s.autopilot.stopOnError = false;
+        s.autopilot.maxAutoSends = 7;
+        s.autopilot.approval.pauseForHuman = false;
+        s.autopilot.approval.autoApproveTools = { L"Read", L"Bash(git *)" };
+
+        const auto text = SerializeSessions({ s });
+        const auto back = DeserializeSessions(text);
+        CHECK(back.size() == 1, "sessions round-trip count");
+        if (back.size() == 1)
+        {
+            const auto& r = back[0];
+            CHECK(r.id == L"sid-1" && r.title == L"My Task" && r.workingDir == L"K:/api", "session metadata");
+            CHECK(r.state == SessionState::WaitingForInput, "session state");
+            CHECK(r.queue.size() == 2, "queue size");
+            CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
+            CHECK(r.queue.size() == 2 && r.queue[1].gate == PromptGate::Manual && r.queue[1].guardPattern == L"answers-a-question:ok", "prompt gate+guard preserved");
+            CHECK(r.autopilot.mode == AutopilotMode::Full && r.autopilot.throttleMs == 750 && !r.autopilot.stopOnError && r.autopilot.maxAutoSends == 7, "autopilot preserved");
+            CHECK(!r.autopilot.approval.pauseForHuman && r.autopilot.approval.autoApproveTools.size() == 2, "approval policy preserved");
+        }
+    }
+
+    // Templates: capture-from-queue resets ids/status; apply assigns fresh ids + Pending.
+    {
+        std::vector<QueuedPrompt> queue;
+        QueuedPrompt a;
+        a.id = L"x";
+        a.label = L"impl";
+        a.text = L"implement";
+        a.status = PromptStatus::Sent; // should NOT carry into the template/apply
+        queue.push_back(a);
+
+        const auto tmpl = MakeTemplateFromQueue(L"impl-test-fix", queue);
+        CHECK(tmpl.name == L"impl-test-fix" && tmpl.prompts.size() == 1, "template captured");
+        CHECK(tmpl.prompts.size() == 1 && tmpl.prompts[0].id.empty(), "template prompt id reset");
+
+        const auto ttext = SerializeTemplates({ tmpl });
+        const auto tback = DeserializeTemplates(ttext);
+        CHECK(tback.size() == 1 && tback[0].name == L"impl-test-fix", "templates round-trip");
+
+        std::vector<QueuedPrompt> target;
+        AppendTemplateToQueue(target, tmpl);
+        CHECK(target.size() == 1, "apply appends");
+        CHECK(target.size() == 1 && !target[0].id.empty() && target[0].status == PromptStatus::Pending, "apply: fresh id + Pending");
+        AppendTemplateToQueue(target, tmpl);
+        CHECK(target.size() == 2 && target[0].id != target[1].id, "apply twice: distinct ids");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -356,6 +459,7 @@ int wmain()
     TestRegistry();
     TestSpawnBuilders();
     TestScheduler();
+    TestPersistence();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");

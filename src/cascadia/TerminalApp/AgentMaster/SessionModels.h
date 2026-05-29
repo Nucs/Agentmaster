@@ -105,4 +105,12 @@ namespace Agentmaster
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};
     };
+
+    // A reusable plan (DESIGN §10 "Plans across the fleet"): a named sequence of prompts
+    // that can be applied to any session or broadcast to many. Persisted separately.
+    struct PlanTemplate
+    {
+        std::wstring name;
+        std::vector<QueuedPrompt> prompts; // status is reset to Pending (with fresh ids) on apply
+    };
 }

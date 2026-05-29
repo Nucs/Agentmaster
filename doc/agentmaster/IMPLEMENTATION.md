@@ -96,7 +96,14 @@ sessions and drives the Triage Board + Autopilot.
   pause-on-human-input, maxAutoSends, stopOnError, and a global Pause-all backstop; sends
   are idempotent (atomic mark-Sent before inject). UI: per-session mode selector, confirm
   banner, Pause-Autopilot toggle. 79/79 checks pass; runtime check pending deploy.
-- **M8** Persistence, plan templates, apply-to-many.
+- **M8** ✅ Persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
+  `AgentMaster/Persistence`): a tiny dependency-free JSON value/parser/printer; sessions
+  (queue + autopilot + metadata) and named plan templates (de)serialize to JSON under
+  `%LOCALAPPDATA%\Agentmaster\` (restore preserves `Sent` statuses — no replay). UI to save
+  a session's queue as a template, apply a template to the selected session, or broadcast
+  it to every session in a directory; sessions autosave on every registry change. 102/102
+  checks pass (incl. JSON + round-trips + template apply). Live session relaunch / WT
+  layout-restore is a documented future step.
 
 ## Build & run
 

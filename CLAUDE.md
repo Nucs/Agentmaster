@@ -55,8 +55,18 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   (transient) / skipped for Manual gate; backstops: pause-on-human-input, maxAutoSends,
   stopOnError, global Pause-all; idempotent sends (atomic mark-Sent before inject). UI adds
   the per-session mode selector, a confirm banner, and a Pause-Autopilot toggle.
-- **Next: M8** — persistence (queue/autopilot/metadata as JSON, restore without replay),
-  plan templates, apply-to-many.
+- **M8 ✅** — persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
+  `AgentMaster/Persistence`): a dependency-free JSON value/parser/printer; sessions and
+  named plan templates (de)serialize to JSON under `%LOCALAPPDATA%\Agentmaster\` (restore
+  preserves `Sent` — no replay). UI to save a session's queue as a template, apply it, or
+  broadcast it to a whole directory; sessions autosave on every change.
+- **All milestones M0–M8 are code-complete; `TerminalAppLib` compiles clean and the engine
+  passes 102/102 standalone checks (`AgentMaster/tests/`).** The remaining step is the full
+  exe **link + deploy + live runtime check** (see "Deploy & run") — deferred while a prior
+  dev instance held the build output lock.
+- Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
+  bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight
+  Plan; relaunch persisted sessions / WT layout restore; prevent splitting the Manager tab.
 - Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts

@@ -5,6 +5,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/SessionRegistry.h"
 
 #include <algorithm>
@@ -161,6 +162,7 @@ namespace winrt::TerminalApp::implementation
     {
         _root = Grid{};
         _dispatcher = DispatcherQueue::GetForCurrentThread();
+        _templates = ::Agentmaster::LoadTemplates(); // persisted plan templates (M8)
 
         try
         {
@@ -483,6 +485,24 @@ namespace winrt::TerminalApp::implementation
                     }
                 }));
                 actions.Children().Append(btnRow);
+
+                // Templates row (M8): save the current plan, apply a saved plan to this
+                // session or broadcast it to every session in the directory.
+                auto tplRow = StackPanel{};
+                tplRow.Orientation(Orientation::Horizontal);
+                tplRow.Spacing(6);
+                _templateNameBox = TextBox{};
+                _templateNameBox.Width(150);
+                _templateNameBox.PlaceholderText(L"template name");
+                tplRow.Children().Append(_templateNameBox);
+                tplRow.Children().Append(mkBtn(L"Save as template", [this]() { _OnSaveTemplate(); }));
+                _templateCombo = ComboBox{};
+                _templateCombo.MinWidth(140);
+                tplRow.Children().Append(_templateCombo);
+                tplRow.Children().Append(mkBtn(L"Apply", [this]() { _OnApplyTemplate(false); }));
+                tplRow.Children().Append(mkBtn(L"Apply to dir", [this]() { _OnApplyTemplate(true); }));
+                actions.Children().Append(tplRow);
+                _RefreshTemplateCombo();
 
                 Grid::SetRow(actions, 2);
                 outer.Children().Append(actions);
@@ -1057,5 +1077,96 @@ namespace winrt::TerminalApp::implementation
                 s.pendingConfirmPromptId.clear();
             }
         });
+    }
+
+    void AgentManagerContent::_RefreshTemplateCombo()
+    {
+        if (!_templateCombo)
+        {
+            return;
+        }
+        _templateCombo.Items().Clear();
+        for (const auto& t : _templates)
+        {
+            _templateCombo.Items().Append(winrt::box_value(winrt::hstring{ t.name }));
+        }
+        if (!_templates.empty())
+        {
+            _templateCombo.SelectedIndex(0);
+        }
+    }
+
+    void AgentManagerContent::_OnSaveTemplate()
+    {
+        if (_selectedId.empty() || !_registry)
+        {
+            return;
+        }
+        const auto sel = _registry->Get(_selectedId);
+        if (!sel || sel->queue.empty())
+        {
+            return;
+        }
+        std::wstring name = _templateNameBox ? std::wstring{ _templateNameBox.Text() } : std::wstring{};
+        if (name.empty())
+        {
+            name = (sel->title.empty() ? std::wstring{ L"plan" } : sel->title) + L"-plan";
+        }
+        _templates.push_back(::Agentmaster::MakeTemplateFromQueue(name, sel->queue));
+        ::Agentmaster::SaveTemplates(_templates);
+        if (_templateNameBox)
+        {
+            _templateNameBox.Text(L"");
+        }
+        _RefreshTemplateCombo();
+        if (_templateCombo && !_templates.empty())
+        {
+            _templateCombo.SelectedIndex(static_cast<int32_t>(_templates.size()) - 1);
+        }
+    }
+
+    void AgentManagerContent::_OnApplyTemplate(bool toWholeDirectory)
+    {
+        if (!_registry || !_templateCombo)
+        {
+            return;
+        }
+        const auto idx = _templateCombo.SelectedIndex();
+        if (idx < 0 || static_cast<size_t>(idx) >= _templates.size())
+        {
+            return;
+        }
+        const auto tmpl = _templates[static_cast<size_t>(idx)];
+
+        if (!toWholeDirectory)
+        {
+            if (_selectedId.empty())
+            {
+                return;
+            }
+            _registry->Update(_selectedId, [&](SessionInfo& s) { ::Agentmaster::AppendTemplateToQueue(s.queue, tmpl); });
+            return;
+        }
+
+        // Apply-to-many: every session in the scoped (or selected) working directory.
+        std::wstring dir = _scopeDir;
+        if (dir.empty())
+        {
+            if (const auto sel = _Selected(_registry->Snapshot()))
+            {
+                dir = sel->workingDir;
+            }
+        }
+        if (dir.empty())
+        {
+            return;
+        }
+        for (const auto& s : _registry->Snapshot())
+        {
+            if (s.workingDir == dir)
+            {
+                _registry->Update(s.id, [&](SessionInfo& ss) { ::Agentmaster::AppendTemplateToQueue(ss.queue, tmpl); });
+            }
+        }
     }
 }

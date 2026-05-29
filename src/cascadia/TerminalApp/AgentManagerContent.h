@@ -17,6 +17,8 @@
 
 #include <winrt/Windows.System.h>
 
+#include <vector>
+
 #include <functional>
 #include <memory>
 #include <string>
@@ -79,6 +81,9 @@ namespace winrt::TerminalApp::implementation
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutopilotChanged(int index);
+        void _OnSaveTemplate();
+        void _OnApplyTemplate(bool toWholeDirectory);
+        void _RefreshTemplateCombo();
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
@@ -109,5 +114,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
+        std::vector<::Agentmaster::PlanTemplate> _templates;
     };
 }

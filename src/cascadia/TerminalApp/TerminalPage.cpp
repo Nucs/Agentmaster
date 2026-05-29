@@ -20,6 +20,7 @@
 #include "AgentMaster/ClaudeSpawn.h"
 #include "AgentMaster/HookWire.h"
 #include "AgentMaster/HooksBridge.h"
+#include "AgentMaster/Persistence.h"
 #include "AgentMaster/Scheduler.h"
 #include "AgentMaster/SessionRegistry.h"
 #include "App.h"
@@ -728,6 +729,17 @@ namespace winrt::TerminalApp::implementation
             });
             _sessionRegistry->AddObserver([sched](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
                 sched->OnObserved(s);
+            });
+        }
+
+        // Persistence (M8): autosave the registry (queue + autopilot + metadata) to
+        // sessions.json on every change, so an in-progress plan survives a crash. Restore
+        // never replays Sent prompts (statuses are preserved); re-launching the live
+        // processes is a future enhancement.
+        {
+            auto reg = _sessionRegistry;
+            _sessionRegistry->AddObserver([reg](const ::Agentmaster::SessionInfo&, ::Agentmaster::HookEvent) {
+                ::Agentmaster::SaveSessions(reg->Snapshot());
             });
         }
 
