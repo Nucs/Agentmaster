@@ -652,6 +652,29 @@ namespace winrt::TerminalApp::implementation
     // - <unused>
     // Return Value:
     // - <none>
+    // Agentmaster: open the always-present Manager tab, pinned at the leftmost
+    // position (tab 0) and non-closable. Tracked in _managerTab.
+    void TerminalPage::_OpenAgentManagerTab()
+    {
+        if (_managerTab)
+        {
+            return;
+        }
+
+        const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
+        // Route keys the content didn't handle back to the page (as other content panes do).
+        managerPane->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
+
+        const auto resultPane = std::make_shared<Pane>(*managerPane);
+        _managerTab = _CreateNewTabFromPane(resultPane, 0); // 0 == leftmost
+
+        if (_managerTab)
+        {
+            // Non-closable: hide this tab's close button.
+            _managerTab.CloseButtonVisibility(winrt::Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility::Never);
+        }
+    }
+
     void TerminalPage::_OnFirstLayout(const IInspectable& /*sender*/, const IInspectable& /*eventArgs*/)
     {
         // Only let this succeed once.
@@ -665,6 +688,10 @@ namespace winrt::TerminalApp::implementation
         if (_startupState == StartupState::NotInitialized)
         {
             _startupState = StartupState::InStartup;
+
+            // Agentmaster: the Manager tab is always present and leftmost (tab 0),
+            // created before startup terminal tabs so they append after it.
+            _OpenAgentManagerTab();
 
             if (_startupConnection)
             {

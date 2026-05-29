@@ -248,6 +248,7 @@ namespace winrt::TerminalApp::implementation
         void _UpdateTabIndices();
 
         TerminalApp::Tab _settingsTab{ nullptr };
+        TerminalApp::Tab _managerTab{ nullptr }; // Agentmaster: the pinned, leftmost Manager tab
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
@@ -327,6 +328,7 @@ namespace winrt::TerminalApp::implementation
         void _OpenNewTabDropdown();
         HRESULT _OpenNewTab(const Microsoft::Terminal::Settings::Model::INewContentArgs& newContentArgs);
         TerminalApp::Tab _CreateNewTabFromPane(std::shared_ptr<Pane> pane, uint32_t insertPosition = -1);
+        void _OpenAgentManagerTab(); // Agentmaster
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 
