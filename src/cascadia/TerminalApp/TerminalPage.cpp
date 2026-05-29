@@ -14,6 +14,7 @@
 #include "../../types/inc/ColorFix.hpp"
 #include "../../types/inc/utils.hpp"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
+#include "AgentManagerContent.h"
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -3837,6 +3838,13 @@ namespace winrt::TerminalApp::implementation
             scratchPane->GetRoot().KeyDown({ get_weak(), &TerminalPage::_KeyDownHandler });
 
             content = *scratchPane;
+        }
+        else if (paneType == L"agentManager")
+        {
+            // Agentmaster: content for the pinned, leftmost Manager tab (C1 "Linked Lenses").
+            const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
+            managerPane->GetRoot().KeyDown({ get_weak(), &TerminalPage::_KeyDownHandler });
+            content = *managerPane;
         }
         else if (paneType == L"settings")
         {

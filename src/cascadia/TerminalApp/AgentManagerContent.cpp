@@ -56,9 +56,10 @@ namespace winrt::TerminalApp::implementation
     {
         return { 1, 1 };
     }
-    void AgentManagerContent::Focus(winrt::Windows::UI::Xaml::FocusState reason)
+    void AgentManagerContent::Focus(winrt::Windows::UI::Xaml::FocusState /*reason*/)
     {
-        _root.Focus(reason);
+        // A Grid/Panel isn't focusable and the placeholder has no focusable child yet.
+        // M6 focuses the primary C1 control (Explorer Tree / search box).
     }
     void AgentManagerContent::Close()
     {

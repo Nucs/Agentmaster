@@ -167,6 +167,9 @@
     <ClInclude Include="ScratchpadContent.h">
       <DependentUpon>TerminalPaneContent.idl</DependentUpon>
     </ClInclude>
+    <!-- Agentmaster -->
+    <ClInclude Include="AgentManagerContent.h" />
+    <ClInclude Include="AgentMaster\SessionModels.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
@@ -280,6 +283,8 @@
     <ClCompile Include="ScratchpadContent.cpp">
       <DependentUpon>TerminalPaneContent.idl</DependentUpon>
     </ClCompile>
+    <!-- Agentmaster -->
+    <ClCompile Include="AgentManagerContent.cpp" />
     <ClCompile Include="SnippetsPaneContent.cpp">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClCompile>
