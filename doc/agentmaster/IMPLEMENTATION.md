@@ -74,11 +74,16 @@ sessions and drives the Triage Board + Autopilot.
 ## Milestones (mirror the task list)
 
 - **M0** ✅ Fork, branch, toolchain, map integration points.
-- **M1** ⏳ This doc + scaffold `AgentManagerContent` & data model (unregistered drafts).
-- **M2** Baseline build of vanilla WT (`OpenConsole.slnx`), confirm runnable.
-- **M3** Register `AgentManagerContent` in `TerminalAppLib.vcxproj` + `_MakePane` dispatch.
-- **M4** Auto-open Manager tab pinned leftmost, non-closable, on startup.
-- **M5** `SessionRegistry` + `claude.exe` spawn + hooks bridge (live state).
+- **M1** ✅ This doc + scaffold `AgentManagerContent` & data model.
+- **M2** ✅ Baseline build of vanilla WT (`OpenConsole.slnx`), confirm runnable.
+- **M3** ✅ Register `AgentManagerContent` in `TerminalAppLib.vcxproj` + `_MakePane` dispatch.
+- **M4** ✅ Auto-open Manager tab pinned leftmost, non-closable, on startup (+ M4.1 own identity, deployed).
+- **M5** ✅ `SessionRegistry` + `claude.exe` spawn + hooks bridge (live state). Engine is plain
+  C++ (`AgentMaster/`): `HookEvents.h` (state machine), `HookWire.h`, `SessionRegistry`,
+  `HooksBridge` (local named-pipe server), `ClaudeSpawn` (id + forwarder + `--settings`
+  hooks recipe). Wired into `TerminalPage` (`_InitAgentmasterEngine`, `_SpawnClaudeSession`)
+  and the Manager UI (Launch button). 67/67 standalone checks pass incl. a live pipe
+  round-trip (`AgentMaster/tests/`).
 - **M6** C1 UI: Triage Board + Explorer Tree + Flight Plan, selection-synced.
 - **M7** Autopilot scheduler (queue + Stop trigger + guards + approval policy).
 - **M8** Persistence, plan templates, apply-to-many.

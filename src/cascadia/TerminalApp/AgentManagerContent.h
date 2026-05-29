@@ -13,12 +13,18 @@
 #include "winrt/TerminalApp.h"
 #include "BasicPaneEvents.h"
 
+#include <functional>
+
 namespace winrt::TerminalApp::implementation
 {
     class AgentManagerContent : public winrt::implements<AgentManagerContent, IPaneContent>, public BasicPaneEvents
     {
     public:
         AgentManagerContent();
+
+        // Agentmaster: the page sets this so the Manager UI can launch a Claude session.
+        // Args: (workingDir, title); empty workingDir => the page picks a default.
+        void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler);
 
         winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
 
@@ -41,6 +47,11 @@ namespace winrt::TerminalApp::implementation
         // See BasicPaneEvents for most generic event definitions
 
     private:
+        void _AppendStatus(const winrt::hstring& line);
+
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _status{ nullptr };
+        std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
     };
 }

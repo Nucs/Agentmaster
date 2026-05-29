@@ -1,0 +1,5 @@
+# Agentmaster M5 test build artifacts (compiled on demand via run-m5-tests.bat)
+*.exe
+*.obj
+*.ilk
+*.pdb

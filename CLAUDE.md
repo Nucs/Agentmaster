@@ -34,8 +34,17 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   `AgentManagerContent` wired into `_MakePane`; the **pinned, non-closable "Agent Manager"
   tab opens at index 0 on startup**; the app ships under its **own package identity**
   (`Agentmaster`, not `WindowsTerminalDev`) and is **deployed & verified running**.
-- **Next: M5** — `SessionRegistry` + spawn `claude.exe` on a ConPTY + the Claude Code
-  hooks bridge (live state). Then M6 (C1 UI), M7 (Autopilot scheduler), M8 (persistence).
+- **M5 ✅** — the native session engine (`src/cascadia/TerminalApp/AgentMaster/`): a
+  thread-safe **`SessionRegistry`** (single source of truth), a **`HooksBridge`** local
+  named-pipe server, and a **`ClaudeSpawn`** recipe that launches `claude.exe` on a ConPTY
+  with `--settings` hooks + `CCMGR_SESSION_ID`/`CCMGR_HOOK_PIPE`, plus a PowerShell
+  forwarder. Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule
+  #1). Wired into `TerminalPage` (`_InitAgentmasterEngine`, `_SpawnClaudeSession`) and a
+  Launch button in the Manager tab. State transitions log to
+  `%LOCALAPPDATA%\Agentmaster\hooks.log` (the M6 Triage Board will render the registry).
+  **67/67** standalone checks pass incl. a live pipe round-trip (`AgentMaster/tests/`).
+- **Next: M6** — the C1 "Linked Lenses" UI (Triage Board + Explorer Tree + Flight Plan)
+  binding to the registry. Then M7 (Autopilot scheduler), M8 (persistence/templates).
 - Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts

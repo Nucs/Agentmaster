@@ -95,6 +95,10 @@ namespace Agentmaster
         std::wstring branch; // git branch / worktree
         SessionState state{ SessionState::Idle };
         int64_t lastActivityUnixMs{ 0 };
+        // Transient runtime flag (not persisted): set from the most recent Stop hook's
+        // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
+        // a turn that ended on a clarifying question must NOT be auto-answered.
+        bool lastMessageWasQuestion{ false };
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};
     };

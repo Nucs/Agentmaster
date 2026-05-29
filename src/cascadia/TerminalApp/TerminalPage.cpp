@@ -11,10 +11,16 @@
 #include <til/unicode.h>
 #include <Utils.h>
 
+#include <filesystem> // Agentmaster: _SpawnClaudeSession derives a title from the cwd leaf
+
 #include "../../types/inc/ColorFix.hpp"
 #include "../../types/inc/utils.hpp"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "AgentManagerContent.h"
+#include "AgentMaster/ClaudeSpawn.h"
+#include "AgentMaster/HookWire.h"
+#include "AgentMaster/HooksBridge.h"
+#include "AgentMaster/SessionRegistry.h"
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -665,6 +671,14 @@ namespace winrt::TerminalApp::implementation
         // Route keys the content didn't handle back to the page (as other content panes do).
         managerPane->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
 
+        // Agentmaster: let the Manager UI launch Claude sessions through the page.
+        managerPane->SetSpawnHandler([weakThis = get_weak()](winrt::hstring dir, winrt::hstring title) {
+            if (auto self = weakThis.get())
+            {
+                self->_SpawnClaudeSession(dir, title);
+            }
+        });
+
         const auto resultPane = std::make_shared<Pane>(*managerPane);
         _managerTab = _CreateNewTabFromPane(resultPane, 0); // 0 == leftmost
 
@@ -673,6 +687,142 @@ namespace winrt::TerminalApp::implementation
             // Non-closable: hide this tab's close button.
             _managerTab.CloseButtonVisibility(winrt::Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility::Never);
         }
+    }
+
+    // Agentmaster: stand up the session-management engine — the SessionRegistry (single
+    // source of truth) and the HooksBridge (the local named-pipe listener that turns Claude
+    // Code hook events into authoritative session state). Called once, before the Manager
+    // tab opens, so the pipe is live and the registry exists when sessions are spawned.
+    void TerminalPage::_InitAgentmasterEngine()
+    {
+        if (_sessionRegistry)
+        {
+            return;
+        }
+
+        _sessionRegistry = std::make_shared<::Agentmaster::SessionRegistry>();
+
+        // Observer: record every state change to a log file (and the debugger). This is
+        // M5's verification surface; the M6 Triage Board will render the same registry on
+        // the UI thread. NOTE: this runs on a bridge thread, so it must touch no XAML.
+        _sessionRegistry->SetObserver([](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent ev) {
+            wchar_t line[600];
+            ::swprintf(line,
+                       600,
+                       L"[%s] %s state=%d question=%d dir=%s\n",
+                       ::Agentmaster::HookEventName(ev),
+                       s.id.c_str(),
+                       static_cast<int>(s.state),
+                       s.lastMessageWasQuestion ? 1 : 0,
+                       s.workingDir.c_str());
+            ::OutputDebugStringW(line);
+            ::Agentmaster::AppendStateLog(L"hooks.log", line);
+        });
+
+        // The Autopilot seam (fully implemented in M7). For now, only a clean turn-complete
+        // (Stop -> WaitingForInput) lands here; we just log that a plan *could* advance.
+        _sessionRegistry->SetAdvanceHandler([](const std::wstring& id) {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[advance] " + id + L" WaitingForInput (Autopilot=M7)\n");
+        });
+
+        const auto pipeName = ::Agentmaster::HookPipeName(::GetCurrentProcessId());
+        auto reg = _sessionRegistry; // shared, captured by the sink
+        _hooksBridge = std::make_shared<::Agentmaster::HooksBridge>(
+            pipeName,
+            [reg](const ::Agentmaster::HookMessage& m) { reg->OnHookEvent(m); },
+            4);
+        _hooksBridge->Start();
+
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
+    }
+
+    // Agentmaster: launch a real claude.exe on a ConPTY in `workingDir`, wired for hooks,
+    // as a normal terminal tab — and register it so its hook-driven state is tracked. Both
+    // the user (keystrokes) and the orchestrator (Autopilot, M7) write the same stdin.
+    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title)
+    {
+        if (!_sessionRegistry || !_hooksBridge)
+        {
+            return;
+        }
+
+        std::wstring dir{ workingDir };
+        if (dir.empty())
+        {
+            wchar_t up[MAX_PATH];
+            const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
+            dir = (n > 0 && n < MAX_PATH) ? std::wstring{ up, n } : std::wstring{ L"C:\\" };
+        }
+
+        std::wstring ttl{ title };
+        if (ttl.empty())
+        {
+            try
+            {
+                ttl = std::filesystem::path{ dir }.filename().wstring();
+            }
+            catch (...)
+            {
+            }
+            if (ttl.empty())
+            {
+                ttl = L"claude";
+            }
+        }
+
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName());
+
+        // Child environment: CCMGR_SESSION_ID + CCMGR_HOOK_PIPE so hook events correlate
+        // back to this session's registry record (HOOKS.md).
+        auto envMap = winrt::single_threaded_map<winrt::hstring, winrt::hstring>();
+        for (const auto& [k, v] : spec.env)
+        {
+            envMap.Insert(winrt::hstring{ k }, winrt::hstring{ v });
+        }
+
+        // Build the ConPTY connection ourselves (commandline = claude + our hooks settings),
+        // then hand it to the normal terminal-pane path as an existing connection. The
+        // default profile only supplies appearance; the process/cwd/env are ours.
+        auto valueSet = TerminalConnection::ConptyConnection::CreateSettings(
+            winrt::hstring{ spec.commandline },
+            winrt::hstring{ dir },
+            winrt::hstring{ ttl },
+            false, // reloadEnvironmentVariables
+            L"", // initialEnvironment: inherit our current block
+            envMap.GetView(),
+            30, // rows  (the control resizes the pty to the pane on first layout)
+            120, // cols
+            winrt::guid{}, // WT_SESSION (auto-generated by the connection)
+            winrt::guid{}); // profileGuid
+
+        TerminalConnection::ConptyConnection connection{};
+        connection.Initialize(valueSet);
+
+        Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs{};
+        const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
+        if (!pane)
+        {
+            return;
+        }
+        _CreateNewTabFromPane(pane);
+
+        // Register the session and bind its stdin injector (used by the Autopilot in M7).
+        // Correctness Rule #3: the injector is bound to THIS session's id, not "the
+        // selected session".
+        ::Agentmaster::SessionInfo info;
+        info.id = spec.sessionId;
+        info.title = ttl;
+        info.workingDir = dir;
+        info.state = ::Agentmaster::SessionState::Idle;
+        _sessionRegistry->Upsert(info);
+
+        _sessionRegistry->SetInjector(spec.sessionId, [connection](const std::wstring& text) {
+            const auto* begin = reinterpret_cast<const char16_t*>(text.data());
+            connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
+        });
+
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[spawn] " + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L" cmd=" + spec.commandline + L"\n");
     }
 
     void TerminalPage::_OnFirstLayout(const IInspectable& /*sender*/, const IInspectable& /*eventArgs*/)
@@ -688,6 +838,10 @@ namespace winrt::TerminalApp::implementation
         if (_startupState == StartupState::NotInitialized)
         {
             _startupState = StartupState::InStartup;
+
+            // Agentmaster: stand up the session engine (registry + hooks pipe) first, so the
+            // Manager tab — and any session it spawns — has it available.
+            _InitAgentmasterEngine();
 
             // Agentmaster: the Manager tab is always present and leftmost (tab 0),
             // created before startup terminal tabs so they append after it.
@@ -3871,6 +4025,12 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: content for the pinned, leftmost Manager tab (C1 "Linked Lenses").
             const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
             managerPane->GetRoot().KeyDown({ get_weak(), &TerminalPage::_KeyDownHandler });
+            managerPane->SetSpawnHandler([weakThis = get_weak()](winrt::hstring dir, winrt::hstring title) {
+                if (auto self = weakThis.get())
+                {
+                    self->_SpawnClaudeSession(dir, title);
+                }
+            });
             content = *managerPane;
         }
         else if (paneType == L"settings")

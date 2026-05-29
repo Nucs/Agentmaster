@@ -34,6 +34,15 @@ namespace winrt::Microsoft::Terminal::Settings
     struct TerminalSettingsCreateResult;
 }
 
+// Agentmaster: the native session-management engine (plain C++; see
+// src/cascadia/TerminalApp/AgentMaster/). Forward-declared so TerminalPage can hold it by
+// shared_ptr without pulling the engine headers into this widely-included header.
+namespace Agentmaster
+{
+    class SessionRegistry;
+    class HooksBridge;
+}
+
 namespace winrt::TerminalApp::implementation
 {
     struct TerminalSettingsCache;
@@ -250,6 +259,13 @@ namespace winrt::TerminalApp::implementation
         TerminalApp::Tab _settingsTab{ nullptr };
         TerminalApp::Tab _managerTab{ nullptr }; // Agentmaster: the pinned, leftmost Manager tab
 
+        // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
+        // the single source of truth; HooksBridge feeds it authoritative state from Claude
+        // Code hooks over a local named pipe. Held by shared_ptr so they can be
+        // forward-declared in this header (HooksBridge's dtor joins its listener threads).
+        std::shared_ptr<::Agentmaster::SessionRegistry> _sessionRegistry{ nullptr };
+        std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
+
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
         bool _isMaximized{ false };
@@ -329,6 +345,8 @@ namespace winrt::TerminalApp::implementation
         HRESULT _OpenNewTab(const Microsoft::Terminal::Settings::Model::INewContentArgs& newContentArgs);
         TerminalApp::Tab _CreateNewTabFromPane(std::shared_ptr<Pane> pane, uint32_t insertPosition = -1);
         void _OpenAgentManagerTab(); // Agentmaster
+        void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
+        void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 
