@@ -49,9 +49,14 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
   (cross-thread refresh via `DispatcherQueue`). Bidirectional selection + directory scope;
   Explorer `Enter`=Activate / `Del`=kill (never injects — Rule #2); Flight Plan
   add/reorder/delete/Send-now. Compiles clean (lib); runtime check pending deploy.
-- **Next: M7** — the Autopilot scheduler on the registry's advance seam (turn-complete
-  trigger, question-guard, approval policy, throttle, backstops, idempotent sends). Then M8
-  (persistence/templates/apply-to-many).
+- **M7 ✅** — the Autopilot scheduler (`AgentMaster/Scheduler`): a pure, fully unit-tested
+  `DecideAdvance()` + a worker thread on the registry's advance seam. Turn-complete →
+  auto-send next Pending (Full) / one-click confirm (SemiAuto) / Held by the question-guard
+  (transient) / skipped for Manual gate; backstops: pause-on-human-input, maxAutoSends,
+  stopOnError, global Pause-all; idempotent sends (atomic mark-Sent before inject). UI adds
+  the per-session mode selector, a confirm banner, and a Pause-Autopilot toggle.
+- **Next: M8** — persistence (queue/autopilot/metadata as JSON, restore without replay),
+  plan templates, apply-to-many.
 - Milestones are tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts

@@ -99,6 +99,9 @@ namespace Agentmaster
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
         bool lastMessageWasQuestion{ false };
+        // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
+        // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
+        std::wstring pendingConfirmPromptId;
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};
     };

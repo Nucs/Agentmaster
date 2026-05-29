@@ -20,6 +20,7 @@
 #include "AgentMaster/ClaudeSpawn.h"
 #include "AgentMaster/HookWire.h"
 #include "AgentMaster/HooksBridge.h"
+#include "AgentMaster/Scheduler.h"
 #include "AgentMaster/SessionRegistry.h"
 #include "App.h"
 #include "DebugTapConnection.h"
@@ -714,11 +715,21 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AppendStateLog(L"hooks.log", line);
         });
 
-        // The Autopilot seam (fully implemented in M7). For now, only a clean turn-complete
-        // (Stop -> WaitingForInput) lands here; we just log that a plan *could* advance.
-        _sessionRegistry->SetAdvanceHandler([](const std::wstring& id) {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[advance] " + id + L" WaitingForInput (Autopilot=M7)\n");
-        });
+        // Autopilot scheduler (M7): owns its own worker thread and drives Flight Plan
+        // queues. A clean turn-complete (Stop -> WaitingForInput) lands on the advance seam
+        // and is forwarded to the scheduler; a separate observer feeds the stopOnError
+        // backstop.
+        _scheduler = std::make_shared<::Agentmaster::Scheduler>(_sessionRegistry);
+        _scheduler->Start();
+        {
+            auto sched = _scheduler;
+            _sessionRegistry->SetAdvanceHandler([sched](const std::wstring& id) {
+                sched->RequestAdvance(id);
+            });
+            _sessionRegistry->AddObserver([sched](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
+                sched->OnObserved(s);
+            });
+        }
 
         const auto pipeName = ::Agentmaster::HookPipeName(::GetCurrentProcessId());
         auto reg = _sessionRegistry; // shared, captured by the sink
@@ -854,6 +865,24 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_KillClaudeSession(id);
+            }
+        });
+        content->SetPauseHandler([weakThis](bool paused) {
+            if (auto self = weakThis.get())
+            {
+                if (self->_scheduler)
+                {
+                    self->_scheduler->SetGlobalPause(paused);
+                }
+            }
+        });
+        content->SetConfirmHandler([weakThis](winrt::hstring id, bool confirm) {
+            if (auto self = weakThis.get())
+            {
+                if (self->_scheduler)
+                {
+                    self->_scheduler->Confirm(std::wstring{ id }, confirm);
+                }
             }
         });
     }

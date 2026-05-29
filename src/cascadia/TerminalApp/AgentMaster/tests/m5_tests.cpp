@@ -29,6 +29,7 @@
 #include "../HooksBridge.cpp"
 #include "../ClaudeSpawn.cpp"
 #include "../HookWire.h"
+#include "../Scheduler.h" // DecideAdvance (pure)
 
 using namespace Agentmaster;
 
@@ -273,13 +274,88 @@ static void TestBridgeRoundTrip()
     CHECK(!bridge.Running(), "bridge stopped");
 }
 
+static void TestScheduler()
+{
+    std::wprintf(L"Autopilot DecideAdvance (Correctness Rule #1 + backstops):\n");
+    auto mk = [](AutopilotMode m, SessionState st) {
+        SessionInfo s;
+        s.id = L"a";
+        s.state = st;
+        s.autopilot.mode = m;
+        QueuedPrompt p;
+        p.id = L"p1";
+        p.text = L"do it";
+        s.queue.push_back(p);
+        return s;
+    };
+    const int64_t now = 100000;
+
+    {
+        auto s = mk(AutopilotMode::Off, SessionState::WaitingForInput);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "off -> none");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::Running);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "not turn-complete -> none");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && p.promptIndex == 0, "full+waiting -> send #0");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        CHECK(DecideAdvance(s, now, 0, true).action == AdvanceAction::None, "global pause -> none");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        s.autopilot.maxAutoSends = 2;
+        s.autopilot.autoSendsThisRun = 2;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "maxAutoSends -> none");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        s.lastMessageWasQuestion = true;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::Hold, "question -> hold");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        s.lastMessageWasQuestion = true;
+        s.queue[0].guardPattern = std::wstring{ kAnswersQuestionOk };
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::Send, "question + override -> send");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        s.queue[0].gate = PromptGate::Manual;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "manual gate -> none");
+    }
+    {
+        auto s = mk(AutopilotMode::SemiAuto, SessionState::WaitingForInput);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::AwaitConfirm, "semi-auto -> await confirm");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        s.queue[0].status = PromptStatus::Sent;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::PlanDone, "no pending -> plan done");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        CHECK(DecideAdvance(s, now, now - 500, false).action == AdvanceAction::None, "human typing -> none");
+    }
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        CHECK(DecideAdvance(s, now, now - 5000, false).action == AdvanceAction::Send, "human idle -> send");
+    }
+}
+
 int wmain()
 {
-    std::wprintf(L"=== Agentmaster M5 tests ===\n");
+    std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestStateMachine();
     TestWire();
     TestRegistry();
     TestSpawnBuilders();
+    TestScheduler();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");

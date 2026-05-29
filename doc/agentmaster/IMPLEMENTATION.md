@@ -89,7 +89,13 @@ sessions and drives the Triage Board + Autopilot.
   via DispatcherQueue), bidirectional selection + directory scope; Explorer `Enter`=Activate
   / `Del`=kill (never injects — Rule #2); Flight Plan queue editing (add/reorder/delete/Send
   now) + per-session Autopilot mode selector. Compiles clean; runtime check pending deploy.
-- **M7** Autopilot scheduler (queue + Stop trigger + guards + approval policy).
+- **M7** ✅ Autopilot scheduler (`AgentMaster/Scheduler`): a pure `DecideAdvance()`
+  (every branch unit-tested) + a worker thread on the registry's advance seam. On a clean
+  turn-complete it sends the next Pending prompt in Full mode, arms a one-click confirm in
+  SemiAuto, Holds behind the question-guard (transient — auto-resumes), honors Manual gate,
+  pause-on-human-input, maxAutoSends, stopOnError, and a global Pause-all backstop; sends
+  are idempotent (atomic mark-Sent before inject). UI: per-session mode selector, confirm
+  banner, Pause-Autopilot toggle. 79/79 checks pass; runtime check pending deploy.
 - **M8** Persistence, plan templates, apply-to-many.
 
 ## Build & run

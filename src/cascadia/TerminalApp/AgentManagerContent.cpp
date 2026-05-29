@@ -211,6 +211,14 @@ namespace winrt::TerminalApp::implementation
     {
         _killHandler = std::move(handler);
     }
+    void AgentManagerContent::SetPauseHandler(std::function<void(bool)> handler)
+    {
+        _pauseHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
+    {
+        _confirmHandler = std::move(handler);
+    }
 
     // ---- IPaneContent -------------------------------------------------------
 
@@ -315,6 +323,22 @@ namespace winrt::TerminalApp::implementation
             launch.Content(winrt::box_value(L"Launch session"));
             launch.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
             bar.Children().Append(launch);
+
+            // Global Autopilot backstop: Pause-all / Resume-all.
+            _pauseBtn = Button{};
+            _pauseBtn.Content(winrt::box_value(L"Pause Autopilot"));
+            _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _globalPaused = !_globalPaused;
+                if (_pauseHandler)
+                {
+                    _pauseHandler(_globalPaused);
+                }
+                if (_pauseBtn)
+                {
+                    _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Autopilot" : L"Pause Autopilot"));
+                }
+            });
+            bar.Children().Append(_pauseBtn);
 
             Grid::SetRow(bar, 0);
             _root.Children().Append(bar);
@@ -773,6 +797,54 @@ namespace winrt::TerminalApp::implementation
         }
         _suppressAutopilotEvent = false;
 
+        // SemiAuto one-click confirm banner (the scheduler armed the next prompt).
+        if (!sel->pendingConfirmPromptId.empty())
+        {
+            winrt::hstring label;
+            for (const auto& p : sel->queue)
+            {
+                if (p.id == sel->pendingConfirmPromptId)
+                {
+                    label = p.label.empty() ? winrt::hstring{ p.text } : winrt::hstring{ p.label };
+                    break;
+                }
+            }
+            auto banner = StackPanel{};
+            banner.Orientation(Orientation::Horizontal);
+            banner.Spacing(8);
+            banner.VerticalAlignment(VerticalAlignment::Center);
+            banner.Children().Append(Text(L"\x2699 Autopilot ready:", 12, true, 1.0));
+            auto lbl = Text(label, 12, false, 0.9);
+            lbl.MaxWidth(220);
+            banner.Children().Append(lbl);
+            auto sendBtn = Button{};
+            sendBtn.Content(winrt::box_value(L"Send"));
+            sendBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (_confirmHandler && !_selectedId.empty())
+                {
+                    _confirmHandler(winrt::hstring{ _selectedId }, true);
+                }
+            });
+            auto skipBtn = Button{};
+            skipBtn.Content(winrt::box_value(L"Skip"));
+            skipBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (_confirmHandler && !_selectedId.empty())
+                {
+                    _confirmHandler(winrt::hstring{ _selectedId }, false);
+                }
+            });
+            banner.Children().Append(sendBtn);
+            banner.Children().Append(skipBtn);
+
+            auto bannerBorder = Border{};
+            bannerBorder.Background(Fill(0x40, 0xDA, 0xA5, 0x20));
+            bannerBorder.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+            bannerBorder.Padding(Thickness{ 8, 4, 8, 4 });
+            bannerBorder.Margin(Thickness{ 0, 6, 0, 0 });
+            bannerBorder.Child(banner);
+            _planHeaderHost.Children().Append(bannerBorder);
+        }
+
         if (sel->queue.empty())
         {
             _planListHost.Children().Append(Text(L"No queued prompts. Type below and Add.", 12, false, 0.6));
@@ -976,6 +1048,14 @@ namespace winrt::TerminalApp::implementation
         }
         const AutopilotMode mode = index == 2 ? AutopilotMode::Full : index == 1 ? AutopilotMode::SemiAuto :
                                                                                    AutopilotMode::Off;
-        _registry->Update(_selectedId, [&](SessionInfo& s) { s.autopilot.mode = mode; });
+        _registry->Update(_selectedId, [&](SessionInfo& s) {
+            s.autopilot.mode = mode;
+            if (mode != AutopilotMode::Off)
+            {
+                // Arming resets the per-run backstop counter and clears any stale confirm.
+                s.autopilot.autoSendsThisRun = 0;
+                s.pendingConfirmPromptId.clear();
+            }
+        });
     }
 }

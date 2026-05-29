@@ -41,6 +41,7 @@ namespace Agentmaster
 {
     class SessionRegistry;
     class HooksBridge;
+    class Scheduler;
 }
 
 namespace winrt::TerminalApp::implementation
@@ -266,6 +267,7 @@ namespace winrt::TerminalApp::implementation
         // forward-declared in this header (HooksBridge's dtor joins its listener threads).
         std::shared_ptr<::Agentmaster::SessionRegistry> _sessionRegistry{ nullptr };
         std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
+        std::shared_ptr<::Agentmaster::Scheduler> _scheduler{ nullptr }; // Agentmaster: Autopilot
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
         std::unordered_map<std::wstring, winrt::weak_ref<TerminalApp::Tab>> _claudeTabs;

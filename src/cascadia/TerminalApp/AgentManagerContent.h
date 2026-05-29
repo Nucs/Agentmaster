@@ -40,6 +40,8 @@ namespace winrt::TerminalApp::implementation
         void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (workingDir, title)
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
         void SetKillHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> close tab
+        void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
+        void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
 
         // IPaneContent
         winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
@@ -87,6 +89,9 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;
         std::function<void(winrt::hstring)> _killHandler;
+        std::function<void(bool)> _pauseHandler;
+        std::function<void(winrt::hstring, bool)> _confirmHandler;
+        bool _globalPaused{ false };
 
         std::wstring _selectedId;
         std::wstring _scopeDir; // board filter: empty == all directories
@@ -103,5 +108,6 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
     };
 }
