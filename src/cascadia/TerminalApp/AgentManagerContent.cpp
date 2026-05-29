@@ -160,10 +160,13 @@ namespace
     // GetFileAttributesW / CompareStringOrdinal are already in scope via pch (this TU
     // already calls ::GetEnvironmentVariableW with MAX_PATH).
 
-    // Normalize for case-insensitive equality: unify separators and drop a trailing one
-    // (but keep the "C:\" drive-root form intact).
+    // Normalize a path for comparison. Separator + trailing-slash rules are filesystem-
+    // dependent, so this splits by platform.
     std::wstring NormPath(std::wstring s)
     {
+#ifdef _WIN32
+        // Windows: '/' and '\' are interchangeable separators; a trailing separator is
+        // insignificant (except on the drive root "C:\").
         for (auto& ch : s)
         {
             if (ch == L'/')
@@ -175,14 +178,29 @@ namespace
         {
             s.pop_back();
         }
+#else
+        // POSIX: '\' is an ordinary filename character; only '/' separates, and a trailing
+        // one is insignificant (except on the root "/").
+        while (s.size() > 1 && s.back() == L'/')
+        {
+            s.pop_back();
+        }
+#endif
         return s;
     }
 
+    // Whether two paths denote the same directory. Case-INsensitive on Windows (NTFS/ReFS
+    // default), case-SENSITIVE on Linux/POSIX. Windows Terminal builds Windows-only today;
+    // the POSIX branch keeps the semantics correct should the engine ever be ported.
     bool PathEq(const std::wstring& a, const std::wstring& b)
     {
         const auto na = NormPath(a);
         const auto nb = NormPath(b);
+#ifdef _WIN32
         return ::CompareStringOrdinal(na.c_str(), -1, nb.c_str(), -1, TRUE) == CSTR_EQUAL;
+#else
+        return na == nb;
+#endif
     }
 
     bool IsDir(const std::wstring& d)
@@ -844,7 +862,7 @@ namespace winrt::TerminalApp::implementation
             std::vector<const SessionInfo*> matches;
             for (const auto& s : sessions)
             {
-                if (!_scopeDir.empty() && s.workingDir != _scopeDir)
+                if (!_scopeDir.empty() && !PathEq(s.workingDir, _scopeDir))
                 {
                     continue;
                 }
@@ -887,11 +905,12 @@ namespace winrt::TerminalApp::implementation
     {
         _treeHost.Children().Clear();
 
-        // ordered unique directories
+        // Ordered, de-duplicated working directories. Paths that differ only by case (on
+        // Windows) collapse into one root; the first-seen spelling becomes its display name.
         std::vector<std::wstring> dirs;
         for (const auto& s : sessions)
         {
-            if (std::find(dirs.begin(), dirs.end(), s.workingDir) == dirs.end())
+            if (std::find_if(dirs.begin(), dirs.end(), [&](const std::wstring& d) { return PathEq(d, s.workingDir); }) == dirs.end())
             {
                 dirs.push_back(s.workingDir);
             }
@@ -911,7 +930,7 @@ namespace winrt::TerminalApp::implementation
             int count = 0;
             for (const auto& s : sessions)
             {
-                if (s.workingDir == dir)
+                if (PathEq(s.workingDir, dir))
                 {
                     ++count;
                 }
@@ -928,7 +947,7 @@ namespace winrt::TerminalApp::implementation
             dirBtn.Content(dh);
             dirBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
             dirBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
-            dirBtn.Background(Fill((dir == _scopeDir) ? 0x30 : 0x00, 0x80, 0x80, 0x80));
+            dirBtn.Background(Fill(PathEq(dir, _scopeDir) ? 0x30 : 0x00, 0x80, 0x80, 0x80));
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
             const auto capturedDir = dir;
@@ -952,7 +971,7 @@ namespace winrt::TerminalApp::implementation
 
             for (const auto& s : sessions)
             {
-                if (s.workingDir != dir)
+                if (!PathEq(s.workingDir, dir))
                 {
                     continue;
                 }
@@ -1421,7 +1440,7 @@ namespace winrt::TerminalApp::implementation
         }
         for (const auto& s : _registry->Snapshot())
         {
-            if (s.workingDir == dir)
+            if (PathEq(s.workingDir, dir))
             {
                 _registry->Update(s.id, [&](SessionInfo& ss) { ::Agentmaster::AppendTemplateToQueue(ss.queue, tmpl); });
             }
