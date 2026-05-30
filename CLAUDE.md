@@ -60,17 +60,30 @@ the `TerminalWindow` startup seam (`GetInitialPosition`/`GetLaunchDimensions`/`G
 WT's own persisted layout is OFF in our DefaultProfile mode; note WT only calls
 `TerminalPage::PersistState()` when `firstWindowPreference != DefaultProfile`, which our mode is
 *not*, so geometry capture rides the autosave, not a close-flush). **So single-window workspace
-restore — geometry + lens — fully works.** **Multi-window reopen (Increment 3) core is also
-done + live-verified:** on startup the `WindowEmperor` counts `windows/*.json` and dispatches
-`wt -w new -s <idx>` per record (it links `TerminalApp.dll`, not the `TerminalAppLib` static lib,
-so it can't call `LoadWindowRecords` — it scans the dir itself); each window resolves `records[idx]`
-for geometry (TerminalWindow) and claims it by id (TerminalPage), so geometry + lens agree; a
-**decide-prompt** (Yes/No "Reopen your N previous windows?") gates the reopen when >1 record exists
-(a lone record / first run is silent). Verified: 2 records → prompt → Yes → 2 windows each at its
-own saved position. **Remaining refinements:** the **open-at-exit manifest** (so the reopen set is
-"windows open at last exit", not every record ever — needs `windowId` on the projected surface,
-since `WM_CLOSE_TERMINAL_WINDOW` can't tell a user close from app-exit) and the Manager **"Reopen
-Windows (N)"** recover button (reopen from inside a running session). See PERSISTENCE.md §13.5.
+restore — geometry + lens — fully works.** **Multi-window reopen (Increment 3) is also done +
+live-verified — including both refinements.** On startup the `WindowEmperor` reopens the
+**open-at-exit** set: it scans `windows/*.json` (sorted by filename, matching `LoadWindowRecords` so
+`-s <idx>` is canonical), reads the **`open-windows.json` manifest** (a byte-scan for braced `{guid}`
+tokens — it links `TerminalApp.dll`, not the `TerminalAppLib` static lib, so it can't call the JSON
+helpers), intersects, and dispatches `wt -w new -s <idx>` only for the records that were open at last
+exit; each window resolves `records[idx]` for geometry (TerminalWindow) and claims it by id
+(TerminalPage), so geometry + lens agree. A **decide-prompt** (Yes/No "Reopen your N previous windows?")
+gates the reopen when >1; a lone record / first run is silent. The **manifest** is owned by the
+process-wide `SharedEngine` (NOT the Emperor enumerating the projected surface — the engine already has
+every window's id): each `TerminalPage` `RegisterLiveWindow`s its `_windowId` at engine init and
+`UnregisterLiveWindow`s in `~TerminalPage`, and every change rewrites `open-windows.json` = the live id
+set **except** a change that empties it (skip-empty preserves the final snapshot; a hard shutdown that
+kills the threads before they unregister leaves the full set). So a window closed mid-session is
+**pruned** from the manifest (won't be re-offered) while its record stays on disk. The Manager's
+**"Reopen Windows (N)"** recover button (next to Archived, shown when N>0 == records-minus-live,
+`Engine::RecoverableWindows`) is the "if I answered No" path: it reopens each not-currently-open record
+via `wt -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows`, the same wt-exe handoff path as
+`_OpenNewWindow`) — the runtime analog of the Emperor loop. Verified end-to-end: 2 records + a manifest
+naming only one → exactly that one reopens (silent) at its geometry; a fake id is dropped + the second
+never added (register rewrote to the live set); the manifest survives app-close (skip-empty); a
+gracefully closed window is pruned; and the recover path reopens a not-open record at its saved geometry.
+**Still deferred (not blocking):** `Other`-tab `actionsJson` capture (non-Claude tab recreation) +
+session re-home. See PERSISTENCE.md §13.5.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -226,7 +239,8 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
   (per-working-directory tab colors), `settings.json`
   (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
-  one file per window; schema/IO in place, written once capture is wired), `bridge.json`
+  one file per window; captured + autosaved + restored), `open-windows.json` (the M10 Increment-3
+  open-at-exit manifest — the live window-id set the next launch reopens), `bridge.json`
   (live-bridge discovery for the shim), and `shim/` (the transparent `claude` PATH shim —
   `claude.cmd` + a POSIX `claude` — that auto-wires hand-typed sessions; see *Adopt any
   `claude`*). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas (MSIX).

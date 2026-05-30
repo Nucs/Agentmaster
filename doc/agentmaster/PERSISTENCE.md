@@ -475,20 +475,43 @@ launch, gated by a decide-prompt, + a recover button** for history). Commits `bf
   → window `Left=192 Top=150`; record `840,440` → `Left=832 Top=440`; 8px X = Win11 frame, Top
   exact). Single-record and first-run paths unchanged.
 
-**Increment 3 — remaining (refinements):**
-- **Open-at-exit manifest** (retention). `WM_CLOSE_TERMINAL_WINDOW` fires for BOTH a user closing one
-  window and app-exit closing each window, so without a manifest the reopen set = *every record ever*
-  (a window you closed mid-session lingers and the prompt re-offers it). The prompt mitigates (you
-  see the count + can decline), but for an accurate "windows open at last exit" set the Emperor must
-  record open window ids at the exit seam (`_persistState`/quit) — which needs `windowId` exposed on
-  the projected `TerminalWindow` surface. Until then, the prompt's N counts all records.
-- **Manager "Reopen Windows (N)" recover button** (the "if I answered No" path). A toolbar button
-  (next to **Archived**) that reopens saved-but-not-open windows from inside a running session — the
-  runtime analog of the Emperor loop (dispatch `wt -w new -s <idx>` per not-open record via the
-  new-window path). Needs the Manager→Emperor new-window-with-`-s` request + the open-set (manifest).
+**Increment 3 — refinements (SHIPPED & live-verified):**
+- **Open-at-exit manifest — DONE** (commit `26991a062`). The reopen set is no longer *every record
+  ever*; it is exactly the windowIds that were OPEN at last exit (a window you close mid-session no
+  longer lingers and gets re-offered). `WM_CLOSE_TERMINAL_WINDOW` can't tell a single user-close from
+  app-exit, so rather than have the Emperor enumerate windows at the exit seam (which would need
+  `windowId` on the projected `TerminalWindow` surface), the **process-wide `SharedEngine` owns the
+  manifest** — it already receives every window's id (each `TerminalPage` registers `_windowId` at
+  engine init, unregisters in `~TerminalPage`). Every change rewrites `open-windows.json` (a sibling
+  of `sessions.json`) = the live id set, **except** a change that empties it is skipped (skip-empty
+  keeps the final snapshot; a hard shutdown that kills the threads before they unregister leaves the
+  full set on disk — both correct). `LoadWindowRecords` now **sorts by filename** so a record's index
+  is canonical (`-s <idx>` agrees across the Emperor scan and the reopened window's lookup). The
+  Emperor reads the manifest (a byte-scan for braced `{guid}` tokens — it links `TerminalApp.dll`, not
+  the static lib, so it can't call the JSON helpers; keys `version`/`open` aren't braced so they're
+  excluded), intersects with the sorted records, and reopens only the open-at-exit set
+  (`wt -w new -s <idx>`); the decide-prompt count is that intersected size. A missing/empty manifest
+  falls back to ALL records (graceful migration; skip-empty makes a present manifest never legitimately
+  empty). **Less plumbing than the projected-surface route, and it survives a hard shutdown better.**
+  Verified live: 2 records + a manifest naming only one ⇒ exactly that one reopens (silent, no prompt)
+  at its geometry; a seeded fake id is dropped and the second record never added (register rewrote to
+  the live set); the manifest survives app-close (skip-empty); and a **gracefully** mid-session-closed
+  window (`SC_CLOSE` → `~TerminalPage` → `UnregisterLiveWindow`) is **pruned** from the manifest while
+  its record stays on disk (recoverable).
+- **Manager "Reopen Windows (N)" recover button — DONE** (commit `04b1989ec`). The "if I answered No"
+  path: a toolbar button next to **Archived**, shown only when N>0, where N == records-minus-live
+  (`Engine::RecoverableWindows`). Click → confirm → `TerminalPage::_ReopenSavedWindows`, which
+  ShellExecutes `wt -w -1 -s <idx>` per not-currently-open record (the same wt-exe path as
+  `_OpenNewWindow`; the single-instance handoff routes it back to the running Emperor → the identical
+  reopen pipeline, just at runtime). **No Manager→Emperor IPC** — a within-process page already reaches
+  new-window creation by ShellExecuting the wt exe with `-w -1`. Verified live: a recoverable record
+  reopened a 2nd window at its saved geometry (`Left=692 Top=480`) via the `-s <idx>` runtime handoff,
+  alongside the already-open window.
 - **`Other`-tab `actionsJson` capture** (non-Claude tab recreation) and session **re-home** (route a
   restored session into the window whose record references it) — both still deferred.
 
 **Acceptance (§13.3) status:** #2 partial (lens), #3 (single-window unchanged; clean first run), and
-**#1 multi-window reopen at geometry/lens — DONE & verified** (the manifest/button above refine
-*which* set reopens + the in-session recover path, not the reopen mechanism itself).
+**#1 multi-window reopen at geometry/lens — DONE & verified.** The two refinements above are now also
+**DONE & verified** (the reopen set is exactly the open-at-exit windows; a mid-session-closed window is
+pruned; the in-session recover button brings back any saved-but-not-open window). **Increment 3 is
+complete bar the two still-deferred items (`Other`-tab content recreation + session re-home).**
