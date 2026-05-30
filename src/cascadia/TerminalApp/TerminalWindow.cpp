@@ -14,6 +14,8 @@
 
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 
+#include "AgentMaster/Persistence.h" // Agentmaster (M10): LoadWindowRecords + WindowGeometry (geometry restore)
+
 using namespace winrt::Windows::ApplicationModel;
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
 using namespace winrt::Windows::Graphics::Display;
@@ -595,6 +597,59 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     // Return Value:
     // - a point containing the requested dimensions in pixels.
+    // Agentmaster (M10): our launchMode JSON token (LaunchModeToToken's inverse) -> WT flags.
+    static LaunchMode AgentmasterTokenToLaunchMode(const std::wstring& token)
+    {
+        auto mode = LaunchMode::DefaultMode;
+        if (token == L"fullscreen")
+        {
+            WI_SetFlag(mode, LaunchMode::FullscreenMode);
+        }
+        else if (token == L"maximizedFocus")
+        {
+            WI_SetFlag(mode, LaunchMode::MaximizedMode);
+            WI_SetFlag(mode, LaunchMode::FocusMode);
+        }
+        else if (token == L"maximized")
+        {
+            WI_SetFlag(mode, LaunchMode::MaximizedMode);
+        }
+        else if (token == L"focus")
+        {
+            WI_SetFlag(mode, LaunchMode::FocusMode);
+        }
+        return mode;
+    }
+
+    // Agentmaster (M10; PERSISTENCE.md §13 Increment 2): this window's restored geometry from its
+    // windows/<id>.json record, consulted by the three geometry methods below. WT's own persisted
+    // layout is OFF in our DefaultProfile mode, so without this a relaunched window opens at the
+    // default position/size. Single-window for now: the FIRST persisted record — which is also the
+    // one TerminalPage::_InitAgentmasterEngine claims (ClaimWindowRecord pops the same front), so
+    // geometry and lens agree. Multi-window restore (Increment 3) will key this by the
+    // Emperor-assigned windowId. Loaded once; nullopt on first run (no records) -> WT defaults.
+    std::optional<::Agentmaster::WindowGeometry> TerminalWindow::_AgentmasterRestoreGeometry()
+    {
+        if (!_agentmasterGeometryLoaded)
+        {
+            _agentmasterGeometryLoaded = true;
+            try
+            {
+                auto records = ::Agentmaster::LoadWindowRecords();
+                if (!records.empty())
+                {
+                    const auto& g = records.front().geometry;
+                    if (g.hasPosition || g.hasSize || !g.launchMode.empty())
+                    {
+                        _agentmasterGeometry = g;
+                    }
+                }
+            }
+            CATCH_LOG();
+        }
+        return _agentmasterGeometry;
+    }
+
     winrt::Windows::Foundation::Size TerminalWindow::GetLaunchDimensions(uint32_t dpi)
     {
         winrt::Windows::Foundation::Size proposedSize{};
@@ -621,6 +676,22 @@ namespace winrt::TerminalApp::implementation
                 // so we need to scale it appropriately.
                 proposedSize.Height = proposedSize.Height * scale;
                 proposedSize.Width = proposedSize.Width * scale;
+            }
+        }
+
+        // Agentmaster (M10): apply our record's saved size when WT's persisted layout gave none
+        // (the common case — our DefaultProfile mode keeps WT persistence off). Same non-scaled
+        // real-pixel convention as InitialSize above. A commandline --size still trumps (below).
+        if (proposedSize.Width == 0 && proposedSize.Height == 0)
+        {
+            if (const auto g = _AgentmasterRestoreGeometry(); g && g->hasSize)
+            {
+                proposedSize.Width = static_cast<float>(g->width) * scale;
+                proposedSize.Height = static_cast<float>(g->height) * scale;
+                if (!g->launchMode.empty())
+                {
+                    focusMode = (g->launchMode == L"focus" || g->launchMode == L"maximizedFocus");
+                }
             }
         }
 
@@ -711,6 +782,12 @@ namespace winrt::TerminalApp::implementation
                 return layout.LaunchMode().Value();
             }
         }
+        // Agentmaster (M10): our record's saved launch mode (maximized/fullscreen/focus), at the
+        // same precedence as a WT persisted layout (above the commandline/settings fallback).
+        if (const auto g = _AgentmasterRestoreGeometry(); g && !g->launchMode.empty())
+        {
+            return AgentmasterTokenToLaunchMode(g->launchMode);
+        }
         return valueFromCommandlineArgs.has_value() ?
                    valueFromCommandlineArgs.value() :
                    valueFromSettings;
@@ -736,6 +813,15 @@ namespace winrt::TerminalApp::implementation
             {
                 initialPosition = layout.InitialPosition().Value();
             }
+        }
+
+        // Agentmaster (M10): our record's saved position when WT's persisted layout gave none.
+        if (const auto g = _AgentmasterRestoreGeometry(); g && g->hasPosition)
+        {
+            ::winrt::Microsoft::Terminal::Settings::Model::LaunchPosition lp;
+            lp.X = static_cast<int32_t>(g->x);
+            lp.Y = static_cast<int32_t>(g->y);
+            initialPosition = lp;
         }
 
         // Commandline args trump everything except for content bounds (tear-out)

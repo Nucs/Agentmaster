@@ -182,6 +182,15 @@ namespace winrt::TerminalApp::implementation
         std::optional<uint32_t> _loadFromPersistedLayoutIdx{};
         std::optional<winrt::Microsoft::Terminal::Settings::Model::WindowLayout> _cachedLayout{ std::nullopt };
 
+        // Agentmaster (M10; PERSISTENCE.md §13 Increment 2): this window's restored geometry from
+        // its windows/<id>.json record, applied in GetInitialPosition / GetLaunchDimensions /
+        // GetLaunchMode — WT's own persisted layout is OFF in our DefaultProfile mode, so these
+        // methods otherwise fall back to defaults. Loaded once (single-window: the first persisted
+        // record; multi-window restore (Increment 3) keys it by the Emperor-assigned windowId).
+        bool _agentmasterGeometryLoaded{ false };
+        std::optional<::Agentmaster::WindowGeometry> _agentmasterGeometry{ std::nullopt };
+        std::optional<::Agentmaster::WindowGeometry> _AgentmasterRestoreGeometry();
+
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
         TerminalApp::SettingsLoadEventArgs _initialLoadResult{ nullptr };
 
