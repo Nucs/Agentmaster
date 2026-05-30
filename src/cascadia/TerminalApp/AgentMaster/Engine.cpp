@@ -185,4 +185,66 @@ namespace Agentmaster
         }
         return std::nullopt;
     }
+
+    void RegisterLiveWindow(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        e.liveWindowIds.insert(windowId);
+        // A live window always has a record on disk (the page's autosave), so writing the manifest now
+        // means even a single-window session (which never triggers a remove-with-remaining) is recorded
+        // — so it reopens at its geometry/lens next run (the shipped Increment-2 behavior).
+        SaveOpenWindows({ e.liveWindowIds.begin(), e.liveWindowIds.end() });
+    }
+
+    void UnregisterLiveWindow(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        e.liveWindowIds.erase(windowId);
+        // Skip-empty: the LAST window's teardown must NOT clear the manifest, or "open at exit" would
+        // always be empty. Leaving the prior snapshot means the next run reopens what was open when the
+        // app exited — for a one-by-one close that is the final window; a hard shutdown that kills the
+        // window threads before they unregister leaves the full set on disk (both are correct). §13.5.
+        if (!e.liveWindowIds.empty())
+        {
+            SaveOpenWindows({ e.liveWindowIds.begin(), e.liveWindowIds.end() });
+        }
+    }
+
+    std::vector<std::wstring> LiveWindowIds()
+    {
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        return { e.liveWindowIds.begin(), e.liveWindowIds.end() };
+    }
+
+    std::vector<RecoverableWindow> RecoverableWindows()
+    {
+        auto& e = SharedEngine();
+        // Snapshot the live set under the lock, then read records OUTSIDE the lock (disk IO).
+        std::set<std::wstring> live;
+        {
+            std::lock_guard<std::mutex> lk(e.windowMutex);
+            live = e.liveWindowIds;
+        }
+        std::vector<RecoverableWindow> out;
+        const auto records = LoadWindowRecords(); // canonical sorted order -> the index IS the `-s <idx>`
+        for (int i = 0; i < static_cast<int>(records.size()); ++i)
+        {
+            if (live.find(records[i].windowId) == live.end())
+            {
+                out.push_back({ i, records[i] });
+            }
+        }
+        return out;
+    }
 }

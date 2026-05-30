@@ -255,6 +255,13 @@ namespace winrt::TerminalApp::implementation
         {
             _scanner->RemoveLivenessProbe(_livenessToken);
         }
+        // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5): this window is gone — drop it
+        // from the process-wide live set, which rewrites open-windows.json (skip-empty: the last window
+        // out leaves the final snapshot intact). Symmetric to the RegisterLiveWindow in engine init.
+        if (!_windowId.empty())
+        {
+            ::Agentmaster::UnregisterLiveWindow(_windowId);
+        }
     }
 
     // Method Description:
@@ -776,6 +783,12 @@ namespace winrt::TerminalApp::implementation
             _windowRecord.windowId = ::Microsoft::Console::Utils::GuidToString(fresh);
         }
         _windowId = _windowRecord.windowId;
+
+        // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5): mark this window LIVE in the
+        // process-wide set, which rewrites open-windows.json. Done here (not at WindowEmperor create
+        // time) because _windowId is only resolved now — register early + correct so even a one-window
+        // session lands in the manifest and reopens next run. Unregistered in ~TerminalPage.
+        ::Agentmaster::RegisterLiveWindow(_windowId);
 
         // Debounced autosave of the window record (750ms trailing): structural/lens churn (drag a
         // splitter, reorder tabs, resize the window) collapses to one write; never per keystroke.

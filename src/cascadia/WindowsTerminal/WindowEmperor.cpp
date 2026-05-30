@@ -20,6 +20,13 @@
 #include "../../types/inc/User32Utils.hpp"
 #include "../../types/inc/utils.hpp"
 
+// Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the open-at-exit reopen scan parses the
+// manifest + sorts the record dir here (the Emperor links TerminalApp.dll, not the static lib).
+#include <algorithm>
+#include <fstream>
+#include <iterator>
+#include <unordered_set>
+
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
 using namespace winrt::Microsoft::Terminal::Settings::Model;
@@ -533,54 +540,119 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         }
 
         // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): reopen our per-window records.
-        // WT's PersistedWindowLayouts loop (above) is empty in our DefaultProfile mode, so we
-        // mirror it for windows/<id>.json: count the records (the Emperor links TerminalApp.dll,
-        // not the TerminalAppLib static lib, so it can't call ::Agentmaster::LoadWindowRecords —
-        // it scans the dir itself) and dispatch one window per record with `-s <idx>`. Each window
-        // then resolves records[idx] for its geometry (TerminalWindow) and claims it by id
-        // (TerminalPage), so geometry + lens agree. The trailing `_windows.empty()` guard below
-        // suppresses the extra default window on a bare launch.
+        // WT's PersistedWindowLayouts loop (above) is empty in our DefaultProfile mode, so we mirror
+        // it for windows/<id>.json. The reopen set is NOT "every record ever" — it is the OPEN-AT-EXIT
+        // set: the windowIds the running app last wrote to open-windows.json (a window you closed
+        // mid-session was pruned from it and is NOT re-offered; the Manager's "Reopen Windows" button
+        // brings any record back later). The Emperor links TerminalApp.dll (not the TerminalAppLib
+        // static lib), so it scans + parses here: build the canonical sorted record list (must match
+        // ::Agentmaster::LoadWindowRecords' sort-by-filename so the index agrees), read the manifest,
+        // and dispatch one window per open-at-exit record with `-s <idx>` -> TerminalWindow resolves
+        // records[idx] for geometry and TerminalPage claims it by id, so geometry + lens agree. The
+        // trailing `_windows.empty()` guard below suppresses the extra default window on a bare launch.
         if (_app.Logic().Settings().GlobalSettings().FirstWindowPreference() == FirstWindowPreference::DefaultProfile)
         {
-            uint32_t recordCount = 0;
+            std::vector<uint32_t> reopenIdx;
             try
             {
                 wchar_t profile[MAX_PATH];
                 const auto n = ::GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
                 if (n > 0 && n < MAX_PATH)
                 {
-                    const std::filesystem::path windowsDir = std::filesystem::path{ profile } / L".agentmaster" / L"windows";
+                    const std::filesystem::path stateDir = std::filesystem::path{ profile } / L".agentmaster";
+                    const std::filesystem::path windowsDir = stateDir / L"windows";
+
+                    // Canonical sorted record ids (filename stems). Sort by filename, identical to
+                    // LoadWindowRecords, so a record's index here == its index there == its `-s <idx>`.
+                    std::vector<std::wstring> ids;
                     if (std::filesystem::exists(windowsDir))
                     {
+                        std::vector<std::filesystem::path> files;
                         for (const auto& entry : std::filesystem::directory_iterator{ windowsDir })
                         {
                             if (entry.is_regular_file() && entry.path().extension() == L".json")
                             {
-                                ++recordCount;
+                                files.push_back(entry.path());
                             }
+                        }
+                        std::sort(files.begin(), files.end(), [](const std::filesystem::path& a, const std::filesystem::path& b) {
+                            return a.filename().wstring() < b.filename().wstring();
+                        });
+                        for (const auto& f : files)
+                        {
+                            ids.push_back(f.stem().wstring());
+                        }
+                    }
+
+                    // The open-at-exit set from open-windows.json. It's our own JSON; rather than link a
+                    // parser, extract the braced "{guid}" tokens — the keys ("version"/"open") aren't
+                    // braced, so they're excluded. The file is ASCII (GUIDs + JSON punctuation), so a
+                    // byte scan widened to wide chars is exact.
+                    std::unordered_set<std::wstring> openIds;
+                    {
+                        std::ifstream in{ stateDir / L"open-windows.json", std::ios::binary };
+                        if (in)
+                        {
+                            const std::string bytes{ std::istreambuf_iterator<char>{ in }, std::istreambuf_iterator<char>{} };
+                            for (size_t i = 0; i < bytes.size();)
+                            {
+                                if (bytes[i] == '"')
+                                {
+                                    const size_t start = ++i;
+                                    while (i < bytes.size() && bytes[i] != '"')
+                                    {
+                                        ++i;
+                                    }
+                                    const std::string tok = bytes.substr(start, i - start);
+                                    if (!tok.empty() && tok.front() == '{')
+                                    {
+                                        openIds.insert(std::wstring{ tok.begin(), tok.end() });
+                                    }
+                                    if (i < bytes.size())
+                                    {
+                                        ++i; // step past the closing quote
+                                    }
+                                }
+                                else
+                                {
+                                    ++i;
+                                }
+                            }
+                        }
+                    }
+
+                    // Intersect records with the open-at-exit set. A missing/empty manifest (first run
+                    // on this build, or a corrupt read) falls back to ALL records — graceful migration,
+                    // and the prompt still gates a multi-window reopen. skip-empty guarantees a present
+                    // manifest is never legitimately empty, so empty == absent here.
+                    for (uint32_t i = 0; i < ids.size(); ++i)
+                    {
+                        if (openIds.empty() || openIds.count(ids[i]) > 0)
+                        {
+                            reopenIdx.push_back(i);
                         }
                     }
                 }
             }
             CATCH_LOG();
 
-            // Reopening MULTIPLE windows warrants a heads-up (the user asked for a "prompted
-            // warning to decide"); a lone window restores silently (it's just remembering where it
-            // was). On "No" we dispatch nothing -> the _windows.empty() guard opens one default
-            // window, and the Manager's "Reopen Windows" recover button can bring the rest back.
-            auto doRestore = recordCount > 0;
-            if (recordCount > 1)
+            // Reopening MULTIPLE windows warrants a heads-up (the user asked for a "prompted warning to
+            // decide"); a lone window restores silently (it's just remembering where it was). On "No" we
+            // dispatch nothing -> the _windows.empty() guard opens one default window, and the Manager's
+            // "Reopen Windows" recover button can bring the rest back.
+            auto doRestore = !reopenIdx.empty();
+            if (reopenIdx.size() > 1)
             {
-                const std::wstring prompt = L"Reopen your " + std::to_wstring(recordCount) +
-                                            L" previous Agentmaster windows?\r\n\r\n(Choose No to start with a single window.)";
+                const std::wstring prompt = L"Reopen your " + std::to_wstring(reopenIdx.size()) +
+                                            L" previous Agentmaster windows?\r\n\r\n(Choose No to start with a single window; the Manager's “Reopen Windows” button can bring the rest back later.)";
                 doRestore = ::MessageBoxW(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION) == IDYES;
             }
 
             if (doRestore)
             {
-                for (uint32_t i = 0; i < recordCount; ++i)
+                for (const auto idx : reopenIdx)
                 {
-                    hstring restoreArgs[] = { L"wt", L"-w", L"new", L"-s", winrt::to_hstring(i) };
+                    hstring restoreArgs[] = { L"wt", L"-w", L"new", L"-s", winrt::to_hstring(idx) };
                     _dispatchCommandlineCommon(restoreArgs, cwd, env, showCmd);
                 }
             }

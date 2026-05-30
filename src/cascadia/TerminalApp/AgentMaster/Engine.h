@@ -26,6 +26,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <string>
 #include <vector>
 
 #include "SessionModels.h" // WindowRecord (M10 window-record claiming)
@@ -63,6 +65,15 @@ namespace Agentmaster
         std::mutex windowMutex;
         bool windowRecordsLoaded{ false };
         std::vector<WindowRecord> unclaimedWindowRecords;
+
+        // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5). The set of windowIds with a
+        // LIVE window in THIS process right now. Each TerminalPage registers its id at engine init and
+        // unregisters at teardown; every change rewrites open-windows.json (the manifest the next run's
+        // WindowEmperor reads to auto-reopen exactly the last-open windows) — EXCEPT a change that
+        // empties the set is NOT written, so the file preserves the final "open at exit" snapshot rather
+        // than being cleared by the last window's teardown. Guarded by windowMutex (same lock as the
+        // record-claim set; the two are touched at disjoint times so there is no re-entrancy).
+        std::set<std::wstring> liveWindowIds;
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -87,4 +98,23 @@ namespace Agentmaster
     // matching record from the unclaimed set and returns it; nullopt if not present (already
     // claimed / absent) -> the window mints a fresh id. See PERSISTENCE.md §13.5.
     std::optional<WindowRecord> ClaimWindowRecord(const std::wstring& windowId);
+
+    // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5). Register/unregister this window's
+    // id in the process-wide live set and refresh open-windows.json. RegisterLiveWindow adds + writes;
+    // UnregisterLiveWindow removes + writes UNLESS the set is now empty (skip-empty keeps the last
+    // snapshot = "windows open at exit"). LiveWindowIds() snapshots the set — used by the Manager's
+    // "Reopen Windows (N)" recover button to filter records to those NOT currently open.
+    void RegisterLiveWindow(const std::wstring& windowId);
+    void UnregisterLiveWindow(const std::wstring& windowId);
+    std::vector<std::wstring> LiveWindowIds();
+
+    // M10 Increment 3 (recover button). A saved window record that is NOT currently open, paired with
+    // its `-s <idx>` (its index in the canonical sorted LoadWindowRecords order) so the Manager can
+    // reopen it the same way the Emperor does at startup (wt -w -1 -s <idx>). See PERSISTENCE.md §13.5.
+    struct RecoverableWindow
+    {
+        int index{ 0 };
+        WindowRecord record;
+    };
+    std::vector<RecoverableWindow> RecoverableWindows();
 }

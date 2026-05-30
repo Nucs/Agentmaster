@@ -63,6 +63,14 @@ namespace Agentmaster
     // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
+    // Open-at-exit window manifest (M10 Increment 3 refinement; PERSISTENCE.md §13.5): the set of
+    // windowIds that were OPEN when the app last exited — distinct from "every record ever," so the
+    // startup auto-reopen offers exactly the last-open windows (a window closed mid-session is pruned
+    // from the set and not re-offered). A flat JSON array of windowId strings (it's a set; order is
+    // irrelevant). The Engine is the sole writer (it holds the live id set); the WindowEmperor reads
+    // it at startup to decide which records to reopen.
+    std::wstring SerializeOpenWindows(const std::vector<std::wstring>& windowIds);
+    std::vector<std::wstring> DeserializeOpenWindows(std::wstring_view text);
     // Per-directory tab colors (dir NormDirKey -> "#RRGGBB"). Persisted so a color follows its
     // working directory across sessions/runs (a color is shared by every tab in that dir).
     std::wstring SerializeDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors);
@@ -95,6 +103,11 @@ namespace Agentmaster
     void SaveWindowRecord(const WindowRecord& record);
     std::vector<WindowRecord> LoadWindowRecords();
     void DeleteWindowRecord(const std::wstring& windowId);
+    // The open-at-exit manifest (open-windows.json, a sibling of sessions.json — NOT under windows/,
+    // so it never pollutes the windows/*.json record scan). Save overwrites with the given live
+    // window-id set; Load reads it back (empty if absent/corrupt). M10 Increment 3; §13.5.
+    void SaveOpenWindows(const std::vector<std::wstring>& windowIds);
+    std::vector<std::wstring> LoadOpenWindows();
     // Per-directory tab colors on disk (dir-colors.json). Get/Set are thread-safe load-modify-save
     // convenience over the whole map; Set with nullopt removes the dir's entry (color reset).
     void SaveDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors);

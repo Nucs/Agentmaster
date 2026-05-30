@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -657,6 +658,40 @@ namespace Agentmaster
         return out;
     }
 
+    std::wstring SerializeOpenWindows(const std::vector<std::wstring>& windowIds)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        auto arr = json::Value::MkArr();
+        for (const auto& id : windowIds)
+        {
+            arr.Push(json::Value::MkStr(id));
+        }
+        root.Set(L"open", std::move(arr));
+        return json::Dump(root);
+    }
+
+    std::vector<std::wstring> DeserializeOpenWindows(std::wstring_view text)
+    {
+        std::vector<std::wstring> out;
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return out;
+        }
+        if (const auto* arr = parsed->Find(L"open"); arr && arr->type == json::Value::Type::Arr)
+        {
+            for (const auto& dv : arr->arr)
+            {
+                if (dv.type == json::Value::Type::Str)
+                {
+                    out.push_back(dv.AsStr());
+                }
+            }
+        }
+        return out;
+    }
+
     std::wstring SerializeLayout(const ManagerLayout& layout)
     {
         auto root = json::Value::MkObj();
@@ -755,6 +790,14 @@ namespace Agentmaster
     std::vector<std::wstring> LoadRecentDirs()
     {
         return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
+    }
+    void SaveOpenWindows(const std::vector<std::wstring>& windowIds)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\open-windows.json", SerializeOpenWindows(windowIds));
+    }
+    std::vector<std::wstring> LoadOpenWindows()
+    {
+        return DeserializeOpenWindows(ReadAllUtf8(AgentmasterStateDir() + L"\\open-windows.json"));
     }
 
     // ===== Tab naming + per-directory color (Agentmaster) =====
@@ -1054,13 +1097,25 @@ namespace Agentmaster
             {
                 return out;
             }
+            // Collect first, then sort by filename so the order is CANONICAL and STABLE across calls.
+            // The WindowEmperor scans this same dir (sorted identically) to map a windowId -> its
+            // `-s <idx>` and a reopened window resolves records[idx] for geometry; both must agree on
+            // the index, so a deterministic order is load-bearing (PERSISTENCE.md §13.5). directory_
+            // iterator order is unspecified, hence the explicit sort.
+            std::vector<std::filesystem::path> files;
             for (const auto& entry : std::filesystem::directory_iterator{ dir })
             {
-                if (!entry.is_regular_file() || entry.path().extension() != L".json")
+                if (entry.is_regular_file() && entry.path().extension() == L".json")
                 {
-                    continue;
+                    files.push_back(entry.path());
                 }
-                auto w = DeserializeWindowRecord(ReadAllUtf8(entry.path().wstring()));
+            }
+            std::sort(files.begin(), files.end(), [](const std::filesystem::path& a, const std::filesystem::path& b) {
+                return a.filename().wstring() < b.filename().wstring();
+            });
+            for (const auto& f : files)
+            {
+                auto w = DeserializeWindowRecord(ReadAllUtf8(f.wstring()));
                 if (!w.windowId.empty())
                 {
                     out.push_back(std::move(w));
