@@ -7,6 +7,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 
 #include <algorithm>
 #include <chrono>
@@ -442,6 +443,10 @@ namespace winrt::TerminalApp::implementation
     {
         _pauseHandler = std::move(handler);
     }
+    void AgentManagerContent::SetReopenWindowsHandler(std::function<void()> handler)
+    {
+        _reopenWindowsHandler = std::move(handler);
+    }
     void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
     {
         _confirmHandler = std::move(handler);
@@ -761,6 +766,17 @@ namespace winrt::TerminalApp::implementation
             _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowArchive(); });
             bar.Children().Append(_archivedBtn);
 
+            // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the "Reopen Windows (N)" recover
+            // button — the "if I answered No" path. It reopens saved windows that are NOT currently
+            // open (the runtime analog of the WindowEmperor's startup reopen loop). Hidden when there
+            // is nothing to recover (N==0); _UpdateReopenButton (driven from _Refresh) maintains both.
+            _reopenBtn = Button{};
+            _reopenBtn.Content(winrt::box_value(L"Reopen Windows"));
+            _reopenBtn.Visibility(Visibility::Collapsed);
+            ToolTipService::SetToolTip(_reopenBtn, winrt::box_value(L"Reopen previously-saved windows that aren't currently open"));
+            _reopenBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnReopenWindows(); });
+            bar.Children().Append(_reopenBtn);
+
             // Settings cog (opens the in-content settings overlay; built at the end of layout).
             _settingsBtn = Button{};
             {
@@ -1047,6 +1063,7 @@ namespace winrt::TerminalApp::implementation
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
         _UpdateArchivedButton(sessions);
+        _UpdateReopenButton();
         if (_archiveOverlay && _archiveOverlay.Visibility() == Visibility::Visible)
         {
             _RebuildArchiveList(); // keep the open archive list current as sessions archive/restore
@@ -2071,6 +2088,38 @@ namespace winrt::TerminalApp::implementation
                                                   winrt::hstring{ L"Archived (" } + winrt::to_hstring(archived) + L")" :
                                                   winrt::hstring{ L"Archived" }));
         _archivedBtn.IsEnabled(archived > 0);
+    }
+
+    void AgentManagerContent::_UpdateReopenButton()
+    {
+        if (!_reopenBtn)
+        {
+            return;
+        }
+        // Recoverable == saved window records NOT currently open in this process (Engine-tracked).
+        // Reads windows/*.json off disk, so keep this on the _Refresh cadence (registry changes), not
+        // a hot path. Show the button only when there is something to recover.
+        const auto n = static_cast<int>(::Agentmaster::RecoverableWindows().size());
+        _reopenBtn.Content(winrt::box_value(winrt::hstring{ L"Reopen Windows (" } + winrt::to_hstring(n) + L")"));
+        _reopenBtn.Visibility(n > 0 ? Visibility::Visible : Visibility::Collapsed);
+    }
+
+    void AgentManagerContent::_OnReopenWindows()
+    {
+        if (!_reopenWindowsHandler)
+        {
+            return;
+        }
+        const auto n = static_cast<int>(::Agentmaster::RecoverableWindows().size());
+        if (n <= 0)
+        {
+            return;
+        }
+        const auto reopen = _reopenWindowsHandler;
+        _Confirm(L"Reopen saved windows?",
+                 winrt::hstring{ L"This reopens " } + winrt::to_hstring(n) + L" previously-saved window(s) at their saved position and layout. Their sessions stay archived until you restore them.",
+                 L"Reopen",
+                 [reopen]() { reopen(); });
     }
 
     void AgentManagerContent::_BuildSettingsOverlay()

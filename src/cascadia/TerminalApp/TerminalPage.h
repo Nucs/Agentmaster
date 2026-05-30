@@ -421,6 +421,10 @@ namespace winrt::TerminalApp::implementation
         void _restartPaneConnection(const TerminalApp::TerminalPaneContent&, const winrt::Windows::Foundation::IInspectable&);
 
         safe_void_coroutine _OpenNewWindow(const Microsoft::Terminal::Settings::Model::INewContentArgs newContentArgs);
+        // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): reopen every saved window NOT currently
+        // open, each via `wt -w -1 -s <idx>` (the same new-window-by-persisted-index path the Emperor
+        // uses at startup) — the Manager's "Reopen Windows (N)" recover button.
+        safe_void_coroutine _ReopenSavedWindows();
 
         void _OpenNewTerminalViaDropdown(const Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs);
 

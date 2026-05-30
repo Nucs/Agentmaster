@@ -54,6 +54,11 @@ namespace winrt::TerminalApp::implementation
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
         void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
+        // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the "Reopen Windows (N)" recover
+        // button's action — reopen saved windows that are NOT currently open (the runtime analog of the
+        // WindowEmperor's startup reopen loop). The content computes N itself
+        // (::Agentmaster::RecoverableWindows) and shows the button only when N>0.
+        void SetReopenWindowsHandler(std::function<void()> handler);
 
         // Agentmaster (M10; PERSISTENCE.md §13): the per-window Manager LENS (selection / scope /
         // selected prompt / collapsed dirs / splitter sizes). GetManagerState reads it;
@@ -165,6 +170,11 @@ namespace winrt::TerminalApp::implementation
         void _OnRestoreSession(const std::wstring& id); // confirm -> _restoreHandler(id)
         void _OnRestoreAll(); // confirm -> restore every archived session
         void _UpdateArchivedButton(const std::vector<::Agentmaster::SessionInfo>& sessions); // label "Archived (N)" + enable
+        // Agentmaster (M10 Increment 3): the "Reopen Windows (N)" recover button. _UpdateReopenButton
+        // sets its label to the recoverable-window count and shows it only when N>0; _OnReopenWindows
+        // confirms, then fires _reopenWindowsHandler (the page reopens every not-currently-open record).
+        void _UpdateReopenButton();
+        void _OnReopenWindows();
         // A buttons-only confirm (XAML-Islands-safe) for consequential actions; runs onYes on accept.
         void _Confirm(const winrt::hstring& title, const winrt::hstring& body, const winrt::hstring& primary, std::function<void()> onYes);
 
@@ -185,6 +195,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
+        std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
         bool _globalPaused{ false };
@@ -214,6 +225,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
         winrt::Windows::UI::Xaml::Controls::Button _archivedBtn{ nullptr }; // "Archived (N)" (next to the cog) -> opens the archive overlay
+        winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
         // ---- Archived-sessions overlay (the "Archived" button) ----
         winrt::Windows::UI::Xaml::Controls::Grid _archiveOverlay{ nullptr }; // dimmed modal layer listing archived sessions
         winrt::Windows::UI::Xaml::Controls::StackPanel _archiveListHost{ nullptr }; // rows of archived sessions (Restore each)

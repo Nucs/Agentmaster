@@ -1297,6 +1297,16 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // M10 Increment 3 (PERSISTENCE.md §13.5): the Manager's "Reopen Windows (N)" recover button —
+        // reopen saved windows that aren't currently open, the runtime analog of the Emperor's startup
+        // reopen loop. Dispatched on the page (it owns the wt-exe new-window path).
+        content->SetReopenWindowsHandler([weakThis]() {
+            if (auto self = weakThis.get())
+            {
+                self->_ReopenSavedWindows();
+            }
+        });
+
         // M10 (PERSISTENCE.md §13): seed this window's Manager lens from its claimed record
         // (selection / scope / collapsed dirs / splitter sizes survive close/reopen), and have the
         // content PUSH lens changes back so the page caches the current lens and debounce-saves the

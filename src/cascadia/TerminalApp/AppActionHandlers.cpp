@@ -10,6 +10,7 @@
 #include "../../types/inc/utils.hpp"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "Utils.h"
+#include "AgentMaster/Engine.h" // Agentmaster (M10): RecoverableWindows (the "Reopen Windows" recover button)
 
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
 using namespace winrt::Windows::UI::Xaml;
@@ -934,6 +935,48 @@ namespace winrt::TerminalApp::implementation
         seInfo.lpParameters = cmdline.c_str();
         seInfo.nShow = SW_SHOWNORMAL;
         LOG_IF_WIN32_BOOL_FALSE(ShellExecuteExW(&seInfo));
+
+        co_return;
+    }
+
+    // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the Manager's "Reopen Windows (N)" recover
+    // button — reopen every saved window that is NOT currently open. This is the runtime analog of the
+    // WindowEmperor's startup reopen loop: each recoverable record is reopened via `wt -w -1 -s <idx>`
+    // (a new window, with the record's canonical sorted index as the persisted-layout index), which
+    // hands off to this same Emperor process -> a new AppHost -> TerminalWindow resolves records[idx]
+    // for geometry and TerminalPage claims it by id (geometry + lens agree). RecoverableWindows()
+    // already pairs each not-open record with that index, so we just dispatch one wt per entry.
+    safe_void_coroutine TerminalPage::_ReopenSavedWindows()
+    {
+        // Compute the recoverable set on the UI thread (a consistent snapshot of records-minus-live).
+        auto recoverable = ::Agentmaster::RecoverableWindows();
+        if (recoverable.empty())
+        {
+            co_return;
+        }
+
+        // GetWtExePath() must be read into a local before ShellExecute mangles it (see _OpenNewWindow).
+        const auto exePath{ GetWtExePath() };
+
+        // ShellExecuteExW may block, so dispatch from a background thread (NOTE: don't touch `this`
+        // past here — everything below is local, mirroring _OpenNewWindow).
+        co_await winrt::resume_background();
+
+        for (const auto& rw : recoverable)
+        {
+            // `-w -1` forces a brand-new window; `-s <idx>` is the global persisted-layout index our
+            // TerminalWindow/TerminalPage read to restore geometry + claim the record by id.
+            const std::wstring cmdline = L"-w -1 -s " + std::to_wstring(rw.index);
+
+            SHELLEXECUTEINFOW seInfo{ 0 };
+            seInfo.cbSize = sizeof(seInfo);
+            seInfo.fMask = SEE_MASK_NOASYNC;
+            seInfo.lpVerb = L"open";
+            seInfo.lpFile = exePath.c_str();
+            seInfo.lpParameters = cmdline.c_str();
+            seInfo.nShow = SW_SHOWNORMAL;
+            LOG_IF_WIN32_BOOL_FALSE(ShellExecuteExW(&seInfo));
+        }
 
         co_return;
     }
