@@ -160,4 +160,29 @@ namespace Agentmaster
         e.unclaimedWindowRecords.erase(e.unclaimedWindowRecords.begin());
         return rec;
     }
+
+    std::optional<WindowRecord> ClaimWindowRecord(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return std::nullopt;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        if (!e.windowRecordsLoaded)
+        {
+            e.unclaimedWindowRecords = LoadWindowRecords();
+            e.windowRecordsLoaded = true;
+        }
+        for (auto it = e.unclaimedWindowRecords.begin(); it != e.unclaimedWindowRecords.end(); ++it)
+        {
+            if (it->windowId == windowId)
+            {
+                auto rec = std::move(*it);
+                e.unclaimedWindowRecords.erase(it);
+                return rec;
+            }
+        }
+        return std::nullopt;
+    }
 }

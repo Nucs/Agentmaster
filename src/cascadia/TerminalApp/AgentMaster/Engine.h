@@ -80,4 +80,11 @@ namespace Agentmaster
     // engine's unclaimed set under lock (loading windows/*.json once on first call). Each window
     // calls this exactly once at init. See PERSISTENCE.md §13.
     std::optional<WindowRecord> ClaimWindowRecord();
+
+    // M10 Increment 3 (multi-window restore): claim a SPECIFIC record by windowId — the Emperor
+    // assigns each restored window its record (via -s <idx> -> TerminalWindow -> TerminalPage), so
+    // geometry and lens come from the same record with no cross-thread pop-order race. Removes the
+    // matching record from the unclaimed set and returns it; nullopt if not present (already
+    // claimed / absent) -> the window mints a fresh id. See PERSISTENCE.md §13.5.
+    std::optional<WindowRecord> ClaimWindowRecord(const std::wstring& windowId);
 }

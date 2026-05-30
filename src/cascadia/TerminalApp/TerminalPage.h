@@ -166,6 +166,7 @@ namespace winrt::TerminalApp::implementation
 
         void SetStartupActions(std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> actions);
         void SetStartupConnection(winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection connection);
+        void SetAgentmasterWindowId(winrt::hstring windowId); // Agentmaster (M10): the Emperor-assigned restore-record id (multi-window reopen)
 
         static std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> ConvertExecuteCommandlineToActions(const Microsoft::Terminal::Settings::Model::ExecuteCommandlineArgs& args);
 
@@ -303,6 +304,9 @@ namespace winrt::TerminalApp::implementation
         // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
         // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
         bool _windowRecordClaimed{ false };
+        // Agentmaster (M10 Increment 3): the Emperor-assigned record id for a multi-window restore,
+        // set by TerminalWindow before _OnFirstLayout. Empty => single-window (claim the front record).
+        std::wstring _assignedWindowId;
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };

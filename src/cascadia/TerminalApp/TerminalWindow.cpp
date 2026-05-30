@@ -179,6 +179,22 @@ namespace winrt::TerminalApp::implementation
             _root->SetStartupActions(_appArgs->ParsedArgs().GetStartupActions());
         }
 
+        // Agentmaster (M10 Increment 3): if the Emperor restored this window from a specific record
+        // (-s <idx> -> _loadFromPersistedLayoutIdx), tell the page which record id to claim, so its
+        // lens matches the geometry TerminalWindow already applied — both index the same record list.
+        if (_loadFromPersistedLayoutIdx)
+        {
+            try
+            {
+                auto records = ::Agentmaster::LoadWindowRecords();
+                if (*_loadFromPersistedLayoutIdx < records.size())
+                {
+                    _root->SetAgentmasterWindowId(winrt::hstring{ records[*_loadFromPersistedLayoutIdx].windowId });
+                }
+            }
+            CATCH_LOG();
+        }
+
         return _root->Initialize(hwnd);
     }
 
@@ -638,7 +654,16 @@ namespace winrt::TerminalApp::implementation
                 auto records = ::Agentmaster::LoadWindowRecords();
                 if (!records.empty())
                 {
-                    const auto& g = records.front().geometry;
+                    // Increment 3 (multi-window): the Emperor dispatched this window with
+                    // -s <idx> -> _loadFromPersistedLayoutIdx, the index into the (stable-order)
+                    // record list. TerminalPage claims the SAME record by its id (passed in
+                    // Initialize), so geometry + lens agree. Single-window (no -s): the front record.
+                    size_t pick = 0;
+                    if (_loadFromPersistedLayoutIdx && *_loadFromPersistedLayoutIdx < records.size())
+                    {
+                        pick = *_loadFromPersistedLayoutIdx;
+                    }
+                    const auto& g = records[pick].geometry;
                     if (g.hasPosition || g.hasSize || !g.launchMode.empty())
                     {
                         _agentmasterGeometry = g;

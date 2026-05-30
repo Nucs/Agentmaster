@@ -758,7 +758,12 @@ namespace winrt::TerminalApp::implementation
         // windows/<id>.json (geometry + Manager lens + ordered tab refs), or a fresh GUID if none
         // remains. Stashed in _windowRecord; its lens is seeded into the Manager tab in
         // _WireAgentManagerContent, and changes are debounced-autosaved back to the same file.
-        if (auto claimed = ::Agentmaster::ClaimWindowRecord())
+        // Increment 3: when the Emperor assigned this window a specific record (multi-window
+        // reopen), claim THAT id so geometry (TerminalWindow) and lens (here) come from the same
+        // record; otherwise claim the front record (single-window) or mint a fresh id.
+        auto claimed = _assignedWindowId.empty() ? ::Agentmaster::ClaimWindowRecord() :
+                                                    ::Agentmaster::ClaimWindowRecord(_assignedWindowId);
+        if (claimed)
         {
             _windowRecord = std::move(*claimed);
             _windowRecordClaimed = true;
@@ -5365,6 +5370,15 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::SetStartupConnection(ITerminalConnection connection)
     {
         _startupConnection = std::move(connection);
+    }
+
+    // Agentmaster (M10 Increment 3): TerminalWindow hands us the record id it resolved from the
+    // Emperor's -s <idx> (multi-window reopen), so _InitAgentmasterEngine claims THAT record (its
+    // geometry already applied by TerminalWindow) instead of the front one. Must be set before
+    // _OnFirstLayout. Empty => single-window (claim the front record).
+    void TerminalPage::SetAgentmasterWindowId(winrt::hstring windowId)
+    {
+        _assignedWindowId = windowId;
     }
 
     winrt::TerminalApp::IDialogPresenter TerminalPage::DialogPresenter() const
