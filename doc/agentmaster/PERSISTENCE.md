@@ -446,17 +446,41 @@ lands as its own commit.
   Fixed by priming the cache from `content->GetManagerState()` at wire time (verified: the live
   record shows the real `0.39066/0.448785`, not `0.4/0.4`).
 
-**Remaining (restaged):**
-- **Increment 2 — single-window geometry re-apply.** Feed the claimed record's geometry into
-  the **`TerminalWindow` startup seam** (`GetInitialPosition`/`GetLaunchDimensions`/
-  `GetLaunchMode`, which run at window creation — *before* `_InitAgentmasterEngine` claims, so
-  this needs an early single-record peek that agrees with the later claim). Add a
-  deactivate/visibility close-flush. Moderate risk (different subsystem; runs before the
-  AV-prone control-init, so no AV hazard). Makes the window **reopen at its saved position/size**.
-- **Increment 3 — multi-window reopen (gated on §13.0).** The Emperor creates N windows from N
-  records and assigns each its record (the deepest cut — **spike a 2-window reopen first**); the
-  `Other` tab `actionsJson` capture (deferred in Increment 1) is finished here for non-Claude
-  tab recreation; re-home a restored session into the window whose record references it.
-- **Acceptance (§13.3) status:** #3 (single-window unchanged; clean first run) and the capture
-  half of #4 met; #1 (multi-window reopen) is Increment 3; geometry re-apply in #1/#4 is
-  Increment 2.
+**Increment 2 — SHIPPED & live-verified** (commit `6d609a815`). A relaunched window reopens
+at its saved position/size/launch-mode via the **`TerminalWindow` startup seam**
+(`GetInitialPosition`/`GetLaunchDimensions`/`GetLaunchMode` — WT's own persisted layout is OFF
+in DefaultProfile, so they otherwise default). `_AgentmasterRestoreGeometry()` returns the front
+record's geometry (single-window) — the same record `ClaimWindowRecord` pops, so geometry + lens
+agree. Runs at window creation (before control-init → no AV hazard). **Verified live:** edited a
+record to a distinctive `x:480 y:320 1000×640`, relaunched, `GetWindowRect` → `Left=472 Top=320
+size=1016×689` (Top exact; Left = 480 − 8px frame; size = content + frame + titlebar). So
+**single-window workspace restore — geometry + lens — fully works.**
+
+**Increment 3 — plumbing SHIPPED (inert); Emperor loop + trigger/retention PENDING a decision**
+(commit `bf2161602`). The claim-by-id infrastructure is in and compile-verified, but does nothing
+until a restore trigger exists (no window gets `-s`, so all paths fall back to single-window):
+- `Engine::ClaimWindowRecord(windowId)`; `TerminalPage::SetAgentmasterWindowId`; TerminalWindow
+  indexes geometry by `_loadFromPersistedLayoutIdx` (the `-s <idx>`) and hands the resolved id to
+  the page — so a restored window's geometry + lens come from the same record, race-free.
+- **Linkage:** `WindowEmperor` (WindowsTerminal.exe) references `TerminalApp.dll`, not the
+  `TerminalAppLib` static lib, so `::Agentmaster::LoadWindowRecords` isn't linkable there — the
+  Emperor restore loop must count `windows/*.json` itself and dispatch `wt -w new -s <idx>` per
+  record (mirroring WT's own `PersistedWindowLayouts` loop, empty in our DefaultProfile mode; the
+  trailing `_windows.empty()` guard then suppresses the extra default window).
+- **Retention (the open question):** `WM_CLOSE_TERMINAL_WINDOW` fires for BOTH a user closing one
+  window and app-exit closing each window — not cleanly distinguishable. So **auto-reopening every
+  record each launch would accumulate windows** (no clean prune-on-close). Two ways forward, a real
+  product fork:
+  - **Auto-reopen** (close N → reopen N automatically): needs an **open-at-exit manifest** (the
+    Emperor records which window ids were open at exit + restores only those) — more Emperor
+    surgery + exposing `windowId` on the projected surface.
+  - **User-initiated reopen** (a launch prompt or a Manager "Reopen Windows (N)" button, mirroring
+    the **Archived** overlay): **sidesteps retention entirely** (records persist harmlessly like
+    archived sessions; the user reopens on demand) and aligns with **Rule #6** (startup never
+    auto-launches). Recommended.
+- Deferred regardless of trigger: the `Other`-tab `actionsJson` capture (non-Claude tab recreation)
+  and session **re-home** (route a restored session into the window whose record references it).
+
+**Acceptance (§13.3) status:** #2 partial (lens), #3 (single-window unchanged; clean first run),
+and **single-window geometry/lens (the core of #1/#4) — DONE & verified**. Full #1 (multi-window
+reopen) awaits the Increment 3 trigger decision above.

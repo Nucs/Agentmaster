@@ -54,10 +54,17 @@ autosave (`_saveWindowRecordThrottled`, fed by tab/resize/recolor/lens-push trig
 one-shot save at end of startup) persists it, and a claimed record **seeds the lens**
 (`AgentManagerContent::Get/SetManagerState` + a lens-changed push). Verified in the deployed
 package: the record carries real geometry + the real splitter layout, and a relaunch **reuses
-the same windowId** (claim → restore round-trip). Remaining: **geometry re-apply** (Increment
-2, via the `TerminalWindow` startup seam + a deactivate close-flush — note WT only calls
-`TerminalPage::PersistState()` when `firstWindowPreference != DefaultProfile`, which our mode
-is *not*) and **multi-window reopen** (Increment 3, gated on PERSISTENCE.md §13.0).
+the same windowId** (claim → restore round-trip). **Increment 2 (geometry re-apply) is also
+done + live-verified:** a relaunched window reopens at its saved position/size/launch-mode via
+the `TerminalWindow` startup seam (`GetInitialPosition`/`GetLaunchDimensions`/`GetLaunchMode` —
+WT's own persisted layout is OFF in our DefaultProfile mode; note WT only calls
+`TerminalPage::PersistState()` when `firstWindowPreference != DefaultProfile`, which our mode is
+*not*, so geometry capture rides the autosave, not a close-flush). **So single-window workspace
+restore — geometry + lens — fully works.** **Multi-window reopen (Increment 3)** has its
+claim-by-id plumbing landed (inert) but needs the Emperor restore loop + a **trigger/retention
+decision** (auto-reopen-all needs an open-at-exit manifest since per-window-close isn't
+distinguishable from app-exit; a user-initiated "Reopen Windows" prompt/button sidesteps it and
+fits Rule #6). See PERSISTENCE.md §13.5.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
