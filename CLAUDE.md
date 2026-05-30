@@ -60,11 +60,17 @@ the `TerminalWindow` startup seam (`GetInitialPosition`/`GetLaunchDimensions`/`G
 WT's own persisted layout is OFF in our DefaultProfile mode; note WT only calls
 `TerminalPage::PersistState()` when `firstWindowPreference != DefaultProfile`, which our mode is
 *not*, so geometry capture rides the autosave, not a close-flush). **So single-window workspace
-restore — geometry + lens — fully works.** **Multi-window reopen (Increment 3)** has its
-claim-by-id plumbing landed (inert) but needs the Emperor restore loop + a **trigger/retention
-decision** (auto-reopen-all needs an open-at-exit manifest since per-window-close isn't
-distinguishable from app-exit; a user-initiated "Reopen Windows" prompt/button sidesteps it and
-fits Rule #6). See PERSISTENCE.md §13.5.
+restore — geometry + lens — fully works.** **Multi-window reopen (Increment 3) core is also
+done + live-verified:** on startup the `WindowEmperor` counts `windows/*.json` and dispatches
+`wt -w new -s <idx>` per record (it links `TerminalApp.dll`, not the `TerminalAppLib` static lib,
+so it can't call `LoadWindowRecords` — it scans the dir itself); each window resolves `records[idx]`
+for geometry (TerminalWindow) and claims it by id (TerminalPage), so geometry + lens agree; a
+**decide-prompt** (Yes/No "Reopen your N previous windows?") gates the reopen when >1 record exists
+(a lone record / first run is silent). Verified: 2 records → prompt → Yes → 2 windows each at its
+own saved position. **Remaining refinements:** the **open-at-exit manifest** (so the reopen set is
+"windows open at last exit", not every record ever — needs `windowId` on the projected surface,
+since `WM_CLOSE_TERMINAL_WINDOW` can't tell a user close from app-exit) and the Manager **"Reopen
+Windows (N)"** recover button (reopen from inside a running session). See PERSISTENCE.md §13.5.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single

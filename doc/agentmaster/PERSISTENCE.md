@@ -456,31 +456,39 @@ record to a distinctive `x:480 y:320 1000×640`, relaunched, `GetWindowRect` →
 size=1016×689` (Top exact; Left = 480 − 8px frame; size = content + frame + titlebar). So
 **single-window workspace restore — geometry + lens — fully works.**
 
-**Increment 3 — plumbing SHIPPED (inert); Emperor loop + trigger/retention PENDING a decision**
-(commit `bf2161602`). The claim-by-id infrastructure is in and compile-verified, but does nothing
-until a restore trigger exists (no window gets `-s`, so all paths fall back to single-window):
-- `Engine::ClaimWindowRecord(windowId)`; `TerminalPage::SetAgentmasterWindowId`; TerminalWindow
-  indexes geometry by `_loadFromPersistedLayoutIdx` (the `-s <idx>`) and hands the resolved id to
-  the page — so a restored window's geometry + lens come from the same record, race-free.
-- **Linkage:** `WindowEmperor` (WindowsTerminal.exe) references `TerminalApp.dll`, not the
-  `TerminalAppLib` static lib, so `::Agentmaster::LoadWindowRecords` isn't linkable there — the
-  Emperor restore loop must count `windows/*.json` itself and dispatch `wt -w new -s <idx>` per
-  record (mirroring WT's own `PersistedWindowLayouts` loop, empty in our DefaultProfile mode; the
-  trailing `_windows.empty()` guard then suppresses the extra default window).
-- **Retention (the open question):** `WM_CLOSE_TERMINAL_WINDOW` fires for BOTH a user closing one
-  window and app-exit closing each window — not cleanly distinguishable. So **auto-reopening every
-  record each launch would accumulate windows** (no clean prune-on-close). Two ways forward, a real
-  product fork:
-  - **Auto-reopen** (close N → reopen N automatically): needs an **open-at-exit manifest** (the
-    Emperor records which window ids were open at exit + restores only those) — more Emperor
-    surgery + exposing `windowId` on the projected surface.
-  - **User-initiated reopen** (a launch prompt or a Manager "Reopen Windows (N)" button, mirroring
-    the **Archived** overlay): **sidesteps retention entirely** (records persist harmlessly like
-    archived sessions; the user reopens on demand) and aligns with **Rule #6** (startup never
-    auto-launches). Recommended.
-- Deferred regardless of trigger: the `Other`-tab `actionsJson` capture (non-Claude tab recreation)
-  and session **re-home** (route a restored session into the window whose record references it).
+**Increment 3 — multi-window reopen: CORE SHIPPED & live-verified** (decision: **auto-reopen on
+launch, gated by a decide-prompt, + a recover button** for history). Commits `bf2161602` (plumbing),
+`319cdb44a` (Emperor loop), `a9364b7d6` (prompt).
+- **Plumbing:** `Engine::ClaimWindowRecord(windowId)`; `TerminalPage::SetAgentmasterWindowId`;
+  TerminalWindow indexes geometry by `_loadFromPersistedLayoutIdx` (the `-s <idx>`) and hands the
+  resolved id to the page — so a restored window's geometry + lens come from the same record,
+  race-free.
+- **Emperor loop:** `WindowEmperor` (links `TerminalApp.dll`, not the `TerminalAppLib` static lib, so
+  it can't call `::Agentmaster::LoadWindowRecords`) **counts `windows/*.json` itself** and dispatches
+  `wt -w new -s <idx>` per record, mirroring WT's own `PersistedWindowLayouts` loop (empty in our
+  DefaultProfile mode); the trailing `_windows.empty()` guard suppresses the extra default window.
+- **Decide-prompt:** when >1 record exists, a Yes/No "Reopen your N previous windows?" gates the
+  loop (Yes → reopen all; No → one default window). A lone record restores silently; first run (0
+  records) opens one default window.
+- **Verified live:** 2 records → relaunch → the prompt (#32770 dialog) appears with **0** windows yet
+  (reopen correctly gated); `IDYES` → **2 windows**, each at its OWN saved position (record `200,150`
+  → window `Left=192 Top=150`; record `840,440` → `Left=832 Top=440`; 8px X = Win11 frame, Top
+  exact). Single-record and first-run paths unchanged.
 
-**Acceptance (§13.3) status:** #2 partial (lens), #3 (single-window unchanged; clean first run),
-and **single-window geometry/lens (the core of #1/#4) — DONE & verified**. Full #1 (multi-window
-reopen) awaits the Increment 3 trigger decision above.
+**Increment 3 — remaining (refinements):**
+- **Open-at-exit manifest** (retention). `WM_CLOSE_TERMINAL_WINDOW` fires for BOTH a user closing one
+  window and app-exit closing each window, so without a manifest the reopen set = *every record ever*
+  (a window you closed mid-session lingers and the prompt re-offers it). The prompt mitigates (you
+  see the count + can decline), but for an accurate "windows open at last exit" set the Emperor must
+  record open window ids at the exit seam (`_persistState`/quit) — which needs `windowId` exposed on
+  the projected `TerminalWindow` surface. Until then, the prompt's N counts all records.
+- **Manager "Reopen Windows (N)" recover button** (the "if I answered No" path). A toolbar button
+  (next to **Archived**) that reopens saved-but-not-open windows from inside a running session — the
+  runtime analog of the Emperor loop (dispatch `wt -w new -s <idx>` per not-open record via the
+  new-window path). Needs the Manager→Emperor new-window-with-`-s` request + the open-set (manifest).
+- **`Other`-tab `actionsJson` capture** (non-Claude tab recreation) and session **re-home** (route a
+  restored session into the window whose record references it) — both still deferred.
+
+**Acceptance (§13.3) status:** #2 partial (lens), #3 (single-window unchanged; clean first run), and
+**#1 multi-window reopen at geometry/lens — DONE & verified** (the manifest/button above refine
+*which* set reopens + the in-session recover path, not the reopen mechanism itself).
