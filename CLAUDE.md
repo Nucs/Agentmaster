@@ -31,7 +31,7 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 ## Status
 
 **All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **154/154** standalone
+`Agentmaster` identity, and verified running.** The engine passes **211/211** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -41,12 +41,23 @@ What works, by area:
 - **Engine (M5, `AgentMaster/`).** Thread-safe `SessionRegistry` (single source of truth;
   multiple observers), `HooksBridge` (local named-pipe server `\\.\pipe\agentmaster.<pid>`),
   `ClaudeSpawn` (spawn/`--resume` recipe + the shared hooks config + PowerShell forwarder).
-  Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1).
+  Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1). The wire
+  line carries an 8th, **escaped `prompt`** field on `UserPromptSubmit` (`WireEscape`/
+  `WireUnescape`: `\ \t \r \n`), so the registry records **every** message a session got — a
+  prompt typed straight into the ConPTY becomes a `Sent`/`Typed` Flight-Plan entry, while the
+  `UserPromptSubmit` echo of a prompt WE injected is recognized (text + a recency window + the
+  transient `QueuedPrompt::echoed` flag) and NOT double-recorded.
 - **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Flight Plan,
   imperative and snapshot-driven from the registry (cross-thread refresh via
-  `DispatcherQueue`), bidirectional selection + directory scope. Explorer `Enter`=Activate /
-  `Del`=kill (never injects — Rule #2). Flight Plan: compose box, Add / Send now / ↑↓ /
-  Delete / Focus / Kill. `Focus()` focuses the cwd `TextBox`. The Launch cwd box has a
+  `DispatcherQueue`), bidirectional selection + directory scope. The Board/Tree show only
+  **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and listed
+  behind an **Archived (N)** toolbar button (by the cog) — a modal list with per-row
+  **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
+  `Del`=archive (never injects — Rule #2). Flight Plan: compose box, Add / Send now / ↑↓ /
+  Delete / Focus / Archive — and it reflects **all** messages a session got, not just queued
+  ones: a chronological **SENT** summary (each row tagged **flight** = we queued+injected it
+  vs **typed** = you typed it into the terminal) over the **UPCOMING** queue (Pending/Held).
+  `Focus()` focuses the cwd `TextBox`. The Launch cwd box has a
   focus-triggered **path-picker drop-down** (`Primitives::Popup`): up to 5 recent dirs (the
   current one excluded) over the subfolders of the current path + a `..` up-nav; click a row
   to navigate, and it re-lists. Working dirs are grouped/scoped with a filesystem-aware
@@ -55,17 +66,33 @@ What works, by area:
   advance seam. Turn-complete → auto-send next Pending (Full) / one-click confirm (SemiAuto)
   / Held by the question-guard (transient) / skip Manual gate. Backstops: pause-on-human-
   input, maxAutoSends, stopOnError, global Pause-all. Idempotent (atomic mark-Sent before
-  inject).
-- **Persistence + restore (M8, `Json.h`/`Persistence`).** Sessions + named plan templates
-  + the path-picker's recent-dirs MRU (de)serialize to JSON under `%USERPROFILE%\.agentmaster\`;
-  sessions autosave on change. On startup `_RestoreClaudeSessions()` re-launches each saved
-  session in its working dir and reloads its Flight Plan + autopilot — so **close == reopen**.
-  Resume is **transcript-gated**: `claude --resume <id>` only when Claude actually has a
-  conversation for that id, otherwise a **fresh** session (new id, same dir + queue). A
-  never-prompted session has no transcript and a blind `--resume` would die with "No
-  conversation found" (Rule #6). `Kill` is the explicit discard (drops it from the registry +
-  `sessions.json`); `Sent` prompts are never replayed. Templates: save a session's queue,
-  apply it, or broadcast to a whole directory.
+  inject). Advances fire on **two** triggers: the `Stop` seam (turn-complete) AND observed
+  changes (`OnObserved`), so a session sitting **Idle** (freshly launched / just `--resume`d —
+  it never emits a `Stop`) with a queued plan + autopilot **starts** consuming instead of
+  waiting forever. `DecideAdvance` treats `Idle` as *ready* alongside `WaitingForInput`; a
+  time-bounded **pickup guard** (the `echoed` flag + `kPickupGuardMs`) holds the next send until
+  the just-injected prompt is picked up, so a change-driven advance never drains the queue (one
+  prompt per turn). `RequestAdvance` dedups; a failed inject (no injector bound yet, e.g.
+  mid-restore) rolls the prompt back to `Pending` rather than stranding a phantom `Sent`.
+- **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
+  templates + the path-picker's recent-dirs MRU (de)serialize to JSON under
+  `%USERPROFILE%\.agentmaster\`; sessions autosave on change. **Lifecycle = Open ⇄ Archived**
+  (the transient `SessionInfo::live` flag, never persisted): Open == has a live tab/claude this
+  run (on the Board); Archived == shut down but kept restorable (behind the Archived button).
+  On startup `_RestoreClaudeSessions()` loads each saved session into the registry as
+  **Archived** and does **NOT** auto-launch it (Rule #6) — the app opens to just the Manager
+  tab; the prior fleet comes back via **Restore** / **Restore all**. Closing a session's tab
+  (the X, the tree `Del`, the Manager's Delete/Archive, or the Flight-Plan **Archive** button)
+  all route through the ONE archive seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`):
+  a single consequence confirm (gated by `confirmBeforeKill`), then `live=false` + clear injector
+  + persist + close the tab — the record is **kept**, so it lists under Archived. **There is no
+  discard**: archive is terminal, and the Claude transcript on disk is never touched. Restore
+  re-launches in the working dir + reloads the Flight Plan + autopilot; resume is
+  **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
+  that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived
+  record is dropped. A never-prompted session has no transcript and a blind `--resume` would die
+  with "No conversation found" (Rule #6). `Sent` prompts are never replayed. Templates: save a
+  session's queue, apply it, or broadcast to a whole directory.
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` after "Pause Autopilot" opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
@@ -74,15 +101,17 @@ What works, by area:
   global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via
   `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus **Autopilot defaults** stamped
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
-  (`confirmBeforeKill` routes the Kill button + tree `Del` through the confirm dialog;
+  (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
+  (tab X / Manager Archive / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box). Loaded at engine init, seeded via `SetSettings`,
   persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
   behavior, so a missing `settings.json` (or any unset field) is a no-op.
 
 Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
-discard a session when its tab is closed via the X (today only `Kill` discards); prevent
-splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+**Restore all** re-opens tabs lazily (a non-foreground restored tab starts its `claude` only
+when first focused — WT's lazy-background-tab behavior; restore one at a time to force start);
+prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
 
@@ -286,6 +315,16 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   treats `/`≡`\`; POSIX is case-SENSITIVE with `\` a literal char. Route every dir
   grouping/scope/match through `PathEq`/`NormPath` (`#ifdef _WIN32` → `CompareStringOrdinal`
   ignoreCase; `#else` → exact) — never raw `==`/`find`.
+- **The hook wire's `prompt` field must be escaped — and the PowerShell escape must mirror
+  `WireEscape` byte-for-byte.** The forwarder appends the `UserPromptSubmit` prompt as the
+  trailing TAB-separated wire field; a real prompt has embedded TAB/newline, which would break
+  the single-line, TAB-split, newline-framed record. Both the PowerShell forwarder and
+  `BuildWireLine` escape it identically — `\ → \\` FIRST, then tab/CR/LF → `\t \r \n` — and the
+  bridge `WireUnescape`s it. The PowerShell side is the one seam the C++ tests can't cover, so
+  verify it with a parity check (`C:\src` → `C:\\src`, `https://` survives, no raw newline/tab
+  remains). PowerShell gotcha: `-replace '\\','\\'` (pattern is regex = one backslash;
+  replacement is literal = two) does the backslash-doubling, and it MUST run before the
+  tab/CR/LF replacements or it would double the backslashes they introduce.
 - **Path-picker Popup placement.** Parent the `Primitives::Popup` into the content root
   (top/left aligned) so its `Horizontal/VerticalOffset` is root-relative; the popup's own
   layout anchor already carries the root's offset within the XAML island, so the two compose
@@ -295,19 +334,28 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
 
 ## Correctness rules (do not regress)
 
-1. **"Waiting-for-you" is three states.** Auto-send fires only on **turn-complete**
-   (`Stop` hook). `Notification(permission)` → Approval Policy (NOT the prompt queue). A
-   `Stop` whose last message is a question → **Held** by the question-guard.
+1. **"Waiting-for-you" is three states.** A session is *ready* for an auto-send when it is
+   **turn-complete** (`Stop` → `WaitingForInput`) **or** sitting **Idle** with no turn in
+   progress (a freshly launched / just-resumed plan must START, not wait for a `Stop` it will
+   never emit); `Running` / `NeedsApproval` / `Error` / `Done` are never ready. A change-driven
+   advance is held to **one prompt per turn** by the pickup guard (don't regress that — it
+   prevents a queue-drain). `Notification(permission)` → Approval Policy (NOT the prompt queue).
+   A `Stop` whose last message is a question → **Held** by the question-guard.
 2. **Tree `Enter` = Activate** (jump to the session's live tab); never forward it to
    `ITerminalConnection::WriteInput` (that would submit a stray carriage return).
 3. **Bind queue → sessionId**, never "the selected session" at send time.
 4. **Idempotent sends:** mark `Sent` atomically + persist; survive restart without replay.
 5. **Backstops:** stop-on-error, maxAutoSends, global pause/kill, pause-on-human-input.
-6. **Restore = resume, not replay — and resume is transcript-gated.** Startup re-launches
-   persisted sessions; `claude --resume <id>` (same id ⇒ hooks still correlate) **only when
-   Claude has a transcript for that id**, else a fresh session (new id, same dir + queue).
-   Queues reload with statuses intact; only `Kill` discards from persistence. Never decide
-   resume from the persisted `SessionState` (it's the live post-restore state) — see Gotchas.
+6. **Startup ARCHIVES, never auto-launches; restore = resume, not replay (transcript-gated).**
+   On startup, persisted sessions load into the registry as **Archived** (`live=false`) and are
+   **NOT** re-launched — the app opens to just the Manager tab, and the prior fleet is restorable
+   as a whole from the **Archived** button (a deliberate reversal of the old auto-reopen). A
+   user-initiated **Restore** re-launches one: `claude --resume <id>` (same id ⇒ hooks still
+   correlate) **only when Claude has a transcript for that id**, else a fresh session (new id,
+   same dir + queue, stale archived record dropped). Queues reload with statuses intact. Closing
+   a tab **archives** (keeps the record, `live=false`); there is **no discard** — archive is
+   terminal, and the Claude transcript on disk is never deleted. Never decide resume from the
+   persisted `SessionState` (it's the live post-restore state) — see Gotchas.
 7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).
 8. **Same directory = same path, filesystem-aware.** Group/scope/match sessions by working
    dir through `PathEq` (case-insensitive on Windows, case-sensitive on POSIX), so
