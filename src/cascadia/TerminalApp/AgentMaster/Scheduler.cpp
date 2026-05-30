@@ -148,6 +148,7 @@ namespace Agentmaster
                         p.status = PromptStatus::Sent;
                         p.sentAtUnixMs = NowMs();
                         p.attempts += 1;
+                        p.echoed = false; // await this injection's UserPromptSubmit echo
                         ss.autopilot.autoSendsThisRun += 1;
                         ss.pendingConfirmPromptId.clear();
                     }
@@ -223,6 +224,7 @@ namespace Agentmaster
                         p.status = PromptStatus::Sent;
                         p.sentAtUnixMs = NowMs();
                         p.attempts += 1;
+                        p.echoed = false; // await this injection's UserPromptSubmit echo
                         ss.autopilot.autoSendsThisRun += 1;
                     }
                     else if (!confirm)

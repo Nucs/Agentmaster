@@ -12,11 +12,13 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "HookEvents.h"
@@ -40,6 +42,14 @@ namespace Agentmaster
 
     // Per-session stdin writer, bound to that session's ConptyConnection by the app layer.
     using Injector = std::function<void(const std::wstring& text)>;
+
+    // Opaque handles returned by AddObserver / AddAdoptionHandler; pass the same value to the
+    // matching Remove* to detach. Agentmaster M9: the engine is a process-wide singleton shared
+    // by every window's Manager lens, so a closing window MUST drop its observer (it captures a
+    // strong DispatcherQueue) and its adoption handler, or they accumulate / dangle across the
+    // shared registry. Tokens are monotonic and never reused, so removing a stale one is a no-op.
+    using ObserverToken = uint64_t;
+    using AdoptionToken = uint64_t;
 
     class SessionRegistry
     {
@@ -68,12 +78,17 @@ namespace Agentmaster
         bool Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
 
         // Wiring. Multiple observers may register (e.g. a logger, the Triage Board UI, the
-        // scheduler); each is invoked on every change, outside the lock. The advance handler
-        // is single (the Autopilot).
-        void AddObserver(RegistryObserver observer);
+        // scheduler, every window's Manager lens); each is invoked on every change, outside the
+        // lock. AddObserver returns a token; RemoveObserver detaches it (M9 window teardown).
+        ObserverToken AddObserver(RegistryObserver observer);
+        void RemoveObserver(ObserverToken token);
         void SetAdvanceHandler(AdvanceHandler handler);
-        // Single handler (the app layer). See AdoptionHandler.
-        void SetAdoptionHandler(AdoptionHandler handler);
+        // Multiple adoption handlers may register — one per window (M9). When a hook arrives for
+        // a session we didn't Launch, ALL are invoked (outside the lock); whichever window hosts
+        // the `+` tab binds it, the rest no-op. AddAdoptionHandler returns a token; the window
+        // detaches via RemoveAdoptionHandler on teardown.
+        AdoptionToken AddAdoptionHandler(AdoptionHandler handler);
+        void RemoveAdoptionHandler(AdoptionToken token);
 
         // Bind / clear a session's stdin injector.
         void SetInjector(const std::wstring& id, Injector injector);
@@ -94,8 +109,13 @@ namespace Agentmaster
         std::unordered_map<std::wstring, SessionInfo> _sessions;
         std::unordered_map<std::wstring, Injector> _injectors;
         std::unordered_map<std::wstring, int64_t> _lastHumanInput;
-        std::vector<RegistryObserver> _observers;
+        std::vector<std::pair<ObserverToken, RegistryObserver>> _observers;
+        uint64_t _nextObserverId{ 1 };
         AdvanceHandler _advance;
-        AdoptionHandler _adopt;
+        std::vector<std::pair<AdoptionToken, AdoptionHandler>> _adopters;
+        uint64_t _nextAdopterId{ 1 };
+        // Monotonic counter for ids of `Typed` prompts the registry synthesizes from
+        // UserPromptSubmit (the registry has no GUID dependency; the id is local-unique).
+        uint64_t _typedSeq{ 0 };
     };
 }

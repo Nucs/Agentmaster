@@ -9,6 +9,7 @@
 #include "AgentMaster/SessionRegistry.h"
 
 #include <algorithm>
+#include <chrono>
 
 using namespace winrt::Windows::Foundation;
 // Using-DECLARATIONS (not a directive) for the color helpers: a `using namespace
@@ -34,6 +35,13 @@ namespace
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
+    }
+
+    int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
     }
 
     // Set the window pointer cursor (used by the resize splitters: a ↔/↕ on hover, Arrow on
@@ -365,14 +373,33 @@ namespace winrt::TerminalApp::implementation
         _BuildLayout();
     }
 
+    // Agentmaster (M9): the registry is a process singleton shared by every window. Detach this
+    // lens's observer on teardown so the shared registry stops invoking a dead window's refresh
+    // (and stops pinning its DispatcherQueue alive). The observer captures get_weak(), so a stray
+    // late call is already a no-op; this also keeps the observer list bounded across many window
+    // open/close cycles. _registry (held by SharedEngine) outlives us, so the call stays valid.
+    AgentManagerContent::~AgentManagerContent()
+    {
+        if (_registry && _observerToken)
+        {
+            _registry->RemoveObserver(_observerToken);
+        }
+    }
+
     void AgentManagerContent::SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry)
     {
+        // Detach any previous observer (defensive — SetRegistry is normally called exactly once).
+        if (_registry && _observerToken)
+        {
+            _registry->RemoveObserver(_observerToken);
+            _observerToken = 0;
+        }
         _registry = std::move(registry);
         if (_registry)
         {
             auto weak = get_weak();
             auto disp = _dispatcher;
-            _registry->AddObserver([weak, disp](const SessionInfo&, HookEvent) {
+            _observerToken = _registry->AddObserver([weak, disp](const SessionInfo&, HookEvent) {
                 if (disp)
                 {
                     disp.TryEnqueue([weak]() {
@@ -1884,25 +1911,59 @@ namespace winrt::TerminalApp::implementation
             _planHeaderHost.Children().Append(bannerBorder);
         }
 
-        if (sel->queue.empty())
+        // The Flight Plan reflects EVERY message this session received — not only ones queued
+        // here. Split the queue into a chronological "sent" summary (each tagged by origin:
+        // queued-by-flight vs typed-straight-into-the-terminal) followed by the upcoming queue.
+        std::vector<const QueuedPrompt*> sent;
+        std::vector<const QueuedPrompt*> upcoming;
+        for (const auto& p : sel->queue)
         {
-            _planListHost.Children().Append(Text(L"No queued prompts. Type below and Add.", 12, false, 0.6));
+            if (p.status == PromptStatus::Pending || p.status == PromptStatus::Held)
+            {
+                upcoming.push_back(&p);
+            }
+            else
+            {
+                sent.push_back(&p);
+            }
+        }
+        // Order the summary by send time; an un-timestamped item (e.g. Skipped) sinks to the
+        // bottom of the summary, just above the upcoming queue.
+        std::stable_sort(sent.begin(), sent.end(), [](const QueuedPrompt* a, const QueuedPrompt* b) {
+            const int64_t ka = a->sentAtUnixMs > 0 ? a->sentAtUnixMs : INT64_MAX;
+            const int64_t kb = b->sentAtUnixMs > 0 ? b->sentAtUnixMs : INT64_MAX;
+            return ka < kb;
+        });
+
+        if (sent.empty() && upcoming.empty())
+        {
+            _planListHost.Children().Append(Text(L"No messages yet. Type into the session, or queue one below.", 12, false, 0.6));
             return;
         }
 
-        for (const auto& p : sel->queue)
-        {
+        // One clickable prompt row. `showOrigin` (the sent summary) swaps the gate badge for a
+        // flight/typed chip so you can see which messages the Manager sent vs. you typed.
+        auto appendRow = [&](const QueuedPrompt& p, bool showOrigin) {
             const bool selected = (p.id == _selectedPromptId);
 
             auto row = StackPanel{};
             row.Orientation(Orientation::Horizontal);
             row.Spacing(8);
-            auto g = Text(PromptGlyph(p.status), 13, false, 0.9);
-            row.Children().Append(g);
+            row.Children().Append(Text(PromptGlyph(p.status), 13, false, 0.9));
             auto lbl = Text(p.label.empty() ? winrt::hstring{ p.text } : winrt::hstring{ p.label }, 13, false, 1.0);
-            lbl.MaxWidth(360);
+            lbl.MaxWidth(320);
             row.Children().Append(lbl);
-            row.Children().Append(Text(GateBadge(p.gate), 11, false, 0.5));
+            if (showOrigin)
+            {
+                const bool typed = (p.origin == PromptOrigin::Typed);
+                // Amber "typed" (a human keystroke) vs. blue "flight" (queued + injected by us).
+                row.Children().Append(Pill(typed ? winrt::hstring{ L"typed" } : winrt::hstring{ L"flight" },
+                                           typed ? ColorHelper::FromArgb(0xFF, 0xD9, 0xA6, 0x2E) : ColorHelper::FromArgb(0xFF, 0x4F, 0x8B, 0xD0)));
+            }
+            else
+            {
+                row.Children().Append(Text(GateBadge(p.gate), 11, false, 0.5));
+            }
             if (p.status == PromptStatus::Held)
             {
                 row.Children().Append(Text(L"(held: agent asked a question)", 11, false, 0.6));
@@ -1922,6 +1983,38 @@ namespace winrt::TerminalApp::implementation
                 _Refresh();
             });
             _planListHost.Children().Append(rowBtn);
+        };
+
+        // A small dim section caption (e.g. "SENT — 4  (1 typed)").
+        auto caption = [&](const winrt::hstring& s, double topMargin) {
+            auto c = Text(s, 11, true, 0.5);
+            c.Margin(Thickness{ 0, topMargin, 0, 4 });
+            _planListHost.Children().Append(c);
+        };
+
+        if (!sent.empty())
+        {
+            int typedCount = 0;
+            for (const auto* p : sent)
+            {
+                if (p->origin == PromptOrigin::Typed)
+                {
+                    ++typedCount;
+                }
+            }
+            caption(winrt::hstring{ L"SENT \x2014 " } + winrt::to_hstring(static_cast<int>(sent.size())) + L"  (" + winrt::to_hstring(typedCount) + L" typed)", 0.0);
+            for (const auto* p : sent)
+            {
+                appendRow(*p, true);
+            }
+        }
+        if (!upcoming.empty())
+        {
+            caption(winrt::hstring{ L"UPCOMING \x2014 " } + winrt::to_hstring(static_cast<int>(upcoming.size())), sent.empty() ? 0.0 : 8.0);
+            for (const auto* p : upcoming)
+            {
+                appendRow(*p, false);
+            }
         }
     }
 
@@ -2022,6 +2115,8 @@ namespace winrt::TerminalApp::implementation
                 p.text = composed;
                 p.status = PromptStatus::Sent; // it's being sent right now
                 p.attempts = 1;
+                p.sentAtUnixMs = NowMs(); // timestamp so it sorts into the "sent" summary
+                p.echoed = false; // await this injection's UserPromptSubmit echo (don't double-record)
                 s.queue.push_back(std::move(p));
             });
             textToSend = composed;
@@ -2062,6 +2157,8 @@ namespace winrt::TerminalApp::implementation
                     textToSend = target->text;
                     target->status = PromptStatus::Sent;
                     target->attempts += 1;
+                    target->sentAtUnixMs = NowMs();
+                    target->echoed = false; // await this injection's UserPromptSubmit echo
                 }
             });
         }

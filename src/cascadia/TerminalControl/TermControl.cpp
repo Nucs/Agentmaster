@@ -1403,13 +1403,15 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             {
                 _restoreInBackground();
             }
-            else if (_core.Connection().State() == TerminalConnection::ConnectionState::NotConnected)
+            else if (const auto conn = _core.Connection(); conn && conn.State() == TerminalConnection::ConnectionState::NotConnected)
             {
                 // Agentmaster: a managed session may have been started eagerly at launch (so a
                 // background/restored tab's claude.exe runs without waiting to be focused). Only
                 // start here if nobody has yet — Start() is not re-entrant; a second call would
-                // transition the connection to Failed.
-                _core.Connection().Start();
+                // transition the connection to Failed. Guard the connection itself too: on the
+                // eager path the core may have no connection at init, and calling .State() on a
+                // null connection access-violates (0xC0000005) in InitializeTerminal.
+                conn.Start();
             }
         }
         else

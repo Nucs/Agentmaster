@@ -68,6 +68,22 @@ static HookMessage Msg(const std::wstring& id, HookEvent ev)
     return m;
 }
 
+static HookMessage UPS(const std::wstring& id, const std::wstring& prompt)
+{
+    HookMessage m;
+    m.sessionId = id;
+    m.event = HookEvent::UserPromptSubmit;
+    m.promptText = prompt;
+    return m;
+}
+
+static int64_t NowMsTest()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 static void TestStateMachine()
 {
     std::wprintf(L"State machine (Correctness Rule #1):\n");
@@ -141,6 +157,30 @@ static void TestWire()
         CHECK(m && m->tabToken.empty(), "missing tabToken ok");
     }
     {
+        // The trailing prompt field carries the submitted message (UserPromptSubmit), escaped
+        // so embedded TAB/newline survive a single-line, TAB-split record.
+        HookMessage m;
+        m.event = HookEvent::UserPromptSubmit;
+        m.sessionId = L"sid";
+        m.cwd = L"K:/api";
+        m.tabToken = L"wt-1";
+        m.promptText = L"line1\tcol\nline2 \\ end";
+        const auto wire = BuildWireLine(m);
+        CHECK(wire.find(L'\n') == std::wstring::npos, "escaped prompt keeps the record single-line");
+        auto rt = ParseWireLine(wire);
+        CHECK(rt && rt->promptText == L"line1\tcol\nline2 \\ end", "prompt round-trips TAB/newline/backslash");
+        CHECK(rt && rt->event == HookEvent::UserPromptSubmit && rt->tabToken == L"wt-1", "prompt line keeps other fields");
+    }
+    {
+        // Escape helpers are exact inverses (what the PowerShell forwarder mirrors).
+        const std::wstring raw = L"a\\b\tc\r\nd";
+        CHECK(WireEscape(raw) == L"a\\\\b\\tc\\r\\nd", "WireEscape \\ tab CR LF");
+        CHECK(WireUnescape(WireEscape(raw)) == raw, "WireUnescape inverts WireEscape");
+        // A line literally carrying an escaped prompt decodes back to TAB + newline.
+        auto m = ParseWireLine(L"UserPromptSubmit\tsid\t\t0\t0\t\t\tfoo\\tbar\\nbaz");
+        CHECK(m && m->promptText == L"foo\tbar\nbaz", "literal escaped prompt decodes");
+    }
+    {
         CHECK(HookPipeName(1234) == L"\\\\.\\pipe\\agentmaster.1234", "pipe name format");
     }
 }
@@ -192,7 +232,7 @@ static void TestRegistry()
     // external. A later hook for the same id must NOT re-adopt.
     int adopted = 0;
     std::wstring adoptId, adoptCwd, adoptTab;
-    reg.SetAdoptionHandler([&](const std::wstring& aid, const std::wstring& acwd, const std::wstring& atab) {
+    reg.AddAdoptionHandler([&](const std::wstring& aid, const std::wstring& acwd, const std::wstring& atab) {
         adopted++;
         adoptId = aid;
         adoptCwd = acwd;
@@ -220,6 +260,123 @@ static void TestRegistry()
     reg.Remove(L"s1");
     CHECK(!reg.Get(L"s1").has_value(), "remove s1");
     CHECK(!reg.Inject(L"s1", L"x"), "inject false after remove");
+}
+
+// Agentmaster M9: the registry is a process-wide singleton with MANY observers/adopters — one
+// per window's Manager lens. Verify AddObserver returns a removable token (RemoveObserver
+// detaches exactly it, stale tokens no-op), and that adoption FANS OUT to every registered
+// handler and detaches by token. This is the seam that keeps a closed window from dangling its
+// observer (a strong DispatcherQueue ref) or its adoption handler on the shared registry.
+static void TestRegistryFanout()
+{
+    std::wprintf(L"SessionRegistry M9 (token observers + multi-adoption fan-out):\n");
+    SessionRegistry reg;
+
+    // Two observers; both fire on a change.
+    std::atomic<int> a{ 0 };
+    std::atomic<int> b{ 0 };
+    const auto tokA = reg.AddObserver([&](const SessionInfo&, HookEvent) { a.fetch_add(1); });
+    reg.AddObserver([&](const SessionInfo&, HookEvent) { b.fetch_add(1); });
+    reg.Upsert(MakeSession(L"s1"));
+    CHECK(a.load() == 1 && b.load() == 1, "both observers fired");
+
+    // Remove the first; only the second fires next time.
+    reg.RemoveObserver(tokA);
+    reg.Update(L"s1", [](SessionInfo&) {});
+    CHECK(a.load() == 1, "removed observer no longer fires");
+    CHECK(b.load() == 2, "remaining observer still fires");
+
+    // Removing a stale or unknown token is a harmless no-op (tokens are never reused).
+    reg.RemoveObserver(tokA);
+    reg.RemoveObserver(99999);
+    reg.Update(L"s1", [](SessionInfo&) {});
+    CHECK(b.load() == 3, "stale/unknown RemoveObserver is a no-op");
+
+    // Multi-adoption: EVERY registered adopter is invoked for a session we didn't Launch.
+    std::atomic<int> ad1{ 0 };
+    std::atomic<int> ad2{ 0 };
+    std::wstring seen1;
+    std::wstring seen2;
+    reg.AddAdoptionHandler([&](const std::wstring& id, const std::wstring&, const std::wstring&) { ad1.fetch_add(1); seen1 = id; });
+    const auto adTok2 = reg.AddAdoptionHandler([&](const std::wstring& id, const std::wstring&, const std::wstring&) { ad2.fetch_add(1); seen2 = id; });
+    reg.OnHookEvent(Msg(L"ext-a", HookEvent::SessionStart));
+    CHECK(ad1.load() == 1 && ad2.load() == 1, "both adopters fired for a new session");
+    CHECK(seen1 == L"ext-a" && seen2 == L"ext-a", "both adopters got the id");
+
+    // Detach the second adopter; only the first fires for the next new session.
+    reg.RemoveAdoptionHandler(adTok2);
+    reg.OnHookEvent(Msg(L"ext-b", HookEvent::SessionStart));
+    CHECK(ad1.load() == 2, "remaining adopter fired for the second new session");
+    CHECK(ad2.load() == 1, "removed adopter did not fire");
+}
+
+static void TestTypedCapture()
+{
+    std::wprintf(L"Flight Plan: record typed messages + suppress our own echoes:\n");
+    SessionRegistry reg;
+    reg.Upsert(MakeSession(L"s1"));
+
+    // 1. A prompt typed straight into the ConPTY (no matching queued prompt) is recorded as a
+    //    Sent/Typed Flight-Plan entry, so the "messages already sent" summary is complete.
+    reg.OnHookEvent(UPS(L"s1", L"hello there"));
+    auto s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 1, "typed prompt recorded as a queue entry");
+    CHECK(s && s->queue.size() == 1 && s->queue[0].origin == PromptOrigin::Typed, "typed prompt tagged Typed");
+    CHECK(s && s->queue.size() == 1 && s->queue[0].status == PromptStatus::Sent, "typed prompt marked Sent");
+    CHECK(s && s->queue.size() == 1 && s->queue[0].text == L"hello there", "typed prompt text captured");
+    CHECK(s && s->queue.size() == 1 && s->queue[0].sentAtUnixMs != 0, "typed prompt timestamped");
+    CHECK(s && s->state == SessionState::Running, "UserPromptSubmit still drives state -> Running");
+
+    // 2. A Flight prompt WE injected (Sent, recent, not yet echoed) is NOT re-recorded when its
+    //    UserPromptSubmit echo arrives — it is just marked echoed.
+    reg.Update(L"s1", [&](SessionInfo& ss) {
+        QueuedPrompt p;
+        p.id = L"f1";
+        p.text = L"run the build";
+        p.status = PromptStatus::Sent;
+        p.origin = PromptOrigin::Flight;
+        p.echoed = false;
+        p.sentAtUnixMs = NowMsTest();
+        ss.queue.push_back(p);
+    });
+    reg.OnHookEvent(UPS(L"s1", L"run the build")); // the echo of our injection
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 2, "echo of our injection NOT recorded as a new entry");
+    bool f1Echoed = false;
+    for (const auto& p : s->queue)
+    {
+        if (p.id == L"f1")
+        {
+            f1Echoed = p.echoed;
+        }
+    }
+    CHECK(f1Echoed, "injected prompt marked echoed once consumed");
+
+    // 3. The echo was consumed, so a SECOND identical submit (a human re-typing the text) IS
+    //    recorded as Typed — the one-echo-per-injection guard does not over-swallow.
+    reg.OnHookEvent(UPS(L"s1", L"run the build"));
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 3, "second identical submit recorded as a typed message");
+
+    // 4. A stale Flight prompt (sent long ago) does not swallow a fresh identical human message.
+    reg.Update(L"s1", [&](SessionInfo& ss) {
+        QueuedPrompt p;
+        p.id = L"old";
+        p.text = L"stale text";
+        p.status = PromptStatus::Sent;
+        p.origin = PromptOrigin::Flight;
+        p.echoed = false;
+        p.sentAtUnixMs = NowMsTest() - 60000; // a minute ago, outside the echo window
+        ss.queue.push_back(p);
+    });
+    reg.OnHookEvent(UPS(L"s1", L"stale text"));
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 5, "fresh message past a stale prompt's window is recorded");
+
+    // 5. An empty prompt body records nothing (defensive: a UPS with no text).
+    reg.OnHookEvent(UPS(L"s1", L""));
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 5, "empty prompt body records nothing");
 }
 
 static void TestSpawnBuilders()
@@ -460,6 +617,7 @@ static void TestPersistence()
         a.text = L"please add unit tests";
         a.status = PromptStatus::Sent;
         a.sentAtUnixMs = 999;
+        a.origin = PromptOrigin::Typed; // a directly-typed message must survive the round-trip
         QueuedPrompt b;
         b.id = L"p2";
         b.label = L"commit";
@@ -485,6 +643,7 @@ static void TestPersistence()
             CHECK(r.external, "external flag preserved");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
+            CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Flight, "prompt origin preserved (Typed vs Flight)");
             CHECK(r.queue.size() == 2 && r.queue[1].gate == PromptGate::Manual && r.queue[1].guardPattern == L"answers-a-question:ok", "prompt gate+guard preserved");
             CHECK(r.autopilot.mode == AutopilotMode::Full && r.autopilot.throttleMs == 750 && !r.autopilot.stopOnError && r.autopilot.maxAutoSends == 7, "autopilot preserved");
             CHECK(!r.autopilot.approval.pauseForHuman && r.autopilot.approval.autoApproveTools.size() == 2, "approval policy preserved");
@@ -613,6 +772,8 @@ int wmain()
     TestStateMachine();
     TestWire();
     TestRegistry();
+    TestRegistryFanout();
+    TestTypedCapture();
     TestSpawnBuilders();
     TestScheduler();
     TestPersistence();

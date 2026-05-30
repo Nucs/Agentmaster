@@ -50,6 +50,16 @@ namespace Agentmaster
         Failed
     };
 
+    // How a prompt entered the Flight Plan. The Flight Plan reflects EVERY message a session
+    // received (DESIGN: "all messages user sent, not only via the flight plan"), so a prompt
+    // the human typed straight into the ConPTY — captured from the UserPromptSubmit hook — is
+    // recorded too, tagged `Typed`, alongside the `Flight` prompts we queued/injected.
+    enum class PromptOrigin
+    {
+        Flight, // queued and injected through the Flight Plan (our send)
+        Typed, // typed directly into the terminal by the human (captured via UserPromptSubmit)
+    };
+
     struct QueuedPrompt
     {
         std::wstring id;
@@ -65,6 +75,11 @@ namespace Agentmaster
         uint32_t attempts{ 0 };
         uint32_t maxAttempts{ 1 };
         int64_t sentAtUnixMs{ 0 };
+        PromptOrigin origin{ PromptOrigin::Flight }; // Flight (we sent it) vs Typed (human typed it)
+        // Transient (NOT persisted): a Flight prompt we just injected expects ONE
+        // UserPromptSubmit echo back; `echoed` marks that echo consumed so the registry does
+        // not re-record our own injection as a `Typed` message. Reset to false at each send.
+        bool echoed{ false };
     };
 
     struct ApprovalPolicy

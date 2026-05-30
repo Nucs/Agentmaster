@@ -7,11 +7,15 @@
 //
 // One hook invocation -> one UTF-8, newline-terminated, TAB-separated record:
 //
-//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \n
+//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \n
 //
 // Fields after `sessionId` are optional (older/edge forwarders may omit them). `cwd`,
 // `tool` and `tabToken` are assumed free of TAB/newline (true for Windows paths, Claude
-// tool names, and the plain WT_SESSION GUID).
+// tool names, and the plain WT_SESSION GUID). The trailing `prompt` (set only on
+// UserPromptSubmit, so the Flight Plan can show EVERY message a session received, not just
+// ones we queued) is the one field that CAN contain TAB/newline, so it is escaped
+// (\ \t \r \n) by both the forwarder and BuildWireLine and un-escaped on parse — keeping
+// the record single-line and the field split unambiguous.
 // We deliberately avoid JSON on the wire so the bridge needs no JSON dependency; the
 // forwarder (which DOES have PowerShell's ConvertFrom-Json) does the parsing and emits
 // these few flat fields.
@@ -35,6 +39,75 @@ namespace Agentmaster
         return L"\\\\.\\pipe\\agentmaster." + std::to_wstring(pid);
     }
 
+    // Escape a free-text field (the prompt body) so it stays TAB/newline-free on the wire:
+    //   \ -> \\   tab -> \t   CR -> \r   LF -> \n
+    // Single-pass (each input char maps independently), so it is order-independent. The
+    // PowerShell forwarder mirrors this exactly. PURE.
+    inline std::wstring WireEscape(std::wstring_view s)
+    {
+        std::wstring o;
+        o.reserve(s.size());
+        for (const wchar_t c : s)
+        {
+            switch (c)
+            {
+            case L'\\':
+                o += L"\\\\";
+                break;
+            case L'\t':
+                o += L"\\t";
+                break;
+            case L'\r':
+                o += L"\\r";
+                break;
+            case L'\n':
+                o += L"\\n";
+                break;
+            default:
+                o += c;
+                break;
+            }
+        }
+        return o;
+    }
+
+    // Inverse of WireEscape. A lone/unknown backslash escape is kept verbatim (total: never
+    // throws, never reads past the end). PURE.
+    inline std::wstring WireUnescape(std::wstring_view s)
+    {
+        std::wstring o;
+        o.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i)
+        {
+            if (s[i] == L'\\' && i + 1 < s.size())
+            {
+                switch (s[i + 1])
+                {
+                case L'\\':
+                    o += L'\\';
+                    ++i;
+                    continue;
+                case L't':
+                    o += L'\t';
+                    ++i;
+                    continue;
+                case L'r':
+                    o += L'\r';
+                    ++i;
+                    continue;
+                case L'n':
+                    o += L'\n';
+                    ++i;
+                    continue;
+                default:
+                    break; // unknown escape: keep the backslash as-is
+                }
+            }
+            o += s[i];
+        }
+        return o;
+    }
+
     // Build a single wire line (used by tests and as the reference the forwarder mirrors).
     inline std::wstring BuildWireLine(const HookMessage& m)
     {
@@ -52,6 +125,8 @@ namespace Agentmaster
         s.append(m.tool);
         s.push_back(kWireFieldSep);
         s.append(m.tabToken);
+        s.push_back(kWireFieldSep);
+        s.append(WireEscape(m.promptText));
         return s;
     }
 
@@ -112,6 +187,11 @@ namespace Agentmaster
         if (fields.size() > 6)
         {
             m.tabToken = std::wstring{ fields[6] };
+        }
+        if (fields.size() > 7)
+        {
+            // The prompt is the only field that may carry escaped TAB/newline (see WireEscape).
+            m.promptText = WireUnescape(fields[7]);
         }
         return m;
     }

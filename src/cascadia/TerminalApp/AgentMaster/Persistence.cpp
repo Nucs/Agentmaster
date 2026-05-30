@@ -197,6 +197,15 @@ namespace Agentmaster
         return PromptGate::OnTurnComplete;
     }
 
+    std::wstring ToString(PromptOrigin o)
+    {
+        return o == PromptOrigin::Typed ? L"Typed" : L"Flight";
+    }
+    PromptOrigin PromptOriginFromString(std::wstring_view s)
+    {
+        return s == L"Typed" ? PromptOrigin::Typed : PromptOrigin::Flight;
+    }
+
     // ---- struct <-> json ----
 
     json::Value ToJson(const QueuedPrompt& p)
@@ -216,6 +225,7 @@ namespace Agentmaster
         o.Set(L"attempts", json::Value::MkNum(p.attempts));
         o.Set(L"maxAttempts", json::Value::MkNum(p.maxAttempts));
         o.Set(L"sentAtUnixMs", json::Value::MkNum(static_cast<double>(p.sentAtUnixMs)));
+        o.Set(L"origin", json::Value::MkStr(ToString(p.origin)));
         return o;
     }
 
@@ -236,6 +246,9 @@ namespace Agentmaster
         p.attempts = v.U32At(L"attempts");
         p.maxAttempts = v.U32At(L"maxAttempts", 1);
         p.sentAtUnixMs = v.I64At(L"sentAtUnixMs");
+        p.origin = PromptOriginFromString(v.StrAt(L"origin", L"Flight"));
+        // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already
+        // happened in a past run; the recency window stops it from matching a fresh message.
         return p;
     }
 

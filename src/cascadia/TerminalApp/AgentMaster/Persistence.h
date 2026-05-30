@@ -27,6 +27,8 @@ namespace Agentmaster
     PromptStatus PromptStatusFromString(std::wstring_view s);
     std::wstring ToString(PromptGate g);
     PromptGate PromptGateFromString(std::wstring_view s);
+    std::wstring ToString(PromptOrigin o);
+    PromptOrigin PromptOriginFromString(std::wstring_view s);
 
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);

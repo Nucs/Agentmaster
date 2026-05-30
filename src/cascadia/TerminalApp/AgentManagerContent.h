@@ -37,6 +37,7 @@ namespace winrt::TerminalApp::implementation
     {
     public:
         AgentManagerContent();
+        ~AgentManagerContent(); // Agentmaster (M9): detach our observer from the shared registry
 
         // Wiring from the page (called right after construction).
         void SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry);
@@ -129,6 +130,11 @@ namespace winrt::TerminalApp::implementation
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
 
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
+        // Agentmaster (M9): our observer's token on the shared (process-wide) registry, so this
+        // window's lens detaches cleanly on teardown instead of dangling a strong
+        // DispatcherQueue ref there. (An ::Agentmaster::ObserverToken == uint64_t; kept as
+        // uint64_t to avoid including SessionRegistry.h in this header.)
+        uint64_t _observerToken{ 0 };
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;

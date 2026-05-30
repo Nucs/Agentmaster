@@ -171,9 +171,17 @@ try {
   $isQ = "0"
   $perm = "0"
   $tool = ""
+  $prompt = ""
   if ($j -ne $null) {
     if ($j.cwd) { $cwd = [string]$j.cwd }
     if ($j.tool_name) { $tool = [string]$j.tool_name }
+    # The submitted prompt text, so the Manager's Flight Plan reflects EVERY message the
+    # session got (including ones typed straight into this terminal). Escaped to keep the
+    # wire record single-line + TAB-free (mirrors HookWire.h WireEscape): \ -> \\ then tab/CR/LF.
+    if ($Event -eq "UserPromptSubmit" -and $j.prompt) {
+      $prompt = [string]$j.prompt
+      $prompt = $prompt -replace '\\','\\' -replace "`t",'\t' -replace "`r",'\r' -replace "`n",'\n'
+    }
     if ($Event -eq "Notification") {
       $m = ""
       if ($j.message) { $m = [string]$j.message }
@@ -210,7 +218,7 @@ try {
   $bs = $pipe.LastIndexOf("\")
   if ($bs -ge 0) { $name = $pipe.Substring($bs + 1) }
 
-  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab) -join "`t"
+  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab, $prompt) -join "`t"
 
   $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::Out)
   try {

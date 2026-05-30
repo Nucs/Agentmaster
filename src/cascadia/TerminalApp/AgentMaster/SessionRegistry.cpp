@@ -6,6 +6,32 @@
 #include "SessionRegistry.h"
 
 #include <algorithm>
+#include <chrono>
+
+namespace
+{
+    int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
+    // A short single-line label for a captured prompt (mirrors the UI's Add-prompt rule).
+    std::wstring MakeLabel(const std::wstring& text)
+    {
+        std::wstring label = text.substr(0, 56);
+        std::replace(label.begin(), label.end(), L'\n', L' ');
+        std::replace(label.begin(), label.end(), L'\r', L' ');
+        return label;
+    }
+
+    // A Flight prompt we injected echoes back as a UserPromptSubmit with the same text. We
+    // only treat an incoming prompt as that echo when a matching Flight prompt was Sent very
+    // recently (so a stale never-echoed prompt, or a reloaded old one, can't swallow a fresh
+    // human message that happens to repeat the text).
+    constexpr int64_t kEchoWindowMs = 15000;
+}
 
 namespace Agentmaster
 {
@@ -14,7 +40,11 @@ namespace Agentmaster
         std::vector<RegistryObserver> observers;
         {
             std::lock_guard guard{ _mtx };
-            observers = _observers;
+            observers.reserve(_observers.size());
+            for (const auto& o : _observers)
+            {
+                observers.push_back(o.second);
+            }
         }
         for (auto& ob : observers)
         {
@@ -147,6 +177,40 @@ namespace Agentmaster
                 s.lastMessageWasQuestion = msg.lastMessageIsQuestion;
             }
 
+            // The Flight Plan reflects EVERY message a session received. A UserPromptSubmit is
+            // either the echo of a prompt WE just injected (suppress it — it is already in the
+            // queue as Sent), or a prompt the human typed straight into the ConPTY (record it
+            // as a Sent/Typed entry so the Flight Plan's "sent" summary is complete).
+            if (msg.event == HookEvent::UserPromptSubmit && !msg.promptText.empty())
+            {
+                const int64_t now = NowMs();
+                bool isEcho = false;
+                for (auto& p : s.queue)
+                {
+                    if (p.origin == PromptOrigin::Flight && p.status == PromptStatus::Sent && !p.echoed &&
+                        p.text == msg.promptText && p.sentAtUnixMs != 0 && (now - p.sentAtUnixMs) >= 0 &&
+                        (now - p.sentAtUnixMs) < kEchoWindowMs)
+                    {
+                        p.echoed = true; // consume exactly one echo per injected prompt
+                        isEcho = true;
+                        break;
+                    }
+                }
+                if (!isEcho)
+                {
+                    QueuedPrompt typed;
+                    typed.id = L"typed-" + std::to_wstring(now) + L"-" + std::to_wstring(_typedSeq++);
+                    typed.label = MakeLabel(msg.promptText);
+                    typed.text = msg.promptText;
+                    typed.status = PromptStatus::Sent;
+                    typed.origin = PromptOrigin::Typed;
+                    typed.echoed = true; // it IS the message; no further echo expected
+                    typed.attempts = 1;
+                    typed.sentAtUnixMs = now;
+                    s.queue.push_back(std::move(typed));
+                }
+            }
+
             snapshot = s;
             found = true;
             // Only a clean turn-complete advances the Flight Plan (Correctness Rule #1).
@@ -157,14 +221,32 @@ namespace Agentmaster
         {
             _notify(snapshot, msg.event);
         }
-        if (adopted && _adopt)
+        if (adopted)
         {
-            try
+            // Fan out to every window's adoption handler (M9: the registry is a process-wide
+            // singleton). Snapshot under the lock, invoke outside it; whichever window hosts
+            // this session's `+` tab binds it, the rest no-op.
+            std::vector<AdoptionHandler> adopters;
             {
-                _adopt(msg.sessionId, msg.cwd, msg.tabToken);
+                std::lock_guard guard{ _mtx };
+                adopters.reserve(_adopters.size());
+                for (const auto& a : _adopters)
+                {
+                    adopters.push_back(a.second);
+                }
             }
-            catch (...)
+            for (auto& adopt : adopters)
             {
+                if (adopt)
+                {
+                    try
+                    {
+                        adopt(msg.sessionId, msg.cwd, msg.tabToken);
+                    }
+                    catch (...)
+                    {
+                    }
+                }
             }
         }
         if (triggerAdvance && _advance)
@@ -196,10 +278,20 @@ namespace Agentmaster
         return true;
     }
 
-    void SessionRegistry::AddObserver(RegistryObserver observer)
+    ObserverToken SessionRegistry::AddObserver(RegistryObserver observer)
     {
         std::lock_guard guard{ _mtx };
-        _observers.push_back(std::move(observer));
+        const ObserverToken token = _nextObserverId++;
+        _observers.emplace_back(token, std::move(observer));
+        return token;
+    }
+
+    void SessionRegistry::RemoveObserver(ObserverToken token)
+    {
+        std::lock_guard guard{ _mtx };
+        _observers.erase(
+            std::remove_if(_observers.begin(), _observers.end(), [token](const auto& o) { return o.first == token; }),
+            _observers.end());
     }
 
     void SessionRegistry::SetAdvanceHandler(AdvanceHandler handler)
@@ -208,10 +300,20 @@ namespace Agentmaster
         _advance = std::move(handler);
     }
 
-    void SessionRegistry::SetAdoptionHandler(AdoptionHandler handler)
+    AdoptionToken SessionRegistry::AddAdoptionHandler(AdoptionHandler handler)
     {
         std::lock_guard guard{ _mtx };
-        _adopt = std::move(handler);
+        const AdoptionToken token = _nextAdopterId++;
+        _adopters.emplace_back(token, std::move(handler));
+        return token;
+    }
+
+    void SessionRegistry::RemoveAdoptionHandler(AdoptionToken token)
+    {
+        std::lock_guard guard{ _mtx };
+        _adopters.erase(
+            std::remove_if(_adopters.begin(), _adopters.end(), [token](const auto& a) { return a.first == token; }),
+            _adopters.end());
     }
 
     void SessionRegistry::SetInjector(const std::wstring& id, Injector injector)

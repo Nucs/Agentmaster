@@ -18,6 +18,7 @@
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "AgentManagerContent.h"
 #include "AgentMaster/ClaudeSpawn.h"
+#include "AgentMaster/Engine.h"
 #include "AgentMaster/HookWire.h"
 #include "AgentMaster/HooksBridge.h"
 #include "AgentMaster/Persistence.h"
@@ -233,6 +234,19 @@ namespace winrt::TerminalApp::implementation
     {
         InitializeComponent();
         _WindowProperties.PropertyChanged({ get_weak(), &TerminalPage::_windowPropertyChanged });
+    }
+
+    // Agentmaster (M9): the engine is a process singleton shared by every window. When this
+    // window is torn down, drop its adoption handler from the shared registry so it doesn't
+    // linger (the handler captures get_weak(), so a stray call is already a safe no-op — this
+    // just keeps the registry's handler list bounded across many window open/close cycles). The
+    // registry itself outlives every window (held by SharedEngine), so this call stays valid.
+    TerminalPage::~TerminalPage()
+    {
+        if (_sessionRegistry && _adoptionToken)
+        {
+            _sessionRegistry->RemoveAdoptionHandler(_adoptionToken);
+        }
     }
 
     // Method Description:
@@ -699,108 +713,33 @@ namespace winrt::TerminalApp::implementation
 
         _appSettings = ::Agentmaster::LoadAppSettings(); // the Settings cog (per-field defaults if absent)
 
-        _sessionRegistry = std::make_shared<::Agentmaster::SessionRegistry>();
+        // M9: consume the ONE process-wide engine. v1.24 WT is a WindowEmperor — every window
+        // lives in a single process — so the SessionRegistry (single source of truth), the
+        // HooksBridge (the `\\.\pipe\agentmaster.<pid>` listener — the PID is unambiguous only
+        // because there is exactly one bridge), and the Scheduler must be a process singleton,
+        // NOT a per-window object. The first window to reach here constructs + wires + starts
+        // it (the logging / scheduler / persistence observers, the pipe, bridge discovery + the
+        // shared hook files + the claude PATH shim — see AgentMaster/Engine.{h,cpp}); every
+        // later window receives the same instance. This page just copies the shared_ptrs.
+        auto& engine = ::Agentmaster::SharedEngine();
+        _sessionRegistry = engine.registry;
+        _hooksBridge = engine.bridge;
+        _scheduler = engine.scheduler;
 
-        // Observer: record every state change to a log file (and the debugger). This is
-        // M5's verification surface; the M6 Triage Board will render the same registry on
-        // the UI thread. NOTE: this runs on a bridge thread, so it must touch no XAML.
-        _sessionRegistry->AddObserver([](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent ev) {
-            wchar_t line[600];
-            ::swprintf(line,
-                       600,
-                       L"[%s] %s state=%d question=%d dir=%s\n",
-                       ::Agentmaster::HookEventName(ev),
-                       s.id.c_str(),
-                       static_cast<int>(s.state),
-                       s.lastMessageWasQuestion ? 1 : 0,
-                       s.workingDir.c_str());
-            ::OutputDebugStringW(line);
-            ::Agentmaster::AppendStateLog(L"hooks.log", line);
-        });
-
-        // Autopilot scheduler (M7): owns its own worker thread and drives Flight Plan
-        // queues. A clean turn-complete (Stop -> WaitingForInput) lands on the advance seam
-        // and is forwarded to the scheduler; a separate observer feeds the stopOnError
-        // backstop.
-        _scheduler = std::make_shared<::Agentmaster::Scheduler>(_sessionRegistry);
-        _scheduler->Start();
-        {
-            auto sched = _scheduler;
-            _sessionRegistry->SetAdvanceHandler([sched](const std::wstring& id) {
-                sched->RequestAdvance(id);
-            });
-            _sessionRegistry->AddObserver([sched](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
-                sched->OnObserved(s);
-            });
-        }
-
-        // Persistence (M8): autosave the registry (queue + autopilot + metadata) to
-        // sessions.json on every change, so an in-progress plan survives a crash. Restore
-        // never replays Sent prompts (statuses are preserved); re-launching the live
-        // processes is a future enhancement.
-        {
-            auto reg = _sessionRegistry;
-            _sessionRegistry->AddObserver([reg](const ::Agentmaster::SessionInfo&, ::Agentmaster::HookEvent) {
-                ::Agentmaster::SaveSessions(reg->Snapshot());
-            });
-        }
-
-        const auto pipeName = ::Agentmaster::HookPipeName(::GetCurrentProcessId());
-        auto reg = _sessionRegistry; // shared, captured by the sink
-        _hooksBridge = std::make_shared<::Agentmaster::HooksBridge>(
-            pipeName,
-            [reg](const ::Agentmaster::HookMessage& m) { reg->OnHookEvent(m); },
-            4);
-        _hooksBridge->Start();
-
-        // Agentmaster (B+D+C — observe & control sessions we did NOT Launch): make a
-        // hand-typed `claude` in any `+` tab self-wire for hooks and get adopted.
-        //  * publish the live pipe to bridge.json (a forwarder that didn't inherit
-        //    CCMGR_HOOK_PIPE can still find it);
-        //  * export CCMGR_HOOK_PIPE on OUR process and prepend a transparent `claude` PATH
-        //    shim — every `+` tab inherits our live env (ConptyConnection regenerates from
-        //    the current process block), so a bare `claude` there runs the shim, which adds
-        //    `--settings <ourHooks>`. Launch's direct CreateProcessW("claude …") resolves
-        //    claude.exe (no PATHEXT) and bypasses the .cmd shim — so no double-wiring.
-        try
-        {
-            ::Agentmaster::WriteBridgeDiscovery(pipeName);
-            const auto stateDir = ::Agentmaster::AgentmasterStateDir();
-            const auto hookFiles = ::Agentmaster::MaterializeSharedHookFiles(stateDir, ::Agentmaster::LoadAppSettings());
-            // Resolve real claude + author the shim BEFORE touching PATH (so it never finds
-            // our own shim), then prepend the shim dir.
-            const auto shimDir = ::Agentmaster::MaterializeClaudeShim(stateDir, hookFiles.first);
-            ::SetEnvironmentVariableW(L"CCMGR_HOOK_PIPE", pipeName.c_str());
-            if (!shimDir.empty())
-            {
-                std::wstring path;
-                const DWORD need = ::GetEnvironmentVariableW(L"PATH", nullptr, 0);
-                if (need > 1)
-                {
-                    path.resize(need);
-                    const DWORD got = ::GetEnvironmentVariableW(L"PATH", path.data(), need);
-                    path.resize(got);
-                }
-                const std::wstring newPath = shimDir + L";" + path;
-                ::SetEnvironmentVariableW(L"PATH", newPath.c_str());
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[engine] claude shim on PATH: " + shimDir + L"\n");
-            }
-        }
-        CATCH_LOG();
-
-        // Adoption seam: a hook for a session we didn't Launch -> try to bind it to its
-        // hosting ConPTY so it becomes fully managed (observe + control).
+        // Adoption seam, PER WINDOW: a hook for a session we didn't Launch -> try to bind it to
+        // its hosting ConPTY so it becomes fully managed (observe + control). The shared
+        // registry fans the event out to EVERY window's handler; whichever window hosts the `+`
+        // tab binds it, the rest no-op. Detached in ~TerminalPage so a closed window's handler
+        // doesn't linger on the process-wide registry.
         {
             const auto weakThis = get_weak();
-            _sessionRegistry->SetAdoptionHandler([weakThis](const std::wstring& id, const std::wstring& cwd, const std::wstring& tabToken) {
+            _adoptionToken = _sessionRegistry->AddAdoptionHandler([weakThis](const std::wstring& id, const std::wstring& cwd, const std::wstring& tabToken) {
                 if (auto self = weakThis.get())
                 {
                     self->_AdoptExternalSession(winrt::hstring{ id }, winrt::hstring{ cwd }, winrt::hstring{ tabToken });
                 }
             });
         }
-
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
     }
 
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch session").
@@ -817,11 +756,11 @@ namespace winrt::TerminalApp::implementation
     // restores its Flight Plan + autopilot from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    void TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
-            return;
+            return nullptr;
         }
 
         std::wstring dir{ workingDir };
@@ -887,7 +826,7 @@ namespace winrt::TerminalApp::implementation
         const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
         if (!pane)
         {
-            return;
+            return nullptr;
         }
         const auto tab = _CreateNewTabFromPane(pane);
         if (tab)
@@ -921,43 +860,68 @@ namespace winrt::TerminalApp::implementation
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
         });
 
-        // Eagerly start the connection so claude.exe runs even while this tab is unfocused.
-        // TermControl otherwise starts it lazily on the first non-zero layout
-        // (TermControl::_InitializeTerminal), so a background or restored tab would never spawn
-        // its process — no hooks fire and Autopilot has nothing to drive. _MakePane above already
-        // built the control+core, and ControlCore subscribes to the connection's output on
-        // construction, so the first frames are buffered and render when the tab is shown.
-        // MUST be AFTER Upsert + SetInjector: the SessionStart hook then finds THIS managed
-        // record instead of being mis-adopted as an external session (Rule #1/#3). TermControl
-        // skips its now-redundant Start via a NotConnected guard, so there is no double-start.
-        try
-        {
-            connection.Start();
-        }
-        CATCH_LOG();
-
         const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       tag + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+        return tab;
     }
 
     // Agentmaster: on startup, re-launch every persisted session (claude --resume) with its
-    // Flight Plan + autopilot restored, so the app reopens to the state it was closed in.
-    void TerminalPage::_RestoreClaudeSessions()
+    // Flight Plan + autopilot restored, so the app reopens to the state it was closed in. Each
+    // restored tab is briefly SELECTED so its TermControl lays out and runs _InitializeTerminal,
+    // which is what starts the connection (claude.exe). Without this, a background restored tab
+    // never lays out, so its claude never spawns (no hooks, nothing for Autopilot to drive)
+    // until the user clicks it — the lazy-start behavior. We yield between sessions so each tab
+    // can initialize before the next steals selection, then return focus to the Manager tab.
+    // This is the SAFE path: the control starts its own connection ONCE INITIALIZED, unlike
+    // eagerly calling connection.Start() before the core exists (which AVs in the output handler).
+    winrt::fire_and_forget TerminalPage::_RestoreClaudeSessions()
     {
         if (!_sessionRegistry)
         {
-            return;
+            co_return;
         }
+        // M9: the registry is a process singleton, so restore is a PROCESS-once action — the
+        // first window re-launches the saved fleet; a later window must NOT re-load
+        // sessions.json and double-spawn the same conversations into the one registry.
+        // exchange() makes the first-window election race-free across window threads.
+        if (::Agentmaster::SharedEngine().restored.exchange(true))
+        {
+            co_return;
+        }
+        const auto strongThis = get_strong(); // keep the page alive across the awaits below
+
         const auto saved = ::Agentmaster::LoadSessions();
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) from sessions.json\n");
+
         for (const auto& s : saved)
         {
             if (s.id.empty() || s.workingDir.empty())
             {
                 continue;
             }
-            _LaunchClaudeSession(winrt::hstring{ s.workingDir }, winrt::hstring{ s.title }, s);
+            const auto tab = _LaunchClaudeSession(winrt::hstring{ s.workingDir }, winrt::hstring{ s.title }, s);
+            if (tab)
+            {
+                if (const auto& item = tab.TabViewItem())
+                {
+                    _tabView.SelectedItem(item);
+                }
+                // Let the now-selected tab lay out + initialize (which starts its connection)
+                // before the next session steals selection. Worst case (too brief on a loaded
+                // machine) a tab stays lazy until focused — never a crash.
+                co_await winrt::resume_after(std::chrono::milliseconds(250));
+                co_await wil::resume_foreground(Dispatcher());
+            }
+        }
+
+        // Return focus to the Manager tab (tab 0).
+        if (_managerTab)
+        {
+            if (const auto& item = _managerTab.TabViewItem())
+            {
+                _tabView.SelectedItem(item);
+            }
         }
     }
 

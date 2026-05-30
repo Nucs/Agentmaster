@@ -112,6 +112,11 @@ namespace Agentmaster
         // Drives NeedsApproval / ApprovalPolicy rather than the prompt queue.
         bool permissionRequest{ false };
         std::wstring tool; // associated tool name, when applicable
+        // The submitted prompt body, set ONLY on UserPromptSubmit (escaped on the wire). Lets
+        // the registry record EVERY message a session received — including ones the human
+        // typed straight into the ConPTY, not just ones we queued — into the Flight Plan.
+        // Empty for every other event.
+        std::wstring promptText;
         // The hosting terminal's WT_SESSION GUID (plain, no braces), echoed by the forwarder
         // from $env:WT_SESSION. Lets the app correlate a session we did NOT launch (a
         // hand-typed `claude` in a `+` tab) back to its ConPTY connection so it can bind a

@@ -118,6 +118,7 @@ namespace winrt::TerminalApp::implementation
     {
     public:
         TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager);
+        ~TerminalPage(); // Agentmaster: detach this window's adoption handler from the shared engine (M9)
 
         // This implements shobjidl's IInitializeWithWindow, but due to a XAML Compiler bug we cannot
         // put it in our inheritance graph. https://github.com/microsoft/microsoft-ui-xaml/issues/3331
@@ -266,11 +267,16 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
         // the single source of truth; HooksBridge feeds it authoritative state from Claude
-        // Code hooks over a local named pipe. Held by shared_ptr so they can be
-        // forward-declared in this header (HooksBridge's dtor joins its listener threads).
+        // Code hooks over a local named pipe. M9: these are the ONE process-wide engine
+        // (::Agentmaster::SharedEngine()), shared by every window; this page just holds copies
+        // of the shared_ptrs. Forward-declared here (HooksBridge's dtor joins its threads).
         std::shared_ptr<::Agentmaster::SessionRegistry> _sessionRegistry{ nullptr };
         std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
         std::shared_ptr<::Agentmaster::Scheduler> _scheduler{ nullptr }; // Agentmaster: Autopilot
+        // Agentmaster (M9): this window's adoption handler on the shared registry — fans out a
+        // hand-typed `+`-tab `claude` to whichever window hosts it. Detached in ~TerminalPage.
+        // (An ::Agentmaster::AdoptionToken; uint64_t to avoid pulling SessionRegistry.h here.)
+        uint64_t _adoptionToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
@@ -357,8 +363,8 @@ namespace winrt::TerminalApp::implementation
         void _OpenAgentManagerTab(); // Agentmaster
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
-        void _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // Agentmaster
-        void _RestoreClaudeSessions(); // Agentmaster: re-launch persisted sessions (claude --resume)
+        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // Agentmaster (returns the created tab)
+        winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: re-launch persisted sessions (claude --resume), selecting each so it initializes
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
         void _KillClaudeSession(winrt::hstring sessionId); // Agentmaster: close a session's tab (confirm)
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
