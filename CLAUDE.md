@@ -42,11 +42,29 @@ What works, by area:
   multiple observers), `HooksBridge` (local named-pipe server `\\.\pipe\agentmaster.<pid>`),
   `ClaudeSpawn` (spawn/`--resume` recipe + the shared hooks config + PowerShell forwarder).
   Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1). The wire
-  line carries an 8th, **escaped `prompt`** field on `UserPromptSubmit` (`WireEscape`/
+  line carries a 7th **`tabToken`** field (the hosting `WT_SESSION`, for adopting a hand-typed
+  `claude` — see *Adopt any `claude`* below) and an 8th, **escaped `prompt`** field on
+  `UserPromptSubmit` (`WireEscape`/
   `WireUnescape`: `\ \t \r \n`), so the registry records **every** message a session got — a
   prompt typed straight into the ConPTY becomes a `Sent`/`Typed` Flight-Plan entry, while the
   `UserPromptSubmit` echo of a prompt WE injected is recognized (text + a recency window + the
   transient `QueuedPrompt::echoed` flag) and NOT double-recorded.
+- **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
+  type yourself into any tab (the WT `+` button → `cd` → `claude`) is managed too, not just
+  Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env
+  and prepend a transparent **`claude` PATH shim** (`~/.agentmaster/shim/` — `claude.cmd` for
+  cmd/PowerShell + a POSIX `claude`) that injects `--settings <ours>` then execs the real claude
+  (`ResolveRealClaude`, resolved BEFORE the PATH prepend so it never finds the shim); every new
+  tab inherits this env, so a bare `claude` self-wires for hooks. (Launch's direct
+  `CreateProcessW("claude …")` resolves `claude.exe` with no PATHEXT, bypassing the `.cmd` shim
+  — no double-wiring.) The forwarder takes the session id from the hook **payload** and emits
+  the hosting **`WT_SESSION`** as the `tabToken` wire field, falling back to a **`bridge.json`**
+  discovery file when it didn't inherit the pipe env. The registry **adopts** an unknown session
+  on `SessionStart` (flagged `SessionInfo::external`) and fires `SetAdoptionHandler`;
+  `TerminalPage::_AdoptExternalSession` matches the `tabToken` to a live ConPTY
+  (`ITerminalConnection::SessionId`) and **binds a stdin injector** — promoting it to full
+  observe+control (Autopilot can drive it). A claude hosted outside this app (no matching
+  connection) stays observe-only (Rule #9).
 - **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Flight Plan,
   imperative and snapshot-driven from the registry (cross-thread refresh via
   `DispatcherQueue`), bidirectional selection + directory scope. The Board/Tree show only
@@ -138,8 +156,10 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `settings.json`
-  (the Settings cog's `AppSettings`). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas
-  (MSIX).
+  (the Settings cog's `AppSettings`), `bridge.json` (live-bridge discovery for the shim), and
+  `shim/` (the transparent `claude` PATH shim — `claude.cmd` + a POSIX `claude` — that
+  auto-wires hand-typed sessions; see *Adopt any `claude`*). Deliberately NOT under
+  `%LOCALAPPDATA%` — see Gotchas (MSIX).
 
 ## Integration points (1.24 pluggable pane-content model)
 
@@ -310,6 +330,18 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   `ClaudeConversationExists(id)` globs `<CLAUDE_CONFIG_DIR | ~/.claude>/projects/*/<id>.jsonl`
   (ids are unique UUIDs, so no need to reproduce Claude's cwd→dir encoding). No transcript ⇒
   launch fresh (`[restore-fresh]` in `hooks.log`) instead of `--resume` (`[resume]`).
+- **A ConPTY connection's process spawns on the control's first non-zero layout — never
+  eager-`Start()` it before the control initializes.** `TermControl::_InitializeTerminal`
+  (gated on `SwapChainPanel().LayoutUpdated`) is what calls `_core.Connection().Start()`, so a
+  background/unfocused tab's `claude.exe` doesn't launch until the tab is first shown (hence
+  "Restore all" re-opens lazily). Trying to force a background session to run by calling
+  `connection.Start()` early from the app layer **crashes the app**: the connection's output
+  then reaches `ControlCore`'s output handler before `_core.Initialize()` (gated on that same
+  layout) has run → **AV `0xc0000005` in `Microsoft.Terminal.Control.dll`**, on every startup
+  restore. The safe way to start a background session is to let its control initialize first
+  (select the tab) — which is *why* startup ARCHIVES instead of auto-launching (Rule #6): no
+  startup tabs ⇒ nothing to lazily-not-start, and a user Restore opens one focused tab that
+  initializes normally.
 - **Working-dir comparison must be filesystem-aware** (else the Explorer Tree forks one dir
   into multiple roots). Windows is case-INsensitive (`C:\…\Desktop` == `…\desktop`) and
   treats `/`≡`\`; POSIX is case-SENSITIVE with `\` a literal char. Route every dir
@@ -360,6 +392,12 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
 8. **Same directory = same path, filesystem-aware.** Group/scope/match sessions by working
    dir through `PathEq` (case-insensitive on Windows, case-sensitive on POSIX), so
    case-variant spellings of one directory never fork the Explorer Tree into two roots.
+9. **Adopt only on `SessionStart`; bind by `tabToken`, never guess.** A hook for a session we
+   didn't Launch creates an `external` record ONLY on `SessionStart` (any other event for an
+   unknown id is ignored — there's no connection to bind). Promotion to control correlates the
+   `WT_SESSION` `tabToken` to a live ConPTY and binds the injector to THAT id (Rule #3); if no
+   connection matches (a claude hosted outside this app), it stays observe-only — never bind to
+   "the active tab".
 
 ## Conventions
 
