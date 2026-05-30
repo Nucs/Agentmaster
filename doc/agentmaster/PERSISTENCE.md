@@ -408,3 +408,55 @@ Phases A–B are identical either way, so coding starts before this is locked.
 A → B (ship capture+autosave first — useful alone, de-risks the schema) → **confirm §13.0** →
 C (spike Emperor multi-window, then wire) → D → E. Each phase compiles via the lib check and
 lands as its own commit.
+
+### 13.5 Delivery status (as built)
+
+**Increment 1 — SHIPPED & live-verified** (commits `67d8b8e4b` engine/data-layer +
+`caa3f1f1d` capture/restore). Phases A + B + per-window **lens** restore, single-window:
+- **Identity (A):** `Engine::ClaimWindowRecord()` hands each window an existing
+  `windows/<id>.json` (popped from a shared unclaimed set under lock) or a fresh
+  `CoCreateGuid` id; `TerminalPage::_windowId`/`_windowRecord`/`_windowRecordClaimed`.
+- **Capture + autosave (B):** `_CaptureWindowRecord()` reads geometry (the exact
+  `PersistState` recipe — `RequestLaunchPosition` + tab-content size + launch-mode flags),
+  ordered tab refs (Manager/Settings skipped; Claude → `sessionId` + color; else `Other`),
+  and the cached lens. `_saveWindowRecordThrottled` (750 ms trailing) → `_FlushWindowRecord`,
+  triggered by `_tabs.VectorChanged`, `_tabContent.SizeChanged`, tab recolor, the content's
+  lens push, and a one-shot save at the end of `_CompleteInitialization` (so the record exists
+  from launch).
+- **Lens restore + content push:** `AgentManagerContent::GetManagerState`/`SetManagerState` +
+  `SetLensChangedHandler`; every lens mutation pushes the current lens to the page. A **claimed**
+  record seeds the lens (re-applies splitter fractions to the live tracks); a **fresh** window
+  primes the page cache *from* the content's actual lens.
+- **Verified live:** app launches, engine up, archive model intact; a record is written with
+  **real** geometry (e.g. `x:156,y:156,1113×586`) and the **real** global splitter layout
+  (`0.39066/0.448785`, not the `0.4/0.4` default); on relaunch the **same windowId file is
+  reused** (claim works), confirming capture → persist → claim → restore → re-persist.
+
+**Findings (this pass):**
+- **`PersistState()` is never called in our mode.** `WindowEmperor::_persistState`
+  (`WindowEmperor.cpp:1249`) calls `TerminalPage::PersistState()` **only when
+  `firstWindowPreference != DefaultProfile`** — but "Agentmaster owns everything" deliberately
+  runs `DefaultProfile`. So a close-flush hooked there is dead code. Increment 1 instead relies
+  on autosave-on-change (lens changes always save), which is sufficient for the lens. The
+  proper close/teardown flush (for geometry move-without-resize) moves to **Increment 2** via a
+  seam that *does* fire (window deactivate / visibility-change), independent of WT's gating.
+- **Self-found bug (fixed):** the page caches the lens only via the content's *push*, but a
+  fresh window never pushes before its first change — so a save triggered before the first lens
+  push (e.g. a resize) would persist a **stale default layout** and reset splitters on reopen.
+  Fixed by priming the cache from `content->GetManagerState()` at wire time (verified: the live
+  record shows the real `0.39066/0.448785`, not `0.4/0.4`).
+
+**Remaining (restaged):**
+- **Increment 2 — single-window geometry re-apply.** Feed the claimed record's geometry into
+  the **`TerminalWindow` startup seam** (`GetInitialPosition`/`GetLaunchDimensions`/
+  `GetLaunchMode`, which run at window creation — *before* `_InitAgentmasterEngine` claims, so
+  this needs an early single-record peek that agrees with the later claim). Add a
+  deactivate/visibility close-flush. Moderate risk (different subsystem; runs before the
+  AV-prone control-init, so no AV hazard). Makes the window **reopen at its saved position/size**.
+- **Increment 3 — multi-window reopen (gated on §13.0).** The Emperor creates N windows from N
+  records and assigns each its record (the deepest cut — **spike a 2-window reopen first**); the
+  `Other` tab `actionsJson` capture (deferred in Increment 1) is finished here for non-Claude
+  tab recreation; re-home a restored session into the window whose record references it.
+- **Acceptance (§13.3) status:** #3 (single-window unchanged; clean first run) and the capture
+  half of #4 met; #1 (multi-window reopen) is Increment 3; geometry re-apply in #1/#4 is
+  Increment 2.

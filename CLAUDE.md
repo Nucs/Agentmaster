@@ -46,8 +46,18 @@ racing on `\\.\pipe\agentmaster.<pid>` and clobbering `sessions.json`. **M10's d
 done — unit-tested:** the per-window `WindowRecord` schema + `windows/<id>.json` (de)serialize,
 shaped as **Option 1** — per-window *UI state only* (geometry + Manager lens + ordered tab
 *refs*); `sessions.json` + `SessionInfo.live` stay the single session source of truth, never
-duplicated. The live capture/restore wiring (geometry + lens + debounced autosave) is the
-remaining M10 work.
+duplicated. **M10 capture + per-window lens restore is now done — built + live-verified**
+(PERSISTENCE.md §13.5): each window **claims** its `windows/<id>.json` at engine init
+(`Engine::ClaimWindowRecord`, or mints a fresh GUID), `_CaptureWindowRecord` reads live
+geometry (the `PersistState` recipe) + ordered tab refs + the Manager lens, a debounced
+autosave (`_saveWindowRecordThrottled`, fed by tab/resize/recolor/lens-push triggers + a
+one-shot save at end of startup) persists it, and a claimed record **seeds the lens**
+(`AgentManagerContent::Get/SetManagerState` + a lens-changed push). Verified in the deployed
+package: the record carries real geometry + the real splitter layout, and a relaunch **reuses
+the same windowId** (claim → restore round-trip). Remaining: **geometry re-apply** (Increment
+2, via the `TerminalWindow` startup seam + a deactivate close-flush — note WT only calls
+`TerminalPage::PersistState()` when `firstWindowPreference != DefaultProfile`, which our mode
+is *not*) and **multi-window reopen** (Increment 3, gated on PERSISTENCE.md §13.0).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
