@@ -411,6 +411,19 @@ namespace winrt::TerminalApp::implementation
     //   an aggregate confirmation has already been shown (i.e. close other tabs)
     winrt::Windows::Foundation::IAsyncAction TerminalPage::_HandleCloseTabRequested(winrt::TerminalApp::Tab tab, bool skipConfirmClose)
     {
+        // Agentmaster: a Claude session tab ARCHIVES (shut down + keep restorable) rather than a
+        // plain close. This is the single seam shared by clicking the tab's X, the Manager's
+        // Delete/Archive, the tree Del key, and the Flight-Plan "Archive" button.
+        // _ArchiveAndCloseClaudeTab shows the one consequence confirm, does the archive
+        // bookkeeping (live=false, clear injector, drop the _claudeTabs entry, persist), then
+        // closes. It erases the id from _claudeTabs FIRST, so the close it triggers (-> _RemoveTab)
+        // is just a normal teardown and won't re-enter this branch.
+        if (const auto archiveId = _ClaudeSessionForTab(tab); !archiveId.empty())
+        {
+            co_await _ArchiveAndCloseClaudeTab(tab, archiveId, skipConfirmClose);
+            co_return;
+        }
+
         winrt::com_ptr<TerminalPage> strong;
 
         if (tab.ReadOnly())
@@ -1192,7 +1205,19 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_TryMoveTab(const uint32_t currentTabIndex,
                                    const int32_t suggestedNewTabIndex)
     {
-        auto newTabIndex = gsl::narrow_cast<uint32_t>(std::clamp<int32_t>(suggestedNewTabIndex, 0, _tabs.Size() - 1));
+        // Agentmaster: the pinned Manager tab is non-movable, and nothing may move ahead of it.
+        // Bail with <=1 tab so the clamp below can never get lo>hi (lowerBound 1 vs hi 0 when the
+        // sole tab is the Manager) and so Size()-1 can't underflow.
+        if (_tabs.Size() <= 1)
+        {
+            return;
+        }
+        if (_managerTab && currentTabIndex < _tabs.Size() && _tabs.GetAt(currentTabIndex) == _managerTab)
+        {
+            return; // can't move the Manager tab itself
+        }
+        const int32_t lowerBound = _managerTab ? 1 : 0; // keep index 0 reserved for the Manager tab
+        auto newTabIndex = gsl::narrow_cast<uint32_t>(std::clamp<int32_t>(suggestedNewTabIndex, lowerBound, _tabs.Size() - 1));
         if (currentTabIndex != newTabIndex)
         {
             auto tab = _tabs.GetAt(currentTabIndex);
@@ -1254,6 +1279,8 @@ namespace winrt::TerminalApp::implementation
 
         from = std::nullopt;
         to = std::nullopt;
+
+        _PinManagerTabFirst(); // Agentmaster: a tab dropped before the pinned Manager tab snaps it back to 0
     }
 
     void TerminalPage::_DismissTabContextMenus()

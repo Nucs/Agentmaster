@@ -43,7 +43,8 @@ namespace winrt::TerminalApp::implementation
         void SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry);
         void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (workingDir, title)
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
-        void SetKillHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> close tab
+        void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
+        void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
         void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
@@ -118,8 +119,7 @@ namespace winrt::TerminalApp::implementation
         void _OnRenameSession(const std::wstring& id); // begin an in-place rename of the row
         void _CommitRename(); // apply the in-place editor's text to the session title
         void _CancelRename(); // discard the in-place editor (Esc)
-        void _OnDeleteSession(const std::wstring& id); // confirm (ContentDialog) then kill
-        void _RequestKill(const std::wstring& id); // confirmBeforeKill ? confirm-then-kill : kill now
+        void _RequestArchive(const std::wstring& id); // route to the page's archive seam (which presents the consequence + closes the tab)
 
         // Settings cog: an in-content modal overlay (NOT a ContentDialog — a text box inside a
         // ContentDialog receives no keypresses in XAML Islands; see the _renameBox note). Built
@@ -128,6 +128,19 @@ namespace winrt::TerminalApp::implementation
         void _ShowSettings(); // populate controls from _appSettings, then reveal the overlay
         void _HideSettings();
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
+
+        // Archived-sessions overlay (mirrors the settings overlay): a modal list of sessions that
+        // were closed/archived (live==false). Each row Restores (re-launch + resume); the header
+        // states the consequence. Opened from the "Archived" toolbar button next to the cog.
+        void _BuildArchiveOverlay();
+        void _ShowArchive();
+        void _HideArchive();
+        void _RebuildArchiveList(); // (re)populate _archiveListHost from the registry's !live sessions
+        void _OnRestoreSession(const std::wstring& id); // confirm -> _restoreHandler(id)
+        void _OnRestoreAll(); // confirm -> restore every archived session
+        void _UpdateArchivedButton(const std::vector<::Agentmaster::SessionInfo>& sessions); // label "Archived (N)" + enable
+        // A buttons-only confirm (XAML-Islands-safe) for consequential actions; runs onYes on accept.
+        void _Confirm(const winrt::hstring& title, const winrt::hstring& body, const winrt::hstring& primary, std::function<void()> onYes);
 
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         // Agentmaster (M9): our observer's token on the shared (process-wide) registry, so this
@@ -139,7 +152,8 @@ namespace winrt::TerminalApp::implementation
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;
-        std::function<void(winrt::hstring)> _killHandler;
+        std::function<void(winrt::hstring)> _archiveHandler;
+        std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
@@ -168,6 +182,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
+        winrt::Windows::UI::Xaml::Controls::Button _archivedBtn{ nullptr }; // "Archived (N)" (next to the cog) -> opens the archive overlay
+        // ---- Archived-sessions overlay (the "Archived" button) ----
+        winrt::Windows::UI::Xaml::Controls::Grid _archiveOverlay{ nullptr }; // dimmed modal layer listing archived sessions
+        winrt::Windows::UI::Xaml::Controls::StackPanel _archiveListHost{ nullptr }; // rows of archived sessions (Restore each)
         // ---- Settings overlay (the cog dialog) ----
         winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };

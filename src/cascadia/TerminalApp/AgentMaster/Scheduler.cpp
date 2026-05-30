@@ -250,7 +250,10 @@ namespace Agentmaster
         // advance. DecideAdvance + the pickup guard keep it to one prompt per turn, and
         // RequestAdvance dedups the burst. External/observe-only sessions are skipped: they have
         // no injector to write to until adopted (and would just churn the deferred-send path).
-        if (!s.external && s.autopilot.mode != AutopilotMode::Off &&
+        // ARCHIVED sessions (!live) are skipped too: they have no live claude/injector — an
+        // archived plan with autopilot on must not churn the deferred-send path (it loads from
+        // disk Idle, possibly with mode=Full + Pending prompts) until the user restores it.
+        if (s.live && !s.external && s.autopilot.mode != AutopilotMode::Off &&
             (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput))
         {
             bool hasPending = false;

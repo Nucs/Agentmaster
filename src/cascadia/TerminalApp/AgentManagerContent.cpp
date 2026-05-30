@@ -422,9 +422,13 @@ namespace winrt::TerminalApp::implementation
     {
         _activateHandler = std::move(handler);
     }
-    void AgentManagerContent::SetKillHandler(std::function<void(winrt::hstring)> handler)
+    void AgentManagerContent::SetArchiveHandler(std::function<void(winrt::hstring)> handler)
     {
-        _killHandler = std::move(handler);
+        _archiveHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _restoreHandler = std::move(handler);
     }
     void AgentManagerContent::SetPauseHandler(std::function<void(bool)> handler)
     {
@@ -680,6 +684,15 @@ namespace winrt::TerminalApp::implementation
             });
             bar.Children().Append(_pauseBtn);
 
+            // Archived sessions: opens the in-content archive overlay (built at the end of
+            // layout). Closing a session tab archives it (shut down, kept restorable) rather than
+            // discarding it; this is where you bring those back. Label carries a live count.
+            _archivedBtn = Button{};
+            _archivedBtn.Content(winrt::box_value(L"Archived"));
+            ToolTipService::SetToolTip(_archivedBtn, winrt::box_value(L"Restore archived (closed) sessions"));
+            _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowArchive(); });
+            bar.Children().Append(_archivedBtn);
+
             // Settings cog (opens the in-content settings overlay; built at the end of layout).
             _settingsBtn = Button{};
             {
@@ -833,10 +846,10 @@ namespace winrt::TerminalApp::implementation
                         _activateHandler(winrt::hstring{ _selectedId });
                     }
                 }));
-                btnRow.Children().Append(mkBtn(L"Kill", [this]() {
+                btnRow.Children().Append(mkBtn(L"Archive", [this]() {
                     if (!_selectedId.empty())
                     {
-                        _RequestKill(_selectedId);
+                        _RequestArchive(_selectedId);
                     }
                 }));
                 actions.Children().Append(btnRow);
@@ -930,6 +943,7 @@ namespace winrt::TerminalApp::implementation
             _root.Children().Append(_pathPopup);
         }
 
+        _BuildArchiveOverlay(); // modal archived-sessions layer
         _BuildSettingsOverlay(); // modal settings layer, appended last so it renders on top
     }
 
@@ -949,6 +963,11 @@ namespace winrt::TerminalApp::implementation
         _RebuildBoard(sessions);
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
+        _UpdateArchivedButton(sessions);
+        if (_archiveOverlay && _archiveOverlay.Visibility() == Visibility::Visible)
+        {
+            _RebuildArchiveList(); // keep the open archive list current as sessions archive/restore
+        }
     }
 
     Button AgentManagerContent::_MakeCard(const SessionInfo& s)
@@ -1230,6 +1249,10 @@ namespace winrt::TerminalApp::implementation
             std::vector<const SessionInfo*> matches;
             for (const auto& s : sessions)
             {
+                if (!s.live)
+                {
+                    continue; // archived (closed) sessions live in the "Archived" overlay, not the board
+                }
                 if (!_scopeDir.empty() && !PathEq(s.workingDir, _scopeDir))
                 {
                     continue;
@@ -1286,6 +1309,10 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> dirs;
         for (const auto& s : sessions)
         {
+            if (!s.live)
+            {
+                continue; // archived sessions are shown in the "Archived" overlay, not the tree
+            }
             if (std::find_if(dirs.begin(), dirs.end(), [&](const std::wstring& d) { return PathEq(d, s.workingDir); }) == dirs.end())
             {
                 dirs.push_back(s.workingDir);
@@ -1313,7 +1340,7 @@ namespace winrt::TerminalApp::implementation
             int count = 0;
             for (const auto& s : sessions)
             {
-                if (PathEq(s.workingDir, dir))
+                if (s.live && PathEq(s.workingDir, dir))
                 {
                     ++count;
                 }
@@ -1370,7 +1397,7 @@ namespace winrt::TerminalApp::implementation
 
             for (const auto& s : sessions)
             {
-                if (!PathEq(s.workingDir, dir))
+                if (!s.live || !PathEq(s.workingDir, dir))
                 {
                     continue;
                 }
@@ -1459,7 +1486,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     else if (key == VirtualKey::Delete)
                     {
-                        _RequestKill(id);
+                        _RequestArchive(id); // Del archives (shut down + keep restorable), not discard
                         e.Handled(true);
                     }
                     else if (key == VirtualKey::F2)
@@ -1499,19 +1526,19 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(rename);
 
-        MenuFlyoutItem del;
-        del.Text(L"Delete\x2026");
-        del.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+        MenuFlyoutItem archive;
+        archive.Text(L"Archive\x2026");
+        archive.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
-                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_OnDeleteSession(id); } });
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestArchive(id); } });
             }
             else if (auto self = weak.get())
             {
-                self->_OnDeleteSession(id);
+                self->_RequestArchive(id);
             }
         });
-        menu.Items().Append(del);
+        menu.Items().Append(archive);
 
         return menu;
     }
@@ -1560,32 +1587,30 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
-    void AgentManagerContent::_OnDeleteSession(const std::wstring& id)
+    void AgentManagerContent::_RequestArchive(const std::wstring& id)
     {
+        // "Delete"/"Archive" in the Manager routes to the page's archive seam, which PRESENTS THE
+        // CONSEQUENCE (gated by the cog's confirmBeforeKill) and closes the tab — the SAME path as
+        // clicking the tab's own X. We deliberately do not confirm here, to avoid a double dialog.
         if (id.empty())
         {
             return;
         }
-
-        // A clear accept/cancel warning before the irreversible discard. A buttons-only
-        // ContentDialog is XAML-Islands-safe; set XamlRoot + theme like TerminalWindow does
-        // (the dialog's PopupRoot is outside our tree, so it won't inherit either on its own).
-        std::wstring title;
-        if (_registry)
+        if (_archiveHandler)
         {
-            if (const auto s = _registry->Get(id))
-            {
-                title = s->title;
-            }
+            _archiveHandler(winrt::hstring{ id });
         }
-        const winrt::hstring body = title.empty() ?
-            winrt::hstring{ L"This closes the session's tab and removes it from the saved fleet. This can't be undone." } :
-            winrt::hstring{ L"\x201C" + title + L"\x201D will be closed and removed from the saved fleet. This can't be undone." };
+    }
 
+    // A buttons-only confirm (XAML-Islands-safe: a text box inside a ContentDialog gets no
+    // keypresses, but buttons work — see the _renameBox note). Runs onYes when the user accepts.
+    // Used for Restore / Restore-all (the archive confirm itself lives at the page level).
+    void AgentManagerContent::_Confirm(const winrt::hstring& title, const winrt::hstring& body, const winrt::hstring& primary, std::function<void()> onYes)
+    {
         ContentDialog dialog;
-        dialog.Title(winrt::box_value(L"Delete session?"));
+        dialog.Title(winrt::box_value(title));
         dialog.Content(winrt::box_value(body));
-        dialog.PrimaryButtonText(L"Delete");
+        dialog.PrimaryButtonText(primary);
         dialog.CloseButtonText(L"Cancel");
         dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
         if (_root)
@@ -1599,12 +1624,11 @@ namespace winrt::TerminalApp::implementation
             {
             }
         }
-        auto kill = _killHandler;
-        const winrt::hstring hid{ id };
-        dialog.PrimaryButtonClick([kill, hid](const ContentDialog&, const ContentDialogButtonClickEventArgs&) {
-            if (kill)
+        auto cb = std::move(onYes);
+        dialog.PrimaryButtonClick([cb](const ContentDialog&, const ContentDialogButtonClickEventArgs&) {
+            if (cb)
             {
-                kill(hid);
+                cb();
             }
         });
         try
@@ -1616,20 +1640,247 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void AgentManagerContent::_RequestKill(const std::wstring& id)
+    // ---- Archived-sessions overlay ------------------------------------------
+
+    void AgentManagerContent::_BuildArchiveOverlay()
     {
-        if (id.empty())
+        // A dimmed modal layer (like the settings overlay), built into the main visual tree and
+        // toggled by Visibility. Lists archived (closed) sessions; each can be Restored. The
+        // backdrop tap cancels; the card swallows taps so inside-clicks don't close it.
+        _archiveOverlay = Grid{};
+        _archiveOverlay.Visibility(Visibility::Collapsed);
+        _archiveOverlay.Background(SolidColorBrush{ ColorHelper::FromArgb(0xA0, 0x00, 0x00, 0x00) });
+        Grid::SetRow(_archiveOverlay, 0);
+        Grid::SetRowSpan(_archiveOverlay, 99);
+        Grid::SetColumnSpan(_archiveOverlay, 99);
+        _archiveOverlay.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+            _HideArchive();
+        });
+
+        auto card = Border{};
+        card.Background(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x25, 0x25, 0x25) });
+        card.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x90, 0x80, 0x80, 0x80) });
+        card.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
+        card.Padding(Thickness{ 20, 16, 20, 16 });
+        card.Width(560);
+        card.MaxHeight(620);
+        card.HorizontalAlignment(HorizontalAlignment::Center);
+        card.VerticalAlignment(VerticalAlignment::Center);
+        card.RequestedTheme(ElementTheme::Dark);
+        card.Tapped([](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& e) {
+            e.Handled(true);
+        });
+
+        auto panel = StackPanel{};
+        panel.Spacing(10);
+
+        auto headerRow = StackPanel{};
+        headerRow.Orientation(Orientation::Horizontal);
+        headerRow.Spacing(12);
+        headerRow.VerticalAlignment(VerticalAlignment::Center);
+        headerRow.Children().Append(Text(L"Archived sessions", 18, true, 1.0));
+        auto restoreAll = Button{};
+        restoreAll.Content(winrt::box_value(L"Restore all"));
+        restoreAll.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnRestoreAll(); });
+        headerRow.Children().Append(restoreAll);
+        panel.Children().Append(headerRow);
+
+        panel.Children().Append(Text(L"These sessions were closed (archived). Restoring re-launches a session and resumes its conversation + Flight Plan (claude --resume). Nothing here is deleted \x2014 the conversation transcript is kept on disk.", 12, false, 0.7));
+
+        _archiveListHost = StackPanel{};
+        _archiveListHost.Spacing(6);
+        _archiveListHost.Margin(Thickness{ 0, 4, 0, 0 });
+        auto scroll = ScrollViewer{};
+        scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        scroll.MaxHeight(440);
+        scroll.Content(_archiveListHost);
+        panel.Children().Append(scroll);
+
+        auto buttons = StackPanel{};
+        buttons.Orientation(Orientation::Horizontal);
+        buttons.HorizontalAlignment(HorizontalAlignment::Right);
+        buttons.Spacing(8);
+        buttons.Margin(Thickness{ 0, 8, 0, 0 });
+        auto close = Button{};
+        close.Content(winrt::box_value(L"Close"));
+        close.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideArchive(); });
+        buttons.Children().Append(close);
+        panel.Children().Append(buttons);
+
+        card.Child(panel);
+        _archiveOverlay.Children().Append(card);
+        _root.Children().Append(_archiveOverlay);
+    }
+
+    void AgentManagerContent::_ShowArchive()
+    {
+        if (!_archiveOverlay)
         {
             return;
         }
-        if (_appSettings.confirmBeforeKill)
+        _RebuildArchiveList();
+        _archiveOverlay.Visibility(Visibility::Visible);
+    }
+
+    void AgentManagerContent::_HideArchive()
+    {
+        if (_archiveOverlay)
         {
-            _OnDeleteSession(id); // confirm dialog, then kill on accept
+            _archiveOverlay.Visibility(Visibility::Collapsed);
         }
-        else if (_killHandler)
+    }
+
+    void AgentManagerContent::_RebuildArchiveList()
+    {
+        if (!_archiveListHost)
         {
-            _killHandler(winrt::hstring{ id });
+            return;
         }
+        _archiveListHost.Children().Clear();
+
+        std::vector<SessionInfo> sessions;
+        if (_registry)
+        {
+            sessions = _registry->Snapshot();
+        }
+
+        int shown = 0;
+        for (const auto& s : sessions)
+        {
+            if (s.live)
+            {
+                continue; // only archived (closed) sessions appear here
+            }
+            ++shown;
+
+            auto infoCol = StackPanel{};
+            infoCol.Spacing(1);
+            infoCol.VerticalAlignment(VerticalAlignment::Center);
+            infoCol.Children().Append(Text(s.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ s.title }, 14, true, 1.0));
+            infoCol.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
+            if (!s.queue.empty())
+            {
+                int sent = 0;
+                for (const auto& p : s.queue)
+                {
+                    if (p.status == PromptStatus::Sent)
+                    {
+                        ++sent;
+                    }
+                }
+                infoCol.Children().Append(Text(winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size())) + L" prompts", 11, false, 0.6));
+            }
+
+            auto restore = Button{};
+            restore.Content(winrt::box_value(L"Restore"));
+            restore.VerticalAlignment(VerticalAlignment::Center);
+            const auto id = s.id;
+            restore.Click([this, id](const IInspectable&, const RoutedEventArgs&) { _OnRestoreSession(id); });
+
+            auto rowGrid = Grid{};
+            {
+                ColumnDefinition c0;
+                c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                ColumnDefinition c1;
+                c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+                rowGrid.ColumnDefinitions().Append(c0);
+                rowGrid.ColumnDefinitions().Append(c1);
+            }
+            Grid::SetColumn(infoCol, 0);
+            Grid::SetColumn(restore, 1);
+            rowGrid.Children().Append(infoCol);
+            rowGrid.Children().Append(restore);
+
+            auto border = Border{};
+            border.Background(Fill(0x18, 0x80, 0x80, 0x80));
+            border.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+            border.Padding(Thickness{ 8, 6, 8, 6 });
+            border.Child(rowGrid);
+            _archiveListHost.Children().Append(border);
+        }
+
+        if (shown == 0)
+        {
+            _archiveListHost.Children().Append(Text(L"No archived sessions. Closing a session's tab archives it here.", 12, false, 0.6));
+        }
+    }
+
+    void AgentManagerContent::_OnRestoreSession(const std::wstring& id)
+    {
+        if (id.empty() || !_restoreHandler)
+        {
+            return;
+        }
+        std::wstring title;
+        if (_registry)
+        {
+            if (const auto s = _registry->Get(id))
+            {
+                title = s->title;
+            }
+        }
+        const winrt::hstring body = title.empty() ?
+            winrt::hstring{ L"This re-launches the session and resumes its conversation + Flight Plan (claude --resume)." } :
+            winrt::hstring{ L"\x201C" + title + L"\x201D will re-launch and resume its conversation + Flight Plan (claude --resume)." };
+        const auto restore = _restoreHandler;
+        const winrt::hstring hid{ id };
+        _Confirm(L"Restore session?", body, L"Restore", [restore, hid, this]() {
+            restore(hid);
+            _HideArchive();
+        });
+    }
+
+    void AgentManagerContent::_OnRestoreAll()
+    {
+        if (!_restoreHandler || !_registry)
+        {
+            return;
+        }
+        std::vector<std::wstring> ids;
+        for (const auto& s : _registry->Snapshot())
+        {
+            if (!s.live)
+            {
+                ids.push_back(s.id);
+            }
+        }
+        if (ids.empty())
+        {
+            return;
+        }
+        const auto restore = _restoreHandler;
+        _Confirm(L"Restore all archived sessions?",
+                 winrt::hstring{ L"This re-launches and resumes " } + winrt::to_hstring(static_cast<int>(ids.size())) + L" session(s), each with its Flight Plan.",
+                 L"Restore all",
+                 [restore, ids, this]() {
+                     for (const auto& id : ids)
+                     {
+                         restore(winrt::hstring{ id });
+                     }
+                     _HideArchive();
+                 });
+    }
+
+    void AgentManagerContent::_UpdateArchivedButton(const std::vector<SessionInfo>& sessions)
+    {
+        if (!_archivedBtn)
+        {
+            return;
+        }
+        int archived = 0;
+        for (const auto& s : sessions)
+        {
+            if (!s.live)
+            {
+                ++archived;
+            }
+        }
+        _archivedBtn.Content(winrt::box_value(archived > 0 ?
+                                                  winrt::hstring{ L"Archived (" } + winrt::to_hstring(archived) + L")" :
+                                                  winrt::hstring{ L"Archived" }));
+        _archivedBtn.IsEnabled(archived > 0);
     }
 
     void AgentManagerContent::_BuildSettingsOverlay()
@@ -1707,7 +1958,7 @@ namespace winrt::TerminalApp::implementation
         // BEHAVIOR
         panel.Children().Append(Text(L"BEHAVIOR", 11, true, 0.6));
         _setConfirmKill = ToggleSwitch{};
-        _setConfirmKill.Header(winrt::box_value(L"Confirm before killing a session"));
+        _setConfirmKill.Header(winrt::box_value(L"Confirm before archiving a session"));
         panel.Children().Append(_setConfirmKill);
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
@@ -1895,7 +2146,7 @@ namespace winrt::TerminalApp::implementation
         _planListHost.Children().Clear();
 
         const auto sel = _Selected(sessions);
-        if (!sel)
+        if (!sel || !sel->live) // an archived (closed) session isn't planned here — restore it first
         {
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
             _suppressAutopilotEvent = true;

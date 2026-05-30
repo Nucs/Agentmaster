@@ -451,7 +451,7 @@ namespace Agentmaster
         o.Set(L"kind", json::Value::MkStr(t.kind == TabKind::Other ? L"Other" : L"Claude"));
         if (t.kind == TabKind::Claude)
         {
-            o.Set(L"session", ToJson(t.session));
+            o.Set(L"sessionId", json::Value::MkStr(t.sessionId)); // a reference; the record lives in sessions.json
         }
         else
         {
@@ -470,10 +470,7 @@ namespace Agentmaster
         t.kind = (v.StrAt(L"kind", L"Claude") == L"Other") ? TabKind::Other : TabKind::Claude;
         if (t.kind == TabKind::Claude)
         {
-            if (const auto* s = v.Find(L"session"); s && s->type == json::Value::Type::Obj)
-            {
-                t.session = SessionFromJson(*s);
-            }
+            t.sessionId = v.StrAt(L"sessionId");
         }
         else
         {

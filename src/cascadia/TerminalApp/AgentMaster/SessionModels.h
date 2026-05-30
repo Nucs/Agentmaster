@@ -115,6 +115,14 @@ namespace Agentmaster
         // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is
         // (re)launched as a managed session on restore. Persisted so the card survives reopen.
         bool external{ false };
+        // Transient runtime flag (NOT persisted): is this session OPEN (has a live tab +
+        // claude.exe this run) or ARCHIVED (shut down but kept restorable)? The Triage Board /
+        // Explorer Tree show only Open (live) sessions; Archived (!live) ones are listed behind
+        // the Manager's "Archived" button and can be restored on demand. Set true when we Launch
+        // / restore / adopt a session, false when the user archives it (closes its tab). Always
+        // false on load (Correctness Rule #6: startup re-opens NOTHING — every persisted session
+        // comes back Archived, restorable as a whole), so it never needs to round-trip to JSON.
+        bool live{ false };
         // Transient runtime flag (not persisted): set from the most recent Stop hook's
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
@@ -182,12 +190,13 @@ namespace Agentmaster
     };
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====
-    // The flat sessions.json (M8) is window-blind. The WindowEmperor runs every window in one
-    // process, so persistence is per-WINDOW: each window owns a WindowRecord — its geometry,
-    // its ORDERED tabs (Claude sessions we re-resume + opaque WT actions for everything else),
-    // and its Manager-tab lens — stored as windows/<windowId>.json. "Agentmaster owns
-    // everything" (the chosen restore authority): WT persists nothing; we capture + re-apply
-    // geometry and all tabs ourselves.
+    // The WindowEmperor runs every window in one process, so window-level UI state is
+    // per-WINDOW: each window owns a WindowRecord — geometry + Manager-tab lens + ORDERED tab
+    // refs — stored as windows/<windowId>.json. This is a THIN layer OVER the session-archive
+    // model: sessions.json + SessionInfo.live stay the single source of truth for the fleet
+    // (lifecycle, queues, open/archived). The WindowRecord never duplicates session data — a
+    // Claude tab here is just the session's id (tab order + window<->session affinity) — so a
+    // window re-applies its geometry/lens and re-homes its sessions without a second copy.
 
     // A window's position/size/launch-mode, captured from WT's WindowLayout and re-applied by
     // us on restore. The `has*` flags distinguish "unset" from a real 0 (e.g. a window at the
@@ -210,15 +219,16 @@ namespace Agentmaster
         Other, // any other WT tab — restored by replaying its stored ActionAndArgs JSON
     };
 
-    // One ordered tab inside a window. A Claude tab reuses SessionInfo verbatim (id == the
-    // conversation id, plus the Flight Plan queue + autopilot), so its side-data serializes
-    // exactly like sessions.json; `tabColor` is the optional "#RRGGBB" we paint it. An Other
-    // tab is opaque: `actionsJson` is the WT ActionAndArgs (NewTab + SetTabColor + RenameTab)
-    // that recreates it, so its own color/title ride along inside that blob.
+    // One ordered tab inside a window — a REFERENCE, not a copy. A Claude tab stores only the
+    // session's id (its full record — queue, autopilot, live/archived — lives once in
+    // sessions.json); `tabColor` is the optional "#RRGGBB" we paint it. An Other tab is opaque:
+    // `actionsJson` is the WT ActionAndArgs (NewTab + SetTabColor + RenameTab) that recreates
+    // it, so its own color/title ride along inside that blob. This records tab ORDER + the
+    // window<->session affinity without duplicating any session data.
     struct TabEntry
     {
         TabKind kind{ TabKind::Claude };
-        SessionInfo session; // valid when kind == Claude
+        std::wstring sessionId; // valid when kind == Claude — references the session in sessions.json
         std::wstring tabColor; // optional "#RRGGBB" (Claude tabs); empty => none
         std::wstring actionsJson; // valid when kind == Other (opaque WT ActionAndArgs)
     };
@@ -235,8 +245,9 @@ namespace Agentmaster
         ManagerLayout layout{}; // splitter fractions (was the global layout.json; now per-window)
     };
 
-    // The per-window source of truth for restore. One file per window
+    // Per-window UI state: geometry + lens + ordered tab refs. One file per window
     // (windows/<windowId>.json) so opening/closing windows never contend on a single document.
+    // NOT the session source of truth — that is sessions.json (the archive model).
     struct WindowRecord
     {
         std::wstring windowId; // stable GUID, generated once per window and embedded in its Manager tab

@@ -216,10 +216,12 @@ tryAdvance(s):
 - **Sessions:** each is a `TermControl` over a `ClaudeConnection` (a `ConptyConnection`, possibly wrapped to add session id + hook wiring). Previews reuse the renderer/buffer serialize.
 - **Identity:** ships as its own package **`Agentmaster`** (`Package-Dev.appxmanifest`), distinct from any Windows Terminal.
 
-## 13. Persistence
+## 13. Persistence & the Open ⇄ Archived lifecycle
 
-- Per session: queue + autopilot state + metadata (title, dir, branch) saved as JSON under the app's state dir; restored on restart **without replaying** sent prompts.
-- Optionally restore the **layout** (which sessions/dirs were open) like WT's session restore.
+- Per session: queue + autopilot state + metadata (title, dir, branch) saved as JSON under the app's state dir; reloaded **without replaying** sent prompts.
+- **Lifecycle = Open ⇄ Archived** (transient `SessionInfo::live`, never persisted). *Open* = a live tab/`claude.exe` this run (shown on the Board/Tree); *Archived* = shut down but kept restorable (listed behind the Manager's **Archived** button).
+- **Closing a session's tab archives it** (the X, tree `Del`, Manager Archive, Flight-Plan Archive — one seam, one consequence confirm): the record is **kept** (`live=false`), so it survives + lists under Archived. There is **no discard** — archive is terminal, and the Claude transcript on disk is never deleted.
+- **Startup ARCHIVES, never auto-launches** (reversal of the earlier "close == reopen"): persisted sessions load as Archived; the app opens to just the Manager tab. The user re-opens what they want via **Restore** / **Restore all** → `claude --resume <id>` (transcript-gated; a missing transcript ⇒ a fresh id, and the stale archived record is dropped). Quitting therefore archives the open fleet for next launch.
 - Plan **templates** saved separately and reusable across sessions/machines.
 
 ## 14. Safety & security

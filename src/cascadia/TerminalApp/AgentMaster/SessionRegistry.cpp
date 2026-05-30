@@ -153,6 +153,9 @@ namespace Agentmaster
                 created.id = msg.sessionId;
                 created.workingDir = msg.cwd;
                 created.state = SessionState::Idle;
+                // A hook means a real claude is running, so this session is OPEN (live), not
+                // archived — it belongs on the Triage Board immediately.
+                created.live = true;
                 // Mark it external/observe-only; the adoption handler (fired below, outside
                 // the lock) tries to bind it to its ConPTY for full control.
                 created.external = true;

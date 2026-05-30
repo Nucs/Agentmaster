@@ -364,9 +364,13 @@ namespace winrt::TerminalApp::implementation
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // Agentmaster (returns the created tab)
-        winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: re-launch persisted sessions (claude --resume), selecting each so it initializes
+        winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
-        void _KillClaudeSession(winrt::hstring sessionId); // Agentmaster: close a session's tab (confirm)
+        void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
+        void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume) an archived session + its Flight Plan
+        std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
+        winrt::Windows::Foundation::IAsyncAction _ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm); // Agentmaster: confirm -> archive bookkeeping -> close
+        void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
 

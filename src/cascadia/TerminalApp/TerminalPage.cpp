@@ -704,6 +704,18 @@ namespace winrt::TerminalApp::implementation
             {
                 tabImpl->DisableCloseAndMoveMenuItems();
             }
+            // Non-movable by drag, too: CanDrag(false) stops the tab being dragged/torn out;
+            // the drag/move seams additionally call _PinManagerTabFirst() to snap it back to
+            // index 0 if another tab is dropped before it. Best-effort (wrapped).
+            try
+            {
+                if (const auto tvi = _managerTab.TabViewItem())
+                {
+                    tvi.CanDrag(false);
+                    tvi.AllowDrop(false);
+                }
+            }
+            CATCH_LOG();
         }
     }
 
@@ -850,6 +862,7 @@ namespace winrt::TerminalApp::implementation
         info.workingDir = dir;
         info.state = ::Agentmaster::SessionState::Idle; // hooks re-establish the real state
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
+        info.live = true; // OPEN: has a live tab/claude now -> shows on the Triage Board (not Archived)
         info.pendingConfirmPromptId.clear();
         if (!restored)
         {
@@ -862,6 +875,14 @@ namespace winrt::TerminalApp::implementation
         }
         _sessionRegistry->Upsert(info);
 
+        // Restoring an archived session whose transcript no longer exists yields a FRESH id
+        // (restore-fresh). The new (live) record above replaces nothing, so drop the stale
+        // archived record under the old id — otherwise it would linger in the Archived list.
+        if (restored && !restored->id.empty() && restored->id != spec.sessionId)
+        {
+            _sessionRegistry->Remove(restored->id);
+        }
+
         _sessionRegistry->SetInjector(spec.sessionId, [connection](const std::wstring& text) {
             const auto* begin = reinterpret_cast<const char16_t*>(text.data());
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
@@ -873,63 +894,47 @@ namespace winrt::TerminalApp::implementation
         return tab;
     }
 
-    // Agentmaster: on startup, re-launch every persisted session (claude --resume) with its
-    // Flight Plan + autopilot restored, so the app reopens to the state it was closed in. Each
-    // restored tab is briefly SELECTED so its TermControl lays out and runs _InitializeTerminal,
-    // which is what starts the connection (claude.exe). Without this, a background restored tab
-    // never lays out, so its claude never spawns (no hooks, nothing for Autopilot to drive)
-    // until the user clicks it — the lazy-start behavior. We yield between sessions so each tab
-    // can initialize before the next steals selection, then return focus to the Manager tab.
-    // This is the SAFE path: the control starts its own connection ONCE INITIALIZED, unlike
-    // eagerly calling connection.Start() before the core exists (which AVs in the output handler).
+    // Agentmaster: on startup, load every persisted session into the registry as ARCHIVED
+    // (live=false) — and do NOT auto-launch any of them. This is the deliberate reversal of the
+    // old "close == reopen" auto-relaunch (Correctness Rule #6): the app opens to just the
+    // Manager tab, the prior fleet arrives Archived (restorable as a whole), and the user
+    // re-opens what they want from the Manager's "Archived" button (which resumes via
+    // `claude --resume`, transcript-gated, in _RestoreArchivedSession). No tabs are created
+    // here, so there is nothing to lay out / yield for — the body runs synchronously.
     winrt::fire_and_forget TerminalPage::_RestoreClaudeSessions()
     {
         if (!_sessionRegistry)
         {
             co_return;
         }
-        // M9: the registry is a process singleton, so restore is a PROCESS-once action — the
-        // first window re-launches the saved fleet; a later window must NOT re-load
-        // sessions.json and double-spawn the same conversations into the one registry.
-        // exchange() makes the first-window election race-free across window threads.
+        // M9: the registry is a process singleton, so this load is a PROCESS-once action — the
+        // first window populates the shared registry from sessions.json; a later window must NOT
+        // re-load and double-insert. exchange() makes the first-window election race-free.
         if (::Agentmaster::SharedEngine().restored.exchange(true))
         {
             co_return;
         }
-        const auto strongThis = get_strong(); // keep the page alive across the awaits below
 
-        const auto saved = ::Agentmaster::LoadSessions();
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) from sessions.json\n");
+        auto saved = ::Agentmaster::LoadSessions();
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived\n");
 
-        for (const auto& s : saved)
+        for (auto& s : saved)
         {
             if (s.id.empty() || s.workingDir.empty())
             {
                 continue;
             }
-            const auto tab = _LaunchClaudeSession(winrt::hstring{ s.workingDir }, winrt::hstring{ s.title }, s);
-            if (tab)
-            {
-                if (const auto& item = tab.TabViewItem())
-                {
-                    _tabView.SelectedItem(item);
-                }
-                // Let the now-selected tab lay out + initialize (which starts its connection)
-                // before the next session steals selection. Worst case (too brief on a loaded
-                // machine) a tab stays lazy until focused — never a crash.
-                co_await winrt::resume_after(std::chrono::milliseconds(250));
-                co_await wil::resume_foreground(Dispatcher());
-            }
+            // Archived: present + restorable, but no live tab/claude. Reset the transient
+            // runtime fields (a fresh process has no live state) and keep the persisted queue +
+            // autopilot intact (Rule #6: restore == resume, never replay; Sent stays Sent).
+            s.live = false;
+            s.external = false;
+            s.state = ::Agentmaster::SessionState::Idle;
+            s.lastMessageWasQuestion = false;
+            s.pendingConfirmPromptId.clear();
+            _sessionRegistry->Upsert(std::move(s));
         }
-
-        // Return focus to the Manager tab (tab 0).
-        if (_managerTab)
-        {
-            if (const auto& item = _managerTab.TabViewItem())
-            {
-                _tabView.SelectedItem(item);
-            }
-        }
+        co_return;
     }
 
     // Agentmaster: wire a freshly-created Manager content to the engine. Idempotently
@@ -957,10 +962,16 @@ namespace winrt::TerminalApp::implementation
                 self->_ActivateClaudeSession(id);
             }
         });
-        content->SetKillHandler([weakThis](winrt::hstring id) {
+        content->SetArchiveHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())
             {
-                self->_KillClaudeSession(id);
+                self->_ArchiveClaudeSession(id);
+            }
+        });
+        content->SetRestoreHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_RestoreArchivedSession(id);
             }
         });
         content->SetPauseHandler([weakThis](bool paused) {
@@ -1018,27 +1029,159 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: close a session's tab through the normal confirm flow.
-    void TerminalPage::_KillClaudeSession(winrt::hstring sessionId)
+    // Agentmaster: archive a session (the Manager's Delete / Archive / tree Del / Flight-Plan
+    // "Archive"). In the lifecycle model "Delete" == archive: it routes through the SAME
+    // tab-close seam as clicking the tab's X, so the one consequence confirm + archive
+    // bookkeeping (in _HandleCloseTabRequested -> _ArchiveAndCloseClaudeTab) applies uniformly.
+    // The session record is KEPT (live=false) so it persists and lists under "Archived".
+    void TerminalPage::_ArchiveClaudeSession(winrt::hstring sessionId)
     {
         const std::wstring id{ sessionId };
         const auto it = _claudeTabs.find(id);
-        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
-        if (it != _claudeTabs.end())
+        if (const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr)
         {
-            _claudeTabs.erase(it);
+            _HandleCloseTabRequested(tab); // -> archive confirm + bookkeeping + close
+            return;
         }
-        // Kill is the explicit "discard" action: drop it from the registry so it is no
-        // longer persisted and won't be restored on the next launch. (Closing the app, or a
-        // tab, without Kill leaves the session persisted so it resumes next time.)
+        // No live tab (e.g. an observe-only external session, or one that already closed): just
+        // mark it Archived in the registry so it leaves the board and lists under "Archived".
         if (_sessionRegistry)
         {
-            _sessionRegistry->Remove(id);
+            _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+                s.live = false;
+                s.pendingConfirmPromptId.clear();
+            });
+            _sessionRegistry->SetInjector(id, nullptr);
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
-        if (tab)
+    }
+
+    // Agentmaster: the shared archive seam — confirm the consequence (unless suppressed), do the
+    // archive bookkeeping, then close the tab. KEEPING the registry record (live=false) is what
+    // makes archive reversible: the session persists and lists under the Manager's "Archived"
+    // button for restore. (The old behavior — Remove from the registry + sessions.json — was the
+    // irreversible discard the lifecycle model drops: archive is terminal, nothing is forgotten,
+    // and the Claude transcript on disk is never touched either.)
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm)
+    {
+        // Consequence confirm (a buttons-only ContentDialog -> XAML-Islands-safe). Gated by the
+        // cog's confirmBeforeKill (relabeled "confirm before archiving"); skipConfirm is set when
+        // an aggregate confirmation already ran (e.g. close-other-tabs).
+        if (_appSettings.confirmBeforeKill && !skipConfirm)
         {
-            _HandleCloseTabRequested(tab);
+            if (const auto presenter{ _dialogPresenter.get() })
+            {
+                std::wstring title;
+                if (_sessionRegistry)
+                {
+                    if (const auto s = _sessionRegistry->Get(sessionId))
+                    {
+                        title = s->title;
+                    }
+                }
+                ContentDialog dialog;
+                dialog.Title(winrt::box_value(L"Archive session?"));
+                dialog.Content(winrt::box_value(title.empty() ?
+                                                    winrt::hstring{ L"This shuts the session down and moves it to Archived. You can restore it (with its Flight Plan) anytime from the Manager’s “Archived” button." } :
+                                                    winrt::hstring{ L"“" + title + L"” will be shut down and moved to Archived. You can restore it (with its Flight Plan) anytime from the Manager’s “Archived” button." }));
+                dialog.PrimaryButtonText(L"Archive");
+                dialog.CloseButtonText(L"Cancel");
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+
+                const auto weak = get_weak();
+                const auto result = co_await presenter.ShowDialog(dialog);
+                const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+                if (!strong)
+                {
+                    co_return;
+                }
+                if (result != ContentDialogResult::Primary)
+                {
+                    co_return; // cancelled -> leave the session Open
+                }
+            }
+            // No presenter to confirm with -> archive anyway (it's reversible; don't strand the close).
+        }
+
+        // Archive bookkeeping: KEEP the record, flip it to Archived, unbind stdin, persist, and
+        // drop the sessionId -> tab mapping (so the close below is a plain teardown).
+        if (_sessionRegistry)
+        {
+            _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
+                s.live = false;
+                s.pendingConfirmPromptId.clear();
+            });
+            _sessionRegistry->SetInjector(sessionId, nullptr);
+            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        }
+        _claudeTabs.erase(sessionId);
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + sessionId + L"\n");
+
+        tab.Close(); // -> Closed -> _RemoveTab (tab.Shutdown disconnects -> claude.exe exits)
+        co_return;
+    }
+
+    // Agentmaster: re-launch (resume) an archived session from the Manager's "Archived" list.
+    // The record is still in the registry (live=false); _LaunchClaudeSession resumes it
+    // (claude --resume <id>, transcript-gated) with its Flight Plan + autopilot, and flips it
+    // back to live (Open). A missing transcript yields a fresh id; _LaunchClaudeSession then
+    // drops the stale archived record so it doesn't linger in the list.
+    void TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const auto info = _sessionRegistry->Get(std::wstring{ sessionId });
+        if (!info || info->live)
+        {
+            return; // unknown, or already Open
+        }
+        _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+    }
+
+    // Agentmaster: which session (if any) hosts this tab? Reverse-lookup of _claudeTabs (whose
+    // forward direction is sessionId -> tab). Used by the tab-close seam to recognize a Claude
+    // session tab so it archives instead of plain-closing.
+    std::wstring TerminalPage::_ClaudeSessionForTab(const TerminalApp::Tab& tab)
+    {
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            if (const auto t = weakTab.get(); t && t == tab)
+            {
+                return id;
+            }
+        }
+        return {};
+    }
+
+    // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
+    // creation appends (the Manager is created first), so the only ways it can drift are a tab
+    // drag-drop or a move-tab action; this snaps it back. No-op when it is already first.
+    void TerminalPage::_PinManagerTabFirst()
+    {
+        if (!_managerTab)
+        {
+            return;
+        }
+        uint32_t idx{};
+        if (_tabs.IndexOf(_managerTab, idx) && idx != 0)
+        {
+            auto tab = _managerTab;
+            const auto tvi = tab.TabViewItem();
+            _tabs.RemoveAt(idx);
+            _tabs.InsertAt(0, tab);
+            try
+            {
+                uint32_t viewIdx{};
+                if (tvi && _tabView.TabItems().IndexOf(tvi, viewIdx))
+                {
+                    _tabView.TabItems().RemoveAt(viewIdx);
+                    _tabView.TabItems().InsertAt(0, tvi);
+                }
+            }
+            CATCH_LOG();
+            _UpdateTabIndices();
         }
     }
 
@@ -4606,6 +4749,13 @@ namespace winrt::TerminalApp::implementation
 
         for (const auto& tab : _tabs)
         {
+            // Agentmaster: the pinned Manager tab is permanently non-closable — never let the
+            // theme's global close-button setting re-enable its X (this loop is what was
+            // clobbering the Never set in _OpenAgentManagerTab on every theme/settings apply).
+            if (_managerTab && tab == _managerTab)
+            {
+                continue;
+            }
             tab.CloseButtonVisibility(visibility);
         }
 

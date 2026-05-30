@@ -772,11 +772,12 @@ static void TestManagerLayout()
     }
 }
 
-// Agentmaster M10: the per-window WindowRecord — the new (window-scoped) source of truth that
-// supersedes the flat sessions.json. Verify the whole tree round-trips: geometry (incl. a
-// negative coordinate from a 2nd monitor), ORDERED tabs (a Claude tab whose SessionInfo carries
-// its Flight Plan + autopilot, and an opaque Other tab whose actionsJson is itself JSON), and
-// the Manager lens. Plus the one-file-per-window disk path (Save/Load/Delete), self-cleaning.
+// Agentmaster M10: the per-window WindowRecord — per-window UI state (geometry + lens + ORDERED
+// tab refs) layered OVER the session-archive model (sessions.json stays the session source of
+// truth, so a Claude tab here is just a sessionId reference, never a copy). Verify the whole
+// tree round-trips: geometry (incl. a negative coordinate from a 2nd monitor), ordered Claude
+// (ref) + Other (opaque actionsJson) tabs, and the Manager lens. Plus the one-file-per-window
+// disk path (Save/Load/Delete), self-cleaning.
 static void TestWindowRecord()
 {
     std::wprintf(L"Window record (per-window workspace persistence, M10):\n");
@@ -792,23 +793,11 @@ static void TestWindowRecord()
     in.geometry.height = 800;
     in.geometry.launchMode = L"maximized";
 
-    // A Claude tab reuses SessionInfo, so its Flight Plan + autopilot ride along verbatim.
+    // A Claude tab is a REFERENCE — just the session id (its full record lives in sessions.json).
     TabEntry claude;
     claude.kind = TabKind::Claude;
     claude.tabColor = L"#FFD700";
-    claude.session.id = L"conv-abc";
-    claude.session.title = L"api";
-    claude.session.workingDir = L"K:/api";
-    claude.session.state = SessionState::WaitingForInput;
-    {
-        QueuedPrompt p;
-        p.id = L"q1";
-        p.text = L"run the tests";
-        p.status = PromptStatus::Sent; // a Sent prompt is recorded (never replayed — Rule #4)
-        claude.session.queue.push_back(p);
-    }
-    claude.session.autopilot.mode = AutopilotMode::Full;
-    claude.session.autopilot.maxAutoSends = 7;
+    claude.sessionId = L"conv-abc";
     in.tabs.push_back(claude);
 
     // An Other tab is opaque: actionsJson is WT ActionAndArgs — itself JSON, so this also tests
@@ -837,9 +826,7 @@ static void TestWindowRecord()
     {
         CHECK(out.tabs[0].kind == TabKind::Claude, "tab[0] is Claude");
         CHECK(out.tabs[0].tabColor == L"#FFD700", "Claude tab color round-trip");
-        CHECK(out.tabs[0].session.id == L"conv-abc" && out.tabs[0].session.workingDir == L"K:/api", "Claude tab session identity round-trip");
-        CHECK(out.tabs[0].session.queue.size() == 1 && out.tabs[0].session.queue[0].status == PromptStatus::Sent, "Claude tab Flight Plan (Sent status) round-trip");
-        CHECK(out.tabs[0].session.autopilot.mode == AutopilotMode::Full && out.tabs[0].session.autopilot.maxAutoSends == 7, "Claude tab autopilot round-trip");
+        CHECK(out.tabs[0].sessionId == L"conv-abc", "Claude tab sessionId reference round-trip");
         CHECK(out.tabs[1].kind == TabKind::Other, "tab[1] is Other");
         CHECK(out.tabs[1].actionsJson == L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]", "Other tab actionsJson (nested JSON) round-trip");
     }
