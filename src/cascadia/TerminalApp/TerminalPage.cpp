@@ -761,6 +761,7 @@ namespace winrt::TerminalApp::implementation
         if (auto claimed = ::Agentmaster::ClaimWindowRecord())
         {
             _windowRecord = std::move(*claimed);
+            _windowRecordClaimed = true;
         }
         else
         {
@@ -816,6 +817,27 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
+
+        // M10 autosave triggers (PERSISTENCE.md §13): structural changes (tab add/remove/reorder)
+        // and window resize debounce a window-record save. Lens changes come through the content's
+        // push (SetLensChangedHandler in _WireAgentManagerContent); tab recolor through
+        // _OnClaudeTabColorChanged. _ScheduleWindowRecordSave no-ops until startup completes, so
+        // the tabs added during _OnFirstLayout don't thrash saves.
+        _tabs.VectorChanged([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self = weakThis.get())
+            {
+                self->_ScheduleWindowRecordSave();
+            }
+        });
+        if (_tabContent)
+        {
+            _tabContent.SizeChanged([weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->_ScheduleWindowRecordSave();
+                }
+            });
+        }
     }
 
     // Agentmaster: per-directory tab color helpers — the engine persists colors as "#RRGGBB"
@@ -846,6 +868,136 @@ namespace winrt::TerminalApp::implementation
         c.G = byteAt(2);
         c.B = byteAt(4);
         return c;
+    }
+
+    // Agentmaster (M10): WT's LaunchMode flags -> a stable JSON token we own both ends of
+    // (capture here, restore in the TerminalWindow startup seam). Mirrors WT's own token names.
+    static std::wstring LaunchModeToToken(winrt::Microsoft::Terminal::Settings::Model::LaunchMode mode)
+    {
+        using LM = winrt::Microsoft::Terminal::Settings::Model::LaunchMode;
+        if (WI_IsFlagSet(mode, LM::FullscreenMode))
+        {
+            return L"fullscreen";
+        }
+        const bool maximized = WI_IsFlagSet(mode, LM::MaximizedMode);
+        const bool focus = WI_IsFlagSet(mode, LM::FocusMode);
+        if (maximized && focus)
+        {
+            return L"maximizedFocus";
+        }
+        if (maximized)
+        {
+            return L"maximized";
+        }
+        if (focus)
+        {
+            return L"focus";
+        }
+        return L"default";
+    }
+
+    // Agentmaster (M10; PERSISTENCE.md §13): build this window's record from LIVE state. Geometry
+    // uses the exact recipe as PersistState() (size from the tab content, position asked of the
+    // window layer, mode from the focus/maximize flags) — read-only, no side effects. Tabs are
+    // captured IN ORDER as REFERENCES: the pinned Manager + transient Settings tabs are skipped; a
+    // Claude tab becomes its sessionId (+ runtime color); any other tab is marked Other (its full
+    // ActionAndArgs restore blob is only needed by multi-window restore — Increment 3). The
+    // Manager lens (rec.manager) is kept current by the content's push, so it's carried verbatim.
+    ::Agentmaster::WindowRecord TerminalPage::_CaptureWindowRecord()
+    {
+        using namespace winrt::Microsoft::Terminal::Settings::Model;
+
+        ::Agentmaster::WindowRecord rec = _windowRecord; // preserves windowId + the cached lens
+        rec.windowId = _windowId;
+
+        // --- geometry (same recipe as PersistState) ---
+        ::Agentmaster::WindowGeometry geo;
+        auto mode = LaunchMode::DefaultMode;
+        WI_SetFlagIf(mode, LaunchMode::FullscreenMode, _isFullscreen);
+        WI_SetFlagIf(mode, LaunchMode::FocusMode, _isInFocusMode);
+        WI_SetFlagIf(mode, LaunchMode::MaximizedMode, _isMaximized);
+        geo.launchMode = LaunchModeToToken(mode);
+
+        if (_tabContent)
+        {
+            const auto w = static_cast<double>(_tabContent.ActualWidth());
+            const auto h = static_cast<double>(_tabContent.ActualHeight());
+            if (w > 0 && h > 0)
+            {
+                geo.hasSize = true;
+                geo.width = w;
+                geo.height = h;
+            }
+        }
+
+        // We don't know our own position; ask the window layer (exactly as PersistState does).
+        const auto launchPosRequest{ winrt::make<LaunchPositionRequest>() };
+        RequestLaunchPosition.raise(*this, launchPosRequest);
+        // LaunchPosition is a WinRT struct: X/Y are IReference<Int32> FIELDS, not methods.
+        if (const auto pos = launchPosRequest.Position(); pos.X)
+        {
+            geo.hasPosition = true;
+            geo.x = static_cast<double>(pos.X.Value());
+            geo.y = pos.Y ? static_cast<double>(pos.Y.Value()) : 0.0;
+        }
+        rec.geometry = geo;
+
+        // --- ordered tab refs ---
+        rec.tabs.clear();
+        for (const auto& tab : _tabs)
+        {
+            if ((_managerTab && tab == _managerTab) || (_settingsTab && tab == _settingsTab))
+            {
+                continue; // the pinned Manager tab is re-created; the Settings tab is transient
+            }
+            ::Agentmaster::TabEntry entry;
+            const auto sessionId = _ClaudeSessionForTab(tab);
+            if (!sessionId.empty())
+            {
+                entry.kind = ::Agentmaster::TabKind::Claude;
+                entry.sessionId = sessionId;
+                if (const auto t = _GetTabImpl(tab))
+                {
+                    if (const auto c = t->GetRuntimeTabColor())
+                    {
+                        entry.tabColor = ClaudeColorToHex(*c);
+                    }
+                }
+            }
+            else
+            {
+                entry.kind = ::Agentmaster::TabKind::Other; // actionsJson deferred to Increment 3
+            }
+            rec.tabs.push_back(std::move(entry));
+        }
+
+        return rec;
+    }
+
+    // Agentmaster (M10): the debounced autosave trigger. No-ops until startup completes so the
+    // tabs/geometry churned during _OnFirstLayout don't write a half-built record.
+    void TerminalPage::_ScheduleWindowRecordSave()
+    {
+        if (_startupState != StartupState::Initialized || _windowId.empty())
+        {
+            return;
+        }
+        if (_saveWindowRecordThrottled)
+        {
+            _saveWindowRecordThrottled->Run();
+        }
+    }
+
+    // Agentmaster (M10): capture + persist synchronously. The throttled autosave funnels here, and
+    // so does the close-flush (PersistState) so the last move/resize isn't lost past the debounce.
+    void TerminalPage::_FlushWindowRecord()
+    {
+        if (_windowId.empty())
+        {
+            return; // engine not initialized (no Manager tab) — nothing to persist
+        }
+        _windowRecord = _CaptureWindowRecord();
+        ::Agentmaster::SaveWindowRecord(_windowRecord);
     }
 
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch session").
@@ -1124,6 +1276,31 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::MaterializeSharedHookFiles(::Agentmaster::AgentmasterStateDir(), s);
                 }
                 CATCH_LOG();
+            }
+        });
+
+        // M10 (PERSISTENCE.md §13): seed this window's Manager lens from its claimed record
+        // (selection / scope / collapsed dirs / splitter sizes survive close/reopen), and have the
+        // content PUSH lens changes back so the page caches the current lens and debounce-saves the
+        // window record. The push carries the lens payload, so _CaptureWindowRecord never has to
+        // reach back into the tab to pull it. Only a CLAIMED record seeds — a fresh window keeps the
+        // content's ctor-loaded global splitter sizes (no reset-to-default on every new window).
+        if (_windowRecordClaimed)
+        {
+            content->SetManagerState(_windowRecord.manager); // content now matches the cache
+        }
+        else
+        {
+            // Fresh window: prime the cache FROM the content's actual lens (incl. its ctor-loaded
+            // global splitter sizes) so a save triggered before the first lens push (e.g. a resize)
+            // persists the real layout, not a stale default — which would reset splitters on reopen.
+            _windowRecord.manager = content->GetManagerState();
+        }
+        content->SetLensChangedHandler([weakThis](::Agentmaster::ManagerState st) {
+            if (auto self = weakThis.get())
+            {
+                self->_windowRecord.manager = std::move(st);
+                self->_ScheduleWindowRecordSave();
             }
         });
     }
@@ -1436,6 +1613,7 @@ namespace winrt::TerminalApp::implementation
         }
         ::Agentmaster::SetDirColor(dir, newHex); // upsert the color, or drop it on reset
         _ApplyDirColorToTabs(dir, newHex); // every live tab in this dir tracks the change
+        _ScheduleWindowRecordSave(); // M10: the per-tab color rides in the window record
     }
 
     // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
@@ -1831,6 +2009,11 @@ namespace winrt::TerminalApp::implementation
     safe_void_coroutine TerminalPage::_CompleteInitialization()
     {
         _startupState = StartupState::Initialized;
+
+        // M10 (PERSISTENCE.md §13): now that startup has settled, write this window's record once
+        // so its existence + geometry + lens are persisted from launch (not only after the first
+        // interaction). _ScheduleWindowRecordSave gates on Initialized, just set above.
+        _ScheduleWindowRecordSave();
 
         // GH#632 - It's possible that the user tried to create the terminal
         // with only one tab, with only an elevated profile. If that happens,

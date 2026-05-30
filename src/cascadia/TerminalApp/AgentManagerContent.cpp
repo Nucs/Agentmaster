@@ -461,6 +461,66 @@ namespace winrt::TerminalApp::implementation
         _settingsSink = std::move(handler);
     }
 
+    // ---- Per-window Manager lens (M10; PERSISTENCE.md §13) ------------------
+
+    ::Agentmaster::ManagerState AgentManagerContent::GetManagerState() const
+    {
+        ::Agentmaster::ManagerState st;
+        st.selectedId = _selectedId;
+        st.scopeDir = _scopeDir;
+        st.selectedPromptId = _selectedPromptId;
+        st.collapsedDirs.assign(_collapsedDirs.begin(), _collapsedDirs.end());
+        st.layout = _layout;
+        return st;
+    }
+
+    void AgentManagerContent::SetManagerState(const ::Agentmaster::ManagerState& state)
+    {
+        _selectedId = state.selectedId;
+        _scopeDir = state.scopeDir;
+        _selectedPromptId = state.selectedPromptId;
+        _collapsedDirs.clear();
+        _collapsedDirs.insert(state.collapsedDirs.begin(), state.collapsedDirs.end());
+        // A restored per-window layout overrides the global default loaded in the ctor; push the
+        // fractions into the live tracks so the splitters land where the window left them.
+        _layout = state.layout;
+        _ApplyLayoutToTracks();
+        _Refresh();
+    }
+
+    void AgentManagerContent::SetLensChangedHandler(std::function<void(::Agentmaster::ManagerState)> handler)
+    {
+        _lensChangedHandler = std::move(handler);
+    }
+
+    void AgentManagerContent::_NotifyLensChanged()
+    {
+        if (_lensChangedHandler)
+        {
+            _lensChangedHandler(GetManagerState());
+        }
+    }
+
+    void AgentManagerContent::_ApplyLayoutToTracks()
+    {
+        if (_boardRow)
+        {
+            _boardRow.Height(GridLengthHelper::FromValueAndType(_layout.boardFraction, GridUnitType::Star));
+        }
+        if (_bottomRow)
+        {
+            _bottomRow.Height(GridLengthHelper::FromValueAndType(1.0 - _layout.boardFraction, GridUnitType::Star));
+        }
+        if (_treeCol)
+        {
+            _treeCol.Width(GridLengthHelper::FromValueAndType(_layout.treeFraction, GridUnitType::Star));
+        }
+        if (_planCol)
+        {
+            _planCol.Width(GridLengthHelper::FromValueAndType(1.0 - _layout.treeFraction, GridUnitType::Star));
+        }
+    }
+
     // ---- IPaneContent -------------------------------------------------------
 
     FrameworkElement AgentManagerContent::GetRoot()
@@ -1237,6 +1297,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
         ::Agentmaster::SaveLayout(_layout);
+        _NotifyLensChanged(); // M10: splitter sizes ride in the per-window record too
 
         ApplyCursor(CoreCursorType::Arrow);
         e.Handled(true);
@@ -1327,20 +1388,28 @@ namespace winrt::TerminalApp::implementation
         }
         _treeHost.Children().Clear();
 
-        // Agentmaster: apply the Explorer Tree scope. LOCAL (default) keeps only the sessions
-        // hosted in THIS window (the page's _claudeTabs, surfaced by _localScopeProvider); GLOBAL
-        // keeps every window's session (the whole process-wide registry). All the dir grouping +
-        // counts + rows below iterate `scoped`, so the filter flows through uniformly. GLOBAL (or
-        // an unwired provider, e.g. mid-init) is a no-op view onto the original snapshot.
+        // Agentmaster: Explorer Tree scope + ordering. localIds == the sessions hosted in THIS
+        // window (the page's _claudeTabs, surfaced by _localScopeProvider). LOCAL (default) keeps
+        // ONLY those; GLOBAL keeps every window's session (the whole process-wide registry) but
+        // ORDERS this window's first and tags the rest "outside" (see the dir partition + the row
+        // bucketing below). With no provider (mid-init) everything counts as local — no filter, no
+        // reorder, no tag. isLocal() answers "is this session hosted in this window?".
+        const bool haveLocal = static_cast<bool>(_localScopeProvider);
+        std::unordered_set<std::wstring> localIds;
+        if (haveLocal)
+        {
+            localIds = _localScopeProvider();
+        }
+        const auto isLocal = [&](const SessionInfo& s) { return !haveLocal || localIds.find(s.id) != localIds.end(); };
+
         std::vector<SessionInfo> scopedStore;
         const std::vector<SessionInfo>* scopedPtr = &sessions;
-        if (!_treeGlobalScope && _localScopeProvider)
+        if (!_treeGlobalScope && haveLocal)
         {
-            const auto localIds = _localScopeProvider();
             scopedStore.reserve(sessions.size());
             for (const auto& s : sessions)
             {
-                if (localIds.find(s.id) != localIds.end())
+                if (isLocal(s))
                 {
                     scopedStore.push_back(s);
                 }
@@ -1368,12 +1437,26 @@ namespace winrt::TerminalApp::implementation
         {
             // In LOCAL scope an empty tree can simply mean other windows hold the sessions; say so
             // (and hint at GLOBAL) rather than implying the whole fleet is empty.
-            const wchar_t* empty = (!_treeGlobalScope && _localScopeProvider)
+            const wchar_t* empty = (!_treeGlobalScope && haveLocal)
                                        ? L"No sessions in this window \x2014 Launch above, or switch to GLOBAL for all windows."
                                        : L"No sessions yet \x2014 use Launch session above.";
             _treeHost.Children().Append(Text(empty, 12, false, 0.6));
             return;
         }
+
+        // Agentmaster: surface directories holding at least one of THIS window's sessions before
+        // directories that are entirely from other windows (stable within each group). In LOCAL
+        // scope every dir is local, so this is a no-op; it only reorders the GLOBAL view.
+        std::stable_partition(dirs.begin(), dirs.end(), [&](const std::wstring& d) {
+            for (const auto& s : scoped)
+            {
+                if (s.live && PathEq(s.workingDir, d) && isLocal(s))
+                {
+                    return true;
+                }
+            }
+            return false;
+        });
 
         // Tracks the directory header rendered just above the current one, so collapsing the
         // selected directory can move the scope to its predecessor ("" — all directories — when
@@ -1445,12 +1528,28 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
 
+            // Order this dir's rows THIS window's sessions first, then "outside" ones (other
+            // windows), each group keeping snapshot order. The pointers stay valid: `scoped` is
+            // not mutated past this point. In LOCAL scope the second pass is empty.
+            std::vector<const SessionInfo*> rowOrder;
             for (const auto& s : scoped)
             {
-                if (!s.live || !PathEq(s.workingDir, dir))
+                if (s.live && PathEq(s.workingDir, dir) && isLocal(s))
                 {
-                    continue;
+                    rowOrder.push_back(&s);
                 }
+            }
+            for (const auto& s : scoped)
+            {
+                if (s.live && PathEq(s.workingDir, dir) && !isLocal(s))
+                {
+                    rowOrder.push_back(&s);
+                }
+            }
+
+            for (const auto* sp : rowOrder)
+            {
+                const auto& s = *sp;
                 const auto id = s.id;
 
                 // In-place rename editor for this row (see _renameBox note in the header).
@@ -1495,6 +1594,15 @@ namespace winrt::TerminalApp::implementation
                 row.Children().Append(g);
                 row.Children().Append(Text(s.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ s.title }, 13, false, 1.0));
                 row.Children().Append(Text(StateLabel(s.state), 11, false, 0.5));
+                // Agentmaster: a gray "outside" tag marks a session hosted in another window (only
+                // possible in GLOBAL scope; in LOCAL every row is this window's). It sits at the end
+                // of the row, after the state label.
+                if (!isLocal(s))
+                {
+                    auto outside = Pill(L"outside", Color{ 0xFF, 0x8A, 0x8A, 0x8A });
+                    outside.Opacity(0.85);
+                    row.Children().Append(outside);
+                }
 
                 auto rowBtn = Button{};
                 rowBtn.Content(row);
@@ -2375,6 +2483,7 @@ namespace winrt::TerminalApp::implementation
             const auto pid = p.id;
             rowBtn.Click([this, pid](const IInspectable&, const RoutedEventArgs&) {
                 _selectedPromptId = pid;
+                _NotifyLensChanged(); // M10
                 _Refresh();
             });
             _planListHost.Children().Append(rowBtn);
@@ -2435,12 +2544,14 @@ namespace winrt::TerminalApp::implementation
         }
         _selectedId = id;
         _selectedPromptId.clear();
+        _NotifyLensChanged(); // M10: selection is part of the per-window lens
         _Refresh();
     }
 
     void AgentManagerContent::_SetScope(const std::wstring& dir)
     {
         _scopeDir = dir;
+        _NotifyLensChanged(); // M10: scope + collapsed-dir toggles funnel through here
         _Refresh();
     }
 

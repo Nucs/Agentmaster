@@ -55,6 +55,15 @@ namespace winrt::TerminalApp::implementation
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
         void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
 
+        // Agentmaster (M10; PERSISTENCE.md §13): the per-window Manager LENS (selection / scope /
+        // selected prompt / collapsed dirs / splitter sizes). GetManagerState reads it;
+        // SetManagerState seeds it on restore (re-applies the splitter sizes, then refreshes);
+        // SetLensChangedHandler installs a callback the content fires — carrying the current lens —
+        // whenever the lens mutates, so the hosting window debounce-saves its window record.
+        ::Agentmaster::ManagerState GetManagerState() const;
+        void SetManagerState(const ::Agentmaster::ManagerState& state);
+        void SetLensChangedHandler(std::function<void(::Agentmaster::ManagerState)> handler);
+
         // IPaneContent
         winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
         void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings& settings);
@@ -89,6 +98,12 @@ namespace winrt::TerminalApp::implementation
         void _SelectSession(const std::wstring& id);
         void _SetScope(const std::wstring& dir);
         std::optional<::Agentmaster::SessionInfo> _Selected(const std::vector<::Agentmaster::SessionInfo>& sessions) const;
+
+        // Agentmaster (M10): fire _lensChangedHandler with the current lens (GetManagerState) so the
+        // window debounce-saves its record; _ApplyLayoutToTracks pushes _layout's fractions into the
+        // live row/column definitions (used when seeding a restored per-window layout).
+        void _NotifyLensChanged();
+        void _ApplyLayoutToTracks();
 
         // Action-bar handlers (operate on _selectedId / _selectedPromptId).
         void _OnLaunch();
@@ -170,6 +185,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
+        std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
         bool _globalPaused{ false };
 

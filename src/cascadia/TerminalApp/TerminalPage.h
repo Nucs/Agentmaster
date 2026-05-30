@@ -299,6 +299,10 @@ namespace winrt::TerminalApp::implementation
         std::wstring _windowId;
         ::Agentmaster::WindowRecord _windowRecord{};
         std::shared_ptr<ThrottledFunc<>> _saveWindowRecordThrottled{ nullptr };
+        // True when _windowRecord was CLAIMED from disk (a real prior layout) vs freshly minted.
+        // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
+        // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
+        bool _windowRecordClaimed{ false };
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
