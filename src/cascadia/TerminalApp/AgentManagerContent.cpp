@@ -430,6 +430,10 @@ namespace winrt::TerminalApp::implementation
     {
         _restoreHandler = std::move(handler);
     }
+    void AgentManagerContent::SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler)
+    {
+        _renameHandler = std::move(handler);
+    }
     void AgentManagerContent::SetPauseHandler(std::function<void(bool)> handler)
     {
         _pauseHandler = std::move(handler);
@@ -1569,9 +1573,20 @@ namespace winrt::TerminalApp::implementation
 
         _renamingId.clear();
         _renameBox = nullptr;
-        if (_registry && !name.empty())
+        if (!name.empty())
         {
-            _registry->Update(id, [&](SessionInfo& s) { s.title = name; });
+            // The title is ONE value: the Explorer-tree name == the WT tab title == the persisted
+            // SessionInfo.title. Route through the page so it updates the shared registry AND
+            // retitles the session's tab in lockstep; the direct registry write is the fallback
+            // when unwired (e.g. the standalone tests).
+            if (_renameHandler)
+            {
+                _renameHandler(winrt::hstring{ id }, winrt::hstring{ name });
+            }
+            else if (_registry)
+            {
+                _registry->Update(id, [&](SessionInfo& s) { s.title = name; });
+            }
         }
         _Refresh();
     }

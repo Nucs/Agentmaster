@@ -27,20 +27,40 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
 Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
 Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
+Workspace persistence (M9–M14): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
 
 ## Status
 
 **All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **211/211** standalone
+`Agentmaster` identity, and verified running.** The engine passes **209/209** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
 reopen (traces in `~/.agentmaster/hooks.log`).
 
+**Workspace persistence (M9–M14, [`PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md)) is in
+progress.** **M9 (singleton engine) is complete — compiles + unit-tested:** the
+registry/bridge/scheduler are now ONE process-wide `SharedEngine` (`AgentMaster/Engine.{h,cpp}`),
+so the WindowEmperor's many windows share one fleet over one pipe instead of two registries
+racing on `\\.\pipe\agentmaster.<pid>` and clobbering `sessions.json`. **M10's data layer is
+done — unit-tested:** the per-window `WindowRecord` schema + `windows/<id>.json` (de)serialize,
+shaped as **Option 1** — per-window *UI state only* (geometry + Manager lens + ordered tab
+*refs*); `sessions.json` + `SessionInfo.live` stay the single session source of truth, never
+duplicated. The live capture/restore wiring (geometry + lens + debounced autosave) is the
+remaining M10 work.
+
 What works, by area:
-- **Engine (M5, `AgentMaster/`).** Thread-safe `SessionRegistry` (single source of truth;
-  multiple observers), `HooksBridge` (local named-pipe server `\\.\pipe\agentmaster.<pid>`),
-  `ClaudeSpawn` (spawn/`--resume` recipe + the shared hooks config + PowerShell forwarder).
+- **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
+  source of truth; **token-based** observers — `AddObserver`→token + `RemoveObserver` — and
+  multiple `AddAdoptionHandler`s, so a closing window detaches its lens observer + adoption
+  handler cleanly instead of dangling on the shared registry), `HooksBridge` (local named-pipe
+  server `\\.\pipe\agentmaster.<pid>`), `ClaudeSpawn` (spawn/`--resume` recipe + the shared hooks
+  config + PowerShell forwarder). **M9:** one process-wide **`SharedEngine()`** (`Engine.{h,cpp}`)
+  owns the registry/bridge/scheduler for ALL windows (the WindowEmperor is one process, N windows
+  on N threads); each `TerminalPage` copies the shared `shared_ptr`s and its Manager tab is a
+  per-window *lens* over the one fleet. The `<pid>` pipe is unambiguous *because* there is exactly
+  one bridge; one writer for `sessions.json`; restore loads process-once
+  (`Engine::restored.exchange`, so a 2nd window can't double-load the fleet).
   Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1). The wire
   line carries a 7th **`tabToken`** field (the hosting `WT_SESSION`, for adopting a hand-typed
   `claude` — see *Adopt any `claude`* below) and an 8th, **escaped `prompt`** field on
@@ -60,7 +80,7 @@ What works, by area:
   — no double-wiring.) The forwarder takes the session id from the hook **payload** and emits
   the hosting **`WT_SESSION`** as the `tabToken` wire field, falling back to a **`bridge.json`**
   discovery file when it didn't inherit the pipe env. The registry **adopts** an unknown session
-  on `SessionStart` (flagged `SessionInfo::external`) and fires `SetAdoptionHandler`;
+  on `SessionStart` (flagged `SessionInfo::external`) and fires every window's adoption handler (`AddAdoptionHandler`, fanned out — whichever window hosts the `+` tab binds it);
   `TerminalPage::_AdoptExternalSession` matches the `tabToken` to a live ConPTY
   (`ITerminalConnection::SessionId`) and **binds a stdin injector** — promoting it to full
   observe+control (Autopilot can drive it). A claude hosted outside this app (no matching
@@ -71,7 +91,12 @@ What works, by area:
   **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and listed
   behind an **Archived (N)** toolbar button (by the cog) — a modal list with per-row
   **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
-  `Del`=archive (never injects — Rule #2). Flight Plan: compose box, Add / Send now / ↑↓ /
+  `Del`=archive (never injects — Rule #2). **A session's title is one value** — the
+  Explorer-tree row, the WT **tab** title, and the persisted `SessionInfo.title` are the same
+  thing: it's **pinned** onto the tab at launch/restore (`Tab::SetTabText`, so it stops floating
+  with claude's OSC title) and renaming from **either** side syncs the other + persists (Explorer
+  right-click **Rename…** → `_RenameClaudeSession`; a WT tab rename → `_SyncClaudeTitleFromTab`;
+  Rule #11). Flight Plan: compose box, Add / Send now / ↑↓ /
   Delete / Focus / Archive — and it reflects **all** messages a session got, not just queued
   ones: a chronological **SENT** summary (each row tagged **flight** = we queued+injected it
   vs **typed** = you typed it into the terminal) over the **UPCOMING** queue (Pending/Held).
@@ -111,6 +136,16 @@ What works, by area:
   record is dropped. A never-prompted session has no transcript and a blind `--resume` would die
   with "No conversation found" (Rule #6). `Sent` prompts are never replayed. Templates: save a
   session's queue, apply it, or broadcast to a whole directory.
+- **Per-window records (M10 data layer, `Persistence`/`SessionModels`).** A `WindowRecord`
+  (one file per window: `windows/<windowId>.json`) holds per-window **UI state** — geometry
+  (position/size/launch-mode), the Manager **lens** (selection / dir scope / selected prompt /
+  collapsed dirs / splitter fractions), and an **ordered list of tab refs** (a Claude tab = just
+  its `sessionId`; a non-Claude tab = an opaque WT `actionsJson`). This is **Option 1** — a thin
+  layer OVER the archive model: it records tab order + window↔session affinity + geometry/lens
+  WITHOUT duplicating session data (`sessions.json` stays the session truth, so there is one copy
+  of every session). Schema + (de)serialize + `Save/Load/DeleteWindowRecord` are done and
+  unit-tested; the live **capture** (build a window's record + debounced autosave) and **restore**
+  (re-apply geometry/lens, re-home sessions) are the remaining M10/M12 wiring (`PERSISTENCE.md`).
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` after "Pause Autopilot" opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
@@ -147,19 +182,21 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
   - `src/cascadia/TerminalApp/AgentMaster/` — the engine (plain C++, no WinRT; the `.cpp`
     are `<PrecompiledHeader>NotUsing`): `SessionModels.h`, `HookEvents.h`, `HookWire.h`,
     `SessionRegistry.{h,cpp}`, `HooksBridge.{h,cpp}`, `ClaudeSpawn.{h,cpp}`,
-    `Scheduler.{h,cpp}`, `Json.h`, `Persistence.{h,cpp}`, and `tests/` (standalone harness,
+    `Scheduler.{h,cpp}`, `Engine.{h,cpp}` (the M9 process-wide `SharedEngine`),
+    `Json.h`, `Persistence.{h,cpp}`, and `tests/` (standalone harness,
     not in the msbuild — run `tests/run-m5-tests.bat`).
-  - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore) and
+  - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync) and
     `TabManagement.cpp`; registrations in `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
 - **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `settings.json`
-  (the Settings cog's `AppSettings`), `bridge.json` (live-bridge discovery for the shim), and
-  `shim/` (the transparent `claude` PATH shim — `claude.cmd` + a POSIX `claude` — that
-  auto-wires hand-typed sessions; see *Adopt any `claude`*). Deliberately NOT under
-  `%LOCALAPPDATA%` — see Gotchas (MSIX).
+  (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
+  one file per window; schema/IO in place, written once capture is wired), `bridge.json`
+  (live-bridge discovery for the shim), and `shim/` (the transparent `claude` PATH shim —
+  `claude.cmd` + a POSIX `claude` — that auto-wires hand-typed sessions; see *Adopt any
+  `claude`*). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas (MSIX).
 
 ## Integration points (1.24 pluggable pane-content model)
 
@@ -168,19 +205,37 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
 - Content dispatch by type string in `TerminalPage::_MakePane` (`TerminalPage.cpp`): we add
   an `else if (paneType == L"agentManager")` branch → `make_self<AgentManagerContent>()`.
 - The Manager tab is opened by **`TerminalPage::_OpenAgentManagerTab()`**, called from
-  `_OnFirstLayout` *before* startup terminal tabs, so it lands at index 0 (leftmost). It
-  sets the tab's `CloseButtonVisibility = Never` (non-closable) and is tracked in the
-  `_managerTab` member (nulled on close in `TabManagement.cpp`, mirroring `_settingsTab`).
+  `_OnFirstLayout` *before* startup terminal tabs, so it lands at index 0 (leftmost), and is
+  tracked in the `_managerTab` member (nulled on close in `TabManagement.cpp`, mirroring
+  `_settingsTab`). It is **non-closable AND non-movable**:
+  - *Non-closable* — `CloseButtonVisibility = Never` (→ `IsClosable(false)`) hides the X and
+    `DisableCloseAndMoveMenuItems()` greys the context-menu Close/Move. **Critically,**
+    `_updateAllTabCloseButtons()` (which re-applies the theme's global close-button setting to
+    *every* tab on each theme/settings pass) **skips `_managerTab`** — otherwise it re-enabled
+    the X right after we set it (see Gotchas). The only way to "kill" is closing the **window**.
+  - *Non-movable* — its `TabViewItem` is `CanDrag(false)`/`AllowDrop(false)`; `_TryMoveTab`
+    refuses to move it and reserves index 0 for it; and `_PinManagerTabFirst()` (called from
+    `_TabDragCompleted`) snaps it back to 0 if another tab is dropped ahead of it.
 - Tab placement primitive: `_CreateNewTabFromPane(pane, insertPosition)` (`TabManagement.cpp`).
 - **Engine wiring (`TerminalPage`):** `_InitAgentmasterEngine()` (from `_OnFirstLayout`,
-  before the Manager tab) creates the `SessionRegistry` + `HooksBridge` + `Scheduler` and
-  wires the registry's observer/advance seams. `_WireAgentManagerContent()` hands the
-  content the registry + spawn/activate/kill/pause/confirm callbacks + the cog's
-  settings seed/persist (`SetSettings`/`SetSettingsHandler`).
-  `_LaunchClaudeSession(dir, title, restored)` builds a claude `ConptyConnection`
-  (cmdline/cwd/env ours) and opens it as a normal terminal tab via `_MakePane(args, …,
-  existingConnection)`; `_SpawnClaudeSession` = fresh, `_RestoreClaudeSessions()` = resume
-  the persisted set. `sessionId → Tab` lives in `_claudeTabs` for Activate/Kill.
+  before the Manager tab) **consumes the process-wide `::Agentmaster::SharedEngine()`** (M9) —
+  copies the shared `SessionRegistry` + `HooksBridge` + `Scheduler` `shared_ptr`s and registers
+  THIS window's adoption handler (a token, detached in `~TerminalPage`). The once-per-process
+  wiring (the logging / scheduler / persistence observers, the pipe, bridge discovery + hook
+  files + the PATH shim) lives in `Engine.cpp` and runs on first access.
+  `_WireAgentManagerContent()` hands the content the shared registry + spawn / activate / archive
+  / restore / rename / pause / confirm callbacks + the cog's settings seed/persist
+  (`SetSettings`/`SetSettingsHandler`). `_LaunchClaudeSession(dir, title, restored)` builds a
+  claude `ConptyConnection` (cmdline/cwd/env ours) and opens it as a normal terminal tab via
+  `_MakePane(args, …, existingConnection)`; `_SpawnClaudeSession` = fresh,
+  `_RestoreClaudeSessions()` = load the persisted fleet **as Archived** (process-once via
+  `Engine::restored`), `_RestoreArchivedSession()` = the on-demand resume.
+  `sessionId → Tab` lives in `_claudeTabs` (per window) for Activate / Archive / retitle. A
+  session's **title is one value** (Explorer name == tab title == persisted `SessionInfo.title`):
+  `_LaunchClaudeSession` **pins** it onto the tab (`Tab::SetTabText`); an Explorer rename routes
+  through the `rename` callback → `_RenameClaudeSession` (registry + tab in lockstep); a WT tab
+  rename (double-click / right-click **Rename Tab** / `renameTab` action, all via `Tab::SetTabText`)
+  flows back through `_UpdateTitle` → `_SyncClaudeTitleFromTab`, which writes the registry (Rule #11).
 - **Shared stdin:** the registry holds a per-session injector bound to that session's
   `ConptyConnection::WriteInput`, so the user's keystrokes and the scheduler's prompts both
   reach the same `claude.exe` stdin (Correctness Rule #3 binds the injector to the id).
@@ -293,6 +348,15 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   **in-content modal overlay** (a dimmed `Grid` over `_root`, `RowSpan`-all; the card swallows
   taps via a handled `Tapped`, a backdrop tap = cancel). Don't reach for a ContentDialog when a
   field needs keyboard input.
+- **A pinned tab's `CloseButtonVisibility::Never` is silently undone by
+  `_updateAllTabCloseButtons()`.** Setting `Never` on a tab once (as `_OpenAgentManagerTab` does)
+  is NOT enough: that method loops EVERY tab and re-applies the theme's *global* close-button
+  setting (`tab.CloseButtonVisibility(theme…)` → `IsClosable`), and it runs on every theme/
+  settings apply — which happens *after* the Manager tab is created — so the X reappeared. Fix:
+  **skip `_managerTab` in that loop.** Note hiding the X (`IsClosable`) is independent of
+  drag-reorder: a non-closable tab can still be dragged/torn out, so non-movable needs its own
+  guard (`TabViewItem.CanDrag(false)` + `_PinManagerTabFirst()` snap-back + a `_TryMoveTab`
+  refusal). Context-menu Close/Move is a third axis (`DisableCloseAndMoveMenuItems()`).
 - **Never reuse the `WindowsTerminalDev` package identity.** It belongs to the separate
   `K:\source\windowsterminal` checkout; registering the same identity tries to *replace*
   it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
@@ -398,6 +462,28 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
    `WT_SESSION` `tabToken` to a live ConPTY and binds the injector to THAT id (Rule #3); if no
    connection matches (a claude hosted outside this app), it stays observe-only — never bind to
    "the active tab".
+10. **One engine per process (M9); a closing window must detach; records reference, never copy.**
+    Exactly ONE `SessionRegistry` / `HooksBridge` / `Scheduler` for the whole process
+    (`SharedEngine()`), shared by every window — never re-create them per `TerminalPage`, and
+    never key the bridge on anything that collides across windows (the `<pid>` pipe is fine
+    *because* there is one bridge). Each window registers its lens observer + adoption handler by
+    **token** and detaches them on teardown (`RemoveObserver` in `~AgentManagerContent`,
+    `RemoveAdoptionHandler` in `~TerminalPage`); the fleet loads **process-once**
+    (`Engine::restored.exchange`) so a second window can't double-insert. Per-window persisted UI
+    state (geometry + lens + ordered tab refs) is the `WindowRecord` (`windows/<id>.json`) and it
+    must **reference** sessions by id, never copy them — `sessions.json` + `SessionInfo.live`
+    remain the one session source of truth (Option 1).
+11. **A session's title is ONE value — Explorer name == tab title == persisted `SessionInfo.title`.**
+    `s.title` is the single source of truth; it is **pinned** onto the WT tab at launch / restore /
+    adopt (`Tab::SetTabText`, so the tab stops floating with claude's volatile OSC title). Renaming
+    from **either** side writes that one value and persists (the autosave-on-change observer): the
+    Explorer-tree **Rename…** routes through the `rename` callback → `_RenameClaudeSession` (registry
+    + tab); a WT tab rename (double-click / right-click **Rename Tab** / `renameTab` action — all
+    funnel through `Tab::SetTabText` → `PropertyChanged("Title")` → `_UpdateTitle`) flows back via
+    `_SyncClaudeTitleFromTab`. Equality guards make an already-in-step sync a no-op (no loops); an
+    emptied override (`ResetTabText`) re-pins. On **adopt**, a name the user already gave the `+` tab
+    wins (mirrored into the registry); else the tab is pinned to the managed name. Don't reintroduce
+    a separate tab title or scrape claude's OSC title for the name.
 
 ## Conventions
 

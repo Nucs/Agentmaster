@@ -888,6 +888,19 @@ namespace winrt::TerminalApp::implementation
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
         });
 
+        // Agentmaster: a session's title is ONE value — the Explorer-tree name, the persisted
+        // SessionInfo.title, and the WT tab title are the same thing. Pin the tab to it now
+        // (SetTabText) so the tab strip shows the managed name instead of floating with claude's
+        // volatile OSC title; a later tab rename writes back through _SyncClaudeTitleFromTab, and an
+        // Explorer-tree rename re-pins it through _RenameClaudeSession.
+        if (tab)
+        {
+            if (const auto impl = _GetTabImpl(tab))
+            {
+                impl->SetTabText(winrt::hstring{ ttl });
+            }
+        }
+
         const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       tag + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
@@ -972,6 +985,12 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_RestoreArchivedSession(id);
+            }
+        });
+        content->SetRenameHandler([weakThis](winrt::hstring id, winrt::hstring title) {
+            if (auto self = weakThis.get())
+            {
+                self->_RenameClaudeSession(id, title);
             }
         });
         content->SetPauseHandler([weakThis](bool paused) {
@@ -1155,6 +1174,75 @@ namespace winrt::TerminalApp::implementation
         return {};
     }
 
+    // Agentmaster: rename a Claude session from the Manager's Explorer Tree. A session's title is
+    // ONE value — the Explorer-tree name, the persisted SessionInfo.title, and the WT tab title.
+    // Write it to the shared registry (which persists it via the autosave-on-change observer and
+    // refreshes every window's Triage Board / Explorer Tree / Flight Plan) and, when THIS window
+    // hosts the session's tab, retitle the tab strip to match. The tab's own rename path mirrors
+    // the other direction (_SyncClaudeTitleFromTab); the SetTabText below re-enters it once and
+    // settles immediately (the registry title already equals the new text).
+    void TerminalPage::_RenameClaudeSession(winrt::hstring sessionId, winrt::hstring title)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const std::wstring id{ sessionId };
+        const std::wstring name{ title };
+        _sessionRegistry->Update(id, [&name](::Agentmaster::SessionInfo& s) { s.title = name; });
+
+        const auto it = _claudeTabs.find(id);
+        if (const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr)
+        {
+            if (const auto impl = _GetTabImpl(tab))
+            {
+                impl->SetTabText(title);
+            }
+        }
+    }
+
+    // Agentmaster: the reverse direction — a Claude TAB was renamed (the header double-click, the
+    // right-click "Rename Tab", or the renameTab action; all funnel through Tab::SetTabText ->
+    // PropertyChanged("Title") -> _UpdateTitle -> here). Mirror the tab's text into the session's
+    // title so the Explorer-tree name and the persisted record track the tab. Because every Claude
+    // tab is pinned to its managed name at launch, a non-empty runtime tab text that differs from
+    // the registry title can only be a user rename; an emptied one (a bare renameTab / ResetTabText)
+    // is re-pinned so the tab never falls back to claude's volatile OSC title and diverges.
+    void TerminalPage::_SyncClaudeTitleFromTab(const TerminalApp::Tab& tab)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const auto id = _ClaudeSessionForTab(tab);
+        if (id.empty())
+        {
+            return; // not a Claude session tab (or not yet mapped) -> nothing to sync
+        }
+        const auto impl = _GetTabImpl(tab);
+        if (!impl)
+        {
+            return;
+        }
+        const std::wstring text{ impl->GetTabText() };
+        const auto info = _sessionRegistry->Get(id);
+        if (text.empty())
+        {
+            // Override cleared (ResetTabText) -> re-pin to the managed name. Re-enters once, then
+            // settles (GetTabText() == title -> the equality guard below returns without writing).
+            if (info && !info->title.empty())
+            {
+                impl->SetTabText(winrt::hstring{ info->title });
+            }
+            return;
+        }
+        if (info && info->title == text)
+        {
+            return; // already in sync (our own pin / an Explorer-driven rename) -> no write, no loop
+        }
+        _sessionRegistry->Update(id, [&text](::Agentmaster::SessionInfo& s) { s.title = text; });
+    }
+
     // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
     // creation appends (the Manager is created first), so the only ways it can drift are a tab
     // drag-drop or a move-tab action; this snaps it back. No-op when it is already first.
@@ -1287,6 +1375,23 @@ namespace winrt::TerminalApp::implementation
                     connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
                 });
                 _claudeTabs[id] = winrt::make_weak(projectedTab);
+                // Agentmaster: unify the adopted tab's title with the Explorer name (the one-title
+                // rule). If the user already named this hand-typed `claude` tab, that rename is
+                // authoritative -> mirror it into the registry; otherwise pin the tab to the managed
+                // name (the cwd leaf set above) so both sides match. Either way it is now in
+                // _claudeTabs, so subsequent renames sync via _SyncClaudeTitleFromTab.
+                if (const auto impl = _GetTabImpl(projectedTab))
+                {
+                    const std::wstring tabText{ impl->GetTabText() };
+                    if (!tabText.empty())
+                    {
+                        _sessionRegistry->Update(id, [&tabText](::Agentmaster::SessionInfo& s) { s.title = tabText; });
+                    }
+                    else if (const auto s = _sessionRegistry->Get(id); s && !s->title.empty())
+                    {
+                        impl->SetTabText(winrt::hstring{ s->title });
+                    }
+                }
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
                 co_return;
             }
@@ -2654,6 +2759,10 @@ namespace winrt::TerminalApp::implementation
         {
             TitleChanged.raise(*this, nullptr);
         }
+        // Agentmaster: a Claude session's title is one value (Explorer name == tab title ==
+        // persisted record). Title changes on a Claude tab are user renames -> mirror them back
+        // into the registry. No-op for non-Claude tabs and for our own pin/sync writes.
+        _SyncClaudeTitleFromTab(tab);
     }
 
     // Method Description:

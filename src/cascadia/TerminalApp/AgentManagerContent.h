@@ -45,6 +45,7 @@ namespace winrt::TerminalApp::implementation
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
+        void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
@@ -154,6 +155,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _activateHandler;
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring)> _restoreHandler;
+        std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
