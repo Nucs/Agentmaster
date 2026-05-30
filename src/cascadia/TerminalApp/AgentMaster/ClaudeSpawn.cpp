@@ -227,7 +227,7 @@ try {
 )PSHOOK";
     }
 
-    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath)
+    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions)
     {
         const auto base = std::wstring{ L"powershell -NoProfile -ExecutionPolicy Bypass -File \"" } + std::wstring{ forwarderPath } + L"\"";
 
@@ -243,32 +243,54 @@ try {
         json += block(L"Stop") + L",\n";
         json += block(L"SubagentStop") + L",\n";
         json += block(L"SessionEnd") + L"\n";
-        json += L"  }\n}\n";
+        json += L"  }"; // close "hooks"
+
+        // Optional Claude-session settings from the cog. Each is emitted ONLY when it differs
+        // from Claude's own default, so an all-defaults config stays byte-for-byte the prior
+        // hooks-only file (Json schema validates these keys; see the settings discussion).
+        if (!model.empty())
+        {
+            json += L",\n  \"model\": \"" + JsonEscape(model) + L"\"";
+        }
+        if (!includeCoAuthoredBy)
+        {
+            json += L",\n  \"includeCoAuthoredBy\": false";
+        }
+        if (!skipPermissions)
+        {
+            // The "other variation": when we do NOT pass --dangerously-skip-permissions, pin
+            // the standard permission mode in the settings file (normal prompts + trust apply).
+            json += L",\n  \"permissions\": { \"defaultMode\": \"default\" }";
+        }
+
+        json += L"\n}\n";
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions)
     {
-        // Agentmaster: every spawned session runs with --dangerously-skip-permissions. The
-        // app drives claude programmatically (Autopilot + injected prompts) and gates risky
+        // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
+        // the app drives claude programmatically (Autopilot + injected prompts) and gates risky
         // actions through its own Approval Policy, so the per-tool permission prompts are
-        // redundant here. Critically, permission mode `bypassPermissions` ALSO skips the
-        // per-folder "Do you trust the files in this folder?" trust dialog at startup (the
-        // dialog block is gated on `mode !== "bypassPermissions"`), which would otherwise
-        // wedge an unattended ConPTY session waiting on a keypress. It does NOT suppress the
-        // one-time GLOBAL "Bypass Permissions mode" acceptance (~/.claude.json
-        // `bypassPermissionsModeAccepted`) — that shows once, ever, until accepted.
+        // redundant. Critically, permission mode `bypassPermissions` ALSO skips the per-folder
+        // "Do you trust the files in this folder?" trust dialog at startup (the dialog block is
+        // gated on `mode !== "bypassPermissions"`), which would otherwise wedge an unattended
+        // ConPTY session waiting on a keypress. It does NOT suppress the one-time GLOBAL "Bypass
+        // Permissions mode" acceptance (~/.claude.json `bypassPermissionsModeAccepted`).
+        // When OFF, the flag is omitted and BuildHooksSettingsJson pins permissions.defaultMode
+        // instead (normal prompts + trust apply).
+        const std::wstring flag = skipPermissions ? L"--dangerously-skip-permissions " : L"";
         if (resume)
         {
             // Resume the existing conversation by id; --resume implies the session id.
-            std::wstring cmd = L"claude --dangerously-skip-permissions --resume ";
+            std::wstring cmd = L"claude " + flag + L"--resume ";
             cmd += sessionId;
             cmd += L" --settings \"";
             cmd += settingsPath;
             cmd += L"\"";
             return cmd;
         }
-        std::wstring cmd = L"claude --dangerously-skip-permissions --settings \"";
+        std::wstring cmd = L"claude " + flag + L"--settings \"";
         cmd += settingsPath;
         cmd += L"\" --session-id ";
         cmd += sessionId;
@@ -411,7 +433,7 @@ try {
         }
     }
 
-    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir)
+    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings)
     {
         const std::wstring forwarderPath = stateDir + L"\\agentmaster-hook.ps1";
         const std::wstring settingsPath = stateDir + L"\\hooks-settings.json";
@@ -422,7 +444,7 @@ try {
         {
             return { std::wstring{}, std::wstring{} };
         }
-        if (!WriteFileUtf8(settingsPath, BuildHooksSettingsJson(forwarderFwd)))
+        if (!WriteFileUtf8(settingsPath, BuildHooksSettingsJson(forwarderFwd, settings.model, settings.includeCoAuthoredBy, settings.skipPermissions)))
         {
             return { std::wstring{}, std::wstring{} };
         }
@@ -562,7 +584,7 @@ try {
         WriteFileUtf8(dir + L"\\bridge.json", json);
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
@@ -573,12 +595,12 @@ try {
         spec.sessionId = resume ? std::wstring{ resumeSessionId } : NewSessionId();
 
         const auto stateDir = AgentmasterStateDir();
-        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir);
+        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir, settings);
         spec.settingsPath = settingsPath;
         spec.forwarderPath = forwarderPath;
 
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions);
 
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
         spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);

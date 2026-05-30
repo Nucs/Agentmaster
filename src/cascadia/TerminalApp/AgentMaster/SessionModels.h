@@ -128,4 +128,34 @@ namespace Agentmaster
         double boardFraction{ 0.4 }; // Triage Board height / (Board + Bottom)      [root rows]
         double treeFraction{ 0.4 }; // Explorer Tree width / (Tree + Flight Plan)   [bottom cols]
     };
+
+    // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autopilot").
+    // Every default reproduces the prior hardcoded behavior, so a missing settings.json (or
+    // any unset field) changes nothing. Persisted to ~/.agentmaster/settings.json, loaded at
+    // startup, and applied at two seams: the spawn recipe (Claude fields) and new-session
+    // creation (autopilot defaults are stamped onto the session's AutopilotState). These are
+    // GLOBAL defaults/backstops; per-session autopilot mode still lives in the Flight Plan.
+    struct AppSettings
+    {
+        // --- Claude sessions (spawn recipe; see ClaudeSpawn) ---
+        // ON  => spawn with --dangerously-skip-permissions (also skips the startup trust
+        //        dialog). OFF => no flag; the settings file instead carries the "other
+        //        variation" permissions.defaultMode:"default" (normal prompts + trust apply).
+        bool skipPermissions{ true };
+        // "" (As Is) => don't override the model. Else == what you'd type after `/model `
+        //  (e.g. "opus" / "sonnet" / a full id) -> emitted as the settings `model` key.
+        std::wstring model{};
+        // false => emit includeCoAuthoredBy:false (drop Claude's commit/PR co-author byline).
+        bool includeCoAuthoredBy{ true };
+
+        // --- Autopilot defaults stamped onto NEW sessions (not restored ones) ---
+        AutopilotMode defaultAutopilotMode{ AutopilotMode::Off };
+        uint32_t maxAutoSends{ 100 }; // runaway backstop
+        bool stopOnError{ true }; // pause a plan when a turn ends in error
+        bool pauseOnHumanInput{ true }; // suspend auto-send while the human is typing
+
+        // --- Behavior sugar ---
+        bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
+        std::wstring defaultLaunchDir{}; // "" => the Launch cwd box defaults to %USERPROFILE%
+    };
 }

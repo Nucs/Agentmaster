@@ -45,6 +45,8 @@ namespace winrt::TerminalApp::implementation
         void SetKillHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> close tab
         void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
+        void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
+        void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
 
         // IPaneContent
         winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
@@ -116,6 +118,15 @@ namespace winrt::TerminalApp::implementation
         void _CommitRename(); // apply the in-place editor's text to the session title
         void _CancelRename(); // discard the in-place editor (Esc)
         void _OnDeleteSession(const std::wstring& id); // confirm (ContentDialog) then kill
+        void _RequestKill(const std::wstring& id); // confirmBeforeKill ? confirm-then-kill : kill now
+
+        // Settings cog: an in-content modal overlay (NOT a ContentDialog — a text box inside a
+        // ContentDialog receives no keypresses in XAML Islands; see the _renameBox note). Built
+        // into the main visual tree so its TextBoxes work; shown/hidden by toggling Visibility.
+        void _BuildSettingsOverlay();
+        void _ShowSettings(); // populate controls from _appSettings, then reveal the overlay
+        void _HideSettings();
+        void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
 
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
@@ -125,6 +136,8 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _killHandler;
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
+        std::function<void(::Agentmaster::AppSettings)> _settingsSink;
+        ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
         bool _globalPaused{ false };
 
         std::wstring _selectedId;
@@ -147,6 +160,18 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
+        // ---- Settings overlay (the cog dialog) ----
+        winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setModel{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setIncludeCoAuthored{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setDefaultMode{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setMaxAutoSends{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setStopOnError{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;

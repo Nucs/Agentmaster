@@ -37,6 +37,8 @@ namespace Agentmaster
     SessionInfo SessionFromJson(const json::Value& v);
     json::Value ToJson(const PlanTemplate& t);
     PlanTemplate TemplateFromJson(const json::Value& v);
+    json::Value ToJson(const AppSettings& s);
+    AppSettings AppSettingsFromJson(const json::Value& v);
 
     // ---- whole-document (de)serialization (pure; testable) ----
     std::wstring SerializeSessions(const std::vector<SessionInfo>& sessions);
@@ -49,6 +51,9 @@ namespace Agentmaster
     // Manager-tab splitter geometry (pane sizes survive close/reopen). Deserialize clamps.
     std::wstring SerializeLayout(const ManagerLayout& layout);
     ManagerLayout DeserializeLayout(std::wstring_view text);
+    // Global app settings (the Settings cog). Deserialize falls back to per-field defaults.
+    std::wstring SerializeAppSettings(const AppSettings& settings);
+    AppSettings DeserializeAppSettings(std::wstring_view text);
 
     // ---- disk (state dir; best-effort) ----
     void SaveSessions(const std::vector<SessionInfo>& sessions);
@@ -59,6 +64,8 @@ namespace Agentmaster
     std::vector<std::wstring> LoadRecentDirs();
     void SaveLayout(const ManagerLayout& layout);
     ManagerLayout LoadLayout();
+    void SaveAppSettings(const AppSettings& settings);
+    AppSettings LoadAppSettings();
 
     // ---- templates: build + apply ----
     // Capture a session's current queue as a reusable template.

@@ -228,12 +228,17 @@ static void TestSpawnBuilders()
     CHECK(ToForwardSlashes(L"C:\\a\\b") == L"C:/a/b", "to forward slashes");
     CHECK(JsonEscape(L"a\"b\\c") == L"a\\\"b\\\\c", "json escape quote+backslash");
 
-    const auto cmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false);
-    CHECK(cmd == L"claude --dangerously-skip-permissions --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh)");
-    const auto rcmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true);
-    CHECK(rcmd == L"claude --dangerously-skip-permissions --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume)");
+    const auto cmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, true);
+    CHECK(cmd == L"claude --dangerously-skip-permissions --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh, bypass)");
+    const auto rcmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, true);
+    CHECK(rcmd == L"claude --dangerously-skip-permissions --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume, bypass)");
+    // skipPermissions OFF: no flag (the settings file pins permissions.defaultMode instead).
+    const auto cmdNB = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, false);
+    CHECK(cmdNB == L"claude --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh, no bypass)");
+    const auto rcmdNB = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, false);
+    CHECK(rcmdNB == L"claude --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume, no bypass)");
 
-    const auto json = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1");
+    const auto json = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1", L"", true, true);
     CHECK(json.find(L"\"hooks\"") != std::wstring::npos, "settings has hooks");
     CHECK(json.find(L"SessionStart") != std::wstring::npos, "settings has SessionStart");
     CHECK(json.find(L"UserPromptSubmit") != std::wstring::npos, "settings has UserPromptSubmit");
@@ -243,6 +248,15 @@ static void TestSpawnBuilders()
     CHECK(json.find(L"SessionEnd") != std::wstring::npos, "settings has SessionEnd");
     CHECK(json.find(L"-Event Stop") != std::wstring::npos, "settings wires -Event Stop");
     CHECK(json.find(L"C:/x/agentmaster-hook.ps1") != std::wstring::npos, "settings references forwarder");
+    // All-defaults (bypass on, model empty, co-authored on) => hooks-only, no extra keys.
+    CHECK(json.find(L"\"model\"") == std::wstring::npos, "default settings omit model");
+    CHECK(json.find(L"includeCoAuthoredBy") == std::wstring::npos, "default settings omit includeCoAuthoredBy");
+    CHECK(json.find(L"permissions") == std::wstring::npos, "bypass settings omit permissions.defaultMode");
+    // Non-default Claude fields are emitted; no-bypass pins permissions.defaultMode ("other variation").
+    const auto json2 = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1", L"sonnet", false, false);
+    CHECK(json2.find(L"\"model\": \"sonnet\"") != std::wstring::npos, "settings emit model when set");
+    CHECK(json2.find(L"\"includeCoAuthoredBy\": false") != std::wstring::npos, "settings emit includeCoAuthoredBy:false");
+    CHECK(json2.find(L"\"defaultMode\": \"default\"") != std::wstring::npos, "no-bypass pins permissions.defaultMode");
 
     const auto fwd = BuildForwarderScript();
     CHECK(fwd.find(L"NamedPipeClientStream") != std::wstring::npos, "forwarder uses NamedPipeClientStream");
@@ -532,6 +546,52 @@ static void TestManagerLayout()
     }
 }
 
+static void TestAppSettings()
+{
+    std::wprintf(L"App settings (the Settings cog):\n");
+
+    // Round-trip every field with non-default values.
+    {
+        AppSettings in;
+        in.skipPermissions = false;
+        in.model = L"opus";
+        in.includeCoAuthoredBy = false;
+        in.defaultAutopilotMode = AutopilotMode::Full;
+        in.maxAutoSends = 7;
+        in.stopOnError = false;
+        in.pauseOnHumanInput = false;
+        in.confirmBeforeKill = false;
+        in.defaultLaunchDir = L"K:/work";
+        const auto out = DeserializeAppSettings(SerializeAppSettings(in));
+        CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
+        CHECK(out.model == L"opus", "settings model round-trip");
+        CHECK(out.includeCoAuthoredBy == false, "settings includeCoAuthoredBy round-trip");
+        CHECK(out.defaultAutopilotMode == AutopilotMode::Full, "settings defaultAutopilotMode round-trip");
+        CHECK(out.maxAutoSends == 7u, "settings maxAutoSends round-trip");
+        CHECK(out.stopOnError == false, "settings stopOnError round-trip");
+        CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
+        CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
+        CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
+    }
+
+    // Empty / garbage -> all defaults (a missing settings.json must change nothing).
+    {
+        const auto out = DeserializeAppSettings(L"");
+        CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
+        CHECK(out.defaultAutopilotMode == AutopilotMode::Off && out.maxAutoSends == 100u, "settings autopilot defaults on empty");
+        const auto out2 = DeserializeAppSettings(L"not json");
+        CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
+    }
+
+    // A present subset is honored; the rest keep defaults.
+    {
+        const auto out = DeserializeAppSettings(L"{\"settings\":{\"model\":\"sonnet\",\"maxAutoSends\":3}}");
+        CHECK(out.model == L"sonnet", "settings present model honored");
+        CHECK(out.maxAutoSends == 3u, "settings present maxAutoSends honored");
+        CHECK(out.skipPermissions == true, "settings missing skipPermissions -> default");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -542,6 +602,7 @@ int wmain()
     TestScheduler();
     TestPersistence();
     TestManagerLayout();
+    TestAppSettings();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");

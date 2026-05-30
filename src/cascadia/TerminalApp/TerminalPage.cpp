@@ -697,6 +697,8 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        _appSettings = ::Agentmaster::LoadAppSettings(); // the Settings cog (per-field defaults if absent)
+
         _sessionRegistry = std::make_shared<::Agentmaster::SessionRegistry>();
 
         // Observer: record every state change to a log file (and the debugger). This is
@@ -764,7 +766,7 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::WriteBridgeDiscovery(pipeName);
             const auto stateDir = ::Agentmaster::AgentmasterStateDir();
-            const auto hookFiles = ::Agentmaster::MaterializeSharedHookFiles(stateDir);
+            const auto hookFiles = ::Agentmaster::MaterializeSharedHookFiles(stateDir, ::Agentmaster::LoadAppSettings());
             // Resolve real claude + author the shim BEFORE touching PATH (so it never finds
             // our own shim), then prepend the shim dir.
             const auto shimDir = ::Agentmaster::MaterializeClaudeShim(stateDir, hookFiles.first);
@@ -853,7 +855,7 @@ namespace winrt::TerminalApp::implementation
         // new conversation id. (Correctness Rule #6: restore == resume, never replay.)
         const bool wantResume = restored && !restored->id.empty() && ::Agentmaster::ClaudeConversationExists(restored->id);
         const std::wstring resumeId = wantResume ? restored->id : std::wstring{};
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId);
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings());
 
         // Child environment: CCMGR_SESSION_ID + CCMGR_HOOK_PIPE so hook events correlate
         // back to this session's registry record (HOOKS.md).
@@ -903,12 +905,36 @@ namespace winrt::TerminalApp::implementation
         info.state = ::Agentmaster::SessionState::Idle; // hooks re-establish the real state
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.pendingConfirmPromptId.clear();
+        if (!restored)
+        {
+            // A NEW session inherits the global Autopilot defaults from the cog; a restored one
+            // keeps its persisted AutopilotState (Correctness Rule #6).
+            info.autopilot.mode = _appSettings.defaultAutopilotMode;
+            info.autopilot.maxAutoSends = _appSettings.maxAutoSends;
+            info.autopilot.stopOnError = _appSettings.stopOnError;
+            info.autopilot.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+        }
         _sessionRegistry->Upsert(info);
 
         _sessionRegistry->SetInjector(spec.sessionId, [connection](const std::wstring& text) {
             const auto* begin = reinterpret_cast<const char16_t*>(text.data());
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
         });
+
+        // Eagerly start the connection so claude.exe runs even while this tab is unfocused.
+        // TermControl otherwise starts it lazily on the first non-zero layout
+        // (TermControl::_InitializeTerminal), so a background or restored tab would never spawn
+        // its process — no hooks fire and Autopilot has nothing to drive. _MakePane above already
+        // built the control+core, and ControlCore subscribes to the connection's output on
+        // construction, so the first frames are buffered and render when the tab is shown.
+        // MUST be AFTER Upsert + SetInjector: the SessionStart hook then finds THIS managed
+        // record instead of being mis-adopted as an external session (Rule #1/#3). TermControl
+        // skips its now-redundant Start via a NotConnected guard, so there is no double-start.
+        try
+        {
+            connection.Start();
+        }
+        CATCH_LOG();
 
         const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
         ::Agentmaster::AppendStateLog(L"hooks.log",
@@ -982,6 +1008,23 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_scheduler->Confirm(std::wstring{ id }, confirm);
                 }
+            }
+        });
+        // Settings cog: seed the dialog with the loaded settings, and persist + apply on Save.
+        content->SetSettings(_appSettings);
+        content->SetSettingsHandler([weakThis](::Agentmaster::AppSettings s) {
+            if (auto self = weakThis.get())
+            {
+                self->_appSettings = s;
+                ::Agentmaster::SaveAppSettings(s);
+                // Re-materialize the shared --settings file so model / co-authored-by /
+                // permission-mode changes also reach an adopted hand-typed `claude` (the PATH
+                // shim points at this file). Fresh spawns rebuild it from settings regardless.
+                try
+                {
+                    ::Agentmaster::MaterializeSharedHookFiles(::Agentmaster::AgentmasterStateDir(), s);
+                }
+                CATCH_LOG();
             }
         });
     }

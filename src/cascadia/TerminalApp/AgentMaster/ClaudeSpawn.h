@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "SessionModels.h" // AppSettings (spawn reads the Claude-session settings)
+
 namespace Agentmaster
 {
     struct ClaudeSpawnSpec
@@ -48,17 +50,23 @@ namespace Agentmaster
     // then writes one wire line to the pipe. `-Event <Name>` selects the event.
     std::wstring BuildForwarderScript();
 
-    // The Claude hooks settings JSON wiring each consumed event to the forwarder.
+    // The Claude settings JSON: always wires each consumed hook event to the forwarder, and
+    // additionally carries the optional Claude-session settings the user sets via the cog:
+    //   * model              -> emits "model": "<v>"            (only when non-empty)
+    //   * includeCoAuthoredBy -> emits "includeCoAuthoredBy": false (only when false)
+    //   * skipPermissions    -> when FALSE, emits "permissions": { "defaultMode": "default" }
+    //                           (the "other variation"; when TRUE the CLI flag handles bypass)
     // `forwarderPath` should already be in a JSON-friendly (forward-slash) form.
-    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath);
+    std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions);
 
     // Assemble the claude command line. `settingsPath` should be forward-slash form.
-    // Always includes --dangerously-skip-permissions: the app gates risk via its own Approval
-    // Policy, and `bypassPermissions` mode also skips the startup "trust this folder" dialog
-    // that would otherwise wedge an unattended ConPTY session (see ClaudeSpawn.cpp).
-    // resume=false: a fresh session  -> claude --dangerously-skip-permissions --settings "<f>" --session-id <id>
-    // resume=true : resume an existing conversation -> claude --dangerously-skip-permissions --resume <id> --settings "<f>"
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume);
+    // `skipPermissions` ON => prepend --dangerously-skip-permissions (the app gates risk via
+    // its own Approval Policy, and `bypassPermissions` mode also skips the startup "trust this
+    // folder" dialog that would otherwise wedge an unattended ConPTY session). OFF => no flag
+    // (BuildHooksSettingsJson then carries permissions.defaultMode:"default" instead).
+    // resume=false: claude [--dangerously-skip-permissions] --settings "<f>" --session-id <id>
+    // resume=true : claude [--dangerously-skip-permissions] --resume <id> --settings "<f>"
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions);
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
@@ -87,7 +95,7 @@ namespace Agentmaster
     // so they always match the running build). Returns {settingsPath, forwarderPath} in
     // backslash form. Throws nothing meaningful for the caller; returns empty paths on I/O
     // failure.
-    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir);
+    std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings);
 
     // Resolve the real `claude` launcher on PATH (searched as claude.exe/.cmd/.bat, in that
     // order). MUST be called BEFORE the shim dir is prepended to PATH so it never resolves to
@@ -111,5 +119,5 @@ namespace Agentmaster
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh
     // id is generated. The id is always exported as CCMGR_SESSION_ID for hook correlation.
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId = L"");
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings);
 }

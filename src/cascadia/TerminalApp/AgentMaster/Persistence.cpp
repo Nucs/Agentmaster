@@ -352,6 +352,36 @@ namespace Agentmaster
         return t;
     }
 
+    json::Value ToJson(const AppSettings& s)
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"skipPermissions", json::Value::MkBool(s.skipPermissions));
+        o.Set(L"model", json::Value::MkStr(s.model));
+        o.Set(L"includeCoAuthoredBy", json::Value::MkBool(s.includeCoAuthoredBy));
+        o.Set(L"defaultAutopilotMode", json::Value::MkStr(ToString(s.defaultAutopilotMode)));
+        o.Set(L"maxAutoSends", json::Value::MkNum(s.maxAutoSends));
+        o.Set(L"stopOnError", json::Value::MkBool(s.stopOnError));
+        o.Set(L"pauseOnHumanInput", json::Value::MkBool(s.pauseOnHumanInput));
+        o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
+        o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
+        return o;
+    }
+
+    AppSettings AppSettingsFromJson(const json::Value& v)
+    {
+        AppSettings s; // any missing field keeps the struct default (== prior hardcoded behavior)
+        s.skipPermissions = v.BoolAt(L"skipPermissions", true);
+        s.model = v.StrAt(L"model");
+        s.includeCoAuthoredBy = v.BoolAt(L"includeCoAuthoredBy", true);
+        s.defaultAutopilotMode = AutopilotModeFromString(v.StrAt(L"defaultAutopilotMode", L"Off"));
+        s.maxAutoSends = v.U32At(L"maxAutoSends", 100);
+        s.stopOnError = v.BoolAt(L"stopOnError", true);
+        s.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);
+        s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
+        s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
+        return s;
+    }
+
     // ---- whole document ----
 
     std::wstring SerializeSessions(const std::vector<SessionInfo>& sessions)
@@ -477,6 +507,29 @@ namespace Agentmaster
         return layout;
     }
 
+    std::wstring SerializeAppSettings(const AppSettings& settings)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        root.Set(L"settings", ToJson(settings));
+        return json::Dump(root);
+    }
+
+    AppSettings DeserializeAppSettings(std::wstring_view text)
+    {
+        AppSettings s; // defaults stand in for a missing/corrupt file or field
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return s;
+        }
+        if (const auto* o = parsed->Find(L"settings"); o && o->type == json::Value::Type::Obj)
+        {
+            s = AppSettingsFromJson(*o);
+        }
+        return s;
+    }
+
     // ---- disk ----
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
@@ -510,6 +563,14 @@ namespace Agentmaster
     ManagerLayout LoadLayout()
     {
         return DeserializeLayout(ReadAllUtf8(AgentmasterStateDir() + L"\\layout.json"));
+    }
+    void SaveAppSettings(const AppSettings& settings)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\settings.json", SerializeAppSettings(settings));
+    }
+    AppSettings LoadAppSettings()
+    {
+        return DeserializeAppSettings(ReadAllUtf8(AgentmasterStateDir() + L"\\settings.json"));
     }
 
     // ---- templates apply ----

@@ -1403,8 +1403,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             {
                 _restoreInBackground();
             }
-            else
+            else if (_core.Connection().State() == TerminalConnection::ConnectionState::NotConnected)
             {
+                // Agentmaster: a managed session may have been started eagerly at launch (so a
+                // background/restored tab's claude.exe runs without waiting to be focused). Only
+                // start here if nobody has yet — Start() is not re-entrant; a second call would
+                // transition the connection to Failed.
                 _core.Connection().Start();
             }
         }

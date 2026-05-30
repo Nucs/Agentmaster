@@ -389,6 +389,20 @@ namespace winrt::TerminalApp::implementation
     {
         _confirmHandler = std::move(handler);
     }
+    void AgentManagerContent::SetSettings(const ::Agentmaster::AppSettings& settings)
+    {
+        _appSettings = settings;
+        // Seed the Launch cwd box with the configured default (wiring runs after _BuildLayout,
+        // which had defaulted the box to %USERPROFILE%). Only override when a default is set.
+        if (_cwdBox && !settings.defaultLaunchDir.empty())
+        {
+            _cwdBox.Text(winrt::hstring{ settings.defaultLaunchDir });
+        }
+    }
+    void AgentManagerContent::SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler)
+    {
+        _settingsSink = std::move(handler);
+    }
 
     // ---- IPaneContent -------------------------------------------------------
 
@@ -581,6 +595,18 @@ namespace winrt::TerminalApp::implementation
             });
             bar.Children().Append(_pauseBtn);
 
+            // Settings cog (opens the in-content settings overlay; built at the end of layout).
+            _settingsBtn = Button{};
+            {
+                FontIcon cog;
+                cog.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+                cog.Glyph(L"\xE713"); // Settings (cog)
+                _settingsBtn.Content(cog);
+            }
+            ToolTipService::SetToolTip(_settingsBtn, winrt::box_value(L"Settings"));
+            _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
+            bar.Children().Append(_settingsBtn);
+
             Grid::SetRow(bar, 0);
             _root.Children().Append(bar);
         }
@@ -723,9 +749,9 @@ namespace winrt::TerminalApp::implementation
                     }
                 }));
                 btnRow.Children().Append(mkBtn(L"Kill", [this]() {
-                    if (_killHandler && !_selectedId.empty())
+                    if (!_selectedId.empty())
                     {
-                        _killHandler(winrt::hstring{ _selectedId });
+                        _RequestKill(_selectedId);
                     }
                 }));
                 actions.Children().Append(btnRow);
@@ -817,6 +843,8 @@ namespace winrt::TerminalApp::implementation
             Grid::SetRow(_pathPopup, 0);
             _root.Children().Append(_pathPopup);
         }
+
+        _BuildSettingsOverlay(); // modal settings layer, appended last so it renders on top
     }
 
     // ---- Refresh / rebuild --------------------------------------------------
@@ -1306,7 +1334,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     else if (key == VirtualKey::Delete)
                     {
-                        _OnDeleteSession(id);
+                        _RequestKill(id);
                         e.Handled(true);
                     }
                     else if (key == VirtualKey::F2)
@@ -1461,6 +1489,243 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
         }
+    }
+
+    void AgentManagerContent::_RequestKill(const std::wstring& id)
+    {
+        if (id.empty())
+        {
+            return;
+        }
+        if (_appSettings.confirmBeforeKill)
+        {
+            _OnDeleteSession(id); // confirm dialog, then kill on accept
+        }
+        else if (_killHandler)
+        {
+            _killHandler(winrt::hstring{ id });
+        }
+    }
+
+    void AgentManagerContent::_BuildSettingsOverlay()
+    {
+        // A dimmed, full-bleed modal layer over the whole Manager. Deliberately NOT a
+        // ContentDialog: a text box inside a ContentDialog gets no keypresses in XAML Islands
+        // (see the _renameBox note), and this surface has free-text fields (model, dir, count).
+        // Living in the main visual tree, its TextBoxes behave normally.
+        _settingsOverlay = Grid{};
+        _settingsOverlay.Visibility(Visibility::Collapsed);
+        _settingsOverlay.Background(SolidColorBrush{ ColorHelper::FromArgb(0xA0, 0x00, 0x00, 0x00) });
+        Grid::SetRow(_settingsOverlay, 0);
+        Grid::SetRowSpan(_settingsOverlay, 99); // cover every row of _root regardless of count
+        Grid::SetColumnSpan(_settingsOverlay, 99);
+        // Click on the backdrop = Cancel; the card swallows taps so inside-clicks don't close.
+        _settingsOverlay.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+            _HideSettings();
+        });
+
+        auto card = Border{};
+        card.Background(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x25, 0x25, 0x25) });
+        card.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x90, 0x80, 0x80, 0x80) });
+        card.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
+        card.Padding(Thickness{ 20, 16, 20, 16 });
+        card.Width(460);
+        card.HorizontalAlignment(HorizontalAlignment::Center);
+        card.VerticalAlignment(VerticalAlignment::Center);
+        card.RequestedTheme(ElementTheme::Dark);
+        card.Tapped([](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& e) {
+            e.Handled(true);
+        });
+
+        auto panel = StackPanel{};
+        panel.Spacing(10);
+        panel.Children().Append(Text(L"Agentmaster Settings", 18, true, 1.0));
+
+        // CLAUDE SESSIONS
+        panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
+        _setSkipPermissions = ToggleSwitch{};
+        _setSkipPermissions.Header(winrt::box_value(L"Skip permission prompts (bypass)"));
+        panel.Children().Append(_setSkipPermissions);
+        _setModel = TextBox{};
+        _setModel.Header(winrt::box_value(L"Model"));
+        _setModel.PlaceholderText(L"As Is \x2014 blank keeps Claude's default (e.g. opus / sonnet)");
+        panel.Children().Append(_setModel);
+        _setIncludeCoAuthored = ToggleSwitch{};
+        _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
+        panel.Children().Append(_setIncludeCoAuthored);
+
+        // AUTOPILOT
+        panel.Children().Append(Text(L"AUTOPILOT (defaults for new sessions)", 11, true, 0.6));
+        _setDefaultMode = ComboBox{};
+        _setDefaultMode.Header(winrt::box_value(L"New-session mode"));
+        _setDefaultMode.Items().Append(winrt::box_value(L"Off"));
+        _setDefaultMode.Items().Append(winrt::box_value(L"SemiAuto"));
+        _setDefaultMode.Items().Append(winrt::box_value(L"Full"));
+        panel.Children().Append(_setDefaultMode);
+        _setMaxAutoSends = TextBox{};
+        _setMaxAutoSends.Header(winrt::box_value(L"Max auto-sends per run"));
+        _setMaxAutoSends.PlaceholderText(L"100");
+        panel.Children().Append(_setMaxAutoSends);
+        _setStopOnError = ToggleSwitch{};
+        _setStopOnError.Header(winrt::box_value(L"Stop on error"));
+        panel.Children().Append(_setStopOnError);
+        _setPauseOnHuman = ToggleSwitch{};
+        _setPauseOnHuman.Header(winrt::box_value(L"Pause on human input"));
+        panel.Children().Append(_setPauseOnHuman);
+
+        // BEHAVIOR
+        panel.Children().Append(Text(L"BEHAVIOR", 11, true, 0.6));
+        _setConfirmKill = ToggleSwitch{};
+        _setConfirmKill.Header(winrt::box_value(L"Confirm before killing a session"));
+        panel.Children().Append(_setConfirmKill);
+        _setLaunchDir = TextBox{};
+        _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
+        _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
+        panel.Children().Append(_setLaunchDir);
+
+        // Cancel / Save
+        auto buttons = StackPanel{};
+        buttons.Orientation(Orientation::Horizontal);
+        buttons.HorizontalAlignment(HorizontalAlignment::Right);
+        buttons.Spacing(8);
+        buttons.Margin(Thickness{ 0, 8, 0, 0 });
+        auto cancel = Button{};
+        cancel.Content(winrt::box_value(L"Cancel"));
+        cancel.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideSettings(); });
+        auto save = Button{};
+        save.Content(winrt::box_value(L"Save"));
+        save.Click([this](const IInspectable&, const RoutedEventArgs&) { _SaveSettings(); });
+        buttons.Children().Append(cancel);
+        buttons.Children().Append(save);
+        panel.Children().Append(buttons);
+
+        auto scroll = ScrollViewer{};
+        scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        scroll.MaxHeight(560);
+        scroll.Content(panel);
+        card.Child(scroll);
+
+        _settingsOverlay.Children().Append(card);
+        _root.Children().Append(_settingsOverlay);
+    }
+
+    void AgentManagerContent::_ShowSettings()
+    {
+        if (!_settingsOverlay)
+        {
+            return;
+        }
+        // Populate every control from the current settings before revealing.
+        if (_setSkipPermissions)
+        {
+            _setSkipPermissions.IsOn(_appSettings.skipPermissions);
+        }
+        if (_setModel)
+        {
+            _setModel.Text(winrt::hstring{ _appSettings.model });
+        }
+        if (_setIncludeCoAuthored)
+        {
+            _setIncludeCoAuthored.IsOn(_appSettings.includeCoAuthoredBy);
+        }
+        if (_setDefaultMode)
+        {
+            _setDefaultMode.SelectedIndex(_appSettings.defaultAutopilotMode == AutopilotMode::Full ? 2 :
+                                          _appSettings.defaultAutopilotMode == AutopilotMode::SemiAuto ? 1 :
+                                                                                                         0);
+        }
+        if (_setMaxAutoSends)
+        {
+            _setMaxAutoSends.Text(winrt::hstring{ std::to_wstring(_appSettings.maxAutoSends) });
+        }
+        if (_setStopOnError)
+        {
+            _setStopOnError.IsOn(_appSettings.stopOnError);
+        }
+        if (_setPauseOnHuman)
+        {
+            _setPauseOnHuman.IsOn(_appSettings.pauseOnHumanInput);
+        }
+        if (_setConfirmKill)
+        {
+            _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
+        }
+        if (_setLaunchDir)
+        {
+            _setLaunchDir.Text(winrt::hstring{ _appSettings.defaultLaunchDir });
+        }
+        _settingsOverlay.Visibility(Visibility::Visible);
+    }
+
+    void AgentManagerContent::_HideSettings()
+    {
+        if (_settingsOverlay)
+        {
+            _settingsOverlay.Visibility(Visibility::Collapsed);
+        }
+    }
+
+    void AgentManagerContent::_SaveSettings()
+    {
+        if (_setSkipPermissions)
+        {
+            _appSettings.skipPermissions = _setSkipPermissions.IsOn();
+        }
+        if (_setModel)
+        {
+            std::wstring m{ _setModel.Text() };
+            const auto a = m.find_first_not_of(L" \t");
+            const auto b = m.find_last_not_of(L" \t");
+            _appSettings.model = (a == std::wstring::npos) ? std::wstring{} : m.substr(a, b - a + 1);
+        }
+        if (_setIncludeCoAuthored)
+        {
+            _appSettings.includeCoAuthoredBy = _setIncludeCoAuthored.IsOn();
+        }
+        if (_setDefaultMode)
+        {
+            const int idx = _setDefaultMode.SelectedIndex();
+            _appSettings.defaultAutopilotMode = idx == 2 ? AutopilotMode::Full : idx == 1 ? AutopilotMode::SemiAuto :
+                                                                                            AutopilotMode::Off;
+        }
+        if (_setMaxAutoSends)
+        {
+            const std::wstring t{ _setMaxAutoSends.Text() };
+            uint32_t v = 0;
+            bool any = false;
+            for (const wchar_t c : t)
+            {
+                if (c >= L'0' && c <= L'9')
+                {
+                    v = v * 10 + static_cast<uint32_t>(c - L'0');
+                    any = true;
+                }
+            }
+            _appSettings.maxAutoSends = (any && v > 0) ? v : 100; // empty/zero/garbage -> default backstop
+        }
+        if (_setStopOnError)
+        {
+            _appSettings.stopOnError = _setStopOnError.IsOn();
+        }
+        if (_setPauseOnHuman)
+        {
+            _appSettings.pauseOnHumanInput = _setPauseOnHuman.IsOn();
+        }
+        if (_setConfirmKill)
+        {
+            _appSettings.confirmBeforeKill = _setConfirmKill.IsOn();
+        }
+        if (_setLaunchDir)
+        {
+            _appSettings.defaultLaunchDir = std::wstring{ _setLaunchDir.Text() };
+        }
+        if (_settingsSink)
+        {
+            _settingsSink(_appSettings); // page persists + applies to future spawns
+        }
+        _HideSettings();
     }
 
     void AgentManagerContent::_RebuildPlan(const std::vector<SessionInfo>& sessions)
