@@ -270,14 +270,18 @@ namespace
         return b.substr(0, pos);
     }
 
-    // The immediate subdirectories of `dir` (leaf names only), case-insensitively sorted.
-    // Skips ".", "..", and SYSTEM dirs (e.g. $Recycle.Bin, System Volume Information).
+    // The immediate subdirectories of `dir` (leaf names only), most-recently-MODIFIED first
+    // (the folder's last-write FILETIME, newest at the top — the Explorer "Date modified" sort
+    // order, which surfaces the directories you've touched lately). Each leaf is paired with
+    // its 64-bit FILETIME so the sort is a cheap integer compare; equal timestamps fall back to
+    // a case-insensitive name sort so the order stays stable. Skips ".", "..", and SYSTEM dirs
+    // (e.g. $Recycle.Bin, System Volume Information).
     std::vector<std::wstring> EnumSubdirs(const std::wstring& dir)
     {
-        std::vector<std::wstring> out;
+        std::vector<std::pair<std::wstring, unsigned long long>> items;
         if (dir.empty())
         {
-            return out;
+            return {};
         }
         std::wstring pattern = dir;
         while (pattern.size() > 3 && (pattern.back() == L'\\' || pattern.back() == L'/'))
@@ -294,7 +298,7 @@ namespace
         HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE)
         {
-            return out;
+            return {};
         }
         do
         {
@@ -311,13 +315,27 @@ namespace
             {
                 continue;
             }
-            out.push_back(name);
+            const unsigned long long mtime =
+                (static_cast<unsigned long long>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                static_cast<unsigned long long>(fd.ftLastWriteTime.dwLowDateTime);
+            items.emplace_back(name, mtime);
         } while (::FindNextFileW(h, &fd));
         ::FindClose(h);
 
-        std::sort(out.begin(), out.end(), [](const std::wstring& a, const std::wstring& b) {
-            return ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+        std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+            if (a.second != b.second)
+            {
+                return a.second > b.second; // newest (largest FILETIME) first
+            }
+            return ::CompareStringOrdinal(a.first.c_str(), -1, b.first.c_str(), -1, TRUE) == CSTR_LESS_THAN;
         });
+
+        std::vector<std::wstring> out;
+        out.reserve(items.size());
+        for (auto& it : items)
+        {
+            out.push_back(std::move(it.first));
+        }
         return out;
     }
 }
@@ -514,19 +532,56 @@ namespace winrt::TerminalApp::implementation
             // Path-picker drop-down. Open it only on *user* focus (Pointer/Keyboard) so the
             // dropdown doesn't pop every time the tab is programmatically activated.
             _cwdBox.GotFocus([this](const IInspectable&, const RoutedEventArgs&) {
-                if (_cwdBox)
+                if (!_cwdBox)
                 {
-                    const auto fs = _cwdBox.FocusState();
-                    if (fs == FocusState::Pointer || fs == FocusState::Keyboard)
-                    {
-                        _OpenPathPicker();
-                    }
+                    return;
+                }
+                // (Re)focusing the box clears any prior Esc/Enter/blur dismissal, so the next
+                // keystroke brings the list back; when the focus itself came from the user
+                // (pointer/keyboard) open it right away.
+                _pathPickerUserDismissed = false;
+                const auto fs = _cwdBox.FocusState();
+                if (fs == FocusState::Pointer || fs == FocusState::Keyboard)
+                {
+                    _OpenPathPicker();
+                }
+            });
+            // Clicking back into an ALREADY-focused box fires no GotFocus, so a tap also re-shows
+            // a previously dismissed picker (open only if needed; a tap is not a drag, so it
+            // won't fight text selection).
+            _cwdBox.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+                if (!_cwdBox)
+                {
+                    return;
+                }
+                _pathPickerUserDismissed = false;
+                if (!_pathPopup || !_pathPopup.IsOpen())
+                {
+                    _OpenPathPicker();
                 }
             });
             _cwdBox.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
+                if (!_cwdBox)
+                {
+                    return;
+                }
+                // Typing should ALWAYS surface the list. The prior version only refreshed an
+                // already-open popup, so whenever the box held focus while the popup was closed
+                // (focus arrived programmatically, a stray LostFocus closed it, etc.) typing
+                // showed nothing — exactly the reported "list doesn't show" symptom. Now we
+                // reopen when closed and refresh when open. The lone exception is an explicit
+                // Esc/Enter dismissal, which sticks until the box is refocused or tapped.
+                if (_cwdBox.FocusState() == FocusState::Unfocused || _pathPickerUserDismissed)
+                {
+                    return;
+                }
                 if (_pathPopup && _pathPopup.IsOpen())
                 {
                     _RebuildPathPicker();
+                }
+                else
+                {
+                    _OpenPathPicker();
                 }
             });
             // Close only when focus truly left (not when a row button briefly takes it):
@@ -550,8 +605,9 @@ namespace winrt::TerminalApp::implementation
                             return; // regained focus (e.g. after clicking a row) — leave it alone
                         }
                         // Focus truly left the box: close the picker (if open) and normalize
-                        // what's there. Closing first means the normalize's TextChanged won't
-                        // bother rebuilding the (now-closed) picker.
+                        // what's there. Mark it dismissed so the normalize's TextChanged won't
+                        // reopen the (now-closed) picker; refocusing/tapping the box clears it.
+                        self->_pathPickerUserDismissed = true;
                         self->_ClosePathPicker();
                         self->_NormalizeCwdBox();
                     });
@@ -562,12 +618,14 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (_pathPopup && _pathPopup.IsOpen())
                     {
+                        _pathPickerUserDismissed = true; // stays dismissed until refocus/tap
                         _ClosePathPicker();
                         e.Handled(true);
                     }
                 }
                 else if (e.Key() == VirtualKey::Enter)
                 {
+                    _pathPickerUserDismissed = true; // committing dismisses; keep normalize from reopening it
                     _ClosePathPicker();
                     _NormalizeCwdBox(); // commit: normalize what the user typed
                 }
@@ -824,6 +882,7 @@ namespace winrt::TerminalApp::implementation
             sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
             sv.MaxHeight(380);
             sv.AllowFocusOnInteraction(false); // scrollbar drags mustn't steal focus from the box either
+            sv.IsTabStop(false); // ...and the scroll viewer must never become the focused element itself
             sv.Content(_pathListHost);
 
             _pathPanelBorder = Border{};
@@ -2308,6 +2367,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        _pathPickerUserDismissed = false; // opening clears the dismiss latch
         if (_pathPanelBorder)
         {
             _pathPanelBorder.Width(std::max<double>(380.0, _cwdBox.ActualWidth()));

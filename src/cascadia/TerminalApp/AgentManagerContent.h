@@ -157,6 +157,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _pathPanelBorder{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _pathListHost{ nullptr };
         std::vector<std::wstring> _recentDirs; // MRU of launched working dirs (persisted)
+        bool _pathPickerUserDismissed{ false }; // Esc/Enter/blur dismiss the picker; (re)focusing/tapping the box clears it
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
