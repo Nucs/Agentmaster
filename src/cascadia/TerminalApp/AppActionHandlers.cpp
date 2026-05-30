@@ -11,6 +11,7 @@
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "Utils.h"
 #include "AgentMaster/Engine.h" // Agentmaster (M10): RecoverableWindows (the "Reopen Windows" recover button)
+#include "AgentMaster/ClaudeSpawn.h" // Agentmaster (M10): AppendStateLog (reopen diagnostics)
 
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
 using namespace winrt::Windows::UI::Xaml;
@@ -948,15 +949,34 @@ namespace winrt::TerminalApp::implementation
     // already pairs each not-open record with that index, so we just dispatch one wt per entry.
     safe_void_coroutine TerminalPage::_ReopenSavedWindows()
     {
-        // Compute the recoverable set on the UI thread (a consistent snapshot of records-minus-live).
-        auto recoverable = ::Agentmaster::RecoverableWindows();
+        // Everything before the first co_await runs on the UI thread; a throw here would escape into
+        // the ContentDialog button-click handler and, because this is a safe_void_coroutine
+        // (suspend_never initial-suspend), land in its unhandled_exception -> assert(false) in Debug.
+        // So guard the prep explicitly and never let it throw.
+        std::vector<::Agentmaster::RecoverableWindow> recoverable;
+        try
+        {
+            // Consistent snapshot of records-minus-live (the not-currently-open windows to reopen).
+            recoverable = ::Agentmaster::RecoverableWindows();
+        }
+        CATCH_LOG();
+
+        // Our package registers the `agentmaster.exe` execution alias (Package-Dev.appxmanifest);
+        // GetWtExePath() assumes a wt.exe/wtd.exe alias and returns a NON-EXISTENT <PFN>\wt.exe (so the
+        // ShellExecute would silently no-op — the original bug). ShellExecute the alias BY NAME: the
+        // alias dir (%LOCALAPPDATA%\Microsoft\WindowsApps) is on PATH, and ShellExecuteExW resolves it
+        // + follows the APPEXECLINK reparse to our packaged app; the single-instance handoff then routes
+        // `-s <idx>` back to the running Emperor (verified: claims the record + restores its geometry).
+        // Launch by NAME, NOT the full reparse-point path — a full-path launch can bypass the alias
+        // resolution and cascade a fresh, record-less window instead.
+        const std::wstring exePath = L"agentmaster.exe";
+
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[reopen] recoverable=" + std::to_wstring(recoverable.size()) + L" exe=" + exePath + L"\n");
         if (recoverable.empty())
         {
             co_return;
         }
-
-        // GetWtExePath() must be read into a local before ShellExecute mangles it (see _OpenNewWindow).
-        const auto exePath{ GetWtExePath() };
 
         // ShellExecuteExW may block, so dispatch from a background thread (NOTE: don't touch `this`
         // past here — everything below is local, mirroring _OpenNewWindow).
@@ -964,18 +984,25 @@ namespace winrt::TerminalApp::implementation
 
         for (const auto& rw : recoverable)
         {
-            // `-w -1` forces a brand-new window; `-s <idx>` is the global persisted-layout index our
-            // TerminalWindow/TerminalPage read to restore geometry + claim the record by id.
-            const std::wstring cmdline = L"-w -1 -s " + std::to_wstring(rw.index);
+            try
+            {
+                // `-w -1` forces a brand-new window; `-s <idx>` is the global persisted-layout index our
+                // TerminalWindow/TerminalPage read to restore geometry + claim the record by id. The
+                // single-instance handoff routes this back to the running Emperor -> the same reopen path.
+                const std::wstring cmdline = L"-w -1 -s " + std::to_wstring(rw.index);
 
-            SHELLEXECUTEINFOW seInfo{ 0 };
-            seInfo.cbSize = sizeof(seInfo);
-            seInfo.fMask = SEE_MASK_NOASYNC;
-            seInfo.lpVerb = L"open";
-            seInfo.lpFile = exePath.c_str();
-            seInfo.lpParameters = cmdline.c_str();
-            seInfo.nShow = SW_SHOWNORMAL;
-            LOG_IF_WIN32_BOOL_FALSE(ShellExecuteExW(&seInfo));
+                SHELLEXECUTEINFOW seInfo{ 0 };
+                seInfo.cbSize = sizeof(seInfo);
+                seInfo.fMask = SEE_MASK_NOASYNC;
+                seInfo.lpVerb = L"open";
+                seInfo.lpFile = exePath.c_str();
+                seInfo.lpParameters = cmdline.c_str();
+                seInfo.nShow = SW_SHOWNORMAL;
+                const auto ok = ShellExecuteExW(&seInfo);
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[reopen] dispatch -s " + std::to_wstring(rw.index) + L" ok=" + (ok ? std::wstring{ L"1" } : std::wstring{ L"0" }) + L"\n");
+            }
+            CATCH_LOG();
         }
 
         co_return;
