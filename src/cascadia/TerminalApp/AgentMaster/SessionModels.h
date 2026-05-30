@@ -127,6 +127,12 @@ namespace Agentmaster
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
         bool lastMessageWasQuestion{ false };
+        // Transient (NOT persisted): the latest assistant message text the interval reconciler
+        // (SessionScanner) tailed from this session's transcript. Hooks don't carry assistant
+        // output — this captures it (the foundation for a live Flight-Plan "peek"). Written via
+        // the registry's QUIET path so streaming text never triggers a persist/UI/scheduler
+        // cascade. Empty until the scanner reads a transcript line.
+        std::wstring lastAssistantText;
         // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
         // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
         std::wstring pendingConfirmPromptId;

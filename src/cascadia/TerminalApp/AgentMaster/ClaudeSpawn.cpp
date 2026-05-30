@@ -331,11 +331,11 @@ try {
         return std::wstring{ buf };
     }
 
-    bool ClaudeConversationExists(std::wstring_view sessionId)
+    std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId)
     {
         if (sessionId.empty())
         {
-            return false;
+            return {};
         }
         // Claude stores transcripts under <config>/projects/<encoded-cwd>/<session-id>.jsonl.
         // The config dir is CLAUDE_CONFIG_DIR if set, else ~/.claude.
@@ -345,7 +345,7 @@ try {
             const std::wstring home = GetEnvW(L"USERPROFILE");
             if (home.empty())
             {
-                return false;
+                return {};
             }
             base = home + L"\\.claude";
         }
@@ -359,9 +359,9 @@ try {
         HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE)
         {
-            return false;
+            return {};
         }
-        bool found = false;
+        std::wstring found;
         do
         {
             if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
@@ -377,12 +377,17 @@ try {
             const DWORD attr = ::GetFileAttributesW(candidate.c_str());
             if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
             {
-                found = true;
+                found = candidate;
                 break;
             }
         } while (::FindNextFileW(h, &fd));
         ::FindClose(h);
         return found;
+    }
+
+    bool ClaudeConversationExists(std::wstring_view sessionId)
+    {
+        return !ResolveClaudeTranscriptPath(sessionId).empty();
     }
 
     std::wstring AgentmasterStateDir()

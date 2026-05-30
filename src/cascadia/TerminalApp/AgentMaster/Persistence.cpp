@@ -8,8 +8,11 @@
 
 #include <windows.h>
 
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <unordered_set>
 
 namespace
 {
@@ -752,6 +755,258 @@ namespace Agentmaster
     std::vector<std::wstring> LoadRecentDirs()
     {
         return DeserializeRecentDirs(ReadAllUtf8(AgentmasterStateDir() + L"\\recent-dirs.json"));
+    }
+
+    // ===== Tab naming + per-directory color (Agentmaster) =====
+
+    namespace
+    {
+        std::wstring LowerCopy(std::wstring s)
+        {
+            for (auto& c : s)
+            {
+                c = static_cast<wchar_t>(std::towlower(static_cast<wint_t>(c)));
+            }
+            return s;
+        }
+
+        // Strip trailing path separators ('/' or '\\') but keep a bare root ("C:\\" / "/").
+        std::wstring StripTrailingSep(std::wstring s)
+        {
+            while (s.size() > 1 && (s.back() == L'\\' || s.back() == L'/'))
+            {
+                if (s.size() == 3 && s[1] == L':')
+                {
+                    break; // "C:\" — keep the root separator
+                }
+                s.pop_back();
+            }
+            return s;
+        }
+
+        // dir-colors.json is read-modify-written; one process (M9) but many window threads.
+        std::mutex g_dirColorMtx;
+    }
+
+    bool IsGenericDirName(const std::wstring& segment)
+    {
+        // Top-20 generic build/output/dependency/structural folder names (compared case-folded).
+        static const std::unordered_set<std::wstring> kGeneric = {
+            L"bin", L"obj", L"debug", L"release", L"build", L"out", L"dist", L"target",
+            L"publish", L"bld", L"x64", L"x86", L"win32", L"arm64", L"node_modules",
+            L"packages", L"src", L"lib", L"temp", L"tmp",
+        };
+        return kGeneric.find(LowerCopy(segment)) != kGeneric.end();
+    }
+
+    std::wstring DeriveSessionTitle(const std::wstring& workingDir)
+    {
+        std::wstring base;
+        try
+        {
+            // Walk up from the leaf to the first non-generic segment (K:\proj\bin\Debug -> "proj").
+            std::filesystem::path cur{ StripTrailingSep(workingDir) };
+            while (!cur.empty())
+            {
+                const std::wstring leaf = cur.filename().wstring();
+                if (!leaf.empty() && leaf != L"." && leaf != L".." && !IsGenericDirName(leaf))
+                {
+                    base = leaf;
+                    break;
+                }
+                const auto parent = cur.parent_path();
+                if (parent.empty() || parent == cur)
+                {
+                    break; // reached the root with nothing but generic segments
+                }
+                cur = parent;
+            }
+            if (base.empty())
+            {
+                // All-generic (or rootless) -> fall back to the actual leaf.
+                base = std::filesystem::path{ StripTrailingSep(workingDir) }.filename().wstring();
+            }
+        }
+        catch (...)
+        {
+        }
+        if (base.empty())
+        {
+            base = L"claude";
+        }
+
+        // Display rules by length/case.
+        if (base.size() <= 16)
+        {
+            return base; // short -> as-is
+        }
+        bool allLower = true;
+        for (const wchar_t c : base)
+        {
+            if (std::iswupper(static_cast<wint_t>(c)))
+            {
+                allLower = false;
+                break;
+            }
+        }
+        if (!allLower)
+        {
+            // >16 and has capitals -> the capital letters only ("MyLongProjectName" -> "MLPN").
+            std::wstring caps;
+            for (const wchar_t c : base)
+            {
+                if (std::iswupper(static_cast<wint_t>(c)))
+                {
+                    caps.push_back(c);
+                }
+            }
+            if (!caps.empty())
+            {
+                return caps;
+            }
+        }
+        // >16 all-lowercase -> as-is, truncated past 30 chars with an ellipsis.
+        if (base.size() > 30)
+        {
+            return base.substr(0, 30) + L"...";
+        }
+        return base;
+    }
+
+    std::wstring NormDirKey(const std::wstring& dir)
+    {
+        std::wstring s = dir;
+#ifdef _WIN32
+        for (auto& ch : s)
+        {
+            if (ch == L'/')
+            {
+                ch = L'\\';
+            }
+        }
+        while (s.size() > 3 && s.back() == L'\\')
+        {
+            s.pop_back();
+        }
+        s = LowerCopy(s);
+#else
+        while (s.size() > 1 && s.back() == L'/')
+        {
+            s.pop_back();
+        }
+#endif
+        return s;
+    }
+
+    std::wstring AutoDirColorHex(const std::wstring& dir)
+    {
+        // A fixed palette of distinct, readable tab colors. Same dir => same color (hash of the
+        // canonical key); different dirs spread across the palette.
+        static const wchar_t* const kPalette[] = {
+            L"#E06C75", L"#E5C07B", L"#98C379", L"#56B6C2", L"#61AFEF", L"#C678DD",
+            L"#D19A66", L"#BE5046", L"#528BFF", L"#7FD962", L"#FF9E64", L"#2BBAC5",
+            L"#B267E6", L"#F78C6C",
+        };
+        const std::wstring key = NormDirKey(dir);
+        // FNV-1a over the key's code units (stable across runs).
+        uint64_t h = 1469598103934665603ull;
+        for (const wchar_t c : key)
+        {
+            h ^= static_cast<uint64_t>(static_cast<uint16_t>(c));
+            h *= 1099511628211ull;
+        }
+        const size_t n = sizeof(kPalette) / sizeof(kPalette[0]);
+        return kPalette[static_cast<size_t>(h % n)];
+    }
+
+    std::wstring SerializeDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        auto arr = json::Value::MkArr();
+        for (const auto& [dir, color] : colors)
+        {
+            auto o = json::Value::MkObj();
+            o.Set(L"dir", json::Value::MkStr(dir));
+            o.Set(L"color", json::Value::MkStr(color));
+            arr.Push(std::move(o));
+        }
+        root.Set(L"colors", std::move(arr));
+        return json::Dump(root);
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> DeserializeDirColors(std::wstring_view text)
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return out;
+        }
+        if (const auto* arr = parsed->Find(L"colors"); arr && arr->type == json::Value::Type::Arr)
+        {
+            for (const auto& el : arr->arr)
+            {
+                if (el.type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                const auto dir = el.StrAt(L"dir");
+                const auto color = el.StrAt(L"color");
+                if (!dir.empty() && !color.empty())
+                {
+                    out.emplace_back(dir, color);
+                }
+            }
+        }
+        return out;
+    }
+
+    void SaveDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\dir-colors.json", SerializeDirColors(colors));
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> LoadDirColors()
+    {
+        return DeserializeDirColors(ReadAllUtf8(AgentmasterStateDir() + L"\\dir-colors.json"));
+    }
+
+    std::optional<std::wstring> GetDirColor(const std::wstring& dir)
+    {
+        const std::wstring key = NormDirKey(dir);
+        std::lock_guard guard{ g_dirColorMtx };
+        for (const auto& [k, color] : LoadDirColors())
+        {
+            if (k == key)
+            {
+                return color;
+            }
+        }
+        return std::nullopt;
+    }
+
+    void SetDirColor(const std::wstring& dir, const std::optional<std::wstring>& colorHex)
+    {
+        const std::wstring key = NormDirKey(dir);
+        std::lock_guard guard{ g_dirColorMtx };
+        auto colors = LoadDirColors();
+        // Drop any existing entry for this dir, then (when setting) append the new one — this both
+        // upserts a color and, for nullopt (a reset), simply removes it.
+        std::vector<std::pair<std::wstring, std::wstring>> kept;
+        kept.reserve(colors.size() + 1);
+        for (auto& entry : colors)
+        {
+            if (entry.first != key)
+            {
+                kept.push_back(std::move(entry));
+            }
+        }
+        if (colorHex)
+        {
+            kept.emplace_back(key, *colorHex);
+        }
+        SaveDirColors(kept);
     }
     void SaveLayout(const ManagerLayout& layout)
     {

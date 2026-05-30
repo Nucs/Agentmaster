@@ -9,8 +9,10 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "Json.h"
@@ -61,6 +63,10 @@ namespace Agentmaster
     // Recent working directories (MRU) for the Launch path-picker. Front == most recent.
     std::wstring SerializeRecentDirs(const std::vector<std::wstring>& dirs);
     std::vector<std::wstring> DeserializeRecentDirs(std::wstring_view text);
+    // Per-directory tab colors (dir NormDirKey -> "#RRGGBB"). Persisted so a color follows its
+    // working directory across sessions/runs (a color is shared by every tab in that dir).
+    std::wstring SerializeDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors);
+    std::vector<std::pair<std::wstring, std::wstring>> DeserializeDirColors(std::wstring_view text);
     // Manager-tab splitter geometry (pane sizes survive close/reopen). Deserialize clamps.
     std::wstring SerializeLayout(const ManagerLayout& layout);
     ManagerLayout DeserializeLayout(std::wstring_view text);
@@ -89,6 +95,29 @@ namespace Agentmaster
     void SaveWindowRecord(const WindowRecord& record);
     std::vector<WindowRecord> LoadWindowRecords();
     void DeleteWindowRecord(const std::wstring& windowId);
+    // Per-directory tab colors on disk (dir-colors.json). Get/Set are thread-safe load-modify-save
+    // convenience over the whole map; Set with nullopt removes the dir's entry (color reset).
+    void SaveDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors);
+    std::vector<std::pair<std::wstring, std::wstring>> LoadDirColors();
+    std::optional<std::wstring> GetDirColor(const std::wstring& dir);
+    void SetDirColor(const std::wstring& dir, const std::optional<std::wstring>& colorHex);
+
+    // ---- tab naming + per-directory color (pure; testable) ----
+    // Derive a tab/session display name from a working directory: walk up past generic build/
+    // output/structural segments (bin/obj/Debug/... the top 20) to the first meaningful folder,
+    // then apply the length rules — <=16 chars used as-is; >16 mixed-case -> its capital letters
+    // only; >16 all-lowercase -> as-is, truncated past 30 chars with "...". Never empty ("claude").
+    std::wstring DeriveSessionTitle(const std::wstring& workingDir);
+    // Whether a single path segment (any case) is a generic build/output/structural folder name
+    // we skip when naming (bin, obj, debug, release, build, ... — the top 20).
+    bool IsGenericDirName(const std::wstring& segment);
+    // Canonical comparison key for a working directory: separators normalized, trailing slash
+    // stripped, and (on Windows) lowercased — so case/slash variants of one dir collapse to one
+    // key. Keys the per-directory color map and matches sibling tabs in the same directory.
+    std::wstring NormDirKey(const std::wstring& dir);
+    // A stable, pleasant default tab color ("#RRGGBB") for a directory, chosen from a fixed palette
+    // by hashing NormDirKey(dir) — same dir => same color; different dirs spread across the palette.
+    std::wstring AutoDirColorHex(const std::wstring& dir);
 
     // ---- templates: build + apply ----
     // Capture a session's current queue as a reusable template.

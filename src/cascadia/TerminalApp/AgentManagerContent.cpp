@@ -434,6 +434,10 @@ namespace winrt::TerminalApp::implementation
     {
         _renameHandler = std::move(handler);
     }
+    void AgentManagerContent::SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider)
+    {
+        _localScopeProvider = std::move(provider);
+    }
     void AgentManagerContent::SetPauseHandler(std::function<void(bool)> handler)
     {
         _pauseHandler = std::move(handler);
@@ -767,9 +771,24 @@ namespace winrt::TerminalApp::implementation
                 auto outer = Grid{};
                 outer.RowDefinitions().Append(autoRow());
                 outer.RowDefinitions().Append(starRow(1));
-                auto hd = Text(L"EXPLORER TREE", 12, true, 0.8);
-                Grid::SetRow(hd, 0);
-                outer.Children().Append(hd);
+                // Header row: the title + a LOCAL/GLOBAL scope toggle (Agentmaster). LOCAL shows
+                // only this window's sessions (the page's _claudeTabs, via _localScopeProvider);
+                // GLOBAL shows every window's sessions (the whole process-wide registry). The
+                // button's label is the current mode; clicking flips it and rebuilds the tree.
+                auto hdrow = StackPanel{};
+                hdrow.Orientation(Orientation::Horizontal);
+                hdrow.Spacing(8);
+                hdrow.VerticalAlignment(VerticalAlignment::Center);
+                hdrow.Children().Append(Text(L"EXPLORER TREE", 12, true, 0.8));
+                _treeScopeBtn = Button{};
+                _treeScopeBtn.FontSize(11);
+                _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                ToolTipService::SetToolTip(_treeScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows"));
+                _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
+                hdrow.Children().Append(_treeScopeBtn);
+                _UpdateTreeScopeButton();
+                Grid::SetRow(hdrow, 0);
+                outer.Children().Append(hdrow);
 
                 _treeHost = StackPanel{};
                 _treeHost.Margin(Thickness{ 0, 8, 0, 0 });
@@ -1308,10 +1327,32 @@ namespace winrt::TerminalApp::implementation
         }
         _treeHost.Children().Clear();
 
+        // Agentmaster: apply the Explorer Tree scope. LOCAL (default) keeps only the sessions
+        // hosted in THIS window (the page's _claudeTabs, surfaced by _localScopeProvider); GLOBAL
+        // keeps every window's session (the whole process-wide registry). All the dir grouping +
+        // counts + rows below iterate `scoped`, so the filter flows through uniformly. GLOBAL (or
+        // an unwired provider, e.g. mid-init) is a no-op view onto the original snapshot.
+        std::vector<SessionInfo> scopedStore;
+        const std::vector<SessionInfo>* scopedPtr = &sessions;
+        if (!_treeGlobalScope && _localScopeProvider)
+        {
+            const auto localIds = _localScopeProvider();
+            scopedStore.reserve(sessions.size());
+            for (const auto& s : sessions)
+            {
+                if (localIds.find(s.id) != localIds.end())
+                {
+                    scopedStore.push_back(s);
+                }
+            }
+            scopedPtr = &scopedStore;
+        }
+        const std::vector<SessionInfo>& scoped = *scopedPtr;
+
         // Ordered, de-duplicated working directories. Paths that differ only by case (on
         // Windows) collapse into one root; the first-seen spelling becomes its display name.
         std::vector<std::wstring> dirs;
-        for (const auto& s : sessions)
+        for (const auto& s : scoped)
         {
             if (!s.live)
             {
@@ -1325,7 +1366,12 @@ namespace winrt::TerminalApp::implementation
 
         if (dirs.empty())
         {
-            _treeHost.Children().Append(Text(L"No sessions yet \x2014 use Launch session above.", 12, false, 0.6));
+            // In LOCAL scope an empty tree can simply mean other windows hold the sessions; say so
+            // (and hint at GLOBAL) rather than implying the whole fleet is empty.
+            const wchar_t* empty = (!_treeGlobalScope && _localScopeProvider)
+                                       ? L"No sessions in this window \x2014 Launch above, or switch to GLOBAL for all windows."
+                                       : L"No sessions yet \x2014 use Launch session above.";
+            _treeHost.Children().Append(Text(empty, 12, false, 0.6));
             return;
         }
 
@@ -1342,7 +1388,7 @@ namespace winrt::TerminalApp::implementation
             //   expanded + unselected -> select (stay expanded)
             //   expanded + selected   -> collapse + select the previous directory
             int count = 0;
-            for (const auto& s : sessions)
+            for (const auto& s : scoped)
             {
                 if (s.live && PathEq(s.workingDir, dir))
                 {
@@ -1399,7 +1445,7 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
 
-            for (const auto& s : sessions)
+            for (const auto& s : scoped)
             {
                 if (!s.live || !PathEq(s.workingDir, dir))
                 {
@@ -1503,6 +1549,27 @@ namespace winrt::TerminalApp::implementation
                 rowBtn.ContextFlyout(_MakeSessionMenu(id));
                 _treeHost.Children().Append(rowBtn);
             }
+        }
+    }
+
+    // Agentmaster: flip the Explorer Tree between LOCAL (this window's sessions) and GLOBAL (all
+    // windows), then rebuild from the current snapshot. The toggle is per-window, in-memory state.
+    void AgentManagerContent::_ToggleTreeScope()
+    {
+        _treeGlobalScope = !_treeGlobalScope;
+        _UpdateTreeScopeButton();
+        if (_registry)
+        {
+            _RebuildTree(_registry->Snapshot());
+        }
+    }
+
+    // Reflect the current scope on the toggle button's label.
+    void AgentManagerContent::_UpdateTreeScopeButton()
+    {
+        if (_treeScopeBtn)
+        {
+            _treeScopeBtn.Content(winrt::box_value(_treeGlobalScope ? L"GLOBAL" : L"LOCAL"));
         }
     }
 

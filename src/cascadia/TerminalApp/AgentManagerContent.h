@@ -46,6 +46,10 @@ namespace winrt::TerminalApp::implementation
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
+        // Agentmaster: the set of session ids hosted in THIS window (the page's _claudeTabs).
+        // Used by the Explorer Tree's LOCAL scope to show only this window's sessions; GLOBAL
+        // ignores it and shows every window's sessions (the whole process-wide registry).
+        void SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider);
         void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
@@ -75,6 +79,12 @@ namespace winrt::TerminalApp::implementation
         void _RebuildBoard(const std::vector<::Agentmaster::SessionInfo>& sessions);
         void _RebuildTree(const std::vector<::Agentmaster::SessionInfo>& sessions);
         void _RebuildPlan(const std::vector<::Agentmaster::SessionInfo>& sessions);
+
+        // Agentmaster: Explorer Tree scope toggle (LOCAL = this window's tabs / GLOBAL = all
+        // windows). _ToggleTreeScope flips the mode + rebuilds; _UpdateTreeScopeButton refreshes
+        // the toggle button's label to the current mode.
+        void _ToggleTreeScope();
+        void _UpdateTreeScopeButton();
 
         void _SelectSession(const std::wstring& id);
         void _SetScope(const std::wstring& dir);
@@ -156,6 +166,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
+        std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
@@ -165,12 +176,14 @@ namespace winrt::TerminalApp::implementation
         std::wstring _selectedId;
         std::wstring _scopeDir; // board filter: empty == all directories
         std::wstring _selectedPromptId;
+        bool _treeGlobalScope{ false }; // Agentmaster: Explorer Tree scope. false == LOCAL (this window's tabs only); true == GLOBAL (all windows)
         std::unordered_set<std::wstring> _collapsedDirs;
         bool _suppressAutopilotEvent{ false };
 
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _boardHost{ nullptr }; // horizontal columns
         winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::StackPanel _treeHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };

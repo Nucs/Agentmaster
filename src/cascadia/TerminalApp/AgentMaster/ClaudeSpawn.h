@@ -97,6 +97,13 @@ namespace Agentmaster
     // fails with "No conversation found" (the tab would die with exit code 1).
     bool ClaudeConversationExists(std::wstring_view sessionId);
 
+    // Resolve the on-disk transcript for `sessionId`: <claude-config>/projects/*/<id>.jsonl, or
+    // empty if none exists yet. The interval reconciler (SessionScanner) tails this file to
+    // recover what a dropped hook missed. Ids are unique UUIDs, so we glob across all project
+    // dirs rather than reproduce Claude's cwd encoding. ClaudeConversationExists is now exactly
+    // `!ResolveClaudeTranscriptPath(id).empty()`.
+    std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId);
+
     // Write the shared forwarder + hooks settings into `stateDir`. Idempotent (overwrites
     // so they always match the running build). Returns {settingsPath, forwarderPath} in
     // backslash form. Throws nothing meaningful for the caller; returns empty paths on I/O

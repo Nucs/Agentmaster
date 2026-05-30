@@ -179,6 +179,7 @@
     <ClInclude Include="AgentMaster\Json.h" />
     <ClInclude Include="AgentMaster\Persistence.h" />
     <ClInclude Include="AgentMaster\Engine.h" />
+    <ClInclude Include="AgentMaster\SessionScanner.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
@@ -311,6 +312,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\Engine.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionScanner.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SnippetsPaneContent.cpp">

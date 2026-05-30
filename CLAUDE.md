@@ -96,7 +96,12 @@ What works, by area:
   thing: it's **pinned** onto the tab at launch/restore (`Tab::SetTabText`, so it stops floating
   with claude's OSC title) and renaming from **either** side syncs the other + persists (Explorer
   right-click **Rename…** → `_RenameClaudeSession`; a WT tab rename → `_SyncClaudeTitleFromTab`;
-  Rule #11). Flight Plan: compose box, Add / Send now / ↑↓ /
+  Rule #11). A launched session's default name is **smart-derived from its cwd**
+  (`DeriveSessionTitle`: walk up past generic `bin/obj/Debug/...` segments to the first meaningful
+  folder, then **≤16 chars** as-is / **>16 mixed-case** → its capitals only / **>16 all-lower** →
+  as-is truncated past 30 with `...`), and each tab is **colored per working directory** (a stable
+  auto palette color or the dir's persisted one; recoloring one tab recolors every tab in that dir
+  and persists — Rule #12). Flight Plan: compose box, Add / Send now / ↑↓ /
   Delete / Focus / Archive — and it reflects **all** messages a session got, not just queued
   ones: a chronological **SENT** summary (each row tagged **flight** = we queued+injected it
   vs **typed** = you typed it into the terminal) over the **UPCOMING** queue (Pending/Held).
@@ -164,6 +169,9 @@ Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
 **Restore all** re-opens tabs lazily (a non-foreground restored tab starts its `claude` only
 when first focused — WT's lazy-background-tab behavior; restore one at a time to force start);
+a one-time **"Restore your previous layout?"** launch prompt (offers **all archived sessions**;
+decided + **deferred** — it ships *after* the per-window `WindowRecord` capture is wired so it
+restores true per-window layouts, not a flat global list — see `PERSISTENCE.md` §6/§6a);
 prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
@@ -185,13 +193,15 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
     `Scheduler.{h,cpp}`, `Engine.{h,cpp}` (the M9 process-wide `SharedEngine`),
     `Json.h`, `Persistence.{h,cpp}`, and `tests/` (standalone harness,
     not in the msbuild — run `tests/run-m5-tests.bat`).
-  - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync) and
-    `TabManagement.cpp`; registrations in `TerminalAppLib.vcxproj`.
+  - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync, smart
+    naming + per-dir tab color), `Tab.{h,cpp}` (a `TabColorChanged` event + `GetRuntimeTabColor`),
+    and `TabManagement.cpp`; registrations in `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
 - **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
-  `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `settings.json`
+  `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
+  (per-working-directory tab colors), `settings.json`
   (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
   one file per window; schema/IO in place, written once capture is wired), `bridge.json`
   (live-bridge discovery for the shim), and `shim/` (the transparent `claude` PATH shim —
@@ -236,6 +246,11 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
   through the `rename` callback → `_RenameClaudeSession` (registry + tab in lockstep); a WT tab
   rename (double-click / right-click **Rename Tab** / `renameTab` action, all via `Tab::SetTabText`)
   flows back through `_UpdateTitle` → `_SyncClaudeTitleFromTab`, which writes the registry (Rule #11).
+  `_LaunchClaudeSession`/`_AdoptExternalSession` also **smart-name** an untitled session
+  (`DeriveSessionTitle`) and **color the tab per working dir** (`_ApplyDirColorToTab` — the dir's
+  persisted color or a stable auto one); a user color change flows `Tab::SetRuntimeTabColor` → the
+  new `Tab::TabColorChanged` event → `_OnClaudeTabColorChanged`, which persists it to
+  `dir-colors.json` and recolors every live tab in that dir (Rule #12).
 - **Shared stdin:** the registry holds a per-session injector bound to that session's
   `ConptyConnection::WriteInput`, so the user's keystrokes and the scheduler's prompts both
   reach the same `claude.exe` stdin (Correctness Rule #3 binds the injector to the id).
@@ -368,6 +383,14 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   But **never** touch the running **Store** Windows Terminal — it's the user's live session
   (under `Program Files\WindowsApps\…`, not our path). Never blanket-`taskkill` by image
   name; always path-filter so the Store WT is spared.
+- **Packaging (`PRI210 / 0x800704c8`) can fail to overwrite `resources.pri`.** The registered
+  loose-layout package keeps `src\cascadia\CascadiaPackage\bin\x64\Debug\resources.pri`
+  memory-mapped, so MakePri's final overwrite-move dies with `0x800704c8` (ERROR_USER_MAPPED_FILE)
+  — and `handle64` shows *no* owning user process (it's a registered-package/kernel mapping). The
+  exe/dll already linked by then (your code is in the fresh `TerminalApp.dll`, copied into the
+  layout *before* this step), so it's purely the PRI. Fix: **delete that `resources.pri` and
+  rebuild** — MakePri then *creates* it fresh instead of overwriting a mapped target. (The Defender
+  exclusion in Building FAST #3 also reduces the transient-lock variant.)
 - **MSIX virtualizes a packaged app's `%LOCALAPPDATA%`** to the package LocalCache, but the
   spawned **`claude.exe` is external** and resolves paths against the real filesystem. So
   the hooks files + `--settings` path **must** live somewhere un-virtualized that both
@@ -484,6 +507,15 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
     emptied override (`ResetTabText`) re-pins. On **adopt**, a name the user already gave the `+` tab
     wins (mirrored into the registry); else the tab is pinned to the managed name. Don't reintroduce
     a separate tab title or scrape claude's OSC title for the name.
+12. **A tab's color is ONE value per working directory.** Every Claude tab in a dir shares one
+    color, persisted to `dir-colors.json` (keyed by `NormDirKey` — slash/case/trailing-normalized).
+    On launch/restore/adopt `_ApplyDirColorToTab` paints the tab from the dir's persisted color, or
+    a stable auto palette color (hash of the dir; persisted so it survives). A user color change
+    (`Tab::SetRuntimeTabColor`/`Reset` → `TabColorChanged` → `_OnClaudeTabColorChanged`) **persists
+    it for the dir AND recolors every live tab in that dir** (filesystem-aware, Rule #8); a reset
+    drops the entry. A de-dupe vs the persisted color makes our own launch/propagation writes
+    no-ops — don't regress that, it is what keeps propagation from looping. (The default *name*,
+    `DeriveSessionTitle`, only seeds an *untitled* session — a real/renamed title wins, Rule #11.)
 
 ## Conventions
 

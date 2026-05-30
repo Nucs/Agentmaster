@@ -77,6 +77,19 @@ namespace Agentmaster
         // delivered to the observer afterwards. Returns false if the id is unknown.
         bool Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
 
+        // Like Update but DOES NOT notify observers — for purely-transient fields (the interval
+        // reconciler's captured assistant text) that must not trigger the persist / UI-refresh /
+        // scheduler cascade on every byte of streamed output. No-op if the id is unknown.
+        void UpdateQuiet(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
+
+        // Record a human message the interval reconciler (SessionScanner) found in the transcript
+        // that the UserPromptSubmit hook dropped. IDEMPOTENT by text: if an identical message is
+        // already recorded (any prompt with status Sent — covers our injected Flight echoes AND
+        // prior Typed captures), it is NOT re-added, so the push (hook) and pull (scan) paths
+        // converge instead of double-recording. Otherwise it appends a Typed/Sent entry exactly
+        // like a hook-captured typed prompt and notifies. No-op for empty text / unknown id.
+        void NoteExternalPrompt(const std::wstring& id, const std::wstring& text);
+
         // Wiring. Multiple observers may register (e.g. a logger, the Triage Board UI, the
         // scheduler, every window's Manager lens); each is invoked on every change, outside the
         // lock. AddObserver returns a token; RemoveObserver detaches it (M9 window teardown).

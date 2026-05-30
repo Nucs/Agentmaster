@@ -1920,6 +1920,7 @@ namespace winrt::TerminalApp::implementation
         _runtimeTabColor.emplace(color);
         _RecalculateAndApplyTabColor();
         _tabStatus.TabColorIndicator(color);
+        TabColorChanged.raise(); // Agentmaster: propagate to same-dir tabs + persist (per-dir color)
     }
 
     // Method Description:
@@ -1937,6 +1938,7 @@ namespace winrt::TerminalApp::implementation
         _runtimeTabColor.reset();
         _RecalculateAndApplyTabColor();
         _tabStatus.TabColorIndicator(GetTabColor().value_or(Windows::UI::Colors::Transparent()));
+        TabColorChanged.raise(); // Agentmaster: propagate the reset to same-dir tabs + drop the persisted color
     }
 
     winrt::Windows::UI::Xaml::Media::Brush Tab::_BackgroundBrush()

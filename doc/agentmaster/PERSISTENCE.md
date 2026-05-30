@@ -34,7 +34,8 @@ non-destructive close.
 - Persist the full tree: **windows → tabs (order, color, title) → panes → Claude
   sessions**, plus **window position + size + launch mode**, plus each window's **Manager
   tab lens state**.
-- First launch of the process **restores everything** (resume each Claude conversation).
+- First launch of the process **archives** the saved workspace and **offers** to restore it
+  (Rule #6: never auto-launch); restore resumes each Claude conversation per-window (§6/§6a).
 - **Close is never destructive.** Closing a window or the app tears down the live
   windows/tabs/`claude.exe` processes but leaves the workspace **restorable**.
 - **`Kill` remains the only destructive discard** (per-session) — Correctness Rule #6.
@@ -159,14 +160,22 @@ of stored order (it is special).
 
 ## 6. Lifecycle flows
 
-**First launch (restore).**
+**First launch (restore).** *(Revised for the Open ⇄ Archived model — Correctness Rule #6:
+startup **ARCHIVES, never auto-launches**. The earlier "recreate every tab automatically"
+flow is superseded by an explicit restore, so a relaunch never avalanches into N spawning
+`claude.exe`es the user didn't ask for.)*
 1. Emperor starts → create the **singleton engine** (one registry + one pipe + scheduler).
-2. Load every `windows/<id>.json`.
-3. For each record (in saved order): create a window at its `geometry`; add the Manager tab
-   at index 0 seeded with its lens; then recreate `tabs` **in order** — `Other` via WT
-   action replay, `Claude` via `_LaunchClaudeSession(..., resume=convId)`.
-4. As each Claude `SessionStart` arrives, the engine re-attaches that `convId`'s Flight Plan
-   + autopilot from the record (correlate by id — same as M8 restore, now window-scoped).
+2. Load every `windows/<id>.json` (per-window UI state) **and** `sessions.json`; the sessions
+   enter the registry **Archived** (`live=false`) — NOT auto-launched. The app opens to one
+   window with just its (pinned, non-closable) Manager tab.
+3. A one-time **"Restore your previous layout?"** prompt offers to bring the workspace back.
+   Decision: it **offers all archived sessions**, and once it can read the `WindowRecord`s it
+   restores **per window** (geometry + Manager lens + that window's tabs in order — `Claude`
+   via `_LaunchClaudeSession(..., resume=convId)`, `Other` via WT action replay). Dismiss → the
+   sessions stay in the **Archived** list, restorable **per-tab** anytime. *(Held until the
+   WindowRecord capture/restore is wired — §6a.)*
+4. As each restored Claude `SessionStart` arrives, the engine re-attaches that `convId`'s
+   Flight Plan + autopilot from the record (correlate by id — window-scoped).
 
 **Close window.** Tear down the window's tabs → each ConPTY closes → its `claude.exe` job
 exits. The record is already current (debounced autosave), so nothing else to do — the
@@ -181,6 +190,32 @@ no tabs left is deleted. Add **"Kill all sessions in this window."**
 
 **New window / new tab.** A fresh `windowId`; the Manager tab seeds from the global default
 lens; sessions launched into it are tagged `(windowId, tabId)` and autosaved.
+
+### 6a. Restore granularity & the launch prompt
+
+When restoring, there are **two grains**, one model:
+
+- **Per-window — the *layout* / "workspace".** The `WindowRecord` is the unit: geometry +
+  Manager lens + the **ordered set of sessions that were open in that window**. The launch
+  prompt restores at this grain ("reopen where I left off"), recreating the window(s) with
+  their tabs in order. **Requires the WindowRecord capture → restore wiring** (M10 capture →
+  M12 restore).
+- **Per-tab — the *session*.** The Manager's **Archived** list restores **one session at a
+  time** (or **Restore all**) into the *current* window — a cherry-pick, decoupled from any
+  window grouping. **Already shipped** (`_RestoreArchivedSession` / the Archived overlay).
+
+So **per-window is the coarse "restore my workspace" unit (the launch prompt); per-tab is the
+fine-grained cherry-pick (the Archived button), always available.** A session restored per-tab
+re-homes into the current window; window↔session affinity (the `WindowRecord` tab ref) is
+advisory until full per-window restore lands.
+
+**Locked decisions for the launch prompt:**
+- It **offers all archived sessions** (not only those open at last close — so no `openAtExit`
+  marker is needed).
+- It is **held until the full per-window `WindowRecord` capture is wired first** — so when it
+  ships it restores true **per-window** layouts rather than a flat global list. Until then,
+  restore is **per-tab only** (the Archived list); startup stays clean (just the Manager tab,
+  Rule #6).
 
 ## 7. Correctness rules (extend `IMPLEMENTATION.md` §"Correctness rules")
 
@@ -226,6 +261,13 @@ per-window records.
 
 ## 11. Milestones (continue `IMPLEMENTATION.md`; M0–M8 are done)
 
+> **⚠️ Superseded by §13.** This original list predates two decisions that reshaped the work:
+> the **session-archive model** (sessions persist/restore *window-blind* via `sessions.json` +
+> `SessionInfo.live`, **on demand** — no auto-restore, no `Kill`) and **Option 1** (the
+> `WindowRecord` holds per-window *UI state only* — geometry + lens + tab *refs* — never copies
+> session data). **M9 shipped; M10's data layer shipped.** M11 is largely obviated;
+> M14 migration is moot. See **§13** for the live delivery plan that finishes the job.
+
 - **M9 — Singleton engine.** Hoist registry/bridge/scheduler to one process-wide owner;
   share it to every window's Manager tab; one pipe; tag sessions `(windowId, tabId)`. Fixes
   the multi-window collision. *(Prereq for all below.)*
@@ -259,3 +301,110 @@ per-window records.
 Keep the diff against upstream **additive** (new engine files + small touches at the
 integration points) so rebasing onto `microsoft/terminal` stays cheap — same convention as
 the rest of Agentmaster.
+
+## 13. Delivery plan to full ship (revised — supersedes §11)
+
+Persistence is now **two layers**:
+- **Session layer — SHIPPED.** The archive model: `sessions.json` + `SessionInfo.live`; startup
+  loads everything **Archived**; closing a tab archives it; the global **Archived** overlay
+  restores on demand (`claude --resume`, transcript-gated). This is the session source of truth
+  and is done — nothing below changes it.
+- **Window layer — THIS PLAN.** Per-window **UI state** (geometry + Manager lens + ordered tab
+  *refs*) in `windows/<windowId>.json` (Option 1, §3). **M9 + the M10 data layer are done.** What
+  remains is *capturing* that record from a live window and *re-applying* it on launch.
+
+### 13.0 Lock one product decision first (blocks Phase C only)
+
+**On app launch, what comes back?** The session layer already guarantees "no claude is
+relaunched — everything is Archived." The window layer adds: do we **reopen the saved windows**
+(empty — Manager tab + their geometry + their splitter/lens), or keep launching a **single**
+window?
+- **Target (recommended):** reopen each saved window at its geometry/lens, empty of sessions; the
+  Archived overlay restores sessions, which **re-home** to their origin window. Delivers
+  "close == reopen your workspace layout" without relaunching any claude.
+- **Lite:** if multi-window restore is *not* wanted, the plan collapses to **single-window
+  geometry+lens** (Phases A, B, C-lite, E — skip the Emperor multi-window work). Much smaller.
+
+Phases A–B are identical either way, so coding starts before this is locked.
+
+### 13.1 Phases
+
+**Phase A — Identity + lens exposure (additive, low-collision).**
+- `TerminalPage::_windowId` (a GUID `hstring`), minted once at engine init; a restored window
+  adopts its record's id instead (Phase C).
+- `AgentManagerContent::GetManagerState()` → `ManagerState` (selection / scopeDir /
+  selectedPromptId / collapsed dirs / `_layout`) — a pure getter over existing members.
+- *Files:* `TerminalPage.{h,cpp}`, `AgentManagerContent.{h,cpp}`.
+- *Done when:* both compile (lib check) and a debug line can dump a window's id + lens.
+
+**Phase B — Capture + autosave (the core of M10).**
+- `TerminalPage::_CaptureWindowRecord()` builds the `WindowRecord`:
+  - **geometry** — reuse WT's own layout path (study `PersistState()` /
+    `IslandWindow`/`AppHost` `GetWindowLayout` → `InitialPosition` / `InitialSize` / `LaunchMode`)
+    and fill `WindowGeometry`.
+  - **tabs** — walk `_tabs` in order; classify each: the Manager tab → skip; a Claude tab (id in
+    `_claudeTabs`) → `TabEntry{Claude, sessionId, tabColor}` (color from the tab's runtime color,
+    Rule #12); else → `TabEntry{Other, actionsJson}` from the tab's persist actions.
+  - **manager** — `content->GetManagerState()`.
+- **Debounced autosave** (`ThrottledFunc`, already used in `TerminalPage`): `SaveWindowRecord`
+  on structural/lens change — tab add/remove/reorder (`_tabs.VectorChanged`), tab rename/recolor,
+  window move/resize, and a lens-changed callback from the content. **Never per keystroke.**
+- *Files:* `TerminalPage.{h,cpp}`, `AgentManagerContent.{h,cpp}` (the lens-changed callback).
+- *Done when:* open/move/resize/retab a window → a correct `windows/<id>.json` appears; verified
+  by inspecting the file + a standalone capture-shape test.
+
+**Phase C — Restore (M12; gated on §13.0).**
+- *Multi-window target:* at startup (Emperor/`App` scope), for each `LoadWindowRecords()` record
+  (deterministic order): create a window at its `geometry`, seed its Manager tab with the lens.
+  The session layer leaves every session Archived, so the window comes back **empty**. This needs
+  Emperor-level multi-window creation — the deepest cut; **spike a 2-window reopen first.**
+- **Re-home:** when `_RestoreArchivedSession` opens a session, route its tab into the window whose
+  record references that `sessionId` (if open), else the current window.
+- **windowId stability:** a restored window adopts its record's `windowId`, so its next autosave
+  overwrites the same file.
+- **Pinned Manager tab:** force-create only when the record has none; else restore + re-pin
+  leftmost/non-closable (mirrors today's `_OpenAgentManagerTab` guard).
+- *Files:* `TerminalPage.{h,cpp}`, the Emperor/`App` startup seam, `AgentManagerContent` (lens seed).
+- *Done when:* close app with N windows → relaunch → N windows reopen at geometry + lens, empty;
+  restoring a session re-homes it.
+
+**Phase D — Lifecycle + cleanup.**
+- **Close flush:** capture once more on teardown (hook `PersistState()` / the window-close seam)
+  so the last move/resize isn't lost past the debounce.
+- **Retention:** keep all window records (cheap); a manual "forget this window's layout" only if
+  clutter appears (`DeleteWindowRecord` already exists). There is **no `Kill`** — archive is the
+  only session teardown.
+- *Files:* `TerminalPage.{h,cpp}`.
+
+**Phase E — Tests, verify, deploy.**
+- Standalone: capture-shape unit (fake tab list → expected record), restore ordering, re-home
+  affinity lookup, geometry round-trip with the `has*` flags. Keep the all-pass tradition.
+- Live: run the §13.3 acceptance script in the deployed package; tail `hooks.log`.
+- Update `CLAUDE.md` Status (window layer shipped) and retire §11.
+
+### 13.2 Risks & mitigations
+- **Geometry-capture API is the unknown** — spike the geometry *read* first (find the exact
+  `GetWindowLayout`/`InitialPosition` path) before building autosave around it.
+- **Emperor multi-window creation** (Phase C) is the deepest integration — spike a 2-window
+  reopen before wiring the rest; if too invasive, fall back to §13.0's single-window-lite ship.
+- **Live-edit collision** — Phases A/B/D touch `TerminalPage`/`AgentManagerContent`, files under
+  active archive-model work. Land each as a small, separately-compilable diff when those areas
+  are at rest.
+- **Lazy tabs / multi-monitor** — restored windows open *empty*, so there's no lazy-claude start
+  problem; WT clamps off-screen geometry.
+
+### 13.3 Definition of done (acceptance)
+1. Two windows, different positions/sizes + different splitter layouts + a few sessions → close
+   app → relaunch → **both reopen at their geometry with their splitter/lens**, Manager-only,
+   sessions Archived.
+2. Restore a session from Archived → its tab opens **in the window it was closed in**.
+3. Single-window use unchanged; first run (no `windows/`) opens one default window.
+4. Move/resize/retab, then kill the app hard (no clean close) → relaunch → last layout is within
+   one debounce of correct.
+5. All standalone checks pass (incl. new capture/restore tests); lib + full exe build clean;
+   deployed and verified running.
+
+### 13.4 Sequencing
+A → B (ship capture+autosave first — useful alone, de-risks the schema) → **confirm §13.0** →
+C (spike Emperor multi-window, then wire) → D → E. Each phase compiles via the lib check and
+lands as its own commit.

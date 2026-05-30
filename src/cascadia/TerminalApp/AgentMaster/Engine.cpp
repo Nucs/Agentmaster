@@ -12,6 +12,7 @@
 #include "Persistence.h"
 #include "Scheduler.h"
 #include "SessionRegistry.h"
+#include "SessionScanner.h"
 
 #include <windows.h>
 
@@ -71,6 +72,20 @@ namespace Agentmaster
                 });
             }
 
+            // Interval reconciler (M11; the PULL half — the bridge is PUSH). A low-priority
+            // worker tails each live session's transcript to recover what a dropped hook missed
+            // (a missed Stop strands a session in Running; assistant text is hook-invisible) and
+            // fans out a periodic liveness sweep so a dead claude.exe (crash / exit with no
+            // SessionEnd) is archived. Adaptive cadence + idle-sleep keep it ~free when nothing is
+            // live; the observer below Wake()s it the instant a session goes live. The liveness
+            // CHECK is WinRT (walks tabs), so it is delegated to per-window probes the scanner ticks.
+            e->scanner = std::make_shared<SessionScanner>(e->registry);
+            e->scanner->Start();
+            {
+                auto scan = e->scanner;
+                e->registry->AddObserver([scan](const SessionInfo&, HookEvent) { scan->Wake(); });
+            }
+
             const auto pipeName = HookPipeName(::GetCurrentProcessId());
             {
                 auto reg = e->registry; // shared, captured by the sink
@@ -123,5 +138,26 @@ namespace Agentmaster
         }();
 
         return *g;
+    }
+
+    std::optional<WindowRecord> ClaimWindowRecord()
+    {
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        if (!e.windowRecordsLoaded)
+        {
+            // Load every windows/*.json once. Front-to-back claim order is whatever the
+            // directory iterator yields; multi-window restore (PERSISTENCE.md §13.0) will impose
+            // a deterministic order when it assigns records to windows.
+            e.unclaimedWindowRecords = LoadWindowRecords();
+            e.windowRecordsLoaded = true;
+        }
+        if (e.unclaimedWindowRecords.empty())
+        {
+            return std::nullopt;
+        }
+        auto rec = std::move(e.unclaimedWindowRecords.front());
+        e.unclaimedWindowRecords.erase(e.unclaimedWindowRecords.begin());
+        return rec;
     }
 }

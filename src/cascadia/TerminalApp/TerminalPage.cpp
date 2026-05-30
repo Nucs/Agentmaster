@@ -24,6 +24,7 @@
 #include "AgentMaster/Persistence.h"
 #include "AgentMaster/Scheduler.h"
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/SessionScanner.h"
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -246,6 +247,13 @@ namespace winrt::TerminalApp::implementation
         if (_sessionRegistry && _adoptionToken)
         {
             _sessionRegistry->RemoveAdoptionHandler(_adoptionToken);
+        }
+        // Symmetric to the adoption handler: drop this window's liveness probe from the shared
+        // scanner so a closed window's probe (it captures get_weak()) doesn't linger on the
+        // process-wide scanner. The scanner outlives every window (held by SharedEngine).
+        if (_scanner && _livenessToken)
+        {
+            _scanner->RemoveLivenessProbe(_livenessToken);
         }
     }
 
@@ -744,6 +752,40 @@ namespace winrt::TerminalApp::implementation
         _sessionRegistry = engine.registry;
         _hooksBridge = engine.bridge;
         _scheduler = engine.scheduler;
+        _scanner = engine.scanner;
+
+        // M10 (PERSISTENCE.md §13): claim this window's persisted record — an existing
+        // windows/<id>.json (geometry + Manager lens + ordered tab refs), or a fresh GUID if none
+        // remains. Stashed in _windowRecord; its lens is seeded into the Manager tab in
+        // _WireAgentManagerContent, and changes are debounced-autosaved back to the same file.
+        if (auto claimed = ::Agentmaster::ClaimWindowRecord())
+        {
+            _windowRecord = std::move(*claimed);
+        }
+        else
+        {
+            GUID fresh{};
+            ::CoCreateGuid(&fresh);
+            _windowRecord = ::Agentmaster::WindowRecord{};
+            _windowRecord.windowId = ::Microsoft::Console::Utils::GuidToString(fresh);
+        }
+        _windowId = _windowRecord.windowId;
+
+        // Debounced autosave of the window record (750ms trailing): structural/lens churn (drag a
+        // splitter, reorder tabs, resize the window) collapses to one write; never per keystroke.
+        _saveWindowRecordThrottled = std::make_shared<ThrottledFunc<>>(
+            DispatcherQueue::GetForCurrentThread(),
+            til::throttled_func_options{
+                .delay = std::chrono::milliseconds{ 750 },
+                .debounce = true,
+                .trailing = true,
+            },
+            [weakThis = get_weak()]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_FlushWindowRecord();
+                }
+            });
 
         // Adoption seam, PER WINDOW: a hook for a session we didn't Launch -> try to bind it to
         // its hosting ConPTY so it becomes fully managed (observe + control). The shared
@@ -759,6 +801,51 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
+
+        // Liveness probe, PER WINDOW: the shared scanner ticks this on its slow cadence; it
+        // marshals to OUR UI thread and archives any of this window's claude tabs whose ConPTY
+        // has Closed (a crash / `/exit` that fired no SessionEnd, or a clean SessionEnd that only
+        // set Done). Fans out to every window like adoption; each window sweeps only its own tabs.
+        if (_scanner)
+        {
+            const auto weakThis = get_weak();
+            _livenessToken = _scanner->AddLivenessProbe([weakThis]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_SweepClaudeLiveness(); // self marshals to its UI thread
+                }
+            });
+        }
+    }
+
+    // Agentmaster: per-directory tab color helpers — the engine persists colors as "#RRGGBB"
+    // strings; these convert to/from the WT tab color (alpha forced opaque).
+    static std::wstring ClaudeColorToHex(const winrt::Windows::UI::Color& c)
+    {
+        wchar_t buf[8];
+        ::swprintf(buf, 8, L"#%02X%02X%02X", static_cast<unsigned>(c.R), static_cast<unsigned>(c.G), static_cast<unsigned>(c.B));
+        return buf;
+    }
+    static std::optional<winrt::Windows::UI::Color> ClaudeHexToColor(const std::wstring& hexIn)
+    {
+        std::wstring s = hexIn;
+        if (!s.empty() && s.front() == L'#')
+        {
+            s.erase(0, 1);
+        }
+        if (s.size() != 6)
+        {
+            return std::nullopt;
+        }
+        const auto byteAt = [&s](size_t i) {
+            return static_cast<uint8_t>(::wcstoul(s.substr(i, 2).c_str(), nullptr, 16));
+        };
+        winrt::Windows::UI::Color c{};
+        c.A = 255;
+        c.R = byteAt(0);
+        c.G = byteAt(2);
+        c.B = byteAt(4);
+        return c;
     }
 
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch session").
@@ -793,17 +880,9 @@ namespace winrt::TerminalApp::implementation
         std::wstring ttl{ title };
         if (ttl.empty())
         {
-            try
-            {
-                ttl = std::filesystem::path{ dir }.filename().wstring();
-            }
-            catch (...)
-            {
-            }
-            if (ttl.empty())
-            {
-                ttl = L"claude";
-            }
+            // Smart tab/session name: walk past generic bin/obj/Debug/... segments to the first
+            // meaningful folder, then apply the length/case rules (see DeriveSessionTitle).
+            ttl = ::Agentmaster::DeriveSessionTitle(dir);
         }
 
         // Resume ONLY if Claude actually has a saved conversation for this id. A session that
@@ -899,6 +978,8 @@ namespace winrt::TerminalApp::implementation
             {
                 impl->SetTabText(winrt::hstring{ ttl });
             }
+            // Per-directory tab color: the dir's persisted color, or a stable auto-assigned one.
+            _ApplyDirColorToTab(tab, dir);
         }
 
         const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
@@ -992,6 +1073,23 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_RenameClaudeSession(id, title);
             }
+        });
+        // Agentmaster: surface THIS window's hosted session ids for the Explorer Tree's LOCAL
+        // scope. The shared (process-wide) registry holds every window's sessions; _claudeTabs is
+        // the per-window subset. Expired weak tabs (torn-down) are skipped so the set is live.
+        content->SetLocalScopeProvider([weakThis]() -> std::unordered_set<std::wstring> {
+            std::unordered_set<std::wstring> ids;
+            if (auto self = weakThis.get())
+            {
+                for (const auto& [id, weakTab] : self->_claudeTabs)
+                {
+                    if (weakTab.get())
+                    {
+                        ids.insert(id);
+                    }
+                }
+            }
+            return ids;
         });
         content->SetPauseHandler([weakThis](bool paused) {
             if (auto self = weakThis.get())
@@ -1243,6 +1341,103 @@ namespace winrt::TerminalApp::implementation
         _sessionRegistry->Update(id, [&text](::Agentmaster::SessionInfo& s) { s.title = text; });
     }
 
+    // Agentmaster: paint a Claude tab from its working directory's color — the persisted color for
+    // the dir if any, else a stable auto-assigned one (which we persist so it survives + is shared
+    // by the dir). SetRuntimeTabColor re-enters _OnClaudeTabColorChanged once, which settles
+    // immediately (the persisted color now equals the tab's color), so this never loops.
+    void TerminalPage::_ApplyDirColorToTab(const TerminalApp::Tab& tab, const std::wstring& dir)
+    {
+        auto hex = ::Agentmaster::GetDirColor(dir);
+        if (!hex)
+        {
+            hex = ::Agentmaster::AutoDirColorHex(dir);
+            ::Agentmaster::SetDirColor(dir, hex); // persist the auto color -> stable + shared by the dir
+        }
+        if (const auto color = ClaudeHexToColor(*hex))
+        {
+            if (const auto impl = _GetTabImpl(tab))
+            {
+                impl->SetRuntimeTabColor(*color);
+            }
+        }
+    }
+
+    // Agentmaster: recolor every live Claude tab whose session shares `dir` (filesystem-aware match)
+    // to `colorHex`, or reset them when nullopt. Fans a user's color change across the directory.
+    void TerminalPage::_ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        std::optional<winrt::Windows::UI::Color> color;
+        if (colorHex)
+        {
+            color = ClaudeHexToColor(*colorHex);
+        }
+        const std::wstring key = ::Agentmaster::NormDirKey(dir);
+        for (const auto& [sid, weakTab] : _claudeTabs)
+        {
+            const auto info = _sessionRegistry->Get(sid);
+            if (!info || ::Agentmaster::NormDirKey(info->workingDir) != key)
+            {
+                continue;
+            }
+            if (const auto t = weakTab.get())
+            {
+                if (const auto impl = _GetTabImpl(t))
+                {
+                    if (color)
+                    {
+                        impl->SetRuntimeTabColor(*color);
+                    }
+                    else
+                    {
+                        impl->ResetRuntimeTabColor();
+                    }
+                }
+            }
+        }
+    }
+
+    // Agentmaster: the user changed a Claude tab's color (color picker / setTabColor action ->
+    // Tab::SetRuntimeTabColor/Reset -> TabColorChanged -> here). Color is ONE value per working
+    // directory: persist it for the dir and fan it out to every live tab in that dir. The de-dupe
+    // vs the persisted color makes our own launch/propagation writes no-ops (no loop).
+    void TerminalPage::_OnClaudeTabColorChanged(const TerminalApp::Tab& tab)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const auto id = _ClaudeSessionForTab(tab);
+        if (id.empty())
+        {
+            return; // not a Claude session tab
+        }
+        const auto info = _sessionRegistry->Get(id);
+        if (!info)
+        {
+            return;
+        }
+        const std::wstring dir = info->workingDir;
+
+        std::optional<std::wstring> newHex;
+        if (const auto impl = _GetTabImpl(tab))
+        {
+            if (const auto c = impl->GetRuntimeTabColor())
+            {
+                newHex = ClaudeColorToHex(*c);
+            }
+        }
+        if (::Agentmaster::GetDirColor(dir) == newHex)
+        {
+            return; // already in sync (our own launch/propagation write) -> no persist, no loop
+        }
+        ::Agentmaster::SetDirColor(dir, newHex); // upsert the color, or drop it on reset
+        _ApplyDirColorToTabs(dir, newHex); // every live tab in this dir tracks the change
+    }
+
     // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
     // creation appends (the Manager is created first), so the only ways it can drift are a tab
     // drag-drop or a move-tab action; this snaps it back. No-op when it is already first.
@@ -1291,24 +1486,14 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring id{ sessionId };
 
-        // Give the adopted card a readable title (its working dir's leaf) if it has none.
-        std::wstring ttl;
-        try
-        {
-            ttl = std::filesystem::path{ std::wstring{ cwd } }.filename().wstring();
-        }
-        catch (...)
-        {
-        }
-        if (!ttl.empty())
-        {
-            _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
-                if (s.title.empty())
-                {
-                    s.title = ttl;
-                }
-            });
-        }
+        // Give the adopted card a readable title (smart-derived from its working dir) if it has none.
+        const std::wstring ttl = ::Agentmaster::DeriveSessionTitle(std::wstring{ cwd });
+        _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
+            if (s.title.empty())
+            {
+                s.title = ttl;
+            }
+        });
 
         const auto lower = [](std::wstring s) {
             for (auto& c : s)
@@ -1392,12 +1577,98 @@ namespace winrt::TerminalApp::implementation
                         impl->SetTabText(winrt::hstring{ s->title });
                     }
                 }
+                _ApplyDirColorToTab(projectedTab, std::wstring{ cwd }); // per-directory tab color
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
                 co_return;
             }
         }
 
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no connection for " + token + L")\n");
+    }
+
+    // Agentmaster: the scanner's interval liveness sweep, marshaled onto THIS window's UI thread
+    // (the ConnectionState read + XAML tab walk are UI-thread-only, so the plain-C++ scanner can't
+    // do it itself — it just TICKS this probe on its slow cadence). Walk this window's claude tabs;
+    // any whose hosting ConPTY connection has reached Closed — the claude.exe exited (crashed with
+    // no SessionEnd, ran `/exit`, or a clean SessionEnd that only set state=Done) — is archived in
+    // place: flip the record to Archived (live=false), unbind its stdin injector, drop the
+    // sessionId->tab mapping, and persist. The (now-dead) tab is LEFT for the user to read/close;
+    // the session leaves the Triage Board and lists under "Archived", restorable via `claude
+    // --resume`. No confirm dialog — the process is already gone (unlike the user-initiated archive
+    // seam). Best-effort + idempotent: a tab with no terminal, or any live terminal, is left alone.
+    winrt::fire_and_forget TerminalPage::_SweepClaudeLiveness()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+
+        if (!_sessionRegistry || _claudeTabs.empty())
+        {
+            co_return;
+        }
+
+        // Collect first, mutate after — never erase from _claudeTabs while iterating it.
+        std::vector<std::wstring> dead;
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            const auto tab = weakTab.get();
+            if (!tab)
+            {
+                continue; // weak_ref already lapsed (tab fully torn down) — the close path owns it
+            }
+            const auto tabImpl = _GetTabImpl(tab);
+            if (!tabImpl)
+            {
+                continue;
+            }
+            bool sawTerminal = false;
+            bool anyAlive = false;
+            tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+                const auto content = pane->GetContent();
+                if (!content)
+                {
+                    return;
+                }
+                const auto term = content.try_as<TerminalApp::TerminalPaneContent>();
+                if (!term)
+                {
+                    return;
+                }
+                const auto ctrl = term.GetTermControl();
+                if (!ctrl)
+                {
+                    return;
+                }
+                sawTerminal = true;
+                // < Closed == NotConnected / Connecting / Connected / Closing -> still alive.
+                if (ctrl.ConnectionState() < TerminalConnection::ConnectionState::Closed)
+                {
+                    anyAlive = true;
+                }
+            });
+            // Only archive a tab we positively saw a (dead) terminal in — never one whose content
+            // we couldn't read, and never one with any still-live terminal (e.g. a user split).
+            if (sawTerminal && !anyAlive)
+            {
+                dead.push_back(id);
+            }
+        }
+
+        if (dead.empty())
+        {
+            co_return;
+        }
+        for (const auto& id : dead)
+        {
+            _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+                s.live = false;
+                s.pendingConfirmPromptId.clear();
+            });
+            _sessionRegistry->SetInjector(id, nullptr);
+            _claudeTabs.erase(id);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[liveness] dead -> archived " + id + L"\n");
+        }
+        ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        co_return;
     }
 
     void TerminalPage::_OnFirstLayout(const IInspectable& /*sender*/, const IInspectable& /*eventArgs*/)
@@ -2877,6 +3148,18 @@ namespace winrt::TerminalApp::implementation
         hostingTab.TaskbarProgressChanged({ get_weak(), &TerminalPage::_SetTaskbarProgressHandler });
 
         hostingTab.RestartTerminalRequested({ get_weak(), &TerminalPage::_restartPaneConnection });
+
+        // Agentmaster: a Claude tab's color is shared by every tab in its working directory. When
+        // the user changes it (color picker / setTabColor action -> SetRuntimeTabColor), mirror it
+        // onto the dir's other tabs and persist it per directory.
+        hostingTab.TabColorChanged([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (page && tab)
+            {
+                page->_OnClaudeTabColorChanged(*tab);
+            }
+        });
     }
 
     // Method Description:

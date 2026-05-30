@@ -281,6 +281,66 @@ namespace Agentmaster
         return true;
     }
 
+    void SessionRegistry::UpdateQuiet(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate)
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end())
+        {
+            return;
+        }
+        mutate(it->second);
+        // Deliberately NO _notify: this path exists precisely to avoid the persist / UI / advance
+        // cascade for transient, high-frequency fields (e.g. streamed assistant text).
+    }
+
+    void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text)
+    {
+        if (text.empty())
+        {
+            return;
+        }
+        SessionInfo snapshot;
+        bool changed = false;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end())
+            {
+                return;
+            }
+            auto& s = it->second;
+            // Idempotent: a message already recorded (status Sent — a Typed capture or an injected
+            // Flight prompt's echo, which also shows up as a user line in the transcript) must not
+            // be duplicated. Pending plan items are NOT "recorded messages", so they don't suppress
+            // recording a human message that happens to match a queued prompt's text.
+            for (const auto& p : s.queue)
+            {
+                if (p.status == PromptStatus::Sent && p.text == text)
+                {
+                    return;
+                }
+            }
+            const int64_t now = NowMs();
+            QueuedPrompt typed;
+            typed.id = L"recon-" + std::to_wstring(now) + L"-" + std::to_wstring(_typedSeq++);
+            typed.label = MakeLabel(text);
+            typed.text = text;
+            typed.status = PromptStatus::Sent;
+            typed.origin = PromptOrigin::Typed;
+            typed.echoed = true; // it IS the message; no further echo expected
+            typed.attempts = 1;
+            typed.sentAtUnixMs = now;
+            s.queue.push_back(std::move(typed));
+            snapshot = s;
+            changed = true;
+        }
+        if (changed)
+        {
+            _notify(snapshot, HookEvent::UserPromptSubmit);
+        }
+    }
+
     ObserverToken SessionRegistry::AddObserver(RegistryObserver observer)
     {
         std::lock_guard guard{ _mtx };

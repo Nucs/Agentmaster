@@ -45,6 +45,7 @@ namespace Agentmaster
     class SessionRegistry;
     class HooksBridge;
     class Scheduler;
+    class SessionScanner;
 }
 
 namespace winrt::TerminalApp::implementation
@@ -273,14 +274,31 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<::Agentmaster::SessionRegistry> _sessionRegistry{ nullptr };
         std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
         std::shared_ptr<::Agentmaster::Scheduler> _scheduler{ nullptr }; // Agentmaster: Autopilot
+        std::shared_ptr<::Agentmaster::SessionScanner> _scanner{ nullptr }; // Agentmaster: the interval reconciler (PULL)
         // Agentmaster (M9): this window's adoption handler on the shared registry — fans out a
         // hand-typed `+`-tab `claude` to whichever window hosts it. Detached in ~TerminalPage.
         // (An ::Agentmaster::AdoptionToken; uint64_t to avoid pulling SessionRegistry.h here.)
         uint64_t _adoptionToken{ 0 };
+        // Agentmaster: this window's liveness probe on the shared scanner — the scanner ticks it
+        // on the slow cadence and it archives any of THIS window's claude tabs whose ConPTY has
+        // Closed. Detached in ~TerminalPage. (An ::Agentmaster::LivenessToken; uint64_t to avoid
+        // pulling SessionScanner.h into this header.)
+        uint64_t _livenessToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
         std::unordered_map<std::wstring, winrt::weak_ref<TerminalApp::Tab>> _claudeTabs;
+
+        // Agentmaster (M10; PERSISTENCE.md §13): per-window workspace persistence. _windowId is
+        // this window's stable GUID; _windowRecord is its persisted UI state (geometry + Manager
+        // lens + ORDERED tab refs). Claimed at engine init (an existing windows/<id>.json, or a
+        // fresh GUID), its lens seeded into the Manager tab on wire, then autosaved on
+        // structural/lens change (debounced via _saveWindowRecordThrottled) and flushed on close.
+        // The session fleet stays in sessions.json — the record only REFERENCES sessions by id
+        // (Option 1; Correctness Rule #10), never copies them.
+        std::wstring _windowId;
+        ::Agentmaster::WindowRecord _windowRecord{};
+        std::shared_ptr<ThrottledFunc<>> _saveWindowRecordThrottled{ nullptr };
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
@@ -371,10 +389,22 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
         void _RenameClaudeSession(winrt::hstring sessionId, winrt::hstring title); // Agentmaster: Explorer-tree rename -> registry title (persist) + retitle the session's tab
         void _SyncClaudeTitleFromTab(const TerminalApp::Tab& tab); // Agentmaster: a Claude tab rename -> mirror back into the registry title (the one title)
+        void _ApplyDirColorToTab(const TerminalApp::Tab& tab, const std::wstring& dir); // Agentmaster: paint a tab from its working dir's persisted/auto color
+        void _ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex); // Agentmaster: recolor every live tab in a dir
+        void _OnClaudeTabColorChanged(const TerminalApp::Tab& tab); // Agentmaster: user changed a tab color -> persist per dir + propagate to same-dir tabs
         winrt::Windows::Foundation::IAsyncAction _ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm); // Agentmaster: confirm -> archive bookkeeping -> close
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
+        winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
+        // Agentmaster (M10; PERSISTENCE.md §13): capture this window's record (geometry + ordered
+        // tab refs + Manager lens) and persist it to windows/<windowId>.json. _CaptureWindowRecord
+        // reads live state (mirrors PersistState's geometry recipe); _ScheduleWindowRecordSave is
+        // the debounced autosave trigger (structural/lens change); _FlushWindowRecord captures +
+        // saves synchronously (close-flush, so the last move/resize isn't lost past the debounce).
+        ::Agentmaster::WindowRecord _CaptureWindowRecord();
+        void _ScheduleWindowRecordSave();
+        void _FlushWindowRecord();
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 

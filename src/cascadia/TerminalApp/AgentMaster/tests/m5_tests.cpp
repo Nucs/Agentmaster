@@ -33,6 +33,7 @@
 #include "../Persistence.h"
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
+#include "../SessionScanner.h" // ParseTranscriptDelta (pure)
 
 using namespace Agentmaster;
 
@@ -923,6 +924,171 @@ static void TestAppSettings()
     }
 }
 
+static void TestTabNamingAndColor()
+{
+    std::wprintf(L"[tab naming + per-dir color]\n");
+
+    // --- DeriveSessionTitle: walk up past generic segments, then length/case rules ---
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp") == L"NumSharp", "short non-generic leaf as-is");
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\bin\\Debug") == L"NumSharp", "walk up past bin/Debug");
+    CHECK(DeriveSessionTitle(L"K:\\proj\\obj\\x64\\Release") == L"proj", "walk up past obj/x64/Release");
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\") == L"NumSharp", "trailing slash tolerated");
+    CHECK(DeriveSessionTitle(L"K:/source/NumSharp") == L"NumSharp", "forward slashes tolerated");
+    CHECK(DeriveSessionTitle(L"C:\\bin") == L"bin", "all-generic falls back to the leaf");
+    CHECK(DeriveSessionTitle(L"") == L"claude", "empty dir -> claude");
+
+    // length rules
+    CHECK(DeriveSessionTitle(L"C:\\x\\MyProject") == L"MyProject", "<=16 used as-is (mixed case)");
+    CHECK(DeriveSessionTitle(L"C:\\x\\abcdefghijklmnop") == L"abcdefghijklmnop", "16 chars used as-is");
+    CHECK(DeriveSessionTitle(L"C:\\x\\MyVeryLongProjectName") == L"MVLPN", ">16 mixed-case -> capitals only");
+    CHECK(DeriveSessionTitle(L"C:\\x\\myreasonablylongname") == L"myreasonablylongname", ">16 all-lower <=30 as-is");
+    {
+        const std::wstring leaf(35, L'a');
+        CHECK(DeriveSessionTitle(L"C:\\x\\" + leaf) == std::wstring(30, L'a') + L"...", ">30 all-lower truncated with ...");
+    }
+
+    // --- IsGenericDirName (case-folded) ---
+    CHECK(IsGenericDirName(L"bin") && IsGenericDirName(L"BIN") && IsGenericDirName(L"Obj"), "generic names case-insensitive");
+    CHECK(!IsGenericDirName(L"NumSharp"), "project name not generic");
+
+    // --- NormDirKey: slash + trailing + (windows) case fold collapse to one key ---
+    CHECK(NormDirKey(L"K:\\A\\B\\") == NormDirKey(L"K:/a/b"), "case/slash/trailing variants share a key");
+
+    // --- AutoDirColorHex: deterministic, palette form, stable across path spelling ---
+    const auto c1 = AutoDirColorHex(L"K:\\source\\NumSharp");
+    CHECK(c1.size() == 7 && c1[0] == L'#', "auto color is #RRGGBB");
+    CHECK(c1 == AutoDirColorHex(L"K:\\source\\NumSharp"), "auto color deterministic");
+    CHECK(c1 == AutoDirColorHex(L"k:/source/numsharp"), "auto color stable across spelling");
+
+    // --- DirColors serialize round-trip (pure; no disk) ---
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> in = {
+            { L"k:\\a", L"#112233" }, { L"k:\\b", L"#AABBCC" }
+        };
+        const auto out = DeserializeDirColors(SerializeDirColors(in));
+        CHECK(out.size() == 2, "dir-colors round-trip count");
+        CHECK(out.size() == 2 && out[0].first == L"k:\\a" && out[0].second == L"#112233", "dir-colors round-trip [0]");
+        CHECK(out.size() == 2 && out[1].first == L"k:\\b" && out[1].second == L"#AABBCC", "dir-colors round-trip [1]");
+    }
+    CHECK(DeserializeDirColors(L"").empty(), "empty dir-colors -> empty");
+    CHECK(DeserializeDirColors(L"not json").empty(), "garbage dir-colors -> empty");
+}
+
+static void TestTranscriptScan()
+{
+    std::wprintf(L"Transcript reconciler (interval scan):\n");
+
+    // assistant line: content array with a text block + stop_reason -> one Assistant event
+    {
+        const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"All done."}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1, "assistant line -> 1 event");
+        CHECK(!r.events.empty() && r.events[0].kind == TranscriptEvent::Kind::Assistant, "assistant kind");
+        CHECK(!r.events.empty() && r.events[0].text == L"All done.", "assistant text collected");
+        CHECK(!r.events.empty() && r.events[0].stopReason == L"end_turn", "assistant stop_reason captured");
+        CHECK(r.consumed == line.size(), "consumed the full complete line");
+    }
+    // assistant tool_use turn: stop_reason tool_use, no text (turn NOT complete -> no synth Stop)
+    {
+        const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].stopReason == L"tool_use", "tool_use stop_reason");
+        CHECK(r.events.size() == 1 && r.events[0].text.empty(), "tool_use line has no text");
+    }
+    // user line: plain string content -> a UserPrompt
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"role":"user","content":"hello there"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::UserPrompt, "user string -> prompt");
+        CHECK(r.events.size() == 1 && r.events[0].text == L"hello there", "user prompt text");
+    }
+    // user line: tool_result array -> NOT a human prompt (no false positive)
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "tool_result user line -> no prompt");
+    }
+    // user line: isMeta -> skipped
+    {
+        const std::wstring line = LR"j({"type":"user","isMeta":true,"message":{"content":"<command-reminder>"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "meta user line -> skipped");
+    }
+    // partial trailing line: only the complete line is parsed; consumed stops at the last newline
+    {
+        const std::wstring chunk = LR"j({"type":"user","message":{"content":"first"}})j" L"\n" LR"j({"type":"user","message":{"content":"par)j";
+        const auto r = ParseTranscriptDelta(chunk);
+        CHECK(r.events.size() == 1 && r.events[0].text == L"first", "partial tail: only the complete line parsed");
+        CHECK(r.consumed == chunk.find(L'\n') + 1, "partial tail: consumed stops at the last newline");
+    }
+    // CRLF + leading blank line tolerated
+    {
+        const std::wstring chunk = std::wstring{ L"\r\n" } + LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok?"}]}})j" + L"\r\n";
+        const auto r = ParseTranscriptDelta(chunk);
+        CHECK(r.events.size() == 1 && r.events[0].text == L"ok?", "CRLF + blank line tolerated");
+    }
+    // garbage / non-JSON lines are skipped, not fatal
+    {
+        const auto r = ParseTranscriptDelta(L"not json at all\n{bad\n");
+        CHECK(r.events.empty(), "garbage transcript lines -> no events (no throw)");
+    }
+    // ORDER contract: events come back in transcript order. The scanner's missed-Stop fix relies
+    // on processing an assistant(end_turn) THEN a following user(prompt) in order, so the new
+    // human turn clears the stale end_turn before it could trigger a premature synthesized Stop.
+    {
+        const std::wstring chunk =
+            std::wstring{ LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}})j" } + L"\n" +
+            LR"j({"type":"user","message":{"content":"next please"}})j" + L"\n";
+        const auto r = ParseTranscriptDelta(chunk);
+        CHECK(r.events.size() == 2, "mixed delta -> 2 events");
+        CHECK(r.events.size() == 2 && r.events[0].kind == TranscriptEvent::Kind::Assistant && r.events[0].stopReason == L"end_turn", "order: assistant end_turn first");
+        CHECK(r.events.size() == 2 && r.events[1].kind == TranscriptEvent::Kind::UserPrompt && r.events[1].text == L"next please", "order: user prompt second (clears stale end_turn)");
+    }
+
+    // NoteExternalPrompt: dedups against an existing Sent (the hook already recorded the message),
+    // but records a genuinely missed one, tagged Typed/Sent.
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"s1"));
+        reg.OnHookEvent(UPS(L"s1", L"typed by human")); // hook path records a Typed (Sent) entry
+        const auto before = reg.Get(L"s1");
+        const size_t n0 = before ? before->queue.size() : 0;
+        reg.NoteExternalPrompt(L"s1", L"typed by human"); // reconciler sees the same line -> skip
+        const auto after = reg.Get(L"s1");
+        CHECK(after && after->queue.size() == n0, "NoteExternalPrompt dedups vs an existing Sent");
+        reg.NoteExternalPrompt(L"s1", L"a dropped-hook message"); // genuinely new -> recorded
+        const auto after2 = reg.Get(L"s1");
+        CHECK(after2 && after2->queue.size() == n0 + 1, "NoteExternalPrompt records a missed message");
+        bool taggedTyped = false;
+        if (after2)
+        {
+            for (const auto& p : after2->queue)
+            {
+                if (p.text == L"a dropped-hook message")
+                {
+                    taggedTyped = (p.origin == PromptOrigin::Typed && p.status == PromptStatus::Sent);
+                }
+            }
+        }
+        CHECK(taggedTyped, "reconciled prompt tagged Typed/Sent");
+        reg.NoteExternalPrompt(L"s1", L""); // empty -> no-op
+        const auto after3 = reg.Get(L"s1");
+        CHECK(after3 && after3->queue.size() == n0 + 1, "NoteExternalPrompt ignores empty text");
+    }
+    // UpdateQuiet mutates the record (and, by contract, fires no observer — exercised here for the mutation)
+    {
+        SessionRegistry reg;
+        int observed = 0;
+        reg.AddObserver([&](const SessionInfo&, HookEvent) { ++observed; });
+        reg.Upsert(MakeSession(L"s2")); // Upsert notifies -> observed == 1
+        const int afterUpsert = observed;
+        reg.UpdateQuiet(L"s2", [](SessionInfo& s) { s.lastAssistantText = L"peek"; });
+        const auto s = reg.Get(L"s2");
+        CHECK(s && s->lastAssistantText == L"peek", "UpdateQuiet mutates the record");
+        CHECK(observed == afterUpsert, "UpdateQuiet fires NO observer (no persist/UI churn)");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -933,10 +1099,12 @@ int wmain()
     TestTypedCapture();
     TestSpawnBuilders();
     TestScheduler();
+    TestTranscriptScan();
     TestPersistence();
     TestManagerLayout();
     TestWindowRecord();
     TestAppSettings();
+    TestTabNamingAndColor();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");
