@@ -31,7 +31,7 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 ## Status
 
 **All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **103/103** standalone
+`Agentmaster` identity, and verified running.** The engine passes **154/154** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -66,6 +66,18 @@ What works, by area:
   conversation found" (Rule #6). `Kill` is the explicit discard (drops it from the registry +
   `sessions.json`); `Sent` prompts are never replayed. Templates: save a session's queue,
   apply it, or broadcast to a whole directory.
+- **Settings cog (`AppSettings`, `settings.json`).** A `⚙` after "Pause Autopilot" opens a
+  global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
+  NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
+  Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
+  `--dangerously-skip-permissions`), `model` (== `/model <v>`), `includeCoAuthoredBy`, and a
+  global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via
+  `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus **Autopilot defaults** stamped
+  onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
+  (`confirmBeforeKill` routes the Kill button + tree `Del` through the confirm dialog;
+  `defaultLaunchDir` seeds the cwd box). Loaded at engine init, seeded via `SetSettings`,
+  persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
+  behavior, so a missing `settings.json` (or any unset field) is a no-op.
 
 Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
@@ -96,8 +108,9 @@ splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION
 - **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
-  `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU). Deliberately NOT
-  under `%LOCALAPPDATA%` — see Gotchas (MSIX).
+  `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `settings.json`
+  (the Settings cog's `AppSettings`). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas
+  (MSIX).
 
 ## Integration points (1.24 pluggable pane-content model)
 
@@ -113,7 +126,8 @@ splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION
 - **Engine wiring (`TerminalPage`):** `_InitAgentmasterEngine()` (from `_OnFirstLayout`,
   before the Manager tab) creates the `SessionRegistry` + `HooksBridge` + `Scheduler` and
   wires the registry's observer/advance seams. `_WireAgentManagerContent()` hands the
-  content the registry + spawn/activate/kill/pause/confirm callbacks.
+  content the registry + spawn/activate/kill/pause/confirm callbacks + the cog's
+  settings seed/persist (`SetSettings`/`SetSettingsHandler`).
   `_LaunchClaudeSession(dir, title, restored)` builds a claude `ConptyConnection`
   (cmdline/cwd/env ours) and opens it as a normal terminal tab via `_MakePane(args, …,
   existingConnection)`; `_SpawnClaudeSession` = fresh, `_RestoreClaudeSessions()` = resume
@@ -222,6 +236,14 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   `Text` namespace into scope and collides with a `Text(...)` helper (C2872/C2882) — prefer
   narrow `using`-declarations (`Color`/`ColorHelper`/`Colors`). The `.cpp` can't run-time
   test here, so the compiler is the safety net; build the lib (#6) after UI edits.
+- **A text box inside a `ContentDialog` gets no keypresses in XAML Islands.** The dialog's
+  PopupRoot sits outside our island's input path, so a hosted `TextBox`/`NumberBox` takes
+  focus but receives no typing (first hit with the tree-rename box). So: use a **buttons-only**
+  ContentDialog for confirms (`_OnDeleteSession`), and build anything that needs typing **into
+  the main visual tree** instead — the in-place rename editor, and the Settings cog's
+  **in-content modal overlay** (a dimmed `Grid` over `_root`, `RowSpan`-all; the card swallows
+  taps via a handled `Tapped`, a backdrop tap = cancel). Don't reach for a ContentDialog when a
+  field needs keyboard input.
 - **Never reuse the `WindowsTerminalDev` package identity.** It belongs to the separate
   `K:\source\windowsterminal` checkout; registering the same identity tries to *replace*
   it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
@@ -240,6 +262,17 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   Using `%LOCALAPPDATA%` here silently breaks hooks for spawned sessions (the app writes to
   LocalCache; Claude reads the empty real path). Verified live: with the fix, a spawned
   session's `SessionStart`/`UserPromptSubmit` reach the registry (`~/.agentmaster/hooks.log`).
+- **`--dangerously-skip-permissions` also skips the startup "trust this folder" dialog.**
+  Spawned sessions run with the flag by default (`AppSettings.skipPermissions`): besides
+  auto-accepting tool prompts, permission mode `bypassPermissions` makes claude skip the
+  per-folder trust dialog at startup (claude's block is gated on `mode !== "bypassPermissions"`),
+  which would otherwise wedge an unattended ConPTY session waiting on a keypress. It does NOT
+  suppress the one-time **global** "Bypass Permissions mode" acceptance (`~/.claude.json`
+  `bypassPermissionsModeAccepted` — shown once, ever, until accepted). Toggling skipPermissions
+  OFF drops the flag and instead pins `permissions.defaultMode:"default"` in the hooks-settings
+  file (normal prompts + trust apply). The trust decision itself keys on the **git toplevel**
+  of the cwd (forward-slash) under `~/.claude.json` `projects.<dir>.hasTrustDialogAccepted` — a
+  trusted ancestor counts; accepting at your **home dir never persists** (so it re-prompts).
 - **`claude --resume <id>` dies if there's no conversation.** A session that was opened but
   never prompted has no saved transcript; resuming it exits code 1 ("No conversation found")
   and the tab is dead. **Don't gate on the persisted `SessionState`** — it is overwritten
