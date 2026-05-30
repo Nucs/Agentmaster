@@ -1555,12 +1555,13 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Create a sub-menu for our extended move tab items.
-        Controls::MenuFlyoutSubItem moveSubMenu;
-        moveSubMenu.Text(RS_(L"TabMoveSubMenu"));
-        moveSubMenu.Items().Append(_moveToNewWindowMenuItem);
-        moveSubMenu.Items().Append(_moveRightMenuItem);
-        moveSubMenu.Items().Append(_moveLeftMenuItem);
-        flyout.Items().Append(moveSubMenu);
+        // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
+        // out the whole "Move tab" sub-menu. See DisableCloseAndMoveMenuItems().
+        _moveSubMenu.Text(RS_(L"TabMoveSubMenu"));
+        _moveSubMenu.Items().Append(_moveToNewWindowMenuItem);
+        _moveSubMenu.Items().Append(_moveRightMenuItem);
+        _moveSubMenu.Items().Append(_moveLeftMenuItem);
+        flyout.Items().Append(_moveSubMenu);
     }
 
     // Method Description:
@@ -1605,34 +1606,36 @@ namespace winrt::TerminalApp::implementation
         Automation::AutomationProperties::SetHelpText(_closeOtherTabsMenuItem, closeOtherTabsToolTip);
 
         // Close
-        Controls::MenuFlyoutItem closeTabMenuItem;
+        // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
+        // out the "Close tab" entry. See DisableCloseAndMoveMenuItems().
         Controls::FontIcon closeSymbol;
         closeSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
         closeSymbol.Glyph(L"\xE711");
 
-        closeTabMenuItem.Click([weakThis](auto&&, auto&&) {
+        _closeTabMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
                 tab->CloseRequested.raise(nullptr, nullptr);
             }
         });
-        closeTabMenuItem.Text(RS_(L"TabClose"));
-        closeTabMenuItem.Icon(closeSymbol);
+        _closeTabMenuItem.Text(RS_(L"TabClose"));
+        _closeTabMenuItem.Icon(closeSymbol);
         const auto closeTabToolTip = RS_(L"TabCloseToolTip");
 
-        WUX::Controls::ToolTipService::SetToolTip(closeTabMenuItem, box_value(closeTabToolTip));
-        Automation::AutomationProperties::SetHelpText(closeTabMenuItem, closeTabToolTip);
+        WUX::Controls::ToolTipService::SetToolTip(_closeTabMenuItem, box_value(closeTabToolTip));
+        Automation::AutomationProperties::SetHelpText(_closeTabMenuItem, closeTabToolTip);
 
         // Create a sub-menu for our extended close items.
-        Controls::MenuFlyoutSubItem closeSubMenu;
-        closeSubMenu.Text(RS_(L"TabCloseSubMenu"));
-        closeSubMenu.Items().Append(_closeTabsAfterMenuItem);
-        closeSubMenu.Items().Append(_closeOtherTabsMenuItem);
-        flyout.Items().Append(closeSubMenu);
+        // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
+        // out the whole "Close" sub-menu. See DisableCloseAndMoveMenuItems().
+        _closeSubMenu.Text(RS_(L"TabCloseSubMenu"));
+        _closeSubMenu.Items().Append(_closeTabsAfterMenuItem);
+        _closeSubMenu.Items().Append(_closeOtherTabsMenuItem);
+        flyout.Items().Append(_closeSubMenu);
 
-        flyout.Items().Append(closeTabMenuItem);
+        flyout.Items().Append(_closeTabMenuItem);
 
-        return closeSubMenu;
+        return _closeSubMenu;
     }
 
     // Method Description:
@@ -1838,6 +1841,20 @@ namespace winrt::TerminalApp::implementation
 
         // enabled if not last tab
         _moveRightMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
+    }
+
+    // Agentmaster: permanently gray out the context-menu entries that would move or
+    // close this tab ("Move tab", "Close", "Close tab"). Used by the pinned, leftmost
+    // Manager tab, which must never be relocatable or closable (it mirrors the hidden
+    // close button). _EnableMenuItems() only ever touches the inner items, never these
+    // three, so a one-shot disable here is not undone on subsequent tab re-indexing.
+    void Tab::DisableCloseAndMoveMenuItems()
+    {
+        ASSERT_UI_THREAD();
+
+        _moveSubMenu.IsEnabled(false);
+        _closeSubMenu.IsEnabled(false);
+        _closeTabMenuItem.IsEnabled(false);
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs)

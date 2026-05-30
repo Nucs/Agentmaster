@@ -111,6 +111,8 @@ namespace winrt::TerminalApp::implementation
         Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility CloseButtonVisibility();
         void CloseButtonVisibility(Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility visible);
 
+        void DisableCloseAndMoveMenuItems(); // Agentmaster
+
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
         til::event<winrt::Windows::Foundation::EventHandler<winrt::Windows::Foundation::IInspectable>> Closed;
@@ -152,6 +154,12 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeOtherTabsMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsAfterMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closePaneMenuItem{};
+        // Agentmaster: the "Move tab" / "Close" sub-menus and the "Close tab" item are kept
+        // as members (not locals in _CreateContextMenu) so the pinned Manager tab can gray
+        // them out via DisableCloseAndMoveMenuItems().
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _moveSubMenu{};
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _closeSubMenu{};
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabMenuItem{};
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };
         winrt::hstring _keyChord{};

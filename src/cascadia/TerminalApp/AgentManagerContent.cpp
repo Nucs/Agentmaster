@@ -1298,11 +1298,18 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // Tracks the directory header rendered just above the current one, so collapsing the
+        // selected directory can move the scope to its predecessor ("" — all directories — when
+        // the selected one is the topmost header).
+        std::wstring prevDir;
         for (const auto& dir : dirs)
         {
             const bool collapsed = _collapsedDirs.find(dir) != _collapsedDirs.end();
 
-            // dir header (toggles collapse + scopes the board)
+            // dir header. A click resolves the select-vs-collapse collision by state:
+            //   collapsed             -> uncollapse + select
+            //   expanded + unselected -> select (stay expanded)
+            //   expanded + selected   -> collapse + select the previous directory
             int count = 0;
             for (const auto& s : sessions)
             {
@@ -1327,18 +1334,34 @@ namespace winrt::TerminalApp::implementation
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
             const auto capturedDir = dir;
-            dirBtn.Click([this, capturedDir](const IInspectable&, const RoutedEventArgs&) {
-                if (_collapsedDirs.find(capturedDir) != _collapsedDirs.end())
+            const auto capturedPrevDir = prevDir; // predecessor at build time, for "collapse + select previous"
+            dirBtn.Click([this, capturedDir, capturedPrevDir](const IInspectable&, const RoutedEventArgs&) {
+                const bool isCollapsed = _collapsedDirs.find(capturedDir) != _collapsedDirs.end();
+                const bool isSelected = PathEq(capturedDir, _scopeDir);
+                if (isCollapsed)
                 {
+                    // click + collapsed -> uncollapse + select
                     _collapsedDirs.erase(capturedDir);
+                    _SetScope(capturedDir);
+                }
+                else if (!isSelected)
+                {
+                    // click + expanded + unselected -> select (leave it expanded)
+                    _SetScope(capturedDir);
                 }
                 else
                 {
+                    // click + expanded + selected -> collapse + select the previous directory
+                    // (capturedPrevDir is "" for the topmost header, which scopes to all dirs)
                     _collapsedDirs.insert(capturedDir);
+                    _SetScope(capturedPrevDir);
                 }
-                _SetScope(capturedDir);
             });
             _treeHost.Children().Append(dirBtn);
+
+            // This header is the predecessor of the next one. Set before the collapse-skip
+            // below so a collapsed directory still counts as a predecessor.
+            prevDir = dir;
 
             if (collapsed)
             {

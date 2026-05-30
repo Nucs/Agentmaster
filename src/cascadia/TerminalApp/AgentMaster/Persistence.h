@@ -41,6 +41,17 @@ namespace Agentmaster
     PlanTemplate TemplateFromJson(const json::Value& v);
     json::Value ToJson(const AppSettings& s);
     AppSettings AppSettingsFromJson(const json::Value& v);
+    // Workspace persistence (M10): the per-window record + its parts.
+    json::Value ToJson(const ManagerLayout& l);
+    ManagerLayout ManagerLayoutFromJson(const json::Value& v);
+    json::Value ToJson(const WindowGeometry& g);
+    WindowGeometry GeometryFromJson(const json::Value& v);
+    json::Value ToJson(const TabEntry& t);
+    TabEntry TabEntryFromJson(const json::Value& v);
+    json::Value ToJson(const ManagerState& m);
+    ManagerState ManagerStateFromJson(const json::Value& v);
+    json::Value ToJson(const WindowRecord& w);
+    WindowRecord WindowRecordFromJson(const json::Value& v);
 
     // ---- whole-document (de)serialization (pure; testable) ----
     std::wstring SerializeSessions(const std::vector<SessionInfo>& sessions);
@@ -56,6 +67,10 @@ namespace Agentmaster
     // Global app settings (the Settings cog). Deserialize falls back to per-field defaults.
     std::wstring SerializeAppSettings(const AppSettings& settings);
     AppSettings DeserializeAppSettings(std::wstring_view text);
+    // A single window's record (M10). One file per window; round-trips geometry + ordered tabs
+    // + the Manager lens. Deserialize tolerates a missing/corrupt document (empty record).
+    std::wstring SerializeWindowRecord(const WindowRecord& record);
+    WindowRecord DeserializeWindowRecord(std::wstring_view text);
 
     // ---- disk (state dir; best-effort) ----
     void SaveSessions(const std::vector<SessionInfo>& sessions);
@@ -68,6 +83,12 @@ namespace Agentmaster
     ManagerLayout LoadLayout();
     void SaveAppSettings(const AppSettings& settings);
     AppSettings LoadAppSettings();
+    // Per-window records under windows/<windowId>.json (M10). Save writes one file (creating
+    // the windows/ subdir); Load reads every windows/*.json; Delete removes one. Closing a
+    // window never deletes — the sole prune is Kill (Correctness Rule #7).
+    void SaveWindowRecord(const WindowRecord& record);
+    std::vector<WindowRecord> LoadWindowRecords();
+    void DeleteWindowRecord(const std::wstring& windowId);
 
     // ---- templates: build + apply ----
     // Capture a session's current queue as a reusable template.

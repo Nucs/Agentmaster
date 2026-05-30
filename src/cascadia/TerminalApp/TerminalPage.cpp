@@ -697,6 +697,13 @@ namespace winrt::TerminalApp::implementation
         {
             // Non-closable: hide this tab's close button.
             _managerTab.CloseButtonVisibility(winrt::Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility::Never);
+
+            // Agentmaster: also gray out the right-click "Move tab" / "Close" / "Close tab"
+            // entries so the pinned Manager tab can't be relocated or closed from the menu.
+            if (const auto tabImpl{ _GetTabImpl(_managerTab) })
+            {
+                tabImpl->DisableCloseAndMoveMenuItems();
+            }
         }
     }
 

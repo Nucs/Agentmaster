@@ -399,6 +399,166 @@ namespace Agentmaster
         return s;
     }
 
+    // ---- workspace persistence: the per-window record + its parts (M10) ----
+
+    json::Value ToJson(const ManagerLayout& l)
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"boardFraction", json::Value::MkNum(l.boardFraction));
+        o.Set(L"treeFraction", json::Value::MkNum(l.treeFraction));
+        return o;
+    }
+
+    ManagerLayout ManagerLayoutFromJson(const json::Value& v)
+    {
+        ManagerLayout l;
+        // Same sane-band clamp as DeserializeLayout, so a corrupt fraction can't collapse a pane.
+        auto sane = [](double x, double fb) { return (x > 0.05 && x < 0.95) ? x : fb; };
+        l.boardFraction = sane(v.NumAt(L"boardFraction", l.boardFraction), l.boardFraction);
+        l.treeFraction = sane(v.NumAt(L"treeFraction", l.treeFraction), l.treeFraction);
+        return l;
+    }
+
+    json::Value ToJson(const WindowGeometry& g)
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"hasPosition", json::Value::MkBool(g.hasPosition));
+        o.Set(L"x", json::Value::MkNum(g.x));
+        o.Set(L"y", json::Value::MkNum(g.y));
+        o.Set(L"hasSize", json::Value::MkBool(g.hasSize));
+        o.Set(L"width", json::Value::MkNum(g.width));
+        o.Set(L"height", json::Value::MkNum(g.height));
+        o.Set(L"launchMode", json::Value::MkStr(g.launchMode));
+        return o;
+    }
+
+    WindowGeometry GeometryFromJson(const json::Value& v)
+    {
+        WindowGeometry g;
+        g.hasPosition = v.BoolAt(L"hasPosition", false);
+        g.x = v.NumAt(L"x", 0);
+        g.y = v.NumAt(L"y", 0);
+        g.hasSize = v.BoolAt(L"hasSize", false);
+        g.width = v.NumAt(L"width", 0);
+        g.height = v.NumAt(L"height", 0);
+        g.launchMode = v.StrAt(L"launchMode");
+        return g;
+    }
+
+    json::Value ToJson(const TabEntry& t)
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"kind", json::Value::MkStr(t.kind == TabKind::Other ? L"Other" : L"Claude"));
+        if (t.kind == TabKind::Claude)
+        {
+            o.Set(L"session", ToJson(t.session));
+        }
+        else
+        {
+            o.Set(L"actionsJson", json::Value::MkStr(t.actionsJson));
+        }
+        if (!t.tabColor.empty())
+        {
+            o.Set(L"tabColor", json::Value::MkStr(t.tabColor));
+        }
+        return o;
+    }
+
+    TabEntry TabEntryFromJson(const json::Value& v)
+    {
+        TabEntry t;
+        t.kind = (v.StrAt(L"kind", L"Claude") == L"Other") ? TabKind::Other : TabKind::Claude;
+        if (t.kind == TabKind::Claude)
+        {
+            if (const auto* s = v.Find(L"session"); s && s->type == json::Value::Type::Obj)
+            {
+                t.session = SessionFromJson(*s);
+            }
+        }
+        else
+        {
+            t.actionsJson = v.StrAt(L"actionsJson");
+        }
+        t.tabColor = v.StrAt(L"tabColor");
+        return t;
+    }
+
+    json::Value ToJson(const ManagerState& m)
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"selectedId", json::Value::MkStr(m.selectedId));
+        o.Set(L"scopeDir", json::Value::MkStr(m.scopeDir));
+        o.Set(L"selectedPromptId", json::Value::MkStr(m.selectedPromptId));
+        auto cd = json::Value::MkArr();
+        for (const auto& d : m.collapsedDirs)
+        {
+            cd.Push(json::Value::MkStr(d));
+        }
+        o.Set(L"collapsedDirs", std::move(cd));
+        o.Set(L"layout", ToJson(m.layout));
+        return o;
+    }
+
+    ManagerState ManagerStateFromJson(const json::Value& v)
+    {
+        ManagerState m;
+        m.selectedId = v.StrAt(L"selectedId");
+        m.scopeDir = v.StrAt(L"scopeDir");
+        m.selectedPromptId = v.StrAt(L"selectedPromptId");
+        if (const auto* cd = v.Find(L"collapsedDirs"); cd && cd->type == json::Value::Type::Arr)
+        {
+            for (const auto& dv : cd->arr)
+            {
+                if (dv.type == json::Value::Type::Str)
+                {
+                    m.collapsedDirs.push_back(dv.AsStr());
+                }
+            }
+        }
+        if (const auto* l = v.Find(L"layout"); l && l->type == json::Value::Type::Obj)
+        {
+            m.layout = ManagerLayoutFromJson(*l);
+        }
+        return m;
+    }
+
+    json::Value ToJson(const WindowRecord& w)
+    {
+        auto o = json::Value::MkObj();
+        o.Set(L"windowId", json::Value::MkStr(w.windowId));
+        o.Set(L"geometry", ToJson(w.geometry));
+        auto tabs = json::Value::MkArr();
+        for (const auto& t : w.tabs)
+        {
+            tabs.Push(ToJson(t));
+        }
+        o.Set(L"tabs", std::move(tabs));
+        o.Set(L"manager", ToJson(w.manager));
+        return o;
+    }
+
+    WindowRecord WindowRecordFromJson(const json::Value& v)
+    {
+        WindowRecord w;
+        w.windowId = v.StrAt(L"windowId");
+        if (const auto* g = v.Find(L"geometry"); g && g->type == json::Value::Type::Obj)
+        {
+            w.geometry = GeometryFromJson(*g);
+        }
+        if (const auto* tabs = v.Find(L"tabs"); tabs && tabs->type == json::Value::Type::Arr)
+        {
+            for (const auto& tv : tabs->arr)
+            {
+                w.tabs.push_back(TabEntryFromJson(tv));
+            }
+        }
+        if (const auto* m = v.Find(L"manager"); m && m->type == json::Value::Type::Obj)
+        {
+            w.manager = ManagerStateFromJson(*m);
+        }
+        return w;
+    }
+
     // ---- whole document ----
 
     std::wstring SerializeSessions(const std::vector<SessionInfo>& sessions)
@@ -547,6 +707,29 @@ namespace Agentmaster
         return s;
     }
 
+    std::wstring SerializeWindowRecord(const WindowRecord& record)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        root.Set(L"window", ToJson(record));
+        return json::Dump(root);
+    }
+
+    WindowRecord DeserializeWindowRecord(std::wstring_view text)
+    {
+        WindowRecord w;
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return w;
+        }
+        if (const auto* o = parsed->Find(L"window"); o && o->type == json::Value::Type::Obj)
+        {
+            w = WindowRecordFromJson(*o);
+        }
+        return w;
+    }
+
     // ---- disk ----
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
@@ -588,6 +771,69 @@ namespace Agentmaster
     AppSettings LoadAppSettings()
     {
         return DeserializeAppSettings(ReadAllUtf8(AgentmasterStateDir() + L"\\settings.json"));
+    }
+
+    // Per-window records live one-file-per-window under .agentmaster\windows\ so opening and
+    // closing windows never contend on a single document.
+    void SaveWindowRecord(const WindowRecord& record)
+    {
+        if (record.windowId.empty())
+        {
+            return;
+        }
+        const auto dir = AgentmasterStateDir() + L"\\windows";
+        try
+        {
+            std::filesystem::create_directories(std::filesystem::path{ dir });
+        }
+        catch (...)
+        {
+        }
+        WriteAllUtf8(dir + L"\\" + record.windowId + L".json", SerializeWindowRecord(record));
+    }
+
+    std::vector<WindowRecord> LoadWindowRecords()
+    {
+        std::vector<WindowRecord> out;
+        try
+        {
+            const std::filesystem::path dir{ AgentmasterStateDir() + L"\\windows" };
+            if (!std::filesystem::exists(dir))
+            {
+                return out;
+            }
+            for (const auto& entry : std::filesystem::directory_iterator{ dir })
+            {
+                if (!entry.is_regular_file() || entry.path().extension() != L".json")
+                {
+                    continue;
+                }
+                auto w = DeserializeWindowRecord(ReadAllUtf8(entry.path().wstring()));
+                if (!w.windowId.empty())
+                {
+                    out.push_back(std::move(w));
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        return out;
+    }
+
+    void DeleteWindowRecord(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return;
+        }
+        try
+        {
+            std::filesystem::remove(std::filesystem::path{ AgentmasterStateDir() + L"\\windows\\" + windowId + L".json" });
+        }
+        catch (...)
+        {
+        }
     }
 
     // ---- templates apply ----

@@ -772,6 +772,122 @@ static void TestManagerLayout()
     }
 }
 
+// Agentmaster M10: the per-window WindowRecord — the new (window-scoped) source of truth that
+// supersedes the flat sessions.json. Verify the whole tree round-trips: geometry (incl. a
+// negative coordinate from a 2nd monitor), ORDERED tabs (a Claude tab whose SessionInfo carries
+// its Flight Plan + autopilot, and an opaque Other tab whose actionsJson is itself JSON), and
+// the Manager lens. Plus the one-file-per-window disk path (Save/Load/Delete), self-cleaning.
+static void TestWindowRecord()
+{
+    std::wprintf(L"Window record (per-window workspace persistence, M10):\n");
+    auto approx = [](double a, double b) { return (a > b ? a - b : b - a) < 1e-9; };
+
+    WindowRecord in;
+    in.windowId = L"win-guid-1";
+    in.geometry.hasPosition = true;
+    in.geometry.x = 120;
+    in.geometry.y = -40; // a real negative coordinate (2nd monitor) must survive
+    in.geometry.hasSize = true;
+    in.geometry.width = 1280;
+    in.geometry.height = 800;
+    in.geometry.launchMode = L"maximized";
+
+    // A Claude tab reuses SessionInfo, so its Flight Plan + autopilot ride along verbatim.
+    TabEntry claude;
+    claude.kind = TabKind::Claude;
+    claude.tabColor = L"#FFD700";
+    claude.session.id = L"conv-abc";
+    claude.session.title = L"api";
+    claude.session.workingDir = L"K:/api";
+    claude.session.state = SessionState::WaitingForInput;
+    {
+        QueuedPrompt p;
+        p.id = L"q1";
+        p.text = L"run the tests";
+        p.status = PromptStatus::Sent; // a Sent prompt is recorded (never replayed — Rule #4)
+        claude.session.queue.push_back(p);
+    }
+    claude.session.autopilot.mode = AutopilotMode::Full;
+    claude.session.autopilot.maxAutoSends = 7;
+    in.tabs.push_back(claude);
+
+    // An Other tab is opaque: actionsJson is WT ActionAndArgs — itself JSON, so this also tests
+    // nested-JSON-as-a-string escaping survives the round-trip.
+    TabEntry other;
+    other.kind = TabKind::Other;
+    other.actionsJson = L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]";
+    in.tabs.push_back(other);
+
+    in.manager.selectedId = L"conv-abc";
+    in.manager.scopeDir = L"K:/api";
+    in.manager.selectedPromptId = L"q1";
+    in.manager.collapsedDirs.push_back(L"K:/old");
+    in.manager.layout.boardFraction = 0.5;
+    in.manager.layout.treeFraction = 0.45;
+
+    const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
+
+    CHECK(out.windowId == L"win-guid-1", "record windowId round-trip");
+    CHECK(out.geometry.hasPosition && approx(out.geometry.x, 120) && approx(out.geometry.y, -40), "geometry position (negative y) round-trip");
+    CHECK(out.geometry.hasSize && approx(out.geometry.width, 1280) && approx(out.geometry.height, 800), "geometry size round-trip");
+    CHECK(out.geometry.launchMode == L"maximized", "geometry launchMode round-trip");
+
+    CHECK(out.tabs.size() == 2, "tab count + order preserved");
+    if (out.tabs.size() == 2)
+    {
+        CHECK(out.tabs[0].kind == TabKind::Claude, "tab[0] is Claude");
+        CHECK(out.tabs[0].tabColor == L"#FFD700", "Claude tab color round-trip");
+        CHECK(out.tabs[0].session.id == L"conv-abc" && out.tabs[0].session.workingDir == L"K:/api", "Claude tab session identity round-trip");
+        CHECK(out.tabs[0].session.queue.size() == 1 && out.tabs[0].session.queue[0].status == PromptStatus::Sent, "Claude tab Flight Plan (Sent status) round-trip");
+        CHECK(out.tabs[0].session.autopilot.mode == AutopilotMode::Full && out.tabs[0].session.autopilot.maxAutoSends == 7, "Claude tab autopilot round-trip");
+        CHECK(out.tabs[1].kind == TabKind::Other, "tab[1] is Other");
+        CHECK(out.tabs[1].actionsJson == L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]", "Other tab actionsJson (nested JSON) round-trip");
+    }
+
+    CHECK(out.manager.selectedId == L"conv-abc", "lens selectedId round-trip");
+    CHECK(out.manager.scopeDir == L"K:/api", "lens scopeDir round-trip");
+    CHECK(out.manager.selectedPromptId == L"q1", "lens selectedPromptId round-trip");
+    CHECK(out.manager.collapsedDirs.size() == 1 && out.manager.collapsedDirs[0] == L"K:/old", "lens collapsedDirs round-trip");
+    CHECK(approx(out.manager.layout.boardFraction, 0.5) && approx(out.manager.layout.treeFraction, 0.45), "lens splitter fractions round-trip");
+
+    // Tolerant of a missing / corrupt document.
+    {
+        const auto empty = DeserializeWindowRecord(L"");
+        CHECK(empty.windowId.empty() && empty.tabs.empty(), "empty text -> empty record (no throw)");
+        const auto garbage = DeserializeWindowRecord(L"}{not json");
+        CHECK(garbage.windowId.empty(), "garbage text -> empty record (no throw)");
+    }
+
+    // Disk round-trip (one file per window under .agentmaster\windows\). Uses a sentinel id and
+    // cleans up, so it neither collides with nor leaves residue among real window records.
+    {
+        WindowRecord rec;
+        rec.windowId = L"__m5test_window__";
+        rec.geometry.hasSize = true;
+        rec.geometry.width = 640;
+        rec.tabs.push_back(TabEntry{}); // one default (Claude) tab
+        SaveWindowRecord(rec);
+        bool found = false;
+        for (const auto& w : LoadWindowRecords())
+        {
+            if (w.windowId == L"__m5test_window__")
+            {
+                found = true;
+                CHECK(w.geometry.hasSize && approx(w.geometry.width, 640), "disk record geometry survives Save/Load");
+                CHECK(w.tabs.size() == 1, "disk record tabs survive Save/Load");
+            }
+        }
+        CHECK(found, "SaveWindowRecord then LoadWindowRecords finds it");
+        DeleteWindowRecord(L"__m5test_window__");
+        bool stillThere = false;
+        for (const auto& w : LoadWindowRecords())
+        {
+            stillThere = stillThere || (w.windowId == L"__m5test_window__");
+        }
+        CHECK(!stillThere, "DeleteWindowRecord prunes the file");
+    }
+}
+
 static void TestAppSettings()
 {
     std::wprintf(L"App settings (the Settings cog):\n");
@@ -832,6 +948,7 @@ int wmain()
     TestScheduler();
     TestPersistence();
     TestManagerLayout();
+    TestWindowRecord();
     TestAppSettings();
     TestBridgeRoundTrip();
 

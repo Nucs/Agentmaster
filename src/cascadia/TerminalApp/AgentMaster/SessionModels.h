@@ -180,4 +180,68 @@ namespace Agentmaster
         // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
         uint32_t recentDirsLimit{ 10 };
     };
+
+    // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====
+    // The flat sessions.json (M8) is window-blind. The WindowEmperor runs every window in one
+    // process, so persistence is per-WINDOW: each window owns a WindowRecord — its geometry,
+    // its ORDERED tabs (Claude sessions we re-resume + opaque WT actions for everything else),
+    // and its Manager-tab lens — stored as windows/<windowId>.json. "Agentmaster owns
+    // everything" (the chosen restore authority): WT persists nothing; we capture + re-apply
+    // geometry and all tabs ourselves.
+
+    // A window's position/size/launch-mode, captured from WT's WindowLayout and re-applied by
+    // us on restore. The `has*` flags distinguish "unset" from a real 0 (e.g. a window at the
+    // top-left corner). launchMode is WT's LaunchMode serialized as its JSON token
+    // ("default"/"maximized"/"focus"/...); empty => default.
+    struct WindowGeometry
+    {
+        bool hasPosition{ false };
+        double x{ 0 };
+        double y{ 0 };
+        bool hasSize{ false };
+        double width{ 0 };
+        double height{ 0 };
+        std::wstring launchMode;
+    };
+
+    enum class TabKind
+    {
+        Claude, // a Manager-owned claude.exe session — restored via `claude --resume <convId>`
+        Other, // any other WT tab — restored by replaying its stored ActionAndArgs JSON
+    };
+
+    // One ordered tab inside a window. A Claude tab reuses SessionInfo verbatim (id == the
+    // conversation id, plus the Flight Plan queue + autopilot), so its side-data serializes
+    // exactly like sessions.json; `tabColor` is the optional "#RRGGBB" we paint it. An Other
+    // tab is opaque: `actionsJson` is the WT ActionAndArgs (NewTab + SetTabColor + RenameTab)
+    // that recreates it, so its own color/title ride along inside that blob.
+    struct TabEntry
+    {
+        TabKind kind{ TabKind::Claude };
+        SessionInfo session; // valid when kind == Claude
+        std::wstring tabColor; // optional "#RRGGBB" (Claude tabs); empty => none
+        std::wstring actionsJson; // valid when kind == Other (opaque WT ActionAndArgs)
+    };
+
+    // A window's Manager-tab lens — the per-window VIEW over the one shared fleet (selection,
+    // directory scope, which prompt is selected, which dir rows are collapsed, splitter sizes).
+    // These are view preferences; the fleet itself lives in the shared SessionRegistry.
+    struct ManagerState
+    {
+        std::wstring selectedId; // selected session card
+        std::wstring scopeDir; // Explorer-tree directory scope ("" => all)
+        std::wstring selectedPromptId; // selected Flight-Plan row
+        std::vector<std::wstring> collapsedDirs; // Explorer-tree dirs the user collapsed
+        ManagerLayout layout{}; // splitter fractions (was the global layout.json; now per-window)
+    };
+
+    // The per-window source of truth for restore. One file per window
+    // (windows/<windowId>.json) so opening/closing windows never contend on a single document.
+    struct WindowRecord
+    {
+        std::wstring windowId; // stable GUID, generated once per window and embedded in its Manager tab
+        WindowGeometry geometry;
+        std::vector<TabEntry> tabs; // ORDERED (left-to-right)
+        ManagerState manager;
+    };
 }
