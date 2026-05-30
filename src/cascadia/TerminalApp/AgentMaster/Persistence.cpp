@@ -358,6 +358,7 @@ namespace Agentmaster
         o.Set(L"skipPermissions", json::Value::MkBool(s.skipPermissions));
         o.Set(L"model", json::Value::MkStr(s.model));
         o.Set(L"includeCoAuthoredBy", json::Value::MkBool(s.includeCoAuthoredBy));
+        o.Set(L"env", json::Value::MkStr(s.env));
         o.Set(L"defaultAutopilotMode", json::Value::MkStr(ToString(s.defaultAutopilotMode)));
         o.Set(L"maxAutoSends", json::Value::MkNum(s.maxAutoSends));
         o.Set(L"stopOnError", json::Value::MkBool(s.stopOnError));
@@ -373,6 +374,7 @@ namespace Agentmaster
         s.skipPermissions = v.BoolAt(L"skipPermissions", true);
         s.model = v.StrAt(L"model");
         s.includeCoAuthoredBy = v.BoolAt(L"includeCoAuthoredBy", true);
+        s.env = v.StrAt(L"env");
         s.defaultAutopilotMode = AutopilotModeFromString(v.StrAt(L"defaultAutopilotMode", L"Off"));
         s.maxAutoSends = v.U32At(L"maxAutoSends", 100);
         s.stopOnError = v.BoolAt(L"stopOnError", true);

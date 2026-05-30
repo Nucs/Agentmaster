@@ -147,6 +147,10 @@ namespace Agentmaster
         std::wstring model{};
         // false => emit includeCoAuthoredBy:false (drop Claude's commit/PR co-author byline).
         bool includeCoAuthoredBy{ true };
+        // Extra environment variables injected into EVERY spawned session, edited as a single
+        // ';'-delimited list of NAME=VALUE pairs (e.g. "FOO=bar;HTTPS_PROXY=http://h:8080").
+        // Parsed by ParseEnvAssignments at spawn; CCMGR_* names are ignored (reserved).
+        std::wstring env{};
 
         // --- Autopilot defaults stamped onto NEW sessions (not restored ones) ---
         AutopilotMode defaultAutopilotMode{ AutopilotMode::Off };

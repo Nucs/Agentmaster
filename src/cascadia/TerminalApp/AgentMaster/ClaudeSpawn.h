@@ -71,6 +71,12 @@ namespace Agentmaster
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
 
+    // Parse a ';'-delimited list of NAME=VALUE assignments (e.g. "FOO=bar;BAZ=qux") into pairs,
+    // for AppSettings.env (extra environment applied to every spawned session). Entries without
+    // '=' or with an empty NAME are skipped; whitespace around an entry and around NAME is
+    // trimmed; VALUE is taken verbatim (may itself contain '='). Pure + unit-tested.
+    std::vector<std::pair<std::wstring, std::wstring>> ParseEnvAssignments(std::wstring_view spec);
+
     // --- OS-touching ---
 
     // %LOCALAPPDATA%\Agentmaster (falls back to %TEMP%\Agentmaster). Created if absent.

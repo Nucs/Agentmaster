@@ -584,6 +584,47 @@ try {
         WriteFileUtf8(dir + L"\\bridge.json", json);
     }
 
+    std::vector<std::pair<std::wstring, std::wstring>> ParseEnvAssignments(std::wstring_view spec)
+    {
+        const auto trim = [](std::wstring_view v) -> std::wstring_view {
+            size_t a = 0, b = v.size();
+            while (a < b && (v[a] == L' ' || v[a] == L'\t' || v[a] == L'\r' || v[a] == L'\n'))
+            {
+                ++a;
+            }
+            while (b > a && (v[b - 1] == L' ' || v[b - 1] == L'\t' || v[b - 1] == L'\r' || v[b - 1] == L'\n'))
+            {
+                --b;
+            }
+            return v.substr(a, b - a);
+        };
+
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        size_t i = 0;
+        while (i <= spec.size())
+        {
+            const size_t semi = spec.find(L';', i);
+            const size_t end = (semi == std::wstring_view::npos) ? spec.size() : semi;
+            const std::wstring_view entry = trim(spec.substr(i, end - i));
+            const size_t eq = entry.find(L'=');
+            if (eq != std::wstring_view::npos)
+            {
+                const std::wstring_view name = trim(entry.substr(0, eq));
+                const std::wstring_view value = trim(entry.substr(eq + 1));
+                if (!name.empty())
+                {
+                    out.emplace_back(std::wstring{ name }, std::wstring{ value });
+                }
+            }
+            if (semi == std::wstring_view::npos)
+            {
+                break;
+            }
+            i = semi + 1;
+        }
+        return out;
+    }
+
     ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings)
     {
         ClaudeSpawnSpec spec;
@@ -604,6 +645,16 @@ try {
 
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
         spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);
+        // The cog's global env, applied to every session. Skip CCMGR_* so a stray user entry
+        // can't clobber the hook-correlation vars (which must win in the child env map).
+        for (auto& kv : ParseEnvAssignments(settings.env))
+        {
+            if (kv.first.rfind(L"CCMGR_", 0) == 0)
+            {
+                continue;
+            }
+            spec.env.emplace_back(std::move(kv.first), std::move(kv.second));
+        }
         return spec;
     }
 }

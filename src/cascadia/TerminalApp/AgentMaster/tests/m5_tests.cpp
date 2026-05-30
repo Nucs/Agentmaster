@@ -258,6 +258,19 @@ static void TestSpawnBuilders()
     CHECK(json2.find(L"\"includeCoAuthoredBy\": false") != std::wstring::npos, "settings emit includeCoAuthoredBy:false");
     CHECK(json2.find(L"\"defaultMode\": \"default\"") != std::wstring::npos, "no-bypass pins permissions.defaultMode");
 
+    // ParseEnvAssignments: ';'-delimited NAME=VALUE -> pairs (for AppSettings.env).
+    {
+        const auto e = ParseEnvAssignments(L" FOO=bar ; HTTPS_PROXY=http://h:8080 ; PATH=a=b=c ");
+        CHECK(e.size() == 3, "env parse: three entries");
+        CHECK(e[0].first == L"FOO" && e[0].second == L"bar", "env parse: trims + splits FOO=bar");
+        CHECK(e[1].first == L"HTTPS_PROXY" && e[1].second == L"http://h:8080", "env parse: value keeps :// ");
+        CHECK(e[2].first == L"PATH" && e[2].second == L"a=b=c", "env parse: value keeps later '='");
+        const auto empty = ParseEnvAssignments(L"");
+        CHECK(empty.empty(), "env parse: empty -> none");
+        const auto bad = ParseEnvAssignments(L"NOEQUALS;=noname;;GOOD=1");
+        CHECK(bad.size() == 1 && bad[0].first == L"GOOD", "env parse: skips malformed/empty entries");
+    }
+
     const auto fwd = BuildForwarderScript();
     CHECK(fwd.find(L"NamedPipeClientStream") != std::wstring::npos, "forwarder uses NamedPipeClientStream");
     CHECK(fwd.find(L"CCMGR_SESSION_ID") != std::wstring::npos, "forwarder reads CCMGR_SESSION_ID");
@@ -562,8 +575,10 @@ static void TestAppSettings()
         in.pauseOnHumanInput = false;
         in.confirmBeforeKill = false;
         in.defaultLaunchDir = L"K:/work";
+        in.env = L"FOO=bar;BAZ=qux";
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
+        CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
         CHECK(out.model == L"opus", "settings model round-trip");
         CHECK(out.includeCoAuthoredBy == false, "settings includeCoAuthoredBy round-trip");
         CHECK(out.defaultAutopilotMode == AutopilotMode::Full, "settings defaultAutopilotMode round-trip");

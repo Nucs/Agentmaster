@@ -1613,6 +1613,11 @@ namespace winrt::TerminalApp::implementation
         _setIncludeCoAuthored = ToggleSwitch{};
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
         panel.Children().Append(_setIncludeCoAuthored);
+        _setEnv = TextBox{};
+        _setEnv.Header(winrt::box_value(L"Environment variables (applied to every session)"));
+        _setEnv.PlaceholderText(L"NAME=VALUE;NAME=VALUE  (e.g. FOO=bar;HTTPS_PROXY=http://h:8080)");
+        _setEnv.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setEnv);
 
         // AUTOPILOT
         panel.Children().Append(Text(L"AUTOPILOT (defaults for new sessions)", 11, true, 0.6));
@@ -1689,6 +1694,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setIncludeCoAuthored.IsOn(_appSettings.includeCoAuthoredBy);
         }
+        if (_setEnv)
+        {
+            _setEnv.Text(winrt::hstring{ _appSettings.env });
+        }
         if (_setDefaultMode)
         {
             _setDefaultMode.SelectedIndex(_appSettings.defaultAutopilotMode == AutopilotMode::Full ? 2 :
@@ -1742,6 +1751,10 @@ namespace winrt::TerminalApp::implementation
         if (_setIncludeCoAuthored)
         {
             _appSettings.includeCoAuthoredBy = _setIncludeCoAuthored.IsOn();
+        }
+        if (_setEnv)
+        {
+            _appSettings.env = std::wstring{ _setEnv.Text() };
         }
         if (_setDefaultMode)
         {
