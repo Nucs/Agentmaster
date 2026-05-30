@@ -532,6 +532,45 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             }
         }
 
+        // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): reopen our per-window records.
+        // WT's PersistedWindowLayouts loop (above) is empty in our DefaultProfile mode, so we
+        // mirror it for windows/<id>.json: count the records (the Emperor links TerminalApp.dll,
+        // not the TerminalAppLib static lib, so it can't call ::Agentmaster::LoadWindowRecords —
+        // it scans the dir itself) and dispatch one window per record with `-s <idx>`. Each window
+        // then resolves records[idx] for its geometry (TerminalWindow) and claims it by id
+        // (TerminalPage), so geometry + lens agree. The trailing `_windows.empty()` guard below
+        // suppresses the extra default window on a bare launch.
+        if (_app.Logic().Settings().GlobalSettings().FirstWindowPreference() == FirstWindowPreference::DefaultProfile)
+        {
+            uint32_t recordCount = 0;
+            try
+            {
+                wchar_t profile[MAX_PATH];
+                const auto n = ::GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+                if (n > 0 && n < MAX_PATH)
+                {
+                    const std::filesystem::path windowsDir = std::filesystem::path{ profile } / L".agentmaster" / L"windows";
+                    if (std::filesystem::exists(windowsDir))
+                    {
+                        for (const auto& entry : std::filesystem::directory_iterator{ windowsDir })
+                        {
+                            if (entry.is_regular_file() && entry.path().extension() == L".json")
+                            {
+                                ++recordCount;
+                            }
+                        }
+                    }
+                }
+            }
+            CATCH_LOG();
+
+            for (uint32_t i = 0; i < recordCount; ++i)
+            {
+                hstring restoreArgs[] = { L"wt", L"-w", L"new", L"-s", winrt::to_hstring(i) };
+                _dispatchCommandlineCommon(restoreArgs, cwd, env, showCmd);
+            }
+        }
+
         const auto args = commandlineToArgArray(GetCommandLineW());
 
         if (args.size() == 2 && args[1] == L"-Embedding")
