@@ -564,10 +564,25 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             }
             CATCH_LOG();
 
-            for (uint32_t i = 0; i < recordCount; ++i)
+            // Reopening MULTIPLE windows warrants a heads-up (the user asked for a "prompted
+            // warning to decide"); a lone window restores silently (it's just remembering where it
+            // was). On "No" we dispatch nothing -> the _windows.empty() guard opens one default
+            // window, and the Manager's "Reopen Windows" recover button can bring the rest back.
+            auto doRestore = recordCount > 0;
+            if (recordCount > 1)
             {
-                hstring restoreArgs[] = { L"wt", L"-w", L"new", L"-s", winrt::to_hstring(i) };
-                _dispatchCommandlineCommon(restoreArgs, cwd, env, showCmd);
+                const std::wstring prompt = L"Reopen your " + std::to_wstring(recordCount) +
+                                            L" previous Agentmaster windows?\r\n\r\n(Choose No to start with a single window.)";
+                doRestore = ::MessageBoxW(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION) == IDYES;
+            }
+
+            if (doRestore)
+            {
+                for (uint32_t i = 0; i < recordCount; ++i)
+                {
+                    hstring restoreArgs[] = { L"wt", L"-w", L"new", L"-s", winrt::to_hstring(i) };
+                    _dispatchCommandlineCommon(restoreArgs, cwd, env, showCmd);
+                }
             }
         }
 
