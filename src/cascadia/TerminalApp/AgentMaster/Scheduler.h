@@ -30,6 +30,13 @@ namespace Agentmaster
     // is allowed to fire even when the agent's last message was a question.
     inline constexpr std::wstring_view kAnswersQuestionOk = L"answers-a-question:ok";
 
+    // After injecting a prompt the session lingers Idle/WaitingForInput for a beat until
+    // Claude's UserPromptSubmit moves it to Running. DecideAdvance refuses to fire another
+    // prompt while a Flight prompt is Sent-but-not-yet-echoed within this window — so a
+    // change-driven advance (the observer trigger that lets idle plans START) can't drain the
+    // whole queue at once. Bounded in time so a lost echo can't permanently stall the plan.
+    inline constexpr int64_t kPickupGuardMs = 4000;
+
     enum class AdvanceAction
     {
         None, // nothing to do (see reason)
@@ -51,9 +58,10 @@ namespace Agentmaster
     //   nowUnixMs            — current time
     //   lastHumanInputUnixMs — when the human last typed into this session (0 if never)
     //   globalPause          — the scheduler's global Pause-all backstop
-    // Encodes, in order: global pause; mode Off; not turn-complete; pause-on-human-input;
-    // maxAutoSends; (no Pending => PlanDone); Manual-gate skip; question-guard Hold;
-    // SemiAuto => AwaitConfirm; Full => Send.
+    // Encodes, in order: global pause; mode Off; not-ready (only Idle or WaitingForInput are
+    // ready — see below); pause-on-human-input; maxAutoSends; awaiting-injection-pickup guard;
+    // (no Pending => PlanDone); Manual-gate skip; question-guard Hold; SemiAuto => AwaitConfirm;
+    // Full => Send.
     inline AdvancePlan DecideAdvance(const SessionInfo& s,
                                      int64_t nowUnixMs,
                                      int64_t lastHumanInputUnixMs,
@@ -71,9 +79,14 @@ namespace Agentmaster
             plan.reason = L"autopilot off";
             return plan;
         }
-        if (s.state != SessionState::WaitingForInput)
+        // Ready for a prompt = turn-complete (a clean Stop -> WaitingForInput) OR sitting Idle
+        // with no turn in progress (freshly launched / just resumed). An Idle session never
+        // emits a Stop, so gating on WaitingForInput alone would leave a queued plan + autopilot
+        // waiting forever; allowing Idle lets the plan START. Running / NeedsApproval / Error /
+        // Done are NOT ready (mid-turn, awaiting you, or ended).
+        if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
         {
-            plan.reason = L"not turn-complete";
+            plan.reason = L"not ready (mid-turn / needs-approval / ended)";
             return plan;
         }
         if (s.autopilot.pauseOnHumanInput &&
@@ -88,6 +101,22 @@ namespace Agentmaster
         {
             plan.reason = L"maxAutoSends reached";
             return plan;
+        }
+
+        // Awaiting-injection-pickup guard: if a Flight prompt we just injected is Sent but has
+        // not yet echoed back (Claude hasn't moved to Running), hold off — otherwise an advance
+        // driven by an observed change in that brief window would send the NEXT prompt too,
+        // draining the queue. Time-bounded (kPickupGuardMs) so a lost echo can't stall forever,
+        // and ignores un-timestamped Sent prompts (e.g. a restored plan) via sentAtUnixMs != 0.
+        for (const auto& q : s.queue)
+        {
+            if (q.origin == PromptOrigin::Flight && q.status == PromptStatus::Sent && !q.echoed &&
+                q.sentAtUnixMs != 0 && (nowUnixMs - q.sentAtUnixMs) >= 0 &&
+                (nowUnixMs - q.sentAtUnixMs) < kPickupGuardMs)
+            {
+                plan.reason = L"awaiting injection pickup";
+                return plan;
+            }
         }
 
         // First Pending prompt that isn't blocked by an unmet dependency.

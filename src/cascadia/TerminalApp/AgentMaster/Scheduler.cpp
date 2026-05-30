@@ -57,6 +57,16 @@ namespace Agentmaster
     {
         {
             std::lock_guard lk{ _mtx };
+            // Dedup: one pending advance per session is enough — _process always re-reads the
+            // latest state, so collapsing a burst of observed changes (the idle-plan trigger
+            // can fire on every mutation) loses nothing and keeps the queue from piling up.
+            for (const auto& q : _queue)
+            {
+                if (q == sessionId)
+                {
+                    return;
+                }
+            }
             _queue.push_back(sessionId);
         }
         _cv.notify_one();
@@ -157,8 +167,35 @@ namespace Agentmaster
                 {
                     // Inject + submit (null-terminated by std::wstring). Idempotent: the
                     // prompt is already marked Sent above, so a duplicate advance won't resend.
-                    _registry->Inject(id, text + L"\r");
-                    AppendStateLog(L"autopilot.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
+                    const bool delivered = _registry->Inject(id, text + L"\r");
+                    if (delivered)
+                    {
+                        AppendStateLog(L"autopilot.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
+                    }
+                    else
+                    {
+                        // No stdin injector bound yet — can happen if a restored session's plan
+                        // bootstraps from Idle before its ConPTY is wired. Roll the prompt back to
+                        // Pending (Rule #4: never strand a phantom Sent) so it re-fires once the
+                        // injector binds (the SessionStart hook re-triggers an advance).
+                        _registry->Update(id, [&](SessionInfo& ss) {
+                            if (plan2.promptIndex < ss.queue.size() && ss.queue[plan2.promptIndex].status == PromptStatus::Sent)
+                            {
+                                auto& p = ss.queue[plan2.promptIndex];
+                                p.status = PromptStatus::Pending;
+                                p.echoed = false;
+                                if (p.attempts > 0)
+                                {
+                                    p.attempts -= 1;
+                                }
+                                if (ss.autopilot.autoSendsThisRun > 0)
+                                {
+                                    ss.autopilot.autoSendsThisRun -= 1;
+                                }
+                            }
+                        });
+                        AppendStateLog(L"autopilot.log", L"[send-deferred] " + id + L" (no injector yet)\n");
+                    }
                 }
                 return;
             }
@@ -203,6 +240,32 @@ namespace Agentmaster
         {
             _registry->Update(s.id, [](SessionInfo& ss) { ss.autopilot.mode = AutopilotMode::Off; });
             AppendStateLog(L"autopilot.log", L"[stop-on-error] paused " + s.id + L"\n");
+            return;
+        }
+
+        // Drive the plan from observed changes, not only the Stop hook: a managed session
+        // sitting Idle/WaitingForInput with autopilot on and something Pending (just resumed,
+        // or you just enabled autopilot / added a prompt) should START consuming. Without this
+        // a resumed-Idle session would wait forever — it never emits a Stop to trigger an
+        // advance. DecideAdvance + the pickup guard keep it to one prompt per turn, and
+        // RequestAdvance dedups the burst. External/observe-only sessions are skipped: they have
+        // no injector to write to until adopted (and would just churn the deferred-send path).
+        if (!s.external && s.autopilot.mode != AutopilotMode::Off &&
+            (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput))
+        {
+            bool hasPending = false;
+            for (const auto& p : s.queue)
+            {
+                if (p.status == PromptStatus::Pending)
+                {
+                    hasPending = true;
+                    break;
+                }
+            }
+            if (hasPending)
+            {
+                RequestAdvance(s.id);
+            }
         }
     }
 

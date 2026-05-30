@@ -176,5 +176,8 @@ namespace Agentmaster
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
         std::wstring defaultLaunchDir{}; // "" => the Launch cwd box defaults to %USERPROFILE%
+        // How many recent working directories the Launch path-picker's "RECENT" section
+        // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
+        uint32_t recentDirsLimit{ 10 };
     };
 }

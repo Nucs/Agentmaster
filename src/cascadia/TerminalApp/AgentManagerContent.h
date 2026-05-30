@@ -179,6 +179,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
@@ -209,6 +210,10 @@ namespace winrt::TerminalApp::implementation
         // clicks on the same row (GetDoubleClickTime threshold) -> Activate; single -> select.
         std::wstring _lastTreeClickId;
         unsigned long long _lastTreeClickTick{ 0 };
+        // Triage Board cards use the same click-timing trick (a Button swallows DoubleTapped):
+        // double-click a card -> Activate (jump to the live terminal tab); single -> select.
+        std::wstring _lastCardClickId;
+        unsigned long long _lastCardClickTick{ 0 };
         // In-place rename: a TextBox swapped into the row being renamed. A ContentDialog can't
         // host a text box in XAML Islands (it receives no keypresses), so we edit inline like
         // the tab renamer; while the editor is live the tree skips rebuilds to keep focus+text.

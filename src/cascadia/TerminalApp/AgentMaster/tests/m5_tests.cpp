@@ -571,6 +571,60 @@ static void TestScheduler()
         auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
         CHECK(DecideAdvance(s, now, now - 5000, false).action == AdvanceAction::Send, "human idle -> send");
     }
+
+    // --- Idle bootstrap: a just-resumed / freshly-launched session must START its plan, not
+    //     wait for a Stop it will never emit (the "ddd is Idle + auto but won't fire" bug). ---
+    {
+        auto s = mk(AutopilotMode::Full, SessionState::Idle);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && p.promptIndex == 0, "full + idle -> send (bootstrap)");
+    }
+    {
+        auto s = mk(AutopilotMode::SemiAuto, SessionState::Idle);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::AwaitConfirm, "semi-auto + idle -> await confirm");
+    }
+    {
+        auto s = mk(AutopilotMode::Off, SessionState::Idle);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "off + idle -> none");
+    }
+    {
+        // Not-ready states stay rejected (mid-turn / awaiting you).
+        auto s = mk(AutopilotMode::Full, SessionState::NeedsApproval);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "needs-approval -> none");
+        s.state = SessionState::Done;
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "done -> none");
+    }
+
+    // --- Pickup guard: one prompt per turn even though advances can now be change-driven. ---
+    auto withLead = [&](PromptStatus st, bool echoed, int64_t sentAt, SessionState state) {
+        auto s = mk(AutopilotMode::Full, state);
+        QueuedPrompt lead; // a prior Flight prompt at the FRONT; p1 (Pending) follows
+        lead.id = L"p0";
+        lead.text = L"already sent";
+        lead.status = st;
+        lead.origin = PromptOrigin::Flight;
+        lead.echoed = echoed;
+        lead.sentAtUnixMs = sentAt;
+        s.queue.insert(s.queue.begin(), lead);
+        return s;
+    };
+    {
+        // Just injected (Sent, recent, not echoed) -> hold the next prompt until Claude picks it up.
+        auto s = withLead(PromptStatus::Sent, false, now - 500, SessionState::Idle);
+        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "pickup guard: awaiting injection -> none");
+    }
+    {
+        // Echoed (Claude moved to Running and back) -> the next Pending proceeds.
+        auto s = withLead(PromptStatus::Sent, true, now - 500, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "echoed lead -> next pending sends");
+    }
+    {
+        // Stale un-echoed (echo lost long ago) -> window expired, don't stall the plan forever.
+        auto s = withLead(PromptStatus::Sent, false, now - 60000, SessionState::WaitingForInput);
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::Send && s.queue[p.promptIndex].id == L"p1", "stale un-echoed -> window expired, proceed");
+    }
 }
 
 static void TestPersistence()

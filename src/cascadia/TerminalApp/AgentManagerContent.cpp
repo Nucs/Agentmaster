@@ -992,7 +992,23 @@ namespace winrt::TerminalApp::implementation
         card.BorderBrush(SolidColorBrush{ accent });
         card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
         const auto id = s.id;
-        card.Click([this, id](const IInspectable&, const RoutedEventArgs&) { _SelectSession(id); });
+        // Single click = select; double click (within the OS threshold) = Activate (jump to
+        // the session's live terminal tab), mirroring the Explorer Tree rows. A Button
+        // swallows DoubleTapped, so we time the successive clicks ourselves.
+        card.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+            const auto nowTick = ::GetTickCount64();
+            const bool dbl = (id == _lastCardClickId) && (nowTick - _lastCardClickTick) <= ::GetDoubleClickTime();
+            _lastCardClickId = id;
+            _lastCardClickTick = nowTick;
+            if (dbl && _activateHandler)
+            {
+                _activateHandler(winrt::hstring{ id });
+            }
+            else
+            {
+                _SelectSession(id);
+            }
+        });
         return card;
     }
 
@@ -1674,6 +1690,10 @@ namespace winrt::TerminalApp::implementation
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
         panel.Children().Append(_setLaunchDir);
+        _setRecentDirsLimit = TextBox{};
+        _setRecentDirsLimit.Header(winrt::box_value(L"Recent Launch directories to remember"));
+        _setRecentDirsLimit.PlaceholderText(L"10");
+        panel.Children().Append(_setRecentDirsLimit);
 
         // Cancel / Save
         auto buttons = StackPanel{};
@@ -1751,6 +1771,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setLaunchDir.Text(winrt::hstring{ _appSettings.defaultLaunchDir });
         }
+        if (_setRecentDirsLimit)
+        {
+            _setRecentDirsLimit.Text(winrt::hstring{ std::to_wstring(_appSettings.recentDirsLimit) });
+        }
         _settingsOverlay.Visibility(Visibility::Visible);
     }
 
@@ -1819,6 +1843,21 @@ namespace winrt::TerminalApp::implementation
         if (_setLaunchDir)
         {
             _appSettings.defaultLaunchDir = std::wstring{ _setLaunchDir.Text() };
+        }
+        if (_setRecentDirsLimit)
+        {
+            const std::wstring t{ _setRecentDirsLimit.Text() };
+            uint32_t v = 0;
+            bool any = false;
+            for (const wchar_t c : t)
+            {
+                if (c >= L'0' && c <= L'9')
+                {
+                    v = v * 10 + static_cast<uint32_t>(c - L'0');
+                    any = true;
+                }
+            }
+            _appSettings.recentDirsLimit = (any && v > 0) ? v : 10; // empty/zero/garbage -> default
         }
         if (_settingsSink)
         {
@@ -2326,9 +2365,12 @@ namespace winrt::TerminalApp::implementation
 
     std::vector<std::wstring> AgentManagerContent::_CollectRecentDirs(const std::wstring& current) const
     {
+        // The RECENT section length is a global setting (AppSettings::recentDirsLimit, default
+        // 10); 0/garbage falls back to 10.
+        const size_t limit = _appSettings.recentDirsLimit > 0 ? _appSettings.recentDirsLimit : 10;
         std::vector<std::wstring> out;
         auto add = [&](const std::wstring& d) {
-            if (d.empty() || out.size() >= 5)
+            if (d.empty() || out.size() >= limit)
             {
                 return;
             }
@@ -2352,7 +2394,7 @@ namespace winrt::TerminalApp::implementation
         }
         // Supplement from live sessions (most-recently-active first) so the list is useful
         // even before anything has been launched this run.
-        if (out.size() < 5 && _registry)
+        if (out.size() < limit && _registry)
         {
             auto snap = _registry->Snapshot();
             std::sort(snap.begin(), snap.end(), [](const SessionInfo& a, const SessionInfo& b) {
@@ -2374,9 +2416,10 @@ namespace winrt::TerminalApp::implementation
         }
         _recentDirs.erase(std::remove_if(_recentDirs.begin(), _recentDirs.end(), [&](const std::wstring& e) { return PathEq(e, dir); }), _recentDirs.end());
         _recentDirs.insert(_recentDirs.begin(), dir);
-        if (_recentDirs.size() > 10)
+        const size_t cap = _appSettings.recentDirsLimit > 0 ? _appSettings.recentDirsLimit : 10;
+        if (_recentDirs.size() > cap)
         {
-            _recentDirs.resize(10);
+            _recentDirs.resize(cap);
         }
         ::Agentmaster::SaveRecentDirs(_recentDirs);
     }
@@ -2426,7 +2469,7 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring current = _cwdBox ? std::wstring{ _cwdBox.Text() } : std::wstring{};
 
-        // RECENT (up to 5, current excluded).
+        // RECENT (up to AppSettings::recentDirsLimit, current excluded).
         const auto recents = _CollectRecentDirs(current);
         if (!recents.empty())
         {
