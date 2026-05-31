@@ -903,20 +903,9 @@ namespace winrt::TerminalApp::implementation
                 auto actions = StackPanel{};
                 actions.Spacing(6);
 
-                auto apRow = StackPanel{};
-                apRow.Orientation(Orientation::Horizontal);
-                apRow.Spacing(8);
-                apRow.Children().Append(Text(L"Autopilot", 13, true, 0.9));
-                _autopilotCombo = ComboBox{};
-                _autopilotCombo.Items().Append(winrt::box_value(L"Off"));
-                _autopilotCombo.Items().Append(winrt::box_value(L"Semi-auto"));
-                _autopilotCombo.Items().Append(winrt::box_value(L"Full"));
-                _autopilotCombo.SelectedIndex(0);
-                _autopilotCombo.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) {
-                    _OnAutopilotChanged(_autopilotCombo ? _autopilotCombo.SelectedIndex() : 0);
-                });
-                apRow.Children().Append(_autopilotCombo);
-                actions.Children().Append(apRow);
+                // Autopilot mode now lives as a toggle in the FLIGHT PLAN header (Agentmaster) —
+                // _autopilotBtn / _CycleAutopilot / _UpdateAutopilotButton, mirroring the EXPLORER
+                // TREE LOCAL/GLOBAL toggle but acting on the selected session. (No combo here.)
 
                 // Compose row (Agentmaster): the action icons stick to the TOP-LEFT and the prompt
                 // textarea fills the rest, growing downward as it becomes multiline —
@@ -943,6 +932,7 @@ namespace winrt::TerminalApp::implementation
                 auto composeRow = Grid{};
                 composeRow.ColumnDefinitions().Append(autoCol()); // icon column (sticks top-left)
                 composeRow.ColumnDefinitions().Append(starCol(1)); // textarea fills the rest
+                composeRow.ColumnDefinitions().Append(autoCol()); // templates (paper) icon, top-right
 
                 auto iconCol = StackPanel{};
                 iconCol.Orientation(Orientation::Horizontal);
@@ -977,6 +967,20 @@ namespace winrt::TerminalApp::implementation
                 Grid::SetColumn(_addPromptBox, 1);
                 composeRow.Children().Append(_addPromptBox);
 
+                // Paper icon at the textarea's TOP-RIGHT: toggles the (collapsed-by-default)
+                // Templates row open/closed (Agentmaster). Kept inline (not a Flyout) so its
+                // TextBox keeps receiving keypresses — a text box in a popup/ContentDialog gets
+                // none in XAML Islands (see Gotchas).
+                auto paperBtn = mkIconBtn(L"Templates \x2014 save / apply prompt plans", fluentGlyph(L"\xE8A5"), [this]() {
+                    if (_templatesRow)
+                    {
+                        _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
+                    }
+                });
+                paperBtn.Margin(Thickness{ 6, 0, 0, 0 });
+                Grid::SetColumn(paperBtn, 2);
+                composeRow.Children().Append(paperBtn);
+
                 actions.Children().Append(composeRow);
 
                 // mkBtn — the plain text buttons used by the Templates row below.
@@ -987,29 +991,46 @@ namespace winrt::TerminalApp::implementation
                     return btn;
                 };
 
-                // Templates row (M8): save the current plan, apply a saved plan to this
-                // session or broadcast it to every session in the directory.
-                auto tplRow = StackPanel{};
-                tplRow.Orientation(Orientation::Horizontal);
-                tplRow.Spacing(6);
+                // Templates row (M8): save the current plan, apply a saved plan to this session or
+                // broadcast it to every session in the directory. Collapsed by default — the paper
+                // icon at the textarea's top-right toggles it open (Agentmaster).
+                _templatesRow = StackPanel{};
+                _templatesRow.Orientation(Orientation::Horizontal);
+                _templatesRow.Spacing(6);
+                _templatesRow.Visibility(Visibility::Collapsed);
                 _templateNameBox = TextBox{};
                 _templateNameBox.Width(150);
                 _templateNameBox.PlaceholderText(L"template name");
-                tplRow.Children().Append(_templateNameBox);
-                tplRow.Children().Append(mkBtn(L"Save as template", [this]() { _OnSaveTemplate(); }));
+                _templatesRow.Children().Append(_templateNameBox);
+                _templatesRow.Children().Append(mkBtn(L"Save as template", [this]() { _OnSaveTemplate(); }));
                 _templateCombo = ComboBox{};
                 _templateCombo.MinWidth(140);
-                tplRow.Children().Append(_templateCombo);
-                tplRow.Children().Append(mkBtn(L"Apply", [this]() { _OnApplyTemplate(false); }));
-                tplRow.Children().Append(mkBtn(L"Apply to dir", [this]() { _OnApplyTemplate(true); }));
-                actions.Children().Append(tplRow);
+                _templatesRow.Children().Append(_templateCombo);
+                _templatesRow.Children().Append(mkBtn(L"Apply", [this]() { _OnApplyTemplate(false); }));
+                _templatesRow.Children().Append(mkBtn(L"Apply to dir", [this]() { _OnApplyTemplate(true); }));
+                actions.Children().Append(_templatesRow);
                 _RefreshTemplateCombo();
 
                 Grid::SetRow(actions, 2);
                 outer.Children().Append(actions);
 
+                // Header row: the title + an Autopilot mode toggle (Agentmaster) — mirrors the
+                // EXPLORER TREE LOCAL/GLOBAL toggle, but acts on the SELECTED session. A colored
+                // state dot (gray circle = Off, amber half = Semi, green disc = Full) emphasizes
+                // the mode; clicking cycles Off -> Semi-auto -> Full. Dim/disabled with no live
+                // session selected.
                 auto headerLabel = StackPanel{};
+                headerLabel.Orientation(Orientation::Horizontal);
+                headerLabel.Spacing(8);
+                headerLabel.VerticalAlignment(VerticalAlignment::Center);
                 headerLabel.Children().Append(Text(L"FLIGHT PLAN", 12, true, 0.8));
+                _autopilotBtn = Button{};
+                _autopilotBtn.FontSize(11);
+                _autopilotBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                ToolTipService::SetToolTip(_autopilotBtn, winrt::box_value(L"Autopilot \x2014 click to cycle Off / Semi-auto / Full for the selected session"));
+                _autopilotBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutopilot(); });
+                headerLabel.Children().Append(_autopilotBtn);
+                _UpdateAutopilotButton(AutopilotMode::Off, false);
 
                 auto wrap = Grid{};
                 wrap.RowDefinitions().Append(autoRow());
@@ -2523,12 +2544,7 @@ namespace winrt::TerminalApp::implementation
         if (!sel || !sel->live) // an archived (closed) session isn't planned here — restore it first
         {
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
-            _suppressAutopilotEvent = true;
-            if (_autopilotCombo)
-            {
-                _autopilotCombo.SelectedIndex(0);
-            }
-            _suppressAutopilotEvent = false;
+            _UpdateAutopilotButton(AutopilotMode::Off, false); // no live session: dim the header toggle
             return;
         }
 
@@ -2541,14 +2557,8 @@ namespace winrt::TerminalApp::implementation
         _planHeaderHost.Children().Append(titleRow);
         _planHeaderHost.Children().Append(Text(winrt::hstring{ sel->workingDir }, 12, false, 0.6));
 
-        // reflect autopilot mode without re-triggering the change handler
-        _suppressAutopilotEvent = true;
-        if (_autopilotCombo)
-        {
-            _autopilotCombo.SelectedIndex(sel->autopilot.mode == AutopilotMode::Full ? 2 : sel->autopilot.mode == AutopilotMode::SemiAuto ? 1 :
-                                                                                                                                            0);
-        }
-        _suppressAutopilotEvent = false;
+        // reflect autopilot mode on the header toggle
+        _UpdateAutopilotButton(sel->autopilot.mode, true);
 
         // SemiAuto one-click confirm banner (the scheduler armed the next prompt).
         if (!sel->pendingConfirmPromptId.empty())
@@ -2981,6 +2991,67 @@ namespace winrt::TerminalApp::implementation
                 s.pendingConfirmPromptId.clear();
             }
         });
+    }
+
+    // Agentmaster: the FLIGHT-PLAN-header Autopilot toggle — advance the selected session's mode
+    // (Off -> Semi-auto -> Full -> Off), reusing _OnAutopilotChanged's apply logic.
+    void AgentManagerContent::_CycleAutopilot()
+    {
+        if (_selectedId.empty() || !_registry)
+        {
+            return;
+        }
+        const auto s = _registry->Get(_selectedId);
+        if (!s || !s->live)
+        {
+            return; // nothing live to drive (the button is disabled in this state anyway)
+        }
+        // Off(0) -> Semi-auto(1) -> Full(2) -> Off — same index order the old combo used.
+        const int next = s->autopilot.mode == AutopilotMode::Off ? 1 :
+                                                                    (s->autopilot.mode == AutopilotMode::SemiAuto ? 2 : 0);
+        _OnAutopilotChanged(next); // writes the registry + clears the per-run backstops
+        _Refresh(); // repaint the header toggle now (the registry observer also refreshes)
+    }
+
+    // Paint the Autopilot toggle: a colored state dot (gray circle = Off, amber half = Semi, green
+    // disc = Full) + a label. Dim + disabled when no live session is selected.
+    void AgentManagerContent::_UpdateAutopilotButton(AutopilotMode mode, bool enabled)
+    {
+        if (!_autopilotBtn)
+        {
+            return;
+        }
+        winrt::hstring glyph;
+        winrt::hstring label;
+        Color dot{};
+        switch (mode)
+        {
+        case AutopilotMode::Full:
+            glyph = L"\x25CF"; // ●
+            label = L"Autopilot: Full";
+            dot = Colors::MediumSeaGreen();
+            break;
+        case AutopilotMode::SemiAuto:
+            glyph = L"\x25D0"; // ◐
+            label = L"Autopilot: Semi";
+            dot = Colors::Goldenrod();
+            break;
+        case AutopilotMode::Off:
+        default:
+            glyph = L"\x25CB"; // ○
+            label = L"Autopilot: Off";
+            dot = Colors::Gray();
+            break;
+        }
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(6);
+        auto g = Text(glyph, 12, true, enabled ? 1.0 : 0.4);
+        g.Foreground(SolidColorBrush{ dot });
+        row.Children().Append(g);
+        row.Children().Append(Text(label, 11, false, enabled ? 0.95 : 0.5));
+        _autopilotBtn.Content(row);
+        _autopilotBtn.IsEnabled(enabled);
     }
 
     void AgentManagerContent::_RefreshTemplateCombo()

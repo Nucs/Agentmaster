@@ -118,6 +118,11 @@ namespace winrt::TerminalApp::implementation
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutopilotChanged(int index);
+        // Agentmaster: the FLIGHT-PLAN-header Autopilot toggle. _CycleAutopilot advances the
+        // selected session's mode (Off -> Semi-auto -> Full -> Off); _UpdateAutopilotButton paints
+        // the button's colored state dot + label (dim/disabled when no live session is selected).
+        void _CycleAutopilot();
+        void _UpdateAutopilotButton(::Agentmaster::AutopilotMode mode, bool enabled);
         void _OnSaveTemplate();
         void _OnApplyTemplate(bool toWholeDirectory);
         void _RefreshTemplateCombo();
@@ -226,7 +231,8 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _recentDirs; // MRU of launched working dirs (persisted)
         bool _pathPickerUserDismissed{ false }; // Esc/Enter/blur dismiss the picker; (re)focusing/tapping the box clears it
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::ComboBox _autopilotCombo{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _autopilotBtn{ nullptr }; // Agentmaster: Autopilot mode toggle in the FLIGHT PLAN header (replaces the old combo)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _templatesRow{ nullptr }; // Agentmaster: the Templates row — collapsed by default, toggled by the paper icon
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
         winrt::Windows::UI::Xaml::Controls::Button _archivedBtn{ nullptr }; // "Archived (N)" (next to the cog) -> opens the archive overlay
