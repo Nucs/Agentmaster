@@ -174,12 +174,28 @@ namespace Agentmaster
             e.unclaimedWindowRecords = LoadWindowRecords();
             e.windowRecordsLoaded = true;
         }
+        // 1) The startup claim pool (records present at launch, not yet claimed) — the decline-at-startup
+        //    recover path lands here.
         for (auto it = e.unclaimedWindowRecords.begin(); it != e.unclaimedWindowRecords.end(); ++it)
         {
             if (it->windowId == windowId)
             {
                 auto rec = std::move(*it);
                 e.unclaimedWindowRecords.erase(it);
+                return rec;
+            }
+        }
+        // 2) The reclaimable pool (records claimed-then-closed THIS session, returned by
+        //    UnregisterLiveWindow). This is what lets the in-session "Reopen Windows" button re-claim a
+        //    window it earlier closed — restoring its real id + lens — instead of minting a fresh,
+        //    lens-less duplicate. find+erase is atomic under the lock, so two windows never share a
+        //    record (a double-dispatch's second claim misses and mints, as intended).
+        for (auto it = e.reclaimableWindowRecords.begin(); it != e.reclaimableWindowRecords.end(); ++it)
+        {
+            if (it->windowId == windowId)
+            {
+                auto rec = std::move(*it);
+                e.reclaimableWindowRecords.erase(it);
                 return rec;
             }
         }
@@ -208,6 +224,11 @@ namespace Agentmaster
             return;
         }
         auto& e = SharedEngine();
+        // Re-read the closing window's record from disk BEFORE the lock (disk I/O off the mutex). It is
+        // returned to the reclaimable pool below so the in-session recover button can re-claim it.
+        // Absent on disk (a window closed before its first autosave) => nothing to re-claim, fine.
+        auto reclaim = LoadWindowRecord(windowId);
+
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.erase(windowId);
         // Skip-empty: the LAST window's teardown must NOT clear the manifest, or "open at exit" would
@@ -217,6 +238,25 @@ namespace Agentmaster
         if (!e.liveWindowIds.empty())
         {
             SaveOpenWindows({ e.liveWindowIds.begin(), e.liveWindowIds.end() });
+        }
+        // Return the record to the reclaimable pool so a later in-session reopen (the recover button)
+        // re-claims THIS record (real id + lens) rather than minting a duplicate. Dedup the re-add so a
+        // double teardown can't stack two copies. The startup pool is left alone — reclaim is by id only.
+        if (reclaim)
+        {
+            bool present = false;
+            for (const auto& r : e.reclaimableWindowRecords)
+            {
+                if (r.windowId == windowId)
+                {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present)
+            {
+                e.reclaimableWindowRecords.push_back(std::move(*reclaim));
+            }
         }
     }
 

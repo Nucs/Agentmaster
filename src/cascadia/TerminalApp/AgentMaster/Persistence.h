@@ -102,6 +102,10 @@ namespace Agentmaster
     // window never deletes — the sole prune is Kill (Correctness Rule #7).
     void SaveWindowRecord(const WindowRecord& record);
     std::vector<WindowRecord> LoadWindowRecords();
+    // Load a SINGLE window record by id (windows/<windowId>.json), or nullopt if absent/corrupt. Used
+    // to return a closed window's record to the in-session claim pool (Engine::UnregisterLiveWindow) so
+    // the "Reopen Windows" recover button can re-claim it instead of minting a lens-less duplicate.
+    std::optional<WindowRecord> LoadWindowRecord(const std::wstring& windowId);
     void DeleteWindowRecord(const std::wstring& windowId);
     // The open-at-exit manifest (open-windows.json, a sibling of sessions.json — NOT under windows/,
     // so it never pollutes the windows/*.json record scan). Save overwrites with the given live

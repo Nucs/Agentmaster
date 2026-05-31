@@ -1128,6 +1128,31 @@ namespace Agentmaster
         return out;
     }
 
+    std::optional<WindowRecord> LoadWindowRecord(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return std::nullopt;
+        }
+        try
+        {
+            const auto path = AgentmasterStateDir() + L"\\windows\\" + windowId + L".json";
+            if (!std::filesystem::exists(std::filesystem::path{ path }))
+            {
+                return std::nullopt;
+            }
+            auto w = DeserializeWindowRecord(ReadAllUtf8(path));
+            if (!w.windowId.empty())
+            {
+                return w;
+            }
+        }
+        catch (...)
+        {
+        }
+        return std::nullopt;
+    }
+
     void DeleteWindowRecord(const std::wstring& windowId)
     {
         if (windowId.empty())

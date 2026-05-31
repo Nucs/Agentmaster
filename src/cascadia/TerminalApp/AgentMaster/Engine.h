@@ -66,6 +66,17 @@ namespace Agentmaster
         bool windowRecordsLoaded{ false };
         std::vector<WindowRecord> unclaimedWindowRecords;
 
+        // M10 Increment 3 (in-session re-claim; PERSISTENCE.md §13.5). Records that were CLAIMED
+        // earlier this session and then CLOSED — returned here (loaded from disk) by
+        // UnregisterLiveWindow. The startup pool above only ever shrinks, so without this a window
+        // reopened DURING a session (the "Reopen Windows" recover button) could not re-claim its record
+        // and would mint a fresh, lens-less duplicate, orphaning the original + never clearing it from
+        // the recoverable set. Drawn from by id ONLY (ClaimWindowRecord(windowId) searches both pools);
+        // the no-arg front-pop claim never touches it, so a plain "+ new window" never silently adopts a
+        // closed window's geometry/lens. Cross-session is unaffected (the next launch reloads the
+        // startup pool from disk). Guarded by windowMutex.
+        std::vector<WindowRecord> reclaimableWindowRecords;
+
         // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5). The set of windowIds with a
         // LIVE window in THIS process right now. Each TerminalPage registers its id at engine init and
         // unregisters at teardown; every change rewrites open-windows.json (the manifest the next run's
