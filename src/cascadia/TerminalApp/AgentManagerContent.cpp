@@ -919,6 +919,18 @@ namespace winrt::TerminalApp::implementation
                     fi.FontSize(16);
                     return fi;
                 };
+                // The "!" isn't an icon-font glyph, so render it as a FontIcon in the UI text font
+                // (bold). A FontIcon centers its glyph the same way the Segoe Fluent ones above do,
+                // so the exclamation lines up with the eye/envelope — a plain TextBlock rode high
+                // because its line box reserves descent space below the glyph.
+                auto textIconGlyph = [](const winrt::hstring& g) {
+                    FontIcon fi;
+                    fi.FontFamily(FontFamily{ L"Segoe UI" });
+                    fi.Glyph(g);
+                    fi.FontSize(16);
+                    fi.FontWeight(FontWeights::Bold());
+                    return fi;
+                };
                 auto mkIconBtn = [&](const winrt::hstring& tip, const IInspectable& glyph, std::function<void()> fn) {
                     auto btn = Button{};
                     btn.Content(glyph);
@@ -947,7 +959,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 }));
                 // Exclamation point = Send now (a literal bold "!"; confirmed before it fires).
-                iconCol.Children().Append(mkIconBtn(L"Send now (asks first)", Text(L"!", 16, true, 1.0), [this]() { _OnSendNow(); }));
+                iconCol.Children().Append(mkIconBtn(L"Send now (asks first)", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
                 // Envelope = Add the composed prompt to the queue.
                 iconCol.Children().Append(mkIconBtn(L"Add to the queue", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
                 Grid::SetColumn(iconCol, 0);
