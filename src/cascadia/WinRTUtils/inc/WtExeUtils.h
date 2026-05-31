@@ -88,7 +88,15 @@ _TIL_INLINEPREFIX const std::wstring& GetWtExePath()
                 if (!pfn.empty())
                 {
                     const std::filesystem::path windowsAppsPath{ wil::ExpandEnvironmentStringsW<std::wstring>(LocalAppDataAppsPath.data()) };
-                    const auto wtPath = windowsAppsPath / std::wstring_view{ pfn } / (IsDevBuild() ? WtdExe : WtExe);
+                    // Agentmaster: our package registers the `agentmaster.exe` execution alias (see
+                    // Package-Dev.appxmanifest), NOT wt.exe/wtd.exe — so the upstream assumption resolves
+                    // to a non-existent <PFN>\wt.exe and every launcher (new-window, jump list, ...)
+                    // silently fails. Pick OUR alias by package family name. Verified: ShellExecuteEx on
+                    // this full <PFN>\agentmaster.exe path activates our packaged app and hands off.
+                    const std::wstring_view alias = til::starts_with(std::wstring_view{ pfn }, std::wstring_view{ L"Agentmaster" }) ?
+                                                        std::wstring_view{ L"agentmaster.exe" } :
+                                                        (IsDevBuild() ? WtdExe : WtExe);
+                    const auto wtPath = windowsAppsPath / std::wstring_view{ pfn } / alias;
                     return wtPath;
                 }
             }

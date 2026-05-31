@@ -13,6 +13,7 @@
 #include <sddl.h>
 #include <propkey.h>
 #include <propvarutil.h>
+#include <appmodel.h> // Agentmaster: GetCurrentPackageFamilyName (package-distinct single-instance identity)
 
 #include "AppHost.h"
 #include "resource.h"
@@ -451,6 +452,26 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     if (Utils::IsRunningElevated())
     {
         windowClassName.append(L" Admin");
+    }
+    // Agentmaster: windowClassName seeds BOTH the single-instance mutex (CreateMutexW below) and the
+    // FindWindowW handoff target. Upstream derives it from WT_BRANDING only, which is package-BLIND —
+    // so our Agentmaster build (Dev branding) would share ONE single-instance identity with the real
+    // WindowsTerminalDev and hand its commandline off to that app (defeating the distinct package
+    // identity we rely on to coexist). Append the package family name (unique per package) so the
+    // mutex/class are ours alone. Unpackaged builds already disambiguate via the exe-path hash below.
+    if (IsPackaged())
+    {
+        UINT32 pfnLength = 0;
+        if (GetCurrentPackageFamilyName(&pfnLength, nullptr) == ERROR_INSUFFICIENT_BUFFER && pfnLength > 1)
+        {
+            std::wstring pfn(pfnLength, L'\0');
+            if (GetCurrentPackageFamilyName(&pfnLength, pfn.data()) == ERROR_SUCCESS)
+            {
+                pfn.resize(pfnLength > 0 ? pfnLength - 1 : 0); // drop the trailing NUL
+                windowClassName.push_back(L' ');
+                windowClassName.append(pfn);
+            }
+        }
     }
     if (!IsPackaged())
     {
