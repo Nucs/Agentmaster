@@ -918,40 +918,74 @@ namespace winrt::TerminalApp::implementation
                 apRow.Children().Append(_autopilotCombo);
                 actions.Children().Append(apRow);
 
+                // Compose row (Agentmaster): the action icons stick to the TOP-LEFT and the prompt
+                // textarea fills the rest, growing downward as it becomes multiline —
+                //   [eye = Focus]  [! = Send now (asks first)]  [envelope = Add to queue]  |  [textarea]
+                // Per-message actions (Move up / Move down / Delete / Archive) live on the message
+                // right-click menu now (see _MakePromptMenu, attached in _RebuildPlan), not a button row.
+                auto fluentGlyph = [](const winrt::hstring& g) {
+                    FontIcon fi;
+                    fi.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+                    fi.Glyph(g);
+                    fi.FontSize(16);
+                    return fi;
+                };
+                auto mkIconBtn = [&](const winrt::hstring& tip, const IInspectable& glyph, std::function<void()> fn) {
+                    auto btn = Button{};
+                    btn.Content(glyph);
+                    btn.Padding(Thickness{ 9, 6, 9, 6 });
+                    btn.VerticalAlignment(VerticalAlignment::Top);
+                    ToolTipService::SetToolTip(btn, winrt::box_value(tip));
+                    btn.Click([fn](const IInspectable&, const RoutedEventArgs&) { fn(); });
+                    return btn;
+                };
+
+                auto composeRow = Grid{};
+                composeRow.ColumnDefinitions().Append(autoCol()); // icon column (sticks top-left)
+                composeRow.ColumnDefinitions().Append(starCol(1)); // textarea fills the rest
+
+                auto iconCol = StackPanel{};
+                iconCol.Orientation(Orientation::Horizontal);
+                iconCol.Spacing(4);
+                iconCol.VerticalAlignment(VerticalAlignment::Top); // stay at the top as the box grows
+                iconCol.Margin(Thickness{ 0, 0, 6, 0 });
+                // Eye = Focus the session (jump to its live tab).
+                iconCol.Children().Append(mkIconBtn(L"Focus session (jump to its tab)", fluentGlyph(L"\xE7B3"), [this]() {
+                    if (_activateHandler && !_selectedId.empty())
+                    {
+                        _activateHandler(winrt::hstring{ _selectedId });
+                    }
+                }));
+                // Exclamation point = Send now (a literal bold "!"; confirmed before it fires).
+                iconCol.Children().Append(mkIconBtn(L"Send now (asks first)", Text(L"!", 16, true, 1.0), [this]() { _OnSendNow(); }));
+                // Envelope = Add the composed prompt to the queue.
+                iconCol.Children().Append(mkIconBtn(L"Add to the queue", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
+                Grid::SetColumn(iconCol, 0);
+                composeRow.Children().Append(iconCol);
+
                 _addPromptBox = TextBox{};
                 _addPromptBox.PlaceholderText(L"queue a prompt for the selected session\x2026");
                 _addPromptBox.AcceptsReturn(true);
                 _addPromptBox.TextWrapping(TextWrapping::Wrap);
-                _addPromptBox.MaxHeight(96);
-                actions.Children().Append(_addPromptBox);
+                _addPromptBox.MinHeight(34);
+                _addPromptBox.MaxHeight(160);
+                _addPromptBox.VerticalAlignment(VerticalAlignment::Top);
+                _addPromptBox.VerticalContentAlignment(VerticalAlignment::Top);
+                // TextBox has no direct VerticalScrollBarVisibility in this projection — it's the
+                // attached ScrollViewer property (see Gotchas: this XAML projection differs from WPF).
+                ScrollViewer::SetVerticalScrollBarVisibility(_addPromptBox, ScrollBarVisibility::Auto);
+                Grid::SetColumn(_addPromptBox, 1);
+                composeRow.Children().Append(_addPromptBox);
 
-                auto btnRow = StackPanel{};
-                btnRow.Orientation(Orientation::Horizontal);
-                btnRow.Spacing(6);
+                actions.Children().Append(composeRow);
+
+                // mkBtn — the plain text buttons used by the Templates row below.
                 auto mkBtn = [&](const winrt::hstring& label, std::function<void()> fn) {
                     auto btn = Button{};
                     btn.Content(winrt::box_value(label));
                     btn.Click([fn](const IInspectable&, const RoutedEventArgs&) { fn(); });
                     return btn;
                 };
-                btnRow.Children().Append(mkBtn(L"Add", [this]() { _OnAddPrompt(); }));
-                btnRow.Children().Append(mkBtn(L"Send now", [this]() { _OnSendNow(); }));
-                btnRow.Children().Append(mkBtn(L"\x2191", [this]() { _OnMovePrompt(-1); }));
-                btnRow.Children().Append(mkBtn(L"\x2193", [this]() { _OnMovePrompt(1); }));
-                btnRow.Children().Append(mkBtn(L"Delete", [this]() { _OnDeletePrompt(); }));
-                btnRow.Children().Append(mkBtn(L"Focus", [this]() {
-                    if (_activateHandler && !_selectedId.empty())
-                    {
-                        _activateHandler(winrt::hstring{ _selectedId });
-                    }
-                }));
-                btnRow.Children().Append(mkBtn(L"Archive", [this]() {
-                    if (!_selectedId.empty())
-                    {
-                        _RequestArchive(_selectedId);
-                    }
-                }));
-                actions.Children().Append(btnRow);
 
                 // Templates row (M8): save the current plan, apply a saved plan to this
                 // session or broadcast it to every session in the directory.
@@ -1739,6 +1773,87 @@ namespace winrt::TerminalApp::implementation
         return menu;
     }
 
+    // Agentmaster: the Flight-Plan message right-click menu. Per-prompt queue ops (Move up / Move
+    // down / Delete) appear only on UPCOMING rows (a sent/historical row can't be reordered);
+    // Archive (the whole session) is always offered. The queue ops act on `promptId` (the
+    // right-clicked row, selecting it first) and — like _MakeSessionMenu — defer one tick so the
+    // closing flyout's focus restore doesn't race the list rebuild.
+    MenuFlyout AgentManagerContent::_MakePromptMenu(const std::wstring& promptId, bool upcoming)
+    {
+        MenuFlyout menu;
+        auto disp = _dispatcher;
+        auto weak = get_weak();
+
+        if (upcoming)
+        {
+            MenuFlyoutItem up;
+            up.Text(L"Move up");
+            up.Click([weak, disp, promptId](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, promptId]() { if (auto self = weak.get()) { self->_selectedPromptId = promptId; self->_OnMovePrompt(-1); } });
+                }
+                else if (auto self = weak.get())
+                {
+                    self->_selectedPromptId = promptId;
+                    self->_OnMovePrompt(-1);
+                }
+            });
+            menu.Items().Append(up);
+
+            MenuFlyoutItem down;
+            down.Text(L"Move down");
+            down.Click([weak, disp, promptId](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, promptId]() { if (auto self = weak.get()) { self->_selectedPromptId = promptId; self->_OnMovePrompt(1); } });
+                }
+                else if (auto self = weak.get())
+                {
+                    self->_selectedPromptId = promptId;
+                    self->_OnMovePrompt(1);
+                }
+            });
+            menu.Items().Append(down);
+
+            MenuFlyoutItem del;
+            del.Text(L"Delete");
+            del.Click([weak, disp, promptId](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, promptId]() { if (auto self = weak.get()) { self->_selectedPromptId = promptId; self->_OnDeletePrompt(); } });
+                }
+                else if (auto self = weak.get())
+                {
+                    self->_selectedPromptId = promptId;
+                    self->_OnDeletePrompt();
+                }
+            });
+            menu.Items().Append(del);
+
+            menu.Items().Append(MenuFlyoutSeparator{});
+        }
+
+        MenuFlyoutItem archive;
+        archive.Text(L"Archive session\x2026");
+        archive.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak]() { if (auto self = weak.get()) { if (!self->_selectedId.empty()) { self->_RequestArchive(self->_selectedId); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (!self->_selectedId.empty())
+                {
+                    self->_RequestArchive(self->_selectedId);
+                }
+            }
+        });
+        menu.Items().Append(archive);
+
+        return menu;
+    }
+
     void AgentManagerContent::_OnRenameSession(const std::wstring& id)
     {
         if (id.empty())
@@ -1833,10 +1948,16 @@ namespace winrt::TerminalApp::implementation
         }
         auto cb = std::move(onYes);
         dialog.PrimaryButtonClick([cb](const ContentDialog&, const ContentDialogButtonClickEventArgs&) {
-            if (cb)
+            // Never let a confirm callback throw out of the XAML event handler: an escaped exception
+            // would reach the app's unhandled-exception path (an assert/FailFast in Debug).
+            try
             {
-                cb();
+                if (cb)
+                {
+                    cb();
+                }
             }
+            CATCH_LOG();
         });
         try
         {
@@ -2106,11 +2227,19 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_OnReopenWindows()
     {
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] button clicked\n");
         if (!_reopenWindowsHandler)
         {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] no handler bound\n");
             return;
         }
-        const auto n = static_cast<int>(::Agentmaster::RecoverableWindows().size());
+        int n = 0;
+        try
+        {
+            n = static_cast<int>(::Agentmaster::RecoverableWindows().size());
+        }
+        CATCH_LOG();
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] recoverable N=" + std::to_wstring(n) + L"\n");
         if (n <= 0)
         {
             return;
@@ -2119,7 +2248,13 @@ namespace winrt::TerminalApp::implementation
         _Confirm(L"Reopen saved windows?",
                  winrt::hstring{ L"This reopens " } + winrt::to_hstring(n) + L" previously-saved window(s) at their saved position and layout. Their sessions stay archived until you restore them.",
                  L"Reopen",
-                 [reopen]() { reopen(); });
+                 [reopen]() {
+                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] confirm accepted -> handler\n");
+                     if (reopen)
+                     {
+                         reopen();
+                     }
+                 });
     }
 
     void AgentManagerContent::_BuildSettingsOverlay()
@@ -2535,6 +2670,10 @@ namespace winrt::TerminalApp::implementation
                 _NotifyLensChanged(); // M10
                 _Refresh();
             });
+            // Right-click menu: queue ops (Move up / Move down / Delete) on UPCOMING rows only
+            // (a sent/historical row can't be reordered), plus Archive session always. showOrigin
+            // is true for the SENT summary, false for the UPCOMING queue.
+            rowBtn.ContextFlyout(_MakePromptMenu(pid, !showOrigin));
             _planListHost.Children().Append(rowBtn);
         };
 
@@ -2646,6 +2785,64 @@ namespace winrt::TerminalApp::implementation
     }
 
     void AgentManagerContent::_OnSendNow()
+    {
+        if (_selectedId.empty() || !_registry)
+        {
+            return;
+        }
+        // The "!" button ASKS before it fires — "Send now" injects into a live claude immediately.
+        // Build a short preview of what WILL be sent (the compose box if non-empty, else the
+        // selected / first-Pending queued prompt — the same target _DoSendNow picks), then confirm.
+        std::wstring preview = _addPromptBox ? std::wstring{ _addPromptBox.Text() } : std::wstring{};
+        if (preview.empty())
+        {
+            if (auto s = _registry->Get(_selectedId))
+            {
+                const QueuedPrompt* target = nullptr;
+                if (!_selectedPromptId.empty())
+                {
+                    for (const auto& p : s->queue)
+                    {
+                        if (p.id == _selectedPromptId)
+                        {
+                            target = &p;
+                            break;
+                        }
+                    }
+                }
+                if (!target)
+                {
+                    for (const auto& p : s->queue)
+                    {
+                        if (p.status == PromptStatus::Pending)
+                        {
+                            target = &p;
+                            break;
+                        }
+                    }
+                }
+                if (target)
+                {
+                    preview = target->label.empty() ? target->text : target->label;
+                }
+            }
+        }
+        if (preview.empty())
+        {
+            return; // nothing composed and nothing pending to send
+        }
+        std::wstring shown = preview.substr(0, 200);
+        std::replace(shown.begin(), shown.end(), L'\n', L' ');
+        std::replace(shown.begin(), shown.end(), L'\r', L' ');
+        auto weak = get_weak();
+        _Confirm(L"Send now?",
+                 winrt::hstring{ L"Send this prompt to the session right now?\n\n\x201C" } + winrt::hstring{ shown } + winrt::hstring{ L"\x201D" },
+                 L"Send",
+                 [weak]() { if (auto self = weak.get()) { self->_DoSendNow(); } });
+    }
+
+    // The actual inject for "Send now" (runs after the confirm).
+    void AgentManagerContent::_DoSendNow()
     {
         if (_selectedId.empty() || !_registry)
         {

@@ -113,7 +113,8 @@ namespace winrt::TerminalApp::implementation
         // Action-bar handlers (operate on _selectedId / _selectedPromptId).
         void _OnLaunch();
         void _OnAddPrompt();
-        void _OnSendNow();
+        void _OnSendNow(); // the "!" icon — confirms, then _DoSendNow
+        void _DoSendNow(); // actual inject, after the Send-now confirm
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutopilotChanged(int index);
@@ -147,6 +148,10 @@ namespace winrt::TerminalApp::implementation
         // Explorer-tree session actions: right-click context menu (Rename / Delete with a
         // confirm warning) + double-click to activate.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id);
+        // Flight-Plan message right-click menu: per-prompt Move up / Move down / Delete (only on
+        // UPCOMING rows — a sent row can't be reordered) + Archive session (always). Queue ops act
+        // on `promptId` (the right-clicked row), not the current selection.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakePromptMenu(const std::wstring& promptId, bool upcoming);
         void _OnRenameSession(const std::wstring& id); // begin an in-place rename of the row
         void _CommitRename(); // apply the in-place editor's text to the session title
         void _CancelRename(); // discard the in-place editor (Esc)
