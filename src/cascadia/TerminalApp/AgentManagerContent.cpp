@@ -438,6 +438,16 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider)
     {
         _localScopeProvider = std::move(provider);
+        // Agentmaster: the provider DEFINES the Explorer Tree's LOCAL scope (the set of sessions THIS
+        // window hosts) — installing it changes what the tree should show, so re-render now. Wiring
+        // installs the provider AFTER SetRegistry's initial _Refresh() (TerminalPage::_WireAgentManagerContent),
+        // so without this the first paint — and every paint until the next registry event — runs with
+        // haveLocal==false and skips the filter: a freshly opened window lists EVERY window's sessions
+        // under the "LOCAL" label until unrelated hook activity happens to trigger a rebuild. Re-render
+        // here so the scope takes effect immediately, independent of wiring order. _Refresh() no-ops
+        // until the layout exists (it always does — the ctor runs _BuildLayout before any Set*), and is
+        // cheap + idempotent.
+        _Refresh();
     }
     void AgentManagerContent::SetPauseHandler(std::function<void(bool)> handler)
     {
