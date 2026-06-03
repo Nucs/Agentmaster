@@ -383,6 +383,7 @@ namespace Agentmaster
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
+        o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         return o;
     }
 
@@ -400,6 +401,7 @@ namespace Agentmaster
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
+        s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         return s;
     }
 

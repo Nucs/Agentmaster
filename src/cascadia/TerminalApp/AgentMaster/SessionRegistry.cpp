@@ -419,6 +419,12 @@ namespace Agentmaster
         return true;
     }
 
+    bool SessionRegistry::HasInjector(const std::wstring& id) const
+    {
+        std::lock_guard guard{ _mtx };
+        return _injectors.find(id) != _injectors.end();
+    }
+
     void SessionRegistry::NoteHumanInput(const std::wstring& id, int64_t unixMs)
     {
         std::lock_guard guard{ _mtx };

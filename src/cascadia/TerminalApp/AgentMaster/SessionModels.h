@@ -193,6 +193,10 @@ namespace Agentmaster
         // How many recent working directories the Launch path-picker's "RECENT" section
         // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
         uint32_t recentDirsLimit{ 10 };
+        // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
+        // top-right of each Claude session's terminal (status + autopilot mode + queued count +
+        // link state). Default ON; a missing key => true (a no-op default, like the rest).
+        bool showTabOverlay{ true };
     };
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====

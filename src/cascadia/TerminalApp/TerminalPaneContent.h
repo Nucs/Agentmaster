@@ -39,6 +39,11 @@ namespace winrt::TerminalApp::implementation
 
         winrt::Windows::UI::Xaml::FrameworkElement GetRoot();
         winrt::Microsoft::Terminal::Control::TermControl GetTermControl();
+
+        // Agentmaster (TAB_OVERLAY.md): install/clear a per-tab overlay (the "link badge") into a
+        // top-right slot floated over the TermControl. Non-projected (call via get_self); a null
+        // element collapses the slot, so a non-Claude pane is visually unchanged.
+        void SetAgentOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay);
         winrt::Windows::Foundation::Size MinimumSize();
         void Focus(winrt::Windows::UI::Xaml::FocusState reason = winrt::Windows::UI::Xaml::FocusState::Programmatic);
         void Close();
@@ -71,6 +76,10 @@ namespace winrt::TerminalApp::implementation
 
     private:
         winrt::Microsoft::Terminal::Control::TermControl _control{ nullptr };
+        // Agentmaster: GetRoot() wraps _control in this Grid so a per-tab overlay can float
+        // top-right; _agentOverlaySlot hosts it (collapsed until SetAgentOverlay fills it).
+        winrt::Windows::UI::Xaml::Controls::Grid _rootWrapper{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _agentOverlaySlot{ nullptr };
         winrt::Microsoft::Terminal::TerminalConnection::ConnectionState _connectionState{ winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected };
         winrt::Microsoft::Terminal::Settings::Model::Profile _profile{ nullptr };
         std::shared_ptr<TerminalSettingsCache> _cache{};

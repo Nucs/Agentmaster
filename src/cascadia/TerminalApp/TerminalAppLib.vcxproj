@@ -169,6 +169,7 @@
     </ClInclude>
     <!-- Agentmaster -->
     <ClInclude Include="AgentManagerContent.h" />
+    <ClInclude Include="AgentTabOverlay.h" />
     <ClInclude Include="AgentMaster\SessionModels.h" />
     <ClInclude Include="AgentMaster\HookEvents.h" />
     <ClInclude Include="AgentMaster\HookWire.h" />
@@ -295,6 +296,7 @@
     </ClCompile>
     <!-- Agentmaster -->
     <ClCompile Include="AgentManagerContent.cpp" />
+    <ClCompile Include="AgentTabOverlay.cpp" />
     <!-- The engine is plain C++ (no WinRT): opt out of the WinRT precompiled header. -->
     <ClCompile Include="AgentMaster\SessionRegistry.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

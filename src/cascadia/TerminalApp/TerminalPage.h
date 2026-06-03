@@ -52,6 +52,7 @@ namespace winrt::TerminalApp::implementation
 {
     struct TerminalSettingsCache;
     class AgentManagerContent; // Agentmaster: the Manager tab's content (IPaneContent)
+    class AgentTabOverlay; // Agentmaster: the per-tab "link badge" overlay (TAB_OVERLAY.md)
 
     inline constexpr uint32_t DefaultRowsToScroll{ 3 };
     inline constexpr std::wstring_view TabletInputServiceKey{ L"TabletInputService" };
@@ -289,6 +290,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
         std::unordered_map<std::wstring, winrt::weak_ref<TerminalApp::Tab>> _claudeTabs;
+        // Agentmaster (TAB_OVERLAY.md): sessionId -> its per-tab "link badge" overlay. STRONG ref
+        // (the page builds + owns it); erased alongside _claudeTabs on archive/close/liveness so the
+        // overlay's registry observer detaches. Type completed in AgentTabOverlay.h (TerminalPage.cpp).
+        std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _claudeOverlays;
 
         // Agentmaster (M10; PERSISTENCE.md §13): per-window workspace persistence. _windowId is
         // this window's stable GUID; _windowRecord is its persisted UI state (geometry + Manager
@@ -391,6 +396,7 @@ namespace winrt::TerminalApp::implementation
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // Agentmaster (returns the created tab)
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
+        void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume) an archived session + its Flight Plan

@@ -107,6 +107,9 @@ namespace Agentmaster
         void SetInjector(const std::wstring& id, Injector injector);
         // Inject text into a session via its bound injector. Returns false if none bound.
         bool Inject(const std::wstring& id, const std::wstring& text) const;
+        // Agentmaster (TAB_OVERLAY.md): is a stdin injector currently bound to this session? Drives
+        // the per-tab overlay's link state (⛓ linked vs observe-only) without exposing the injector.
+        bool HasInjector(const std::wstring& id) const;
 
         // pauseOnHumanInput support: record the last time the human typed into a session.
         void NoteHumanInput(const std::wstring& id, int64_t unixMs);

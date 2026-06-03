@@ -50,11 +50,41 @@ namespace winrt::TerminalApp::implementation
 
     winrt::Windows::UI::Xaml::FrameworkElement TerminalPaneContent::GetRoot()
     {
-        return _control;
+        // Agentmaster (TAB_OVERLAY.md): wrap the control in a Grid the first time so a per-tab
+        // overlay (the "link badge") can float top-right over the terminal. The slot is empty +
+        // Collapsed by default, so a non-Claude pane is visually identical to the bare control.
+        // The wrapper is cached and travels with the content across split/zoom/re-parent (Pane
+        // re-reads GetRoot()), so the overlay is never orphaned.
+        if (!_rootWrapper)
+        {
+            winrt::Windows::UI::Xaml::Controls::Grid grid{};
+            grid.Children().Append(_control);
+
+            winrt::Windows::UI::Xaml::Controls::Border slot{};
+            slot.HorizontalAlignment(HorizontalAlignment::Right);
+            slot.VerticalAlignment(VerticalAlignment::Top);
+            // Clear the terminal's ~16px right-edge scrollbar + a small top gap.
+            slot.Margin(ThicknessHelper::FromLengths(0, 4, 20, 0));
+            slot.Visibility(Visibility::Collapsed);
+            grid.Children().Append(slot);
+
+            _rootWrapper = grid;
+            _agentOverlaySlot = slot;
+        }
+        return _rootWrapper;
     }
     winrt::Microsoft::Terminal::Control::TermControl TerminalPaneContent::GetTermControl()
     {
         return _control;
+    }
+    void TerminalPaneContent::SetAgentOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay)
+    {
+        GetRoot(); // ensure the wrapper + slot exist
+        if (_agentOverlaySlot)
+        {
+            _agentOverlaySlot.Child(overlay);
+            _agentOverlaySlot.Visibility(overlay ? Visibility::Visible : Visibility::Collapsed);
+        }
     }
     winrt::Windows::Foundation::Size TerminalPaneContent::MinimumSize()
     {

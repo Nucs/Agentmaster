@@ -17,6 +17,7 @@
 #include "../../types/inc/utils.hpp"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "AgentManagerContent.h"
+#include "AgentTabOverlay.h"
 #include "AgentMaster/ClaudeSpawn.h"
 #include "AgentMaster/Engine.h"
 #include "AgentMaster/HookWire.h"
@@ -1150,12 +1151,59 @@ namespace winrt::TerminalApp::implementation
             }
             // Per-directory tab color: the dir's persisted color, or a stable auto-assigned one.
             _ApplyDirColorToTab(tab, dir);
+            // Per-tab "link badge" overlay (TAB_OVERLAY.md): top-right status HUD for this session.
+            _AttachClaudeOverlay(tab, spec.sessionId);
         }
 
         const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       tag + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
         return tab;
+    }
+
+    // Agentmaster (TAB_OVERLAY.md): build the per-tab "link badge" overlay for a Claude session and
+    // install it into its terminal pane's top-right slot. Gated on AppSettings.showTabOverlay. A
+    // re-attach replaces the prior overlay for that id (the old com_ptr's release detaches its
+    // observer). Best-effort — a tab with no TerminalPaneContent is left alone.
+    void TerminalPage::_AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId)
+    {
+        if (!_appSettings.showTabOverlay || !_sessionRegistry || !tab || sessionId.empty())
+        {
+            return;
+        }
+        const auto tabImpl = _GetTabImpl(tab);
+        if (!tabImpl)
+        {
+            return;
+        }
+        TerminalApp::TerminalPaneContent termContent{ nullptr };
+        if (const auto rootPane = tabImpl->GetRootPane())
+        {
+            rootPane->WalkTree([&](auto&& pane) {
+                if (termContent)
+                {
+                    return;
+                }
+                if (const auto content = pane->GetContent())
+                {
+                    if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                    {
+                        termContent = term;
+                    }
+                }
+            });
+        }
+        if (!termContent)
+        {
+            return;
+        }
+        auto overlay = winrt::make_self<implementation::AgentTabOverlay>();
+        overlay->Initialize(sessionId, _sessionRegistry);
+        if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
+        {
+            impl->SetAgentOverlay(overlay->Root());
+        }
+        _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
     }
 
     // Agentmaster: on startup, load every persisted session into the registry as ARCHIVED
@@ -1437,6 +1485,7 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         }
         _claudeTabs.erase(sessionId);
+        _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + sessionId + L"\n");
 
         tab.Close(); // -> Closed -> _RemoveTab (tab.Shutdown disconnects -> claude.exe exits)
@@ -1784,6 +1833,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
                 _ApplyDirColorToTab(projectedTab, std::wstring{ cwd }); // per-directory tab color
+                _AttachClaudeOverlay(projectedTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
                 co_return;
             }
@@ -1871,6 +1921,7 @@ namespace winrt::TerminalApp::implementation
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _claudeTabs.erase(id);
+            _claudeOverlays.erase(id); // drop the per-tab overlay (detaches its registry observer)
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[liveness] dead -> archived " + id + L"\n");
         }
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
