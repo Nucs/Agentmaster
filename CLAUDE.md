@@ -233,7 +233,8 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
   - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync, smart
     naming + per-dir tab color), `Tab.{h,cpp}` (a `TabColorChanged` event + `GetRuntimeTabColor`),
     and `TabManagement.cpp`; registrations in `TerminalAppLib.vcxproj`.
-  - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`.
+  - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
+    `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*).
 - **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
@@ -242,9 +243,10 @@ prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEM
   (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
   one file per window; captured + autosaved + restored), `open-windows.json` (the M10 Increment-3
   open-at-exit manifest — the live window-id set the next launch reopens), `bridge.json`
-  (live-bridge discovery for the shim), and `shim/` (the transparent `claude` PATH shim —
+  (live-bridge discovery for the shim), `shim/` (the transparent `claude` PATH shim —
   `claude.cmd` + a POSIX `claude` — that auto-wires hand-typed sessions; see *Adopt any
-  `claude`*). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas (MSIX).
+  `claude`*), and `locks/` (the `build-launch` mutex — `tools/am-lock.sh`; see Deploy & run →
+  *Concurrency lock*). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas (MSIX).
 
 ## Integration points (1.24 pluggable pane-content model)
 
@@ -301,6 +303,10 @@ serially → 31 threads idle), builds the **whole** solution (tests/tools/sample
 re-runs `nuget restore` every call. Per-file `/MP` is already enabled
 (`src/common.build.pre.props:145`).
 
+> ⚠️ **Hold the `build-launch` mutex before any full exe build, launch, or deploy** — see
+> Deploy & run → *Concurrency lock*. (A lib-only compile-check, #6, doesn't relink the running
+> exe and so needs no lock.)
+
 1. **Build on NVMe, not the A400.** `K:` is a DRAM-less SATA SSD; a WT build is tens of
    thousands of tiny files and 32 threads thrash it. Prefer **`Q:` (Kingston Fury
    Renegade, Gen4 NVMe + DRAM, ~546 GB free)** or `C:` (Corsair MP600 PRO).
@@ -356,11 +362,42 @@ Launch any of these ways:
 - Start menu: **“Agentmaster”**
 - `Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"`
 
+### Concurrency lock (multi-agent) — REQUIRED before any build, launch, or deploy
+
+There is exactly ONE dev instance and ONE build output tree (`…\CascadiaPackage\bin\x64\Debug`),
+so the close→build→relaunch cycle is **process-global and destructive**. Two actors running it at
+once — two AI agents, or an agent + a human — collide: one closes the instance the other just
+launched, two msbuilds race on the same outputs, and the **exe link fails because a running
+`WindowsTerminal.exe` locks the very `WindowsTerminal.exe` being relinked**. **REQUIREMENT: hold
+the global `build-launch` mutex for the WHOLE cycle before you build (full exe), launch, deploy,
+OR close our instance.** (A lib-only compile-check — Building FAST #6 — doesn't relink the running
+exe, so it needs no lock.) The mutex is a filesystem lock (`tools/am-lock.sh`, built on `mkdir(2)`
+atomicity) under `%USERPROFILE%\.agentmaster\locks\`, so it **persists across separate Bash calls**
+(each Bash tool call is a fresh shell) and is shared by every agent.
+
+```bash
+TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse --short HEAD)") || exit 1
+# ... entire close → build → relaunch cycle while holding $TOKEN ...
+bash tools/am-lock.sh release --token "$TOKEN"
+```
+`acquire` prints the token to **stdout** (capture it) and logs to stderr; `--wait 600` **queues**
+behind another agent's build (picking up within ~1s of its release) instead of failing. Without
+`--wait`, a contended `acquire` exits **3 (`BUSY`)** with the holder printed — back off, don't
+spin. A crashed holder can't wedge it: a lock past its TTL (default 30 min) is auto-broken on the
+next `acquire`. Token-checked `release` means one agent can't drop another's lock. Helpers:
+`status` (who holds it + age), `refresh --token T` (extend a long hold), `acquire --force` (steal
+now), `with --wait 600 -- <cmd>` (acquire → run one command → release). `bash tools/am-lock.sh --help`.
+
 **Inner loop.** The loose layout is live (binaries update in place), but you **cannot
 relink `WindowsTerminal.exe` while the app is running** — it locks the exe. So: close *our*
 dev instance (spare the Store WT), rebuild, relaunch. The user has **standing-authorized
 this close→build→relaunch cycle** ("always auto deploy") — run it without prompting; just
-never touch the Store WT (it's not under our path — see Gotchas).
+never touch the Store WT (it's not under our path — see Gotchas). **Hold the `build-launch`
+mutex around the whole cycle** (acquire at step 0, release at step 4 — see *Concurrency lock*).
+```bash
+# 0. acquire the global mutex — REQUIRED (queues behind another agent's build)
+TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse --short HEAD)") || exit 1
+```
 ```powershell
 # 1. close ONLY our dev instance (path filter spares the Store WT — see Gotchas)
 Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
@@ -369,6 +406,10 @@ Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenC
 pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64
 # 3. relaunch
 Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"   # or: agentmaster
+```
+```bash
+# 4. release the mutex (always — even if a step above failed)
+bash tools/am-lock.sh release --token "$TOKEN"
 ```
 Re-register **only** when `Package-Dev.appxmanifest` changes. (VS F5 on `CascadiaPackage`
 also builds + deploys.) Runtime/session state lives in `%USERPROFILE%\.agentmaster\`; tail
