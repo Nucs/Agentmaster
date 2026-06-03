@@ -23,6 +23,14 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   - **Flight Plan** (bottom-right) — a per-session prompt queue + **Autopilot**.
 - **Flight Plan / Autopilot:** queue prompts; on **turn-complete** (`Stop` hook) the next
   prompt is auto-sent. Approvals and clarifying-questions are handled separately.
+- **Per-tab link badge (overlay) — designed, not yet built ([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md)):**
+  each Claude session tab also carries a small **top-right terminal HUD** that makes the tab ⇄
+  Agentmaster link legible *while you work inside the session* — hook-driven status (color-matched
+  to the Triage Board), Autopilot mode (**Manual/Semi/Full**), queued count, and link state
+  (**⛓ linked** vs **observe-only**). Dim until hover; hover/click **expands** controls (Autopilot
+  cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm. Off-switchable
+  (`AppSettings.showTabOverlay`). The per-tab *here-and-now* lens, complementing the Manager's
+  *fleet* view.
 
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
 Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
@@ -209,7 +217,11 @@ when first focused — WT's lazy-background-tab behavior; restore one at a time 
 a one-time **"Restore your previous layout?"** launch prompt (offers **all archived sessions**;
 decided + **deferred** — it ships *after* the per-window `WindowRecord` capture is wired so it
 restores true per-window layouts, not a flat global list — see `PERSISTENCE.md` §6/§6a);
-prevent splitting the Manager tab. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+prevent splitting the Manager tab; the **per-tab link badge / overlay** (designed —
+[`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) / DESIGN §9.7; Phase 1 = read-only badge,
+Phase 2 = expand + controls — wraps the terminal in a slot `Grid` at
+`TerminalPaneContent::GetRoot()`, adds an `AgentTabOverlay` + `SessionRegistry::HasInjector` +
+`AppSettings.showTabOverlay`; not yet built). Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
 
