@@ -162,6 +162,16 @@ One shared selection/`ICollectionView` over the registry:
 ### 9.6 Other manager paradigms (deferred, optional toggle-views)
 A2 Mission-Control Wall (live tiles + semantic zoom), A4 Command-Palette switcher, A5 Spatial graph — not built initially; C1 is the primary. They could become alternate views over the same registry later.
 
+### 9.7 Per-tab link badge (the overlay) — *the here-and-now lens*
+The Manager tab is the *fleet* view; each Claude session tab also carries a small **link badge**
+pinned to the **top-right of its terminal**, so the tab ⇄ Agentmaster relationship is legible
+while you work *inside* a session: hook-driven status, whether/how Autopilot is driving it
+(`Manual` / `Semi` / `Full`), link state (`⛓ linked` vs observe-only), queued count, and — on
+hover/click — controls (Autopilot cycle, Send-now, queue peek, Jump-to-Manager) + a contextual
+SemiAuto confirm. Dim until hover; off-switchable. It only *reflects* registry/scheduler state
+and *requests* the same actions the Flight Plan does — never a second source of truth. Full
+spec: [`TAB_OVERLAY.md`](./TAB_OVERLAY.md).
+
 ## 10. Flight Plan & Autopilot (the scheduler)
 
 **Flight Plan** = a per-session ordered list of prompts. **Autopilot** advances it.
