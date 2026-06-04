@@ -115,6 +115,13 @@ namespace Agentmaster
         // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is
         // (re)launched as a managed session on restore. Persisted so the card survives reopen.
         bool external{ false };
+        // Transient (NOT persisted): the latest hosting WT_SESSION (the ConPTY's stable id) that
+        // hooks reported for this session (the wire `tabToken`). The app correlates a tab to its
+        // session by this. It is STABLE across an in-session `/resume` — which mints a NEW Claude
+        // session id but keeps the SAME ConPTY — so the periodic tab reconcile re-homes the tab to
+        // the new id by matching this against each live terminal's WT_SESSION. Empty until a hook
+        // arrives (and after a fresh load, until the session re-emits one).
+        std::wstring tabToken;
         // Transient runtime flag (NOT persisted): is this session OPEN (has a live tab +
         // claude.exe this run) or ARCHIVED (shut down but kept restorable)? The Triage Board /
         // Explorer Tree show only Open (live) sessions; Archived (!live) ones are listed behind

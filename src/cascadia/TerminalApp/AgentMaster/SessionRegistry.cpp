@@ -163,6 +163,12 @@ namespace Agentmaster
             }
 
             auto& s = it->second;
+            // Remember the hosting ConPTY (WT_SESSION) from EVERY hook — the stable tab identity the
+            // app reconciles against (survives an in-session /resume that changes the session id).
+            if (!msg.tabToken.empty())
+            {
+                s.tabToken = msg.tabToken;
+            }
             const auto next = NextSessionState(s.state, msg);
             s.state = next;
             if (msg.ts != 0)

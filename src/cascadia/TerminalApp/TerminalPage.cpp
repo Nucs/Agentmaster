@@ -832,7 +832,8 @@ namespace winrt::TerminalApp::implementation
             _livenessToken = _scanner->AddLivenessProbe([weakThis]() {
                 if (auto self = weakThis.get())
                 {
-                    self->_SweepClaudeLiveness(); // self marshals to its UI thread
+                    self->_ReconcileClaudeTabs(); // bind/attach + re-home (catches missed adoptions + /resume)
+                    self->_SweepClaudeLiveness(); // then archive dead tabs (both self-marshal to the UI thread)
                 }
             });
         }
@@ -1195,6 +1196,7 @@ namespace winrt::TerminalApp::implementation
         }
         if (!termContent)
         {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" NOT attached (no TerminalPaneContent in tab)\n");
             return;
         }
         auto overlay = winrt::make_self<implementation::AgentTabOverlay>();
@@ -1202,8 +1204,9 @@ namespace winrt::TerminalApp::implementation
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
             impl->SetAgentOverlay(overlay->Root());
+            _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");
         }
-        _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
     }
 
     // Agentmaster: on startup, load every persisted session into the registry as ARCHIVED
@@ -1777,6 +1780,10 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Diagnostic: we are actually going to try to (re)bind this session to a tab (not a fast
+        // no-op). Shows how many terminal tabs this window has, so a mismatch is visible in the log.
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[bind-try] " + id + L" token=" + token + L" tabs=" + std::to_wstring(_tabs.Size()) + L"\n");
+
         if (token.empty())
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no tabToken)\n");
@@ -1986,6 +1993,53 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[liveness] dead -> archived " + id + L"\n");
         }
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        co_return;
+    }
+
+    // Agentmaster (TAB_OVERLAY.md): the periodic tab<->session BIND reconcile — the POLL backstop to
+    // event-driven adoption. Ticked by the shared SessionScanner alongside the liveness sweep. For
+    // every LIVE session that has reported a hosting WT_SESSION (tabToken), re-run the idempotent
+    // bind (_AdoptExternalSession), UNLESS it is already fully set up in THIS window (bound tab +
+    // overlay) — that skip keeps the common case free of work and log noise. This catches: a session
+    // whose SessionStart adoption was missed; a missed overlay attach; and a tab whose claude changed
+    // its session id via an in-session /resume (the id changed; the tabToken — the ConPTY — did not,
+    // and ANY later hook refreshes s.tabToken, so the poll re-homes even with no fresh SessionStart).
+    // Only LIVE sessions are reconciled: a re-home archives the superseded id (live=false), so two
+    // ids sharing one ConPTY can't ping-pong over the tab.
+    winrt::fire_and_forget TerminalPage::_ReconcileClaudeTabs()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry)
+        {
+            co_return;
+        }
+        const auto sessions = _sessionRegistry->Snapshot();
+        size_t attempts = 0;
+        for (const auto& s : sessions)
+        {
+            if (!s.live || s.tabToken.empty())
+            {
+                continue; // archived, or no hook has revealed a hosting ConPTY yet
+            }
+            // Skip sessions already fully set up in THIS window (bound tab + overlay) — no work, no log.
+            const auto it = _claudeTabs.find(s.id);
+            const bool boundHere = (it != _claudeTabs.end() && it->second.get() != nullptr);
+            const bool overlayOk = (_claudeOverlays.find(s.id) != _claudeOverlays.end()) || !_appSettings.showTabOverlay;
+            if (boundHere && overlayOk)
+            {
+                continue;
+            }
+            ++attempts;
+            _AdoptExternalSession(winrt::hstring{ s.id }, winrt::hstring{ s.workingDir }, winrt::hstring{ s.tabToken });
+        }
+        if (attempts > 0)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[reconcile] sessions=" + std::to_wstring(sessions.size()) +
+                                              L" attempts=" + std::to_wstring(attempts) +
+                                              L" boundTabs=" + std::to_wstring(_claudeTabs.size()) + L"\n");
+        }
         co_return;
     }
 
