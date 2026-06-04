@@ -7,12 +7,15 @@
 
 #include <windows.h>
 #include <objbase.h> // CoCreateGuid
+#include <tlhelp32.h> // CreateToolhelp32Snapshot (find the claude descendant of a tab's shell)
 
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace
 {
@@ -32,6 +35,149 @@ namespace
         }
         buf.resize(got);
         return buf;
+    }
+
+    // Read a process's REAL current directory from its PEB (x64). Empty on any failure. The offsets
+    // (PEB.ProcessParameters @ 0x20, RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath @ 0x38) are
+    // the stable x64 layout WT itself relies on in ConptyConnection::_commandlineFromProcess.
+    std::wstring ReadProcessCwd(DWORD pid)
+    {
+        if (pid == 0)
+        {
+            return {};
+        }
+        const HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (h == nullptr)
+        {
+            return {};
+        }
+        std::wstring result;
+        using NtQIP = LONG(__stdcall*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+        static const auto ntqip = reinterpret_cast<NtQIP>(
+            ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+        if (ntqip != nullptr)
+        {
+            struct PBI
+            {
+                LONG_PTR ExitStatus;
+                PVOID PebBaseAddress;
+                ULONG_PTR Reserved[4];
+            } pbi{};
+            if (ntqip(h, 0 /*ProcessBasicInformation*/, &pbi, sizeof(pbi), nullptr) == 0 && pbi.PebBaseAddress != nullptr)
+            {
+                auto* peb = static_cast<BYTE*>(pbi.PebBaseAddress);
+                void* procParams = nullptr;
+                SIZE_T got = 0;
+                if (::ReadProcessMemory(h, peb + 0x20, &procParams, sizeof(procParams), &got) && procParams != nullptr)
+                {
+                    struct UStr
+                    {
+                        USHORT Length;
+                        USHORT MaxLength;
+                        PVOID Buffer;
+                    } us{};
+                    if (::ReadProcessMemory(h, static_cast<BYTE*>(procParams) + 0x38, &us, sizeof(us), &got) &&
+                        us.Length > 0 && us.Buffer != nullptr)
+                    {
+                        std::wstring buf;
+                        buf.resize(us.Length / sizeof(wchar_t));
+                        if (::ReadProcessMemory(h, us.Buffer, buf.data(), us.Length, &got))
+                        {
+                            result.assign(buf.data(), us.Length / sizeof(wchar_t));
+                        }
+                    }
+                }
+            }
+        }
+        ::CloseHandle(h);
+        while (!result.empty() && (result.back() == L'\\' || result.back() == L'/'))
+        {
+            result.pop_back();
+        }
+        return result;
+    }
+
+    bool NameIsClaude(const std::wstring& exe)
+    {
+        // case-insensitive match of the Toolhelp leaf image name against "claude.exe"
+        static const wchar_t* const target = L"claude.exe";
+        if (exe.size() != 10)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < 10; ++i)
+        {
+            wchar_t c = exe[i];
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+            if (c != target[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // BFS the process tree under `ancestorPid` and return the pid of the first `claude.exe` found
+    // (shell -> claude, or shell -> cmd-shim -> claude). 0 if none.
+    DWORD FindClaudeDescendantPid(DWORD ancestorPid)
+    {
+        if (ancestorPid == 0)
+        {
+            return 0;
+        }
+        const HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE)
+        {
+            return 0;
+        }
+        std::vector<std::pair<DWORD, DWORD>> tree; // (pid, ppid)
+        std::vector<std::pair<DWORD, std::wstring>> names; // (pid, exe leaf)
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        if (::Process32FirstW(snap, &pe))
+        {
+            do
+            {
+                tree.emplace_back(pe.th32ProcessID, pe.th32ParentProcessID);
+                names.emplace_back(pe.th32ProcessID, std::wstring{ pe.szExeFile });
+            } while (::Process32NextW(snap, &pe));
+        }
+        ::CloseHandle(snap);
+
+        const auto nameOf = [&names](DWORD pid) -> const std::wstring* {
+            for (const auto& n : names)
+            {
+                if (n.first == pid)
+                {
+                    return &n.second;
+                }
+            }
+            return nullptr;
+        };
+
+        std::vector<DWORD> frontier{ ancestorPid };
+        std::unordered_set<DWORD> seen{ ancestorPid };
+        for (size_t i = 0; i < frontier.size(); ++i)
+        {
+            const DWORD cur = frontier[i];
+            for (const auto& [pid, ppid] : tree)
+            {
+                if (ppid != cur || seen.count(pid) != 0)
+                {
+                    continue;
+                }
+                if (const auto* nm = nameOf(pid); nm != nullptr && NameIsClaude(*nm))
+                {
+                    return pid; // shallowest claude under the shell
+                }
+                seen.insert(pid);
+                frontier.push_back(pid);
+            }
+        }
+        return 0;
     }
 
     std::string Utf16ToUtf8(std::wstring_view s)
@@ -346,6 +492,16 @@ try {
             base = home + L"\\.claude";
         }
         return base + L"\\projects";
+    }
+
+    std::wstring ClaudeCwdForShell(uint32_t shellPid)
+    {
+        const DWORD claudePid = FindClaudeDescendantPid(static_cast<DWORD>(shellPid));
+        if (claudePid == 0)
+        {
+            return {}; // this shell isn't running a claude (also our scoping: skip non-claude tabs)
+        }
+        return ReadProcessCwd(claudePid);
     }
 
     std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId)

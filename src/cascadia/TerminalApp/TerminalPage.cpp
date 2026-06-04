@@ -2142,7 +2142,22 @@ namespace winrt::TerminalApp::implementation
                     return;
                 }
                 conn = ctrl.Connection();
-                cwd = std::wstring{ ctrl.WorkingDirectory() };
+                // Get the REAL cwd of the `claude` running in this tab by reading it from the claude
+                // PROCESS (a descendant of the tab's shell) — accurate even without shell integration,
+                // and it scopes to tabs actually running claude. PowerShell does NOT sync its process
+                // cwd with Set-Location, so neither the shell's own cwd nor the OSC-tracked
+                // WorkingDirectory is reliable after a `cd`; the claude process always has it right.
+                if (const auto cpc = conn.try_as<TerminalConnection::ConptyConnection>())
+                {
+                    if (const auto h = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(cpc.RootProcessHandle())))
+                    {
+                        cwd = ::Agentmaster::ClaudeCwdForShell(::GetProcessId(h));
+                    }
+                }
+                if (cwd.empty())
+                {
+                    cwd = std::wstring{ ctrl.WorkingDirectory() }; // fallback (OSC; may be stale / the starting dir)
+                }
             });
             if (!conn)
             {

@@ -111,6 +111,15 @@ namespace Agentmaster
     // detection signal that no shell function / alias / PATH quirk can shadow. [Agentmaster]
     std::wstring ClaudeProjectsDir();
 
+    // Given a tab's shell process id, find a `claude.exe` running under it (direct child, or deeper:
+    // shell -> cmd-shim -> claude) and return that claude's REAL current directory, read from its PEB.
+    // Empty if there is no claude descendant or the read fails. This is how the manager correlates a
+    // hand-typed `claude` to its transcript WITHOUT shell integration: PowerShell does NOT sync its
+    // own process cwd with Set-Location, but it DOES spawn claude with the right cwd — so we read the
+    // cwd from the claude process, not the shell. Doubles as scoping: a tab with no claude descendant
+    // returns empty and is skipped (so non-claude tabs never bind to a transcript). [Agentmaster]
+    std::wstring ClaudeCwdForShell(uint32_t shellPid);
+
     // Write the shared forwarder + hooks settings into `stateDir`. Idempotent (overwrites
     // so they always match the running build). Returns {settingsPath, forwarderPath} in
     // backslash form. Throws nothing meaningful for the caller; returns empty paths on I/O
