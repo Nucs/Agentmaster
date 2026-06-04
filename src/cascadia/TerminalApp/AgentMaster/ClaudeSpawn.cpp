@@ -331,12 +331,8 @@ try {
         return std::wstring{ buf };
     }
 
-    std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId)
+    std::wstring ClaudeProjectsDir()
     {
-        if (sessionId.empty())
-        {
-            return {};
-        }
         // Claude stores transcripts under <config>/projects/<encoded-cwd>/<session-id>.jsonl.
         // The config dir is CLAUDE_CONFIG_DIR if set, else ~/.claude.
         std::wstring base = GetEnvW(L"CLAUDE_CONFIG_DIR");
@@ -349,7 +345,20 @@ try {
             }
             base = home + L"\\.claude";
         }
-        const std::wstring projects = base + L"\\projects";
+        return base + L"\\projects";
+    }
+
+    std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return {};
+        }
+        const std::wstring projects = ClaudeProjectsDir();
+        if (projects.empty())
+        {
+            return {};
+        }
         const std::wstring leaf = std::wstring{ sessionId } + L".jsonl";
 
         // Session ids are unique UUIDs, so rather than reproduce Claude's cwd->dir encoding we

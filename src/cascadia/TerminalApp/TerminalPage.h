@@ -411,6 +411,8 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)
         winrt::fire_and_forget _ReconcileClaudeTabs(); // Agentmaster: poll backstop — bind/attach + re-home claude tabs by stable WT_SESSION (scanner-ticked)
+        winrt::fire_and_forget _DiscoverClaudeTabsByCwd(); // Agentmaster: bulletproof PULL — bind un-hooked hand-typed claudes by transcript cwd (scanner-ticked)
+        void _BindClaudeSessionToTab(const TerminalApp::Tab& hostTab, const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn, const std::wstring& id, const std::wstring& cwd, const std::wstring& origin); // Agentmaster: shared bind tail for adoption + discovery
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
         // Agentmaster (M10; PERSISTENCE.md §13): capture this window's record (geometry + ordered
         // tab refs + Manager lens) and persist it to windows/<windowId>.json. _CaptureWindowRecord

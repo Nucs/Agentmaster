@@ -832,8 +832,9 @@ namespace winrt::TerminalApp::implementation
             _livenessToken = _scanner->AddLivenessProbe([weakThis]() {
                 if (auto self = weakThis.get())
                 {
-                    self->_ReconcileClaudeTabs(); // bind/attach + re-home (catches missed adoptions + /resume)
-                    self->_SweepClaudeLiveness(); // then archive dead tabs (both self-marshal to the UI thread)
+                    self->_ReconcileClaudeTabs(); // bind/attach + re-home hooked sessions (tabToken)
+                    self->_DiscoverClaudeTabsByCwd(); // bulletproof: bind un-hooked claudes by cwd (transcript discovery)
+                    self->_SweepClaudeLiveness(); // then archive dead tabs (all self-marshal to the UI thread)
                 }
             });
         }
@@ -1848,10 +1849,31 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
+        _BindClaudeSessionToTab(hostTab, match, id, std::wstring{ cwd }, L"WT_SESSION " + token);
+        co_return;
+    }
+
+    // Agentmaster: bind a Claude session id to a specific live tab + ConPTY connection — the shared
+    // tail of BOTH correlation paths: WT_SESSION-tabToken adoption (_AdoptExternalSession) and cwd-
+    // based transcript discovery (_DiscoverClaudeTabsByCwd). Runs on the UI thread. Handles the in-
+    // session /resume RE-HOME (a different id already bound to this tab is archived, its Flight Plan
+    // kept restorable), derives/pins the title (one-title rule, Rule #11), binds the stdin injector
+    // (Rule #3: inject by sessionId), marks the session live, colors the tab per working dir (Rule
+    // #12), attaches the per-tab overlay, and persists. `origin` is a human tag for the log only.
+    void TerminalPage::_BindClaudeSessionToTab(const TerminalApp::Tab& hostTab,
+                                               const TerminalConnection::ITerminalConnection& conn,
+                                               const std::wstring& id,
+                                               const std::wstring& cwd,
+                                               const std::wstring& origin)
+    {
+        if (!_sessionRegistry || !hostTab || !conn || id.empty())
+        {
+            return;
+        }
+
         // RE-HOME (in-session `/resume`): if this SAME tab is currently bound to a DIFFERENT session
-        // id, the conversation switched ids on a stable ConPTY (the id changed; the tabToken did
-        // not). Supersede the old id — archive it (its Flight Plan stays restorable) and drop its
-        // tab/overlay binding — then re-point this tab to the new id below.
+        // id, the conversation switched ids on a stable ConPTY. Supersede the old id — archive it
+        // (its Flight Plan stays restorable) and drop its tab/overlay binding — then re-point below.
         for (const auto& [oldId, weakOld] : _claudeTabs)
         {
             if (const auto t = weakOld.get(); t && t == hostTab && oldId != id)
@@ -1868,8 +1890,8 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Give the (adopted) card a readable title from its working dir if it has none.
-        const std::wstring ttl = ::Agentmaster::DeriveSessionTitle(std::wstring{ cwd });
+        // Give the card a readable title from its working dir if it has none.
+        const std::wstring ttl = ::Agentmaster::DeriveSessionTitle(cwd);
         _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
             if (s.title.empty())
             {
@@ -1877,8 +1899,8 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        // Bind the (new) id to this tab — full observe+control (Rule #3: inject by sessionId).
-        const auto connection = match;
+        // Bind the id to this tab — full observe+control (Rule #3: inject by sessionId).
+        const auto connection = conn;
         _sessionRegistry->SetInjector(id, [connection](const std::wstring& text) {
             const auto* begin = reinterpret_cast<const char16_t*>(text.data());
             connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
@@ -1903,11 +1925,10 @@ namespace winrt::TerminalApp::implementation
                 impl->SetTabText(winrt::hstring{ s->title });
             }
         }
-        _ApplyDirColorToTab(hostTab, std::wstring{ cwd }); // per-directory tab color
+        _ApplyDirColorToTab(hostTab, cwd); // per-directory tab color
         _AttachClaudeOverlay(hostTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
-        co_return;
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");
     }
 
     // Agentmaster: the scanner's interval liveness sweep, marshaled onto THIS window's UI thread
@@ -2039,6 +2060,133 @@ namespace winrt::TerminalApp::implementation
                                           L"[reconcile] sessions=" + std::to_wstring(sessions.size()) +
                                               L" attempts=" + std::to_wstring(attempts) +
                                               L" boundTabs=" + std::to_wstring(_claudeTabs.size()) + L"\n");
+        }
+        co_return;
+    }
+
+    // Agentmaster (bulletproof detection): correlate THIS window's tabs to discovered Claude
+    // transcripts by working directory — the PULL path that needs NO hooks / shim / settings, so a
+    // hand-typed `claude` (whose hooks never wired — e.g. a shell `claude` function shadows the PATH
+    // shim) is still detected, bound, and given the overlay. The scanner indexes recent transcripts
+    // off-thread (id + cwd + mtime); here, on the UI thread, each UNBOUND terminal tab is matched to
+    // the newest transcript whose cwd == the tab's live WorkingDirectory(). Scoped to OUR tabs (we
+    // only ever look up dirs our tabs sit in), so other claudes on the machine never leak onto the
+    // board. A matched id with no record yet is created via a synthesized SessionStart, then bound
+    // through the shared _BindClaudeSessionToTab. HasInjector is the cross-window "already claimed"
+    // guard. Ticked by the scanner alongside the reconcile + liveness sweep.
+    winrt::fire_and_forget TerminalPage::_DiscoverClaudeTabsByCwd()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry || !_scanner)
+        {
+            co_return;
+        }
+        const auto recent = _scanner->RecentTranscripts();
+        if (recent.empty())
+        {
+            co_return;
+        }
+
+        for (const auto& projectedTab : _tabs)
+        {
+            if (projectedTab == _managerTab)
+            {
+                continue;
+            }
+            const auto tabImpl = _GetTabImpl(projectedTab);
+            if (!tabImpl)
+            {
+                continue;
+            }
+
+            // Already bound to a live session on this tab? skip (one session per tab).
+            bool alreadyBound = false;
+            for (const auto& [boundId, weakBound] : _claudeTabs)
+            {
+                if (const auto t = weakBound.get(); t && t == projectedTab)
+                {
+                    alreadyBound = true;
+                    break;
+                }
+            }
+            if (alreadyBound)
+            {
+                continue;
+            }
+
+            // This tab's terminal control -> connection + live working directory.
+            TerminalConnection::ITerminalConnection conn{ nullptr };
+            std::wstring cwd;
+            tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+                if (conn)
+                {
+                    return;
+                }
+                const auto content = pane->GetContent();
+                if (!content)
+                {
+                    return;
+                }
+                const auto term = content.try_as<TerminalApp::TerminalPaneContent>();
+                if (!term)
+                {
+                    return;
+                }
+                const auto ctrl = term.GetTermControl();
+                if (!ctrl)
+                {
+                    return;
+                }
+                conn = ctrl.Connection();
+                cwd = std::wstring{ ctrl.WorkingDirectory() };
+            });
+            if (!conn || cwd.empty())
+            {
+                continue; // no terminal, or the shell isn't reporting a cwd (no OSC 9;9)
+            }
+            const std::wstring cwdKey = ::Agentmaster::NormDirKey(cwd);
+
+            // Newest discovered transcript in this tab's cwd that isn't already bound to a tab
+            // anywhere (HasInjector == claimed). Filesystem-aware dir match (Rule #8).
+            const ::Agentmaster::DiscoveredTranscript* best = nullptr;
+            for (const auto& d : recent)
+            {
+                if (::Agentmaster::NormDirKey(d.cwd) != cwdKey)
+                {
+                    continue;
+                }
+                if (_sessionRegistry->HasInjector(d.id))
+                {
+                    continue;
+                }
+                if (!best || d.mtimeMs > best->mtimeMs)
+                {
+                    best = &d;
+                }
+            }
+            if (!best)
+            {
+                continue;
+            }
+
+            const std::wstring id = best->id;
+            // Create a record for a never-seen id (synthesize the SessionStart the missing hook would
+            // have sent — the registry adopts it as external). A known id (e.g. a hand-resumed
+            // archived one) skips this and is just (re)bound.
+            if (!_sessionRegistry->Get(id))
+            {
+                ::Agentmaster::HookMessage start;
+                start.event = ::Agentmaster::HookEvent::SessionStart;
+                start.sessionId = id;
+                start.cwd = cwd;
+                start.ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+                _sessionRegistry->OnHookEvent(start);
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + id + L" cwd=" + cwd + L"\n");
+            _BindClaudeSessionToTab(projectedTab, conn, id, cwd, L"cwd " + cwd);
         }
         co_return;
     }

@@ -70,6 +70,59 @@ namespace
         return b > 0 && s[b - 1] == L'?';
     }
 
+    // Read the `cwd` recorded in a transcript's FIRST JSON line (every Claude transcript line
+    // carries the working dir). Reads only the head (one buffer), shares all access so it never
+    // blocks claude's append. Empty if the file can't be read or has no cwd yet.
+    std::wstring ReadTranscriptCwd(const std::wstring& path)
+    {
+        const HANDLE h = ::CreateFileW(path.c_str(),
+                                       GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr,
+                                       OPEN_EXISTING,
+                                       FILE_FLAG_SEQUENTIAL_SCAN,
+                                       nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return {};
+        }
+        std::string bytes;
+        bytes.resize(16384);
+        DWORD got = 0;
+        const BOOL ok = ::ReadFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &got, nullptr);
+        ::CloseHandle(h);
+        if (!ok || got == 0)
+        {
+            return {};
+        }
+        bytes.resize(got);
+        size_t start = 0;
+        while (start < bytes.size())
+        {
+            const size_t nl = bytes.find('\n', start);
+            const size_t end = (nl == std::string::npos) ? bytes.size() : nl;
+            if (end > start)
+            {
+                const std::wstring wide = Utf8ToUtf16(bytes.data() + start, static_cast<int>(end - start));
+                const auto parsed = Agentmaster::json::Parse(wide);
+                if (parsed && parsed->type == Agentmaster::json::Value::Type::Obj)
+                {
+                    const std::wstring cwd = parsed->StrAt(L"cwd");
+                    if (!cwd.empty())
+                    {
+                        return cwd;
+                    }
+                }
+            }
+            if (nl == std::string::npos)
+            {
+                break;
+            }
+            start = nl + 1;
+        }
+        return {};
+    }
+
     // Concatenate the text blocks of a Claude message `content` (string, or array of blocks).
     std::wstring CollectText(const Agentmaster::json::Value* content)
     {
@@ -315,6 +368,19 @@ namespace Agentmaster
 
     int64_t SessionScanner::_scanOnce()
     {
+        const int64_t now = NowMs();
+
+        // Discovery (the PULL detection of un-hooked, hand-typed claudes): refresh the recent-
+        // transcript index while armed, rate-limited to its own cadence so a fast Running-cadence
+        // tick (300ms) doesn't re-enumerate the projects tree. Independent of any live session —
+        // this is how a `claude` started in a fresh tab (no managed session yet) gets noticed.
+        const bool armed = _discoverArmed.load();
+        if (armed && (now - _lastDiscoverMs) >= kScanDiscoverMs)
+        {
+            _discoverOnce();
+            _lastDiscoverMs = now;
+        }
+
         const auto sessions = _registry->Snapshot();
 
         bool anyLive = false;
@@ -351,12 +417,15 @@ namespace Agentmaster
             }
         }
 
-        const int64_t now = NowMs();
-        _maybeSweepLiveness(now, anyLive);
+        // Run the app-layer probes when armed even with nothing live, so each window's probe can
+        // correlate a freshly discovered transcript to one of its tabs (the probe alone knows tabs).
+        _maybeSweepLiveness(now, anyLive || armed);
 
         if (!anyLive)
         {
-            return -1; // sleep until woken
+            // Keep ticking on the discovery cadence while armed (so new transcripts are noticed);
+            // otherwise sleep at zero cost until a registry observer Wake()s us.
+            return armed ? kScanDiscoverMs : -1;
         }
         return anyRunning ? kScanRunningMs : kScanLiveIdleMs;
     }
@@ -542,5 +611,101 @@ namespace Agentmaster
                 }
             }
         }
+    }
+
+    void SessionScanner::ArmDiscovery()
+    {
+        // Only discover sessions that start AFTER this point — the user's pre-existing claude
+        // history (and our own just-restored archived sessions) must not flood in.
+        _discoverSinceMs = NowMs();
+        _discoverArmed.store(true);
+        Wake(); // break the idle wait so discovery starts ticking immediately
+    }
+
+    std::vector<DiscoveredTranscript> SessionScanner::RecentTranscripts() const
+    {
+        std::lock_guard lk{ _discMtx };
+        return _recent;
+    }
+
+    void SessionScanner::_discoverOnce()
+    {
+        const std::wstring projects = ClaudeProjectsDir();
+        if (projects.empty())
+        {
+            return;
+        }
+
+        std::vector<DiscoveredTranscript> found;
+
+        const std::wstring dirPattern = projects + L"\\*";
+        WIN32_FIND_DATAW fd{};
+        HANDLE dh = ::FindFirstFileW(dirPattern.c_str(), &fd);
+        if (dh == INVALID_HANDLE_VALUE)
+        {
+            return;
+        }
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                continue;
+            }
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..")
+            {
+                continue;
+            }
+
+            const std::wstring sub = projects + L"\\" + name;
+            const std::wstring filePattern = sub + L"\\*.jsonl";
+            WIN32_FIND_DATAW ff{};
+            HANDLE fh = ::FindFirstFileW(filePattern.c_str(), &ff);
+            if (fh == INVALID_HANDLE_VALUE)
+            {
+                continue;
+            }
+            do
+            {
+                if (ff.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    continue;
+                }
+                const int64_t mtime = FiletimeToUnixMs(ff.ftLastWriteTime);
+                if (mtime < _discoverSinceMs)
+                {
+                    continue; // predates this run — not something the user just started
+                }
+                std::wstring leaf = ff.cFileName; // "<id>.jsonl"
+                if (leaf.size() <= 6)
+                {
+                    continue;
+                }
+                const std::wstring id = leaf.substr(0, leaf.size() - 6); // strip ".jsonl"
+
+                // cwd: read the transcript head ONCE per id, then cache (even if empty — don't
+                // re-open a still-header-less file every tick).
+                std::wstring cwd;
+                if (const auto it = _cwdById.find(id); it != _cwdById.end())
+                {
+                    cwd = it->second;
+                }
+                else
+                {
+                    cwd = ReadTranscriptCwd(sub + L"\\" + leaf);
+                    _cwdById[id] = cwd;
+                }
+                if (cwd.empty())
+                {
+                    continue;
+                }
+                found.push_back(DiscoveredTranscript{ id, cwd, mtime });
+            } while (::FindNextFileW(fh, &ff));
+            ::FindClose(fh);
+        } while (::FindNextFileW(dh, &fd));
+        ::FindClose(dh);
+
+        std::lock_guard lk{ _discMtx };
+        _recent.swap(found);
     }
 }

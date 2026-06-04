@@ -81,6 +81,10 @@ namespace Agentmaster
             // CHECK is WinRT (walks tabs), so it is delegated to per-window probes the scanner ticks.
             e->scanner = std::make_shared<SessionScanner>(e->registry);
             e->scanner->Start();
+            // Arm transcript discovery: from now on the scanner indexes every NEW Claude transcript
+            // (a hand-typed `claude` whose hooks never wired). Each window's probe correlates the
+            // index to its own tabs by working directory — the one detection path no shell can shadow.
+            e->scanner->ArmDiscovery();
             {
                 auto scan = e->scanner;
                 e->registry->AddObserver([scan](const SessionInfo&, HookEvent) { scan->Wake(); });

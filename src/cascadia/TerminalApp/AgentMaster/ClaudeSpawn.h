@@ -104,6 +104,13 @@ namespace Agentmaster
     // `!ResolveClaudeTranscriptPath(id).empty()`.
     std::wstring ResolveClaudeTranscriptPath(std::wstring_view sessionId);
 
+    // The Claude transcript root: <claude-config>/projects (config dir == CLAUDE_CONFIG_DIR, else
+    // ~/.claude). Empty if neither resolves. The SessionScanner enumerates this to DISCOVER claude
+    // sessions launched outside the Manager (a hand-typed `claude` in any tab) — claude always
+    // writes a per-session <id>.jsonl here regardless of how it was started, so this is the one
+    // detection signal that no shell function / alias / PATH quirk can shadow. [Agentmaster]
+    std::wstring ClaudeProjectsDir();
+
     // Write the shared forwarder + hooks settings into `stateDir`. Idempotent (overwrites
     // so they always match the running build). Returns {settingsPath, forwarderPath} in
     // backslash form. Throws nothing meaningful for the caller; returns empty paths on I/O

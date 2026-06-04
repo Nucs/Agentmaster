@@ -48,6 +48,18 @@ namespace Agentmaster
     inline constexpr int64_t kScanStopQuiescenceMs = 2000; // transcript must be this quiet before a synthesized Stop
     inline constexpr int64_t kScanMaxDeltaBytes = 1 << 20; // read at most 1 MiB of new transcript per tick
     inline constexpr int64_t kScanForceConsumeBytes = 4 << 20; // a 4 MiB run with no newline -> skip it (corrupt/binary guard)
+    inline constexpr int64_t kScanDiscoverMs = 1500; // cadence for the transcript-discovery sweep while armed but idle
+
+    // One recently-active transcript the discovery sweep found: a Claude session (by id) running in
+    // `cwd`. The app correlates this to one of ITS tabs by working directory to detect + bind a
+    // session it did not launch and whose hooks never wired (a hand-typed `claude`). DISCOVERY ONLY
+    // BUILDS THIS INDEX (off the UI thread); the app does the tab correlation (it alone knows tabs).
+    struct DiscoveredTranscript
+    {
+        std::wstring id; // Claude session id (the <id>.jsonl stem)
+        std::wstring cwd; // working dir recorded in the transcript (first line's `cwd`)
+        int64_t mtimeMs{ 0 }; // last-write time (newest wins when a cwd has several)
+    };
 
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
     struct TranscriptEvent
@@ -105,6 +117,17 @@ namespace Agentmaster
         LivenessToken AddLivenessProbe(LivenessProbe probe);
         void RemoveLivenessProbe(LivenessToken token);
 
+        // Arm the transcript-discovery sweep (call once at engine init). From now on the worker keeps
+        // ticking even with no live sessions and indexes every transcript modified AFTER this call —
+        // so a hand-typed `claude` (which never registers via a hook) is still found. Sessions that
+        // already existed before arming are ignored (we only discover what starts during this run).
+        void ArmDiscovery();
+
+        // Snapshot of recently-active transcripts (id + cwd + mtime), newest-modified. The app's
+        // per-window probe reads this and binds each unbound tab to the transcript whose cwd matches
+        // the tab's working directory. Thread-safe; returns a copy.
+        std::vector<DiscoveredTranscript> RecentTranscripts() const;
+
     private:
         // Per-session tail cursor (owned solely by the worker thread — no lock needed).
         struct ScanState
@@ -121,6 +144,7 @@ namespace Agentmaster
         void _reconcileSession(const SessionInfo& s);
         void _readDelta(ScanState& st, const SessionInfo& s, int64_t size);
         void _maybeSweepLiveness(int64_t nowMs, bool anyLive);
+        void _discoverOnce(); // enumerate recent transcripts into _recent (worker thread)
 
         std::shared_ptr<SessionRegistry> _registry;
         std::thread _thread;
@@ -133,5 +157,13 @@ namespace Agentmaster
         std::vector<std::pair<LivenessToken, LivenessProbe>> _probes;
         uint64_t _nextProbeId{ 1 };
         int64_t _lastSweepMs{ 0 };
+
+        // --- transcript discovery (the PULL detection of un-hooked, hand-typed claudes) ---
+        std::atomic<bool> _discoverArmed{ false };
+        int64_t _discoverSinceMs{ 0 }; // worker-only: ignore transcripts older than this (set at arm)
+        int64_t _lastDiscoverMs{ 0 }; // worker-only: rate-limit the enumeration to kScanDiscoverMs
+        std::unordered_map<std::wstring, std::wstring> _cwdById; // worker-only cache: id -> cwd (head read once)
+        mutable std::mutex _discMtx; // guards _recent (separate from _mtx so the index build never blocks Wake)
+        std::vector<DiscoveredTranscript> _recent; // latest discovery snapshot (published to the app)
     };
 }
