@@ -101,10 +101,14 @@ namespace Agentmaster
             //  * publish the live pipe to bridge.json (a forwarder that didn't inherit
             //    CCMGR_HOOK_PIPE can still find it);
             //  * export CCMGR_HOOK_PIPE on OUR process and prepend a transparent `claude` PATH
-            //    shim — every `+` tab inherits our live env (ConptyConnection regenerates from
-            //    the current process block), so a bare `claude` there runs the shim, which adds
-            //    `--settings <ourHooks>`. Launch's direct CreateProcessW("claude ...") resolves
-            //    claude.exe (no PATHEXT) and bypasses the .cmd shim — so no double-wiring.
+            //    shim — every `+` tab inherits our live process env block, so a bare `claude` there
+            //    runs the shim, which adds `--settings <ourHooks>`. This inheritance ONLY holds
+            //    because we force the profiles.defaults `reloadEnvironmentVariables` OFF (see
+            //    CascadiaSettingsSerialization FixupUserSettings — [Agentmaster]): with WT's default
+            //    env-reload ON, ConptyConnection rebuilds a child's env from the REGISTRY
+            //    (til::env::regenerate), which DROPS these runtime-only vars and the shim is never
+            //    hit. Launch's direct CreateProcessW("claude ...") resolves claude.exe (no PATHEXT)
+            //    and bypasses the .cmd shim — so no double-wiring.
             try
             {
                 WriteBridgeDiscovery(pipeName);

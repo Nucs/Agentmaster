@@ -680,6 +680,17 @@ bool SettingsLoader::FixupUserSettings()
         fixedUp = true;
     }
 
+    // Agentmaster: force env-reload OFF at profiles.defaults (in-memory; we do NOT set fixedUp, so
+    // this is not written back to the user's settings.json) so EVERY new tab inherits our LIVE
+    // process environment block. The engine injects a transparent `claude` PATH shim + CCMGR_HOOK_PIPE
+    // into THIS process at startup; with env-reload ON (the WT default), ConptyConnection rebuilds a
+    // child's environment from the REGISTRY (til::env::regenerate), which DROPS those runtime-only
+    // vars — so a hand-typed `claude` in a normal/`+` tab resolves to the real exe (no --settings)
+    // and never wires hooks, leaving it unobservable/unadoptable. With reload OFF, ConptyConnection
+    // uses til::env::from_current_environment() (the live block), so the shim + pipe are present and
+    // a bare `claude` self-wires for hooks (then gets adopted + the per-tab overlay). [Agentmaster]
+    userSettings.baseLayerProfile->ReloadEnvironmentVariables(false);
+
     // Terminal 1.23: Migrate the global
     // `experimental.input.forceVT` to being a per-profile setting.
     if (userSettings.globals->LegacyForceVTInput())
