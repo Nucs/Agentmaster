@@ -1723,12 +1723,20 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: a hook arrived for a session we did NOT Launch — a `claude` the user typed
-    // into a `+` tab, wired by the PATH shim. The registry has already adopted it (observe-
-    // only, external=true); promote it to full control by finding the live ConPTY whose
-    // WT_SESSION equals `tabToken` and binding a stdin injector to it (Correctness Rule #3:
-    // the injector is bound to THIS session's id). Best-effort: a claude hosted outside this
-    // app (no matching connection) stays observe-only. Runs on the UI thread (XAML walk).
+    // Agentmaster: reconcile a session's tab binding on a SessionStart, keyed by the STABLE
+    // WT_SESSION `tabToken` (the ConPTY identity, which — unlike the Claude session id — never
+    // changes for the life of a tab). Now fired for EVERY SessionStart, this one path handles:
+    //   * ADOPT  — a `claude` the user typed into a `+` tab (a new, unknown id wired by the PATH
+    //              shim): find the live ConPTY whose WT_SESSION == tabToken and bind a stdin
+    //              injector to it, promoting it to full observe+control (Rule #3).
+    //   * RE-HOME — a tab whose claude changed conversation id via the in-session `/resume` (the id
+    //              changes, the tabToken does not). The same tab is found bound to an OLD id; that
+    //              old id is archived (queue kept restorable) and the tab is re-pointed to the new
+    //              id — even if the new id is a previously-known/archived one (which never creates a
+    //              record here, so the old new-record-only adoption gate missed it).
+    // Idempotent: a SessionStart for an already-bound session (every Manager-launched one) fast-
+    // returns. Best-effort: a claude with no matching connection in this window stays observe-only
+    // and the registry is left untouched. Runs on the UI thread (XAML walk).
     winrt::fire_and_forget TerminalPage::_AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken)
     {
         auto strongThis{ get_strong() };
@@ -1741,15 +1749,6 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring id{ sessionId };
 
-        // Give the adopted card a readable title (smart-derived from its working dir) if it has none.
-        const std::wstring ttl = ::Agentmaster::DeriveSessionTitle(std::wstring{ cwd });
-        _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
-            if (s.title.empty())
-            {
-                s.title = ttl;
-            }
-        });
-
         const auto lower = [](std::wstring s) {
             for (auto& c : s)
             {
@@ -1761,13 +1760,32 @@ namespace winrt::TerminalApp::implementation
             return s;
         };
         const std::wstring token = lower(std::wstring{ tabToken });
+
+        // Idempotent fast path: a SessionStart for a session already bound to a live tab (and
+        // carrying its overlay, when overlays are enabled) needs nothing. This is the common case —
+        // every Manager-launched session re-emits SessionStart and lands here, so the reconcile is
+        // a cheap no-op for them (no walk, no registry writes, no cross-window notify spam).
+        if (const auto it = _claudeTabs.find(id); it != _claudeTabs.end())
+        {
+            if (const auto t = it->second.get())
+            {
+                const bool overlayOk = (_claudeOverlays.find(id) != _claudeOverlays.end()) || !_appSettings.showTabOverlay;
+                if (overlayOk)
+                {
+                    co_return;
+                }
+            }
+        }
+
         if (token.empty())
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no tabToken)\n");
             co_return;
         }
 
-        // Find the live ConPTY whose WT_SESSION == token, then bind it.
+        // Find the live ConPTY in THIS window whose WT_SESSION == token (the STABLE tab identity).
+        TerminalApp::Tab hostTab{ nullptr };
+        TerminalConnection::ITerminalConnection match{ nullptr };
         for (const auto& projectedTab : _tabs)
         {
             const auto tabImpl = _GetTabImpl(projectedTab);
@@ -1775,9 +1793,9 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-            TerminalConnection::ITerminalConnection match{ nullptr };
+            TerminalConnection::ITerminalConnection found{ nullptr };
             tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
-                if (match)
+                if (found)
                 {
                     return;
                 }
@@ -1803,43 +1821,86 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (lower(::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId())) == token)
                 {
-                    match = conn;
+                    found = conn;
                 }
             });
-
-            if (match)
+            if (found)
             {
-                const auto connection = match;
-                _sessionRegistry->SetInjector(id, [connection](const std::wstring& text) {
-                    const auto* begin = reinterpret_cast<const char16_t*>(text.data());
-                    connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
-                });
-                _claudeTabs[id] = winrt::make_weak(projectedTab);
-                // Agentmaster: unify the adopted tab's title with the Explorer name (the one-title
-                // rule). If the user already named this hand-typed `claude` tab, that rename is
-                // authoritative -> mirror it into the registry; otherwise pin the tab to the managed
-                // name (the cwd leaf set above) so both sides match. Either way it is now in
-                // _claudeTabs, so subsequent renames sync via _SyncClaudeTitleFromTab.
-                if (const auto impl = _GetTabImpl(projectedTab))
-                {
-                    const std::wstring tabText{ impl->GetTabText() };
-                    if (!tabText.empty())
-                    {
-                        _sessionRegistry->Update(id, [&tabText](::Agentmaster::SessionInfo& s) { s.title = tabText; });
-                    }
-                    else if (const auto s = _sessionRegistry->Get(id); s && !s->title.empty())
-                    {
-                        impl->SetTabText(winrt::hstring{ s->title });
-                    }
-                }
-                _ApplyDirColorToTab(projectedTab, std::wstring{ cwd }); // per-directory tab color
-                _AttachClaudeOverlay(projectedTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
-                co_return;
+                hostTab = projectedTab;
+                match = found;
+                break;
             }
         }
 
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no connection for " + token + L")\n");
+        // No connection in this window hosts that WT_SESSION — a claude hosted outside this app (or
+        // in another window). Stay observe-only; do NOT touch the registry (avoids notify spam on
+        // every other window for a session it doesn't host).
+        if (!match || !hostTab)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" observe-only (no connection for " + token + L")\n");
+            co_return;
+        }
+
+        // RE-HOME (in-session `/resume`): if this SAME tab is currently bound to a DIFFERENT session
+        // id, the conversation switched ids on a stable ConPTY (the id changed; the tabToken did
+        // not). Supersede the old id — archive it (its Flight Plan stays restorable) and drop its
+        // tab/overlay binding — then re-point this tab to the new id below.
+        for (const auto& [oldId, weakOld] : _claudeTabs)
+        {
+            if (const auto t = weakOld.get(); t && t == hostTab && oldId != id)
+            {
+                _sessionRegistry->SetInjector(oldId, nullptr);
+                _sessionRegistry->Update(oldId, [](::Agentmaster::SessionInfo& s) {
+                    s.live = false;
+                    s.pendingConfirmPromptId.clear();
+                });
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + oldId + L" -> " + id + L" (same tab, new conversation id)\n");
+                _claudeTabs.erase(oldId);
+                _claudeOverlays.erase(oldId);
+                break; // one tab hosts one session
+            }
+        }
+
+        // Give the (adopted) card a readable title from its working dir if it has none.
+        const std::wstring ttl = ::Agentmaster::DeriveSessionTitle(std::wstring{ cwd });
+        _sessionRegistry->Update(id, [&ttl](::Agentmaster::SessionInfo& s) {
+            if (s.title.empty())
+            {
+                s.title = ttl;
+            }
+        });
+
+        // Bind the (new) id to this tab — full observe+control (Rule #3: inject by sessionId).
+        const auto connection = match;
+        _sessionRegistry->SetInjector(id, [connection](const std::wstring& text) {
+            const auto* begin = reinterpret_cast<const char16_t*>(text.data());
+            connection.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
+        });
+        _claudeTabs[id] = winrt::make_weak(hostTab);
+        _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+            s.live = true; // running in a tab we control now (covers /resume to a previously-archived id)
+        });
+
+        // One-title rule: a name the user already gave the tab wins (mirror it into the registry);
+        // otherwise pin the tab to the managed name. Either way it is now in _claudeTabs, so later
+        // renames sync via _SyncClaudeTitleFromTab.
+        if (const auto impl = _GetTabImpl(hostTab))
+        {
+            const std::wstring tabText{ impl->GetTabText() };
+            if (!tabText.empty())
+            {
+                _sessionRegistry->Update(id, [&tabText](::Agentmaster::SessionInfo& s) { s.title = tabText; });
+            }
+            else if (const auto s = _sessionRegistry->Get(id); s && !s->title.empty())
+            {
+                impl->SetTabText(winrt::hstring{ s->title });
+            }
+        }
+        _ApplyDirColorToTab(hostTab, std::wstring{ cwd }); // per-directory tab color
+        _AttachClaudeOverlay(hostTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
+        ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound to WT_SESSION " + token + L"\n");
+        co_return;
     }
 
     // Agentmaster: the scanner's interval liveness sweep, marshaled onto THIS window's UI thread

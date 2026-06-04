@@ -134,7 +134,6 @@ namespace Agentmaster
         SessionInfo snapshot;
         bool found = false;
         bool triggerAdvance = false;
-        bool adopted = false; // this call CREATED the record (a session we didn't launch)
 
         {
             std::lock_guard guard{ _mtx };
@@ -161,7 +160,6 @@ namespace Agentmaster
                 created.external = true;
                 _order.push_back(msg.sessionId);
                 it = _sessions.emplace(msg.sessionId, std::move(created)).first;
-                adopted = true;
             }
 
             auto& s = it->second;
@@ -224,11 +222,18 @@ namespace Agentmaster
         {
             _notify(snapshot, msg.event);
         }
-        if (adopted)
+        // Agentmaster: fire the bind/adoption handler on EVERY SessionStart — not only when this
+        // call CREATED the record — so the app layer can reconcile the tab<->session binding by the
+        // STABLE WT_SESSION tabToken. This covers (a) adopting a hand-typed `+`-tab claude (a new,
+        // unknown id), AND (b) RE-HOMING a tab whose claude switched conversation id via the
+        // in-session `/resume` (the session id changes; the ConPTY / tabToken does not — and the new
+        // id may even be a previously-known/archived one, which never created a record here). The
+        // reconcile is idempotent: a SessionStart for an already-bound session fast-returns.
+        if (msg.event == HookEvent::SessionStart)
         {
-            // Fan out to every window's adoption handler (M9: the registry is a process-wide
-            // singleton). Snapshot under the lock, invoke outside it; whichever window hosts
-            // this session's `+` tab binds it, the rest no-op.
+            // Fan out to every window's bind handler (M9: the registry is a process-wide singleton).
+            // Snapshot under the lock, invoke outside it; whichever window hosts this session's tab
+            // binds / re-homes it, the rest no-op.
             std::vector<AdoptionHandler> adopters;
             {
                 std::lock_guard guard{ _mtx };
