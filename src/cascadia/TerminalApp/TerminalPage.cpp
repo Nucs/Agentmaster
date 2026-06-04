@@ -2088,6 +2088,9 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
+        bool boundAny = false;
+        std::vector<std::wstring> unmatchedTabCwds; // diagnostic: unbound terminal tabs we couldn't match
+
         for (const auto& projectedTab : _tabs)
         {
             if (projectedTab == _managerTab)
@@ -2141,9 +2144,14 @@ namespace winrt::TerminalApp::implementation
                 conn = ctrl.Connection();
                 cwd = std::wstring{ ctrl.WorkingDirectory() };
             });
-            if (!conn || cwd.empty())
+            if (!conn)
             {
-                continue; // no terminal, or the shell isn't reporting a cwd (no OSC 9;9)
+                continue; // not a terminal tab
+            }
+            if (cwd.empty())
+            {
+                unmatchedTabCwds.push_back(L"(no-cwd)"); // shell isn't reporting a cwd (no OSC 9;9)
+                continue;
             }
             const std::wstring cwdKey = ::Agentmaster::NormDirKey(cwd);
 
@@ -2167,6 +2175,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (!best)
             {
+                unmatchedTabCwds.push_back(cwd); // a cwd, but no (unclaimed) transcript matched it
                 continue;
             }
 
@@ -2187,6 +2196,36 @@ namespace winrt::TerminalApp::implementation
             }
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + id + L" cwd=" + cwd + L"\n");
             _BindClaudeSessionToTab(projectedTab, conn, id, cwd, L"cwd " + cwd);
+            boundAny = true;
+        }
+
+        // Diagnostic (self-limiting): only when there ARE recent transcripts, we bound nothing this
+        // pass, and at least one unbound terminal tab couldn't be matched — show that tab's cwd vs
+        // the indexed cwds so a mismatch (or a missing/stale WorkingDirectory) is visible in the log.
+        if (!boundAny && !unmatchedTabCwds.empty())
+        {
+            std::wstring tabs;
+            for (size_t i = 0; i < unmatchedTabCwds.size() && i < 4; ++i)
+            {
+                tabs += (tabs.empty() ? L"" : L" | ");
+                tabs += unmatchedTabCwds[i];
+            }
+            std::wstring idx;
+            {
+                int n = 0;
+                for (const auto& d : recent)
+                {
+                    if (n++ >= 4)
+                    {
+                        break;
+                    }
+                    idx += (idx.empty() ? L"" : L" | ");
+                    idx += d.cwd;
+                }
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[discover-miss] tabCwds=[" + tabs + L"] idxN=" + std::to_wstring(recent.size()) +
+                                              L" idxCwds=[" + idx + L"]\n");
         }
         co_return;
     }
