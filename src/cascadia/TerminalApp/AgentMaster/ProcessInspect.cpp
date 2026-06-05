@@ -8,10 +8,12 @@
 #include <windows.h>
 #include <tlhelp32.h> // CreateToolhelp32Snapshot
 
+#include <algorithm>
 #include <string_view>
 #include <unordered_set>
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
+#include "Json.h" // transcript line parsing (ReadTranscriptInfo)
 
 namespace
 {
@@ -276,6 +278,81 @@ namespace
         } while (::FindNextFileW(h, &fd));
         ::FindClose(h);
         return out;
+    }
+
+    // UTF-8 bytes -> wide. Claude transcripts are UTF-8 .jsonl. Empty on empty/failure.
+    std::wstring Utf8ToWide(const std::string& bytes)
+    {
+        if (bytes.empty())
+        {
+            return {};
+        }
+        const int n = ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+        if (n <= 0)
+        {
+            return {};
+        }
+        std::wstring w(static_cast<size_t>(n), L'\0');
+        ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), w.data(), n);
+        return w;
+    }
+
+    // Collapse a (possibly multi-line) prompt to a single trimmed display line: take the first
+    // non-blank line, trim surrounding whitespace. Used for the external row's title.
+    std::wstring FirstLineTrim(const std::wstring& s)
+    {
+        size_t i = 0;
+        // skip leading blank lines / whitespace
+        while (i < s.size() && (s[i] == L'\n' || s[i] == L'\r' || s[i] == L' ' || s[i] == L'\t'))
+        {
+            ++i;
+        }
+        size_t j = i;
+        while (j < s.size() && s[j] != L'\n' && s[j] != L'\r')
+        {
+            ++j;
+        }
+        // trim trailing whitespace of [i, j)
+        while (j > i && (s[j - 1] == L' ' || s[j - 1] == L'\t'))
+        {
+            --j;
+        }
+        return s.substr(i, j - i);
+    }
+
+    // Read up to maxBytes from the START of a file (0 == whole file). Empty on failure. Shared
+    // read/write/delete so a live, append-only transcript can be read while Claude writes it.
+    std::string ReadFileHead(const std::wstring& path, size_t maxBytes)
+    {
+        const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return {};
+        }
+        LARGE_INTEGER sz{};
+        ::GetFileSizeEx(h, &sz);
+        uint64_t want = static_cast<uint64_t>(sz.QuadPart);
+        if (maxBytes != 0 && want > maxBytes)
+        {
+            want = maxBytes;
+        }
+        std::string bytes(static_cast<size_t>(want), '\0');
+        size_t off = 0;
+        while (off < bytes.size())
+        {
+            DWORD got = 0;
+            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(bytes.size() - off, 1u << 20));
+            if (!::ReadFile(h, bytes.data() + off, chunk, &got, nullptr) || got == 0)
+            {
+                break;
+            }
+            off += got;
+        }
+        bytes.resize(off);
+        ::CloseHandle(h);
+        return bytes;
     }
 }
 
@@ -835,5 +912,162 @@ namespace Agentmaster
     std::wstring ResolveSessionId(std::wstring_view cwd, int64_t startUnixMs)
     {
         return ResolveSessionIdIn(ClaudeProjectsDir(), cwd, startUnixMs);
+    }
+
+    // ===== transcript content: timing + title + human prompts ================================
+
+    bool TranscriptTimesIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs)
+    {
+        createdUnixMs = 0;
+        lastActivityUnixMs = 0;
+        if (projectsDir.empty() || cwd.empty() || sessionId.empty())
+        {
+            return false;
+        }
+        const std::wstring path = std::wstring{ projectsDir } + L"\\" + EncodeCwdToProjectDir(cwd) + L"\\" + std::wstring{ sessionId } + L".jsonl";
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad) || (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return false;
+        }
+        createdUnixMs = FileTimeToUnixMs(fad.ftCreationTime);
+        lastActivityUnixMs = FileTimeToUnixMs(fad.ftLastWriteTime);
+        return true;
+    }
+
+    bool TranscriptTimes(std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs)
+    {
+        return TranscriptTimesIn(ClaudeProjectsDir(), cwd, sessionId, createdUnixMs, lastActivityUnixMs);
+    }
+
+    TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
+    {
+        TranscriptInfo info;
+        if (projectsDir.empty() || cwd.empty() || sessionId.empty())
+        {
+            return info;
+        }
+        const std::wstring path = std::wstring{ projectsDir } + L"\\" + EncodeCwdToProjectDir(cwd) + L"\\" + std::wstring{ sessionId } + L".jsonl";
+
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad) || (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return info; // not found
+        }
+        info.found = true;
+        info.createdUnixMs = FileTimeToUnixMs(fad.ftCreationTime);
+        info.lastActivityUnixMs = FileTimeToUnixMs(fad.ftLastWriteTime);
+
+        const std::string bytes = ReadFileHead(path, maxBytes);
+        if (bytes.empty())
+        {
+            return info; // times only
+        }
+        const bool truncated = (maxBytes != 0); // a head read may end mid-line -> skip the last segment
+        const std::wstring wide = Utf8ToWide(bytes);
+
+        std::wstring firstPrompt;
+        size_t start = 0;
+        for (size_t i = 0; i <= wide.size(); ++i)
+        {
+            if (i < wide.size() && wide[i] != L'\n')
+            {
+                continue;
+            }
+            // The segment after the final '\n' (i == size) is partial on a truncated head read.
+            if (i == wide.size() && truncated)
+            {
+                break;
+            }
+            std::wstring_view line(wide.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+            if (obj.StrAt(L"type") != L"user" || obj.BoolAt(L"isMeta"))
+            {
+                continue;
+            }
+            if (info.gitBranch.empty())
+            {
+                const std::wstring gb = obj.StrAt(L"gitBranch");
+                if (!gb.empty())
+                {
+                    info.gitBranch = gb;
+                }
+            }
+            const auto* msg = obj.Find(L"message");
+            if (!msg || msg->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto* content = msg->Find(L"content");
+            if (!content)
+            {
+                continue;
+            }
+            std::wstring prompt;
+            if (content->type == json::Value::Type::Str)
+            {
+                prompt = content->str;
+            }
+            else if (content->type == json::Value::Type::Arr)
+            {
+                // A pure-text user message is a human prompt; ANY tool_result block means a tool turn.
+                bool hasToolResult = false;
+                std::wstring text;
+                for (const auto& blk : content->arr)
+                {
+                    if (blk.type != json::Value::Type::Obj)
+                    {
+                        continue;
+                    }
+                    const std::wstring bt = blk.StrAt(L"type");
+                    if (bt == L"tool_result")
+                    {
+                        hasToolResult = true;
+                        break;
+                    }
+                    if (bt == L"text")
+                    {
+                        text += blk.StrAt(L"text");
+                    }
+                }
+                if (!hasToolResult)
+                {
+                    prompt = text;
+                }
+            }
+            if (prompt.empty())
+            {
+                continue;
+            }
+            if (firstPrompt.empty())
+            {
+                firstPrompt = prompt;
+            }
+            if (info.userPrompts.size() < maxPrompts)
+            {
+                info.userPrompts.push_back(std::move(prompt));
+            }
+        }
+        info.title = FirstLineTrim(firstPrompt);
+        return info;
+    }
+
+    TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
+    {
+        return ReadTranscriptInfoIn(ClaudeProjectsDir(), cwd, sessionId, maxBytes, maxPrompts);
     }
 }

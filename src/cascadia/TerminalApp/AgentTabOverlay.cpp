@@ -201,8 +201,45 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
+    void AgentTabOverlay::ShowActivity(const std::wstring& kind)
+    {
+        // A tab the observer classified but that is NOT a linked Claude session: a shell ("pwsh" /
+        // "cmd"), a never-prompted claude ("claude", no transcript id yet, §11d), or codex. Registry-
+        // LESS static badge (no id to observe). The real Initialize()-bound overlay replaces this whole
+        // element once a claude resolves its conversation id (first prompt).
+        _pending = true;
+        _sessionId.clear();
+        if (!_dispatcher)
+        {
+            _dispatcher = DispatcherQueue::GetForCurrentThread();
+        }
+        if (!_line || !_root)
+        {
+            return;
+        }
+        if (kind == _lastActivitySig)
+        {
+            return; // unchanged -> no XAML churn (this runs every probe tick)
+        }
+        _lastActivitySig = kind;
+        _root.Visibility(Visibility::Visible);
+        _line.Inlines().Clear();
+        Run glyph{};
+        glyph.Text(winrt::hstring{ L"\x25CB" }); // ○ gray — observed, but not a linked session
+        glyph.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // gray
+        glyph.FontWeight(FontWeights::SemiBold());
+        _line.Inlines().Append(glyph);
+        Run text{};
+        text.Text(winrt::hstring{ std::wstring{ L" " } + kind + L"  " + kDot + L"  unlinked" });
+        _line.Inlines().Append(text);
+    }
+
     void AgentTabOverlay::_Refresh()
     {
+        if (_pending)
+        {
+            return; // a pending badge is static — it has no registry session to refresh from
+        }
         if (!_line || !_registry)
         {
             return;

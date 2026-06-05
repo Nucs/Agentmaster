@@ -390,6 +390,14 @@ namespace Agentmaster
                 correlatedPids.push_back(cpid);
                 rosteredOwner[cpid] = ownerWin; // mark this pid OURS for the census below
 
+                // Conversation timing (age + last activity) from the transcript — a cheap stat, only
+                // once the id is resolved. Drives the Manager's per-session timing adornment.
+                int64_t convCreated = 0, convLast = 0;
+                if (!sid.empty())
+                {
+                    TranscriptTimes(f.cwd, sid, convCreated, convLast);
+                }
+
                 CorrelationRow cr;
                 cr.wtSession = wtSession;
                 cr.claudePid = cpid;
@@ -399,6 +407,8 @@ namespace Agentmaster
                 cr.runningApp = RunningApp::Agentmaster; // rostered == in our tab == ours (not AM_SESSION-gated)
                 cr.alive = true;
                 cr.observedUnixMs = now;
+                cr.createdUnixMs = convCreated;
+                cr.lastActivityUnixMs = convLast;
                 corr.push_back(std::move(cr));
 
                 TabActivityRow ar;
@@ -430,6 +440,8 @@ namespace Agentmaster
                     o.permissionMode = f.permissionMode;
                     o.sessionName = f.sessionName;
                     o.observedUnixMs = now;
+                    o.createdUnixMs = convCreated;
+                    o.lastActivityUnixMs = convLast;
                     _registry->ObserveClaude(o);
                 }
                 continue;
@@ -470,7 +482,32 @@ namespace Agentmaster
         //    visible immediately) or a slow keepalive (a soak shows the survey is alive).
         int ours = 0, external = 0, other = 0;
         std::vector<uint32_t> oursPids;
-        std::vector<ExternalClaudeRow> externalRows; // published for the Manager's "External (N)" group (O6)
+        std::vector<ExternalClaudeRow> externalRows; // published for the Manager's "External" group (O6)
+        // Resolve a claude's host shell leaf from the snapshot (its parent's image) — labels a
+        // cmd-/console-hosted external ("cmd.exe", "pwsh.exe", ...). Pure scan over `snap`.
+        const auto parentImageOf = [&snap](uint32_t childPid) -> std::wstring {
+            uint32_t ppid = 0;
+            for (const auto& e : snap)
+            {
+                if (e.pid == childPid)
+                {
+                    ppid = e.ppid;
+                    break;
+                }
+            }
+            if (ppid == 0)
+            {
+                return {};
+            }
+            for (const auto& e : snap)
+            {
+                if (e.pid == ppid)
+                {
+                    return e.image;
+                }
+            }
+            return {};
+        };
         for (const auto& [pid, f] : factsByPid)
         {
             const RunningApp app = rosteredOwner.count(pid) ? RunningApp::Agentmaster : f.runningApp;
@@ -478,25 +515,54 @@ namespace Agentmaster
             {
                 ++ours;
                 oursPids.push_back(pid);
+                continue;
             }
-            else if (app == RunningApp::WindowsTerminal)
+            // External (observe-only): a WT-hosted claude (WindowsTerminal) OR a bare-console /
+            // cmd-hosted one (Other / Unknown). Both are surfaced in the Manager's External group,
+            // enriched out-of-band with the conversation id + transcript timing + a title.
+            if (app == RunningApp::WindowsTerminal)
             {
                 ++external;
-                ExternalClaudeRow ex;
-                ex.pid = pid;
-                ex.wtSession = f.wtSession;
-                ex.cwd = f.cwd;
-                ex.model = f.model;
-                ex.effort = f.effort;
-                ex.background = f.background;
-                ex.startUnixMs = f.startUnixMs;
-                ex.observedUnixMs = now;
-                externalRows.push_back(std::move(ex));
             }
             else
             {
                 ++other;
             }
+            ExternalClaudeRow ex;
+            ex.pid = pid;
+            ex.wtSession = f.wtSession;
+            ex.cwd = f.cwd;
+            ex.model = f.model;
+            ex.effort = f.effort;
+            ex.background = f.background;
+            ex.startUnixMs = f.startUnixMs;
+            ex.observedUnixMs = now;
+            ex.host = app; // WindowsTerminal vs Other/Unknown (cmd / bare console)
+            if (app != RunningApp::WindowsTerminal)
+            {
+                ex.hostImage = parentImageOf(pid); // cmd.exe / pwsh.exe / ... (WT rows leave this empty)
+            }
+            const std::wstring sid = ResolveObservedId(f);
+            ex.sessionId = sid;
+            if (!sid.empty())
+            {
+                TranscriptTimes(f.cwd, sid, ex.createdUnixMs, ex.lastActivityUnixMs);
+                const auto cached = _extInfoCache.find(sid);
+                if (cached != _extInfoCache.end())
+                {
+                    ex.title = cached->second.title;
+                    ex.gitBranch = cached->second.gitBranch;
+                }
+                else
+                {
+                    // One-time transcript head read (128 KB) for the first prompt (title) + gitBranch.
+                    const auto ti = ReadTranscriptInfo(f.cwd, sid, 131072, 1);
+                    ex.title = ti.title;
+                    ex.gitBranch = ti.gitBranch;
+                    _extInfoCache.emplace(sid, ExtInfo{ ti.title, ti.gitBranch });
+                }
+            }
+            externalRows.push_back(std::move(ex));
         }
         std::sort(externalRows.begin(), externalRows.end(), [](const ExternalClaudeRow& a, const ExternalClaudeRow& b) { return a.pid < b.pid; });
         std::sort(oursPids.begin(), oursPids.end());

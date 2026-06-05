@@ -349,6 +349,18 @@ namespace Agentmaster
             // Provenance timestamp: always refreshed, but it alone is NOT a "change" (it must not
             // trigger the observer/persist cascade every heartbeat).
             s.lastObservedUnixMs = o.observedUnixMs;
+            // Transcript timing (conversation age + last activity). Refreshed silently like
+            // lastObservedUnixMs — NOT a "change" (mtime ticks on every write; the Manager computes
+            // the "ago" live from these each refresh, so they need not drive the cascade). Never
+            // clobber a known value with 0 (transcript momentarily unresolved).
+            if (o.createdUnixMs != 0)
+            {
+                s.convCreatedUnixMs = o.createdUnixMs;
+            }
+            if (o.lastActivityUnixMs != 0)
+            {
+                s.convLastActivityUnixMs = o.lastActivityUnixMs;
+            }
 
             changed = changed || created;
             snapshot = s;

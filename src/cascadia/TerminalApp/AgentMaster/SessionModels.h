@@ -164,6 +164,12 @@ namespace Agentmaster
         bool hookWired{}; // have we received ANY hook for this id this run? (provenance)
         int64_t lastHookUnixMs{}; // last authoritative push (hook) — provenance vs the pull
         int64_t lastObservedUnixMs{}; // last pull observation (the S-lane survey)
+        // Transcript-derived timing (the conversation's true age + last activity), filled by the
+        // S-lane (ObserveClaude) from the transcript's ctime/mtime. Drives the Manager's per-session
+        // timing adornment (created-ago / active-for / last-activity-ago). 0 until the transcript
+        // exists. Transient — re-derived each run (NOT persisted; Persistence.cpp must not write them).
+        int64_t convCreatedUnixMs{}; // transcript ctime (≈ conversation start)
+        int64_t convLastActivityUnixMs{}; // transcript mtime (≈ last activity)
 
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};

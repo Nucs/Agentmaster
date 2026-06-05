@@ -37,6 +37,14 @@ namespace winrt::TerminalApp::implementation
         // (id-filtered, marshaled to the UI thread). Call on the UI thread.
         void Initialize(const std::wstring& sessionId, std::shared_ptr<::Agentmaster::SessionRegistry> registry);
 
+        // Agentmaster (OBSERVER.md §4/§11d): render a registry-LESS "observe" badge for a tab the
+        // Fleet Observer classified but that is NOT a linked Claude session — a shell (kind "pwsh" /
+        // "cmd"), a never-prompted claude ("claude", no transcript id yet), or codex. Shows
+        // "○ <kind> · unlinked" (gray); no registry observer (there is no session to track). Idempotent
+        // by `kind` (a re-render is skipped when unchanged). The real Initialize-bound overlay replaces
+        // it once a claude resolves a conversation id (its first prompt).
+        void ShowActivity(const std::wstring& kind);
+
         // The FrameworkElement to install into the pane's overlay slot.
         winrt::Windows::UI::Xaml::FrameworkElement Root() const { return _root; }
 
@@ -45,6 +53,8 @@ namespace winrt::TerminalApp::implementation
         void _Detach(); // drop the registry observer
 
         std::wstring _sessionId;
+        bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
+        std::wstring _lastActivitySig; // last kind rendered by ShowActivity (skip redundant re-renders)
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         uint64_t _observerToken{ 0 }; // ::Agentmaster::ObserverToken (uint64_t; avoid the header here)
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };

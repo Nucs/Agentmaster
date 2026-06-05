@@ -79,6 +79,10 @@ namespace Agentmaster
         RunningApp runningApp{ RunningApp::Unknown };
         bool alive{ true };
         int64_t observedUnixMs{};
+        // Transcript timing (the conversation's age + last activity; for the Manager's per-row
+        // timing adornment). 0 until the transcript exists. Stat-only — cheap.
+        int64_t createdUnixMs{}; // transcript ctime (≈ conversation start)
+        int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity)
     };
 
     // Per-tab activity for EVERY tab, claude or not (the TabActivityTable; published to the UI
@@ -117,21 +121,33 @@ namespace Agentmaster
         bool background{};
         std::wstring model, effort, permissionMode, sessionName;
         int64_t observedUnixMs{};
+        int64_t createdUnixMs{}; // transcript ctime (≈ conversation start) — per-session timing
+        int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity) — per-session timing
     };
 
-    // An EXTERNAL claude (RunningApp::WindowsTerminal — a real Windows Terminal / foreign host, not
-    // one of OUR tabs). The census already counts these; O6 also PUBLISHES them (the External()
-    // table) so the Manager can surface an observe-only "External (N)" group (no registry session,
-    // no Flight Plan, never bound — Rule #9/#13). Facts only, all runtime. (OBSERVER.md §11c / §19-Q2)
+    // An EXTERNAL claude — one we do NOT manage: a real Windows Terminal claude (has a WT_SESSION
+    // but not our AM_SESSION) OR a bare-console / cmd-hosted claude (neither WT_SESSION nor ours,
+    // i.e. RunningApp::Other). The census counts these; O6 PUBLISHES them (the External() table) so
+    // the Manager surfaces an observe-only group (no registry session, never bound — Rule #9/#13).
+    // Enriched (out-of-band) with the conversation's id + title + branch + timing so a row shows real
+    // data instead of a bare "claude". Facts only, all runtime. (OBSERVER.md §11c / §19-Q2)
     struct ExternalClaudeRow
     {
         uint32_t pid{};
-        std::wstring wtSession; // its WT_SESSION (the foreign tab id; NOT in our roster)
+        std::wstring wtSession; // its WT_SESSION (the foreign tab id; NOT in our roster); empty if cmd-hosted
         std::wstring cwd;
         std::wstring model;
         std::wstring effort;
         bool background{};
         int64_t startUnixMs{};
         int64_t observedUnixMs{};
+        // Enrichment (transcript-resolved + host classification):
+        std::wstring sessionId; // resolved conversation id (EMPTY until the first prompt); enables Adopt + the read-only plan
+        std::wstring title; // first human prompt, one line (the display title; recent transcripts carry no summary)
+        std::wstring gitBranch; // gitBranch recorded in the transcript, if any
+        RunningApp host{ RunningApp::WindowsTerminal }; // WindowsTerminal == WT-hosted; Other == cmd / bare console
+        std::wstring hostImage; // the host shell leaf for an Other host ("cmd.exe", "pwsh.exe", ...); empty for WT
+        int64_t createdUnixMs{}; // transcript ctime (≈ conversation start)
+        int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity)
     };
 }

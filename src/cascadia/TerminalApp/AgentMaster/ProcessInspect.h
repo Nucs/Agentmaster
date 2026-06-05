@@ -173,4 +173,34 @@ namespace Agentmaster
     // the S-lane calls each survey; it re-runs until the transcript appears (first prompt), then the
     // id fills and the registry record is created. Empty until then.
     std::wstring ResolveSessionId(std::wstring_view cwd, int64_t startUnixMs);
+
+    // ===== transcript content: timing + title + human prompts ================================
+
+    // Cheap stat of <projectsDir>/<encode(cwd)>/<sessionId>.jsonl: creation time (≈ the conversation
+    // start) and last-write time (≈ last activity), as Unix ms. Returns false (outs left 0) when the
+    // file is absent. GetFileAttributesEx only — no read, no parse — so it is cheap enough to call
+    // each survey for every correlated session. (Feature: per-session age / activity timing.)
+    bool TranscriptTimesIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs);
+    bool TranscriptTimes(std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs);
+
+    // A transcript's user-facing metadata, read out-of-band for the Manager's external rows (a real
+    // title instead of a bare "claude") and the read-only Flight Plan of a selected external session.
+    struct TranscriptInfo
+    {
+        bool found{};
+        int64_t createdUnixMs{}; // file ctime (≈ conversation start)
+        int64_t lastActivityUnixMs{}; // file mtime (≈ last activity)
+        std::wstring title; // a display title: the FIRST human prompt, collapsed to one trimmed line
+        std::wstring gitBranch; // the gitBranch recorded on the user lines (first seen), if any
+        std::vector<std::wstring> userPrompts; // the human prompts in order (capped at maxPrompts)
+    };
+
+    // Read <projectsDir>/<encode(cwd)>/<sessionId>.jsonl out-of-band. Always stats (created/last);
+    // then reads up to `maxBytes` from the START of the file (0 == the whole file) and parses the
+    // HUMAN prompts (role==user, text content, skipping isMeta / tool_result turns — the same rule
+    // ParseTranscriptDelta uses), keeping at most `maxPrompts`. `title` is the first prompt collapsed
+    // to one line; `gitBranch` is the first seen. (Recent transcripts carry NO "summary" line —
+    // verified 0/1842 over 90 days — so the first prompt is the title source.) Filesystem only.
+    TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
+    TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
 }

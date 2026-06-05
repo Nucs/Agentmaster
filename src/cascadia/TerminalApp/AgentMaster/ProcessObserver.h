@@ -101,6 +101,17 @@ namespace Agentmaster
         // survey so a closed tab's entry drops.
         std::unordered_map<std::wstring, TabActivity> _lastActivityByWt;
 
+        // Worker-thread-only cache (no lock) of an EXTERNAL session's transcript-derived title +
+        // gitBranch, keyed by the resolved conversation id, so the per-external transcript head-read
+        // happens once (not every survey — the title doesn't change). Grows only with the distinct
+        // external sessions seen this run.
+        struct ExtInfo
+        {
+            std::wstring title;
+            std::wstring gitBranch;
+        };
+        std::unordered_map<std::wstring, ExtInfo> _extInfoCache;
+
         // Debounce (O7, worker-thread-only, no lock). The FULL Toolhelp survey runs at most every
         // kObserverHeartbeatMs; between full surveys the worker ticks at kObserverFastTickMs and, when
         // the roster is byte-identical AND every correlated (pid,start) pair is still alive, SKIPS the

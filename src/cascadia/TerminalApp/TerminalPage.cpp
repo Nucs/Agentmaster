@@ -247,6 +247,12 @@ namespace winrt::TerminalApp::implementation
     // registry itself outlives every window (held by SharedEngine), so this call stays valid.
     TerminalPage::~TerminalPage()
     {
+        // Agentmaster (lifecycle gap #1): archive any of this window's still-live sessions before we
+        // detach. Normally CloseWindow already did this (deterministically, before raising
+        // CloseWindowRequested); this is the catch-all for quit-all / any teardown path that bypassed
+        // it. Idempotent — a no-op if CloseWindow already cleared _claudeTabs.
+        _ArchiveWindowSessionsOnTeardown();
+
         if (_sessionRegistry && _adoptionToken)
         {
             _sessionRegistry->RemoveAdoptionHandler(_adoptionToken);
@@ -1227,6 +1233,62 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (OBSERVER.md §4/§11d): attach-or-update a registry-LESS "○ <kind> · unlinked" badge
+    // on a NON-bound tab the observer classified — a shell ("pwsh" / "cmd"), a never-prompted claude
+    // ("claude": correlated but no transcript id yet, §11d), or codex. Keyed by WT_SESSION (there is no
+    // sessionId). If a badge already exists for the tab its kind is updated in place (so a pwsh tab
+    // that becomes a claude flips pwsh -> claude); the real _AttachClaudeOverlay replaces it once a
+    // claude resolves an id. Idempotent — ShowActivity skips a re-render when the kind is unchanged.
+    void TerminalPage::_SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind)
+    {
+        if (!_appSettings.showTabOverlay || !tab || wtSession.empty())
+        {
+            return;
+        }
+        if (const auto existing = _pendingOverlays.find(wtSession); existing != _pendingOverlays.end())
+        {
+            if (existing->second)
+            {
+                existing->second->ShowActivity(kind); // update the kind in place (no-op if unchanged)
+            }
+            return;
+        }
+        const auto tabImpl = _GetTabImpl(tab);
+        if (!tabImpl)
+        {
+            return;
+        }
+        TerminalApp::TerminalPaneContent termContent{ nullptr };
+        if (const auto rootPane = tabImpl->GetRootPane())
+        {
+            rootPane->WalkTree([&](auto&& pane) {
+                if (termContent)
+                {
+                    return;
+                }
+                if (const auto content = pane->GetContent())
+                {
+                    if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                    {
+                        termContent = term;
+                    }
+                }
+            });
+        }
+        if (!termContent)
+        {
+            return;
+        }
+        auto overlay = winrt::make_self<implementation::AgentTabOverlay>();
+        overlay->ShowActivity(kind);
+        if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
+        {
+            impl->SetAgentOverlay(overlay->Root());
+            _pendingOverlays[wtSession] = overlay;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] observe badge kind=" + kind + L" wt=" + wtSession + L"\n");
+        }
+    }
+
     // Agentmaster: on startup, load every persisted session into the registry as ARCHIVED
     // (live=false) — and do NOT auto-launch any of them. This is the deliberate reversal of the
     // old "close == reopen" auto-relaunch (Correctness Rule #6): the app opens to just the
@@ -1314,6 +1376,14 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_RenameClaudeSession(id, title);
+            }
+        });
+        // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL
+        // scope — resolve its conversation id from the transcript and resume it into a managed tab.
+        content->SetAdoptExternalHandler([weakThis](uint32_t pid, winrt::hstring cwd) {
+            if (auto self = weakThis.get())
+            {
+                self->_AdoptExternalClaude(pid, cwd);
             }
         });
         // Agentmaster: surface THIS window's hosted session ids for the Explorer Tree's LOCAL
@@ -1516,6 +1586,42 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
+    // Agentmaster (lifecycle gap #1): archive THIS window's live Claude sessions as the window tears
+    // down. Closing a window (chrome ✕ / Alt+F4 / closeWindow action / quit) destroys its tabs but —
+    // unlike the per-tab X — runs NO archive bookkeeping. Without this the sessions linger live=true
+    // in the SHARED registry as phantom cards on every OTHER window's Triage Board (Activate is a
+    // no-op; the claude is already gone), and worse: each session's injector lambda holds a STRONG
+    // ref to its ConptyConnection, so the connection never releases and claude.exe is orphaned past
+    // the window. Mirror _ArchiveAndCloseClaudeTab's bookkeeping for every hosted session — minus the
+    // confirm dialog and tab.Close() (the tabs go with the window): flip live=false, clear the
+    // injector (releases the connection -> claude.exe exits), drop the per-window maps, persist once.
+    // Called from the deterministic close seam (CloseWindow, after the confirm) for IMMEDIATE phantom
+    // clearing, and again from ~TerminalPage as the catch-all for quit / any other teardown path.
+    // Idempotent: the second call finds _claudeTabs already cleared and no-ops; sessions archived
+    // earlier via tab-X are already gone from _claudeTabs, so they aren't touched. The shared registry
+    // outlives every window (held by SharedEngine), so this stays valid in the destructor.
+    void TerminalPage::_ArchiveWindowSessionsOnTeardown()
+    {
+        if (!_sessionRegistry || _claudeTabs.empty())
+        {
+            return;
+        }
+        // Iterate-then-clear (never erase a node mid-iteration): `id` is a ref into the map node, used
+        // only inside the loop body; the whole map is cleared AFTER the loop.
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+                s.live = false;
+                s.pendingConfirmPromptId.clear();
+            });
+            _sessionRegistry->SetInjector(id, nullptr);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[teardown-archive] " + id + L"\n");
+        }
+        _claudeTabs.clear();
+        _claudeOverlays.clear(); // releases the overlays' com_ptrs (detaches their registry observers)
+        ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+    }
+
     // Agentmaster: re-launch (resume) an archived session from the Manager's "Archived" list.
     // The record is still in the registry (live=false); _LaunchClaudeSession resumes it
     // (claude --resume <id>, transcript-gated) with its Flight Plan + autopilot, and flips it
@@ -1533,6 +1639,43 @@ namespace winrt::TerminalApp::implementation
             return; // unknown, or already Open
         }
         _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+    }
+
+    // Agentmaster (Fleet Observer): adopt an EXTERNAL (observe-only) claude from the Explorer Tree's
+    // EXTERNAL scope. We host no ConPTY for the foreign process, so we can NEVER inject into the live
+    // external (Rule #9/#13) — "adopt" instead brings its CONVERSATION under management: resolve the
+    // conversation id from the transcript (cwd + process-start -> ResolveSessionId, Rule #14) and
+    // resume it into a NEW managed, controllable tab (claude --resume <id>, with a Flight Plan +
+    // Autopilot), reusing the proven _LaunchClaudeSession resume path. When the external has no
+    // transcript yet (never prompted -> id ""), fall back to a fresh managed session in the same dir
+    // (== "Open New Session Here"). The original external process is left running and untouched — we never inject
+    // into or kill it; the user closes it to avoid two writers on one transcript. _LaunchClaudeSession
+    // re-checks ClaudeConversationExists, so a transcript that vanished between resolve and launch also
+    // degrades to fresh rather than dying on "No conversation found".
+    void TerminalPage::_AdoptExternalClaude(uint32_t pid, winrt::hstring cwd)
+    {
+        const std::wstring dir{ cwd };
+        const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
+        const std::wstring id = ::Agentmaster::ResolveSessionId(dir, start);
+
+        std::optional<::Agentmaster::SessionInfo> restored;
+        if (!id.empty())
+        {
+            ::Agentmaster::SessionInfo info{};
+            info.id = id; // _LaunchClaudeSession transcript-gates the --resume on this id
+            info.workingDir = dir;
+            // Adopted sessions are new to us (no persisted plan), so seed the cog's Autopilot defaults
+            // as a fresh launch would — but resume the external's existing conversation.
+            info.autopilot.mode = _appSettings.defaultAutopilotMode;
+            info.autopilot.maxAutoSends = _appSettings.maxAutoSends;
+            info.autopilot.stopOnError = _appSettings.stopOnError;
+            info.autopilot.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+            restored = std::move(info);
+        }
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      std::wstring{ L"[adopt-external] pid=" } + std::to_wstring(pid) + L" cwd=" + dir +
+                                          L" -> " + (id.empty() ? std::wstring{ L"(fresh \x2014 no transcript)" } : (L"resume " + id)) + L"\n");
+        _LaunchClaudeSession(cwd, winrt::hstring{}, restored);
     }
 
     // Agentmaster: which session (if any) hosts this tab? Reverse-lookup of _claudeTabs (whose
@@ -2224,34 +2367,27 @@ namespace winrt::TerminalApp::implementation
         }
 
         const auto corr = _observer->Correlation();
-        if (corr.empty())
-        {
-            co_return;
-        }
+        const auto act = _observer->Activity(); // every tab's foreground activity (pwsh / cmd / claude / codex)
         std::unordered_map<std::wstring, ::Agentmaster::CorrelationRow> byWt;
         for (const auto& c : corr)
         {
             byWt[c.wtSession] = c;
         }
+        std::unordered_map<std::wstring, ::Agentmaster::TabActivity> actByWt;
+        for (const auto& a : act)
+        {
+            actByWt[a.wtSession] = a.activity;
+        }
+        std::unordered_set<std::wstring> rosterWts; // this window's tabs this tick (for observe-badge pruning)
         for (const auto& pt : probeTabs)
         {
-            const auto it = byWt.find(pt.wt);
-            if (it == byWt.end())
-            {
-                continue;
-            }
-            const auto& c = it->second;
-            // External (observe-only) or no conversation id yet (never-prompted; §11d) -> don't bind.
-            if (c.runningApp != ::Agentmaster::RunningApp::Agentmaster || c.sessionId.empty())
-            {
-                continue;
-            }
+            rosterWts.insert(pt.wt);
             const auto hostTab = pt.tab.get();
             if (!hostTab)
             {
                 continue; // tab torn down during the settle
             }
-            // One session per tab; skip if this tab is already bound.
+            // One session per tab; is this tab already bound (has a real overlay)?
             bool alreadyBound = false;
             for (const auto& [boundId, weakBound] : _claudeTabs)
             {
@@ -2263,20 +2399,104 @@ namespace winrt::TerminalApp::implementation
             }
             if (alreadyBound)
             {
+                _DropPendingOverlay(pt.wt); // bound -> the real overlay owns the slot now
                 continue;
             }
-            // Cross-window "already claimed" guard (another window already bound this id).
-            if (_sessionRegistry->HasInjector(c.sessionId))
+
+            const auto it = byWt.find(pt.wt);
+            const bool oursClaude = (it != byWt.end()) && it->second.runningApp == ::Agentmaster::RunningApp::Agentmaster;
+
+            if (oursClaude && !it->second.sessionId.empty())
             {
+                // Resolved (the claude has a transcript / explicit id). Cross-window "already claimed"
+                // guard, then bind via the shared tail — keyed on the exact WT_SESSION, so a hand-typed
+                // claude after a `cd` binds to the right id even with no hook. The bound overlay
+                // replaces any pending badge in the slot.
+                if (_sessionRegistry->HasInjector(it->second.sessionId))
+                {
+                    _DropPendingOverlay(pt.wt);
+                    continue;
+                }
+                _DropPendingOverlay(pt.wt);
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + it->second.sessionId + L" cwd=" + it->second.cwd + L" (observer wt=" + pt.wt + L")\n");
+                _BindClaudeSessionToTab(hostTab, pt.conn, it->second.sessionId, it->second.cwd, L"observer wt=" + pt.wt);
                 continue;
             }
-            // The observer's ObserveClaude already created the (external) registry record for our
-            // claude; bind it to this tab via the shared tail. Keyed on the exact WT_SESSION, so a
-            // hand-typed claude after a `cd` binds to the right id even with no hook.
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + c.sessionId + L" cwd=" + c.cwd + L" (observer wt=" + pt.wt + L")\n");
-            _BindClaudeSessionToTab(hostTab, pt.conn, c.sessionId, c.cwd, L"observer wt=" + pt.wt);
+
+            // Non-bound and not a resolved claude -> show an "observe" badge for whatever the observer
+            // classified this tab as: an unresolved claude (no transcript id yet, §11d), or a shell /
+            // codex from the activity table. So a pwsh / cmd tab carries "○ pwsh · unlinked" too, and
+            // it flips to "claude" the instant the user runs claude (then to the linked overlay on the
+            // first prompt).
+            std::wstring kind;
+            if (oursClaude)
+            {
+                kind = L"claude"; // correlated to a claude, but no conversation id yet
+            }
+            else if (const auto ait = actByWt.find(pt.wt); ait != actByWt.end())
+            {
+                switch (ait->second)
+                {
+                case ::Agentmaster::TabActivity::Powershell:
+                    kind = L"pwsh";
+                    break;
+                case ::Agentmaster::TabActivity::Cmd:
+                    kind = L"cmd";
+                    break;
+                case ::Agentmaster::TabActivity::Codex:
+                    kind = L"codex";
+                    break;
+                case ::Agentmaster::TabActivity::ClaudeCode:
+                    kind = L"claude"; // activity caught the claude before correlation did
+                    break;
+                default:
+                    break; // Other / Unknown -> no badge
+                }
+            }
+            if (!kind.empty())
+            {
+                _SetTabActivityBadge(hostTab, pt.wt, kind);
+            }
+            else if (!corr.empty() || !act.empty())
+            {
+                // A fresh survey says this tab is nothing we badge (or its claude exited) -> drop the badge.
+                _DropPendingOverlay(pt.wt);
+            }
+        }
+        // Tabs that left THIS window's roster (closed / moved) -> drop their pending badge.
+        for (auto pit = _pendingOverlays.begin(); pit != _pendingOverlays.end();)
+        {
+            if (rosterWts.count(pit->first))
+            {
+                ++pit;
+            }
+            else
+            {
+                if (pit->second)
+                {
+                    pit->second->Root().Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
+                }
+                pit = _pendingOverlays.erase(pit);
+            }
         }
         co_return;
+    }
+
+    // Agentmaster (OBSERVER.md §11d): drop this window's pending "claude · unlinked" badge for a tab
+    // (by WT_SESSION) — collapse its element (we hold the overlay, not the pane) and release it. Used
+    // when the tab binds a real session, the claude exits, or the tab leaves the roster.
+    void TerminalPage::_DropPendingOverlay(const std::wstring& wtSession)
+    {
+        const auto it = _pendingOverlays.find(wtSession);
+        if (it == _pendingOverlays.end())
+        {
+            return;
+        }
+        if (it->second)
+        {
+            it->second->Root().Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
+        }
+        _pendingOverlays.erase(it);
     }
 
     void TerminalPage::_OnFirstLayout(const IInspectable& /*sender*/, const IInspectable& /*eventArgs*/)
@@ -4100,6 +4320,11 @@ namespace winrt::TerminalApp::implementation
                 co_return;
             }
         }
+
+        // Agentmaster (lifecycle gap #1): archive this window's live sessions NOW — before the host
+        // tears us down — so they don't linger as phantom cards on other windows or orphan claude.exe.
+        // (Confirm already passed above; the destructor repeats this idempotently as a backstop.)
+        _ArchiveWindowSessionsOnTeardown();
 
         CloseWindowRequested.raise(*this, nullptr);
     }

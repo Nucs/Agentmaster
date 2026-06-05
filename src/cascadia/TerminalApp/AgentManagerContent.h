@@ -46,6 +46,11 @@ namespace winrt::TerminalApp::implementation
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
+        // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL scope.
+        // (pid, workingDir) -> the page resolves the conversation id from the transcript and resumes it
+        // into a NEW managed, controllable tab (`claude --resume <id>`), or launches fresh if it has no
+        // transcript. The original external process is left running (we never inject into / kill it).
+        void SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring)> handler);
         // Agentmaster: the set of session ids hosted in THIS window (the page's _claudeTabs).
         // Used by the Explorer Tree's LOCAL scope to show only this window's sessions; GLOBAL
         // ignores it and shows every window's sessions (the whole process-wide registry).
@@ -99,11 +104,23 @@ namespace winrt::TerminalApp::implementation
         void _Refresh();
         void _RebuildBoard(const std::vector<::Agentmaster::SessionInfo>& sessions);
         void _RebuildTree(const std::vector<::Agentmaster::SessionInfo>& sessions);
+        // Agentmaster: the Explorer Tree's EXTERNAL scope — render the Fleet Observer's observe-only
+        // external claudes (_externalClaudes) grouped by working dir, each row carrying an Open New Session Here /
+        // Adopt right-click menu. Reads the member table, not the registry snapshot.
+        void _RebuildExternalTree();
         void _RebuildPlan(const std::vector<::Agentmaster::SessionInfo>& sessions);
+        // Agentmaster: select an EXTERNAL (observe-only) row in the tree's EXTERNAL scope -> the
+        // Flight Plan shows that conversation's prompts READ-ONLY (we host no ConPTY, so we can't
+        // drive it). _LoadExternalPlan reads the transcript prompts on a background thread (one-shot
+        // per id) and posts them back via the dispatcher; _RebuildExternalPlan renders them.
+        void _SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title);
+        void _LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd);
+        void _RebuildExternalPlan();
 
-        // Agentmaster: Explorer Tree scope toggle (LOCAL = this window's tabs / GLOBAL = all
-        // windows). _ToggleTreeScope flips the mode + rebuilds; _UpdateTreeScopeButton refreshes
-        // the toggle button's label to the current mode.
+        // Agentmaster: Explorer Tree scope toggle, cycling LOCAL -> GLOBAL -> EXTERNAL (this
+        // window's tabs / all windows / observe-only externals). _ToggleTreeScope advances the mode
+        // + rebuilds (and clears selection when entering EXTERNAL so the Flight Plan reads
+        // nothing-selected); _UpdateTreeScopeButton refreshes the toggle button's label.
         void _ToggleTreeScope();
         void _UpdateTreeScopeButton();
 
@@ -148,6 +165,15 @@ namespace winrt::TerminalApp::implementation
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
+        // Agentmaster: assemble one Triage Board column. With `fill` (default) the column fills the
+        // board height with a pinned `header` over a vertically-scrolling `cards` list, so a tall
+        // column (e.g. a large External census) scrolls within the board instead of clipping past
+        // the bottom edge (the board's own ScrollViewer has vertical scroll disabled). With
+        // `fill=false` the box hugs its content (a collapsed column: header only, nothing to scroll).
+        winrt::Windows::UI::Xaml::Controls::Border _MakeBoardColumn(
+            const winrt::Windows::UI::Xaml::UIElement& header,
+            const winrt::Windows::UI::Xaml::UIElement& cards,
+            bool fill = true);
         // Agentmaster (O6): build the "External (N)" board column (real-WindowsTerminal claudes,
         // observe-only); empty if there are none. The header toggles _externalCollapsed; each card is
         // non-interactive with an (currently disabled) Adopt seam for future external-session restore.
@@ -165,6 +191,11 @@ namespace winrt::TerminalApp::implementation
         // Explorer-tree session actions: right-click context menu (Rename / Delete with a
         // confirm warning) + double-click to activate.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id);
+        // Agentmaster: the EXTERNAL-tree row right-click menu. Open New Session Here -> spawn a managed session in
+        // the external's cwd (an independent conversation); Adopt -> resume the external's conversation
+        // into a managed, controllable tab (via _adoptExternalHandler). Observe-only externals carry no
+        // registry session, so this menu acts on (pid, cwd), not a session id.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd);
         // Flight-Plan message right-click menu: per-prompt Move up / Move down / Delete (only on
         // UPCOMING rows — a sent row can't be reordered) + Archive session (always). Queue ops act
         // on `promptId` (the right-clicked row), not the current selection.
@@ -213,6 +244,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
+        std::function<void(uint32_t, winrt::hstring)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt -> page resumes the external's conversation into a managed tab
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
@@ -225,7 +257,23 @@ namespace winrt::TerminalApp::implementation
         std::wstring _selectedId;
         std::wstring _scopeDir; // board filter: empty == all directories
         std::wstring _selectedPromptId;
-        bool _treeGlobalScope{ false }; // Agentmaster: Explorer Tree scope. false == LOCAL (this window's tabs only); true == GLOBAL (all windows)
+        // Agentmaster: the EXTERNAL row selected in the tree's EXTERNAL scope (its resolved
+        // conversation id + cwd + title), and the prompts read from its transcript for the read-only
+        // Flight Plan. _externalPlanLoadedFor == the id whose prompts are loaded (empty while loading
+        // or none selected). Mutually exclusive with _selectedId (a managed selection clears these).
+        std::wstring _selectedExternalSessionId;
+        std::wstring _selectedExternalCwd;
+        std::wstring _selectedExternalTitle;
+        std::wstring _externalPlanLoadedFor;
+        std::vector<std::wstring> _externalPlanPrompts;
+        // Agentmaster: Explorer Tree scope (3-way toggle after the "EXPLORER TREE" title).
+        //   Local    == this window's sessions only (the page's _claudeTabs)
+        //   Global   == every window's sessions (the whole process-wide registry)
+        //   External == the Fleet Observer's observe-only external claudes (_externalClaudes), grouped
+        //               by cwd; right-click a row for Open New Session Here / Adopt. In-memory only (NOT part of
+        //               the persisted ManagerState lens, like the prior LOCAL/GLOBAL flag).
+        enum class TreeScope { Local, Global, External };
+        TreeScope _treeScope{ TreeScope::Local };
         std::unordered_set<std::wstring> _collapsedDirs;
         bool _suppressAutopilotEvent{ false };
         // Agentmaster (O6): the observer's External (WindowsTerminal) claudes, pushed by the page's
@@ -237,6 +285,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _boardHost{ nullptr }; // horizontal columns
         winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped
         winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::StackPanel _treeHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };

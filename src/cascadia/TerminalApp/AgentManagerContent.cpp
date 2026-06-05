@@ -8,9 +8,11 @@
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external)
 
 #include <algorithm>
 #include <chrono>
+#include <thread> // background transcript read for an external's read-only plan
 
 using namespace winrt::Windows::Foundation;
 // Using-DECLARATIONS (not a directive) for the color helpers: a `using namespace
@@ -44,6 +46,79 @@ namespace
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
     }
+
+    // Agentmaster: format a duration (ms) as a consolidated span. Units descend month / day / hour /
+    // minute / second; month(=30d) and minute SHARE the letter 'm', disambiguated by position (the
+    // sequence is always largest->smallest), per the requested format: "1m4d6h" (1 month 4 days 6
+    // hours), "2h30m" (2 hours 30 min), "5m30s" (5 min 30 s), "45s". Non-zero units only, from the
+    // largest down to the floor. `allowSeconds` enables the seconds unit — but only when the whole
+    // span is < 1 hour ("seconds if hours not present, otherwise minutes minimum"). Always emits at
+    // least the floor unit (value 0) so a just-started span reads "0m" / "0s", never "".
+    std::wstring FormatSpan(int64_t ms, bool allowSeconds)
+    {
+        if (ms < 0)
+        {
+            ms = 0;
+        }
+        int64_t t = ms / 1000; // seconds
+        const int64_t months = t / (30LL * 24 * 3600);
+        t %= (30LL * 24 * 3600);
+        const int64_t days = t / (24 * 3600);
+        t %= (24 * 3600);
+        const int64_t hours = t / 3600;
+        t %= 3600;
+        const int64_t mins = t / 60;
+        const int64_t secs = t % 60;
+        const bool showSeconds = allowSeconds && months == 0 && days == 0 && hours == 0;
+
+        std::wstring out;
+        const auto add = [&out](int64_t v, const wchar_t* unit) {
+            if (v != 0)
+            {
+                out += std::to_wstring(v);
+                out += unit;
+            }
+        };
+        add(months, L"m");
+        add(days, L"d");
+        add(hours, L"h");
+        add(mins, L"m");
+        if (showSeconds)
+        {
+            add(secs, L"s");
+        }
+        if (out.empty())
+        {
+            out = showSeconds ? L"0s" : L"0m"; // floor unit when everything rounded below it
+        }
+        return out;
+    }
+
+    // Agentmaster: the consolidated per-session timing string "-{createdAgo}/{activeFor}/-{lastAgo}",
+    // e.g. "-2m7d/12h/-2h30m" = created 2 months 7 days ago, active for 12 h, last activity 2 h 30 m
+    // ago. The "ago" parts are signed (-); the active span (lastActivity - created) is not. The first
+    // two parts floor at minutes; the last allows seconds (when < 1 h). Empty when we have no
+    // creation time (a never-prompted session — nothing meaningful to show).
+    std::wstring FormatSessionTiming(int64_t createdMs, int64_t lastActivityMs)
+    {
+        if (createdMs <= 0)
+        {
+            return {};
+        }
+        const int64_t now = NowMs();
+        if (lastActivityMs < createdMs)
+        {
+            lastActivityMs = createdMs; // no activity recorded / clock skew -> 0 active span
+        }
+        const std::wstring createdAgo = FormatSpan(now - createdMs, false);
+        const std::wstring activeFor = FormatSpan(lastActivityMs - createdMs, false);
+        const std::wstring lastAgo = FormatSpan(now - lastActivityMs, true);
+        return L"-" + createdAgo + L"/" + activeFor + L"/-" + lastAgo;
+    }
+
+    // The human-readable tooltip explaining the cryptic timing string.
+    constexpr const wchar_t* kTimingTooltip =
+        L"created ago  /  active for  /  last activity ago\n(e.g. -2m7d/12h/-2h30m — m=month or minute by position, d=day, h=hour, s=second)";
 
     // Set the window pointer cursor (used by the resize splitters: a ↔/↕ on hover, Arrow on
     // exit). There is no per-element cursor in this XAML projection (ProtectedCursor is only
@@ -176,6 +251,21 @@ namespace
         t.Foreground(Fill(0xFF, 0x10, 0x10, 0x10));
         b.Child(t);
         return b;
+    }
+
+    // Agentmaster: the dim per-session timing adornment "-created/active/-lastAgo" + an explanatory
+    // tooltip. Returns a null TextBlock (falsy) when there is no creation time to show, so callers
+    // can `if (auto t = TimingText(...)) row.Children().Append(t);`.
+    TextBlock TimingText(int64_t createdMs, int64_t lastActivityMs)
+    {
+        const std::wstring s = FormatSessionTiming(createdMs, lastActivityMs);
+        if (s.empty())
+        {
+            return nullptr;
+        }
+        auto t = Text(winrt::hstring{ s }, 10, false, 0.45);
+        ToolTipService::SetToolTip(t, winrt::box_value(winrt::hstring{ kTimingTooltip }));
+        return t;
     }
 
     // ---- path helpers for the Launch path-picker drop-down -------------------
@@ -434,6 +524,10 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler)
     {
         _renameHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring)> handler)
+    {
+        _adoptExternalHandler = std::move(handler);
     }
     void AgentManagerContent::SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider)
     {
@@ -815,11 +909,14 @@ namespace winrt::TerminalApp::implementation
             header.Children().Append(Text(L"TRIAGE BOARD", 12, true, 0.8));
             _boardScope = Text(L"[all directories]", 12, false, 0.6);
             header.Children().Append(_boardScope);
-            auto showAll = Button{};
-            showAll.Content(winrt::box_value(L"Show all"));
-            showAll.Padding(Thickness{ 6, 0, 6, 0 });
-            showAll.Click([this](const IInspectable&, const RoutedEventArgs&) { _SetScope(L""); });
-            header.Children().Append(showAll);
+            _showAllBtn = Button{};
+            _showAllBtn.Content(winrt::box_value(L"Show all"));
+            _showAllBtn.Padding(Thickness{ 6, 0, 6, 0 });
+            // Hidden while we ARE showing all (the default scope is "" == all directories); it
+            // reappears once a directory is scoped. _RebuildBoard keeps this in sync on every refresh.
+            _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
+            _showAllBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _SetScope(L""); });
+            header.Children().Append(_showAllBtn);
             Grid::SetRow(header, 0);
             outer.Children().Append(header);
 
@@ -869,7 +966,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn = Button{};
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                ToolTipService::SetToolTip(_treeScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows"));
+                ToolTipService::SetToolTip(_treeScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows; EXTERNAL: observe-only claudes in other hosts (right-click a row: Open New Session Here / Adopt)"));
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
                 _UpdateTreeScopeButton();
@@ -1184,6 +1281,15 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
+        {
+            const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+            if (auto t = TimingText(s.convCreatedUnixMs, last))
+            {
+                stack.Children().Append(t);
+            }
+        }
+
         // autopilot badge ⚙ sent/total
         if (!s.queue.empty())
         {
@@ -1430,6 +1536,11 @@ namespace winrt::TerminalApp::implementation
         {
             _boardScope.Text(_scopeDir.empty() ? winrt::hstring{ L"[all directories]" } : (winrt::hstring{ L"[scope: " } + winrt::hstring{ _scopeDir } + L"]"));
         }
+        if (_showAllBtn)
+        {
+            // "Show all" disappears when we ARE showing all (no scope) and reappears once a dir is scoped.
+            _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
+        }
 
         struct Col
         {
@@ -1478,21 +1589,15 @@ namespace winrt::TerminalApp::implementation
             hdr.Children().Append(dot);
             hdr.Children().Append(Text(col.title, 12, true, 0.9));
             hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(matches.size())), 12, false, 0.6));
-            colStack.Children().Append(hdr);
-
+            // colStack holds the cards only; _MakeBoardColumn pins the header above a vertically
+            // scrolling card list so a tall column scrolls within the board height instead of
+            // clipping past the bottom edge (the board ScrollViewer's vertical scroll is disabled).
             for (const auto* s : matches)
             {
                 colStack.Children().Append(_MakeCard(*s));
             }
 
-            auto col_border = Border{};
-            col_border.Width(220);
-            col_border.Padding(Thickness{ 8, 8, 8, 8 });
-            col_border.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
-            col_border.Background(Fill(0x14, 0x80, 0x80, 0x80));
-            col_border.VerticalAlignment(VerticalAlignment::Top);
-            col_border.Child(colStack);
-            _boardHost.Children().Append(col_border);
+            _boardHost.Children().Append(_MakeBoardColumn(hdr, colStack));
         }
 
         // Agentmaster (O6): a trailing observe-only "External (N)" group for real-WindowsTerminal
@@ -1502,6 +1607,60 @@ namespace winrt::TerminalApp::implementation
         {
             _boardHost.Children().Append(_MakeExternalColumn());
         }
+    }
+
+    // Agentmaster: assemble one Triage Board column. When `fill` is true the column fills the board
+    // height with a pinned `header` (Grid row 0) over a vertically-scrolling `cards` list (row 1),
+    // so a tall column (e.g. a large External census) scrolls within the board instead of clipping
+    // past the bottom edge — the board's own ScrollViewer (BuildUI) has vertical scroll disabled.
+    // When `fill` is false the box hugs its content (a collapsed column: header only, no scroll).
+    // Shared by the per-state columns and the External group so they stay visually in lockstep.
+    Border AgentManagerContent::_MakeBoardColumn(const UIElement& header, const UIElement& cards, bool fill)
+    {
+        auto col_border = Border{};
+        col_border.Width(220);
+        col_border.Padding(Thickness{ 8, 8, 8, 8 });
+        col_border.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+        col_border.Background(Fill(0x14, 0x80, 0x80, 0x80));
+
+        if (fill)
+        {
+            auto grid = Grid{};
+            auto rdHeader = RowDefinition{};
+            rdHeader.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            grid.RowDefinitions().Append(rdHeader);
+            auto rdCards = RowDefinition{};
+            rdCards.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            grid.RowDefinitions().Append(rdCards);
+
+            Grid::SetRow(header.as<FrameworkElement>(), 0); // Grid::SetRow takes a FrameworkElement; header is typed UIElement
+            grid.Children().Append(header);
+
+            auto cardsSv = ScrollViewer{};
+            cardsSv.VerticalScrollMode(ScrollMode::Enabled);
+            cardsSv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            cardsSv.HorizontalScrollMode(ScrollMode::Disabled);
+            cardsSv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            cardsSv.Content(cards);
+            Grid::SetRow(cardsSv, 1);
+            grid.Children().Append(cardsSv);
+
+            // Stretch so the board's horizontal StackPanel gives the column the full viewport height
+            // (the board SV's vertical scroll is off, so the cross-axis is bounded) -> the inner
+            // ScrollViewer has a real height to scroll within.
+            col_border.VerticalAlignment(VerticalAlignment::Stretch);
+            col_border.Child(grid);
+        }
+        else
+        {
+            auto stack = StackPanel{};
+            stack.Spacing(0);
+            stack.Children().Append(header);
+            stack.Children().Append(cards);
+            col_border.VerticalAlignment(VerticalAlignment::Top);
+            col_border.Child(stack);
+        }
+        return col_border;
     }
 
     // Agentmaster (O6): the "External (N)" board column. Observe-only — each card is a real
@@ -1535,24 +1694,20 @@ namespace winrt::TerminalApp::implementation
             _externalCollapsed = !_externalCollapsed;
             _Refresh();
         });
-        colStack.Children().Append(hdrBtn);
-
-        if (!_externalCollapsed)
+        // Collapsed: just the header in a hugging box (no card list to scroll). Expanded: the header
+        // pinned above a vertically-scrolling card list (fills the board height) so a large External
+        // census scrolls within the board instead of clipping past the bottom edge. colStack holds
+        // the cards only (the header is pinned by _MakeBoardColumn, not stacked above them).
+        if (_externalCollapsed)
         {
-            for (const auto& ex : _externalClaudes)
-            {
-                colStack.Children().Append(_MakeExternalCard(ex));
-            }
+            return _MakeBoardColumn(hdrBtn, colStack, false);
         }
 
-        auto col_border = Border{};
-        col_border.Width(220);
-        col_border.Padding(Thickness{ 8, 8, 8, 8 });
-        col_border.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
-        col_border.Background(Fill(0x14, 0x80, 0x80, 0x80));
-        col_border.VerticalAlignment(VerticalAlignment::Top);
-        col_border.Child(colStack);
-        return col_border;
+        for (const auto& ex : _externalClaudes)
+        {
+            colStack.Children().Append(_MakeExternalCard(ex));
+        }
+        return _MakeBoardColumn(hdrBtn, colStack, true);
     }
 
     Border AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)
@@ -1560,21 +1715,55 @@ namespace winrt::TerminalApp::implementation
         auto stack = StackPanel{};
         stack.Spacing(2);
 
-        // Title: the cwd's leaf folder (external claudes carry no managed title), else "claude".
-        std::wstring leaf = ex.cwd;
-        const auto slash = leaf.find_last_of(L"\\/");
-        if (slash != std::wstring::npos && slash + 1 < leaf.size())
+        // Title: the conversation's first prompt (from the transcript), else the cwd leaf, else
+        // "claude" (recent transcripts carry no summary — verified — so the first prompt is the title).
+        std::wstring title = ex.title;
+        if (title.empty())
         {
-            leaf = leaf.substr(slash + 1);
+            std::wstring leaf = ex.cwd;
+            const auto slash = leaf.find_last_of(L"\\/");
+            if (slash != std::wstring::npos && slash + 1 < leaf.size())
+            {
+                leaf = leaf.substr(slash + 1);
+            }
+            title = leaf.empty() ? std::wstring{ L"claude" } : leaf;
         }
-        if (leaf.empty())
+        if (title.size() > 64)
         {
-            leaf = L"claude";
+            title = title.substr(0, 61) + L"\x2026";
         }
-        stack.Children().Append(Text(winrt::hstring{ leaf }, 13, true, 0.9));
+        stack.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
         if (!ex.cwd.empty())
         {
             stack.Children().Append(Text(winrt::hstring{ ex.cwd }, 11, false, 0.55));
+        }
+
+        // host (the foreign terminal) · git branch
+        {
+            std::wstring hostLabel;
+            if (ex.host == RunningApp::WindowsTerminal)
+            {
+                hostLabel = L"Windows Terminal";
+            }
+            else if (!ex.hostImage.empty())
+            {
+                hostLabel = ex.hostImage;
+                const auto dot = hostLabel.rfind(L".exe");
+                if (dot != std::wstring::npos)
+                {
+                    hostLabel = hostLabel.substr(0, dot);
+                }
+            }
+            else
+            {
+                hostLabel = L"external";
+            }
+            std::wstring hb = L"via " + hostLabel;
+            if (!ex.gitBranch.empty())
+            {
+                hb += L"  \x00B7  [" + ex.gitBranch + L"]";
+            }
+            stack.Children().Append(Text(winrt::hstring{ hb }, 10, false, 0.5));
         }
 
         // model · effort · bg · pid
@@ -1601,7 +1790,17 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(Text(winrt::hstring{ me }, 10, false, 0.5));
         }
 
-        // An observe-only pill + a disabled "Adopt" seam (future external-session restore — §11c).
+        // timing (created-ago / active-for / last-activity-ago)
+        {
+            const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
+            if (auto t = TimingText(created, ex.lastActivityUnixMs))
+            {
+                stack.Children().Append(t);
+            }
+        }
+
+        // An observe-only pill + an "Adopt" button: resume this external's conversation into a
+        // managed, controllable tab (the original keeps running). Routes through _adoptExternalHandler.
         auto row = StackPanel{};
         row.Orientation(Orientation::Horizontal);
         row.Spacing(6);
@@ -1610,7 +1809,31 @@ namespace winrt::TerminalApp::implementation
         auto adopt = Button{};
         adopt.Content(Text(L"Adopt", 11, false, 1.0));
         adopt.Padding(Thickness{ 8, 1, 8, 1 });
-        adopt.IsEnabled(false); // seam only — external-session adoption is a future, non-blocking follow-up
+        ToolTipService::SetToolTip(adopt, winrt::box_value(L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running)"));
+        {
+            const auto pid = ex.pid;
+            const auto cwd = ex.cwd;
+            auto weak = get_weak();
+            auto disp = _dispatcher;
+            // Defer one dispatcher tick — EXACTLY the Explorer-Tree Adopt menu (_MakeExternalTreeMenu)
+            // path, so the board's Adopt button "does what adopt does in the tree": same handler, same
+            // (pid, cwd), same deferral. Adopt spawns a managed tab + upserts the registry, which fans
+            // out a board rebuild; running it inline would re-enter the rebuild and destroy this very
+            // card mid-click. Deferring lets the click unwind first (Bug: board Adopt ≠ tree Adopt).
+            adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_adoptExternalHandler) { self->_adoptExternalHandler(pid, winrt::hstring{ cwd }); } } });
+                }
+                else if (auto self = weak.get())
+                {
+                    if (self->_adoptExternalHandler)
+                    {
+                        self->_adoptExternalHandler(pid, winrt::hstring{ cwd });
+                    }
+                }
+            });
+        }
         row.Children().Append(adopt);
         stack.Children().Append(row);
 
@@ -1634,7 +1857,11 @@ namespace winrt::TerminalApp::implementation
         {
             const auto& a = rows[i];
             const auto& b = _externalClaudes[i];
-            if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background)
+            // Include the enrichment fields (id/title/host/branch) so a row that gains its title or
+            // host a tick after first sight triggers one refresh. Timestamps are deliberately NOT
+            // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
+            if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
+                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.gitBranch != b.gitBranch)
             {
                 same = false;
             }
@@ -1659,6 +1886,15 @@ namespace winrt::TerminalApp::implementation
         }
         _treeHost.Children().Clear();
 
+        // Agentmaster: EXTERNAL scope renders the Fleet Observer's observe-only external claudes
+        // (the _externalClaudes table, a different source than the registry snapshot) grouped by cwd,
+        // with an Open New Session Here / Adopt right-click menu. Delegate and return.
+        if (_treeScope == TreeScope::External)
+        {
+            _RebuildExternalTree();
+            return;
+        }
+
         // Agentmaster: Explorer Tree scope + ordering. localIds == the sessions hosted in THIS
         // window (the page's _claudeTabs, surfaced by _localScopeProvider). LOCAL (default) keeps
         // ONLY those; GLOBAL keeps every window's session (the whole process-wide registry) but
@@ -1675,7 +1911,7 @@ namespace winrt::TerminalApp::implementation
 
         std::vector<SessionInfo> scopedStore;
         const std::vector<SessionInfo>* scopedPtr = &sessions;
-        if (!_treeGlobalScope && haveLocal)
+        if (_treeScope == TreeScope::Local && haveLocal)
         {
             scopedStore.reserve(sessions.size());
             for (const auto& s : sessions)
@@ -1708,7 +1944,7 @@ namespace winrt::TerminalApp::implementation
         {
             // In LOCAL scope an empty tree can simply mean other windows hold the sessions; say so
             // (and hint at GLOBAL) rather than implying the whole fleet is empty.
-            const wchar_t* empty = (!_treeGlobalScope && haveLocal)
+            const wchar_t* empty = (_treeScope == TreeScope::Local && haveLocal)
                                        ? L"No sessions in this window \x2014 Launch above, or switch to GLOBAL for all windows."
                                        : L"No sessions yet \x2014 use Launch session above.";
             _treeHost.Children().Append(Text(empty, 12, false, 0.6));
@@ -1874,6 +2110,14 @@ namespace winrt::TerminalApp::implementation
                     outside.Opacity(0.85);
                     row.Children().Append(outside);
                 }
+                // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
+                {
+                    const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+                    if (auto t = TimingText(s.convCreatedUnixMs, last))
+                    {
+                        row.Children().Append(t);
+                    }
+                }
 
                 auto rowBtn = Button{};
                 rowBtn.Content(row);
@@ -1931,16 +2175,299 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: flip the Explorer Tree between LOCAL (this window's sessions) and GLOBAL (all
-    // windows), then rebuild from the current snapshot. The toggle is per-window, in-memory state.
+    // Agentmaster: render the Explorer Tree's EXTERNAL scope — observe-only external claudes (real
+    // Windows Terminal AND cmd-/console-hosted; the observer correlated them but will never bind,
+    // Rule #9/#13), grouped by working dir, each row enriched from its transcript (title / host /
+    // branch / timing). Left-click SELECTS a row -> the Flight Plan shows its conversation read-only
+    // (we host no ConPTY, so it is never drivable). Right-click -> Open New Session Here (spawn a
+    // managed session in that cwd) / Adopt (resume its conversation into a managed tab).
+    void AgentManagerContent::_RebuildExternalTree()
+    {
+        if (_externalClaudes.empty())
+        {
+            _treeHost.Children().Append(Text(L"No external claudes detected \x2014 these are claudes running in real Windows Terminal or other hosts.", 12, false, 0.6));
+            return;
+        }
+
+        // Ordered, de-duplicated working dirs (filesystem-aware, like the session tree). The
+        // first-seen spelling is the display name; an empty cwd (denied/unreadable PEB) groups under
+        // "(unknown)". Rows arrive pid-sorted from the observer, a stable order.
+        const auto dirOf = [](const ::Agentmaster::ExternalClaudeRow& ex) -> std::wstring {
+            return ex.cwd.empty() ? std::wstring{ L"(unknown)" } : ex.cwd;
+        };
+        std::vector<std::wstring> dirs;
+        for (const auto& ex : _externalClaudes)
+        {
+            const std::wstring d = dirOf(ex);
+            if (std::find_if(dirs.begin(), dirs.end(), [&](const std::wstring& x) { return PathEq(x, d); }) == dirs.end())
+            {
+                dirs.push_back(d);
+            }
+        }
+
+        for (const auto& dir : dirs)
+        {
+            const bool collapsed = _collapsedDirs.find(dir) != _collapsedDirs.end();
+            int count = 0;
+            for (const auto& ex : _externalClaudes)
+            {
+                if (PathEq(dirOf(ex), dir))
+                {
+                    ++count;
+                }
+            }
+
+            // dir header (collapsible). Unlike the session tree it does NOT change the board scope:
+            // externals are a global census, not part of the managed directory tree.
+            auto dh = StackPanel{};
+            dh.Orientation(Orientation::Horizontal);
+            dh.Spacing(6);
+            dh.Children().Append(Text(collapsed ? L"\x25B8" : L"\x25BE", 12, false, 0.8)); // ▸ / ▾
+            dh.Children().Append(Text(winrt::hstring{ dir }, 13, true, 0.95));
+            dh.Children().Append(Text(winrt::to_hstring(count), 12, false, 0.5));
+
+            auto dirBtn = Button{};
+            dirBtn.Content(dh);
+            dirBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
+            dirBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
+            dirBtn.Background(Fill(0x00, 0x80, 0x80, 0x80));
+            dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
+            const auto capturedDir = dir;
+            dirBtn.Click([this, capturedDir](const IInspectable&, const RoutedEventArgs&) {
+                if (_collapsedDirs.find(capturedDir) != _collapsedDirs.end())
+                {
+                    _collapsedDirs.erase(capturedDir);
+                }
+                else
+                {
+                    _collapsedDirs.insert(capturedDir);
+                }
+                _NotifyLensChanged(); // collapsed dirs are part of the per-window lens (M10)
+                _Refresh();
+            });
+            _treeHost.Children().Append(dirBtn);
+
+            if (collapsed)
+            {
+                continue;
+            }
+
+            for (const auto& ex : _externalClaudes)
+            {
+                if (!PathEq(dirOf(ex), dir))
+                {
+                    continue;
+                }
+
+                const bool selExt = !ex.sessionId.empty() && ex.sessionId == _selectedExternalSessionId;
+
+                // Title: the conversation's first prompt (from the transcript), else the cwd leaf,
+                // else "claude". Truncated for the row.
+                std::wstring title = ex.title;
+                if (title.empty())
+                {
+                    std::wstring leaf = ex.cwd;
+                    const auto slash = leaf.find_last_of(L"\\/");
+                    if (slash != std::wstring::npos && slash + 1 < leaf.size())
+                    {
+                        leaf = leaf.substr(slash + 1);
+                    }
+                    title = leaf.empty() ? std::wstring{ L"claude" } : leaf;
+                }
+                if (title.size() > 60)
+                {
+                    title = title.substr(0, 57) + L"\x2026";
+                }
+
+                auto row = StackPanel{};
+                row.Orientation(Orientation::Horizontal);
+                row.Spacing(6);
+                auto g = Text(L"\x25CF", 12, false, 1.0); // ● gray — external / observe-only
+                g.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E));
+                row.Children().Append(g);
+                row.Children().Append(Text(winrt::hstring{ title }, 13, false, 1.0));
+
+                // host tag: wt / cmd / pwsh / ... (the foreign host this claude runs in).
+                {
+                    std::wstring hostLabel;
+                    if (ex.host == RunningApp::WindowsTerminal)
+                    {
+                        hostLabel = L"wt";
+                    }
+                    else if (!ex.hostImage.empty())
+                    {
+                        hostLabel = ex.hostImage;
+                        const auto dot = hostLabel.rfind(L".exe");
+                        if (dot != std::wstring::npos)
+                        {
+                            hostLabel = hostLabel.substr(0, dot);
+                        }
+                    }
+                    else
+                    {
+                        hostLabel = L"ext";
+                    }
+                    auto hp = Pill(winrt::hstring{ hostLabel }, Color{ 0xFF, 0x6E, 0x7B, 0x8A });
+                    hp.Opacity(0.85);
+                    row.Children().Append(hp);
+                }
+
+                if (!ex.gitBranch.empty())
+                {
+                    row.Children().Append(Text(winrt::hstring{ L"[" } + winrt::hstring{ ex.gitBranch } + L"]", 11, false, 0.5));
+                }
+
+                // model · effort · bg · pid
+                {
+                    std::wstring me;
+                    const auto addPart = [&](const std::wstring& part) {
+                        if (part.empty())
+                        {
+                            return;
+                        }
+                        if (!me.empty())
+                        {
+                            me += L"  \x00B7  ";
+                        }
+                        me += part;
+                    };
+                    addPart(ex.model);
+                    addPart(ex.effort);
+                    if (ex.background)
+                    {
+                        addPart(L"bg");
+                    }
+                    if (!me.empty())
+                    {
+                        row.Children().Append(Text(winrt::hstring{ me }, 11, false, 0.5));
+                    }
+                }
+                row.Children().Append(Text(winrt::hstring{ L"pid " } + winrt::to_hstring(ex.pid), 11, false, 0.45));
+
+                // timing (created-ago / active-for / last-activity-ago) — transcript ctime/mtime,
+                // falling back to the process start time when there is no transcript yet.
+                {
+                    const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
+                    if (auto t = TimingText(created, ex.lastActivityUnixMs))
+                    {
+                        row.Children().Append(t);
+                    }
+                }
+
+                auto rowBtn = Button{};
+                rowBtn.Content(row);
+                rowBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
+                rowBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
+                rowBtn.Margin(Thickness{ 16, 0, 0, 0 });
+                rowBtn.Padding(Thickness{ 4, 2, 4, 2 });
+                rowBtn.Background(Fill(selExt ? 0x40 : 0x00, 0x80, 0x80, 0x80));
+                rowBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+
+                // Left-click SELECTS this external -> the Flight Plan shows its conversation prompts
+                // read-only (observe-only; we host no ConPTY so we can't drive it). Right-click -> the
+                // Open New Session Here / Adopt menu.
+                rowBtn.ContextFlyout(_MakeExternalTreeMenu(ex.pid, ex.cwd));
+                const auto exId = ex.sessionId;
+                const auto exCwd = ex.cwd;
+                const auto exTitle = title;
+                rowBtn.Click([this, exId, exCwd, exTitle](const IInspectable&, const RoutedEventArgs&) {
+                    _SelectExternal(exId, exCwd, exTitle);
+                });
+                _treeHost.Children().Append(rowBtn);
+            }
+        }
+    }
+
+    // Agentmaster: the EXTERNAL-tree row right-click menu — Open New Session Here (spawn a managed session in the
+    // external's cwd, a new independent conversation) and Adopt (resume the external's conversation
+    // into a managed, controllable tab). Both defer one tick like _MakeSessionMenu so the closing
+    // flyout's focus restore doesn't race the spawn / tree rebuild. Acts on (pid, cwd) — an external
+    // has no registry session id.
+    MenuFlyout AgentManagerContent::_MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd)
+    {
+        MenuFlyout menu;
+        auto disp = _dispatcher;
+        auto weak = get_weak();
+
+        MenuFlyoutItem openHere;
+        openHere.Text(L"Open New Session Here");
+        ToolTipService::SetToolTip(openHere, winrt::box_value(L"Launch a managed Claude session in this directory (a new, independent conversation)"));
+        openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_spawnHandler)
+                {
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                }
+            }
+        });
+        menu.Items().Append(openHere);
+
+        MenuFlyoutItem adopt;
+        adopt.Text(L"Adopt");
+        ToolTipService::SetToolTip(adopt, winrt::box_value(L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)"));
+        adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_adoptExternalHandler) { self->_adoptExternalHandler(pid, winrt::hstring{ cwd }); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_adoptExternalHandler)
+                {
+                    self->_adoptExternalHandler(pid, winrt::hstring{ cwd });
+                }
+            }
+        });
+        menu.Items().Append(adopt);
+
+        return menu;
+    }
+
+    // Agentmaster: advance the Explorer Tree scope LOCAL -> GLOBAL -> EXTERNAL -> LOCAL, then rebuild
+    // from the current snapshot. The toggle is per-window, in-memory state (not persisted in the lens).
     void AgentManagerContent::_ToggleTreeScope()
     {
-        _treeGlobalScope = !_treeGlobalScope;
-        _UpdateTreeScopeButton();
-        if (_registry)
+        // Cycle LOCAL -> GLOBAL -> EXTERNAL -> LOCAL.
+        switch (_treeScope)
         {
-            _RebuildTree(_registry->Snapshot());
+        case TreeScope::Local:
+            _treeScope = TreeScope::Global;
+            break;
+        case TreeScope::Global:
+            _treeScope = TreeScope::External;
+            break;
+        default:
+            _treeScope = TreeScope::Local;
+            break;
         }
+        // Entering EXTERNAL: externals are observe-only, so drop any managed session selection — the
+        // Flight Plan then reads "nothing selected" until an external row is clicked (read-only).
+        if (_treeScope == TreeScope::External && !_selectedId.empty())
+        {
+            _selectedId.clear();
+            _selectedPromptId.clear();
+            _NotifyLensChanged(); // selection is part of the per-window lens (M10)
+        }
+        // Leaving EXTERNAL: drop the external (read-only) selection so the Flight Plan returns to the
+        // managed view cleanly.
+        if (_treeScope != TreeScope::External && !_selectedExternalTitle.empty())
+        {
+            _selectedExternalSessionId.clear();
+            _selectedExternalCwd.clear();
+            _selectedExternalTitle.clear();
+            _externalPlanLoadedFor.clear();
+            _externalPlanPrompts.clear();
+        }
+        _UpdateTreeScopeButton();
+        // _Refresh (not just _RebuildTree) so the board selection highlight + the Flight Plan
+        // re-render to match the cleared selection when entering/leaving EXTERNAL.
+        _Refresh();
     }
 
     // Reflect the current scope on the toggle button's label.
@@ -1948,7 +2475,10 @@ namespace winrt::TerminalApp::implementation
     {
         if (_treeScopeBtn)
         {
-            _treeScopeBtn.Content(winrt::box_value(_treeGlobalScope ? L"GLOBAL" : L"LOCAL"));
+            const wchar_t* label = (_treeScope == TreeScope::Global)     ? L"GLOBAL"
+                                   : (_treeScope == TreeScope::External) ? L"EXTERNAL"
+                                                                         : L"LOCAL";
+            _treeScopeBtn.Content(winrt::box_value(label));
         }
     }
 
@@ -2739,6 +3269,23 @@ namespace winrt::TerminalApp::implementation
         _planHeaderHost.Children().Clear();
         _planListHost.Children().Clear();
 
+        // EXTERNAL scope: the Flight Plan is READ-ONLY (externals are observe-only — we host no
+        // ConPTY, so nothing to drive). With an external selected, show its conversation's prompts;
+        // with none selected, the nothing-selected hint.
+        if (_treeScope == TreeScope::External)
+        {
+            _UpdateAutopilotButton(AutopilotMode::Off, false); // not drivable
+            if (!_selectedExternalTitle.empty())
+            {
+                _RebuildExternalPlan();
+            }
+            else
+            {
+                _planHeaderHost.Children().Append(Text(L"External claudes are observe-only \x2014 click one in the tree to see its conversation (read-only), or right-click to Open New Session Here / Adopt.", 13, false, 0.6));
+            }
+            return;
+        }
+
         const auto sel = _Selected(sessions);
         if (!sel || !sel->live) // an archived (closed) session isn't planned here — restore it first
         {
@@ -2919,6 +3466,85 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster: the READ-ONLY Flight Plan for a selected EXTERNAL session — its conversation's
+    // human prompts (read from the transcript on a background thread by _LoadExternalPlan). No
+    // queue, no actions, no Autopilot: an external runs outside Agentmaster and we never drive it
+    // (Rule #9/#13). The header offers Adopt as the path to make it controllable.
+    void AgentManagerContent::_RebuildExternalPlan()
+    {
+        auto titleRow = StackPanel{};
+        titleRow.Orientation(Orientation::Horizontal);
+        titleRow.Spacing(8);
+        titleRow.Children().Append(Text(_selectedExternalTitle.empty() ? winrt::hstring{ L"claude" } : winrt::hstring{ _selectedExternalTitle }, 16, true, 1.0));
+        titleRow.Children().Append(Pill(L"external \x00B7 observe-only", Colors::Gray()));
+        _planHeaderHost.Children().Append(titleRow);
+        if (!_selectedExternalCwd.empty())
+        {
+            _planHeaderHost.Children().Append(Text(winrt::hstring{ _selectedExternalCwd }, 12, false, 0.6));
+        }
+        _planHeaderHost.Children().Append(Text(L"Read-only \x2014 runs outside Agentmaster. Right-click it in the tree and “Adopt” to resume the conversation into a managed tab.", 11, false, 0.5));
+
+        if (_selectedExternalSessionId.empty())
+        {
+            _planListHost.Children().Append(Text(L"This external session hasn't been prompted yet \x2014 no conversation to show.", 12, false, 0.6));
+            return;
+        }
+        if (_externalPlanLoadedFor != _selectedExternalSessionId)
+        {
+            _planListHost.Children().Append(Text(L"Loading conversation\x2026", 12, false, 0.6));
+            return;
+        }
+        if (_externalPlanPrompts.empty())
+        {
+            _planListHost.Children().Append(Text(L"No human prompts found in this conversation.", 12, false, 0.6));
+            return;
+        }
+
+        const size_t total = _externalPlanPrompts.size();
+        const size_t cap = 300; // bound the XAML we build for a very long conversation
+        const size_t startIdx = (total > cap) ? (total - cap) : 0;
+        {
+            std::wstring capn = L"PROMPTS \x2014 " + std::to_wstring(total);
+            if (startIdx > 0)
+            {
+                capn += L"  (showing last " + std::to_wstring(cap) + L")";
+            }
+            auto c = Text(winrt::hstring{ capn }, 11, true, 0.5);
+            c.Margin(Thickness{ 0, 0, 0, 4 });
+            _planListHost.Children().Append(c);
+        }
+        for (size_t i = startIdx; i < total; ++i)
+        {
+            const std::wstring& p = _externalPlanPrompts[i];
+            std::wstring oneLine = p;
+            const auto nl = oneLine.find_first_of(L"\r\n");
+            if (nl != std::wstring::npos)
+            {
+                oneLine = oneLine.substr(0, nl);
+            }
+            if (oneLine.size() > 200)
+            {
+                oneLine = oneLine.substr(0, 197) + L"\x2026";
+            }
+
+            auto rowSp = StackPanel{};
+            rowSp.Orientation(Orientation::Horizontal);
+            rowSp.Spacing(8);
+            rowSp.Children().Append(Text(winrt::to_hstring(static_cast<int>(i + 1)), 11, false, 0.4));
+            auto lbl = Text(winrt::hstring{ oneLine }, 13, false, 0.95);
+            lbl.MaxWidth(360);
+            rowSp.Children().Append(lbl);
+
+            auto rowBorder = Border{};
+            rowBorder.Padding(Thickness{ 6, 3, 6, 3 });
+            rowBorder.Margin(Thickness{ 0, 0, 0, 4 });
+            rowBorder.Background(Fill(0x14, 0x80, 0x80, 0x80));
+            rowBorder.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+            rowBorder.Child(rowSp);
+            _planListHost.Children().Append(rowBorder);
+        }
+    }
+
     // ---- selection / scope --------------------------------------------------
 
     std::optional<SessionInfo> AgentManagerContent::_Selected(const std::vector<SessionInfo>& sessions) const
@@ -2935,14 +3561,78 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_SelectSession(const std::wstring& id)
     {
-        if (_selectedId == id)
+        // Selecting a managed session clears any external (read-only) selection — the Flight Plan is
+        // one surface; a managed selection wins (it is drivable).
+        const bool hadExternal = !_selectedExternalSessionId.empty();
+        if (_selectedId == id && !hadExternal)
         {
             return;
         }
+        _selectedExternalSessionId.clear();
+        _selectedExternalCwd.clear();
+        _selectedExternalTitle.clear();
         _selectedId = id;
         _selectedPromptId.clear();
         _NotifyLensChanged(); // M10: selection is part of the per-window lens
         _Refresh();
+    }
+
+    // Agentmaster: select an EXTERNAL (observe-only) row -> the Flight Plan shows its conversation
+    // READ-ONLY. We host no ConPTY for it (Rule #9/#13), so this never binds an injector; it only
+    // surfaces what was prompted. Clears the managed selection (one Flight-Plan surface).
+    void AgentManagerContent::_SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title)
+    {
+        _selectedId.clear();
+        _selectedPromptId.clear();
+        _selectedExternalSessionId = sessionId;
+        _selectedExternalCwd = cwd;
+        _selectedExternalTitle = title;
+        _LoadExternalPlan(sessionId, cwd); // kicks off the (cached) background transcript read
+        _NotifyLensChanged();
+        _Refresh();
+    }
+
+    // Read the external conversation's human prompts on a BACKGROUND thread (a transcript can be
+    // multi-MB; never parse it on the UI thread), then post the result back via the dispatcher. Cached
+    // per id (_externalPlanLoadedFor) so re-selecting the same external doesn't re-read. A session
+    // with no transcript yet (empty id) loads nothing (the plan shows "not prompted yet").
+    void AgentManagerContent::_LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd)
+    {
+        if (_externalPlanLoadedFor == sessionId && !sessionId.empty())
+        {
+            return; // already loaded for this id
+        }
+        _externalPlanPrompts.clear();
+        _externalPlanLoadedFor.clear(); // empty => loading / none
+        if (sessionId.empty())
+        {
+            return; // never-prompted external: nothing to read
+        }
+        auto weak = get_weak();
+        auto disp = _dispatcher;
+        std::thread([weak, disp, sessionId, cwd]() {
+            // Whole transcript (maxBytes 0), cap the prompt count so a giant conversation stays bounded.
+            auto info = ::Agentmaster::ReadTranscriptInfo(cwd, sessionId, 0, 1000);
+            if (!disp)
+            {
+                return;
+            }
+            disp.TryEnqueue([weak, sessionId, prompts = std::move(info.userPrompts)]() mutable {
+                auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                // Stale guard: the user may have selected a different external while we were reading.
+                if (self->_selectedExternalSessionId != sessionId)
+                {
+                    return;
+                }
+                self->_externalPlanLoadedFor = sessionId;
+                self->_externalPlanPrompts = std::move(prompts);
+                self->_Refresh();
+            });
+        }).detach();
     }
 
     void AgentManagerContent::_SetScope(const std::wstring& dir)

@@ -24,12 +24,17 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 - **Flight Plan / Autopilot:** queue prompts; on **turn-complete** (`Stop` hook) the next
   prompt is auto-sent. Approvals and clarifying-questions are handled separately.
 - **Per-tab link badge (overlay) — built ([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md)):**
-  each Claude session tab also carries a small **top-right terminal HUD** that makes the tab ⇄
-  Agentmaster link legible *while you work inside the session* — status (color-matched to the
-  Triage Board) + the Fleet Observer's `model · effort · kind`, Autopilot mode
-  (**Manual/Semi/Full**), queued count, and link state (**⛓ linked** vs **observe-only**). Dim
-  until hover; hover/click **expands** controls (Autopilot cycle · Send-now · queue peek ·
-  Jump-to-Manager) + a contextual SemiAuto confirm. Off-switchable (`AppSettings.showTabOverlay`).
+  **every terminal tab the Fleet Observer classifies** carries a small **top-right terminal HUD**
+  that makes the tab ⇄ Agentmaster link legible *while you work inside the session*. A **linked**
+  Claude session shows the full badge — status (color-matched to the Triage Board) + the Fleet
+  Observer's `model · effort · kind`, Autopilot mode (**Manual/Semi/Full**), queued count, and link
+  state **⛓ linked**. Any **other** tab shows a dim **observe badge** `○ <kind> · unlinked` (kind =
+  `pwsh` / `cmd` / `claude` *started-but-not-yet-prompted* (§11d) / `codex`) that **flips in place**
+  as the tab's activity changes — a `pwsh` tab → `claude` the moment you run it → the full linked
+  badge on its first prompt; cleared when claude exits or the tab closes — so a started-but-unprompted
+  claude (no transcript id yet) is never invisible. Dim until hover; hover/click **expands** controls
+  (Autopilot cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm.
+  Off-switchable (`AppSettings.showTabOverlay`).
   The per-tab *here-and-now* lens, complementing the Manager's *fleet* view.
 
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
@@ -169,9 +174,12 @@ What works, by area:
     (`WT_SESSION` + `AM_SESSION` + `CLAUDE_*`); `ProcessStartUnixMs`/`ProcessAlive`; pure tree helpers
     (`FindDescendantByImage`/`ChildrenOf`, replacing the old `FindClaudeDescendantPid`); `ReadClaudeFacts`
     (cmdline+env parse); `ClassifyRunningApp`; transcript resolution (`EncodeCwdToProjectDir` — every
-    non-`[A-Za-z0-9]` → `-`; `ResolveSessionId` — see Rule #14). A denied/elevated/WOW64 PEB read ⇒
-    observe-only, never mis-bound. (Promoted out of `ClaudeSpawn`'s anon namespace; `ClaudeCwdForShell`
-    now delegates here.)
+    non-`[A-Za-z0-9]` → `-`; `ResolveSessionId` — see Rule #14); and **transcript content** —
+    `TranscriptTimes` (cheap ctime/mtime stat = conversation age + last activity) + `ReadTranscriptInfo`
+    (head or full read → the first-prompt **title**, `gitBranch`, and the human prompts, parsed like
+    `ParseTranscriptDelta`; recent transcripts carry NO `summary` — verified 0/1842 over 90 days — so the
+    first prompt is the title). A denied/elevated/WOW64 PEB read ⇒ observe-only, never mis-bound.
+    (Promoted out of `ClaudeSpawn`'s anon namespace; `ClaudeCwdForShell` now delegates here.)
   - **`AM_SESSION` ownership stamp (O2, `Engine`).** A per-process GUID exported into the app env at
     engine init (alongside `CCMGR_HOOK_PIPE`); a Manager-Launched claude additionally carries
     `AM_SESSION=<guid>:<windowId>` (via `spec.env`, the launching window appended). `ClassifyRunningApp`
@@ -185,8 +193,11 @@ What works, by area:
   - **Registry feed (O3, `SessionRegistry::ObserveClaude`).** A provenance-aware upsert: first sight of a
     claude we did NOT Launch creates an `external` record + fires adoption; thereafter it idempotently
     ENRICHES the transient `SessionInfo` facts (pid / liveCwd / model / effort / permissionMode /
-    background / runningApp / amSession / ownerWindowId — all runtime-only, NOT persisted) but **NEVER**
-    sets `SessionState` (push hooks + the transcript tail own state, Rule #1/#7). A steady-state re-observe
+    background / runningApp / amSession / ownerWindowId, plus the transcript timing
+    `convCreated/convLastActivityUnixMs` that drives the per-session timing adornment — all runtime-only,
+    NOT persisted) but **NEVER** sets `SessionState` (push hooks + the transcript tail own state, Rule
+    #1/#7). The timing is refreshed silently (like `lastObservedUnixMs`) — mtime ticks constantly, so it
+    must not drive the change cascade; the UI recomputes the "ago" live on any rebuild. A steady-state re-observe
     with unchanged facts is a no-op (no observer / persist / UI churn). `hookWired`/`lastHookUnixMs` are set
     in `OnHookEvent` for provenance.
   - **S-lane (`ProcessObserver`).** A process-wide worker (next to the scanner, thread/condvar shape
@@ -204,8 +215,14 @@ What works, by area:
     `~TerminalPage` (Rule #10).
   - **Activity + adornments (O6).** Full `TabActivity` taxonomy (Powershell / Cmd / ClaudeCode / Codex
     (bare acknowledge, image+pid only) / Other), enriched `[activity]` events, `model · effort · kind`
-    adornments on the Manager cards + per-tab overlay, and an **External (N)** group surfacing
-    real-WindowsTerminal claudes (observe-only, no Flight Plan).
+    adornments on the Manager cards + per-tab overlay, and an **External (N)** group. The external
+    census now includes **cmd-/console-hosted** claudes too (the `Other` bucket — previously counted but
+    hidden), not only real-WindowsTerminal, and each `ExternalClaudeRow` is **enriched from its
+    transcript** (worker-thread title cache so the head-read happens once): resolved `sessionId`, a
+    **title** (first prompt), `gitBranch`, host kind (`wt` / `cmd` / shell leaf), and `created/lastActivity`
+    timing. Observe-only — surfaced on the board AND the Explorer Tree's **EXTERNAL** scope, where a row's
+    **Open New Session Here** / **Adopt** lives on the right-click menu and a **left-click → a read-only Flight Plan**
+    of the conversation.
   - **Hardening (O7).** Steady-state is µs: the survey skips the Toolhelp snapshot when the roster is
     byte-identical to last tick AND every correlated `(pid, start-time)` pair is still alive (the start time
     is paired — per the rule that PIDs reuse — so a recycled PID can't masquerade as alive), except on the
@@ -214,11 +231,35 @@ What works, by area:
     denied / elevated / WOW64 PEB read is guarded → observe-only, never a misread. 24-h soak: no leak / wedge.
 - **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Flight Plan,
   imperative and snapshot-driven from the registry (cross-thread refresh via
-  `DispatcherQueue`), bidirectional selection + directory scope. The Board/Tree show only
+  `DispatcherQueue`), bidirectional selection + directory scope. Each **Triage-Board column**
+  is a fixed-width box at full board height with a **pinned header over a vertically-scrolling
+  card list** (`_MakeBoardColumn`), so a tall column (e.g. a large **External** census) scrolls
+  within the board instead of clipping past the bottom edge (the board's own ScrollViewer scrolls
+  only horizontally). The Board header's **"Show all"** (clears the directory scope) is shown only
+  when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
+  already showing all directories. The Board/Tree show only
   **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and listed
   behind an **Archived (N)** toolbar button (by the cog) — a modal list with per-row
   **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
-  `Del`=archive (never injects — Rule #2). **A session's title is one value** — the
+  `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
+  EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals):
+  **EXTERNAL** (`_RebuildExternalTree`) lists every claude we do NOT manage — both real-WindowsTerminal
+  **and cmd-/console-hosted** (the `Other` census bucket, previously hidden) — grouped by cwd. Each row is
+  **enriched out-of-band from the transcript**: a real **title** (the conversation's first prompt — recent
+  transcripts carry no `summary`), a **host** tag (`wt` / `cmd` / the shell leaf), `gitBranch`,
+  `model · effort · pid`, and the timing adornment. **Left-click selects** an external → the Flight Plan
+  shows its conversation **read-only** (`_RebuildExternalPlan` — the human prompts, read from the
+  transcript on a **background thread** and cached; observe-only — we host no ConPTY, so it is never
+  drivable, no queue/Autopilot). **Right-click** (and the board card's now-enabled **Adopt** button)
+  offers **Open New Session Here** (spawn a managed session in that cwd) and **Adopt** (resume its conversation into a
+  managed, controllable tab — `_AdoptExternalClaude` resolves the id via `ResolveSessionId`, then
+  `claude --resume`s it, leaving the original external running — Rule #13). With no external selected the
+  Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
+  **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /
+  active span / last-activity ago; `m`=month or minute by position, tooltip-explained;
+  `FormatSessionTiming`/`FormatSpan`) from the transcript's ctime/mtime (managed:
+  `SessionInfo::convCreated/convLastActivityUnixMs`; external: `ExternalClaudeRow` times, falling back to
+  the process start). **A session's title is one value** — the
   Explorer-tree row, the WT **tab** title, and the persisted `SessionInfo.title` are the same
   thing: it's **pinned** onto the tab at launch/restore (`Tab::SetTabText`, so it stops floating
   with claude's OSC title) and renaming from **either** side syncs the other + persists (Explorer
@@ -234,7 +275,7 @@ What works, by area:
   per-message actions moved off a button strip onto a **right-click menu over the messages**
   (`_MakePromptMenu`: **Move up / Move down / Delete** on upcoming rows, **Archive session** on
   any). **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
-  LOCAL/GLOBAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
+  LOCAL/GLOBAL/EXTERNAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
   **cycles** Off → Semi-auto → Full on click (`_CycleAutopilot` / `_UpdateAutopilotButton`,
   replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed
   behind a **paper icon** at the textarea's top-right (kept inline — NOT a Flyout — so its name
@@ -277,6 +318,38 @@ What works, by area:
   record is dropped. A never-prompted session has no transcript and a blind `--resume` would die
   with "No conversation found" (Rule #6). `Sent` prompts are never replayed. Templates: save a
   session's queue, apply it, or broadcast to a whole directory.
+  - **⚠️ Lifecycle coverage — known gaps (review pending, NOT yet fixed; surfaced auditing the
+    add-tab / launch / close / archive / resume paths end-to-end).** The tab-X archive seam above is
+    sound, but the *non-tab-X* exits are not fully covered: **(1, HIGH) closing a _window_ never
+    archives its sessions.** `~TerminalPage` (`TerminalPage.cpp:248`) only Unpublish/Unregister/
+    RemoveHandler — it never iterates `_claudeTabs` to flip `live=false` / unbind, and the per-window
+    liveness sweep (`:2070`) can't save a window whose `_claudeTabs` is being destroyed. Because the
+    non-closable Manager tab means a window never auto-closes via "last tab" (`_RemoveTab`'s
+    `size()==0` path can't fire), **window-chrome ✕ is the _primary_ window exit** — so its sessions
+    linger `live=true` in the shared registry as **phantom cards** on every OTHER window's Triage
+    Board (Activate = no-op; the claude is already dead) with their **injectors + ConptyConnections
+    leaked** (the injector lambda captures the connection) until process exit; only an app restart
+    clears it (`live` isn't persisted). **(2, MED) archiving an unbound-but-live session bounces
+    back** — `_ArchiveClaudeSession`'s no-tab branch (`:1506`) sets `live=false`+persist, but the
+    S-lane's `ObserveClaude` re-sets `live=true` the next tick (`SessionRegistry.cpp:339`), hitting an
+    *ours* claude the observer carded before its bind completed. **(3, MED) adopt-external = two
+    writers on one transcript** — `_AdoptExternalClaude` (`:1613`) `--resume`s the id into a managed
+    tab while the original external keeps running, both appending the same `.jsonl` (only a code
+    comment — "the user closes it" — mitigates). **(4, LOW–MED) `SessionEnd`/`Done` doesn't archive**
+    — only the slow liveness sweep does, and never if the window closes first (→ gap 1); a finished
+    claude lingers as a live card until swept. **(5, LOW) Launch with a null tab leaves a phantom** —
+    `Upsert(live=true)`+`SetInjector` run unconditionally after `_CreateNewTabFromPane`; only
+    `pane==null` is guarded (`:1116`), so a null `tab` yields a live record absent from `_claudeTabs`
+    (un-Activatable, un-sweepable). **(6, LOW) persisted `state` is dead weight** —
+    `ToJson(SessionInfo)` writes it (`Persistence.cpp:308`) but `_RestoreClaudeSessions` forces `Idle`
+    on load (`:1321`); written, never read (the resume-gating gotcha already says don't trust it).
+    **Verified clean (not gaps):** external WindowsTerminal/Other claudes never enter the registry or
+    `sessions.json` (`ObserveClaude` is gated on rostered + resolved id, `ProcessObserver.cpp:427`) —
+    no foreign-claude leak into the Archived list; cross-window double-bind is guarded (`HasInjector`,
+    `TerminalPage.cpp:2373`; one ConPTY lives in one window); and resume-fresh drops the stale archived
+    record (`:1150`). The structural fix for gap 1 is a teardown archive loop (the
+    `_ArchiveAndCloseClaudeTab` bookkeeping minus the dialog + `tab.Close()`) — or session hand-off —
+    hung off the window-close path.
 - **Per-window records (M10 data layer, `Persistence`/`SessionModels`).** A `WindowRecord`
   (one file per window: `windows/<windowId>.json`) holds per-window **UI state** — geometry
   (position/size/launch-mode), the Manager **lens** (selection / dir scope / selected prompt /
@@ -314,7 +387,15 @@ prevent splitting the Manager tab. The **per-tab link badge / overlay**
 wrapped in the terminal's slot `Grid` (`TerminalPaneContent::SetAgentOverlay`), driven by
 `SessionRegistry::HasInjector` + `AppSettings.showTabOverlay`, attached on bind
 (`_AttachClaudeOverlay` / `_claudeOverlays`) and **enriched by the Fleet Observer** with
-`model · effort · kind` (O6). Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+`model · effort · kind` (O6). It now also shows on **every non-bound tab** as a registry-LESS
+**observe badge** (`○ <kind> · unlinked`): the `_ObserverProbe` UI lane reads the observer's
+`Correlation()` + `Activity()` tables and `_SetTabActivityBadge`s each tab's kind via
+`AgentTabOverlay::ShowActivity` (registry-less — there is no session to observe; keyed by `WT_SESSION`
+in `_pendingOverlays`, idempotent on an unchanged kind) — a `pwsh` / `cmd` / `codex` tab, or a
+never-prompted `claude` (correlated but no transcript id yet, §11d). The badge flips kind in place as
+activity changes and is **promoted to the bound `_AttachClaudeOverlay`** the instant a claude resolves
+an id (its first prompt); `_DropPendingOverlay` collapses + releases it when the tab binds, the claude
+exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
 
@@ -335,12 +416,15 @@ wrapped in the terminal's slot `Grid` (`TerminalPaneContent::SetAgentOverlay`), 
     `Scheduler.{h,cpp}`, `Engine.{h,cpp}` (the M9 process-wide `SharedEngine`),
     `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail), the **Fleet
     Observer** — `Activity.h` (data models), `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript
-    primitives), `ProcessObserver.{h,cpp}` (the S-lane) — `Json.h`, `Persistence.{h,cpp}`, and
+    primitives — id resolution + content: title / prompts / ctime·mtime timing),
+    `ProcessObserver.{h,cpp}` (the S-lane) — `Json.h`, `Persistence.{h,cpp}`, and
     `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`).
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
-    enriched by the observer with `model · effort · kind`.
+    enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
+    **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
   - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync, smart
-    naming + per-dir tab color, the observer UI lane `_ObserverProbe`), `Tab.{h,cpp}` (a
+    naming + per-dir tab color, the observer UI lane `_ObserverProbe`, external-claude adopt
+    `_AdoptExternalClaude`), `Tab.{h,cpp}` (a
     `TabColorChanged` event + `GetRuntimeTabColor`), and `TabManagement.cpp`; registrations in
     `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
@@ -389,7 +473,7 @@ wrapped in the terminal's slot `Grid` (`TerminalPaneContent::SetAgentOverlay`), 
   `_DiscoverClaudeTabsByCwd`): publish this window's tab roster, then bind via the observer's
   Correlation table. `~TerminalPage` calls `_observer->UnpublishWindow(_windowId)` (Rule #10).
   `_WireAgentManagerContent()` hands the content the shared registry + spawn / activate / archive
-  / restore / rename / pause / confirm callbacks + the cog's settings seed/persist
+  / restore / rename / adopt-external / pause / confirm callbacks + the cog's settings seed/persist
   (`SetSettings`/`SetSettingsHandler`). `_LaunchClaudeSession(dir, title, restored)` builds a
   claude `ConptyConnection` (cmdline/cwd/env ours) and opens it as a normal terminal tab via
   `_MakePane(args, …, existingConnection)`; `_SpawnClaudeSession` = fresh,
@@ -774,8 +858,12 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
     active tab". `ObserveClaude` **enriches facts but NEVER sets `SessionState`** — push hooks + the
     transcript tail own state (Rule #1/#7); a hooked and an un-hooked claude converge on the same
     record. The observer **only reads** (PEB / Toolhelp / filesystem) — it must NEVER write to a
-    shell's stdin (the invisibility invariant). The transient enrichment fields are **never
-    persisted** (`Persistence.cpp`); the observer re-derives them each run.
+    shell's stdin (the invisibility invariant). **Adopting** an external (the Explorer-Tree
+    EXTERNAL scope's *Adopt*) upholds this — it never injects into / kills the foreign process; it
+    resumes the external's *conversation* into a NEW managed tab (`claude --resume <id>`, id from
+    `ResolveSessionId`, transcript-gated → fresh if none) and leaves the original running. The
+    transient enrichment fields are **never persisted** (`Persistence.cpp`); the observer
+    re-derives them each run.
 14. **Conversation identity is by transcript CREATION time ≈ process start, not newest-mtime.** A
     claude's OWN transcript is created when it first writes — at/after its process start.
     `ResolveSessionId` (for a bare claude with no explicit `--session-id`/`--resume <guid>`) picks
