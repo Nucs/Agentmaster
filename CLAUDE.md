@@ -23,25 +23,26 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   - **Flight Plan** (bottom-right) — a per-session prompt queue + **Autopilot**.
 - **Flight Plan / Autopilot:** queue prompts; on **turn-complete** (`Stop` hook) the next
   prompt is auto-sent. Approvals and clarifying-questions are handled separately.
-- **Per-tab link badge (overlay) — designed, not yet built ([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md)):**
+- **Per-tab link badge (overlay) — built ([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md)):**
   each Claude session tab also carries a small **top-right terminal HUD** that makes the tab ⇄
-  Agentmaster link legible *while you work inside the session* — hook-driven status (color-matched
-  to the Triage Board), Autopilot mode (**Manual/Semi/Full**), queued count, and link state
-  (**⛓ linked** vs **observe-only**). Dim until hover; hover/click **expands** controls (Autopilot
-  cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm. Off-switchable
-  (`AppSettings.showTabOverlay`). The per-tab *here-and-now* lens, complementing the Manager's
-  *fleet* view.
+  Agentmaster link legible *while you work inside the session* — status (color-matched to the
+  Triage Board) + the Fleet Observer's `model · effort · kind`, Autopilot mode
+  (**Manual/Semi/Full**), queued count, and link state (**⛓ linked** vs **observe-only**). Dim
+  until hover; hover/click **expands** controls (Autopilot cycle · Send-now · queue peek ·
+  Jump-to-Manager) + a contextual SemiAuto confirm. Off-switchable (`AppSettings.showTabOverlay`).
+  The per-tab *here-and-now* lens, complementing the Manager's *fleet* view.
 
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
 Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
 Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 Workspace persistence (M9–M14): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
 Per-tab link badge (overlay): [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md).
+Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md).
 
 ## Status
 
 **All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **209/209** standalone
+`Agentmaster` identity, and verified running.** The engine passes **361/361** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -99,6 +100,19 @@ gracefully closed window is pruned; and the recover path reopens a not-open reco
 **Still deferred (not blocking):** `Other`-tab `actionsJson` capture (non-Claude tab recreation) +
 session re-home. See PERSISTENCE.md §13.5.
 
+**The Fleet Observer (O1–O7, [`OBSERVER.md`](doc/agentmaster/OBSERVER.md)) is complete — built,
+deployed, and live-verified.** It is the **PULL** half of the state engine: a process- +
+transcript-driven survey that detects + correlates + enriches **every** Claude session and tab
+activity **out-of-band** (reading each `claude.exe`'s PEB — cwd / cmdline / env — and its
+transcript), so a hand-typed `claude` that fires **zero hooks** (a shell `claude` function/alias
+shadows the PATH shim) is still detected, bound, and driven — with **no hooks, no shim, no
+settings, and nothing the user can feel** (all reads are out-of-band; it **never** writes to a
+shell). It is the always-correct floor beneath the lossy hook **push** and subsumes the old per-tab
+Toolhelp walk + the global `projects/` discovery scan. Live-verified end-to-end in the deployed
+package: a no-hook `claude.exe` typed after a `cd` lands a Triage-Board card + per-tab overlay
+within ~3 s, classified `Agentmaster`; two claudes in one cwd bind to their **own** conversations;
+real-WindowsTerminal claudes are classified external + never bound; steady-state cost is µs.
+
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
   source of truth; **token-based** observers — `AddObserver`→token + `RemoveObserver` — and
@@ -125,7 +139,8 @@ What works, by area:
   and prepend a transparent **`claude` PATH shim** (`~/.agentmaster/shim/` — `claude.cmd` for
   cmd/PowerShell + a POSIX `claude`) that injects `--settings <ours>` then execs the real claude
   (`ResolveRealClaude`, resolved BEFORE the PATH prepend so it never finds the shim); every new
-  tab inherits this env, so a bare `claude` self-wires for hooks. (Launch's direct
+  tab is *meant* to inherit this env so a bare `claude` self-wires for hooks (but WT's env
+  regeneration breaks that for `+` tabs — see the caveat below). (Launch's direct
   `CreateProcessW("claude …")` resolves `claude.exe` with no PATHEXT, bypassing the `.cmd` shim
   — no double-wiring.) The forwarder takes the session id from the hook **payload** and emits
   the hosting **`WT_SESSION`** as the `tabToken` wire field, falling back to a **`bridge.json`**
@@ -134,7 +149,69 @@ What works, by area:
   `TerminalPage::_AdoptExternalSession` matches the `tabToken` to a live ConPTY
   (`ITerminalConnection::SessionId`) and **binds a stdin injector** — promoting it to full
   observe+control (Autopilot can drive it). A claude hosted outside this app (no matching
-  connection) stays observe-only (Rule #9).
+  connection) stays observe-only (Rule #9). **Caveat — this hook fast-path is *degraded* for
+  hand-typed `+`-tab claudes:** WT regenerates a `+`-tab's child env from the registry, dropping
+  these runtime-only vars (`AM_SESSION` / `CCMGR_HOOK_PIPE` / the PATH shim — see Gotchas), so a bare
+  `claude` there fires **zero** hooks (a Manager-Launched session is unaffected — it sets env
+  explicitly via `spec.env`). The **Fleet Observer** (below) is the reliable detection + bind path
+  that needs none of this env — it keys on the **roster correlation**, not the shim/pipe.
+- **Fleet Observer — PULL correlation + activity (O1–O7, `OBSERVER.md`; `AgentMaster/ProcessInspect.{h,cpp}`,
+  `ProcessObserver.{h,cpp}`, `Activity.h`).** The always-correct floor BENEATH the lossy hook push — the
+  one path no shell function / alias / PATH quirk can shadow. Empirically grounded (we measured it live):
+  **`WT_SESSION` is the correlation key** (== `ITerminalConnection::SessionId()`, stable across a claude
+  close→`cd`→reopen), enumeration (~10 ms Toolhelp) is the only cost while PEB reads are µs, and Claude
+  closes its `.jsonl` after each write so correlation is by **cwd → newest transcript**, not an open handle.
+  - **Primitives (`ProcessInspect`).** ONE `SnapshotProcesses()` per survey (reused for census + every tab
+    tree) + µs PEB reads via the x64 `RTL_USER_PROCESS_PARAMETERS` offsets WT itself reads (centralized +
+    commented, WOW64-guarded): `ReadProcessCwd` (the claude PROCESS cwd — tracks `cd` across a relaunch;
+    PowerShell never syncs ITS process cwd, but spawns claude with the right one), `ReadProcessCommandLine`
+    (exposes `--resume`/`--session-id`/`--model`/`--effort`/`--permission-mode`), `ReadProcessEnv`
+    (`WT_SESSION` + `AM_SESSION` + `CLAUDE_*`); `ProcessStartUnixMs`/`ProcessAlive`; pure tree helpers
+    (`FindDescendantByImage`/`ChildrenOf`, replacing the old `FindClaudeDescendantPid`); `ReadClaudeFacts`
+    (cmdline+env parse); `ClassifyRunningApp`; transcript resolution (`EncodeCwdToProjectDir` — every
+    non-`[A-Za-z0-9]` → `-`; `ResolveSessionId` — see Rule #14). A denied/elevated/WOW64 PEB read ⇒
+    observe-only, never mis-bound. (Promoted out of `ClaudeSpawn`'s anon namespace; `ClaudeCwdForShell`
+    now delegates here.)
+  - **`AM_SESSION` ownership stamp (O2, `Engine`).** A per-process GUID exported into the app env at
+    engine init (alongside `CCMGR_HOOK_PIPE`); a Manager-Launched claude additionally carries
+    `AM_SESSION=<guid>:<windowId>` (via `spec.env`, the launching window appended). `ClassifyRunningApp`
+    matches on the GUID **prefix**: ours → `Agentmaster`, a bare `WT_SESSION` (no `AM_SESSION`) → the real
+    `WindowsTerminal`, neither → `Other`. **This is the *census* signal, REFINED by the roster:** a
+    hand-typed `+`-tab claude does NOT reliably inherit `AM_SESSION` (WT regenerates a tab's env — see
+    Gotchas), so a claude correlated to one of OUR roster tabs is `Agentmaster` *regardless* (Rule #13);
+    `AM_SESSION` only classifies the NON-rostered remainder (a background daemon we spawned, telling our
+    instance from another's, or a real `WindowsTerminal` → external, observe-only). Per-process GUID ⇒ two
+    Agentmaster instances stay cleanly separable.
+  - **Registry feed (O3, `SessionRegistry::ObserveClaude`).** A provenance-aware upsert: first sight of a
+    claude we did NOT Launch creates an `external` record + fires adoption; thereafter it idempotently
+    ENRICHES the transient `SessionInfo` facts (pid / liveCwd / model / effort / permissionMode /
+    background / runningApp / amSession / ownerWindowId — all runtime-only, NOT persisted) but **NEVER**
+    sets `SessionState` (push hooks + the transcript tail own state, Rule #1/#7). A steady-state re-observe
+    with unchanged facts is a no-op (no observer / persist / UI churn). `hookWired`/`lastHookUnixMs` are set
+    in `OnHookEvent` for provenance.
+  - **S-lane (`ProcessObserver`).** A process-wide worker (next to the scanner, thread/condvar shape
+    mirrored) on a ~2 s heartbeat + on-roster-change `Wake()`: ONE snapshot → `ReadClaudeFacts` + classify
+    EVERY claude (the census, logged `[observer] census claudes=N ours=A wt=W other=O rostered=R`) → merge
+    every window's published tab roster → per roster tab, `FindDescendantByImage` the shell's claude,
+    resolve its id, and feed `ObserveClaude`. **A claude correlated to a tab in OUR roster is OURS
+    regardless of `AM_SESSION`** (Rule #13). Publishes two copy-under-lock tables (Correlation + Activity).
+  - **UI lane (`TerminalPage::_ObserverProbe`, replaces `_DiscoverClaudeTabsByCwd`).** The one WinRT
+    thread: each scanner tick it builds THIS window's roster `{WT_SESSION = SessionId(), shell PID =
+    GetProcessId(ConptyConnection::RootProcessHandle()), bound}`, `PublishRoster`s it (both reads are µs),
+    then — after a short settle so the publish-triggered survey lands — reads the Correlation table and
+    binds each of our unbound, id-resolved tabs via the **unchanged** `_BindClaudeSessionToTab` (injector +
+    overlay + title + per-dir color). Detached via `_observer->UnpublishWindow(_windowId)` in
+    `~TerminalPage` (Rule #10).
+  - **Activity + adornments (O6).** Full `TabActivity` taxonomy (Powershell / Cmd / ClaudeCode / Codex
+    (bare acknowledge, image+pid only) / Other), enriched `[activity]` events, `model · effort · kind`
+    adornments on the Manager cards + per-tab overlay, and an **External (N)** group surfacing
+    real-WindowsTerminal claudes (observe-only, no Flight Plan).
+  - **Hardening (O7).** Steady-state is µs: the survey skips the Toolhelp snapshot when the roster is
+    byte-identical to last tick AND every correlated `(pid, start-time)` pair is still alive (the start time
+    is paired — per the rule that PIDs reuse — so a recycled PID can't masquerade as alive), except on the
+    slow heartbeat. Retires the now-dead `SessionScanner` transcript-DISCOVERY sweep (`ArmDiscovery` /
+    `RecentTranscripts`, which the observer subsumes; the scanner keeps its state-reconcile tail). A
+    denied / elevated / WOW64 PEB read is guarded → observe-only, never a misread. 24-h soak: no leak / wedge.
 - **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Flight Plan,
   imperative and snapshot-driven from the registry (cross-thread refresh via
   `DispatcherQueue`), bidirectional selection + directory scope. The Board/Tree show only
@@ -232,11 +309,12 @@ when first focused — WT's lazy-background-tab behavior; restore one at a time 
 a one-time **"Restore your previous layout?"** launch prompt (offers **all archived sessions**;
 decided + **deferred** — it ships *after* the per-window `WindowRecord` capture is wired so it
 restores true per-window layouts, not a flat global list — see `PERSISTENCE.md` §6/§6a);
-prevent splitting the Manager tab; the **per-tab link badge / overlay** (designed —
-[`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) / DESIGN §9.7; Phase 1 = read-only badge,
-Phase 2 = expand + controls — wraps the terminal in a slot `Grid` at
-`TerminalPaneContent::GetRoot()`, adds an `AgentTabOverlay` + `SessionRegistry::HasInjector` +
-`AppSettings.showTabOverlay`; not yet built). Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+prevent splitting the Manager tab. The **per-tab link badge / overlay**
+([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) / DESIGN §9.7) is **built** — `AgentTabOverlay`
+wrapped in the terminal's slot `Grid` (`TerminalPaneContent::SetAgentOverlay`), driven by
+`SessionRegistry::HasInjector` + `AppSettings.showTabOverlay`, attached on bind
+(`_AttachClaudeOverlay` / `_claudeOverlays`) and **enriched by the Fleet Observer** with
+`model · effort · kind` (O6). Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
 
@@ -255,11 +333,16 @@ Phase 2 = expand + controls — wraps the terminal in a slot `Grid` at
     are `<PrecompiledHeader>NotUsing`): `SessionModels.h`, `HookEvents.h`, `HookWire.h`,
     `SessionRegistry.{h,cpp}`, `HooksBridge.{h,cpp}`, `ClaudeSpawn.{h,cpp}`,
     `Scheduler.{h,cpp}`, `Engine.{h,cpp}` (the M9 process-wide `SharedEngine`),
-    `Json.h`, `Persistence.{h,cpp}`, and `tests/` (standalone harness,
-    not in the msbuild — run `tests/run-m5-tests.bat`).
+    `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail), the **Fleet
+    Observer** — `Activity.h` (data models), `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript
+    primitives), `ProcessObserver.{h,cpp}` (the S-lane) — `Json.h`, `Persistence.{h,cpp}`, and
+    `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`).
+  - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
+    enriched by the observer with `model · effort · kind`.
   - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync, smart
-    naming + per-dir tab color), `Tab.{h,cpp}` (a `TabColorChanged` event + `GetRuntimeTabColor`),
-    and `TabManagement.cpp`; registrations in `TerminalAppLib.vcxproj`.
+    naming + per-dir tab color, the observer UI lane `_ObserverProbe`), `Tab.{h,cpp}` (a
+    `TabColorChanged` event + `GetRuntimeTabColor`), and `TabManagement.cpp`; registrations in
+    `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
     `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*).
 - **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
@@ -296,10 +379,15 @@ Phase 2 = expand + controls — wraps the terminal in a slot `Grid` at
 - Tab placement primitive: `_CreateNewTabFromPane(pane, insertPosition)` (`TabManagement.cpp`).
 - **Engine wiring (`TerminalPage`):** `_InitAgentmasterEngine()` (from `_OnFirstLayout`,
   before the Manager tab) **consumes the process-wide `::Agentmaster::SharedEngine()`** (M9) —
-  copies the shared `SessionRegistry` + `HooksBridge` + `Scheduler` `shared_ptr`s and registers
-  THIS window's adoption handler (a token, detached in `~TerminalPage`). The once-per-process
-  wiring (the logging / scheduler / persistence observers, the pipe, bridge discovery + hook
-  files + the PATH shim) lives in `Engine.cpp` and runs on first access.
+  copies the shared `SessionRegistry` + `HooksBridge` + `Scheduler` + `SessionScanner` +
+  `ProcessObserver` `shared_ptr`s and registers THIS window's adoption handler + liveness probe
+  (tokens, detached in `~TerminalPage`). The once-per-process wiring (the logging / scheduler /
+  persistence observers, the pipe, bridge discovery + hook files + the PATH shim, the
+  **`AM_SESSION`** mint + export, and the `ProcessObserver` start) lives in `Engine.cpp` and runs
+  on first access. The Fleet Observer's UI lane is `_ObserverProbe()` (ticked by the scanner's
+  liveness probe alongside `_ReconcileClaudeTabs` + `_SweepClaudeLiveness`; it replaced
+  `_DiscoverClaudeTabsByCwd`): publish this window's tab roster, then bind via the observer's
+  Correlation table. `~TerminalPage` calls `_observer->UnpublishWindow(_windowId)` (Rule #10).
   `_WireAgentManagerContent()` hands the content the shared registry + spawn / activate / archive
   / restore / rename / pause / confirm callbacks + the cog's settings seed/persist
   (`SetSettings`/`SetSettingsHandler`). `_LaunchClaudeSession(dir, title, restored)` builds a
@@ -579,6 +667,35 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   to the box's on-screen position. Open it only on `FocusState::Pointer`/`Keyboard` (not
   `Programmatic`) so it doesn't pop on tab activation, and keep it open across row clicks via
   a **deferred** `LostFocus` check (re-focus the box on pick; bail if it regained focus).
+- **Erasing a map node invalidates references to its key — copy the key first.** `_BindClaudeSession-
+  ToTab`'s re-home block did `for (const auto& [oldId, w] : _claudeTabs) { … _claudeTabs.erase(oldId);
+  _claudeOverlays.erase(oldId); }` — `oldId` is a reference INTO the `_claudeTabs` node, so the first
+  erase freed it and the second `erase(oldId)` hashed **freed memory** → AV `0xc0000005` in
+  `std::_Fnv1a_append_bytes` (`std::hash<wstring>`). Latent for ages (re-home was rare); the Fleet
+  Observer's far more frequent correlation/re-home **exposed it**. Fix: `const std::wstring superseded
+  = oldId;` BEFORE any erase. (General rule: never use a `[key, val]` structured-binding ref after
+  erasing that element.)
+- **A `+`-tab claude does NOT inherit our runtime env** (`AM_SESSION` / `CCMGR_HOOK_PIPE` / the PATH
+  shim are all absent), so a hand-typed `claude` there fires **zero hooks** and is classified `wt`
+  by `AM_SESSION` alone. WT regenerates a tab's child env from the **registry** (`til::env::regenerate`)
+  unless `reloadEnvironmentVariables` is genuinely OFF, which drops these runtime-only vars — so the
+  "Adopt any `claude`" hook fast-path is **degraded for `+` tabs** (a Manager-Launched session is fine:
+  it sets env explicitly via `spec.env`). This is **why the observer keys binding on the roster
+  correlation, not `AM_SESSION`** (Rule #13): a claude under one of our tabs' shells is ours
+  regardless. The observer + the transcript-tail reconciler give it full detection + state without
+  hooks; restoring the hook fast-path for `+` tabs (fixing the env regeneration) is a separate,
+  non-blocking follow-up.
+- **Symbolize a crash without cdb/WinDbg via the in-box DIA SDK + DbgHelp.** When the app AVs, the
+  WER **Application Error** event already gives `Faulting module` + `Exception code` + `Fault offset`
+  (the RVA), and a full dump lands in `%LOCALAPPDATA%\CrashDumps\`. No debugger is installed, but
+  `msdia140.dll` + the **DIA SDK** ship with VS 2022 (`…\DIA SDK\include\dia2.h`, `…\lib\amd64\
+  diaguids.lib`). A ~60-line C++ tool can `NoRegCoCreate(msdia140.dll)` → `loadDataFromPdb(TerminalApp.pdb)`
+  → `findSymbolByRVA(rva, SymTagFunction)` + `findLinesByRVA` to map the fault offset to **function +
+  source line** (link `diaguids.lib ole32 oleaut32 advapi32`). For the full call chain, `DbgHelp`'s
+  `MiniDumpReadDumpStream` (ExceptionStream → faulting thread id; ThreadListStream → its stack memory;
+  ModuleListStream → `TerminalApp.dll` base/size) + scanning the stack for in-module return addresses,
+  symbolized through the same DIA session, reconstructs the stack top-down. This is how the re-home
+  use-after-free above was pinned exactly.
 
 ## Correctness rules (do not regress)
 
@@ -645,6 +762,30 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
     drops the entry. A de-dupe vs the persisted color makes our own launch/propagation writes
     no-ops — don't regress that, it is what keeps propagation from looping. (The default *name*,
     `DeriveSessionTitle`, only seeds an *untitled* session — a real/renamed title wins, Rule #11.)
+13. **Fleet Observer: rostered == ours; correlate by `WT_SESSION`, never guess; provenance: push
+    wins for state.** A claude correlated to a tab in OUR published roster (its shell == the ConPTY
+    root of one of our tabs) is running in one of our windows, so it is **OURS** (`RunningApp::
+    Agentmaster`) and bindable **regardless of `AM_SESSION`** — a hand-typed `+`-tab claude does NOT
+    reliably inherit `AM_SESSION` (WT regenerates a tab's env; see Gotchas), so the **roster
+    correlation is the authoritative bind signal**, and `AM_SESSION` is only the secondary signal
+    for the census of NON-rostered claudes (a background daemon we spawned, or telling our instance
+    from another's / a real WindowsTerminal). Correlation keys on the **exact `WT_SESSION`** (==
+    `ITerminalConnection::SessionId()`) — never PPID ancestry, never the stale tab cwd, never "the
+    active tab". `ObserveClaude` **enriches facts but NEVER sets `SessionState`** — push hooks + the
+    transcript tail own state (Rule #1/#7); a hooked and an un-hooked claude converge on the same
+    record. The observer **only reads** (PEB / Toolhelp / filesystem) — it must NEVER write to a
+    shell's stdin (the invisibility invariant). The transient enrichment fields are **never
+    persisted** (`Persistence.cpp`); the observer re-derives them each run.
+14. **Conversation identity is by transcript CREATION time ≈ process start, not newest-mtime.** A
+    claude's OWN transcript is created when it first writes — at/after its process start.
+    `ResolveSessionId` (for a bare claude with no explicit `--session-id`/`--resume <guid>`) picks
+    the cwd's transcript whose **creation time is closest to (and not significantly before) the
+    claude's start**, and REJECTS transcripts created before it started. This is what keeps **two
+    claudes sharing one cwd** bound to their OWN conversations (newest-mtime collapses them onto
+    whichever is momentarily most active), and resolves a **never-prompted** claude to `""` (no card
+    until its first prompt — §11d) rather than collapsing it onto a stale leftover transcript. An
+    explicit `--session-id` / `--resume <guid>` is authoritative and wins (collision-free, known
+    before the transcript exists).
 
 ## Conventions
 
