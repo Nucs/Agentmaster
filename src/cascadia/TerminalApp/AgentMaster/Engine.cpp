@@ -115,6 +115,18 @@ namespace Agentmaster
             //    and bypasses the .cmd shim — so no double-wiring.
             try
             {
+                // Fleet Observer (OBSERVER.md §7): mint the per-process ownership stamp and export
+                // it as AM_SESSION FIRST — before the best-effort shim/discovery setup below (which
+                // can throw) — so EVERY ConPTY child is stamped even if the shim author fails. Every
+                // tab (Launched or a hand-typed `+`) inherits our process env block (the same
+                // mechanism that delivers CCMGR_HOOK_PIPE to a hand-typed claude — reloadEnviron-
+                // mentVariables forced OFF), so its claude.exe carries AM_SESSION and the observer
+                // classifies it RunningApp::Agentmaster. NewSessionId() is just a plain lowercase
+                // hyphenated GUID generator (CoCreateGuid).
+                e->amSession = NewSessionId();
+                ::SetEnvironmentVariableW(L"AM_SESSION", e->amSession.c_str());
+                AppendStateLog(L"hooks.log", L"[engine] AM_SESSION " + e->amSession + L"\n");
+
                 WriteBridgeDiscovery(pipeName);
                 const auto stateDir = AgentmasterStateDir();
                 const auto hookFiles = MaterializeSharedHookFiles(stateDir, LoadAppSettings());

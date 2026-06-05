@@ -49,6 +49,16 @@ namespace Agentmaster
         std::shared_ptr<Scheduler> scheduler;
         std::shared_ptr<SessionScanner> scanner; // the interval reconciler (PULL; complements the bridge's PUSH)
 
+        // Agentmaster (Fleet Observer, OBSERVER.md §7): the per-PROCESS ownership stamp. Minted once
+        // in SharedEngine() and exported as the AM_SESSION env var on our process, so every ConPTY
+        // child carries it — a Manager-Launched claude AND a hand-typed `+`-tab claude both inherit
+        // our env block (reloadEnvironmentVariables is forced OFF; see SharedEngine). The
+        // ProcessObserver (S-lane) reads a claude's AM_SESSION to classify RunningApp: == ours ->
+        // Agentmaster (correlate + bind); a bare WT_SESSION with no/foreign AM_SESSION ->
+        // WindowsTerminal/Other (external, observe-only). Per-process GUID, so two Agentmaster
+        // instances stay cleanly separable (each binds only its own).
+        std::wstring amSession;
+
         // Restore (loading sessions.json + re-launching the saved fleet) is a PROCESS-once
         // action — the registry is now shared, so if every window's _OnFirstLayout restored,
         // a second window would re-launch the same conversations into the one registry (dup
