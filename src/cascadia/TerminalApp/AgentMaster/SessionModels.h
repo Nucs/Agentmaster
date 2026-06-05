@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "Activity.h" // RunningApp (Fleet Observer live-enrichment field on SessionInfo)
+
 namespace Agentmaster
 {
     // Hook-driven lifecycle of a Claude Code session. Authoritative state comes from
@@ -143,6 +145,25 @@ namespace Agentmaster
         // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
         // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
         std::wstring pendingConfirmPromptId;
+
+        // --- Fleet Observer live enrichment (OBSERVER.md §5c) ---
+        // ALL transient (NOT persisted — Persistence.cpp must not write them; PIDs / WT_SESSION /
+        // AM_SESSION / process facts are per-run and re-derived each launch by the observer). Filled
+        // by SessionRegistry::ObserveClaude from the S-lane's out-of-band PEB read; provenance only,
+        // never authoritative state (push hooks + the transcript tail own SessionState).
+        uint32_t pid{}; // claude.exe PID (0 = unknown / not running here)
+        std::wstring liveCwd; // PEB cwd (authoritative live dir; tracks `cd` across a relaunch)
+        std::wstring model; // --model / CLAUDE_CODE_* (drives Manager/overlay adornments)
+        std::wstring effort; // --effort / CLAUDE_CODE_EFFORT_LEVEL
+        std::wstring permissionMode; // --permission-mode
+        std::wstring sessionName; // CLAUDE_CODE_SESSION_NAME (bg jobs)
+        bool background{}; // a background/daemon claude
+        RunningApp runningApp{ RunningApp::Unknown }; // ours (Agentmaster) vs external (WindowsTerminal)
+        std::wstring amSession; // owning Agentmaster instance stamp (empty if external)
+        bool hookWired{}; // have we received ANY hook for this id this run? (provenance)
+        int64_t lastHookUnixMs{}; // last authoritative push (hook) — provenance vs the pull
+        int64_t lastObservedUnixMs{}; // last pull observation (the S-lane survey)
+
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};
     };

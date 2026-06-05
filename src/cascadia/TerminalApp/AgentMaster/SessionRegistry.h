@@ -72,6 +72,18 @@ namespace Agentmaster
         // advance handler (only on a clean Stop -> WaitingForInput), both outside the lock.
         void OnHookEvent(const HookMessage& msg);
 
+        // Fleet Observer (OBSERVER.md §9): the PULL upsert. Merge process facts the S-lane read
+        // out-of-band (PEB cwd / cmdline / env) into the session record — provenance-aware: it
+        // ENRICHES (pid / liveCwd / model / effort / permissionMode / background / runningApp /
+        // amSession / tabToken / live) but NEVER sets SessionState (push hooks + the transcript
+        // tail own state, Rule #1/#7). On first sight of a claude we did not Launch it creates an
+        // `external` record and fires the adoption handlers (so the app binds its ConPTY by
+        // tabToken, same promotion as a hook SessionStart); thereafter it idempotently merges, and
+        // a steady-state re-observe with unchanged facts is a NO-OP (no observer / persist / UI
+        // churn). No-op for an empty sessionId (a correlated-but-never-prompted claude has no
+        // conversation id yet — §11d). Thread-safe.
+        void ObserveClaude(const ObservedClaude& o);
+
         // Mutate a session's Flight Plan / autopilot under the lock (used by the scheduler
         // and UI). The mutator runs while holding the lock; the post-change snapshot is
         // delivered to the observer afterwards. Returns false if the id is unknown.

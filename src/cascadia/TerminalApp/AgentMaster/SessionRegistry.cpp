@@ -163,6 +163,11 @@ namespace Agentmaster
             }
 
             auto& s = it->second;
+            // Provenance (Fleet Observer, OBSERVER.md §9): a hook is the authoritative PUSH. Record
+            // that this session is hook-wired this run + when the last push arrived, so the observer
+            // can LOG provenance (push vs pull) without ever overriding state.
+            s.hookWired = true;
+            s.lastHookUnixMs = (msg.ts != 0) ? msg.ts : NowMs();
             // Remember the hosting ConPTY (WT_SESSION) from EVERY hook — the stable tab identity the
             // app reconciles against (survives an in-session /resume that changes the session id).
             if (!msg.tabToken.empty())
@@ -272,6 +277,111 @@ namespace Agentmaster
             catch (...)
             {
             }
+        }
+    }
+
+    void SessionRegistry::ObserveClaude(const ObservedClaude& o)
+    {
+        if (o.sessionId.empty())
+        {
+            return; // a correlated-but-never-prompted claude has no conversation id yet (§11d)
+        }
+        SessionInfo snapshot;
+        bool created = false;
+        bool changed = false;
+        {
+            std::lock_guard guard{ _mtx };
+            auto it = _sessions.find(o.sessionId);
+            if (it == _sessions.end())
+            {
+                // First sight of a claude we did NOT Launch (a Manager-Launched one is already
+                // registered, so it'd be found). Mirror the hook SessionStart creation: minimal
+                // external + live record. ObserveClaude NEVER sets SessionState — leave it Idle
+                // (the default); push hooks + the transcript tail own state (Rule #1/#7).
+                SessionInfo s;
+                s.id = o.sessionId;
+                s.workingDir = o.cwd;
+                s.state = SessionState::Idle;
+                s.external = true;
+                s.live = true;
+                _order.push_back(o.sessionId);
+                it = _sessions.emplace(o.sessionId, std::move(s)).first;
+                created = true;
+            }
+            auto& s = it->second;
+
+            // Enrichment merge (facts, never state). Track whether anything MEANINGFUL changed so a
+            // steady-state re-observe is a no-op (no observer / persist / UI churn each heartbeat).
+            const auto assign = [&changed](auto& field, const auto& value) {
+                if (field != value)
+                {
+                    field = value;
+                    changed = true;
+                }
+            };
+            if (!o.tabToken.empty())
+            {
+                assign(s.tabToken, o.tabToken); // the correlation key; never clobber with empty
+            }
+            assign(s.amSession, o.amSession);
+            assign(s.runningApp, o.runningApp);
+            assign(s.pid, o.pid);
+            assign(s.liveCwd, o.cwd);
+            assign(s.model, o.model);
+            assign(s.effort, o.effort);
+            assign(s.permissionMode, o.permissionMode);
+            assign(s.background, o.background);
+            assign(s.sessionName, o.sessionName);
+            if (!s.live)
+            {
+                s.live = true; // an observed claude is, by definition, running (Rule #7)
+                changed = true;
+            }
+            if (s.workingDir.empty() && !o.cwd.empty())
+            {
+                s.workingDir = o.cwd; // the persisted M-axis; liveCwd alone tracks a live `cd`
+                changed = true;
+            }
+            // Provenance timestamp: always refreshed, but it alone is NOT a "change" (it must not
+            // trigger the observer/persist cascade every heartbeat).
+            s.lastObservedUnixMs = o.observedUnixMs;
+
+            changed = changed || created;
+            snapshot = s;
+        }
+
+        if (created)
+        {
+            // Fire the bind/adoption handlers (outside the lock) so the app correlates the tabToken
+            // (WT_SESSION) to its ConPTY and binds an injector — the same promotion path as a hook
+            // SessionStart. Fan out to every window (M9); whichever hosts this tab binds it, the rest
+            // no-op. Only on creation: a steady-state re-observe must not re-fire adoption.
+            std::vector<AdoptionHandler> adopters;
+            {
+                std::lock_guard guard{ _mtx };
+                adopters.reserve(_adopters.size());
+                for (const auto& a : _adopters)
+                {
+                    adopters.push_back(a.second);
+                }
+            }
+            for (auto& adopt : adopters)
+            {
+                if (adopt)
+                {
+                    try
+                    {
+                        adopt(o.sessionId, o.cwd, o.tabToken);
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+            }
+        }
+        if (changed)
+        {
+            _notify(snapshot, HookEvent::Unknown);
         }
     }
 

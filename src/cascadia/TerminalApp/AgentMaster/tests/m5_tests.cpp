@@ -383,6 +383,75 @@ static void TestTypedCapture()
     CHECK(s && s->queue.size() == 5, "empty prompt body records nothing");
 }
 
+// Fleet Observer O3 (OBSERVER.md §9): the provenance-aware PULL upsert. A claude observed
+// out-of-band enriches its record (facts) but NEVER overrides hook-owned state; first sight
+// creates an external+live record and fires adoption; a steady-state re-observe is a no-op.
+static void TestObserveClaude()
+{
+    std::wprintf(L"SessionRegistry::ObserveClaude (Fleet Observer pull-upsert + provenance):\n");
+    SessionRegistry reg;
+    std::atomic<int> observed{ 0 };
+    std::atomic<int> adopted{ 0 };
+    reg.AddObserver([&](const SessionInfo&, HookEvent) { observed.fetch_add(1); });
+    reg.AddAdoptionHandler([&](const std::wstring&, const std::wstring&, const std::wstring&) { adopted.fetch_add(1); });
+
+    // 1. First observe of an unknown id CREATES an external + live record and enriches it.
+    ObservedClaude o;
+    o.sessionId = L"obs-1";
+    o.tabToken = L"wt-1";
+    o.amSession = L"am-1";
+    o.cwd = L"K:/proj";
+    o.pid = 1234;
+    o.runningApp = RunningApp::Agentmaster;
+    o.model = L"opus";
+    o.effort = L"high";
+    o.observedUnixMs = 1000;
+    reg.ObserveClaude(o);
+    auto s = reg.Get(L"obs-1");
+    CHECK(s.has_value(), "ObserveClaude creates a record on first sight");
+    CHECK(s && s->external, "observed-into-existence record is external");
+    CHECK(s && s->live, "observed record is live");
+    CHECK(s && s->pid == 1234 && s->liveCwd == L"K:/proj" && s->tabToken == L"wt-1", "facts enriched (pid/liveCwd/tabToken)");
+    CHECK(s && s->model == L"opus" && s->effort == L"high" && s->amSession == L"am-1", "facts enriched (model/effort/amSession)");
+    CHECK(s && s->runningApp == RunningApp::Agentmaster, "runningApp enriched");
+    CHECK(s && s->workingDir == L"K:/proj", "workingDir filled from cwd when empty");
+    CHECK(s && s->state == SessionState::Idle, "ObserveClaude does NOT set state (record defaults Idle)");
+    CHECK(s && s->lastObservedUnixMs == 1000, "lastObservedUnixMs stamped");
+    CHECK(adopted.load() == 1, "adoption fired for a newly-observed (un-Launched) session");
+    const int obsAfterCreate = observed.load();
+    CHECK(obsAfterCreate >= 1, "observer fired on creation");
+
+    // 2. Re-observing identical facts (only the timestamp moves) is a NO-OP — no churn.
+    o.observedUnixMs = 2000;
+    reg.ObserveClaude(o);
+    CHECK(adopted.load() == 1, "no re-adoption on an identical re-observe");
+    CHECK(observed.load() == obsAfterCreate, "identical re-observe fires NO observer (no persist/UI churn)");
+    CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->lastObservedUnixMs == 2000, "lastObservedUnixMs advances quietly even with no notify");
+
+    // 3. Provenance: a hook drives state; a later observation must NOT clobber it.
+    reg.OnHookEvent(UPS(L"obs-1", L"do the thing")); // push -> Running
+    CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->state == SessionState::Running, "push hook set state Running");
+    CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->hookWired, "hookWired set once a hook arrived");
+    CHECK(reg.Get(L"obs-1") && reg.Get(L"obs-1")->lastHookUnixMs > 0, "lastHookUnixMs set by OnHookEvent");
+    const int obsBeforeChange = observed.load();
+    o.cwd = L"K:/proj2"; // a `cd` + relaunch
+    o.model = L"sonnet";
+    o.observedUnixMs = 3000;
+    reg.ObserveClaude(o);
+    s = reg.Get(L"obs-1");
+    CHECK(s && s->liveCwd == L"K:/proj2" && s->model == L"sonnet", "a real fact change is merged");
+    CHECK(s && s->workingDir == L"K:/proj", "workingDir (M-axis) is NOT moved by a live cd (liveCwd tracks it)");
+    CHECK(s && s->state == SessionState::Running, "ObserveClaude did NOT clobber the hook-owned state (push wins)");
+    CHECK(observed.load() > obsBeforeChange, "a genuine fact change fires the observer");
+
+    // 4. An empty sessionId is a no-op (a correlated-but-never-prompted claude has no id yet).
+    const auto countBefore = reg.Count();
+    ObservedClaude noId;
+    noId.cwd = L"K:/x";
+    reg.ObserveClaude(noId);
+    CHECK(reg.Count() == countBefore, "ObserveClaude no-ops for an empty sessionId");
+}
+
 static void TestSpawnBuilders()
 {
     std::wprintf(L"ClaudeSpawn builders:\n");
@@ -1374,6 +1443,7 @@ int wmain()
     TestRegistry();
     TestRegistryFanout();
     TestTypedCapture();
+    TestObserveClaude();
     TestSpawnBuilders();
     TestScheduler();
     TestTranscriptScan();
