@@ -232,11 +232,12 @@ namespace Agentmaster
 
     void ProcessObserver::_worker() noexcept
     {
+        bool forced = true; // the first survey is always a full one (no prior state to debounce against)
         for (;;)
         {
             try
             {
-                _surveyOnce();
+                _surveyOnce(forced);
             }
             catch (...)
             {
@@ -246,10 +247,13 @@ namespace Agentmaster
             {
                 return;
             }
-            // Always heartbeat (unlike the scanner's sleep-forever-when-idle): a claude can be BORN
-            // in a tab whose roster never changed (the user typed `claude` into an existing shell),
-            // and only a periodic survey catches that. Wake() collapses the wait on a roster change.
-            _cv.wait_for(lk, std::chrono::milliseconds(kObserverHeartbeatMs), [this] { return !_running.load() || _woken; });
+            // Tick on the FAST cadence (cheap µs liveness between full surveys; O7). The FULL survey
+            // still runs at the heartbeat — a claude can be BORN in a tab whose roster never changed
+            // (the user typed `claude` into an existing shell), and only a periodic full survey catches
+            // that. A Wake (roster change / a known PID died) collapses the wait AND forces the next
+            // pass to be full, so a fresh claude / a closed tab is caught within ~one fast tick.
+            _cv.wait_for(lk, std::chrono::milliseconds(kObserverFastTickMs), [this] { return !_running.load() || _woken; });
+            forced = _woken; // woke early == something changed -> force a full survey
             _woken = false;
             if (!_running.load())
             {
@@ -258,9 +262,55 @@ namespace Agentmaster
         }
     }
 
-    void ProcessObserver::_surveyOnce()
+    void ProcessObserver::_surveyOnce(bool forcedByWake)
     {
         const int64_t now = NowMs();
+
+        // O7 debounce. Compute the merged-roster signature (cheap — roster lock only) and decide if
+        // this pass needs the FULL Toolhelp snapshot: forced (a Wake / the first pass), the roster
+        // changed, or kObserverHeartbeatMs elapsed since the last full survey (the birth-detection
+        // floor — catches a claude typed into a stable tab). Otherwise, on a fast tick, if every
+        // correlated (pid,start) is still alive, SKIP the snapshot (steady-state µs); if one died or
+        // its PID was reused, fall through to a full survey to reclassify.
+        std::wstring rosterSig;
+        {
+            std::lock_guard lk{ _rosterMtx };
+            std::vector<std::wstring> entries;
+            for (const auto& [win, tabs] : _rosterByWindow)
+            {
+                for (const auto& t : tabs)
+                {
+                    if (!t.wtSession.empty())
+                    {
+                        entries.push_back(t.wtSession + L":" + std::to_wstring(t.shellPid));
+                    }
+                }
+            }
+            std::sort(entries.begin(), entries.end());
+            for (const auto& e : entries)
+            {
+                rosterSig += e;
+                rosterSig += L";";
+            }
+        }
+        const bool dueFull = forcedByWake || rosterSig != _lastRosterSig || (now - _lastFullSurveyMs) >= kObserverHeartbeatMs;
+        if (!dueFull)
+        {
+            bool allAlive = true;
+            for (const auto& [pid, start] : _lastCorrelated)
+            {
+                if (start == 0 || ProcessStartUnixMs(pid) != start) // dead (-> 0) or PID reused (-> different start)
+                {
+                    allAlive = false;
+                    break;
+                }
+            }
+            if (allAlive)
+            {
+                return; // nothing changed -> keep the last published tables; µs cost
+            }
+        }
+
         const auto snap = SnapshotProcesses(); // the one ~10 ms call; reused for census + every tab tree
 
         // 1) Read facts (PEB cwd/cmdline/env) + an initial AM_SESSION-based classification for every
@@ -278,6 +328,14 @@ namespace Agentmaster
             ClaudeProcessFacts f = ReadClaudeFacts(e.pid);
             f.parentPid = e.ppid;
             f.runningApp = ClassifyRunningApp(f.amSession, f.wtSession, _amSession);
+            // O7: a fully-empty PEB read (cwd AND commandline) means a denied / elevated /
+            // cross-integrity (or WOW64) target — it can't be correlated/bound, so it stays
+            // observe-only. Log ONCE per pid so a soak shows why an elevated claude never binds,
+            // without spamming every survey. (ProcessInspect already guards the read -> empty, not garbage.)
+            if (f.cwd.empty() && f.commandline.empty() && _pebDeniedLogged.insert(e.pid).second)
+            {
+                AppendStateLog(L"hooks.log", L"[observer] PEB read denied pid=" + std::to_wstring(e.pid) + L" (elevated/cross-integrity/WOW64?) -> observe-only\n");
+            }
             factsByPid.emplace(e.pid, std::move(f));
         }
 
@@ -494,6 +552,19 @@ namespace Agentmaster
                 }
             }
             _lastActivityByWt.swap(nextActivity);
+        }
+
+        // O7 debounce bookkeeping: remember this FULL survey's roster signature + correlated
+        // (pid, start) so the next fast tick can cheap-skip when nothing changed. (Captured BEFORE the
+        // publish swap empties correlatedPids.)
+        _lastFullSurveyMs = now;
+        _lastRosterSig = rosterSig;
+        _lastCorrelated.clear();
+        _lastCorrelated.reserve(correlatedPids.size());
+        for (const auto pid : correlatedPids)
+        {
+            const auto it = factsByPid.find(pid);
+            _lastCorrelated.emplace_back(pid, it != factsByPid.end() ? it->second.startUnixMs : 0);
         }
 
         // 5) Publish the snapshots (copy-out readers hold no lock while iterating).

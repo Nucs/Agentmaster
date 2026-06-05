@@ -82,9 +82,10 @@ namespace Agentmaster
             // CHECK is WinRT (walks tabs), so it is delegated to per-window probes the scanner ticks.
             e->scanner = std::make_shared<SessionScanner>(e->registry);
             e->scanner->Start();
-            // Arm transcript discovery: from now on the scanner indexes every NEW Claude transcript
-            // (a hand-typed `claude` whose hooks never wired). Each window's probe correlates the
-            // index to its own tabs by working directory — the one detection path no shell can shadow.
+            // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
+            // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
+            // `claude` in a fresh tab is then correlated out-of-band by the observer). The transcript-
+            // discovery ENUMERATION this used to also start is retired (O7); the observer subsumes it.
             e->scanner->ArmDiscovery();
             {
                 auto scan = e->scanner;

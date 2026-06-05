@@ -26,6 +26,8 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "Activity.h" // CorrelationRow, TabActivityRow, TabRosterEntry, ObservedClaude
@@ -34,7 +36,8 @@ namespace Agentmaster
 {
     class SessionRegistry;
 
-    inline constexpr int64_t kObserverHeartbeatMs = 2000; // §8c default full-survey cadence
+    inline constexpr int64_t kObserverHeartbeatMs = 2000; // §8c FULL-survey cadence (the birth-detection floor; preserved by O7's debounce)
+    inline constexpr int64_t kObserverFastTickMs = 1000; // O7: cheap (µs) liveness cadence BETWEEN full surveys
     inline constexpr int64_t kObserverCensusKeepaliveMs = 15000; // re-log an unchanged census at most this often
 
     class ProcessObserver
@@ -67,7 +70,10 @@ namespace Agentmaster
 
     private:
         void _worker() noexcept; // heartbeat + Wake() loop (mirrors SessionScanner::_worker)
-        void _surveyOnce(); // ONE pass: snapshot -> census -> classify -> correlate roster -> publish
+        // ONE pass: snapshot -> census -> classify -> correlate roster -> publish. `forcedByWake` (a
+        // roster change / pid-death Wake, or the very first survey) bypasses the O7 debounce so the
+        // pass always does the full Toolhelp snapshot; an unforced fast tick may cheap-skip (§8c).
+        void _surveyOnce(bool forcedByWake);
 
         std::shared_ptr<SessionRegistry> _registry;
         std::wstring _amSession;
@@ -94,5 +100,15 @@ namespace Agentmaster
         // events (log a tab's pwsh -> ClaudeCode -> pwsh moves; O6). Keyed by wtSession, rebuilt each
         // survey so a closed tab's entry drops.
         std::unordered_map<std::wstring, TabActivity> _lastActivityByWt;
+
+        // Debounce (O7, worker-thread-only, no lock). The FULL Toolhelp survey runs at most every
+        // kObserverHeartbeatMs; between full surveys the worker ticks at kObserverFastTickMs and, when
+        // the roster is byte-identical AND every correlated (pid,start) pair is still alive, SKIPS the
+        // snapshot (a µs liveness check) — steady state is µs. A Wake or a dead correlated claude
+        // forces a full survey. Keeping the FULL cadence at the heartbeat preserves birth detection.
+        int64_t _lastFullSurveyMs{ 0 };
+        std::wstring _lastRosterSig; // (wtSession:shellPid) of the last full survey's merged roster
+        std::vector<std::pair<uint32_t, int64_t>> _lastCorrelated; // (pid, startUnixMs) correlated last full survey
+        std::unordered_set<uint32_t> _pebDeniedLogged; // pids whose PEB read was denied — logged once (O7)
     };
 }
