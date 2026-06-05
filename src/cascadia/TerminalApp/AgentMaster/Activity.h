@@ -75,6 +75,7 @@ namespace Agentmaster
         uint32_t claudePid{};
         std::wstring cwd;
         std::wstring sessionId; // resolved from transcript; EMPTY until the first prompt (§11d)
+        std::wstring ownerWindowId; // the window whose roster hosts this tab (§19-Q1 attribution)
         RunningApp runningApp{ RunningApp::Unknown };
         bool alive{ true };
         int64_t observedUnixMs{};
@@ -109,6 +110,7 @@ namespace Agentmaster
         std::wstring sessionId; // key (may be empty until the transcript exists — see §11d)
         std::wstring tabToken; // == wtSession (SessionInfo::tabToken)
         std::wstring amSession;
+        std::wstring ownerWindowId; // the owning window (roster key / AM_SESSION suffix; §19-Q1)
         std::wstring cwd;
         uint32_t pid{};
         RunningApp runningApp{ RunningApp::Unknown };

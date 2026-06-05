@@ -405,12 +405,14 @@ static void TestObserveClaude()
     o.runningApp = RunningApp::Agentmaster;
     o.model = L"opus";
     o.effort = L"high";
+    o.ownerWindowId = L"win-7";
     o.observedUnixMs = 1000;
     reg.ObserveClaude(o);
     auto s = reg.Get(L"obs-1");
     CHECK(s.has_value(), "ObserveClaude creates a record on first sight");
     CHECK(s && s->external, "observed-into-existence record is external");
     CHECK(s && s->live, "observed record is live");
+    CHECK(s && s->ownerWindowId == L"win-7", "ownerWindowId enriched (window attribution)");
     CHECK(s && s->pid == 1234 && s->liveCwd == L"K:/proj" && s->tabToken == L"wt-1", "facts enriched (pid/liveCwd/tabToken)");
     CHECK(s && s->model == L"opus" && s->effort == L"high" && s->amSession == L"am-1", "facts enriched (model/effort/amSession)");
     CHECK(s && s->runningApp == RunningApp::Agentmaster, "runningApp enriched");
@@ -1284,6 +1286,13 @@ static void TestProcessInspectParse()
     CHECK(ClassifyRunningApp(L"am-2", L"wt-1", L"am-1") == RunningApp::Other, "classify a FOREIGN AM_SESSION -> Other (never ours)");
     CHECK(ClassifyRunningApp(L"", L"wt-1", L"") == RunningApp::WindowsTerminal, "classify with our stamp unminted: empty am + WT -> WindowsTerminal");
     CHECK(ClassifyRunningApp(L"", L"", L"") == RunningApp::Other, "classify all-empty -> Other (no false Agentmaster)");
+
+    // §19-Q1: AM_SESSION may be "<guid>:<windowId>" (a Launched session) — classify on the GUID prefix.
+    CHECK(ClassifyRunningApp(L"am-1:win-9", L"wt-1", L"am-1") == RunningApp::Agentmaster, "classify ours with :<windowId> suffix -> Agentmaster (prefix match)");
+    CHECK(ClassifyRunningApp(L"am-2:win-9", L"wt-1", L"am-1") == RunningApp::Other, "classify a FOREIGN am with :<windowId> -> Other");
+    CHECK(WindowIdFromAmSession(L"am-1:win-9") == L"win-9", "extract windowId from <guid>:<windowId>");
+    CHECK(WindowIdFromAmSession(L"am-1").empty(), "bare <guid> has no windowId");
+    CHECK(WindowIdFromAmSession(L"").empty(), "empty AM_SESSION -> no windowId");
 }
 
 static FILETIME UnixMsToFileTime(int64_t ms)
@@ -1353,13 +1362,22 @@ static void TestTranscriptResolve()
         CHECK(PickNewestTranscript(c, 50) == L"a", "tie-break: other start picks the other");
     }
     {
-        // A stale transcript outside the tie window of the newest is ignored even if its ctime is
-        // closer to start.
+        // IDENTITY is by creation time, not activity: a claude resolves to the transcript CREATED
+        // near its start (its own), even when ANOTHER transcript in the cwd is more recently written.
         std::vector<TranscriptCandidate> c{
-            { L"stale", 1000, 4000 },
-            { L"live", 9000, 100 },
+            { L"mine", 5200, 5000 }, // created at my start (5000), lightly written
+            { L"other", 9000, 100 }, // created long before me (100), very active (mtime 9000)
         };
-        CHECK(PickNewestTranscript(c, 4000) == L"live", "stale (out-of-band) candidate ignored despite closer ctime");
+        CHECK(PickNewestTranscript(c, 5000) == L"mine", "resolve to the transcript created near MY start, not the busiest other");
+    }
+    {
+        // Never-prompted: only transcripts predating this claude's start exist -> resolve to "" (no
+        // collapse onto a stale / another claude's transcript). The same-cwd, 0-message case (§11d).
+        std::vector<TranscriptCandidate> c{
+            { L"old1", 1000, 100 },
+            { L"old2", 2000, 500 },
+        };
+        CHECK(PickNewestTranscript(c, 8000).empty(), "no transcript created at/after start -> empty (never-prompted; no stale collapse)");
     }
 
     // --- ResolveSessionIdIn over a temp projects root (real glob) ---
@@ -1375,9 +1393,14 @@ static void TestTranscriptResolve()
         MakeJsonl(dir + L"\\older-id.jsonl", "{}", 1000, 1000);
         MakeJsonl(dir + L"\\newer-id.jsonl", "{}", 9000, 9000);
 
-        CHECK(ResolveSessionIdIn(projRoot, cwd, 0) == L"newer-id", "ResolveSessionIdIn picks the newest transcript in the encoded dir");
+        CHECK(ResolveSessionIdIn(projRoot, cwd, 0) == L"newer-id", "ResolveSessionIdIn picks the newest transcript in the encoded dir (no start hint)");
         CHECK(ResolveSessionIdIn(projRoot, L"C:\\Nope\\missing", 0).empty(), "ResolveSessionIdIn empty when the encoded dir has no transcripts");
         CHECK(ResolveSessionIdIn(L"", cwd, 0).empty(), "ResolveSessionIdIn empty for an empty projects root");
+        // start-aware (the same-cwd disambiguation over a real glob): resolve to the transcript
+        // created nearest the claude's start; "" when none is at/after it.
+        CHECK(ResolveSessionIdIn(projRoot, cwd, 1000) == L"older-id", "start near older's ctime -> older-id");
+        CHECK(ResolveSessionIdIn(projRoot, cwd, 9000) == L"newer-id", "start near newer's ctime -> newer-id");
+        CHECK(ResolveSessionIdIn(projRoot, cwd, 50000).empty(), "start after all transcripts -> empty (never-prompted)");
 
         std::filesystem::remove_all(std::filesystem::path{ root }, ec);
     }

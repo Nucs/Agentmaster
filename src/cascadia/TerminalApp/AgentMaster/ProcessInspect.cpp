@@ -28,6 +28,11 @@ namespace
     constexpr uintptr_t kParamsEnvironment = 0x80; // .Environment (PVOID)
     constexpr uintptr_t kParamsEnvironmentSize = 0x3F0; // .EnvironmentSize (ULONG_PTR, bytes)
 
+    // A claude's own transcript is created when it first writes — at/after its process start. Allow
+    // this much slack before start (clock resolution / measurement) when deciding "is this MY
+    // transcript"; anything created earlier than (start - skew) belongs to another/older claude.
+    constexpr int64_t kTranscriptStartSkewMs = 2000;
+
     struct UnicodeStr
     {
         USHORT Length; // bytes in use (NOT including a terminator)
@@ -609,12 +614,29 @@ namespace Agentmaster
         facts.background = background;
     }
 
+    std::wstring WindowIdFromAmSession(std::wstring_view amSession)
+    {
+        const auto colon = amSession.find(L':');
+        if (colon == std::wstring_view::npos)
+        {
+            return {}; // a bare "<processGuid>" (hand-typed `+`-tab claude) carries no window id
+        }
+        return std::wstring{ amSession.substr(colon + 1) };
+    }
+
     RunningApp ClassifyRunningApp(std::wstring_view amSession, std::wstring_view wtSession, std::wstring_view ourAmSession)
     {
-        // OBSERVER.md §7: our stamp -> Agentmaster; a bare WT_SESSION (no AM_SESSION) -> external
-        // WindowsTerminal; anything else (incl. a FOREIGN AM_SESSION) -> Other. A foreign-instance
-        // claude is never bound regardless, because its wtSession isn't in this window's roster.
-        if (!ourAmSession.empty() && !amSession.empty() && amSession == ourAmSession)
+        // OBSERVER.md §7 / §19-Q1: our stamp -> Agentmaster; a bare WT_SESSION (no AM_SESSION) ->
+        // external WindowsTerminal; anything else (incl. a FOREIGN AM_SESSION) -> Other. AM_SESSION
+        // is "<processGuid>" for a hand-typed `+`-tab claude (it inherits our process env) or
+        // "<processGuid>:<windowId>" for a Manager-Launched one (the launching window appends its
+        // id via spec.env), so match on the GUID PREFIX — both forms are ours. A foreign-instance
+        // claude is never bound regardless (its wtSession isn't in this window's roster).
+        const auto guidPrefix = [](std::wstring_view s) -> std::wstring_view {
+            const auto colon = s.find(L':');
+            return colon == std::wstring_view::npos ? s : s.substr(0, colon);
+        };
+        if (!ourAmSession.empty() && !amSession.empty() && guidPrefix(amSession) == guidPrefix(ourAmSession))
         {
             return RunningApp::Agentmaster;
         }
@@ -707,25 +729,23 @@ namespace Agentmaster
         {
             return {};
         }
-        int64_t maxMtime = candidates[0].mtimeMs;
-        for (const auto& c : candidates)
+        if (startUnixMs > 0)
         {
-            if (c.mtimeMs > maxMtime)
+            // IDENTITY by creation time: a claude's OWN transcript is created when it first writes —
+            // at/after its process start. Pick the candidate whose CREATION time is closest to (and
+            // not significantly before) the claude's start, and REJECT transcripts created well
+            // before it started (those belong to OTHER claudes / are stale). This is what keeps two
+            // claudes sharing one cwd bound to their OWN conversation, and resolves a never-written-
+            // yet claude to "" rather than collapsing it onto a stale transcript (§11d / §13). mtime
+            // (activity) does NOT determine identity, so it is deliberately not used on this path.
+            const TranscriptCandidate* best = nullptr;
+            int64_t bestDelta = 0;
+            for (const auto& c : candidates)
             {
-                maxMtime = c.mtimeMs;
-            }
-        }
-        const TranscriptCandidate* best = nullptr;
-        int64_t bestDelta = 0;
-        for (const auto& c : candidates)
-        {
-            if (maxMtime - c.mtimeMs > tieWindowMs)
-            {
-                continue; // not in the recently-written band -> not the active conversation
-            }
-            if (startUnixMs > 0)
-            {
-                // tie-break: the transcript created closest to this claude's start time
+                if (c.ctimeMs < startUnixMs - kTranscriptStartSkewMs)
+                {
+                    continue; // created before this claude started -> not its own
+                }
                 const int64_t d = c.ctimeMs >= startUnixMs ? c.ctimeMs - startUnixMs : startUnixMs - c.ctimeMs;
                 if (best == nullptr || d < bestDelta)
                 {
@@ -733,9 +753,16 @@ namespace Agentmaster
                     bestDelta = d;
                 }
             }
-            else if (best == nullptr || c.mtimeMs > best->mtimeMs || (c.mtimeMs == best->mtimeMs && c.ctimeMs > best->ctimeMs))
+            return best != nullptr ? best->stem : std::wstring{};
+        }
+        // No start hint (startUnixMs == 0): fall back to the newest by mtime (tie-broken by ctime).
+        (void)tieWindowMs; // retained for API compat; the start>0 path keys on ctime, not an mtime band
+        const TranscriptCandidate* best = nullptr;
+        for (const auto& c : candidates)
+        {
+            if (best == nullptr || c.mtimeMs > best->mtimeMs || (c.mtimeMs == best->mtimeMs && c.ctimeMs > best->ctimeMs))
             {
-                best = &c; // no start hint -> the strictly newest
+                best = &c;
             }
         }
         return best != nullptr ? best->stem : std::wstring{};

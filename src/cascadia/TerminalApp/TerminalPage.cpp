@@ -23,6 +23,8 @@
 #include "AgentMaster/HookWire.h"
 #include "AgentMaster/HooksBridge.h"
 #include "AgentMaster/Persistence.h"
+#include "AgentMaster/ProcessInspect.h"
+#include "AgentMaster/ProcessObserver.h"
 #include "AgentMaster/Scheduler.h"
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionScanner.h"
@@ -255,6 +257,12 @@ namespace winrt::TerminalApp::implementation
         if (_scanner && _livenessToken)
         {
             _scanner->RemoveLivenessProbe(_livenessToken);
+        }
+        // Fleet Observer (OBSERVER.md §10/§12): drop THIS window's tab roster from the process-wide
+        // observer so a closed window's tabs aren't surveyed/correlated after teardown (Rule #10).
+        if (_observer && !_windowId.empty())
+        {
+            _observer->UnpublishWindow(_windowId);
         }
         // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5): this window is gone — drop it
         // from the process-wide live set, which rewrites open-windows.json (skip-empty: the last window
@@ -761,6 +769,7 @@ namespace winrt::TerminalApp::implementation
         _hooksBridge = engine.bridge;
         _scheduler = engine.scheduler;
         _scanner = engine.scanner;
+        _observer = engine.observer; // Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §10)
 
         // M10 (PERSISTENCE.md §13): claim this window's persisted record — an existing
         // windows/<id>.json (geometry + Manager lens + ordered tab refs), or a fresh GUID if none
@@ -833,7 +842,7 @@ namespace winrt::TerminalApp::implementation
                 if (auto self = weakThis.get())
                 {
                     self->_ReconcileClaudeTabs(); // bind/attach + re-home hooked sessions (tabToken)
-                    self->_DiscoverClaudeTabsByCwd(); // bulletproof: bind un-hooked claudes by cwd (transcript discovery)
+                    self->_ObserverProbe(); // Fleet Observer: publish this window's roster + bind via the correlation table (PULL; no hooks needed)
                     self->_SweepClaudeLiveness(); // then archive dead tabs (all self-marshal to the UI thread)
                 }
             });
@@ -1073,6 +1082,14 @@ namespace winrt::TerminalApp::implementation
         for (const auto& [k, v] : spec.env)
         {
             envMap.Insert(winrt::hstring{ k }, winrt::hstring{ v });
+        }
+        // Fleet Observer (§19-Q1): stamp this Launched claude with AM_SESSION = "<processGuid>:<windowId>"
+        // so the observer attributes it to THIS window (the inherited process env already carries the
+        // bare "<processGuid>"; this overrides it for the child with the owning window appended).
+        // ClassifyRunningApp matches on the GUID prefix, so both forms still read as ours.
+        if (const auto& eng = ::Agentmaster::SharedEngine(); !eng.amSession.empty() && !_windowId.empty())
+        {
+            envMap.Insert(winrt::hstring{ L"AM_SESSION" }, winrt::hstring{ eng.amSession + L":" + _windowId });
         }
 
         // Build the ConPTY connection ourselves (commandline = claude + our hooks settings),
@@ -1854,8 +1871,8 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster: bind a Claude session id to a specific live tab + ConPTY connection — the shared
-    // tail of BOTH correlation paths: WT_SESSION-tabToken adoption (_AdoptExternalSession) and cwd-
-    // based transcript discovery (_DiscoverClaudeTabsByCwd). Runs on the UI thread. Handles the in-
+    // tail of BOTH correlation paths: WT_SESSION-tabToken hook adoption (_AdoptExternalSession) and
+    // the Fleet Observer's PEB correlation table (_ObserverProbe). Runs on the UI thread. Handles the in-
     // session /resume RE-HOME (a different id already bound to this tab is archived, its Flight Plan
     // kept restorable), derives/pins the title (one-title rule, Rule #11), binds the stdin injector
     // (Rule #3: inject by sessionId), marks the session live, colors the tab per working dir (Rule
@@ -1878,14 +1895,19 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto t = weakOld.get(); t && t == hostTab && oldId != id)
             {
-                _sessionRegistry->SetInjector(oldId, nullptr);
-                _sessionRegistry->Update(oldId, [](::Agentmaster::SessionInfo& s) {
+                // COPY the key first: `oldId` is a reference INTO the _claudeTabs node, and the
+                // erase below frees that node — using `oldId` afterwards (the _claudeOverlays erase)
+                // would hash freed memory -> AV. (Latent use-after-free; the observer's more frequent
+                // re-homes exposed it.)
+                const std::wstring superseded = oldId;
+                _sessionRegistry->SetInjector(superseded, nullptr);
+                _sessionRegistry->Update(superseded, [](::Agentmaster::SessionInfo& s) {
                     s.live = false;
                     s.pendingConfirmPromptId.clear();
                 });
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + oldId + L" -> " + id + L" (same tab, new conversation id)\n");
-                _claudeTabs.erase(oldId);
-                _claudeOverlays.erase(oldId);
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
+                _claudeTabs.erase(superseded);
+                _claudeOverlays.erase(superseded);
                 break; // one tab hosts one session
             }
         }
@@ -2064,33 +2086,50 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
-    // Agentmaster (bulletproof detection): correlate THIS window's tabs to discovered Claude
-    // transcripts by working directory — the PULL path that needs NO hooks / shim / settings, so a
-    // hand-typed `claude` (whose hooks never wired — e.g. a shell `claude` function shadows the PATH
-    // shim) is still detected, bound, and given the overlay. The scanner indexes recent transcripts
-    // off-thread (id + cwd + mtime); here, on the UI thread, each UNBOUND terminal tab is matched to
-    // the newest transcript whose cwd == the tab's live WorkingDirectory(). Scoped to OUR tabs (we
-    // only ever look up dirs our tabs sit in), so other claudes on the machine never leak onto the
-    // board. A matched id with no record yet is created via a synthesized SessionStart, then bound
-    // through the shared _BindClaudeSessionToTab. HasInjector is the cross-window "already claimed"
-    // guard. Ticked by the scanner alongside the reconcile + liveness sweep.
-    winrt::fire_and_forget TerminalPage::_DiscoverClaudeTabsByCwd()
+    // Agentmaster (Fleet Observer, OBSERVER.md §10): the UI lane of the PULL observer — the one
+    // WinRT thread that touches XAML. Replaces _DiscoverClaudeTabsByCwd (the per-tab Toolhelp walk).
+    // Two halves, each scanner tick (alongside the reconcile + liveness sweep):
+    //   PUBLISH — build THIS window's tab roster {WT_SESSION, shell PID, already-bound} (both reads
+    //     are µs: ITerminalConnection::SessionId() + RootProcessHandle()->GetProcessId) and hand it
+    //     to the process-wide ProcessObserver, which surveys ALL claude PEBs off-thread in ONE
+    //     snapshot and keys correlation on the exact WT_SESSION.
+    //   READ + BIND — read the observer's correlation table and, for each of our UNBOUND tabs whose
+    //     claude the observer resolved to an OURS conversation id, run the shared
+    //     _BindClaudeSessionToTab (injector + overlay + title + color) — full observe+control with
+    //     NO hooks / shim / settings, so a hand-typed `claude` after a `cd` still binds to the right
+    //     tab + id. A short settle between publish and read lets the publish-triggered survey land,
+    //     so a freshly-typed claude binds this tick (≤ ~one cadence) rather than next.
+    // External (WindowsTerminal) claudes are observe-only (runningApp != Agentmaster) and never bind.
+    winrt::fire_and_forget TerminalPage::_ObserverProbe()
     {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
-        if (!_sessionRegistry || !_scanner)
-        {
-            co_return;
-        }
-        const auto recent = _scanner->RecentTranscripts();
-        if (recent.empty())
+        if (!_sessionRegistry || !_observer)
         {
             co_return;
         }
 
-        bool boundAny = false;
-        std::vector<std::wstring> unmatchedTabCwds; // diagnostic: unbound terminal tabs we couldn't match
+        // Lowercase a GUID-plain string to match the observer's roster key form (it lowercases too).
+        const auto lower = [](std::wstring s) {
+            for (auto& c : s)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            return s;
+        };
 
+        // --- PASS 1 (UI thread): build this window's roster + remember each tab's conn for the bind. ---
+        struct ProbeTab
+        {
+            winrt::weak_ref<TerminalApp::Tab> tab; // weak so the 300ms settle below never delays a tab teardown
+            TerminalConnection::ITerminalConnection conn{ nullptr };
+            std::wstring wt;
+        };
+        std::vector<ProbeTab> probeTabs;
+        std::vector<::Agentmaster::TabRosterEntry> roster;
         for (const auto& projectedTab : _tabs)
         {
             if (projectedTab == _managerTab)
@@ -2102,25 +2141,7 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-
-            // Already bound to a live session on this tab? skip (one session per tab).
-            bool alreadyBound = false;
-            for (const auto& [boundId, weakBound] : _claudeTabs)
-            {
-                if (const auto t = weakBound.get(); t && t == projectedTab)
-                {
-                    alreadyBound = true;
-                    break;
-                }
-            }
-            if (alreadyBound)
-            {
-                continue;
-            }
-
-            // This tab's terminal control -> connection + live working directory.
             TerminalConnection::ITerminalConnection conn{ nullptr };
-            std::wstring cwd;
             tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
                 if (conn)
                 {
@@ -2142,105 +2163,105 @@ namespace winrt::TerminalApp::implementation
                     return;
                 }
                 conn = ctrl.Connection();
-                // Get the REAL cwd of the `claude` running in this tab by reading it from the claude
-                // PROCESS (a descendant of the tab's shell) — accurate even without shell integration,
-                // and it scopes to tabs actually running claude. PowerShell does NOT sync its process
-                // cwd with Set-Location, so neither the shell's own cwd nor the OSC-tracked
-                // WorkingDirectory is reliable after a `cd`; the claude process always has it right.
-                if (const auto cpc = conn.try_as<TerminalConnection::ConptyConnection>())
-                {
-                    if (const auto h = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(cpc.RootProcessHandle())))
-                    {
-                        cwd = ::Agentmaster::ClaudeCwdForShell(::GetProcessId(h));
-                    }
-                }
-                if (cwd.empty())
-                {
-                    cwd = std::wstring{ ctrl.WorkingDirectory() }; // fallback (OSC; may be stale / the starting dir)
-                }
             });
             if (!conn)
             {
                 continue; // not a terminal tab
             }
-            if (cwd.empty())
+            // The exact tab id: WT_SESSION == ITerminalConnection::SessionId() (the correlation key).
+            const std::wstring wt = lower(::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId()));
+            // The tab's shell PID, from the ConPTY root process HANDLE (the observer reads the claude
+            // DESCENDANT's PEB; we hand it the shell so its tree walk is anchored to this exact tab).
+            uint32_t shellPid = 0;
+            if (const auto cpc = conn.try_as<TerminalConnection::ConptyConnection>())
             {
-                unmatchedTabCwds.push_back(L"(no-cwd)"); // shell isn't reporting a cwd (no OSC 9;9)
-                continue;
-            }
-            const std::wstring cwdKey = ::Agentmaster::NormDirKey(cwd);
-
-            // Newest discovered transcript in this tab's cwd that isn't already bound to a tab
-            // anywhere (HasInjector == claimed). Filesystem-aware dir match (Rule #8).
-            const ::Agentmaster::DiscoveredTranscript* best = nullptr;
-            for (const auto& d : recent)
-            {
-                if (::Agentmaster::NormDirKey(d.cwd) != cwdKey)
+                if (const auto h = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(cpc.RootProcessHandle())))
                 {
-                    continue;
-                }
-                if (_sessionRegistry->HasInjector(d.id))
-                {
-                    continue;
-                }
-                if (!best || d.mtimeMs > best->mtimeMs)
-                {
-                    best = &d;
+                    shellPid = ::GetProcessId(h);
                 }
             }
-            if (!best)
+            bool bound = false;
+            for (const auto& [boundId, weakBound] : _claudeTabs)
             {
-                unmatchedTabCwds.push_back(cwd); // a cwd, but no (unclaimed) transcript matched it
-                continue;
+                if (const auto t = weakBound.get(); t && t == projectedTab)
+                {
+                    bound = true;
+                    break;
+                }
             }
-
-            const std::wstring id = best->id;
-            // Create a record for a never-seen id (synthesize the SessionStart the missing hook would
-            // have sent — the registry adopts it as external). A known id (e.g. a hand-resumed
-            // archived one) skips this and is just (re)bound.
-            if (!_sessionRegistry->Get(id))
-            {
-                ::Agentmaster::HookMessage start;
-                start.event = ::Agentmaster::HookEvent::SessionStart;
-                start.sessionId = id;
-                start.cwd = cwd;
-                start.ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                               .count();
-                _sessionRegistry->OnHookEvent(start);
-            }
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + id + L" cwd=" + cwd + L"\n");
-            _BindClaudeSessionToTab(projectedTab, conn, id, cwd, L"cwd " + cwd);
-            boundAny = true;
+            ::Agentmaster::TabRosterEntry e;
+            e.wtSession = wt;
+            e.shellPid = shellPid;
+            e.bound = bound;
+            roster.push_back(std::move(e));
+            probeTabs.push_back({ winrt::make_weak(projectedTab), conn, wt });
         }
 
-        // Diagnostic (self-limiting): only when there ARE recent transcripts, we bound nothing this
-        // pass, and at least one unbound terminal tab couldn't be matched — show that tab's cwd vs
-        // the indexed cwds so a mismatch (or a missing/stale WorkingDirectory) is visible in the log.
-        if (!boundAny && !unmatchedTabCwds.empty())
+        // PUBLISH (the observer diffs + Wake()s its survey when this roster changed).
+        _observer->PublishRoster(_windowId, std::move(roster));
+
+        // Let a publish-triggered survey land before we read, so a just-appeared claude binds THIS
+        // tick rather than next. resume_after resumes on the threadpool — hop back to the UI thread.
+        co_await winrt::resume_after(std::chrono::milliseconds(300));
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry || !_observer)
         {
-            std::wstring tabs;
-            for (size_t i = 0; i < unmatchedTabCwds.size() && i < 4; ++i)
+            co_return;
+        }
+
+        // --- PASS 2 (UI thread): read the correlation table; bind our unbound, id-resolved OURS tabs. ---
+        const auto corr = _observer->Correlation();
+        if (corr.empty())
+        {
+            co_return;
+        }
+        std::unordered_map<std::wstring, ::Agentmaster::CorrelationRow> byWt;
+        for (const auto& c : corr)
+        {
+            byWt[c.wtSession] = c;
+        }
+        for (const auto& pt : probeTabs)
+        {
+            const auto it = byWt.find(pt.wt);
+            if (it == byWt.end())
             {
-                tabs += (tabs.empty() ? L"" : L" | ");
-                tabs += unmatchedTabCwds[i];
+                continue;
             }
-            std::wstring idx;
+            const auto& c = it->second;
+            // External (observe-only) or no conversation id yet (never-prompted; §11d) -> don't bind.
+            if (c.runningApp != ::Agentmaster::RunningApp::Agentmaster || c.sessionId.empty())
             {
-                int n = 0;
-                for (const auto& d : recent)
+                continue;
+            }
+            const auto hostTab = pt.tab.get();
+            if (!hostTab)
+            {
+                continue; // tab torn down during the settle
+            }
+            // One session per tab; skip if this tab is already bound.
+            bool alreadyBound = false;
+            for (const auto& [boundId, weakBound] : _claudeTabs)
+            {
+                if (const auto t = weakBound.get(); t && t == hostTab)
                 {
-                    if (n++ >= 4)
-                    {
-                        break;
-                    }
-                    idx += (idx.empty() ? L"" : L" | ");
-                    idx += d.cwd;
+                    alreadyBound = true;
+                    break;
                 }
             }
-            ::Agentmaster::AppendStateLog(L"hooks.log",
-                                          L"[discover-miss] tabCwds=[" + tabs + L"] idxN=" + std::to_wstring(recent.size()) +
-                                              L" idxCwds=[" + idx + L"]\n");
+            if (alreadyBound)
+            {
+                continue;
+            }
+            // Cross-window "already claimed" guard (another window already bound this id).
+            if (_sessionRegistry->HasInjector(c.sessionId))
+            {
+                continue;
+            }
+            // The observer's ObserveClaude already created the (external) registry record for our
+            // claude; bind it to this tab via the shared tail. Keyed on the exact WT_SESSION, so a
+            // hand-typed claude after a `cd` binds to the right id even with no hook.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + c.sessionId + L" cwd=" + c.cwd + L" (observer wt=" + pt.wt + L")\n");
+            _BindClaudeSessionToTab(hostTab, pt.conn, c.sessionId, c.cwd, L"observer wt=" + pt.wt);
         }
         co_return;
     }

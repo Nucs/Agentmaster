@@ -46,6 +46,7 @@ namespace Agentmaster
     class HooksBridge;
     class Scheduler;
     class SessionScanner;
+    class ProcessObserver;
 }
 
 namespace winrt::TerminalApp::implementation
@@ -277,6 +278,7 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
         std::shared_ptr<::Agentmaster::Scheduler> _scheduler{ nullptr }; // Agentmaster: Autopilot
         std::shared_ptr<::Agentmaster::SessionScanner> _scanner{ nullptr }; // Agentmaster: the interval reconciler (PULL)
+        std::shared_ptr<::Agentmaster::ProcessObserver> _observer{ nullptr }; // Agentmaster: the Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §10)
         // Agentmaster (M9): this window's adoption handler on the shared registry — fans out a
         // hand-typed `+`-tab `claude` to whichever window hosts it. Detached in ~TerminalPage.
         // (An ::Agentmaster::AdoptionToken; uint64_t to avoid pulling SessionRegistry.h here.)
@@ -411,7 +413,7 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)
         winrt::fire_and_forget _ReconcileClaudeTabs(); // Agentmaster: poll backstop — bind/attach + re-home claude tabs by stable WT_SESSION (scanner-ticked)
-        winrt::fire_and_forget _DiscoverClaudeTabsByCwd(); // Agentmaster: bulletproof PULL — bind un-hooked hand-typed claudes by transcript cwd (scanner-ticked)
+        winrt::fire_and_forget _ObserverProbe(); // Agentmaster: the Fleet Observer UI lane — publish this window's tab roster, then bind via the observer's correlation table (replaces _DiscoverClaudeTabsByCwd; OBSERVER.md §10)
         void _BindClaudeSessionToTab(const TerminalApp::Tab& hostTab, const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn, const std::wstring& id, const std::wstring& cwd, const std::wstring& origin); // Agentmaster: shared bind tail for adoption + discovery
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster
         // Agentmaster (M10; PERSISTENCE.md §13): capture this window's record (geometry + ordered

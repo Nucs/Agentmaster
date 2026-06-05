@@ -324,6 +324,10 @@ namespace Agentmaster
                 assign(s.tabToken, o.tabToken); // the correlation key; never clobber with empty
             }
             assign(s.amSession, o.amSession);
+            if (!o.ownerWindowId.empty())
+            {
+                assign(s.ownerWindowId, o.ownerWindowId); // never clobber a known owner with empty
+            }
             assign(s.runningApp, o.runningApp);
             assign(s.pid, o.pid);
             assign(s.liveCwd, o.cwd);

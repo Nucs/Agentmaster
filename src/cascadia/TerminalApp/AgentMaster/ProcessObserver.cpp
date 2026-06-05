@@ -229,11 +229,12 @@ namespace Agentmaster
         const int64_t now = NowMs();
         const auto snap = SnapshotProcesses(); // the one ~10 ms call; reused for census + every tab tree
 
-        // 1) Census: read facts + classify ownership for every claude.exe.
+        // 1) Read facts (PEB cwd/cmdline/env) + an initial AM_SESSION-based classification for every
+        //    claude.exe. The classification is REFINED below: a claude correlated to one of OUR tabs
+        //    is ours regardless of AM_SESSION (a `+`-tab claude does not reliably inherit it — WT
+        //    regenerates a tab's env), so the roster correlation is the authoritative bind signal and
+        //    AM_SESSION is only the secondary signal for the census of NON-rostered claudes.
         std::unordered_map<uint32_t, ClaudeProcessFacts> factsByPid;
-        int ours = 0;
-        int external = 0; // a real Windows Terminal's claude (WT_SESSION, no AM_SESSION)
-        int other = 0;
         for (const auto& e : snap)
         {
             if (!ImageNameEq(e.image, L"claude.exe"))
@@ -243,63 +244,14 @@ namespace Agentmaster
             ClaudeProcessFacts f = ReadClaudeFacts(e.pid);
             f.parentPid = e.ppid;
             f.runningApp = ClassifyRunningApp(f.amSession, f.wtSession, _amSession);
-            switch (f.runningApp)
-            {
-            case RunningApp::Agentmaster:
-                ++ours;
-                break;
-            case RunningApp::WindowsTerminal:
-                ++external;
-                break;
-            default:
-                ++other;
-                break;
-            }
             factsByPid.emplace(e.pid, std::move(f));
         }
 
-        // Census log: on-change (so a Launch/close is visible immediately) or a slow keepalive (so a
-        // soak shows the survey is alive). Signature folds the counts + our claude pids so a swap
-        // that keeps the counts equal still logs.
-        {
-            std::vector<uint32_t> oursPids;
-            for (const auto& [pid, f] : factsByPid)
-            {
-                if (f.runningApp == RunningApp::Agentmaster)
-                {
-                    oursPids.push_back(pid);
-                }
-            }
-            std::sort(oursPids.begin(), oursPids.end());
-            std::wstring sig = std::to_wstring(factsByPid.size()) + L":" + std::to_wstring(ours) + L":" +
-                               std::to_wstring(external) + L":" + std::to_wstring(other);
-            for (const auto p : oursPids)
-            {
-                sig += L"," + std::to_wstring(p);
-            }
-            if (sig != _lastCensusSig || (now - _lastCensusLogMs) >= kObserverCensusKeepaliveMs)
-            {
-                _lastCensusSig = sig;
-                _lastCensusLogMs = now;
-                AppendStateLog(L"hooks.log",
-                               L"[observer] census claudes=" + std::to_wstring(factsByPid.size()) +
-                                   L" ours=" + std::to_wstring(ours) + L" wt=" + std::to_wstring(external) +
-                                   L" other=" + std::to_wstring(other) + L"\n");
-                // Detail for OUR claudes only (usually few; external ones are just counted — privacy
-                // + signal). model/effort are not secrets; cwd is a local path.
-                for (const auto p : oursPids)
-                {
-                    const auto& f = factsByPid[p];
-                    AppendStateLog(L"hooks.log",
-                                   L"[observer]   ours pid=" + std::to_wstring(p) + L" bg=" + (f.background ? L"1" : L"0") +
-                                       L" model=" + f.model + L" effort=" + f.effort + L" cwd=" + f.cwd +
-                                       L" wt=" + f.wtSession + L"\n");
-                }
-            }
-        }
-
-        // 2) Merge every window's roster (one entry per tab; a wtSession lives in exactly one window).
+        // 2) Merge every window's roster (one entry per tab; a wtSession lives in exactly one
+        //    window). Track the owning windowId per tab (the _rosterByWindow key) — this is the
+        //    robust per-window attribution that covers BOTH Launched and hand-typed claudes (§19-Q1).
         std::unordered_map<std::wstring, TabRosterEntry> roster;
+        std::unordered_map<std::wstring, std::wstring> ownerByWt;
         {
             std::lock_guard lk{ _rosterMtx };
             for (const auto& [win, entries] : _rosterByWindow)
@@ -314,20 +266,24 @@ namespace Agentmaster
                     if (it == roster.end())
                     {
                         roster.emplace(e.wtSession, e);
+                        ownerByWt.emplace(e.wtSession, win);
                     }
                     else if (e.bound && !it->second.bound)
                     {
                         it->second = e; // prefer the bound view if (impossibly) duplicated
+                        ownerByWt[e.wtSession] = win;
                     }
                 }
             }
         }
 
-        // 3) Per-tab correlation + activity. (Empty until a window publishes a roster — that wiring
-        //    is the UI lane in O5; O4 builds the full survey so O5 is just publish + read + bind.)
+        // 3) Per-tab correlation + activity. A claude correlated to a tab in OUR roster is running
+        //    in one of our windows -> it is OURS (this Agentmaster process), regardless of AM_SESSION
+        //    (which a `+`-tab claude does not inherit). So the roster correlation IS the bind signal.
         std::vector<CorrelationRow> corr;
         std::vector<TabActivityRow> act;
         std::vector<uint32_t> correlatedPids;
+        std::unordered_map<uint32_t, std::wstring> rosteredOwner; // claude pid -> owning windowId (== ours)
         corr.reserve(roster.size());
         act.reserve(roster.size());
         for (const auto& [wtSession, tab] : roster)
@@ -336,19 +292,19 @@ namespace Agentmaster
             if (cpid != 0)
             {
                 const auto fit = factsByPid.find(cpid);
-                ClaudeProcessFacts f = (fit != factsByPid.end()) ? fit->second : ReadClaudeFacts(cpid);
-                if (fit == factsByPid.end())
-                {
-                    f.runningApp = ClassifyRunningApp(f.amSession, f.wtSession, _amSession);
-                }
+                const ClaudeProcessFacts f = (fit != factsByPid.end()) ? fit->second : ReadClaudeFacts(cpid);
                 const std::wstring sid = ResolveObservedId(f);
+                const std::wstring ownerWin = ownerByWt.count(wtSession) ? ownerByWt[wtSession] : std::wstring{};
+                correlatedPids.push_back(cpid);
+                rosteredOwner[cpid] = ownerWin; // mark this pid OURS for the census below
 
                 CorrelationRow cr;
                 cr.wtSession = wtSession;
                 cr.claudePid = cpid;
                 cr.cwd = f.cwd;
                 cr.sessionId = sid;
-                cr.runningApp = f.runningApp;
+                cr.ownerWindowId = ownerWin;
+                cr.runningApp = RunningApp::Agentmaster; // rostered == in our tab == ours (not AM_SESSION-gated)
                 cr.alive = true;
                 cr.observedUnixMs = now;
                 corr.push_back(std::move(cr));
@@ -364,20 +320,18 @@ namespace Agentmaster
                 ar.observedUnixMs = now;
                 act.push_back(std::move(ar));
 
-                correlatedPids.push_back(cpid);
-
-                // Feed the registry ONLY for OUR claudes with a known id (an external WT claude is
-                // observe-only — never a managed session; a known-id-less ours waits for its
-                // transcript, §11d). ObserveClaude is idempotent + provenance-safe (never sets state).
-                if (f.runningApp == RunningApp::Agentmaster && !sid.empty())
+                // Feed the registry once this OUR claude has a conversation id (a never-prompted one
+                // has none yet, §11d). Idempotent + provenance-safe (ObserveClaude never sets state).
+                if (!sid.empty())
                 {
                     ObservedClaude o;
                     o.sessionId = sid;
                     o.tabToken = wtSession;
                     o.amSession = f.amSession;
+                    o.ownerWindowId = !ownerWin.empty() ? ownerWin : WindowIdFromAmSession(f.amSession);
                     o.cwd = f.cwd;
                     o.pid = cpid;
-                    o.runningApp = f.runningApp;
+                    o.runningApp = RunningApp::Agentmaster;
                     o.background = f.background;
                     o.model = f.model;
                     o.effort = f.effort;
@@ -417,7 +371,60 @@ namespace Agentmaster
             act.push_back(std::move(ar));
         }
 
-        // 4) Publish the snapshots (copy-out readers hold no lock while iterating).
+        // 4) Census: classify each claude — rostered (in one of our tabs) -> OURS; else by AM_SESSION
+        //    (external Windows Terminal / bare Other). Logged on signature change (a Launch/close is
+        //    visible immediately) or a slow keepalive (a soak shows the survey is alive).
+        int ours = 0, external = 0, other = 0;
+        std::vector<uint32_t> oursPids;
+        for (const auto& [pid, f] : factsByPid)
+        {
+            const RunningApp app = rosteredOwner.count(pid) ? RunningApp::Agentmaster : f.runningApp;
+            if (app == RunningApp::Agentmaster)
+            {
+                ++ours;
+                oursPids.push_back(pid);
+            }
+            else if (app == RunningApp::WindowsTerminal)
+            {
+                ++external;
+            }
+            else
+            {
+                ++other;
+            }
+        }
+        std::sort(oursPids.begin(), oursPids.end());
+        {
+            std::wstring sig = std::to_wstring(factsByPid.size()) + L":" + std::to_wstring(ours) + L":" +
+                               std::to_wstring(external) + L":" + std::to_wstring(other);
+            for (const auto p : oursPids)
+            {
+                sig += L"," + std::to_wstring(p);
+            }
+            if (sig != _lastCensusSig || (now - _lastCensusLogMs) >= kObserverCensusKeepaliveMs)
+            {
+                _lastCensusSig = sig;
+                _lastCensusLogMs = now;
+                AppendStateLog(L"hooks.log",
+                               L"[observer] census claudes=" + std::to_wstring(factsByPid.size()) +
+                                   L" ours=" + std::to_wstring(ours) + L" wt=" + std::to_wstring(external) +
+                                   L" other=" + std::to_wstring(other) + L" rostered=" + std::to_wstring(correlatedPids.size()) + L"\n");
+                // Detail for OUR claudes only (privacy + signal; model/effort aren't secrets, cwd is
+                // local). `rostered` == bound to one of our tabs; `stamp` == identified by AM_SESSION.
+                for (const auto p : oursPids)
+                {
+                    const auto& f = factsByPid[p];
+                    const bool rostered = rosteredOwner.count(p) != 0;
+                    const std::wstring win = rostered ? rosteredOwner[p] : WindowIdFromAmSession(f.amSession);
+                    AppendStateLog(L"hooks.log",
+                                   L"[observer]   ours pid=" + std::to_wstring(p) + L" " + (rostered ? L"rostered" : L"stamp") +
+                                       L" bg=" + (f.background ? L"1" : L"0") + L" model=" + f.model + L" effort=" + f.effort +
+                                       L" cwd=" + f.cwd + L" wt=" + f.wtSession + (win.empty() ? L"" : (L" win=" + win)) + L"\n");
+                }
+            }
+        }
+
+        // 5) Publish the snapshots (copy-out readers hold no lock while iterating).
         {
             std::lock_guard lk{ _tableMtx };
             _correlation.swap(corr);

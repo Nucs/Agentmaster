@@ -160,6 +160,7 @@ namespace Agentmaster
         bool background{}; // a background/daemon claude
         RunningApp runningApp{ RunningApp::Unknown }; // ours (Agentmaster) vs external (WindowsTerminal)
         std::wstring amSession; // owning Agentmaster instance stamp (empty if external)
+        std::wstring ownerWindowId; // the window that hosts this session's tab (§19-Q1 attribution)
         bool hookWired{}; // have we received ANY hook for this id this run? (provenance)
         int64_t lastHookUnixMs{}; // last authoritative push (hook) — provenance vs the pull
         int64_t lastObservedUnixMs{}; // last pull observation (the S-lane survey)

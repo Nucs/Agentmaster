@@ -95,8 +95,15 @@ namespace Agentmaster
     void ParseClaudeFacts(std::wstring_view commandline, const std::unordered_map<std::wstring, std::wstring>& env, ClaudeProcessFacts& facts);
 
     // Classify a claude by ownership (OBSERVER.md §7): our AM_SESSION -> Agentmaster; a WT_SESSION
-    // but not ours -> WindowsTerminal (external); neither -> Other. Pure.
+    // but not ours -> WindowsTerminal (external); neither -> Other. Matches on the GUID PREFIX of
+    // AM_SESSION so both "<processGuid>" (hand-typed) and "<processGuid>:<windowId>" (Launched)
+    // forms are recognized as ours (§19-Q1). Pure.
     RunningApp ClassifyRunningApp(std::wstring_view amSession, std::wstring_view wtSession, std::wstring_view ourAmSession);
+
+    // The owning-window id stamped into a Launched claude's AM_SESSION ("<processGuid>:<windowId>"),
+    // or empty for a bare "<processGuid>" (a hand-typed `+`-tab claude, whose window is instead known
+    // from the publishing roster). Pure. (§19-Q1)
+    std::wstring WindowIdFromAmSession(std::wstring_view amSession);
 
     // ===== OS-touching: full facts read for one claude pid =================================
 
@@ -130,10 +137,13 @@ namespace Agentmaster
         int64_t ctimeMs{}; // creation Unix ms
     };
 
-    // Pick the active conversation from a cwd's candidate transcripts: the newest by mtime, and
-    // when several were written within `tieWindowMs` of the newest AND a claude start time is known
-    // (startUnixMs > 0), the one whose creation time is closest to that start. Returns its stem, or
-    // empty for no candidates. Pure + total. (OBSERVER.md §8b)
+    // Pick the conversation a claude is running from a cwd's candidate transcripts, by CREATION-time
+    // IDENTITY (NOT newest-mtime). When the claude's start is known (startUnixMs > 0): REJECT any
+    // transcript created well before it started (those belong to other claudes / are stale) and pick
+    // the one whose creation time is closest to that start — so two claudes sharing a cwd bind to
+    // their OWN conversation, and a never-written-yet claude resolves to "" (§11d / Rule #14). With no
+    // start hint (startUnixMs == 0) it falls back to newest-mtime (tie-broken by ctime). `tieWindowMs`
+    // is retained for API compatibility but unused on the identity path. Pure + total. (OBSERVER.md §8b)
     std::wstring PickNewestTranscript(const std::vector<TranscriptCandidate>& candidates, int64_t startUnixMs, int64_t tieWindowMs = 2000);
 
     // Resolve the active conversation's sessionId for a claude at `cwd` started ~`startUnixMs`,
