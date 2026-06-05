@@ -38,6 +38,7 @@ namespace Agentmaster
     class HooksBridge;
     class Scheduler;
     class SessionScanner;
+    class ProcessObserver;
 
     // The shared engine's three long-lived owners. Held by the process singleton; windows copy
     // the shared_ptrs into their TerminalPage so the registry/bridge/scheduler outlive any one
@@ -48,6 +49,7 @@ namespace Agentmaster
         std::shared_ptr<HooksBridge> bridge;
         std::shared_ptr<Scheduler> scheduler;
         std::shared_ptr<SessionScanner> scanner; // the interval reconciler (PULL; complements the bridge's PUSH)
+        std::shared_ptr<ProcessObserver> observer; // the Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §8)
 
         // Agentmaster (Fleet Observer, OBSERVER.md §7): the per-PROCESS ownership stamp. Minted once
         // in SharedEngine() and exported as the AM_SESSION env var on our process, so every ConPTY

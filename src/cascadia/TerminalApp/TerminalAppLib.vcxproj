@@ -183,6 +183,7 @@
     <ClInclude Include="AgentMaster\SessionScanner.h" />
     <ClInclude Include="AgentMaster\Activity.h" />
     <ClInclude Include="AgentMaster\ProcessInspect.h" />
+    <ClInclude Include="AgentMaster\ProcessObserver.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
@@ -322,6 +323,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\ProcessInspect.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\ProcessObserver.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SnippetsPaneContent.cpp">

@@ -10,6 +10,7 @@
 #include "HookWire.h"
 #include "HooksBridge.h"
 #include "Persistence.h"
+#include "ProcessObserver.h"
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
@@ -152,6 +153,15 @@ namespace Agentmaster
             catch (...)
             {
             }
+
+            // Fleet Observer S-lane (OBSERVER.md §8): the process-wide PULL census/correlation
+            // worker, next to the scanner. Reads each claude.exe's PEB out-of-band, classifies
+            // ownership via the AM_SESSION minted above, and (once a window publishes its tab roster)
+            // correlates + feeds the registry — the always-correct floor beneath the lossy hook push.
+            // Constructed AFTER the try block so it gets the real e->amSession (set at the top of the
+            // try, before the throwing shim I/O). Never torn down (process lifetime), like the rest.
+            e->observer = std::make_shared<ProcessObserver>(e->registry, e->amSession);
+            e->observer->Start();
 
             AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
             return e;

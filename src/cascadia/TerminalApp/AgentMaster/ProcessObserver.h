@@ -1,0 +1,90 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+//
+// Agentmaster — ProcessObserver: the Fleet Observer's S-lane (doc/agentmaster/OBSERVER.md §8).
+//
+// The PULL census/correlation worker. One per process (owned by SharedEngine, next to the
+// SessionScanner), it runs a slow heartbeat (~2 s) + on-event survey that: takes ONE Toolhelp
+// snapshot, reads each claude.exe's PEB out-of-band (ProcessInspect), classifies ownership via
+// AM_SESSION (ours vs an external Windows Terminal), and — for each tab a window publishes in its
+// roster — correlates the tab's shell to its claude, resolves the conversation id, and feeds the
+// one SessionRegistry (ObserveClaude). It is the always-correct floor beneath the lossy hook push:
+// it detects + correlates a claude even when no hook fires, with no shim, no settings, and nothing
+// the user can feel (all reads are out-of-band; it NEVER writes to any shell — the invisibility
+// invariant).
+//
+// Thread/condvar shape mirrors SessionScanner. Plain C++ + Win32, no WinRT (the engine lanes never
+// touch XAML; the UI lane reads the published snapshots and marshals via the DispatcherQueue).
+
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include "Activity.h" // CorrelationRow, TabActivityRow, TabRosterEntry, ObservedClaude
+
+namespace Agentmaster
+{
+    class SessionRegistry;
+
+    inline constexpr int64_t kObserverHeartbeatMs = 2000; // §8c default full-survey cadence
+    inline constexpr int64_t kObserverCensusKeepaliveMs = 15000; // re-log an unchanged census at most this often
+
+    class ProcessObserver
+    {
+    public:
+        // `amSession` is the engine's per-process ownership stamp (Engine::amSession, O2); the
+        // observer classifies a claude RunningApp::Agentmaster iff its AM_SESSION matches this.
+        ProcessObserver(std::shared_ptr<SessionRegistry> registry, std::wstring amSession);
+        ~ProcessObserver();
+
+        ProcessObserver(const ProcessObserver&) = delete;
+        ProcessObserver& operator=(const ProcessObserver&) = delete;
+
+        void Start();
+        void Stop() noexcept;
+        void Wake() noexcept; // event-driven survey (a roster changed / a known PID died)
+
+        // UI lane -> observer (per window, each probe tick). Thread-safe; REPLACES that window's
+        // set, and Wake()s the survey when the set actually changed (so binding latency is ~one
+        // survey, not one heartbeat). UnpublishWindow drops a closing window's set (~TerminalPage).
+        void PublishRoster(const std::wstring& windowId, std::vector<TabRosterEntry> roster);
+        void UnpublishWindow(const std::wstring& windowId);
+
+        // observer -> UI lane (snapshots; copied under the table lock so readers iterate lock-free).
+        std::vector<CorrelationRow> Correlation() const;
+        std::vector<TabActivityRow> Activity() const;
+
+    private:
+        void _worker() noexcept; // heartbeat + Wake() loop (mirrors SessionScanner::_worker)
+        void _surveyOnce(); // ONE pass: snapshot -> census -> classify -> correlate roster -> publish
+
+        std::shared_ptr<SessionRegistry> _registry;
+        std::wstring _amSession;
+
+        std::thread _thread;
+        std::mutex _mtx; // guards _woken (the condvar wait predicate)
+        std::condition_variable _cv;
+        std::atomic<bool> _running{ false };
+        bool _woken{ false };
+
+        mutable std::mutex _rosterMtx; // guards _rosterByWindow (written by N UI lanes, read by the survey)
+        std::unordered_map<std::wstring, std::vector<TabRosterEntry>> _rosterByWindow;
+
+        mutable std::mutex _tableMtx; // guards the published tables (written by the survey, read by UI lanes)
+        std::vector<CorrelationRow> _correlation;
+        std::vector<TabActivityRow> _activity;
+        std::vector<uint32_t> _knownPids; // claude pids that correlated this pass (M-lane liveness cross-check)
+
+        // Worker-thread-only census-log throttle (no lock — touched only inside _surveyOnce).
+        std::wstring _lastCensusSig;
+        int64_t _lastCensusLogMs{ 0 };
+    };
+}
