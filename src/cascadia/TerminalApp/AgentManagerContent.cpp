@@ -1158,6 +1158,32 @@ namespace winrt::TerminalApp::implementation
         stack.Children().Append(Text(s.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ s.title }, 14, true, 1.0));
         stack.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
 
+        // model · effort · kind adornment (O6, Fleet Observer enrichment): only the parts we know.
+        {
+            std::wstring me;
+            const auto addPart = [&](const std::wstring& part) {
+                if (part.empty())
+                {
+                    return;
+                }
+                if (!me.empty())
+                {
+                    me += L"  \x00B7  ";
+                }
+                me += part;
+            };
+            addPart(s.model);
+            addPart(s.effort);
+            if (s.background)
+            {
+                addPart(L"bg");
+            }
+            if (!me.empty())
+            {
+                stack.Children().Append(Text(winrt::hstring{ me }, 10, false, 0.55));
+            }
+        }
+
         // autopilot badge ⚙ sent/total
         if (!s.queue.empty())
         {
@@ -1468,6 +1494,157 @@ namespace winrt::TerminalApp::implementation
             col_border.Child(colStack);
             _boardHost.Children().Append(col_border);
         }
+
+        // Agentmaster (O6): a trailing observe-only "External (N)" group for real-WindowsTerminal
+        // claudes the observer detected (NOT our tabs — no registry session, no Flight Plan). Shown
+        // unscoped (it is a global census, not part of the managed directory tree).
+        if (!_externalClaudes.empty())
+        {
+            _boardHost.Children().Append(_MakeExternalColumn());
+        }
+    }
+
+    // Agentmaster (O6): the "External (N)" board column. Observe-only — each card is a real
+    // Windows Terminal claude the observer correlated out-of-band but will never bind (Rule #9/#13).
+    Border AgentManagerContent::_MakeExternalColumn()
+    {
+        auto colStack = StackPanel{};
+        colStack.Spacing(0);
+
+        auto hdr = StackPanel{};
+        hdr.Orientation(Orientation::Horizontal);
+        hdr.Spacing(6);
+        auto dot = Text(L"\x25CF", 12, false, 1.0);
+        dot.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
+        hdr.Children().Append(dot);
+        hdr.Children().Append(Text(L"External", 12, true, 0.9));
+        hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(_externalClaudes.size())), 12, false, 0.6));
+        hdr.Children().Append(Text(_externalCollapsed ? winrt::hstring{ L"\x25B8" } : winrt::hstring{ L"\x25BE" }, 11, false, 0.6)); // ▸ / ▾
+
+        // The header doubles as the collapse toggle (a Button styled to read like the other column
+        // headers — transparent, borderless, left-aligned).
+        auto hdrBtn = Button{};
+        hdrBtn.Content(hdr);
+        hdrBtn.Background(Fill(0x00, 0, 0, 0));
+        hdrBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        hdrBtn.Padding(Thickness{ 0, 0, 0, 0 });
+        hdrBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        hdrBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        hdrBtn.Margin(Thickness{ 0, 0, 0, 6 });
+        hdrBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _externalCollapsed = !_externalCollapsed;
+            _Refresh();
+        });
+        colStack.Children().Append(hdrBtn);
+
+        if (!_externalCollapsed)
+        {
+            for (const auto& ex : _externalClaudes)
+            {
+                colStack.Children().Append(_MakeExternalCard(ex));
+            }
+        }
+
+        auto col_border = Border{};
+        col_border.Width(220);
+        col_border.Padding(Thickness{ 8, 8, 8, 8 });
+        col_border.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+        col_border.Background(Fill(0x14, 0x80, 0x80, 0x80));
+        col_border.VerticalAlignment(VerticalAlignment::Top);
+        col_border.Child(colStack);
+        return col_border;
+    }
+
+    Border AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)
+    {
+        auto stack = StackPanel{};
+        stack.Spacing(2);
+
+        // Title: the cwd's leaf folder (external claudes carry no managed title), else "claude".
+        std::wstring leaf = ex.cwd;
+        const auto slash = leaf.find_last_of(L"\\/");
+        if (slash != std::wstring::npos && slash + 1 < leaf.size())
+        {
+            leaf = leaf.substr(slash + 1);
+        }
+        if (leaf.empty())
+        {
+            leaf = L"claude";
+        }
+        stack.Children().Append(Text(winrt::hstring{ leaf }, 13, true, 0.9));
+        if (!ex.cwd.empty())
+        {
+            stack.Children().Append(Text(winrt::hstring{ ex.cwd }, 11, false, 0.55));
+        }
+
+        // model · effort · bg · pid
+        {
+            std::wstring me;
+            const auto addPart = [&](const std::wstring& part) {
+                if (part.empty())
+                {
+                    return;
+                }
+                if (!me.empty())
+                {
+                    me += L"  \x00B7  ";
+                }
+                me += part;
+            };
+            addPart(ex.model);
+            addPart(ex.effort);
+            if (ex.background)
+            {
+                addPart(L"bg");
+            }
+            me += (me.empty() ? L"pid " : L"  \x00B7  pid ") + std::to_wstring(ex.pid);
+            stack.Children().Append(Text(winrt::hstring{ me }, 10, false, 0.5));
+        }
+
+        // An observe-only pill + a disabled "Adopt" seam (future external-session restore — §11c).
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(6);
+        row.Margin(Thickness{ 0, 3, 0, 0 });
+        row.Children().Append(Pill(L"observe", Colors::Gray()));
+        auto adopt = Button{};
+        adopt.Content(Text(L"Adopt", 11, false, 1.0));
+        adopt.Padding(Thickness{ 8, 1, 8, 1 });
+        adopt.IsEnabled(false); // seam only — external-session adoption is a future, non-blocking follow-up
+        row.Children().Append(adopt);
+        stack.Children().Append(row);
+
+        auto card = Border{};
+        card.Padding(Thickness{ 8, 6, 8, 6 });
+        card.Margin(Thickness{ 0, 0, 0, 6 });
+        card.Background(Fill(0x18, 0x80, 0x80, 0x80));
+        card.BorderBrush(Fill(0x60, 0x9E, 0x9E, 0x9E));
+        card.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        card.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+        card.Child(stack);
+        return card;
+    }
+
+    void AgentManagerContent::SetExternalClaudes(std::vector<::Agentmaster::ExternalClaudeRow> rows)
+    {
+        // Diff vs the current list (the observer pushes every probe tick) so an unchanged set is a
+        // no-op — no board rebuild churn. Rows arrive pid-sorted from the observer, a stable order.
+        bool same = (rows.size() == _externalClaudes.size());
+        for (size_t i = 0; same && i < rows.size(); ++i)
+        {
+            const auto& a = rows[i];
+            const auto& b = _externalClaudes[i];
+            if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background)
+            {
+                same = false;
+            }
+        }
+        if (same)
+        {
+            return;
+        }
+        _externalClaudes = std::move(rows);
+        _Refresh();
     }
 
     void AgentManagerContent::_RebuildTree(const std::vector<SessionInfo>& sessions)

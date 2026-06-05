@@ -1281,6 +1281,9 @@ namespace winrt::TerminalApp::implementation
         }
         _InitAgentmasterEngine();
         content->SetRegistry(_sessionRegistry);
+        // Agentmaster (O6): remember the content (weak, as its projected IPaneContent) so
+        // _ObserverProbe can push the observer's External (WindowsTerminal) census to it each tick.
+        _agentManagerContent = winrt::make_weak(content.as<winrt::TerminalApp::IPaneContent>());
 
         const auto weakThis = get_weak();
         content->SetSpawnHandler([weakThis](winrt::hstring dir, winrt::hstring title) {
@@ -2209,7 +2212,17 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
-        // --- PASS 2 (UI thread): read the correlation table; bind our unbound, id-resolved OURS tabs. ---
+        // --- PASS 2 (UI thread): push the External census to the Manager, then bind our tabs. ---
+        // External (WindowsTerminal) claudes aren't in any roster, so push them regardless of corr
+        // (a window with zero OUR tabs can still surface the external group). The setter diffs.
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->SetExternalClaudes(_observer->External());
+            }
+        }
+
         const auto corr = _observer->Correlation();
         if (corr.empty())
         {

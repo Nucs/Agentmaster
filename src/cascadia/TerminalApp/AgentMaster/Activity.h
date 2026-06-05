@@ -118,4 +118,20 @@ namespace Agentmaster
         std::wstring model, effort, permissionMode, sessionName;
         int64_t observedUnixMs{};
     };
+
+    // An EXTERNAL claude (RunningApp::WindowsTerminal — a real Windows Terminal / foreign host, not
+    // one of OUR tabs). The census already counts these; O6 also PUBLISHES them (the External()
+    // table) so the Manager can surface an observe-only "External (N)" group (no registry session,
+    // no Flight Plan, never bound — Rule #9/#13). Facts only, all runtime. (OBSERVER.md §11c / §19-Q2)
+    struct ExternalClaudeRow
+    {
+        uint32_t pid{};
+        std::wstring wtSession; // its WT_SESSION (the foreign tab id; NOT in our roster)
+        std::wstring cwd;
+        std::wstring model;
+        std::wstring effort;
+        bool background{};
+        int64_t startUnixMs{};
+        int64_t observedUnixMs{};
+    };
 }

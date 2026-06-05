@@ -508,6 +508,59 @@ namespace Agentmaster
         return out;
     }
 
+    bool IsShellImage(std::wstring_view image)
+    {
+        static constexpr const wchar_t* kShells[] = {
+            L"pwsh.exe", L"powershell.exe", L"cmd.exe", L"bash.exe", L"sh.exe", L"wsl.exe", L"zsh.exe"
+        };
+        for (const auto* s : kShells)
+        {
+            if (ImageNameEq(image, s))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Console host plumbing a shell/claude carries that is NOT "a command in progress".
+    static bool IsConsoleInfra(std::wstring_view image)
+    {
+        return ImageNameEq(image, L"conhost.exe") || ImageNameEq(image, L"OpenConsole.exe");
+    }
+
+    bool HasActiveChild(const std::vector<ProcEntry>& snap, uint32_t pid)
+    {
+        if (pid == 0)
+        {
+            return false;
+        }
+        for (const auto& e : snap)
+        {
+            if (e.ppid == pid && !IsConsoleInfra(e.image))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HasNonShellChild(const std::vector<ProcEntry>& snap, uint32_t pid)
+    {
+        if (pid == 0)
+        {
+            return false;
+        }
+        for (const auto& e : snap)
+        {
+            if (e.ppid == pid && !IsShellImage(e.image) && !IsConsoleInfra(e.image))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ===== PURE: command-line + env parsing ================================================
 
     std::wstring EnvLookup(const std::unordered_map<std::wstring, std::wstring>& env, std::wstring_view name)

@@ -268,6 +268,11 @@ namespace winrt::TerminalApp::implementation
 
         TerminalApp::Tab _settingsTab{ nullptr };
         TerminalApp::Tab _managerTab{ nullptr }; // Agentmaster: the pinned, leftmost Manager tab
+        // Agentmaster (Fleet Observer O6): a WEAK handle to the Manager tab's content (held as its
+        // projected IPaneContent — recovered to the impl via winrt::get_self), so _ObserverProbe can
+        // push the observer's External (WindowsTerminal) census to it each tick. Weak so there is no
+        // page<->content cycle; the content is owned by the (non-closable) Manager pane regardless.
+        winrt::weak_ref<winrt::TerminalApp::IPaneContent> _agentManagerContent;
 
         // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
         // the single source of truth; HooksBridge feeds it authoritative state from Claude

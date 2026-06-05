@@ -60,6 +60,13 @@ namespace winrt::TerminalApp::implementation
         // (::Agentmaster::RecoverableWindows) and shows the button only when N>0.
         void SetReopenWindowsHandler(std::function<void()> handler);
 
+        // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
+        // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
+        // tabs, NO registry session, NO Flight Plan). The page's _ObserverProbe pushes the observer's
+        // External() table here each tick; the content shows them as a collapsible "External (N)"
+        // board group. Diffs against the current list, so an unchanged push is a no-op (no rebuild).
+        void SetExternalClaudes(std::vector<::Agentmaster::ExternalClaudeRow> rows);
+
         // Agentmaster (M10; PERSISTENCE.md §13): the per-window Manager LENS (selection / scope /
         // selected prompt / collapsed dirs / splitter sizes). GetManagerState reads it;
         // SetManagerState seeds it on restore (re-applies the splitter sizes, then refreshes);
@@ -141,6 +148,11 @@ namespace winrt::TerminalApp::implementation
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
+        // Agentmaster (O6): build the "External (N)" board column (real-WindowsTerminal claudes,
+        // observe-only); empty if there are none. The header toggles _externalCollapsed; each card is
+        // non-interactive with an (currently disabled) Adopt seam for future external-session restore.
+        winrt::Windows::UI::Xaml::Controls::Border _MakeExternalColumn();
+        winrt::Windows::UI::Xaml::Controls::Border _MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex);
 
         // Draggable pane splitters (resize + on-hover cursor + persisted sizes).
         // `vertical` == a vertical bar dividing the bottom COLUMNS (↔, resizes Tree/Plan);
@@ -216,6 +228,11 @@ namespace winrt::TerminalApp::implementation
         bool _treeGlobalScope{ false }; // Agentmaster: Explorer Tree scope. false == LOCAL (this window's tabs only); true == GLOBAL (all windows)
         std::unordered_set<std::wstring> _collapsedDirs;
         bool _suppressAutopilotEvent{ false };
+        // Agentmaster (O6): the observer's External (WindowsTerminal) claudes, pushed by the page's
+        // _ObserverProbe; rendered as a collapsible "External (N)" board group. _externalCollapsed
+        // hides the cards (the header keeps the count).
+        std::vector<::Agentmaster::ExternalClaudeRow> _externalClaudes;
+        bool _externalCollapsed{ false };
 
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _boardHost{ nullptr }; // horizontal columns

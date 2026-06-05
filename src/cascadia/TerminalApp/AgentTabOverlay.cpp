@@ -237,6 +237,36 @@ namespace winrt::TerminalApp::implementation
 
         std::wstring rest = L" ";
         rest += StateLabel(s.state);
+        // model · effort · kind adornment (O6, Fleet Observer enrichment): only the parts we know.
+        {
+            std::wstring me;
+            const auto addPart = [&](const std::wstring& part) {
+                if (part.empty())
+                {
+                    return;
+                }
+                if (!me.empty())
+                {
+                    me += L" ";
+                    me += kDot;
+                    me += L" ";
+                }
+                me += part;
+            };
+            addPart(s.model);
+            addPart(s.effort);
+            if (s.background)
+            {
+                addPart(L"bg");
+            }
+            if (!me.empty())
+            {
+                rest += L"  ";
+                rest += kDot;
+                rest += L"  ";
+                rest += me;
+            }
+        }
         rest += L"  ";
         rest += kDot;
         rest += L"  ";

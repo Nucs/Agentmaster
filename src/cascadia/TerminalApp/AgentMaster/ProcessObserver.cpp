@@ -27,6 +27,34 @@ namespace
             .count();
     }
 
+    // A short label for a TabActivity (the [activity] event + any logging). (O6)
+    const wchar_t* ActivityName(TabActivity a)
+    {
+        switch (a)
+        {
+        case TabActivity::Powershell:
+            return L"pwsh";
+        case TabActivity::Cmd:
+            return L"cmd";
+        case TabActivity::ClaudeCode:
+            return L"claude";
+        case TabActivity::Codex:
+            return L"codex";
+        case TabActivity::Other:
+            return L"other";
+        case TabActivity::Unknown:
+        default:
+            return L"unknown";
+        }
+    }
+
+    // First label of a WT_SESSION GUID for terse logs ("e9c916dd-...") — full ids are long + noisy.
+    std::wstring ShortWt(const std::wstring& wt)
+    {
+        const auto dash = wt.find(L'-');
+        return dash == std::wstring::npos ? wt : wt.substr(0, dash);
+    }
+
     // Map a tab's shell image to a coarse activity. (The full taxonomy — busy detection, shell cwd,
     // [activity] transition events — lands in O6; O4 just populates the table.)
     TabActivity ClassifyShellActivity(std::wstring_view image)
@@ -196,6 +224,12 @@ namespace Agentmaster
         return _activity;
     }
 
+    std::vector<ExternalClaudeRow> ProcessObserver::External() const
+    {
+        std::lock_guard lk{ _tableMtx };
+        return _external;
+    }
+
     void ProcessObserver::_worker() noexcept
     {
         for (;;)
@@ -315,7 +349,7 @@ namespace Agentmaster
                 ar.activity = TabActivity::ClaudeCode;
                 ar.image = L"claude.exe";
                 ar.cwd = f.cwd;
-                ar.busy = false; // refined in O6 (claude mid-turn / has a tool child)
+                ar.busy = HasActiveChild(snap, cpid); // O6: claude with a live tool child == mid-turn
                 ar.sessionId = sid;
                 ar.observedUnixMs = now;
                 act.push_back(std::move(ar));
@@ -366,7 +400,9 @@ namespace Agentmaster
                 }
                 ar.activity = ClassifyShellActivity(shellImage);
                 ar.image = shellImage;
-                // shell cwd + busy: an O6 refinement (a pwsh process cwd is stale anyway).
+                // O6: a shell running a non-shell foreground command is busy. (Its PEB cwd is left
+                // empty — pwsh never syncs its PROCESS cwd with Set-Location, so it would be stale.)
+                ar.busy = HasNonShellChild(snap, tab.shellPid);
             }
             act.push_back(std::move(ar));
         }
@@ -376,6 +412,7 @@ namespace Agentmaster
         //    visible immediately) or a slow keepalive (a soak shows the survey is alive).
         int ours = 0, external = 0, other = 0;
         std::vector<uint32_t> oursPids;
+        std::vector<ExternalClaudeRow> externalRows; // published for the Manager's "External (N)" group (O6)
         for (const auto& [pid, f] : factsByPid)
         {
             const RunningApp app = rosteredOwner.count(pid) ? RunningApp::Agentmaster : f.runningApp;
@@ -387,12 +424,23 @@ namespace Agentmaster
             else if (app == RunningApp::WindowsTerminal)
             {
                 ++external;
+                ExternalClaudeRow ex;
+                ex.pid = pid;
+                ex.wtSession = f.wtSession;
+                ex.cwd = f.cwd;
+                ex.model = f.model;
+                ex.effort = f.effort;
+                ex.background = f.background;
+                ex.startUnixMs = f.startUnixMs;
+                ex.observedUnixMs = now;
+                externalRows.push_back(std::move(ex));
             }
             else
             {
                 ++other;
             }
         }
+        std::sort(externalRows.begin(), externalRows.end(), [](const ExternalClaudeRow& a, const ExternalClaudeRow& b) { return a.pid < b.pid; });
         std::sort(oursPids.begin(), oursPids.end());
         {
             std::wstring sig = std::to_wstring(factsByPid.size()) + L":" + std::to_wstring(ours) + L":" +
@@ -424,11 +472,36 @@ namespace Agentmaster
             }
         }
 
+        // 4b) [activity] transition events (O6): log a tab whose activity KIND changed since last
+        //     survey (pwsh -> ClaudeCode -> pwsh). Keyed by wtSession; `busy` rides the line as info
+        //     but does NOT trigger an event (it flips fast as claude spawns tools). The map is
+        //     rebuilt each survey so a closed tab's entry drops. Worker-thread-only (no lock).
+        {
+            std::unordered_map<std::wstring, TabActivity> nextActivity;
+            nextActivity.reserve(act.size());
+            for (const auto& a : act)
+            {
+                nextActivity[a.wtSession] = a.activity;
+                const auto prev = _lastActivityByWt.find(a.wtSession);
+                const bool isNew = (prev == _lastActivityByWt.end());
+                const bool changed = isNew ? (a.activity != TabActivity::Unknown) : (prev->second != a.activity);
+                if (changed)
+                {
+                    const std::wstring from = isNew ? std::wstring{ L"-" } : std::wstring{ ActivityName(prev->second) };
+                    AppendStateLog(L"hooks.log",
+                                   L"[activity] wt=" + ShortWt(a.wtSession) + L" " + from + L" -> " + ActivityName(a.activity) +
+                                       L" image=" + a.image + L" busy=" + (a.busy ? L"1" : L"0") + L"\n");
+                }
+            }
+            _lastActivityByWt.swap(nextActivity);
+        }
+
         // 5) Publish the snapshots (copy-out readers hold no lock while iterating).
         {
             std::lock_guard lk{ _tableMtx };
             _correlation.swap(corr);
             _activity.swap(act);
+            _external.swap(externalRows);
             _knownPids.swap(correlatedPids);
         }
     }

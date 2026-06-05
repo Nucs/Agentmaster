@@ -1206,6 +1206,34 @@ static void TestProcessInspectTree()
     CHECK(kids.size() == 3 && kids[0] == 200 && kids[1] == 300 && kids[2] == 400, "ChildrenOf preserves snapshot order");
     CHECK(ChildrenOf(snap, 200).size() == 1 && ChildrenOf(snap, 200)[0] == 201, "ChildrenOf(pwsh A) == {claude}");
     CHECK(ChildrenOf(snap, 401).empty(), "ChildrenOf of a leaf is empty");
+
+    // --- O6 busy heuristics: IsShellImage / HasActiveChild (claude) / HasNonShellChild (shell) ---
+    CHECK(IsShellImage(L"pwsh.exe") && IsShellImage(L"PowerShell.exe") && IsShellImage(L"cmd.exe"), "IsShellImage: shells");
+    CHECK(!IsShellImage(L"claude.exe") && !IsShellImage(L"codex.exe") && !IsShellImage(L"git.exe") && !IsShellImage(L""), "IsShellImage: non-shells");
+
+    CHECK(HasActiveChild(snap, 201), "claude A is busy: has a tool child (node)");
+    CHECK(!HasActiveChild(snap, 302), "claude B is idle: no children");
+    CHECK(!HasActiveChild(snap, 401), "a leaf process has no active child");
+    CHECK(!HasActiveChild(snap, 999), "unknown pid -> no active child");
+
+    CHECK(HasNonShellChild(snap, 400), "pwsh C is busy: running git (a non-shell command)");
+    CHECK(!HasNonShellChild(snap, 300), "cmd B's only direct child is the cmd shim (a shell) -> not busy");
+    CHECK(HasNonShellChild(snap, 200), "pwsh A has a non-shell child (claude)");
+
+    // console infrastructure (conhost / OpenConsole) is NOT "a command in progress"
+    const std::vector<ProcEntry> infra = {
+        { 500, 1, L"pwsh.exe" },
+        { 501, 500, L"conhost.exe" },
+    };
+    CHECK(!HasActiveChild(infra, 500), "HasActiveChild ignores a conhost child");
+    CHECK(!HasNonShellChild(infra, 500), "HasNonShellChild ignores a conhost child");
+    const std::vector<ProcEntry> infra2 = {
+        { 600, 1, L"pwsh.exe" },
+        { 601, 600, L"OpenConsole.exe" },
+        { 602, 600, L"rg.exe" },
+    };
+    CHECK(HasActiveChild(infra2, 600), "HasActiveChild sees a real (rg) child past OpenConsole");
+    CHECK(HasNonShellChild(infra2, 600), "HasNonShellChild sees rg (a non-shell command)");
 }
 
 static void TestProcessInspectParse()

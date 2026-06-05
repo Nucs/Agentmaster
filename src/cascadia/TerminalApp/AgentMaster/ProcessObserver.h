@@ -61,6 +61,9 @@ namespace Agentmaster
         // observer -> UI lane (snapshots; copied under the table lock so readers iterate lock-free).
         std::vector<CorrelationRow> Correlation() const;
         std::vector<TabActivityRow> Activity() const;
+        // The external (RunningApp::WindowsTerminal) claude census — observe-only, surfaced by the
+        // Manager as an "External (N)" group (O6 / §11c). Copy-under-lock like the other tables.
+        std::vector<ExternalClaudeRow> External() const;
 
     private:
         void _worker() noexcept; // heartbeat + Wake() loop (mirrors SessionScanner::_worker)
@@ -81,10 +84,15 @@ namespace Agentmaster
         mutable std::mutex _tableMtx; // guards the published tables (written by the survey, read by UI lanes)
         std::vector<CorrelationRow> _correlation;
         std::vector<TabActivityRow> _activity;
+        std::vector<ExternalClaudeRow> _external; // external (WindowsTerminal) claudes (O6)
         std::vector<uint32_t> _knownPids; // claude pids that correlated this pass (M-lane liveness cross-check)
 
         // Worker-thread-only census-log throttle (no lock — touched only inside _surveyOnce).
         std::wstring _lastCensusSig;
         int64_t _lastCensusLogMs{ 0 };
+        // Worker-thread-only last-seen activity per tab (no lock) — drives the [activity] transition
+        // events (log a tab's pwsh -> ClaudeCode -> pwsh moves; O6). Keyed by wtSession, rebuilt each
+        // survey so a closed tab's entry drops.
+        std::unordered_map<std::wstring, TabActivity> _lastActivityByWt;
     };
 }

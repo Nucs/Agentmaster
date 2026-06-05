@@ -76,6 +76,23 @@ namespace Agentmaster
     // The pids whose parent is `parent`, in snapshot order. Pure.
     std::vector<uint32_t> ChildrenOf(const std::vector<ProcEntry>& snap, uint32_t parent);
 
+    // True iff `image` is a known interactive shell leaf (pwsh / powershell / cmd / bash / sh / wsl
+    // / zsh). Pure. Used by the activity `busy` heuristic (O6): a shell with a non-shell child is
+    // running a command. (claude.exe / codex.exe are NOT shells — they take their own activity
+    // branch, not the shell branch.)
+    bool IsShellImage(std::wstring_view image);
+
+    // True iff `pid` has a DIRECT child that is a real process — ignoring console infrastructure
+    // (conhost.exe / OpenConsole.exe), which is not "a command in progress". Pure. The `busy`
+    // heuristic for a CLAUDE: claude at rest has no children; running a tool (a Bash shell child,
+    // ripgrep, a helper) gives it one. (OBSERVER.md §6 — the O6 refinement of the O4 placeholder.)
+    bool HasActiveChild(const std::vector<ProcEntry>& snap, uint32_t pid);
+
+    // True iff `pid` has a DIRECT child that is neither a shell (IsShellImage) nor console
+    // infrastructure — i.e. the SHELL is running a foreground command (busy). Pure. (A claude/codex
+    // child counts as non-shell, but those tabs take the ClaudeCode/Codex branch, not the shell one.)
+    bool HasNonShellChild(const std::vector<ProcEntry>& snap, uint32_t pid);
+
     // ===== PURE: command-line + env parsing (the testable core of ReadClaudeFacts) =========
 
     // Case-insensitive environment lookup over a ReadProcessEnv map (Windows env names ignore
