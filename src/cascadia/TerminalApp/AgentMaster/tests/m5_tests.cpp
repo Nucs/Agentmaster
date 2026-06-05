@@ -21,16 +21,19 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 
 // Headers only; the engine .cpp TUs are compiled separately and linked (see
 // run-m5-tests.bat) so each keeps its own anonymous-namespace helpers.
+#include "../Activity.h"
 #include "../ClaudeSpawn.h"
 #include "../HookWire.h"
 #include "../HooksBridge.h"
 #include "../Json.h"
 #include "../Persistence.h"
+#include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)
@@ -1089,6 +1092,280 @@ static void TestTranscriptScan()
     }
 }
 
+// ===== Fleet Observer O1 (ProcessInspect primitives; doc/agentmaster/OBSERVER.md §6, §8b) =====
+
+// A canned snapshot modelling one WindowsTerminal hosting three tabs: pwsh->claude (tab A),
+// cmd->cmd-shim->claude (tab B, 2 levels deep), pwsh->git (tab C, no claude). 201 (claude) also
+// has a node child, so a claude-rooted search must still exclude the root.
+static std::vector<ProcEntry> CannedSnapshot()
+{
+    return {
+        { 10, 1, L"explorer.exe" },
+        { 100, 10, L"WindowsTerminal.exe" },
+        { 200, 100, L"pwsh.exe" }, // tab A shell
+        { 201, 200, L"claude.exe" }, // claude under tab A (direct)
+        { 202, 201, L"node.exe" }, // a tool spawned by claude A
+        { 300, 100, L"cmd.exe" }, // tab B shell
+        { 301, 300, L"cmd.exe" }, // the .cmd shim
+        { 302, 301, L"claude.exe" }, // claude under tab B (2 levels deep)
+        { 400, 100, L"pwsh.exe" }, // tab C shell (no claude)
+        { 401, 400, L"git.exe" },
+    };
+}
+
+static void TestProcessInspectTree()
+{
+    std::wprintf(L"ProcessInspect tree helpers (over a canned snapshot):\n");
+    const auto snap = CannedSnapshot();
+
+    CHECK(ImageNameEq(L"Claude.exe", L"claude.exe"), "ImageNameEq case-insensitive");
+    CHECK(!ImageNameEq(L"claude.exe", L"claude"), "ImageNameEq length-strict");
+    CHECK(!ImageNameEq(L"claude.exe", L"codex.exe"), "ImageNameEq distinct names");
+
+    CHECK(FindDescendantByImage(snap, 200, L"claude.exe") == 201, "claude direct child of pwsh");
+    CHECK(FindDescendantByImage(snap, 300, L"claude.exe") == 302, "claude 2 levels under cmd shim");
+    CHECK(FindDescendantByImage(snap, 400, L"claude.exe") == 0, "no claude under a git tab");
+    CHECK(FindDescendantByImage(snap, 999, L"claude.exe") == 0, "unknown root -> 0");
+    CHECK(FindDescendantByImage(snap, 100, L"claude.exe") == 201, "BFS finds the shallowest claude (tab A)");
+    CHECK(FindDescendantByImage(snap, 201, L"claude.exe") == 0, "descendant search excludes the root itself");
+    CHECK(FindDescendantByImage(snap, 201, L"node.exe") == 202, "descendant of a claude found");
+
+    const auto kids = ChildrenOf(snap, 100);
+    CHECK(kids.size() == 3, "ChildrenOf(WT) count");
+    CHECK(kids.size() == 3 && kids[0] == 200 && kids[1] == 300 && kids[2] == 400, "ChildrenOf preserves snapshot order");
+    CHECK(ChildrenOf(snap, 200).size() == 1 && ChildrenOf(snap, 200)[0] == 201, "ChildrenOf(pwsh A) == {claude}");
+    CHECK(ChildrenOf(snap, 401).empty(), "ChildrenOf of a leaf is empty");
+}
+
+static void TestProcessInspectParse()
+{
+    std::wprintf(L"ProcessInspect cmdline/env parse + classify:\n");
+    using Env = std::unordered_map<std::wstring, std::wstring>;
+
+    // --- ExtractCmdlineArg: "--flag value", "--flag=value", quoting, absent/dangling ---
+    CHECK(ExtractCmdlineArg(L"claude --model opus --effort high", L"--model") == std::optional<std::wstring>(L"opus"), "extract --model value");
+    CHECK(ExtractCmdlineArg(L"claude --model=sonnet", L"--model") == std::optional<std::wstring>(L"sonnet"), "extract --model=value");
+    CHECK(ExtractCmdlineArg(L"claude --settings \"C:/a b/s.json\" --x", L"--settings") == std::optional<std::wstring>(L"C:/a b/s.json"), "extract quoted value with a space");
+    CHECK(!ExtractCmdlineArg(L"claude --resume", L"--resume").has_value(), "dangling flag -> nullopt");
+    CHECK(!ExtractCmdlineArg(L"claude --model opus", L"--effort").has_value(), "absent flag -> nullopt");
+
+    // --- ParseClaudeFacts: a full fresh launch line ---
+    {
+        ClaudeProcessFacts f;
+        Env env{ { L"WT_SESSION", L"wt-1" }, { L"AM_SESSION", L"am-1" } };
+        ParseClaudeFacts(L"claude --dangerously-skip-permissions --model opus --effort high --permission-mode plan --settings \"C:/x/s.json\" --session-id abc-123", env, f);
+        CHECK(f.model == L"opus", "facts model from --model");
+        CHECK(f.effort == L"high", "facts effort from --effort");
+        CHECK(f.permissionMode == L"plan", "facts permission-mode");
+        CHECK(f.sessionIdArg == L"abc-123", "facts --session-id");
+        CHECK(f.resumeTarget.empty(), "fresh launch has no resume target");
+        CHECK(f.wtSession == L"wt-1" && f.amSession == L"am-1", "facts WT_SESSION + AM_SESSION from env");
+        CHECK(!f.background, "interactive launch is not background");
+    }
+
+    // --- resume line + env-derived model/effort fallback ---
+    {
+        ClaudeProcessFacts f;
+        Env env{ { L"CLAUDE_CODE_MODEL", L"haiku" }, { L"CLAUDE_CODE_EFFORT_LEVEL", L"low" } };
+        ParseClaudeFacts(L"claude --resume conv-xyz --settings \"C:/x/s.json\"", env, f);
+        CHECK(f.resumeTarget == L"conv-xyz", "facts --resume target");
+        CHECK(f.model == L"haiku", "facts model falls back to CLAUDE_CODE_MODEL");
+        CHECK(f.effort == L"low", "facts effort falls back to CLAUDE_CODE_EFFORT_LEVEL");
+    }
+    {
+        ClaudeProcessFacts f;
+        Env env{ { L"ANTHROPIC_MODEL", L"claude-x" } };
+        ParseClaudeFacts(L"claude", env, f);
+        CHECK(f.model == L"claude-x", "facts model falls back to ANTHROPIC_MODEL");
+    }
+
+    // --- background detection (env kind / CLAUDE_BG_* / daemon-run cmdline) ---
+    {
+        ClaudeProcessFacts f;
+        Env env{ { L"CLAUDE_CODE_SESSION_KIND", L"bg" }, { L"CLAUDE_CODE_SESSION_NAME", L"nightly" } };
+        ParseClaudeFacts(L"claude", env, f);
+        CHECK(f.background, "background via CLAUDE_CODE_SESSION_KIND=bg");
+        CHECK(f.sessionName == L"nightly", "background session name");
+    }
+    {
+        ClaudeProcessFacts f;
+        Env env{ { L"CLAUDE_BG_HOST", L"x" } };
+        ParseClaudeFacts(L"claude", env, f);
+        CHECK(f.background, "background via any CLAUDE_BG_* env");
+    }
+    {
+        ClaudeProcessFacts f;
+        Env env{};
+        ParseClaudeFacts(L"claude daemon run --bg-pty-host", env, f);
+        CHECK(f.background, "background via daemon-run cmdline");
+    }
+
+    // --- EnvLookup is case-insensitive (Windows env names ignore case) ---
+    {
+        Env env{ { L"wt_session", L"low-key" } };
+        CHECK(EnvLookup(env, L"WT_SESSION") == L"low-key", "EnvLookup case-insensitive key match");
+        CHECK(EnvLookup(env, L"missing").empty(), "EnvLookup miss -> empty");
+    }
+
+    // --- ClassifyRunningApp truth table (OBSERVER.md §7) ---
+    CHECK(ClassifyRunningApp(L"am-1", L"wt-1", L"am-1") == RunningApp::Agentmaster, "classify ours -> Agentmaster");
+    CHECK(ClassifyRunningApp(L"am-1", L"", L"am-1") == RunningApp::Agentmaster, "classify ours even without WT_SESSION");
+    CHECK(ClassifyRunningApp(L"", L"wt-1", L"am-1") == RunningApp::WindowsTerminal, "classify bare WT_SESSION -> WindowsTerminal");
+    CHECK(ClassifyRunningApp(L"", L"", L"am-1") == RunningApp::Other, "classify neither -> Other");
+    CHECK(ClassifyRunningApp(L"am-2", L"wt-1", L"am-1") == RunningApp::Other, "classify a FOREIGN AM_SESSION -> Other (never ours)");
+    CHECK(ClassifyRunningApp(L"", L"wt-1", L"") == RunningApp::WindowsTerminal, "classify with our stamp unminted: empty am + WT -> WindowsTerminal");
+    CHECK(ClassifyRunningApp(L"", L"", L"") == RunningApp::Other, "classify all-empty -> Other (no false Agentmaster)");
+}
+
+static FILETIME UnixMsToFileTime(int64_t ms)
+{
+    ULARGE_INTEGER u;
+    u.QuadPart = static_cast<uint64_t>(ms) * 10000ull + 116444736000000000ull;
+    FILETIME ft;
+    ft.dwLowDateTime = u.LowPart;
+    ft.dwHighDateTime = u.HighPart;
+    return ft;
+}
+
+static void MakeJsonl(const std::wstring& path, const std::string& content, int64_t mtimeMs, int64_t ctimeMs)
+{
+    const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    if (!content.empty())
+    {
+        DWORD w = 0;
+        ::WriteFile(h, content.data(), static_cast<DWORD>(content.size()), &w, nullptr);
+    }
+    const FILETIME c = UnixMsToFileTime(ctimeMs);
+    const FILETIME m = UnixMsToFileTime(mtimeMs);
+    ::SetFileTime(h, &c, nullptr, &m);
+    ::CloseHandle(h);
+}
+
+static void TestTranscriptResolve()
+{
+    std::wprintf(L"ProcessInspect transcript resolution (encode + newest/tie-break):\n");
+
+    // --- EncodeCwdToProjectDir: every non-[A-Za-z0-9] -> '-', no case folding ---
+    CHECK(EncodeCwdToProjectDir(L"C:\\Users\\ELI") == L"C--Users-ELI", "encode plain path");
+    CHECK(EncodeCwdToProjectDir(L"C:\\Users\\ELI\\.claude") == L"C--Users-ELI--claude", "encode dotted segment (\\. -> --)");
+    CHECK(EncodeCwdToProjectDir(L"C:\\Program Files (x86)\\X") == L"C--Program-Files--x86--X", "encode spaces + parens");
+    CHECK(EncodeCwdToProjectDir(L"K:/source/NumSharp") == L"K--source-NumSharp", "encode forward slashes, keep case");
+
+    // --- ExtractCwdFromTranscriptHead: pull the cwd off the user/assistant lines ---
+    {
+        const std::wstring head =
+            LR"j({"type":"mode","mode":"x"})j" L"\n"
+            LR"j({"type":"user","cwd":"C:\\Users\\ELI","message":{"content":"hi"}})j" L"\n";
+        CHECK(ExtractCwdFromTranscriptHead(head) == L"C:\\Users\\ELI", "extract cwd (backslash-unescaped) from head");
+        CHECK(ExtractCwdFromTranscriptHead(LR"j({"type":"mode"})j").empty(), "no cwd in head -> empty");
+    }
+
+    // --- PickNewestTranscript (PURE): newest mtime; tie-break by ctime ~ start ---
+    {
+        std::vector<TranscriptCandidate> c{
+            { L"old", 1000, 1000 },
+            { L"new", 9000, 9000 },
+        };
+        CHECK(PickNewestTranscript(c, 0) == L"new", "newest mtime wins (no start hint)");
+        CHECK(PickNewestTranscript({}, 0).empty(), "no candidates -> empty");
+    }
+    {
+        // Two written within the tie window of each other; the one created closest to the claude's
+        // start time wins (the same-cwd, two-claudes disambiguation).
+        std::vector<TranscriptCandidate> c{
+            { L"a", 5000, 100 },
+            { L"b", 5000, 4000 },
+        };
+        CHECK(PickNewestTranscript(c, 4200) == L"b", "tie-break: ctime closest to start");
+        CHECK(PickNewestTranscript(c, 50) == L"a", "tie-break: other start picks the other");
+    }
+    {
+        // A stale transcript outside the tie window of the newest is ignored even if its ctime is
+        // closer to start.
+        std::vector<TranscriptCandidate> c{
+            { L"stale", 1000, 4000 },
+            { L"live", 9000, 100 },
+        };
+        CHECK(PickNewestTranscript(c, 4000) == L"live", "stale (out-of-band) candidate ignored despite closer ctime");
+    }
+
+    // --- ResolveSessionIdIn over a temp projects root (real glob) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_obs_test_" + std::to_wstring(::GetCurrentProcessId());
+        const std::wstring projRoot = root + L"\\projects";
+        const std::wstring cwd = L"C:\\AmObsTest\\proj";
+        const std::wstring dir = projRoot + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        MakeJsonl(dir + L"\\older-id.jsonl", "{}", 1000, 1000);
+        MakeJsonl(dir + L"\\newer-id.jsonl", "{}", 9000, 9000);
+
+        CHECK(ResolveSessionIdIn(projRoot, cwd, 0) == L"newer-id", "ResolveSessionIdIn picks the newest transcript in the encoded dir");
+        CHECK(ResolveSessionIdIn(projRoot, L"C:\\Nope\\missing", 0).empty(), "ResolveSessionIdIn empty when the encoded dir has no transcripts");
+        CHECK(ResolveSessionIdIn(L"", cwd, 0).empty(), "ResolveSessionIdIn empty for an empty projects root");
+
+        std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
+}
+
+static void TestProcessInspectLive()
+{
+    std::wprintf(L"ProcessInspect live PEB self-read (our own process):\n");
+    const uint32_t self = ::GetCurrentProcessId();
+
+    const auto snap = SnapshotProcesses();
+    CHECK(!snap.empty(), "SnapshotProcesses returns a non-empty census");
+    bool foundSelf = false;
+    std::wstring selfImage;
+    for (const auto& e : snap)
+    {
+        if (e.pid == self)
+        {
+            foundSelf = true;
+            selfImage = e.image;
+        }
+    }
+    CHECK(foundSelf, "snapshot contains our own pid");
+    CHECK(foundSelf && ImageNameEq(selfImage, L"m5_tests.exe"), "snapshot image leaf for self is m5_tests.exe");
+
+    const auto cwd = ReadProcessCwd(self);
+    CHECK(!cwd.empty(), "ReadProcessCwd(self) non-empty");
+    wchar_t cur[MAX_PATH]{};
+    const DWORD n = ::GetCurrentDirectoryW(MAX_PATH, cur);
+    std::wstring curw(cur, n);
+    while (!curw.empty() && (curw.back() == L'\\' || curw.back() == L'/'))
+    {
+        curw.pop_back();
+    }
+    CHECK(NormDirKey(cwd) == NormDirKey(curw), "ReadProcessCwd(self) matches GetCurrentDirectory");
+
+    const auto cl = ReadProcessCommandLine(self);
+    CHECK(!cl.empty(), "ReadProcessCommandLine(self) non-empty");
+    CHECK(cl.find(L"m5_tests") != std::wstring::npos, "command line carries our exe name");
+
+    const auto env = ReadProcessEnv(self);
+    CHECK(!env.empty(), "ReadProcessEnv(self) non-empty");
+    CHECK(!EnvLookup(env, L"SystemRoot").empty(), "live env carries SystemRoot");
+    CHECK(!EnvLookup(env, L"systemroot").empty(), "EnvLookup case-insensitive against a live env");
+
+    CHECK(ProcessStartUnixMs(self) > 0, "ProcessStartUnixMs(self) > 0");
+    CHECK(ProcessAlive(self), "ProcessAlive(self) true");
+    CHECK(!ProcessAlive(0), "ProcessAlive(0) false");
+
+    // Full facts read for self (exercises the OS read + parse path end-to-end). We can't assert
+    // claude-specific fields, but the PEB-derived ones must be populated.
+    const auto facts = ReadClaudeFacts(self);
+    CHECK(facts.pid == self, "ReadClaudeFacts carries the pid");
+    CHECK(!facts.cwd.empty() && !facts.commandline.empty(), "ReadClaudeFacts filled cwd + commandline from the PEB");
+    CHECK(facts.startUnixMs > 0, "ReadClaudeFacts filled start time");
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -1105,6 +1382,10 @@ int wmain()
     TestWindowRecord();
     TestAppSettings();
     TestTabNamingAndColor();
+    TestProcessInspectTree();
+    TestProcessInspectParse();
+    TestTranscriptResolve();
+    TestProcessInspectLive();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");
