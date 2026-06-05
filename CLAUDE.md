@@ -86,8 +86,13 @@ kills the threads before they unregister leaves the full set). So a window close
 **pruned** from the manifest (won't be re-offered) while its record stays on disk. The Manager's
 **"Reopen Windows (N)"** recover button (next to Archived, shown when N>0 == records-minus-live,
 `Engine::RecoverableWindows`) is the "if I answered No" path: it reopens each not-currently-open record
-via `wt -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows`, the same wt-exe handoff path as
-`_OpenNewWindow`) — the runtime analog of the Emperor loop. Verified end-to-end: 2 records + a manifest
+via `agentmaster.exe -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows` ShellExecutes our execution
+alias **by name** — not the upstream `wt.exe`, which doesn't exist for our package — and the
+single-instance handoff routes it back to the Emperor) — the runtime analog of the Emperor loop. A
+window claimed-then-closed THIS session is **re-claimed** (its real id + lens) from a second
+**reclaimable pool** (`Engine::reclaimableWindowRecords`, fed by `UnregisterLiveWindow`, drawn by id
+ONLY), not minted as a lens-less duplicate; the no-arg front-pop claim never draws from it, so a plain
+"+ new window" never adopts a closed window's layout. Verified end-to-end: 2 records + a manifest
 naming only one → exactly that one reopens (silent) at its geometry; a fake id is dropped + the second
 never added (register rewrote to the live set); the manifest survives app-close (skip-empty); a
 gracefully closed window is pruned; and the recover path reopens a not-open record at its saved geometry.
@@ -146,11 +151,20 @@ What works, by area:
   folder, then **≤16 chars** as-is / **>16 mixed-case** → its capitals only / **>16 all-lower** →
   as-is truncated past 30 with `...`), and each tab is **colored per working directory** (a stable
   auto palette color or the dir's persisted one; recoloring one tab recolors every tab in that dir
-  and persists — Rule #12). Flight Plan: compose box, Add / Send now / ↑↓ /
-  Delete / Focus / Archive — and it reflects **all** messages a session got, not just queued
-  ones: a chronological **SENT** summary (each row tagged **flight** = we queued+injected it
-  vs **typed** = you typed it into the terminal) over the **UPCOMING** queue (Pending/Held).
-  `Focus()` focuses the cwd `TextBox`. The Launch cwd box has a
+  and persists — Rule #12). Flight Plan: a **compose row** — three top-left icon buttons
+  (**eye** = Focus / jump to the live tab · **!** = Send now, *which now confirms first* ·
+  **envelope** = Add to the queue) beside a **multiline textarea** that grows as you type;
+  per-message actions moved off a button strip onto a **right-click menu over the messages**
+  (`_MakePromptMenu`: **Move up / Move down / Delete** on upcoming rows, **Archive session** on
+  any). **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
+  LOCAL/GLOBAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
+  **cycles** Off → Semi-auto → Full on click (`_CycleAutopilot` / `_UpdateAutopilotButton`,
+  replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed
+  behind a **paper icon** at the textarea's top-right (kept inline — NOT a Flyout — so its name
+  box still takes keypresses; the XAML-Islands text-input trap). It still reflects **all**
+  messages a session got, not just queued ones: a chronological **SENT** summary (each row
+  tagged **flight** = we queued+injected it vs **typed** = you typed it into the terminal) over
+  the **UPCOMING** queue (Pending/Held). `Focus()` focuses the cwd `TextBox`. The Launch cwd box has a
   focus-triggered **path-picker drop-down** (`Primitives::Popup`): up to 5 recent dirs (the
   current one excluded) over the subfolders of the current path + a `..` up-nav; click a row
   to navigate, and it re-lists. Working dirs are grouped/scoped with a filesystem-aware
@@ -193,9 +207,10 @@ What works, by area:
   its `sessionId`; a non-Claude tab = an opaque WT `actionsJson`). This is **Option 1** — a thin
   layer OVER the archive model: it records tab order + window↔session affinity + geometry/lens
   WITHOUT duplicating session data (`sessions.json` stays the session truth, so there is one copy
-  of every session). Schema + (de)serialize + `Save/Load/DeleteWindowRecord` are done and
-  unit-tested; the live **capture** (build a window's record + debounced autosave) and **restore**
-  (re-apply geometry/lens, re-home sessions) are the remaining M10/M12 wiring (`PERSISTENCE.md`).
+  of every session). Schema + (de)serialize + `Save/Load/Delete/LoadWindowRecord` are done and
+  unit-tested; the live **capture** (debounced autosave) and **restore** (re-apply geometry/lens,
+  claim/re-claim a record by id) are **shipped + live-verified** (see Status + `PERSISTENCE.md` §13.5).
+  **Session re-home** (route a restored session into the window whose record references it) is deferred.
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` after "Pause Autopilot" opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
@@ -439,6 +454,14 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
 - **`Grid`/`Panel` has no `Focus(FocusState)`** in this XAML projection — only
   `Control`-derived types do (this caused error C2039). `IPaneContent::Focus` must focus a
   `Control` child; `AgentManagerContent::Focus` focuses its cwd `TextBox`.
+- **`TextBox` has no `VerticalScrollBarVisibility`** in this projection (WPF puts it on the
+  TextBox; UWP doesn't) — set the **attached** `ScrollViewer.VerticalScrollBarVisibility`
+  instead (`ScrollViewer::SetVerticalScrollBarVisibility(box, …)`; also a C2039, hit on the
+  multiline Flight-Plan compose box). Related glyph-alignment quirk: a bare symbol rides
+  differently per element — a **`TextBlock`** reserves descent space in its line box (so a
+  centered `"!"` sits high), while a **`FontIcon`** centers the glyph's ink. Render compose-bar
+  symbols as `FontIcon` (even a text-font one, e.g. `Segoe UI` glyph `"!"`) so an icon row lines
+  up; mixing `TextBlock` + `FontIcon` siblings misaligns them.
 - **Building a `.vcxproj` directly needs `/p:SolutionDir=K:\source\Agentmaster\`** (trailing
   `\`), else `$(SolutionDir)build\rules\*.targets` imports fail with MSB4019. The `.slnx`
   build sets it implicitly. (See Building FAST #6.)
@@ -467,6 +490,21 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
   `K:\source\windowsterminal` checkout; registering the same identity tries to *replace*
   it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
   `OpenConsoleProxy.dll` is loaded. Our distinct `Agentmaster` identity sidesteps this.
+- **Upstream "wt identity" assumptions are package-BLIND and break under our rename** (commit
+  `404c04f72`). Several WT helpers hardcode the `wt.exe`/`WindowsTerminal` identity and silently
+  misbehave for the `Agentmaster` package: (1) **`GetWtExePath()`** (`WtExeUtils.h`) resolves
+  `<PFN>\wt.exe`/`wtd.exe`, which **doesn't exist** (our manifest registers the **`agentmaster.exe`**
+  execution alias) — so every launcher built on it (`_OpenNewWindow`, the Reopen-Windows button, Jump
+  List shortcuts) silently no-ops; (2) **`windowClassName`** (`WindowEmperor.cpp` — it seeds BOTH the
+  single-instance **mutex** and the **window class**) is built from `WT_BRANDING` only, so our Debug
+  "Windows Terminal Dev" branding **shared one single-instance identity with the real
+  `WindowsTerminalDev`** (a launch could hand its commandline to the *other* window — defeating the
+  whole point of the rename). Fix (both, package-aware): `GetWtExePath` picks `agentmaster.exe` when the
+  package family starts with `Agentmaster`; `windowClassName` appends `GetCurrentPackageFamilyName()`
+  for packaged builds. So coexistence with `WindowsTerminalDev` needs a distinct package identity (above)
+  AND package-distinct **runtime** identifiers. Launch the alias by **name** (`agentmaster.exe`) — it
+  resolves on PATH + follows the APPEXECLINK reparse and hands off; a full reparse-path
+  `CreateProcess`/`Start-Process` bypasses the alias and cascades a fresh window instead.
 - **Closing instances to relink.** Auto-closing **our** dev instance for the deploy inner
   loop is standing-authorized ("always auto deploy"): filter by
   `ExecutablePath -like 'K:\source\Agentmaster\*'` (matches our `WindowsTerminal.exe` *and*
