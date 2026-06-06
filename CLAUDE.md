@@ -242,7 +242,16 @@ What works, by area:
   behind an **Archived (N)** toolbar button (by the cog) — a modal list with per-row
   **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
-  EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals):
+  EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals),
+  and after it a **sort toggle — NEWEST · OLDEST · MOST ACTIVE · A–Z** (`_CycleTreeSort` /
+  `_UpdateTreeSortButton`) that orders **both the directory groups and the rows within each, in every
+  scope** (a dir's rank is an aggregate over its sessions: NEWEST/OLDEST by conversation ctime, MOST
+  ACTIVE by recency with a currently-**Running** session pinned to the top, A–Z by name; ctime/mtime
+  via the same transcript timing as the adornment, `SortKey`/`MakeSortKey`/`SortKeyLess`). Unlike the
+  per-window in-memory scope, the sort is a **GLOBAL, persisted** setting (`AppSettings::treeSort` →
+  `settings.json`, via the same settings sink the cog uses) — it survives restart and seeds every
+  window (the changing window re-sorts live; others adopt it on next launch). EXTERNAL/GLOBAL keep
+  their local-first grouping, with the sort applied **within** each group:
   **EXTERNAL** (`_RebuildExternalTree`) lists every claude we do NOT manage — both real-WindowsTerminal
   **and cmd-/console-hosted** (the `Other` census bucket, previously hidden) — grouped by cwd. Each row is
   **enriched out-of-band from the transcript**: a real **title** (the conversation's first prompt — recent
@@ -371,7 +380,10 @@ What works, by area:
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
-  `defaultLaunchDir` seeds the cwd box). Loaded at engine init, seeded via `SetSettings`,
+  `defaultLaunchDir` seeds the cwd box). It also carries non-cog global state set elsewhere in the
+  UI but persisted through the same file: `showTabOverlay` and **`treeSort`** (the Explorer Tree's
+  NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
+  the cog). Loaded at engine init, seeded via `SetSettings`,
   persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
   behavior, so a missing `settings.json` (or any unset field) is a no-op.
 

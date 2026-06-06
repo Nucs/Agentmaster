@@ -268,6 +268,81 @@ namespace
         return t;
     }
 
+    // ---- Explorer Tree sort (Agentmaster) ------------------------------------
+    // A normalized sort key extracted from EITHER a managed SessionInfo or an observed external row,
+    // so one comparator orders LOCAL/GLOBAL (managed sessions) and EXTERNAL (observe-only claudes).
+
+    struct SortKey
+    {
+        int64_t created; // conversation creation (~age). INT64_MAX when unknown — a fresh / never-
+                         // prompted session has no transcript yet, so it is treated as just-created
+                         // (== newest), floating to the top of NEWEST and the bottom of OLDEST.
+        int64_t last; // last activity (mtime); 0 when unknown.
+        bool active; // currently running (managed Running state) — floats to the top of MOST ACTIVE.
+        std::wstring title; // display title for A-Z (case-insensitive).
+    };
+
+    SortKey MakeSortKey(const ::Agentmaster::SessionInfo& s)
+    {
+        SortKey k{};
+        k.created = s.convCreatedUnixMs > 0 ? s.convCreatedUnixMs : INT64_MAX;
+        k.last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+        k.active = (s.state == ::Agentmaster::SessionState::Running);
+        k.title = s.title;
+        return k;
+    }
+
+    SortKey MakeSortKey(const ::Agentmaster::ExternalClaudeRow& ex)
+    {
+        SortKey k{};
+        const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
+        k.created = created > 0 ? created : INT64_MAX;
+        k.last = ex.lastActivityUnixMs;
+        k.active = false; // externals carry no run-state — rank by recency only
+        k.title = !ex.title.empty() ? ex.title : ex.cwd;
+        return k;
+    }
+
+    // Case-insensitive (ordinal) less, matching PathEq's basis. Used for A-Z and as the deterministic
+    // tiebreaker for every mode so equal keys keep a stable on-screen order.
+    bool CiLess(const std::wstring& a, const std::wstring& b)
+    {
+#ifdef _WIN32
+        return ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+#else
+        return a < b;
+#endif
+    }
+
+    bool SortKeyLess(::Agentmaster::ExplorerSort mode, const SortKey& a, const SortKey& b)
+    {
+        using ::Agentmaster::ExplorerSort;
+        switch (mode)
+        {
+        case ExplorerSort::Newest:
+            if (a.created != b.created)
+                return a.created > b.created; // newest first
+            break;
+        case ExplorerSort::Oldest:
+            if (a.created != b.created)
+                return a.created < b.created; // oldest first
+            break;
+        case ExplorerSort::MostActive:
+            if (a.active != b.active)
+                return a.active; // a running session outranks any idle one
+            if (a.last != b.last)
+                return a.last > b.last; // then most-recent activity first
+            break;
+        case ExplorerSort::Alpha:
+            break; // name is the primary key — handled by the tiebreak below
+        }
+        if (CiLess(a.title, b.title))
+            return true;
+        if (CiLess(b.title, a.title))
+            return false;
+        return false;
+    }
+
     // ---- path helpers for the Launch path-picker drop-down -------------------
     // Plain Win32 + STL (the same toolbox the rest of the engine uses). FindFirstFileW /
     // GetFileAttributesW / CompareStringOrdinal are already in scope via pch (this TU
@@ -564,6 +639,11 @@ namespace winrt::TerminalApp::implementation
         {
             _cwdBox.Text(winrt::hstring{ settings.defaultLaunchDir });
         }
+        // Reflect the (global, persisted) Explorer Tree sort on its toggle. Safe before the UI is
+        // built (the updater no-ops while _treeSortBtn is null); the tree itself adopts the order on
+        // the next data-driven rebuild. Lets a window pick up the loaded/changed sort, not just the
+        // ctor default.
+        _UpdateTreeSortButton();
     }
     void AgentManagerContent::SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler)
     {
@@ -970,6 +1050,18 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
                 _UpdateTreeScopeButton();
+
+                // Agentmaster: a sort toggle AFTER the scope toggle — NEWEST / OLDEST / MOST ACTIVE
+                // (currently-running first) / A-Z. Orders the directory groups AND the rows within
+                // each, in every scope (LOCAL/GLOBAL/EXTERNAL). GLOBAL setting: a click persists it
+                // (AppSettings::treeSort) so the choice survives restart and applies to new windows.
+                _treeSortBtn = Button{};
+                _treeSortBtn.FontSize(11);
+                _treeSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                ToolTipService::SetToolTip(_treeSortBtn, winrt::box_value(L"Sort \x2014 NEWEST / OLDEST / MOST ACTIVE (currently-running first) / A\x2013Z. Applies to every scope; global \x2014 it persists and applies to all windows."));
+                _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
+                hdrow.Children().Append(_treeSortBtn);
+                _UpdateTreeSortButton();
                 Grid::SetRow(hdrow, 0);
                 outer.Children().Append(hdrow);
 
@@ -1951,6 +2043,65 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // Agentmaster: order the directory groups by the active (global) sort. A dir's rank is an
+        // aggregate over its live sessions — NEWEST: its newest session; OLDEST: its oldest; MOST
+        // ACTIVE: its most-recent activity (a running session pins it to the top); A-Z: the dir name.
+        // The local-first stable_partition below runs AFTER this and preserves the order within each
+        // group, so the sort governs ordering while GLOBAL still floats this window's dirs first.
+        const auto sortMode = _appSettings.treeSort;
+        {
+            struct DirAgg
+            {
+                int64_t maxCreated{ 0 };
+                int64_t minCreated{ INT64_MAX };
+                int64_t bestLast{ 0 };
+            };
+            std::vector<std::pair<std::wstring, DirAgg>> ranked;
+            ranked.reserve(dirs.size());
+            for (const auto& dir : dirs)
+            {
+                DirAgg agg;
+                for (const auto& s : scoped)
+                {
+                    if (s.live && PathEq(s.workingDir, dir))
+                    {
+                        const auto k = MakeSortKey(s);
+                        agg.maxCreated = (std::max)(agg.maxCreated, k.created);
+                        agg.minCreated = (std::min)(agg.minCreated, k.created);
+                        agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
+                    }
+                }
+                ranked.push_back({ dir, agg });
+            }
+            std::stable_sort(ranked.begin(), ranked.end(), [&](const std::pair<std::wstring, DirAgg>& A, const std::pair<std::wstring, DirAgg>& B) {
+                const auto& a = A.second;
+                const auto& b = B.second;
+                switch (sortMode)
+                {
+                case ::Agentmaster::ExplorerSort::Newest:
+                    if (a.maxCreated != b.maxCreated)
+                        return a.maxCreated > b.maxCreated;
+                    break;
+                case ::Agentmaster::ExplorerSort::Oldest:
+                    if (a.minCreated != b.minCreated)
+                        return a.minCreated < b.minCreated;
+                    break;
+                case ::Agentmaster::ExplorerSort::MostActive:
+                    if (a.bestLast != b.bestLast)
+                        return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::Alpha:
+                    break;
+                }
+                return CiLess(A.first, B.first); // A-Z primary, and the deterministic tiebreak for all modes
+            });
+            dirs.clear();
+            for (auto& p : ranked)
+            {
+                dirs.push_back(std::move(p.first));
+            }
+        }
+
         // Agentmaster: surface directories holding at least one of THIS window's sessions before
         // directories that are entirely from other windows (stable within each group). In LOCAL
         // scope every dir is local, so this is a no-op; it only reorders the GLOBAL view.
@@ -2036,22 +2187,27 @@ namespace winrt::TerminalApp::implementation
             }
 
             // Order this dir's rows THIS window's sessions first, then "outside" ones (other
-            // windows), each group keeping snapshot order. The pointers stay valid: `scoped` is
-            // not mutated past this point. In LOCAL scope the second pass is empty.
+            // windows), each group ordered by the active (global) sort (Agentmaster). The pointers
+            // stay valid: `scoped` is not mutated past this point. In LOCAL scope the outside group
+            // is empty, so the sort governs the whole list.
             std::vector<const SessionInfo*> rowOrder;
-            for (const auto& s : scoped)
             {
-                if (s.live && PathEq(s.workingDir, dir) && isLocal(s))
+                std::vector<const SessionInfo*> localRows, outsideRows;
+                for (const auto& s : scoped)
                 {
-                    rowOrder.push_back(&s);
+                    if (s.live && PathEq(s.workingDir, dir))
+                    {
+                        (isLocal(s) ? localRows : outsideRows).push_back(&s);
+                    }
                 }
-            }
-            for (const auto& s : scoped)
-            {
-                if (s.live && PathEq(s.workingDir, dir) && !isLocal(s))
-                {
-                    rowOrder.push_back(&s);
-                }
+                const auto rowLess = [&](const SessionInfo* a, const SessionInfo* b) {
+                    return SortKeyLess(sortMode, MakeSortKey(*a), MakeSortKey(*b));
+                };
+                std::stable_sort(localRows.begin(), localRows.end(), rowLess);
+                std::stable_sort(outsideRows.begin(), outsideRows.end(), rowLess);
+                rowOrder.reserve(localRows.size() + outsideRows.size());
+                rowOrder.insert(rowOrder.end(), localRows.begin(), localRows.end());
+                rowOrder.insert(rowOrder.end(), outsideRows.begin(), outsideRows.end());
             }
 
             for (const auto* sp : rowOrder)
@@ -2205,6 +2361,63 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster: order the external dirs by the active (global) sort, exactly like the managed
+        // tree — a dir's rank aggregates its externals (NEWEST/OLDEST by creation, MOST ACTIVE by
+        // recency, A-Z by name). Rows within each dir are sorted the same way below.
+        const auto sortMode = _appSettings.treeSort;
+        {
+            struct DirAgg
+            {
+                int64_t maxCreated{ 0 };
+                int64_t minCreated{ INT64_MAX };
+                int64_t bestLast{ 0 };
+            };
+            std::vector<std::pair<std::wstring, DirAgg>> ranked;
+            ranked.reserve(dirs.size());
+            for (const auto& dir : dirs)
+            {
+                DirAgg agg;
+                for (const auto& ex : _externalClaudes)
+                {
+                    if (PathEq(dirOf(ex), dir))
+                    {
+                        const auto k = MakeSortKey(ex);
+                        agg.maxCreated = (std::max)(agg.maxCreated, k.created);
+                        agg.minCreated = (std::min)(agg.minCreated, k.created);
+                        agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
+                    }
+                }
+                ranked.push_back({ dir, agg });
+            }
+            std::stable_sort(ranked.begin(), ranked.end(), [&](const std::pair<std::wstring, DirAgg>& A, const std::pair<std::wstring, DirAgg>& B) {
+                const auto& a = A.second;
+                const auto& b = B.second;
+                switch (sortMode)
+                {
+                case ::Agentmaster::ExplorerSort::Newest:
+                    if (a.maxCreated != b.maxCreated)
+                        return a.maxCreated > b.maxCreated;
+                    break;
+                case ::Agentmaster::ExplorerSort::Oldest:
+                    if (a.minCreated != b.minCreated)
+                        return a.minCreated < b.minCreated;
+                    break;
+                case ::Agentmaster::ExplorerSort::MostActive:
+                    if (a.bestLast != b.bestLast)
+                        return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::Alpha:
+                    break;
+                }
+                return CiLess(A.first, B.first);
+            });
+            dirs.clear();
+            for (auto& p : ranked)
+            {
+                dirs.push_back(std::move(p.first));
+            }
+        }
+
         for (const auto& dir : dirs)
         {
             const bool collapsed = _collapsedDirs.find(dir) != _collapsedDirs.end();
@@ -2253,12 +2466,22 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
 
+            // This dir's external rows, ordered by the active (global) sort. Pointers into
+            // _externalClaudes stay valid — it is not mutated during the render.
+            std::vector<const ::Agentmaster::ExternalClaudeRow*> dirRows;
             for (const auto& ex : _externalClaudes)
             {
-                if (!PathEq(dirOf(ex), dir))
+                if (PathEq(dirOf(ex), dir))
                 {
-                    continue;
+                    dirRows.push_back(&ex);
                 }
+            }
+            std::stable_sort(dirRows.begin(), dirRows.end(), [&](const ::Agentmaster::ExternalClaudeRow* a, const ::Agentmaster::ExternalClaudeRow* b) {
+                return SortKeyLess(sortMode, MakeSortKey(*a), MakeSortKey(*b));
+            });
+            for (const auto* exp : dirRows)
+            {
+                const auto& ex = *exp;
 
                 const bool selExt = !ex.sessionId.empty() && ex.sessionId == _selectedExternalSessionId;
 
@@ -2479,6 +2702,52 @@ namespace winrt::TerminalApp::implementation
                                    : (_treeScope == TreeScope::External) ? L"EXTERNAL"
                                                                          : L"LOCAL";
             _treeScopeBtn.Content(winrt::box_value(label));
+        }
+    }
+
+    // Agentmaster: advance the Explorer Tree sort NEWEST -> OLDEST -> MOST ACTIVE -> A-Z -> NEWEST.
+    // The sort is a GLOBAL setting: mutate _appSettings.treeSort, refresh the label, then push it
+    // through the settings sink (the page persists it to settings.json and re-materializes), so the
+    // choice survives restart and seeds every other / future window. _Refresh re-sorts THIS window's
+    // tree (and re-renders the board/plan) immediately.
+    void AgentManagerContent::_CycleTreeSort()
+    {
+        using ::Agentmaster::ExplorerSort;
+        switch (_appSettings.treeSort)
+        {
+        case ExplorerSort::Newest:
+            _appSettings.treeSort = ExplorerSort::Oldest;
+            break;
+        case ExplorerSort::Oldest:
+            _appSettings.treeSort = ExplorerSort::MostActive;
+            break;
+        case ExplorerSort::MostActive:
+            _appSettings.treeSort = ExplorerSort::Alpha;
+            break;
+        case ExplorerSort::Alpha:
+        default:
+            _appSettings.treeSort = ExplorerSort::Newest;
+            break;
+        }
+        _UpdateTreeSortButton();
+        if (_settingsSink)
+        {
+            _settingsSink(_appSettings); // persist globally (settings.json) + re-materialize
+        }
+        _Refresh();
+    }
+
+    // Reflect the current (global) sort on the toggle button's label.
+    void AgentManagerContent::_UpdateTreeSortButton()
+    {
+        if (_treeSortBtn)
+        {
+            using ::Agentmaster::ExplorerSort;
+            const wchar_t* label = (_appSettings.treeSort == ExplorerSort::Oldest)       ? L"OLDEST"
+                                   : (_appSettings.treeSort == ExplorerSort::MostActive) ? L"MOST ACTIVE"
+                                   : (_appSettings.treeSort == ExplorerSort::Alpha)      ? L"A\x2013Z"
+                                                                                         : L"NEWEST";
+            _treeSortBtn.Content(winrt::box_value(label));
         }
     }
 

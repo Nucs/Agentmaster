@@ -31,6 +31,8 @@ namespace Agentmaster
     PromptGate PromptGateFromString(std::wstring_view s);
     std::wstring ToString(PromptOrigin o);
     PromptOrigin PromptOriginFromString(std::wstring_view s);
+    std::wstring ToString(ExplorerSort s);
+    ExplorerSort ExplorerSortFromString(std::wstring_view s);
 
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);

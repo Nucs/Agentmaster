@@ -149,6 +149,32 @@ namespace Agentmaster
         return AutopilotMode::Off;
     }
 
+    std::wstring ToString(ExplorerSort s)
+    {
+        switch (s)
+        {
+        case ExplorerSort::Oldest:
+            return L"oldest";
+        case ExplorerSort::MostActive:
+            return L"active";
+        case ExplorerSort::Alpha:
+            return L"alpha";
+        case ExplorerSort::Newest:
+        default:
+            return L"newest";
+        }
+    }
+    ExplorerSort ExplorerSortFromString(std::wstring_view s)
+    {
+        if (s == L"oldest")
+            return ExplorerSort::Oldest;
+        if (s == L"active")
+            return ExplorerSort::MostActive;
+        if (s == L"alpha")
+            return ExplorerSort::Alpha;
+        return ExplorerSort::Newest;
+    }
+
     std::wstring ToString(PromptStatus s)
     {
         switch (s)
@@ -384,6 +410,7 @@ namespace Agentmaster
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
+        o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         return o;
     }
 
@@ -402,6 +429,7 @@ namespace Agentmaster
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
+        s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         return s;
     }
 

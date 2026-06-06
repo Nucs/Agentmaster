@@ -35,6 +35,18 @@ namespace Agentmaster
         Full // auto-send with no confirmation
     };
 
+    // Agentmaster: Explorer Tree ordering — the sort toggle after the LOCAL/GLOBAL/EXTERNAL scope
+    // toggle. Orders BOTH the directory groups and the rows within each (and the EXTERNAL census).
+    // A GLOBAL app setting (AppSettings::treeSort), persisted to settings.json so the choice is
+    // shared by every window and survives restart.
+    enum class ExplorerSort
+    {
+        Newest, // most recently created first (conversation ctime, desc); a fresh/never-prompted session floats up
+        Oldest, // oldest created first (ctime, asc)
+        MostActive, // most recent activity first; a currently-running session ranks at the very top
+        Alpha // A->Z by title (case-insensitive)
+    };
+
     // When a queued prompt is allowed to fire.
     enum class PromptGate
     {
@@ -232,6 +244,9 @@ namespace Agentmaster
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +
         // link state). Default ON; a missing key => true (a no-op default, like the rest).
         bool showTabOverlay{ true };
+        // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
+        // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
+        ExplorerSort treeSort{ ExplorerSort::Newest };
     };
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====
