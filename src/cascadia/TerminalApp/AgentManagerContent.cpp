@@ -925,31 +925,6 @@ namespace winrt::TerminalApp::implementation
             launch.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
             bar.Children().Append(launch);
 
-            // Global Autopilot backstop: Pause-all / Resume-all.
-            _pauseBtn = Button{};
-            _pauseBtn.Content(winrt::box_value(L"Pause Autopilot"));
-            _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                _globalPaused = !_globalPaused;
-                if (_pauseHandler)
-                {
-                    _pauseHandler(_globalPaused);
-                }
-                if (_pauseBtn)
-                {
-                    _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Autopilot" : L"Pause Autopilot"));
-                }
-            });
-            bar.Children().Append(_pauseBtn);
-
-            // Archived sessions: opens the in-content archive overlay (built at the end of
-            // layout). Closing a session tab archives it (shut down, kept restorable) rather than
-            // discarding it; this is where you bring those back. Label carries a live count.
-            _archivedBtn = Button{};
-            _archivedBtn.Content(winrt::box_value(L"Archived"));
-            ToolTipService::SetToolTip(_archivedBtn, winrt::box_value(L"Restore archived (closed) sessions"));
-            _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowArchive(); });
-            bar.Children().Append(_archivedBtn);
-
             // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the "Reopen Windows (N)" recover
             // button — the "if I answered No" path. It reopens saved windows that are NOT currently
             // open (the runtime analog of the WindowEmperor's startup reopen loop). Hidden when there
@@ -972,6 +947,32 @@ namespace winrt::TerminalApp::implementation
             ToolTipService::SetToolTip(_settingsBtn, winrt::box_value(L"Settings"));
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             bar.Children().Append(_settingsBtn);
+
+            // Global Autopilot backstop: Pause-all / Resume-all. Placed AFTER the Settings cog.
+            _pauseBtn = Button{};
+            _pauseBtn.Content(winrt::box_value(L"Pause Autopilot"));
+            _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _globalPaused = !_globalPaused;
+                if (_pauseHandler)
+                {
+                    _pauseHandler(_globalPaused);
+                }
+                if (_pauseBtn)
+                {
+                    _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Autopilot" : L"Pause Autopilot"));
+                }
+            });
+            bar.Children().Append(_pauseBtn);
+
+            // Archived sessions: opens the in-content archive overlay (built at the end of
+            // layout). Closing a session tab archives it (shut down, kept restorable) rather than
+            // discarding it; this is where you bring those back. Label carries a live count.
+            // Placed AFTER the Settings cog (alongside Pause Autopilot).
+            _archivedBtn = Button{};
+            _archivedBtn.Content(winrt::box_value(L"Archived"));
+            ToolTipService::SetToolTip(_archivedBtn, winrt::box_value(L"Restore archived (closed) sessions"));
+            _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowArchive(); });
+            bar.Children().Append(_archivedBtn);
 
             Grid::SetRow(bar, 0);
             _root.Children().Append(bar);

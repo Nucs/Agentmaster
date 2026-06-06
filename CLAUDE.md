@@ -239,7 +239,7 @@ What works, by area:
   when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
   already showing all directories. The Board/Tree show only
   **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and listed
-  behind an **Archived (N)** toolbar button (by the cog) — a modal list with per-row
+  behind an **Archived (N)** toolbar button (the toolbar's rightmost, after the cog) — a modal list with per-row
   **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
   EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals),
@@ -370,7 +370,8 @@ What works, by area:
   unit-tested; the live **capture** (debounced autosave) and **restore** (re-apply geometry/lens,
   claim/re-claim a record by id) are **shipped + live-verified** (see Status + `PERSISTENCE.md` §13.5).
   **Session re-home** (route a restored session into the window whose record references it) is deferred.
-- **Settings cog (`AppSettings`, `settings.json`).** A `⚙` after "Pause Autopilot" opens a
+- **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Reopen · `⚙` ·
+  Pause Autopilot · Archived — the cog sits *before* Pause Autopilot / Archived) opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
