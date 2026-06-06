@@ -256,12 +256,17 @@ What works, by area:
   **and cmd-/console-hosted** (the `Other` census bucket, previously hidden) — grouped by cwd. Each row is
   **enriched out-of-band from the transcript**: a real **title** (the conversation's first prompt — recent
   transcripts carry no `summary`), a **host** tag (`wt` / `cmd` / the shell leaf), `gitBranch`,
-  `model · effort · pid`, and the timing adornment. **Left-click selects** an external → the Flight Plan
-  shows its conversation **read-only** (`_RebuildExternalPlan` — the human prompts, read from the
-  transcript on a **background thread** and cached; observe-only — we host no ConPTY, so it is never
-  drivable, no queue/Autopilot). **Right-click** (and the board card's now-enabled **Adopt** button)
-  offers **Open New Session Here** (spawn a managed session in that cwd) and **Adopt** (resume its conversation into a
-  managed, controllable tab — `_AdoptExternalClaude` resolves the id via `ResolveSessionId`, then
+  `model · effort · pid`, and the timing adornment. **Left-click selects** an external — from the
+  Explorer-Tree EXTERNAL row **OR a Triage-Board External card** (the whole card is the click target;
+  there is no inline observe pill / Adopt button) — → the Flight Plan shows its conversation
+  **read-only** (`_RebuildExternalPlan` — the human prompts, read from the transcript on a
+  **background thread** and cached; observe-only — we host no ConPTY, so it is never drivable, no
+  queue/Autopilot). Selecting an external is **Linked-Lenses-synced** (`_SelectExternal`): it switches
+  the tree to **EXTERNAL** with the row highlighted, highlights the board card, and renders the
+  read-only plan — so a board click behaves exactly like a tree click. **Right-click** (on either the
+  tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Open New Session Here**
+  (spawn a managed session in that cwd) and **Adopt** (resume its conversation into a managed,
+  controllable tab — `_AdoptExternalClaude` resolves the id via `ResolveSessionId`, then
   `claude --resume`s it, leaving the original external running — Rule #13). With no external selected the
   Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
   **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /

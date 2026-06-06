@@ -626,6 +626,10 @@ namespace winrt::TerminalApp::implementation
     {
         _reopenWindowsHandler = std::move(handler);
     }
+    void AgentManagerContent::SetReopenWindowHandler(std::function<void(int)> handler)
+    {
+        _reopenWindowHandler = std::move(handler);
+    }
     void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
     {
         _confirmHandler = std::move(handler);
@@ -1803,7 +1807,7 @@ namespace winrt::TerminalApp::implementation
         return _MakeBoardColumn(hdrBtn, colStack, true);
     }
 
-    Border AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)
+    winrt::Windows::UI::Xaml::Controls::Button AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)
     {
         auto stack = StackPanel{};
         stack.Spacing(2);
@@ -1892,52 +1896,28 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // An observe-only pill + an "Adopt" button: resume this external's conversation into a
-        // managed, controllable tab (the original keeps running). Routes through _adoptExternalHandler.
-        auto row = StackPanel{};
-        row.Orientation(Orientation::Horizontal);
-        row.Spacing(6);
-        row.Margin(Thickness{ 0, 3, 0, 0 });
-        row.Children().Append(Pill(L"observe", Colors::Gray()));
-        auto adopt = Button{};
-        adopt.Content(Text(L"Adopt", 11, false, 1.0));
-        adopt.Padding(Thickness{ 8, 1, 8, 1 });
-        ToolTipService::SetToolTip(adopt, winrt::box_value(L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running)"));
-        {
-            const auto pid = ex.pid;
-            const auto cwd = ex.cwd;
-            auto weak = get_weak();
-            auto disp = _dispatcher;
-            // Defer one dispatcher tick — EXACTLY the Explorer-Tree Adopt menu (_MakeExternalTreeMenu)
-            // path, so the board's Adopt button "does what adopt does in the tree": same handler, same
-            // (pid, cwd), same deferral. Adopt spawns a managed tab + upserts the registry, which fans
-            // out a board rebuild; running it inline would re-enter the rebuild and destroy this very
-            // card mid-click. Deferring lets the click unwind first (Bug: board Adopt ≠ tree Adopt).
-            adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_adoptExternalHandler) { self->_adoptExternalHandler(pid, winrt::hstring{ cwd }); } } });
-                }
-                else if (auto self = weak.get())
-                {
-                    if (self->_adoptExternalHandler)
-                    {
-                        self->_adoptExternalHandler(pid, winrt::hstring{ cwd });
-                    }
-                }
-            });
-        }
-        row.Children().Append(adopt);
-        stack.Children().Append(row);
-
-        auto card = Border{};
+        // The whole card is clickable — left-click SELECTS this external, EXACTLY like clicking its
+        // row in the Explorer Tree (_SelectExternal): the Flight Plan shows its conversation read-only
+        // and the tree syncs to EXTERNAL with this one highlighted (Linked Lenses). Right-click opens
+        // the SAME menu the tree row uses — Open New Session Here / Adopt. (No inline "observe"/"Adopt"
+        // affordance: the card itself is the observe action; Adopt lives on the right-click menu.)
+        const bool selected = !ex.sessionId.empty() && ex.sessionId == _selectedExternalSessionId;
+        auto card = Button{};
+        card.Content(stack);
+        card.HorizontalAlignment(HorizontalAlignment::Stretch);
+        card.HorizontalContentAlignment(HorizontalAlignment::Left);
         card.Padding(Thickness{ 8, 6, 8, 6 });
         card.Margin(Thickness{ 0, 0, 0, 6 });
-        card.Background(Fill(0x18, 0x80, 0x80, 0x80));
-        card.BorderBrush(Fill(0x60, 0x9E, 0x9E, 0x9E));
-        card.BorderThickness(Thickness{ 1, 1, 1, 1 });
-        card.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
-        card.Child(stack);
+        card.Background(Fill(selected ? 0x40 : 0x18, 0x80, 0x80, 0x80));
+        card.BorderBrush(Fill(selected ? 0xFF : 0x60, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
+        card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
+        card.ContextFlyout(_MakeExternalTreeMenu(ex.pid, ex.cwd));
+        const auto exId = ex.sessionId;
+        const auto exCwd = ex.cwd;
+        const auto exTitle = title;
+        card.Click([this, exId, exCwd, exTitle](const IInspectable&, const RoutedEventArgs&) {
+            _SelectExternal(exId, exCwd, exTitle);
+        });
         return card;
     }
 
@@ -3094,15 +3074,33 @@ namespace winrt::TerminalApp::implementation
             sessions = _registry->Snapshot();
         }
 
-        int shown = 0;
-        for (const auto& s : sessions)
+        // Saved window records NOT currently open (Engine-tracked, read off disk). Each is reopenable as
+        // a WHOLE — geometry + lens + ALL its tabs re-homed (the window-grouped restore) — distinct from
+        // the per-session Restore (cherry-pick ONE session into the CURRENT window). Read only when the
+        // overlay is shown (this rebuild), never a hot path.
+        std::vector<::Agentmaster::RecoverableWindow> recoverable;
+        try
         {
-            if (s.live)
-            {
-                continue; // only archived (closed) sessions appear here
-            }
-            ++shown;
+            recoverable = ::Agentmaster::RecoverableWindows();
+        }
+        CATCH_LOG();
 
+        // Find an archived (!live) session by id (linear scan — the archived set is small).
+        const auto findArchived = [&sessions](const std::wstring& id) -> const SessionInfo* {
+            for (const auto& s : sessions)
+            {
+                if (!s.live && s.id == id)
+                {
+                    return &s;
+                }
+            }
+            return nullptr;
+        };
+
+        // One archived-session row: title + dir + prompt count, with a per-session Restore (cherry-pick
+        // into the CURRENT window). Under a window group the label reads "Restore here" so it is visibly
+        // distinct from that group's whole-window "Reopen window".
+        const auto makeSessionRow = [this](const SessionInfo& s, bool groupedInWindow) -> Border {
             auto infoCol = StackPanel{};
             infoCol.Spacing(1);
             infoCol.VerticalAlignment(VerticalAlignment::Center);
@@ -3122,7 +3120,7 @@ namespace winrt::TerminalApp::implementation
             }
 
             auto restore = Button{};
-            restore.Content(winrt::box_value(L"Restore"));
+            restore.Content(winrt::box_value(groupedInWindow ? winrt::hstring{ L"Restore here" } : winrt::hstring{ L"Restore" }));
             restore.VerticalAlignment(VerticalAlignment::Center);
             const auto id = s.id;
             restore.Click([this, id](const IInspectable&, const RoutedEventArgs&) { _OnRestoreSession(id); });
@@ -3146,10 +3144,113 @@ namespace winrt::TerminalApp::implementation
             border.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
             border.Padding(Thickness{ 8, 6, 8, 6 });
             border.Child(rowGrid);
-            _archiveListHost.Children().Append(border);
+            return border;
+        };
+
+        bool any = false;
+        std::unordered_set<std::wstring> grouped;
+
+        // ---- Saved windows: each reopenable as a whole, its archived sessions listed under it ----
+        int ordinal = 0;
+        for (const auto& rw : recoverable)
+        {
+            ++ordinal;
+            std::vector<const SessionInfo*> winSessions; // this window's archived Claude sessions, in tab order
+            int shells = 0; // its non-Claude (pwsh / cmd) tabs — recreated by "Reopen window", not individually restorable
+            for (const auto& t : rw.record.tabs)
+            {
+                if (t.kind == ::Agentmaster::TabKind::Claude)
+                {
+                    if (const auto* hit = t.sessionId.empty() ? nullptr : findArchived(t.sessionId))
+                    {
+                        winSessions.push_back(hit);
+                    }
+                }
+                else if (!t.actionsJson.empty())
+                {
+                    ++shells;
+                }
+            }
+            if (winSessions.empty() && shells == 0)
+            {
+                continue; // this window's tabs are all gone (or its sessions were reopened elsewhere)
+            }
+
+            auto cardPanel = StackPanel{};
+            cardPanel.Spacing(6);
+
+            // Header: composition + the whole-window "Reopen window" (geometry + lens + every tab re-homed).
+            auto header = Grid{};
+            {
+                ColumnDefinition c0;
+                c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+                ColumnDefinition c1;
+                c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+                header.ColumnDefinitions().Append(c0);
+                header.ColumnDefinitions().Append(c1);
+            }
+            auto titleCol = StackPanel{};
+            titleCol.Spacing(1);
+            titleCol.VerticalAlignment(VerticalAlignment::Center);
+            titleCol.Children().Append(Text(winrt::hstring{ L"Saved window " } + winrt::to_hstring(ordinal), 14, true, 0.95));
+            std::wstring comp = std::to_wstring(winSessions.size()) + (winSessions.size() == 1 ? L" session" : L" sessions");
+            if (shells > 0)
+            {
+                comp += L" \x00B7 " + std::to_wstring(shells) + (shells == 1 ? L" shell" : L" shells");
+            }
+            titleCol.Children().Append(Text(winrt::hstring{ comp }, 11, false, 0.6));
+            auto reopenBtn = Button{};
+            reopenBtn.Content(winrt::box_value(L"Reopen window"));
+            reopenBtn.VerticalAlignment(VerticalAlignment::Center);
+            const int idx = rw.index;
+            reopenBtn.Click([this, idx](const IInspectable&, const RoutedEventArgs&) {
+                if (_reopenWindowHandler)
+                {
+                    _reopenWindowHandler(idx);
+                }
+                _HideArchive();
+            });
+            Grid::SetColumn(titleCol, 0);
+            Grid::SetColumn(reopenBtn, 1);
+            header.Children().Append(titleCol);
+            header.Children().Append(reopenBtn);
+            cardPanel.Children().Append(header);
+
+            for (const auto* s : winSessions)
+            {
+                cardPanel.Children().Append(makeSessionRow(*s, true));
+                grouped.insert(s->id);
+            }
+
+            auto group = Border{};
+            group.Background(Fill(0x14, 0x88, 0x99, 0xCC));
+            group.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x40, 0x80, 0x90, 0xC0) });
+            group.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            group.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+            group.Padding(Thickness{ 10, 8, 10, 8 });
+            group.Child(cardPanel);
+            _archiveListHost.Children().Append(group);
+            any = true;
         }
 
-        if (shown == 0)
+        // ---- Loose archived sessions (closed individually, not part of any saved window) ----
+        bool looseHeaderShown = false;
+        for (const auto& s : sessions)
+        {
+            if (s.live || grouped.find(s.id) != grouped.end())
+            {
+                continue;
+            }
+            if (any && !looseHeaderShown)
+            {
+                _archiveListHost.Children().Append(Text(L"Other archived sessions", 12, true, 0.7));
+                looseHeaderShown = true;
+            }
+            _archiveListHost.Children().Append(makeSessionRow(s, false));
+            any = true;
+        }
+
+        if (!any)
         {
             _archiveListHost.Children().Append(Text(L"No archived sessions. Closing a session's tab archives it here.", 12, false, 0.6));
         }
@@ -3857,6 +3958,16 @@ namespace winrt::TerminalApp::implementation
         _selectedExternalSessionId = sessionId;
         _selectedExternalCwd = cwd;
         _selectedExternalTitle = title;
+        // Linked Lenses: selecting an external — from the Explorer Tree OR a Triage-Board External
+        // card — puts all three regions in agreement. Switch the tree to EXTERNAL so it lists the
+        // externals with this one highlighted, and the Flight Plan renders its read-only conversation
+        // (its render is gated on EXTERNAL scope, see _RebuildPlan). A no-op when invoked from the
+        // tree (already EXTERNAL); the meaningful case is a board card click from LOCAL/GLOBAL.
+        if (_treeScope != TreeScope::External)
+        {
+            _treeScope = TreeScope::External;
+            _UpdateTreeScopeButton();
+        }
         _LoadExternalPlan(sessionId, cwd); // kicks off the (cached) background transcript read
         _NotifyLensChanged();
         _Refresh();

@@ -64,6 +64,10 @@ namespace winrt::TerminalApp::implementation
         // WindowEmperor's startup reopen loop). The content computes N itself
         // (::Agentmaster::RecoverableWindows) and shows the button only when N>0.
         void SetReopenWindowsHandler(std::function<void()> handler);
+        // Agentmaster (M10 window-grouped restore): reopen ONE saved window by its canonical sorted
+        // record index (the `-s <idx>` the Emperor/recover path uses). Fired by the per-window "Reopen
+        // window" button in the grouped Archived overlay; the page dispatches a single window restore.
+        void SetReopenWindowHandler(std::function<void(int)> handler);
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
@@ -184,7 +188,7 @@ namespace winrt::TerminalApp::implementation
         // observe-only); empty if there are none. The header toggles _externalCollapsed; each card is
         // non-interactive with an (currently disabled) Adopt seam for future external-session restore.
         winrt::Windows::UI::Xaml::Controls::Border _MakeExternalColumn();
-        winrt::Windows::UI::Xaml::Controls::Border _MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex);
+        winrt::Windows::UI::Xaml::Controls::Button _MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex);
 
         // Draggable pane splitters (resize + on-hover cursor + persisted sizes).
         // `vertical` == a vertical bar dividing the bottom COLUMNS (↔, resizes Tree/Plan);
@@ -256,6 +260,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
+        std::function<void(int)> _reopenWindowHandler; // Agentmaster (M10): reopen ONE saved window by record index (per-window "Reopen window")
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
         bool _globalPaused{ false };
