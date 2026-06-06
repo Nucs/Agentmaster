@@ -1507,10 +1507,24 @@ namespace winrt::TerminalApp::implementation
             _HandleCloseTabRequested(tab); // -> archive confirm + bookkeeping + close
             return;
         }
-        // No live tab (e.g. an observe-only external session, or one that already closed): just
-        // mark it Archived in the registry so it leaves the board and lists under "Archived".
+        // No live tab in THIS window. The no-tab branch can't actually SHUT DOWN the claude (we don't
+        // host its ConPTY), so it must NOT fake an archive on a still-running session (lifecycle gap
+        // #2): setting live=false on a claude that's still alive is reverted to live=true by the next
+        // Fleet Observer survey (ObserveClaude, Rule #7 — an observed claude is running), bouncing the
+        // card back onto the board ~2s later. That alive-but-no-local-tab case is an OURS claude the
+        // observer carded a tick before its bind completed, or one hosted by ANOTHER window (the board
+        // shows the whole fleet, but per-window actions are local — like Activate). Leave such a
+        // session Open: it gets archived from the window that hosts it, or once it binds here the first
+        // branch above closes its tab for real. Only a session whose claude has actually EXITED archives
+        // here — the legitimate "already closed" cleanup; its process is gone, so nothing revives it.
         if (_sessionRegistry)
         {
+            if (const auto info = _sessionRegistry->Get(id); info && info->pid != 0 && ::Agentmaster::ProcessAlive(info->pid))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[archive] " + id + L" not archived here \x2014 claude pid=" + std::to_wstring(info->pid) + L" still alive, not hosted in this window\n");
+                return;
+            }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 s.pendingConfirmPromptId.clear();
