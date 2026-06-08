@@ -47,7 +47,7 @@ Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](do
 ## Status
 
 **All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **361/361** standalone
+`Agentmaster` identity, and verified running.** The engine passes **376/376** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
