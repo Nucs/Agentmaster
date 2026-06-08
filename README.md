@@ -21,9 +21,12 @@ into three selection-synced regions:
 
 - **Triage Board** (top) — sessions as cards in state columns
   (*Running* · *Waiting-for-you* · *Needs-approval* · *Error*).
-- **Explorer Tree** (bottom-left) — the working directories → their sessions, with `LOCAL`/`GLOBAL`
-  scope, smart per-directory tab naming and per-directory tab color.
-- **Flight Plan** (bottom-right) — a per-session prompt queue plus **Autopilot**.
+- **Explorer Tree** (bottom-left) — the working directories → their sessions, with
+  `LOCAL`/`GLOBAL`/`EXTERNAL` scope, a sort toggle (newest / oldest / most-active / A–Z / by-PID),
+  smart per-directory tab naming and per-directory tab color.
+- **Flight Plan** (bottom-right) — a per-session prompt queue plus **Autopilot**; it records the
+  full message history, tagging whether each prompt was queued by you or typed straight into the
+  terminal.
 
 **Flight Plan / Autopilot** — queue prompts; on turn-complete (the Claude `Stop` hook) the next
 queued prompt is auto-sent. Approvals and clarifying questions are handled separately.
@@ -34,16 +37,31 @@ queued prompt is auto-sent. Approvals and clarifying questions are handled separ
   a shared stdin so you and the orchestrator both drive the same session.
 - **Adopt any `claude`** — a `claude` you type yourself into an ordinary tab is managed too (a
   transparent PATH shim auto-wires it for hooks), not just Manager-launched ones.
+- **Fleet Observer** — out-of-band detection that finds, correlates, and enriches *every* Claude
+  session — even a hand-typed one that fires zero hooks — by reading each process's cwd / cmdline /
+  env and its transcript. No hooks, no settings, fully read-only and invisible to the shell.
+- **External sessions** — surfaces Claude running outside the manager (other Windows Terminals,
+  cmd/console), enriched from its transcript (title, git branch, model · effort, timing); view its
+  conversation read-only, or **Adopt** it to resume into a managed, controllable tab.
 - **Autopilot** — turn-complete auto-advance with Full / Semi-auto / Manual modes and backstops
   (stop-on-error, max-auto-sends, pause-on-human-input, global pause).
+- **Per-tab badge** — every terminal tab carries a top-right HUD: a linked Claude shows status +
+  `model · effort · kind` + Autopilot mode + queued count, while any other tab shows a dim
+  `○ kind · unlinked` badge that flips live as the tab's activity changes.
 - **Persistence + archive/restore** — sessions, plan templates, recent dirs, and per-directory tab
   colors persist under `%USERPROFILE%\.agentmaster\`. Sessions live as **Open ⇄ Archived**;
-  restore resumes via `claude --resume` (transcript-gated) and reloads the Flight Plan.
+  restore resumes via `claude --resume` (transcript-gated) and reloads the Flight Plan. Archiving is
+  non-destructive — your Claude transcripts on disk are never deleted.
+- **Multi-window workspace** — one engine shared across all windows; each window persists its
+  geometry, Manager lens, tab layout and focused tab, and reopens on the next launch, with a recover
+  button for windows closed along the way.
 - **One value per concept** — a session's title is one value shared by the Explorer row, the
   Windows Terminal tab title, and the persisted record; a tab's color is one value per working
   directory.
 - **Settings cog** — global Claude-session config (skip-permissions, model, env vars) and Autopilot
   defaults, persisted to `settings.json`.
+- **Coexists with Windows Terminal** — installs side-by-side under its own package identity, so
+  your real Windows Terminal / Dev install is left untouched.
 
 ## Status
 
@@ -52,13 +70,30 @@ package identity, and verified end-to-end (Launch → real `claude.exe` on a Con
 hooks → PowerShell forwarder → named pipe → registry → state machine → UI, plus `claude --resume`
 restore on reopen). The standalone engine harness passes its checks (`src/cascadia/TerminalApp/AgentMaster/tests/`).
 
-**Workspace persistence (M9–M14)** is in progress: **M9** (one process-wide engine shared by all
-windows) is complete and unit-tested; **M10** (per-window UI-state records) has its data layer plus
-per-window record capture and Manager-lens restore working, with window-geometry re-apply and
-multi-window reopen still to come.
+The **Fleet Observer** (O1–O7) is complete — the out-of-band detection layer that manages every
+Claude session, including hand-typed ones that fire no hooks. **Workspace persistence (M9–M14)** is
+largely landed: **M9** (one process-wide engine shared by all windows) and most of **M10**
+(per-window UI-state records — geometry re-apply, Manager-lens restore, focused-tab restore, and
+multi-window reopen) are shipped and live-verified; routing a restored session back into its owning
+window is the main piece still in progress.
 
 See [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md) for the milestone
 tracker.
+
+## Download & install
+
+Grab the latest build from [**Releases**](https://github.com/Nucs/Agentmaster/releases):
+
+- **Portable (recommended)** — download `Agentmaster_<version>_x64.zip` (or `_arm64`), unzip
+  anywhere, and run `agentmaster.exe` in place. No install and no certificate required.
+- **MSIX bundle** — the `.msixbundle` is self-signed, so trust `Agentmaster.cer` once
+  (`Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`),
+  then double-click the bundle or `Add-AppxPackage` it.
+
+Requires Windows 10 2004 (19041) or later, on x64 or arm64, with
+[Claude Code](https://www.anthropic.com/claude-code) (`claude`) installed and on `PATH`. Agentmaster
+installs side-by-side under its own package identity, so any existing Windows Terminal install is
+left untouched. (To build from source instead, see [Building](#building) below.)
 
 ## Architecture & docs
 
@@ -66,6 +101,9 @@ tracker.
   three-region Manager tab).
 - [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md) — milestones & build.
 - [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md) — the Claude Code hooks bridge.
+- [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md) — the Fleet Observer (out-of-band
+  pull correlation + activity).
+- [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) — the per-tab link badge.
 - [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md) — workspace persistence (M9–M14).
 - [`CLAUDE.md`](CLAUDE.md) — the working notes: status by area, build/deploy details, gotchas, and
   the correctness rules.
@@ -78,7 +116,9 @@ stays cheap:
 - `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}` — the Manager tab content (the C1 UI).
 - `src/cascadia/TerminalApp/AgentMaster/` — the engine (plain C++, no WinRT):
   `SessionRegistry`, `HooksBridge`, `ClaudeSpawn`, `Scheduler`, `Engine` (the process-wide shared
-  engine), `Persistence`, and `tests/` (a standalone harness).
+  engine), `Persistence`, the **Fleet Observer** (`ProcessInspect`, `ProcessObserver`, `Activity`),
+  and `tests/` (a standalone harness).
+- `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge overlay.
 - Small touches in `TerminalPage.{h,cpp}`, `Tab.{h,cpp}`, and `TabManagement.cpp` at the
   integration points, plus the registrations in `TerminalAppLib.vcxproj`.
 - `src/cascadia/CascadiaPackage/Package-Dev.appxmanifest` — the distinct `Agentmaster` package
