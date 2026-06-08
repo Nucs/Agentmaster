@@ -1871,8 +1871,9 @@ namespace winrt::TerminalApp::implementation
     }
 
     // ===== Agentmaster: Archive page (full-window redesign) =================================
-    // A "page" mounted over TerminalPage's Root (covering the tab strip), opened by the Manager's
-    // Archived button (SetOpenArchiveHandler -> _ShowArchivePage). LEFT half = a dense sortable table
+    // A "page" mounted over TerminalPage's Root CONTENT rows (covering every pane, below the tab strip;
+    // covering the titlebar row crashes XAML input — see the mount note in _BuildArchivePageShell), opened
+    // by the Manager's Archived button (SetOpenArchiveHandler -> _ShowArchivePage). LEFT half = a dense sortable table
     // of archived sessions (+ which saved window each belongs to); RIGHT half = a detail/preview of the
     // selected row (metadata + read-only Flight Plan + restore actions). Back returns to the tabs.
     // Replaces the Manager's old in-content modal overlay. (A slide/fade transition is a deferred
@@ -1993,8 +1994,8 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Build the page shell ONCE (host + header + table/detail split + footer), mounted full-bleed over
-    // TerminalPage's Root so it covers the tab strip ("the whole window moved a page").
+    // Build the page shell ONCE (host + header + table/detail split + footer), mounted over TerminalPage's
+    // Root content rows (1-2) so it covers every pane below the tab strip (see the mount note below).
     void TerminalPage::_BuildArchivePageShell()
     {
         if (_archivePageHost)
@@ -2139,10 +2140,16 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRow(footer, 2);
         host.Children().Append(footer);
 
-        // Mount full-bleed over Root (RowSpan all 3 rows -> covers the tab strip + content).
+        // Mount over Root's CONTENT rows (1-2: the InfoBar area + TabContent), NOT row 0 (the
+        // titlebar / tab strip). Covering row 0 put an opaque element over WT's titlebar input region;
+        // toggling it during the very click that opened it crashed XAML's pointer/hit-test path — an AV
+        // READ of 0x1d5 (null + field offset) deep in the ninput.dll -> Windows.UI.dll ->
+        // Windows.UI.Xaml.dll input stack (pinned from the crash dump). The CommandPalette + ContentDialogs
+        // live at row 2 and toggle safely during input; we match that. So the page covers every pane
+        // (everything below the tabs); the tab strip + min/max/close caption buttons stay visible + usable.
         this->Root().Children().Append(host);
-        Grid::SetRow(host, 0);
-        Grid::SetRowSpan(host, 3);
+        Grid::SetRow(host, 1);
+        Grid::SetRowSpan(host, 2);
         _archivePageHost = host;
     }
 

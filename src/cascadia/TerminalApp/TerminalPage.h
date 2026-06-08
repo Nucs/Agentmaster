@@ -327,7 +327,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _assignedWindowId;
 
         // Agentmaster (Archive page): the full-window archive surface's state. _archivePageHost is the
-        // collapsed full-bleed Grid mounted on Root (RowSpan all); the rest are its live sub-elements +
+        // collapsed Grid mounted on Root's content rows (1-2, below the tab strip); the rest are its live sub-elements +
         // selection / multi-select / sort / filter state. _archiveRows is the gathered data (re-gathered
         // on show + after an action, NOT per keystroke — RecoverableWindows() reads disk), then filtered
         // + sorted into the table by _RenderArchiveTable.
@@ -475,7 +475,7 @@ namespace winrt::TerminalApp::implementation
         void _FlushWindowRecord();
 
         // Agentmaster (Archive page): the redesigned archive surface — a full-window "page" mounted over
-        // TerminalPage's Root (covering the tab strip), opened by the Manager's Archived button via
+        // TerminalPage's Root content rows (covering all panes below the tab strip), opened by the Archived button via
         // SetOpenArchiveHandler. LEFT = a dense sortable table of archived sessions (+ which saved window
         // each belongs to); RIGHT = a detail/preview of the selected row (metadata + read-only Flight Plan
         // + restore actions); a search filter; multi-select bulk restore. Replaces the in-content overlay.
