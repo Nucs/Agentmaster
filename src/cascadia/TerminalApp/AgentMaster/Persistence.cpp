@@ -568,6 +568,8 @@ namespace Agentmaster
             tabs.Push(ToJson(t));
         }
         o.Set(L"tabs", std::move(tabs));
+        o.Set(L"selectedSessionId", json::Value::MkStr(w.selectedSessionId)); // stable id of the focused Claude tab
+        o.Set(L"selectedTabIndex", json::Value::MkNum(static_cast<double>(w.selectedTabIndex))); // fallback for a shell tab
         o.Set(L"manager", ToJson(w.manager));
         return o;
     }
@@ -587,6 +589,11 @@ namespace Agentmaster
                 w.tabs.push_back(TabEntryFromJson(tv));
             }
         }
+        // Both unset (empty / -1) when absent — a record from before selected-tab persistence reopens
+        // with the Manager tab focused, exactly as it did then. selectedSessionId (stable Claude id) is
+        // preferred on restore; selectedTabIndex is the shell-tab fallback.
+        w.selectedSessionId = v.StrAt(L"selectedSessionId");
+        w.selectedTabIndex = static_cast<int>(v.I64At(L"selectedTabIndex", -1));
         if (const auto* m = v.Find(L"manager"); m && m->type == json::Value::Type::Obj)
         {
             w.manager = ManagerStateFromJson(*m);

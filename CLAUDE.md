@@ -124,8 +124,13 @@ append a spurious pwsh tab to every reopened window and **accumulate one shell p
 record; a reopened window's content comes from the re-home, not the default action. Live-verified:
 a window with 1 Claude + 3 pwsh tabs closed → reopened at its geometry (1466×780 @ 14,173) with the
 Claude session resumed + all three pwsh tabs (title/cwd) replayed; the record round-tripped intact.
-**Still deferred:** exact left-to-right interleave of Claude vs Other tabs on reopen (Claude tabs land
-first, then shells — see PERSISTENCE.md §13.5).
+The reopened window also **re-selects the tab that was focused at close** — persisted by STABLE
+IDENTITY (`WindowRecord::selectedSessionId` = the Claude conversation id; a shell tab, which has no
+cross-restart id, falls back to `selectedTabIndex`; Manager / none ⇒ both unset). `_RestoreWindowTabs`
+resolves the focused tab's live position and applies it deterministically — a trailing `SwitchToTab`
+appended to the shell `ProcessStartupActions` batch (so it runs AFTER the async shells exist), or a
+synchronous select when there are no shells. **Still deferred:** exact left-to-right interleave of
+Claude vs Other tabs on reopen (Claude tabs land first, then shells — see PERSISTENCE.md §13.5).
 
 **The Fleet Observer (O1–O7, [`OBSERVER.md`](doc/agentmaster/OBSERVER.md)) is complete — built,
 deployed, and live-verified.** It is the **PULL** half of the state engine: a process- +

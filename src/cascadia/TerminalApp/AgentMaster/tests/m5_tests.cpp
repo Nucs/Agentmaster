@@ -882,6 +882,12 @@ static void TestWindowRecord()
     other.actionsJson = L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]";
     in.tabs.push_back(other);
 
+    // Selected tab persisted by stable identity (Claude conversation id preferred; index is the shell
+    // fallback). Both set to non-default values so a dropped field FAILS the round-trip (a -1 default
+    // would otherwise mask a missing index).
+    in.selectedSessionId = L"conv-abc";
+    in.selectedTabIndex = 1;
+
     in.manager.selectedId = L"conv-abc";
     in.manager.scopeDir = L"K:/api";
     in.manager.selectedPromptId = L"q1";
@@ -905,6 +911,9 @@ static void TestWindowRecord()
         CHECK(out.tabs[1].kind == TabKind::Other, "tab[1] is Other");
         CHECK(out.tabs[1].actionsJson == L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]", "Other tab actionsJson (nested JSON) round-trip");
     }
+
+    CHECK(out.selectedSessionId == L"conv-abc", "selected tab persisted by stable Claude id (round-trip)");
+    CHECK(out.selectedTabIndex == 1, "selectedTabIndex shell fallback (round-trip)");
 
     CHECK(out.manager.selectedId == L"conv-abc", "lens selectedId round-trip");
     CHECK(out.manager.scopeDir == L"K:/api", "lens scopeDir round-trip");

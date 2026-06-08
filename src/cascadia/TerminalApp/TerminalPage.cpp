@@ -978,8 +978,20 @@ namespace winrt::TerminalApp::implementation
         }
         rec.geometry = geo;
 
-        // --- ordered tab refs ---
+        // --- ordered tab refs (+ which tab is focused) ---
+        // The focused tab is persisted by STABLE IDENTITY so it survives a restart: a Claude tab by its
+        // conversation id (selectedSessionId), a shell tab — which has no cross-restart id — by index
+        // into rec.tabs (selectedTabIndex, the fallback). Manager / none leaves both unset; the Manager
+        // tab is re-created at index 0, the natural default. On reopen the window re-selects this tab so
+        // closing/reopening preserves the ACTIVE tab, not just the set of tabs.
         rec.tabs.clear();
+        rec.selectedSessionId.clear();
+        rec.selectedTabIndex = -1;
+        TerminalApp::Tab focusedTab{ nullptr };
+        if (const auto fi = _GetFocusedTabIndex(); fi && *fi < _tabs.Size())
+        {
+            focusedTab = _tabs.GetAt(*fi);
+        }
         for (const auto& tab : _tabs)
         {
             if ((_managerTab && tab == _managerTab) || (_settingsTab && tab == _settingsTab))
@@ -1023,6 +1035,19 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
                 CATCH_LOG();
+            }
+            if (focusedTab && tab == focusedTab)
+            {
+                // Prefer the stable Claude conversation id; a shell tab (no cross-restart id) falls back
+                // to its index in rec.tabs. Read entry BEFORE the move below.
+                if (entry.kind == ::Agentmaster::TabKind::Claude && !entry.sessionId.empty())
+                {
+                    rec.selectedSessionId = entry.sessionId;
+                }
+                else
+                {
+                    rec.selectedTabIndex = static_cast<int>(rec.tabs.size()); // index this entry will occupy
+                }
             }
             rec.tabs.push_back(std::move(entry));
         }
@@ -1393,10 +1418,19 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         using namespace winrt::Microsoft::Terminal::Settings::Model;
-        // Copy the refs first: _LaunchClaudeSession / ProcessStartupActions re-enter capture + autosave,
-        // which rewrites _windowRecord.tabs out from under us mid-loop.
+        // Snapshot the refs + the focused-tab target FIRST: _LaunchClaudeSession / ProcessStartupActions
+        // re-enter capture + autosave, which rewrites _windowRecord (tabs AND the selected* fields) out
+        // from under us mid-loop.
         const auto tabs = _windowRecord.tabs;
+        const std::wstring selSessionId = _windowRecord.selectedSessionId; // stable Claude id (preferred)
+        const int selTabIndex = _windowRecord.selectedTabIndex; // shell-tab fallback; -1 = Manager/none
+        const bool wantManager = selSessionId.empty() && selTabIndex < 0;
         size_t resumed = 0, shells = 0, skipped = 0;
+        // The focused tab's ABSOLUTE index in _tabs after re-home (Manager is index 0, then the Claude
+        // tabs in creation order, then the shell tabs). Computed LIVE from what actually got created —
+        // the persisted identity is the stable sessionId (Claude) / record index (shell), never a live
+        // position. -1 => unresolved (the selected session couldn't be restored) => leave default focus.
+        int targetAbs = wantManager ? 0 : -1;
 
         // Pass 1 — Claude sessions, synchronously, in record order.
         for (const auto& entry : tabs)
@@ -1416,6 +1450,10 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
             _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            if (!selSessionId.empty() && entry.sessionId == selSessionId)
+            {
+                targetAbs = 1 + static_cast<int>(resumed); // this Claude tab's index (Manager occupies 0)
+            }
             ++resumed;
         }
 
@@ -1424,8 +1462,9 @@ namespace winrt::TerminalApp::implementation
         // A single call keeps the shells in order AND avoids the re-entrant virtual-cwd save/restore race
         // that per-tab calls would cause (ProcessStartupActions wraps its batch in a window cwd swap).
         std::vector<ActionAndArgs> shellActions;
-        for (const auto& entry : tabs)
+        for (size_t i = 0; i < tabs.size(); ++i)
         {
+            const auto& entry = tabs[i];
             if (entry.kind != ::Agentmaster::TabKind::Other || entry.actionsJson.empty())
             {
                 continue;
@@ -1441,20 +1480,47 @@ namespace winrt::TerminalApp::implementation
                         {
                             shellActions.push_back(a);
                         }
+                        if (selSessionId.empty() && selTabIndex == static_cast<int>(i))
+                        {
+                            targetAbs = 1 + static_cast<int>(resumed) + static_cast<int>(shells); // this shell's index
+                        }
                         ++shells;
                     }
                 }
             }
             CATCH_LOG();
         }
+
+        // Re-select the focused tab. With shells (created ASYNC by ProcessStartupActions) we append a
+        // SwitchToTab as the batch's LAST action so it runs AFTER the shells exist and overrides the
+        // "focus the tab I just made" that each newTab does. With no shells the strip is already settled,
+        // so select synchronously. targetAbs < 0 (selected session couldn't be restored) => leave default.
         if (!shellActions.empty())
         {
+            if (targetAbs >= 0)
+            {
+                ActionAndArgs sel;
+                sel.Action(ShortcutAction::SwitchToTab);
+                sel.Args(SwitchToTabArgs{ static_cast<uint32_t>(targetAbs) });
+                shellActions.push_back(std::move(sel));
+            }
             ProcessStartupActions(std::move(shellActions));
+        }
+        else if (targetAbs >= 0 && targetAbs < static_cast<int>(_tabs.Size()))
+        {
+            if (const auto t = _tabs.GetAt(static_cast<uint32_t>(targetAbs)))
+            {
+                if (const auto& item = t.TabViewItem())
+                {
+                    _tabView.SelectedItem(item);
+                }
+            }
         }
 
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[rehome] window " + _windowId + L" resumed=" + std::to_wstring(resumed) +
                                           L" shells=" + std::to_wstring(shells) + L" skipped=" + std::to_wstring(skipped) +
+                                          L" select=" + std::to_wstring(targetAbs) +
                                           L" of " + std::to_wstring(tabs.size()) + L" refs\n");
     }
 

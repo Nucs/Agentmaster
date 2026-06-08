@@ -314,6 +314,15 @@ namespace Agentmaster
         std::wstring windowId; // stable GUID, generated once per window and embedded in its Manager tab
         WindowGeometry geometry;
         std::vector<TabEntry> tabs; // ORDERED (left-to-right)
+        // The focused tab, persisted by STABLE IDENTITY so it survives a restart (positions/indices
+        // shift between runs — a session id does not). A Claude tab => selectedSessionId (the
+        // conversation id, the same stable ref sessions.json uses). A non-Claude (shell) tab has no
+        // cross-restart id (its WT session GUID is regenerated each run), so it falls back to
+        // selectedTabIndex (an index into `tabs`). Manager / none => both unset (empty / -1); the
+        // Manager tab is re-created at index 0, the natural default. On reopen the window re-selects this
+        // tab so closing/reopening preserves the ACTIVE tab, not just the set of tabs.
+        std::wstring selectedSessionId; // selected Claude tab's conversation id (stable); empty otherwise
+        int selectedTabIndex{ -1 }; // fallback for a non-Claude selected tab: index into `tabs`; -1 = Manager/none
         ManagerState manager;
     };
 }
