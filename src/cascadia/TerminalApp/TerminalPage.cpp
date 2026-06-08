@@ -2155,14 +2155,30 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_ShowArchivePage()
     {
-        _BuildArchivePageShell();
-        if (!_archivePageHost)
-        {
-            return;
-        }
-        _GatherArchiveRows();
-        _RenderArchiveTable();
-        _archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Visible);
+        // DEFER the build/show OFF the current input event. This is invoked from the Archived button's
+        // Click, i.e. while that pointer event is still being ROUTED to the button. Restructuring the
+        // visual tree there — appending the page to Root and toggling an opaque full-bleed element
+        // Visible — left XAML routing the in-flight pointer against a tree that changed under it and
+        // dereferencing a stale/null target: AV READ null+offset at Windows.UI.Xaml.dll+0x16344d, deep
+        // in the ninput.dll -> Windows.UI.dll -> Windows.UI.Xaml.dll pointer-routing stack (pinned from
+        // two crash dumps; identical whether mounted over the titlebar row or the content rows). Posting
+        // to the dispatcher lets the click finish routing against the OLD tree; the page then builds +
+        // appears on a clean tick — the same reason ContentDialog.ShowAsync + the CommandPalette defer.
+        Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+            auto self = weak.get();
+            if (!self)
+            {
+                return;
+            }
+            self->_BuildArchivePageShell();
+            if (!self->_archivePageHost)
+            {
+                return;
+            }
+            self->_GatherArchiveRows();
+            self->_RenderArchiveTable();
+            self->_archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Visible);
+        });
     }
 
     void TerminalPage::_HideArchivePage()
