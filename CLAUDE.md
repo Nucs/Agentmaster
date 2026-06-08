@@ -377,38 +377,41 @@ What works, by area:
   record is dropped. A never-prompted session has no transcript and a blind `--resume` would die
   with "No conversation found" (Rule #6). `Sent` prompts are never replayed. Templates: save a
   session's queue, apply it, or broadcast to a whole directory.
-  - **⚠️ Lifecycle coverage — known gaps (review pending, NOT yet fixed; surfaced auditing the
-    add-tab / launch / close / archive / resume paths end-to-end).** The tab-X archive seam above is
-    sound, but the *non-tab-X* exits are not fully covered: **(1, HIGH) closing a _window_ never
-    archives its sessions.** `~TerminalPage` (`TerminalPage.cpp:248`) only Unpublish/Unregister/
-    RemoveHandler — it never iterates `_claudeTabs` to flip `live=false` / unbind, and the per-window
-    liveness sweep (`:2070`) can't save a window whose `_claudeTabs` is being destroyed. Because the
-    non-closable Manager tab means a window never auto-closes via "last tab" (`_RemoveTab`'s
-    `size()==0` path can't fire), **window-chrome ✕ is the _primary_ window exit** — so its sessions
-    linger `live=true` in the shared registry as **phantom cards** on every OTHER window's Triage
-    Board (Activate = no-op; the claude is already dead) with their **injectors + ConptyConnections
-    leaked** (the injector lambda captures the connection) until process exit; only an app restart
-    clears it (`live` isn't persisted). **(2, MED) archiving an unbound-but-live session bounces
-    back** — `_ArchiveClaudeSession`'s no-tab branch (`:1506`) sets `live=false`+persist, but the
-    S-lane's `ObserveClaude` re-sets `live=true` the next tick (`SessionRegistry.cpp:339`), hitting an
-    *ours* claude the observer carded before its bind completed. **(3, MED) adopt-external = two
-    writers on one transcript** — `_AdoptExternalClaude` (`:1613`) `--resume`s the id into a managed
-    tab while the original external keeps running, both appending the same `.jsonl` (only a code
-    comment — "the user closes it" — mitigates). **(4, LOW–MED) `SessionEnd`/`Done` doesn't archive**
-    — only the slow liveness sweep does, and never if the window closes first (→ gap 1); a finished
-    claude lingers as a live card until swept. **(5, LOW) Launch with a null tab leaves a phantom** —
-    `Upsert(live=true)`+`SetInjector` run unconditionally after `_CreateNewTabFromPane`; only
-    `pane==null` is guarded (`:1116`), so a null `tab` yields a live record absent from `_claudeTabs`
-    (un-Activatable, un-sweepable). **(6, LOW) persisted `state` is dead weight** —
-    `ToJson(SessionInfo)` writes it (`Persistence.cpp:308`) but `_RestoreClaudeSessions` forces `Idle`
-    on load (`:1321`); written, never read (the resume-gating gotcha already says don't trust it).
-    **Verified clean (not gaps):** external WindowsTerminal/Other claudes never enter the registry or
-    `sessions.json` (`ObserveClaude` is gated on rostered + resolved id, `ProcessObserver.cpp:427`) —
-    no foreign-claude leak into the Archived list; cross-window double-bind is guarded (`HasInjector`,
-    `TerminalPage.cpp:2373`; one ConPTY lives in one window); and resume-fresh drops the stale archived
-    record (`:1150`). The structural fix for gap 1 is a teardown archive loop (the
-    `_ArchiveAndCloseClaudeTab` bookkeeping minus the dialog + `tab.Close()`) — or session hand-off —
-    hung off the window-close path.
+  - **Lifecycle coverage — audit of the add-tab / launch / close / archive / resume paths
+    end-to-end. #1 & #2 are ✅ FIXED since the audit; #3 (by design), #4 (mitigated), #5 (moot),
+    #6 (cosmetic) remain — all low-severity.** The tab-X archive seam above is sound; the *non-tab-X*
+    exits were the risk. **(1, HIGH — ✅ FIXED) closing a _window_ now archives its sessions.**
+    `_ArchiveWindowSessionsOnTeardown` (`TerminalPage.cpp:1825`, commit `4fa9fb7bc`) mirrors
+    `_ArchiveAndCloseClaudeTab`'s bookkeeping for every hosted session — minus the dialog + `tab.Close()`
+    (the tabs go with the window): flip `live=false`, clear the injector (releases the ConptyConnection →
+    claude.exe exits), drop the per-window maps, persist once. It runs from the deterministic close seam
+    (`CloseWindow:4605`, after the confirm) for immediate phantom-clearing AND idempotently from
+    `~TerminalPage:254` as the catch-all for quit / any other teardown. So a window-chrome ✕ (still the
+    _primary_ window exit — the non-closable Manager tab means `_RemoveTab`'s `size()==0` path can't fire)
+    no longer leaves `live=true` **phantom cards** or **leaked injectors/connections** on the other
+    windows' Triage Boards. **(2, MED — ✅ FIXED) no-tab archive no longer fake-archives a still-running
+    session.** `_ArchiveClaudeSession`'s no-tab branch (`:1730`, commit `0336fa420`) now guards on
+    `ProcessAlive(info->pid)`: it refuses to flip `live=false` on a claude that is still alive but not
+    hosted in THIS window (an *ours* claude the S-lane carded a tick before its bind completed, or one
+    hosted by another window) — which `ObserveClaude` would otherwise bounce back to `live=true` the next
+    survey (`SessionRegistry.cpp:339`, Rule #7). Only a claude that has actually EXITED archives there.
+    **(3, MED — open, by design) adopt-external = two writers on one transcript** — `_AdoptExternalClaude`
+    (`:1877`) `--resume`s the id into a managed tab while the original external keeps running, both
+    appending the same `.jsonl` (only a code comment — "the user closes it" — mitigates). **(4, LOW —
+    mitigated) `SessionEnd`/`Done` doesn't eagerly archive** — only the liveness sweep
+    (`_SweepClaudeLiveness:2334`) does, when the hosting connection reaches Closed; the window-close case
+    it once missed (→ gap 1) is now covered by the teardown archive, leaving only ~one slow heartbeat
+    (~2 s) of a finished claude lingering as a live card. **(5, LOW — effectively moot) Launch with a null
+    tab** — `Upsert(live=true)`+`SetInjector` still run unconditionally after `_CreateNewTabFromPane`
+    (`:1213`), but the `pane==null` guard (`:1183`) makes a null `tab` unreachable
+    (`_CreateNewTabFromPane` returns null only for a null pane), so there is no phantom in practice; the
+    unconditional upsert is a latent defensive nit. **(6, LOW — open) persisted `state` is dead weight** —
+    `ToJson(SessionInfo)` writes it but `_RestoreClaudeSessions` forces `Idle` on load (`:1389`); written,
+    never read (the resume-gating gotcha already says don't trust it). **Verified clean (not gaps):**
+    external WindowsTerminal/Other claudes never enter the registry or `sessions.json` (`ObserveClaude` is
+    gated on rostered + resolved id, `ProcessObserver.cpp:427`) — no foreign-claude leak into the Archived
+    list; cross-window double-bind is guarded (`HasInjector`; one ConPTY lives in one window); and
+    resume-fresh drops the stale archived record (`:1218`).
 - **Per-window records (M10 data layer, `Persistence`/`SessionModels`).** A `WindowRecord`
   (one file per window: `windows/<windowId>.json`) holds per-window **UI state** — geometry
   (position/size/launch-mode), the Manager **lens** (selection / dir scope / selected prompt /
