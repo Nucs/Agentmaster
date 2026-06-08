@@ -2379,8 +2379,8 @@ namespace winrt::TerminalApp::implementation
                         e.Handled(true);
                     }
                 });
-                // Right-click (or context key / long-press) menu: Rename / Delete.
-                rowBtn.ContextFlyout(_MakeSessionMenu(id));
+                // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
+                rowBtn.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
                 _treeHost.Children().Append(rowBtn);
             }
         }
@@ -2692,24 +2692,6 @@ namespace winrt::TerminalApp::implementation
         auto disp = _dispatcher;
         auto weak = get_weak();
 
-        MenuFlyoutItem openHere;
-        openHere.Text(L"Open New Session Here");
-        ToolTipService::SetToolTip(openHere, winrt::box_value(L"Launch a managed Claude session in this directory (a new, independent conversation)"));
-        openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (self->_spawnHandler)
-                {
-                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
-                }
-            }
-        });
-        menu.Items().Append(openHere);
-
         MenuFlyoutItem adopt;
         adopt.Text(L"Adopt");
         ToolTipService::SetToolTip(adopt, winrt::box_value(L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)"));
@@ -2727,6 +2709,27 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(adopt);
+
+        // Open New Session Here — the LAST option in every scope (matches _MakeSessionMenu's LOCAL/
+        // GLOBAL ordering): spawn a managed session in this external's cwd (a new, independent
+        // conversation — distinct from Adopt, which resumes the external's existing conversation).
+        MenuFlyoutItem openHere;
+        openHere.Text(L"Open New Session Here");
+        ToolTipService::SetToolTip(openHere, winrt::box_value(L"Launch a managed Claude session in this directory (a new, independent conversation)"));
+        openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_spawnHandler)
+                {
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                }
+            }
+        });
+        menu.Items().Append(openHere);
 
         return menu;
     }
@@ -2836,14 +2839,15 @@ namespace winrt::TerminalApp::implementation
 
     // ---- Explorer-tree session actions (right-click menu, rename, delete) ----
 
-    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id)
+    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id, const std::wstring& cwd)
     {
         MenuFlyout menu;
         auto disp = _dispatcher;
         auto weak = get_weak();
 
-        // Both items defer one tick: a MenuFlyout restores focus to its target as it closes,
-        // which would otherwise yank focus out of the freshly-shown rename editor / dialog.
+        // All items defer one tick: a MenuFlyout restores focus to its target as it closes,
+        // which would otherwise yank focus out of the freshly-shown rename editor / dialog (and the
+        // spawn / tree rebuild for Open New Session Here).
         MenuFlyoutItem rename;
         rename.Text(L"Rename\x2026");
         rename.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
@@ -2871,6 +2875,28 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(archive);
+
+        // Open New Session Here — the LAST option in every scope (LOCAL/GLOBAL here, EXTERNAL in
+        // _MakeExternalTreeMenu): spawn a managed Claude session in THIS row's working dir, a new
+        // independent conversation. Uses the row's cwd captured at build time (a session's workingDir
+        // is fixed at launch).
+        MenuFlyoutItem openHere;
+        openHere.Text(L"Open New Session Here");
+        ToolTipService::SetToolTip(openHere, winrt::box_value(L"Launch a managed Claude session in this directory (a new, independent conversation)"));
+        openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_spawnHandler)
+                {
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                }
+            }
+        });
+        menu.Items().Append(openHere);
 
         return menu;
     }

@@ -206,9 +206,9 @@ namespace winrt::TerminalApp::implementation
         void _OnSplitterMoved(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e, bool vertical);
         void _OnSplitterReleased(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
 
-        // Explorer-tree session actions: right-click context menu (Rename / Delete with a
-        // confirm warning) + double-click to activate.
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id);
+        // Explorer-tree session actions: right-click context menu (Rename / Archive, then Open New
+        // Session Here in the row's cwd as the last item) + double-click to activate.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id, const std::wstring& cwd);
         // Agentmaster: the EXTERNAL-tree row right-click menu. Open New Session Here -> spawn a managed session in
         // the external's cwd (an independent conversation); Adopt -> resume the external's conversation
         // into a managed, controllable tab (via _adoptExternalHandler). Observe-only externals carry no

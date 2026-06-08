@@ -301,10 +301,13 @@ What works, by area:
   queue/Autopilot). Selecting an external is **Linked-Lenses-synced** (`_SelectExternal`): it switches
   the tree to **EXTERNAL** with the row highlighted, highlights the board card, and renders the
   read-only plan — so a board click behaves exactly like a tree click. **Right-click** (on either the
-  tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Open New Session Here**
-  (spawn a managed session in that cwd) and **Adopt** (resume its conversation into a managed,
-  controllable tab — `_AdoptExternalClaude` resolves the id via `ResolveSessionId`, then
-  `claude --resume`s it, leaving the original external running — Rule #13). With no external selected the
+  tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Adopt** (resume its
+  conversation into a managed, controllable tab — `_AdoptExternalClaude` resolves the id via
+  `ResolveSessionId`, then `claude --resume`s it, leaving the original external running — Rule #13)
+  and, **as the last item, Open New Session Here** (spawn a managed session in that cwd, a new
+  independent conversation). **Open New Session Here is offered in EVERY scope** — it is also the
+  **last item** on the LOCAL/GLOBAL session-row menu (`_MakeSessionMenu`, after Rename / Archive),
+  spawning in that session's working dir. With no external selected the
   Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
   **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /
   active span / last-activity ago; `m`=month or minute by position, tooltip-explained;
