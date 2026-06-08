@@ -4,6 +4,7 @@
 #pragma once
 
 #include <ThrottledFunc.h>
+#include <unordered_set>
 
 #include "TerminalPage.g.h"
 #include "Tab.h"
@@ -325,6 +326,38 @@ namespace winrt::TerminalApp::implementation
         // set by TerminalWindow before _OnFirstLayout. Empty => single-window (claim the front record).
         std::wstring _assignedWindowId;
 
+        // Agentmaster (Archive page): the full-window archive surface's state. _archivePageHost is the
+        // collapsed full-bleed Grid mounted on Root (RowSpan all); the rest are its live sub-elements +
+        // selection / multi-select / sort / filter state. _archiveRows is the gathered data (re-gathered
+        // on show + after an action, NOT per keystroke — RecoverableWindows() reads disk), then filtered
+        // + sorted into the table by _RenderArchiveTable.
+        struct _ArchiveRow
+        {
+            std::wstring id;
+            std::wstring title;
+            std::wstring dir;
+            std::wstring branch;
+            int64_t createdUnixMs{ 0 };
+            int64_t lastActivityUnixMs{ 0 };
+            int windowIndex{ -1 };  // RecoverableWindow::index (for "Reopen its window"); -1 = loose
+            int windowOrdinal{ 0 }; // 1-based "W{n}" display chip; 0 = loose (no saved window)
+            int sentCount{ 0 };
+            int totalCount{ 0 };
+        };
+        winrt::Windows::UI::Xaml::Controls::Grid _archivePageHost{ nullptr };          // full-bleed page over Root
+        winrt::Windows::UI::Xaml::Controls::Grid _archiveHeaderRow{ nullptr };         // LEFT: sortable column header
+        winrt::Windows::UI::Xaml::Controls::StackPanel _archiveRowsHost{ nullptr };    // LEFT: table data rows
+        winrt::Windows::UI::Xaml::Controls::StackPanel _archiveDetailHost{ nullptr };  // RIGHT: detail/preview
+        winrt::Windows::UI::Xaml::Controls::TextBox _archiveSearchBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _archiveCountText{ nullptr };    // header "N sessions · M windows"
+        winrt::Windows::UI::Xaml::Controls::Button _archiveRestoreSelBtn{ nullptr };   // footer bulk action
+        std::vector<_ArchiveRow> _archiveRows;
+        std::wstring _archiveSelectedId;                  // the row whose detail is shown
+        std::unordered_set<std::wstring> _archiveChecked; // multi-select set (by session id)
+        int _archiveSortColumn{ 4 };                      // default sort column: Created (see _RenderArchiveTable)
+        bool _archiveSortAscending{ false };              // default: newest first
+        std::wstring _archiveFilter;                      // lowercased search text
+
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
         bool _isMaximized{ false };
@@ -440,6 +473,20 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::WindowRecord _CaptureWindowRecord();
         void _ScheduleWindowRecordSave();
         void _FlushWindowRecord();
+
+        // Agentmaster (Archive page): the redesigned archive surface — a full-window "page" mounted over
+        // TerminalPage's Root (covering the tab strip), opened by the Manager's Archived button via
+        // SetOpenArchiveHandler. LEFT = a dense sortable table of archived sessions (+ which saved window
+        // each belongs to); RIGHT = a detail/preview of the selected row (metadata + read-only Flight Plan
+        // + restore actions); a search filter; multi-select bulk restore. Replaces the in-content overlay.
+        void _ShowArchivePage(); // build-if-needed + gather + render + show
+        void _HideArchivePage(); // hide (the Back button)
+        void _BuildArchivePageShell(); // one-time: host + header (Back/title/search) + table/detail split + footer
+        void _GatherArchiveRows(); // fill _archiveRows from RecoverableWindows() + loose archived sessions (+ transcript-stat timing)
+        void _RenderArchiveTable(); // apply _archiveFilter + sort to _archiveRows -> rebuild the table + sortable header + selection
+        void _ShowArchiveDetail(const std::wstring& sessionId); // populate the right pane for one row
+        void _RestoreCheckedArchived(); // bulk: restore every checked archived session
+        void _UpdateArchiveBulkButton(); // refresh the footer "Restore selected (N)" label + enabled
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 

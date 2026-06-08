@@ -665,6 +665,10 @@ namespace winrt::TerminalApp::implementation
     {
         _reopenWindowHandler = std::move(handler);
     }
+    void AgentManagerContent::SetOpenArchiveHandler(std::function<void()> handler)
+    {
+        _openArchiveHandler = std::move(handler);
+    }
     void AgentManagerContent::SetRefreshHandler(std::function<void()> handler)
     {
         _refreshHandler = std::move(handler);
@@ -1022,7 +1026,7 @@ namespace winrt::TerminalApp::implementation
             _archivedBtn = Button{};
             _archivedBtn.Content(winrt::box_value(L"Archived"));
             ToolTipService::SetToolTip(_archivedBtn, winrt::box_value(L"Restore archived (closed) sessions"));
-            _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowArchive(); });
+            _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openArchiveHandler) { _openArchiveHandler(); } });
             bar.Children().Append(_archivedBtn);
 
             Grid::SetRow(bar, 0);
@@ -1379,7 +1383,10 @@ namespace winrt::TerminalApp::implementation
             _root.Children().Append(_pathPopup);
         }
 
-        _BuildArchiveOverlay(); // modal archived-sessions layer
+        // Agentmaster (Archive page): the old in-content archive overlay is RETIRED — the Archived
+        // button now opens the full-window Archive page hosted by TerminalPage (over the tab strip,
+        // SetOpenArchiveHandler). _BuildArchiveOverlay() is intentionally NOT called; its methods stay
+        // dormant (every call site is null-guarded on _archiveOverlay / _archiveListHost).
         _BuildSettingsOverlay(); // modal settings layer, appended last so it renders on top
     }
 

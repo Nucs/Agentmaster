@@ -68,6 +68,9 @@ namespace winrt::TerminalApp::implementation
         // record index (the `-s <idx>` the Emperor/recover path uses). Fired by the per-window "Reopen
         // window" button in the grouped Archived overlay; the page dispatches a single window restore.
         void SetReopenWindowHandler(std::function<void(int)> handler);
+        // Agentmaster (Archive page): the Manager's Archived button opens the full-window Archive PAGE
+        // (mounted on TerminalPage's Root, over the tab strip) instead of the old in-content overlay.
+        void SetOpenArchiveHandler(std::function<void()> handler);
         // Agentmaster: the Explorer Tree's "refresh" button (after the sort toggle) — reload the data
         // for the CURRENT scope. The content redraws immediately; this fires so the page can force the
         // Fleet Observer to re-survey now (re-enrich the registry + recompute the External census)
@@ -269,6 +272,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
         std::function<void(int)> _reopenWindowHandler; // Agentmaster (M10): reopen ONE saved window by record index (per-window "Reopen window")
+        std::function<void()> _openArchiveHandler; // Agentmaster (Archive page): open the full-window Archive page (TerminalPage-hosted)
         std::function<void()> _refreshHandler; // Agentmaster: Explorer Tree refresh -> page re-surveys the Fleet Observer (reload the current scope's data)
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)

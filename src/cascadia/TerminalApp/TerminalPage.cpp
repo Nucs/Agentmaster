@@ -1656,6 +1656,13 @@ namespace winrt::TerminalApp::implementation
                 self->_ReopenSavedWindow(index);
             }
         });
+        // Agentmaster (Archive page): the Manager's Archived button opens the full-window Archive page.
+        content->SetOpenArchiveHandler([weakThis]() {
+            if (auto self = weakThis.get())
+            {
+                self->_ShowArchivePage();
+            }
+        });
 
         // M10 (PERSISTENCE.md §13): seed this window's Manager lens from its claimed record
         // (selection / scope / collapsed dirs / splitter sizes survive close/reopen), and have the
@@ -1861,6 +1868,796 @@ namespace winrt::TerminalApp::implementation
             return; // unknown, or already Open
         }
         _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+    }
+
+    // ===== Agentmaster: Archive page (full-window redesign) =================================
+    // A "page" mounted over TerminalPage's Root (covering the tab strip), opened by the Manager's
+    // Archived button (SetOpenArchiveHandler -> _ShowArchivePage). LEFT half = a dense sortable table
+    // of archived sessions (+ which saved window each belongs to); RIGHT half = a detail/preview of the
+    // selected row (metadata + read-only Flight Plan + restore actions). Back returns to the tabs.
+    // Replaces the Manager's old in-content modal overlay. (A slide/fade transition is a deferred
+    // polish — v1 toggles Visibility; the page is in the main visual tree so its search/sort typing
+    // works, unlike a ContentDialog — the XAML-Islands keyboard trap.)
+    namespace
+    {
+        int64_t ArchiveNowMs()
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        }
+
+        std::wstring ArchiveLower(std::wstring s)
+        {
+            for (auto& ch : s)
+            {
+                if (ch >= L'A' && ch <= L'Z')
+                {
+                    ch = static_cast<wchar_t>(ch - L'A' + L'a');
+                }
+            }
+            return s;
+        }
+
+        // "now" / "5m" / "3h" / "2d" from a unix-ms timestamp; "" when unknown (0).
+        std::wstring ArchiveAgo(int64_t unixMs, int64_t nowMs)
+        {
+            if (unixMs <= 0)
+            {
+                return L"";
+            }
+            int64_t s = (nowMs - unixMs) / 1000;
+            if (s < 0)
+            {
+                s = 0;
+            }
+            if (s < 60)
+            {
+                return L"now";
+            }
+            if (s < 3600)
+            {
+                return std::to_wstring(s / 60) + L"m";
+            }
+            if (s < 86400)
+            {
+                return std::to_wstring(s / 3600) + L"h";
+            }
+            return std::to_wstring(s / 86400) + L"d";
+        }
+
+        winrt::Windows::UI::Xaml::Media::SolidColorBrush ArchiveBrush(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
+        {
+            return winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(a, r, g, b) };
+        }
+
+        // A single-line (optionally wrapping) TextBlock with size / weight / opacity. Named to avoid the
+        // `Text(...)` helper / `winrt::Windows::UI::Text` namespace clash (a known C2872 gotcha).
+        winrt::Windows::UI::Xaml::Controls::TextBlock ArchiveText(winrt::hstring text, double size, bool bold, double opacity, bool wrap = false)
+        {
+            winrt::Windows::UI::Xaml::Controls::TextBlock tb;
+            tb.Text(text);
+            tb.FontSize(size);
+            if (bold)
+            {
+                tb.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            }
+            tb.Opacity(opacity);
+            tb.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Center);
+            if (wrap)
+            {
+                tb.TextWrapping(winrt::Windows::UI::Xaml::TextWrapping::Wrap);
+            }
+            else
+            {
+                tb.TextWrapping(winrt::Windows::UI::Xaml::TextWrapping::NoWrap);
+                tb.TextTrimming(winrt::Windows::UI::Xaml::TextTrimming::CharacterEllipsis);
+            }
+            return tb;
+        }
+
+        // The dense table's 7 columns (shared by the header + every data row): select · Title · Dir ·
+        // Branch · Created · Active · Window. Pixel for the fixed ends, star for the elastic middle.
+        void ArchiveAddColumns(const winrt::Windows::UI::Xaml::Controls::Grid& g)
+        {
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+            const auto col = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                g.ColumnDefinitions().Append(c);
+            };
+            col(30, GridUnitType::Pixel); // 0 select
+            col(2.2, GridUnitType::Star); // 1 title
+            col(3.0, GridUnitType::Star); // 2 dir
+            col(1.4, GridUnitType::Star); // 3 branch
+            col(52, GridUnitType::Pixel); // 4 created
+            col(52, GridUnitType::Pixel); // 5 last activity
+            col(58, GridUnitType::Pixel); // 6 window
+        }
+
+        // A stable per-window chip color (cycled palette), keyed by the 1-based display ordinal.
+        winrt::Windows::UI::Color ArchiveWindowColor(int ordinal)
+        {
+            static const winrt::Windows::UI::Color kPalette[] = {
+                winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x5E, 0x9C, 0xD6),
+                winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x57, 0xA6, 0x73),
+                winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xC4, 0x8A, 0x4E),
+                winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xB1, 0x6B, 0xC4),
+                winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xCB, 0x5C, 0x5C),
+                winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x4F, 0xA8, 0xA8),
+            };
+            const int n = static_cast<int>(sizeof(kPalette) / sizeof(kPalette[0]));
+            const int i = ((ordinal - 1) % n + n) % n;
+            return kPalette[i];
+        }
+    }
+
+    // Build the page shell ONCE (host + header + table/detail split + footer), mounted full-bleed over
+    // TerminalPage's Root so it covers the tab strip ("the whole window moved a page").
+    void TerminalPage::_BuildArchivePageShell()
+    {
+        if (_archivePageHost)
+        {
+            return;
+        }
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+
+        Grid host;
+        host.Background(ArchiveBrush(0xFF, 0x1B, 0x1B, 0x1B)); // opaque -> fully hides the tabs behind it
+        host.RequestedTheme(ElementTheme::Dark);
+        host.Visibility(Visibility::Collapsed);
+        {
+            const auto row = [&](double v, GridUnitType t) {
+                RowDefinition r;
+                r.Height(GridLengthHelper::FromValueAndType(v, t));
+                host.RowDefinitions().Append(r);
+            };
+            row(0, GridUnitType::Auto); // 0 header
+            row(1, GridUnitType::Star); // 1 body
+            row(0, GridUnitType::Auto); // 2 footer
+        }
+
+        // --- header: Back · title/counts · search ---
+        Grid header;
+        header.Margin(Thickness{ 16, 10, 16, 8 });
+        {
+            const auto hcol = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                header.ColumnDefinitions().Append(c);
+            };
+            hcol(0, GridUnitType::Auto); // back
+            hcol(1, GridUnitType::Star); // title/counts
+            hcol(0, GridUnitType::Auto); // search
+        }
+        Button back;
+        back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
+        back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _HideArchivePage(); });
+        Grid::SetColumn(back, 0);
+        header.Children().Append(back);
+
+        StackPanel titleStack;
+        titleStack.Margin(Thickness{ 14, 0, 0, 0 });
+        titleStack.VerticalAlignment(VerticalAlignment::Center);
+        titleStack.Children().Append(ArchiveText(L"Archive", 18, true, 1.0));
+        _archiveCountText = ArchiveText(L"", 12, false, 0.6);
+        titleStack.Children().Append(_archiveCountText);
+        Grid::SetColumn(titleStack, 1);
+        header.Children().Append(titleStack);
+
+        TextBox search;
+        search.PlaceholderText(L"Search title, dir, branch\x2026");
+        search.Width(260);
+        search.VerticalAlignment(VerticalAlignment::Center);
+        _archiveSearchBox = search;
+        search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
+            if (const auto tb = s.try_as<TextBox>())
+            {
+                _archiveFilter = ArchiveLower(std::wstring{ tb.Text() });
+                _RenderArchiveTable();
+            }
+        });
+        Grid::SetColumn(search, 2);
+        header.Children().Append(search);
+        Grid::SetRow(header, 0);
+        host.Children().Append(header);
+
+        // --- body: 50/50 table | detail, divided by a thin separator ---
+        Grid body;
+        body.Margin(Thickness{ 16, 0, 16, 0 });
+        {
+            const auto bcol = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                body.ColumnDefinitions().Append(c);
+            };
+            bcol(1, GridUnitType::Star); // table
+            bcol(0, GridUnitType::Auto); // separator
+            bcol(1, GridUnitType::Star); // detail
+        }
+
+        // LEFT — sortable header over a scrolling rows host.
+        Grid left;
+        {
+            const auto lrow = [&](double v, GridUnitType t) {
+                RowDefinition r;
+                r.Height(GridLengthHelper::FromValueAndType(v, t));
+                left.RowDefinitions().Append(r);
+            };
+            lrow(0, GridUnitType::Auto); // column header
+            lrow(1, GridUnitType::Star); // rows
+        }
+        _archiveHeaderRow = Grid{};
+        Grid::SetRow(_archiveHeaderRow, 0);
+        left.Children().Append(_archiveHeaderRow);
+        _archiveRowsHost = StackPanel{};
+        _archiveRowsHost.Spacing(2);
+        ScrollViewer leftScroll;
+        leftScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        leftScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        leftScroll.Padding(Thickness{ 0, 0, 8, 0 });
+        leftScroll.Content(_archiveRowsHost);
+        Grid::SetRow(leftScroll, 1);
+        left.Children().Append(leftScroll);
+        Grid::SetColumn(left, 0);
+        body.Children().Append(left);
+
+        Border sep;
+        sep.Width(1);
+        sep.Background(ArchiveBrush(0x30, 0xC0, 0xC0, 0xC0));
+        sep.Margin(Thickness{ 10, 4, 10, 4 });
+        Grid::SetColumn(sep, 1);
+        body.Children().Append(sep);
+
+        // RIGHT — detail/preview.
+        _archiveDetailHost = StackPanel{};
+        _archiveDetailHost.Spacing(6);
+        ScrollViewer rightScroll;
+        rightScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        rightScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        rightScroll.Padding(Thickness{ 12, 0, 4, 0 });
+        rightScroll.Content(_archiveDetailHost);
+        Grid::SetColumn(rightScroll, 2);
+        body.Children().Append(rightScroll);
+
+        Grid::SetRow(body, 1);
+        host.Children().Append(body);
+
+        // --- footer: bulk restore (right-aligned) ---
+        StackPanel footer;
+        footer.Orientation(Orientation::Horizontal);
+        footer.HorizontalAlignment(HorizontalAlignment::Right);
+        footer.Spacing(8);
+        footer.Margin(Thickness{ 16, 10, 16, 10 });
+        _archiveRestoreSelBtn = Button{};
+        _archiveRestoreSelBtn.Content(winrt::box_value(winrt::hstring{ L"Restore selected" }));
+        _archiveRestoreSelBtn.IsEnabled(false);
+        _archiveRestoreSelBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _RestoreCheckedArchived(); });
+        footer.Children().Append(_archiveRestoreSelBtn);
+        Grid::SetRow(footer, 2);
+        host.Children().Append(footer);
+
+        // Mount full-bleed over Root (RowSpan all 3 rows -> covers the tab strip + content).
+        this->Root().Children().Append(host);
+        Grid::SetRow(host, 0);
+        Grid::SetRowSpan(host, 3);
+        _archivePageHost = host;
+    }
+
+    void TerminalPage::_ShowArchivePage()
+    {
+        _BuildArchivePageShell();
+        if (!_archivePageHost)
+        {
+            return;
+        }
+        _GatherArchiveRows();
+        _RenderArchiveTable();
+        _archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Visible);
+    }
+
+    void TerminalPage::_HideArchivePage()
+    {
+        if (_archivePageHost)
+        {
+            _archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
+        }
+    }
+
+    // Gather the archive data set: every saved-window record's archived Claude sessions (tagged with that
+    // window's index + a 1-based display ordinal), then the loose archived sessions (in no record). Each
+    // row's timing comes from a cheap transcript stat (TranscriptTimes). Reads disk -> called on show +
+    // after an action, NOT per keystroke (the filter/sort in _RenderArchiveTable run over this cache).
+    void TerminalPage::_GatherArchiveRows()
+    {
+        _archiveRows.clear();
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const auto sessions = _sessionRegistry->Snapshot();
+        std::vector<::Agentmaster::RecoverableWindow> recoverable;
+        try
+        {
+            recoverable = ::Agentmaster::RecoverableWindows();
+        }
+        CATCH_LOG();
+
+        const auto findArchived = [&sessions](const std::wstring& id) -> const ::Agentmaster::SessionInfo* {
+            for (const auto& s : sessions)
+            {
+                if (!s.live && s.id == id)
+                {
+                    return &s;
+                }
+            }
+            return nullptr;
+        };
+        const auto buildRow = [](const ::Agentmaster::SessionInfo& s, int windowIndex, int windowOrdinal) {
+            _ArchiveRow r;
+            r.id = s.id;
+            r.title = s.title;
+            r.dir = s.workingDir;
+            r.branch = s.branch;
+            r.windowIndex = windowIndex;
+            r.windowOrdinal = windowOrdinal;
+            for (const auto& p : s.queue)
+            {
+                ++r.totalCount;
+                if (p.status == ::Agentmaster::PromptStatus::Sent)
+                {
+                    ++r.sentCount;
+                }
+            }
+            int64_t created = 0, last = 0;
+            if (::Agentmaster::TranscriptTimes(s.workingDir, s.id, created, last))
+            {
+                r.createdUnixMs = created;
+                r.lastActivityUnixMs = last;
+            }
+            return r;
+        };
+
+        std::unordered_set<std::wstring> grouped;
+        int ordinal = 0;
+        for (const auto& rw : recoverable)
+        {
+            std::vector<const ::Agentmaster::SessionInfo*> winSessions;
+            for (const auto& t : rw.record.tabs)
+            {
+                if (t.kind == ::Agentmaster::TabKind::Claude && !t.sessionId.empty())
+                {
+                    if (const auto* hit = findArchived(t.sessionId))
+                    {
+                        winSessions.push_back(hit);
+                    }
+                }
+            }
+            if (winSessions.empty())
+            {
+                continue; // a window whose archived Claude sessions are all gone (only shells / reopened)
+            }
+            ++ordinal;
+            for (const auto* s : winSessions)
+            {
+                _archiveRows.push_back(buildRow(*s, rw.index, ordinal));
+                grouped.insert(s->id);
+            }
+        }
+        for (const auto& s : sessions)
+        {
+            if (s.live || grouped.find(s.id) != grouped.end())
+            {
+                continue;
+            }
+            _archiveRows.push_back(buildRow(s, -1, 0));
+        }
+    }
+
+    // Apply the search filter + the active sort to _archiveRows and (re)build the column header + data
+    // rows. Also keeps the selection valid (defaults to the first row) and drives the detail pane.
+    void TerminalPage::_RenderArchiveTable()
+    {
+        if (!_archiveRowsHost || !_archiveHeaderRow)
+        {
+            return;
+        }
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+        const int64_t now = ArchiveNowMs();
+
+        // --- sortable column header ---
+        _archiveHeaderRow.Children().Clear();
+        _archiveHeaderRow.ColumnDefinitions().Clear();
+        ArchiveAddColumns(_archiveHeaderRow);
+        _archiveHeaderRow.Margin(Thickness{ 8, 0, 8, 4 });
+        const auto addHeader = [this](int col, winrt::hstring label, bool sortable) {
+            if (!sortable)
+            {
+                auto t = ArchiveText(label, 11, true, 0.5);
+                Grid::SetColumn(t, col);
+                _archiveHeaderRow.Children().Append(t);
+                return;
+            }
+            winrt::hstring arrow{};
+            if (_archiveSortColumn == col)
+            {
+                arrow = _archiveSortAscending ? winrt::hstring{ L" \x25B2" } : winrt::hstring{ L" \x25BC" };
+            }
+            Button b;
+            b.Background(ArchiveBrush(0, 0, 0, 0));
+            b.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            b.Padding(Thickness{ 0, 0, 0, 0 });
+            b.MinWidth(0);
+            b.MinHeight(0);
+            b.HorizontalAlignment(HorizontalAlignment::Left);
+            b.HorizontalContentAlignment(HorizontalAlignment::Left);
+            b.Content(ArchiveText(label + arrow, 11, true, 0.7));
+            b.Click([this, col](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                if (_archiveSortColumn == col)
+                {
+                    _archiveSortAscending = !_archiveSortAscending;
+                }
+                else
+                {
+                    _archiveSortColumn = col;
+                    _archiveSortAscending = (col == 1 || col == 2 || col == 3); // text ascending, time/window descending
+                }
+                _RenderArchiveTable();
+            });
+            Grid::SetColumn(b, col);
+            _archiveHeaderRow.Children().Append(b);
+        };
+        addHeader(0, L"", false);
+        addHeader(1, L"Title", true);
+        addHeader(2, L"Directory", true);
+        addHeader(3, L"Branch", true);
+        addHeader(4, L"Created", true);
+        addHeader(5, L"Active", true);
+        addHeader(6, L"Window", true);
+
+        // --- filter + sort over the gathered rows ---
+        std::vector<const _ArchiveRow*> view;
+        for (const auto& r : _archiveRows)
+        {
+            if (!_archiveFilter.empty())
+            {
+                const std::wstring hay = ArchiveLower(r.title) + L"\n" + ArchiveLower(r.dir) + L"\n" + ArchiveLower(r.branch);
+                if (hay.find(_archiveFilter) == std::wstring::npos)
+                {
+                    continue;
+                }
+            }
+            view.push_back(&r);
+        }
+        const int sortCol = _archiveSortColumn;
+        const bool asc = _archiveSortAscending;
+        std::sort(view.begin(), view.end(), [sortCol, asc](const _ArchiveRow* a, const _ArchiveRow* b) {
+            const auto cmpS = [](const std::wstring& x, const std::wstring& y) {
+                const auto lx = ArchiveLower(x), ly = ArchiveLower(y);
+                return lx < ly ? -1 : (lx > ly ? 1 : 0);
+            };
+            const auto cmpI = [](int64_t x, int64_t y) { return x < y ? -1 : (x > y ? 1 : 0); };
+            int c = 0;
+            switch (sortCol)
+            {
+            case 1:
+                c = cmpS(a->title, b->title);
+                break;
+            case 2:
+                c = cmpS(a->dir, b->dir);
+                break;
+            case 3:
+                c = cmpS(a->branch, b->branch);
+                break;
+            case 4:
+                c = cmpI(a->createdUnixMs, b->createdUnixMs);
+                break;
+            case 5:
+                c = cmpI(a->lastActivityUnixMs, b->lastActivityUnixMs);
+                break;
+            case 6:
+                c = cmpI(a->windowOrdinal, b->windowOrdinal);
+                break;
+            default:
+                break;
+            }
+            if (c == 0)
+            {
+                return a->createdUnixMs > b->createdUnixMs; // stable tiebreak: newest first
+            }
+            return asc ? (c < 0) : (c > 0);
+        });
+
+        // --- keep a valid selection (default to the first visible row) ---
+        bool selValid = false;
+        for (const auto* r : view)
+        {
+            if (r->id == _archiveSelectedId)
+            {
+                selValid = true;
+                break;
+            }
+        }
+        if (!selValid)
+        {
+            _archiveSelectedId = view.empty() ? std::wstring{} : view.front()->id;
+        }
+
+        // --- data rows ---
+        _archiveRowsHost.Children().Clear();
+        if (view.empty())
+        {
+            _archiveRowsHost.Children().Append(ArchiveText(_archiveRows.empty() ?
+                                                               winrt::hstring{ L"No archived sessions. Closing a session's tab archives it here." } :
+                                                               winrt::hstring{ L"No matches." },
+                                                           12, false, 0.6, true));
+        }
+        for (const auto* rp : view)
+        {
+            const _ArchiveRow& r = *rp;
+            const std::wstring rid = r.id;
+            Grid g;
+            ArchiveAddColumns(g);
+
+            CheckBox cb;
+            cb.MinWidth(0);
+            cb.VerticalAlignment(VerticalAlignment::Center);
+            cb.IsChecked(_archiveChecked.find(r.id) != _archiveChecked.end()); // set BEFORE handlers (no spurious fire)
+            cb.Checked([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                _archiveChecked.insert(rid);
+                _UpdateArchiveBulkButton();
+            });
+            cb.Unchecked([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                _archiveChecked.erase(rid);
+                _UpdateArchiveBulkButton();
+            });
+            Grid::SetColumn(cb, 0);
+            g.Children().Append(cb);
+
+            auto title = ArchiveText(r.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ r.title }, 13, true, 0.95);
+            title.Margin(Thickness{ 2, 0, 6, 0 });
+            Grid::SetColumn(title, 1);
+            g.Children().Append(title);
+            auto dir = ArchiveText(winrt::hstring{ r.dir }, 12, false, 0.6);
+            dir.Margin(Thickness{ 0, 0, 6, 0 });
+            Grid::SetColumn(dir, 2);
+            g.Children().Append(dir);
+            auto br = ArchiveText(winrt::hstring{ r.branch }, 12, false, 0.55);
+            br.Margin(Thickness{ 0, 0, 6, 0 });
+            Grid::SetColumn(br, 3);
+            g.Children().Append(br);
+            auto cr = ArchiveText(winrt::hstring{ ArchiveAgo(r.createdUnixMs, now) }, 11, false, 0.6);
+            Grid::SetColumn(cr, 4);
+            g.Children().Append(cr);
+            auto la = ArchiveText(winrt::hstring{ ArchiveAgo(r.lastActivityUnixMs, now) }, 11, false, 0.6);
+            Grid::SetColumn(la, 5);
+            g.Children().Append(la);
+            if (r.windowOrdinal > 0)
+            {
+                Border chip;
+                chip.Background(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ ArchiveWindowColor(r.windowOrdinal) });
+                chip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 3, 3, 3, 3 });
+                chip.Padding(Thickness{ 5, 1, 5, 1 });
+                chip.HorizontalAlignment(HorizontalAlignment::Left);
+                chip.VerticalAlignment(VerticalAlignment::Center);
+                auto wt = ArchiveText(winrt::hstring{ L"W" + std::to_wstring(r.windowOrdinal) }, 10, true, 1.0);
+                chip.Child(wt);
+                Grid::SetColumn(chip, 6);
+                g.Children().Append(chip);
+            }
+
+            Border row;
+            row.Padding(Thickness{ 8, 5, 8, 5 });
+            row.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
+            row.Background(r.id == _archiveSelectedId ? ArchiveBrush(0x50, 0x4A, 0x6E, 0xA8) : ArchiveBrush(0x14, 0x80, 0x80, 0x80));
+            row.Child(g);
+            row.Tapped([this, rid](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+                _archiveSelectedId = rid;
+                _RenderArchiveTable();
+            });
+            _archiveRowsHost.Children().Append(row);
+        }
+
+        // --- header counts ---
+        if (_archiveCountText)
+        {
+            std::unordered_set<int> ws;
+            for (const auto& r : _archiveRows)
+            {
+                if (r.windowOrdinal > 0)
+                {
+                    ws.insert(r.windowOrdinal);
+                }
+            }
+            std::wstring counts = std::to_wstring(_archiveRows.size()) + (_archiveRows.size() == 1 ? L" archived session" : L" archived sessions");
+            if (!ws.empty())
+            {
+                counts += L"  \x00B7  " + std::to_wstring(ws.size()) + (ws.size() == 1 ? L" saved window" : L" saved windows");
+            }
+            _archiveCountText.Text(winrt::hstring{ counts });
+        }
+
+        _UpdateArchiveBulkButton();
+        _ShowArchiveDetail(_archiveSelectedId);
+    }
+
+    // Populate the right pane for one archived session: metadata + a read-only Flight Plan (the persisted
+    // queue; the transcript's human prompts as a fallback) + restore actions.
+    void TerminalPage::_ShowArchiveDetail(const std::wstring& id)
+    {
+        if (!_archiveDetailHost)
+        {
+            return;
+        }
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+        _archiveDetailHost.Children().Clear();
+        if (id.empty() || !_sessionRegistry)
+        {
+            _archiveDetailHost.Children().Append(ArchiveText(L"Select a session to preview its details and Flight Plan.", 12, false, 0.6, true));
+            return;
+        }
+        const auto info = _sessionRegistry->Get(id);
+        if (!info)
+        {
+            _archiveDetailHost.Children().Append(ArchiveText(L"This session is no longer available.", 12, false, 0.6, true));
+            return;
+        }
+
+        const _ArchiveRow* row = nullptr;
+        for (const auto& r : _archiveRows)
+        {
+            if (r.id == id)
+            {
+                row = &r;
+                break;
+            }
+        }
+
+        // Out-of-band transcript read (one row, on select) for branch + prompts + authoritative timing.
+        ::Agentmaster::TranscriptInfo ti{};
+        try
+        {
+            ti = ::Agentmaster::ReadTranscriptInfo(info->workingDir, id, 131072, 60);
+        }
+        CATCH_LOG();
+
+        _archiveDetailHost.Children().Append(ArchiveText(info->title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ info->title }, 18, true, 1.0, true));
+        _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ info->workingDir }, 12, false, 0.7, true));
+
+        const int64_t now = ArchiveNowMs();
+        const int64_t created = ti.createdUnixMs ? ti.createdUnixMs : (row ? row->createdUnixMs : 0);
+        const int64_t last = ti.lastActivityUnixMs ? ti.lastActivityUnixMs : (row ? row->lastActivityUnixMs : 0);
+        const std::wstring branch = !info->branch.empty() ? info->branch : std::wstring{ ti.gitBranch };
+        std::wstring meta;
+        if (!branch.empty())
+        {
+            meta += L"\x2387 " + branch + L"    ";
+        }
+        if (created)
+        {
+            meta += L"created " + ArchiveAgo(created, now) + L" ago";
+        }
+        if (last)
+        {
+            meta += (created ? std::wstring{ L"   \x00B7   " } : std::wstring{}) + L"last active " + ArchiveAgo(last, now) + L" ago";
+        }
+        if (!meta.empty())
+        {
+            _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ meta }, 12, false, 0.6, true));
+        }
+
+        {
+            Border d;
+            d.Height(1);
+            d.Background(ArchiveBrush(0x24, 0xC0, 0xC0, 0xC0));
+            d.Margin(Thickness{ 0, 8, 0, 4 });
+            _archiveDetailHost.Children().Append(d);
+        }
+
+        _archiveDetailHost.Children().Append(ArchiveText(L"Flight Plan (read-only)", 13, true, 0.9));
+        if (!info->queue.empty())
+        {
+            for (const auto& p : info->queue)
+            {
+                winrt::hstring tag;
+                switch (p.status)
+                {
+                case ::Agentmaster::PromptStatus::Sent:
+                    tag = L"\x2713 ";
+                    break;
+                case ::Agentmaster::PromptStatus::Held:
+                    tag = L"\x23F8 ";
+                    break;
+                case ::Agentmaster::PromptStatus::Failed:
+                    tag = L"\x2717 ";
+                    break;
+                case ::Agentmaster::PromptStatus::Skipped:
+                    tag = L"\x2014 ";
+                    break;
+                default:
+                    tag = L"\x2022 ";
+                    break;
+                }
+                const std::wstring bodyText = !p.label.empty() ? std::wstring{ p.label } : std::wstring{ p.text };
+                const winrt::hstring suffix = (p.origin == ::Agentmaster::PromptOrigin::Typed) ? winrt::hstring{ L"   (typed)" } : winrt::hstring{};
+                _archiveDetailHost.Children().Append(ArchiveText(tag + winrt::hstring{ bodyText } + suffix, 12, false, 0.8, true));
+            }
+        }
+        else if (!ti.userPrompts.empty())
+        {
+            for (const auto& up : ti.userPrompts)
+            {
+                _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ L"\x2023 " + up }, 12, false, 0.75, true));
+            }
+        }
+        else
+        {
+            _archiveDetailHost.Children().Append(ArchiveText(L"(no recorded prompts)", 12, false, 0.5, true));
+        }
+
+        {
+            Border d;
+            d.Height(1);
+            d.Background(ArchiveBrush(0x24, 0xC0, 0xC0, 0xC0));
+            d.Margin(Thickness{ 0, 10, 0, 6 });
+            _archiveDetailHost.Children().Append(d);
+        }
+        StackPanel actions;
+        actions.Orientation(Orientation::Horizontal);
+        actions.Spacing(8);
+        Button restore;
+        restore.Content(winrt::box_value(winrt::hstring{ L"Restore here" }));
+        const winrt::hstring hid{ id };
+        restore.Click([this, hid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            _RestoreArchivedSession(hid);
+            _HideArchivePage();
+        });
+        actions.Children().Append(restore);
+        if (row && row->windowIndex >= 0)
+        {
+            Button reopen;
+            reopen.Content(winrt::box_value(winrt::hstring{ L"Reopen its window" }));
+            const int idx = row->windowIndex;
+            reopen.Click([this, idx](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                _ReopenSavedWindow(idx);
+                _HideArchivePage();
+            });
+            actions.Children().Append(reopen);
+        }
+        _archiveDetailHost.Children().Append(actions);
+    }
+
+    // Bulk: restore every checked archived session into the current window, then close the page.
+    void TerminalPage::_RestoreCheckedArchived()
+    {
+        if (_archiveChecked.empty())
+        {
+            return;
+        }
+        const std::vector<std::wstring> ids(_archiveChecked.begin(), _archiveChecked.end());
+        for (const auto& id : ids)
+        {
+            _RestoreArchivedSession(winrt::hstring{ id });
+        }
+        _archiveChecked.clear();
+        _HideArchivePage();
+    }
+
+    void TerminalPage::_UpdateArchiveBulkButton()
+    {
+        if (!_archiveRestoreSelBtn)
+        {
+            return;
+        }
+        const auto n = _archiveChecked.size();
+        _archiveRestoreSelBtn.Content(winrt::box_value(n > 0 ?
+                                                           winrt::hstring{ L"Restore selected (" + std::to_wstring(n) + L")" } :
+                                                           winrt::hstring{ L"Restore selected" }));
+        _archiveRestoreSelBtn.IsEnabled(n > 0);
     }
 
     // Agentmaster (Fleet Observer): adopt an EXTERNAL (observe-only) claude from the Explorer Tree's
