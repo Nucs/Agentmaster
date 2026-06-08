@@ -1156,6 +1156,12 @@ namespace winrt::TerminalApp::implementation
                 const auto tab{ _tabs.GetAt(selectedIndex) };
                 _UpdatedSelectedTab(tab);
             }
+            // Agentmaster (M10): the focused tab is part of the per-window record, so a reopen restores
+            // it. Debounce-save on switch so the selection persists LIVE (not only at the graceful
+            // close-flush) — a switch-then-hard-kill then still reopens the tab you last had focused.
+            // _ScheduleWindowRecordSave no-ops until startup completes, so the tab-creation selection
+            // churn during restore never thrashes a save, and rapid switching collapses to one write.
+            _ScheduleWindowRecordSave();
         }
     }
 
