@@ -1512,6 +1512,15 @@ namespace winrt::TerminalApp::implementation
                 self->_AdoptExternalClaude(pid, cwd);
             }
         });
+        // Agentmaster: the Explorer Tree's refresh button — force the Fleet Observer to re-survey NOW
+        // (re-enrich the registry + recompute the External census) and redraw, instead of waiting for
+        // the next observer/scanner tick. Covers every scope (LOCAL/GLOBAL re-pull + EXTERNAL census).
+        content->SetRefreshHandler([weakThis]() {
+            if (auto self = weakThis.get())
+            {
+                self->_RefreshObserverData();
+            }
+        });
         // Agentmaster: surface THIS window's hosted session ids for the Explorer Tree's LOCAL
         // scope. The shared (process-wide) registry holds every window's sessions; _claudeTabs is
         // the per-window subset. Expired weak tabs (torn-down) are skipped so the set is live.
@@ -2624,6 +2633,40 @@ namespace winrt::TerminalApp::implementation
                     pit->second->Root().Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
                 }
                 pit = _pendingOverlays.erase(pit);
+            }
+        }
+        co_return;
+    }
+
+    // Agentmaster: the Explorer Tree "refresh" button's action — force a fresh reload NOW instead of
+    // waiting for the next observer/scanner tick. Wake() kicks an immediate FULL survey (re-reads each
+    // claude's PEB + transcript -> re-enriches the registry and recomputes the External / Correlation /
+    // Activity tables, bypassing the O7 steady-state debounce); _ObserverProbe() re-publishes this
+    // window's roster, lets the survey settle, then re-pushes the External census + binds. The survey
+    // enriches the registry SILENTLY (no change event, so it never drives churn — Rule #13), so once it
+    // lands we force ONE Manager redraw so the refreshed LOCAL/GLOBAL timing + the EXTERNAL census both
+    // show even when nothing structurally "changed". Covers every displayed scope.
+    winrt::fire_and_forget TerminalPage::_RefreshObserverData()
+    {
+        auto weakThis = get_weak();
+        if (_observer)
+        {
+            _observer->Wake(); // force an immediate full survey
+        }
+        _ObserverProbe(); // re-publish roster -> (settle) -> re-push External census + bind
+
+        // Let the survey + probe land (the probe itself settles ~300 ms), then force a redraw so the
+        // freshly enriched registry + recomputed census are reflected even when nothing "changed".
+        co_await winrt::resume_after(std::chrono::milliseconds(450));
+        co_await wil::resume_foreground(Dispatcher());
+        if (auto self = weakThis.get())
+        {
+            if (const auto ipc = self->_agentManagerContent.get())
+            {
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                {
+                    mgr->RefreshNow();
+                }
             }
         }
         co_return;

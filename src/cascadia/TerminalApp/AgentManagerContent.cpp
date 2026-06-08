@@ -630,6 +630,18 @@ namespace winrt::TerminalApp::implementation
     {
         _reopenWindowHandler = std::move(handler);
     }
+    void AgentManagerContent::SetRefreshHandler(std::function<void()> handler)
+    {
+        _refreshHandler = std::move(handler);
+    }
+    // Agentmaster: force a UI redraw from the current data sources (registry snapshot + the last
+    // pushed external census). Called by the page after an out-of-band reload (the observer survey
+    // lands asynchronously) so the freshly enriched / re-surveyed data shows. Marshal to the UI
+    // thread is the caller's responsibility (the page resumes on the dispatcher before calling).
+    void AgentManagerContent::RefreshNow()
+    {
+        _Refresh();
+    }
     void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
     {
         _confirmHandler = std::move(handler);
@@ -1067,6 +1079,25 @@ namespace winrt::TerminalApp::implementation
                 _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
                 hdrow.Children().Append(_treeSortBtn);
                 _UpdateTreeSortButton();
+
+                // Agentmaster: a refresh button AFTER the sort toggle — reload the tree's data for the
+                // CURRENTLY DISPLAYED scope (LOCAL/GLOBAL: re-pull the registry; EXTERNAL: re-pull the
+                // observer's external census). Redraws immediately (recomputes the live "ago" timing)
+                // and fires _refreshHandler so the page forces the Fleet Observer to re-survey NOW
+                // (re-enrich + recompute the external census) instead of waiting for the next tick.
+                _treeRefreshBtn = Button{};
+                _treeRefreshBtn.FontSize(11);
+                _treeRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                _treeRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
+                ToolTipService::SetToolTip(_treeRefreshBtn, winrt::box_value(L"Refresh \x2014 reload the tree's data for the current scope (LOCAL / GLOBAL / EXTERNAL): re-survey now + redraw."));
+                _treeRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                    _Refresh(); // immediate redraw from current data (recomputes the "ago" timing)
+                    if (_refreshHandler)
+                    {
+                        _refreshHandler(); // page: wake the observer + re-probe -> fresh data lands shortly
+                    }
+                });
+                hdrow.Children().Append(_treeRefreshBtn);
                 Grid::SetRow(hdrow, 0);
                 outer.Children().Append(hdrow);
 

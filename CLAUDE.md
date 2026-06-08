@@ -267,8 +267,14 @@ What works, by area:
   via the same transcript timing as the adornment, `SortKey`/`MakeSortKey`/`SortKeyLess`). Unlike the
   per-window in-memory scope, the sort is a **GLOBAL, persisted** setting (`AppSettings::treeSort` →
   `settings.json`, via the same settings sink the cog uses) — it survives restart and seeds every
-  window (the changing window re-sorts live; others adopt it on next launch). EXTERNAL/GLOBAL keep
-  their local-first grouping, with the sort applied **within** each group:
+  window (the changing window re-sorts live; others adopt it on next launch). After the sort comes a
+  **↻ refresh button** (`_treeRefreshBtn`) that **reloads the data for the current scope**: it redraws
+  immediately (re-pulls the registry snapshot + recomputes the live "ago" timing) and fires
+  `_refreshHandler` → the page's `_RefreshObserverData` — which `Wake()`s the Fleet Observer for an
+  immediate full survey (re-enrich the registry + recompute the External/Correlation tables, bypassing
+  the O7 debounce), re-runs `_ObserverProbe`, then forces one `RefreshNow()` redraw once it lands — so
+  LOCAL/GLOBAL re-pull and the EXTERNAL census both refresh on demand instead of waiting for the next
+  tick. EXTERNAL/GLOBAL keep their local-first grouping, with the sort applied **within** each group:
   **EXTERNAL** (`_RebuildExternalTree`) lists every claude we do NOT manage — both real-WindowsTerminal
   **and cmd-/console-hosted** (the `Other` census bucket, previously hidden) — grouped by cwd. Each row is
   **enriched out-of-band from the transcript**: a real **title** (the conversation's first prompt — recent

@@ -68,6 +68,14 @@ namespace winrt::TerminalApp::implementation
         // record index (the `-s <idx>` the Emperor/recover path uses). Fired by the per-window "Reopen
         // window" button in the grouped Archived overlay; the page dispatches a single window restore.
         void SetReopenWindowHandler(std::function<void(int)> handler);
+        // Agentmaster: the Explorer Tree's "refresh" button (after the sort toggle) — reload the data
+        // for the CURRENT scope. The content redraws immediately; this fires so the page can force the
+        // Fleet Observer to re-survey now (re-enrich the registry + recompute the External census)
+        // instead of waiting for the next tick. Optional — unwired, the button is a plain redraw.
+        void SetRefreshHandler(std::function<void()> handler);
+        // Agentmaster: force a UI redraw (board/tree/plan) from the current data — the page calls this
+        // after an out-of-band reload (the observer survey lands asynchronously) so fresh data shows.
+        void RefreshNow();
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
@@ -261,6 +269,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
         std::function<void(int)> _reopenWindowHandler; // Agentmaster (M10): reopen ONE saved window by record index (per-window "Reopen window")
+        std::function<void()> _refreshHandler; // Agentmaster: Explorer Tree refresh -> page re-surveys the Fleet Observer (reload the current scope's data)
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
         bool _globalPaused{ false };
@@ -299,6 +308,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped
         winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
+        winrt::Windows::UI::Xaml::Controls::Button _treeRefreshBtn{ nullptr }; // Agentmaster: the ↻ refresh button after the sort toggle (reload the current scope's data)
         winrt::Windows::UI::Xaml::Controls::StackPanel _treeHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
