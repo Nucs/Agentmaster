@@ -40,6 +40,30 @@ namespace
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
     }
 
+    // Agentmaster: a small stable palette to color-code the EXTERNAL tree's pid underline by host
+    // window/shell — claudes sharing a terminal window/tab carry the same host shell pid, so they get
+    // the same color and are easy to spot at a glance (even across cwd groups). Vivid-on-dark, visually
+    // distinct hues; the key (the host pid) is spread across the palette by a multiplicative (Fibonacci)
+    // hash so small / sequential pids don't land on the same color. Color order is {A, R, G, B}.
+    Color WindowKeyColor(uint32_t key)
+    {
+        static const Color kPalette[] = {
+            { 0xFF, 0x6E, 0xA8, 0xFF }, // blue
+            { 0xFF, 0x7F, 0xD1, 0x7F }, // green
+            { 0xFF, 0xFF, 0xB8, 0x6C }, // orange
+            { 0xFF, 0xFF, 0x7F, 0x9E }, // pink
+            { 0xFF, 0xC7, 0x92, 0xEA }, // purple
+            { 0xFF, 0x8B, 0xE9, 0xFD }, // cyan
+            { 0xFF, 0xF1, 0xFA, 0x8C }, // yellow
+            { 0xFF, 0x50, 0xC8, 0x78 }, // emerald
+            { 0xFF, 0xFF, 0x9F, 0x40 }, // amber
+            { 0xFF, 0xBD, 0x93, 0xF9 }, // violet
+        };
+        constexpr uint32_t n = sizeof(kPalette) / sizeof(kPalette[0]);
+        const uint32_t h = (key ^ (key >> 16)) * 0x9E3779B1u; // Fibonacci hash -> spread
+        return kPalette[(h >> 24) % n];
+    }
+
     int64_t NowMs()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1965,7 +1989,7 @@ namespace winrt::TerminalApp::implementation
             // host a tick after first sight triggers one refresh. Timestamps are deliberately NOT
             // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
             if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
-                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.gitBranch != b.gitBranch)
+                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid)
             {
                 same = false;
             }
@@ -2578,7 +2602,23 @@ namespace winrt::TerminalApp::implementation
                         row.Children().Append(Text(winrt::hstring{ me }, 11, false, 0.5));
                     }
                 }
-                row.Children().Append(Text(winrt::hstring{ L"pid " } + winrt::to_hstring(ex.pid), 11, false, 0.45));
+                // pid — its UNDERLINE is COLOR-CODED by the host window/shell (ex.hostPid): claudes
+                // running in the same terminal window/tab share a host shell, so they get the same
+                // underline color and are easy to identify at a glance, even across cwd groups.
+                {
+                    const uint32_t key = ex.hostPid ? ex.hostPid : ex.pid;
+                    auto pidCol = StackPanel{};
+                    pidCol.Spacing(1);
+                    pidCol.Children().Append(Text(winrt::hstring{ L"pid " } + winrt::to_hstring(ex.pid), 11, false, 0.55));
+                    auto underline = Border{};
+                    underline.Height(2);
+                    underline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
+                    underline.HorizontalAlignment(HorizontalAlignment::Stretch); // span the "pid N" width
+                    underline.Background(SolidColorBrush{ WindowKeyColor(key) });
+                    ToolTipService::SetToolTip(underline, winrt::box_value(winrt::hstring{ L"Host window/shell pid " } + winrt::to_hstring(key) + L" \x2014 rows with the same underline color share a terminal window/tab"));
+                    pidCol.Children().Append(underline);
+                    row.Children().Append(pidCol);
+                }
 
                 // timing (created-ago / active-for / last-activity-ago) — transcript ctime/mtime,
                 // falling back to the process start time when there is no transcript yet.

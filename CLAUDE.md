@@ -284,7 +284,13 @@ What works, by area:
   **and cmd-/console-hosted** (the `Other` census bucket, previously hidden) — grouped by cwd. Each row is
   **enriched out-of-band from the transcript**: a real **title** (the conversation's first prompt — recent
   transcripts carry no `summary`), a **host** tag (`wt` / `cmd` / the shell leaf), `gitBranch`,
-  `model · effort · pid`, and the timing adornment. **Left-click selects** an external — from the
+  `model · effort · pid`, and the timing adornment. The **pid number carries a color-coded underline**
+  keyed by its **host window/shell** (`ExternalClaudeRow::hostPid` = the claude's parent shell pid,
+  filled by the observer census; `WindowKeyColor` maps it through a stable palette) — claudes running in
+  the **same terminal window/tab share a host shell**, so they get the **same underline color** and are
+  easy to identify at a glance, even across cwd groups (note: real WT runs single-process, so this
+  groups by host **tab/shell**, the finest reliable unit — it never falsely merges distinct windows).
+  **Left-click selects** an external — from the
   Explorer-Tree EXTERNAL row **OR a Triage-Board External card** (the whole card is the click target;
   there is no inline observe pill / Adopt button) — → the Flight Plan shows its conversation
   **read-only** (`_RebuildExternalPlan` — the human prompts, read from the transcript on a

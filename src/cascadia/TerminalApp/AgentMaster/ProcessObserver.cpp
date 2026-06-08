@@ -530,6 +530,7 @@ namespace Agentmaster
             }
             ExternalClaudeRow ex;
             ex.pid = pid;
+            ex.hostPid = f.parentPid ? f.parentPid : pid; // the host shell (claude's parent) — the UI's "same window/tab" color key (fall back to self when the parent is unknown)
             ex.wtSession = f.wtSession;
             ex.cwd = f.cwd;
             ex.model = f.model;
