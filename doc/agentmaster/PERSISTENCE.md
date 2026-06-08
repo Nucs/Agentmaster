@@ -411,6 +411,14 @@ lands as its own commit.
 
 ### 13.5 Delivery status (as built)
 
+> **STATUS — window layer COMPLETE & live-verified.** Increments 1–5 are all SHIPPED &
+> live-verified: single-window geometry+lens (1–2), multi-window reopen with open-at-exit manifest +
+> recover button (3), window-grouped restore = session re-home + shell-tab replay + grouped Archived
+> UI (4), and selected-tab persistence (5). The §11 `M9–M14` ladder is retired (M9/M10 shipped, M11
+> obviated, M12/M13 delivered as these Increments, M14 migration moot). The **only** open item is
+> cosmetic: the exact left-to-right interleave of Claude vs `Other` tabs on reopen (both kinds return;
+> only the ordering is approximate — Claude tabs land first, then shells).
+
 **Increment 1 — SHIPPED & live-verified** (commits `67d8b8e4b` engine/data-layer +
 `caa3f1f1d` capture/restore). Phases A + B + per-window **lens** restore, single-window:
 - **Identity (A):** `Engine::ClaimWindowRecord()` hands each window an existing
@@ -524,9 +532,23 @@ launch, gated by a decide-prompt, + a recover button** for history). Commits `bf
   **Still deferred:** exact left-to-right interleave of Claude vs Other tabs on reopen (Claude first,
   then shells — both kinds return, only the ordering is approximate).
 
-**Acceptance (§13.3) status:** #2 partial (lens), #3 (single-window unchanged; clean first run), and
+**Acceptance (§13.3) status:** #2 ✅ (session re-home — Increment 4), #3 (single-window unchanged; clean first run), and
 **#1 multi-window reopen at geometry/lens — DONE & verified.** The two refinements above are now also
 **DONE & verified** (the reopen set is exactly the open-at-exit windows; a mid-session-closed window is
 pruned; the in-session recover button brings back any saved-but-not-open window). **Increment 3 is
 complete; Increment 4 (window-grouped restore: session re-home + `Other`-tab recreation + grouped
 Archive UI) is now also complete & live-verified.**
+
+**Increment 5 — selected-tab persistence — SHIPPED & live-verified** (commits `a8f744fa5` +
+`549c4fd8e`). The reopened window **re-selects the tab that was focused at close**, persisted by
+STABLE IDENTITY: a Claude tab via `WindowRecord::selectedSessionId` (the conversation id — the same
+stable ref `sessions.json` uses), a non-Claude shell tab via `selectedTabIndex` (its WT session GUID
+is regenerated each run, so it has no cross-restart id), Manager / none ⇒ both unset (Manager is
+index 0, the natural default). `_CaptureWindowRecord` records it (and a tab-switch persists it live,
+not just at close); `_RestoreWindowTabs` resolves the focused tab's live position and applies it
+deterministically — a trailing `SwitchToTab` appended to the shell `ProcessStartupActions` batch (so
+it runs after the async shells exist), or a synchronous select when there are no shells.
+
+**Net:** the window layer is **complete & live-verified** end-to-end (geometry + lens + ordered tabs
++ session re-home + shell replay + focused-tab restore). The single remaining refinement is the
+approximate Claude-vs-`Other` tab interleave noted above (cosmetic).

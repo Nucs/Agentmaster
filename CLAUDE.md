@@ -40,7 +40,7 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
 Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
 Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
-Workspace persistence (M9–M14): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
+Workspace persistence (window layer): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
 Per-tab link badge (overlay): [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md).
 Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md).
 
@@ -53,8 +53,13 @@ deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hook
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
 reopen (traces in `~/.agentmaster/hooks.log`).
 
-**Workspace persistence (M9–M14, [`PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md)) is in
-progress.** **M9 (singleton engine) is complete — compiles + unit-tested:** the
+**Workspace persistence ([`PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md)) — the window layer is
+COMPLETE + live-verified.** (The original **M9–M14** milestone ladder is **superseded** by
+PERSISTENCE.md §13's Increments 1–4: M9 + M10 shipped, **M11 obviated** — the lens rides the
+`WindowRecord` autosave, not a persist-hook — M12/M13 delivered AS the Increments, and **M14
+migration is moot** (no legacy format). The lone remaining item is one **cosmetic** refinement —
+exact left-to-right tab interleave on reopen, noted at the end of this block.) **M9 (singleton
+engine) is complete — compiles + unit-tested:** the
 registry/bridge/scheduler are now ONE process-wide `SharedEngine` (`AgentMaster/Engine.{h,cpp}`),
 so the WindowEmperor's many windows share one fleet over one pipe instead of two registries
 racing on `\\.\pipe\agentmaster.<pid>` and clobbering `sessions.json`. **M10's data layer is
