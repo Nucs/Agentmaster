@@ -304,6 +304,7 @@ namespace
         int64_t last; // last activity (mtime); 0 when unknown.
         bool active; // currently running (managed Running state) — floats to the top of MOST ACTIVE.
         std::wstring title; // display title for A-Z (case-insensitive).
+        uint32_t pid; // BY PID key: the host window/shell pid (externals) or the claude pid (managed) — groups same-window rows together (matches the color-coded underline), UINT32_MAX when unknown (sorts last).
     };
 
     SortKey MakeSortKey(const ::Agentmaster::SessionInfo& s)
@@ -313,6 +314,7 @@ namespace
         k.last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
         k.active = (s.state == ::Agentmaster::SessionState::Running);
         k.title = s.title;
+        k.pid = s.pid ? s.pid : UINT32_MAX; // managed: the claude pid (unique -> the most-active secondary rarely breaks ties)
         return k;
     }
 
@@ -324,6 +326,7 @@ namespace
         k.last = ex.lastActivityUnixMs;
         k.active = false; // externals carry no run-state — rank by recency only
         k.title = !ex.title.empty() ? ex.title : ex.cwd;
+        k.pid = ex.hostPid ? ex.hostPid : (ex.pid ? ex.pid : UINT32_MAX); // BY PID groups by host window/shell (the underline color key), so same-window externals sit together
         return k;
     }
 
@@ -359,6 +362,14 @@ namespace
             break;
         case ExplorerSort::Alpha:
             break; // name is the primary key — handled by the tiebreak below
+        case ExplorerSort::ByPid:
+            if (a.pid != b.pid)
+                return a.pid < b.pid; // group by host window/shell pid (ascending)
+            if (a.active != b.active)
+                return a.active; // then by most active: running first
+            if (a.last != b.last)
+                return a.last > b.last; // ...then most-recent activity
+            break;
         }
         if (CiLess(a.title, b.title))
             return true;
@@ -1099,7 +1110,7 @@ namespace winrt::TerminalApp::implementation
                 _treeSortBtn = Button{};
                 _treeSortBtn.FontSize(11);
                 _treeSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                ToolTipService::SetToolTip(_treeSortBtn, winrt::box_value(L"Sort \x2014 NEWEST / OLDEST / MOST ACTIVE (currently-running first) / A\x2013Z. Applies to every scope; global \x2014 it persists and applies to all windows."));
+                ToolTipService::SetToolTip(_treeSortBtn, winrt::box_value(L"Sort \x2014 NEWEST / OLDEST / MOST ACTIVE (currently-running first) / A\x2013Z / BY PID (group by host window/shell \x2014 same as the pid underline color \x2014 then most active). Applies to every scope; global \x2014 it persists and applies to all windows."));
                 _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
                 hdrow.Children().Append(_treeSortBtn);
                 _UpdateTreeSortButton();
@@ -2091,6 +2102,7 @@ namespace winrt::TerminalApp::implementation
                 int64_t maxCreated{ 0 };
                 int64_t minCreated{ INT64_MAX };
                 int64_t bestLast{ 0 };
+                uint32_t minPid{ UINT32_MAX }; // BY PID: a dir's rank is its lowest host/claude pid
             };
             std::vector<std::pair<std::wstring, DirAgg>> ranked;
             ranked.reserve(dirs.size());
@@ -2105,6 +2117,7 @@ namespace winrt::TerminalApp::implementation
                         agg.maxCreated = (std::max)(agg.maxCreated, k.created);
                         agg.minCreated = (std::min)(agg.minCreated, k.created);
                         agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
+                        agg.minPid = (std::min)(agg.minPid, k.pid);
                     }
                 }
                 ranked.push_back({ dir, agg });
@@ -2125,6 +2138,12 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::ByPid:
+                    if (a.minPid != b.minPid)
+                        return a.minPid < b.minPid;
+                    if (a.bestLast != b.bestLast)
+                        return a.bestLast > b.bestLast; // then most active
                     break;
                 case ::Agentmaster::ExplorerSort::Alpha:
                     break;
@@ -2407,6 +2426,7 @@ namespace winrt::TerminalApp::implementation
                 int64_t maxCreated{ 0 };
                 int64_t minCreated{ INT64_MAX };
                 int64_t bestLast{ 0 };
+                uint32_t minPid{ UINT32_MAX }; // BY PID: a dir's rank is its lowest host-window pid
             };
             std::vector<std::pair<std::wstring, DirAgg>> ranked;
             ranked.reserve(dirs.size());
@@ -2421,6 +2441,7 @@ namespace winrt::TerminalApp::implementation
                         agg.maxCreated = (std::max)(agg.maxCreated, k.created);
                         agg.minCreated = (std::min)(agg.minCreated, k.created);
                         agg.bestLast = (std::max)(agg.bestLast, k.active ? INT64_MAX : k.last);
+                        agg.minPid = (std::min)(agg.minPid, k.pid);
                     }
                 }
                 ranked.push_back({ dir, agg });
@@ -2441,6 +2462,12 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::ByPid:
+                    if (a.minPid != b.minPid)
+                        return a.minPid < b.minPid;
+                    if (a.bestLast != b.bestLast)
+                        return a.bestLast > b.bestLast; // then most active
                     break;
                 case ::Agentmaster::ExplorerSort::Alpha:
                     break;
@@ -2757,9 +2784,9 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: advance the Explorer Tree sort NEWEST -> OLDEST -> MOST ACTIVE -> A-Z -> NEWEST.
-    // The sort is a GLOBAL setting: mutate _appSettings.treeSort, refresh the label, then push it
-    // through the settings sink (the page persists it to settings.json and re-materializes), so the
+    // Agentmaster: advance the Explorer Tree sort NEWEST -> OLDEST -> MOST ACTIVE -> A-Z -> BY PID ->
+    // NEWEST. The sort is a GLOBAL setting: mutate _appSettings.treeSort, refresh the label, then push
+    // it through the settings sink (the page persists it to settings.json and re-materializes), so the
     // choice survives restart and seeds every other / future window. _Refresh re-sorts THIS window's
     // tree (and re-renders the board/plan) immediately.
     void AgentManagerContent::_CycleTreeSort()
@@ -2777,6 +2804,9 @@ namespace winrt::TerminalApp::implementation
             _appSettings.treeSort = ExplorerSort::Alpha;
             break;
         case ExplorerSort::Alpha:
+            _appSettings.treeSort = ExplorerSort::ByPid;
+            break;
+        case ExplorerSort::ByPid:
         default:
             _appSettings.treeSort = ExplorerSort::Newest;
             break;
@@ -2798,6 +2828,7 @@ namespace winrt::TerminalApp::implementation
             const wchar_t* label = (_appSettings.treeSort == ExplorerSort::Oldest)       ? L"OLDEST"
                                    : (_appSettings.treeSort == ExplorerSort::MostActive) ? L"MOST ACTIVE"
                                    : (_appSettings.treeSort == ExplorerSort::Alpha)      ? L"A\x2013Z"
+                                   : (_appSettings.treeSort == ExplorerSort::ByPid)      ? L"BY PID"
                                                                                          : L"NEWEST";
             _treeSortBtn.Content(winrt::box_value(label));
         }

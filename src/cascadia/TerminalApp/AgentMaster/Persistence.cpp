@@ -159,6 +159,8 @@ namespace Agentmaster
             return L"active";
         case ExplorerSort::Alpha:
             return L"alpha";
+        case ExplorerSort::ByPid:
+            return L"pid";
         case ExplorerSort::Newest:
         default:
             return L"newest";
@@ -172,6 +174,8 @@ namespace Agentmaster
             return ExplorerSort::MostActive;
         if (s == L"alpha")
             return ExplorerSort::Alpha;
+        if (s == L"pid")
+            return ExplorerSort::ByPid;
         return ExplorerSort::Newest;
     }
 

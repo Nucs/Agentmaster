@@ -265,11 +265,14 @@ What works, by area:
   **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
   EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals),
-  and after it a **sort toggle — NEWEST · OLDEST · MOST ACTIVE · A–Z** (`_CycleTreeSort` /
+  and after it a **sort toggle — NEWEST · OLDEST · MOST ACTIVE · A–Z · BY PID** (`_CycleTreeSort` /
   `_UpdateTreeSortButton`) that orders **both the directory groups and the rows within each, in every
   scope** (a dir's rank is an aggregate over its sessions: NEWEST/OLDEST by conversation ctime, MOST
-  ACTIVE by recency with a currently-**Running** session pinned to the top, A–Z by name; ctime/mtime
-  via the same transcript timing as the adornment, `SortKey`/`MakeSortKey`/`SortKeyLess`). Unlike the
+  ACTIVE by recency with a currently-**Running** session pinned to the top, A–Z by name, **BY PID** by
+  the **host window/shell pid** — externals: `ExternalClaudeRow::hostPid`, the same key as the
+  color-coded pid underline, so same-window rows group together; managed: the claude pid — **then by
+  most active** within each pid group; ctime/mtime via the same transcript timing as the adornment,
+  `SortKey`/`MakeSortKey`/`SortKeyLess`). Unlike the
   per-window in-memory scope, the sort is a **GLOBAL, persisted** setting (`AppSettings::treeSort` →
   `settings.json`, via the same settings sink the cog uses) — it survives restart and seeds every
   window (the changing window re-sorts live; others adopt it on next launch). After the sort comes a

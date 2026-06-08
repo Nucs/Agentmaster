@@ -44,7 +44,8 @@ namespace Agentmaster
         Newest, // most recently created first (conversation ctime, desc); a fresh/never-prompted session floats up
         Oldest, // oldest created first (ctime, asc)
         MostActive, // most recent activity first; a currently-running session ranks at the very top
-        Alpha // A->Z by title (case-insensitive)
+        Alpha, // A->Z by title (case-insensitive)
+        ByPid // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
     };
 
     // When a queued prompt is allowed to fire.
