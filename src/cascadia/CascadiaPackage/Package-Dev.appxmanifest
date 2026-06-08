@@ -19,10 +19,15 @@
 
   <!-- Agentmaster: distinct package identity (NOT WindowsTerminalDev) so this fork
        installs alongside any real Windows Terminal / WindowsTerminalDev without
-       collision. Publisher kept so the existing dev signing cert still matches. -->
+       collision. Publisher is CN=Agentmaster (an honest self-signed identity); this is
+       what derives the package family name Agentmaster_56k4f06dsfp9r. The GitHub release
+       self-signs with a cert whose subject matches this Publisher exactly (see
+       .github/workflows/release.yml). The local dev flow registers the loose layout
+       UNSIGNED (no CascadiaPackage_TemporaryKey.pfx => AppxPackageSigningEnabled=false in
+       the wapproj), so renaming the Publisher does not affect Build-Agentmaster.ps1. -->
   <Identity
     Name="Agentmaster"
-    Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    Publisher="CN=Agentmaster"
     Version="0.0.1.0" />
 
   <Properties>

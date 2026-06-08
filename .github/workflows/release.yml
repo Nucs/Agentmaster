@@ -1,0 +1,339 @@
+# Agentmaster — GitHub release build.
+#
+# A fork-friendly port of Windows Terminal's Azure-Pipelines "full release build"
+# (build/pipelines/ob-release.yml -> pipeline-onebranch-full-release-build.yml),
+# stripped of everything Microsoft-internal:
+#   - NO Azure / OneBranch / 1ES, NO ESRP signing, NO symbol publishing, NO vpack
+#   - NO nightly (tag/dispatch only), NO NuGet *publishing* (restore stays — it's a build dep)
+#   - the Microsoft-internal "terminal-internal" Universal Package + WindowsTerminalOfficialBuild
+#     are NOT used; we build the Dev branding, which is our Agentmaster identity.
+#
+# Produces, attached to a GitHub Release:
+#   - Agentmaster_<ver>.msixbundle   (x64+arm64; SELF-SIGNED — see the .cer caveat below)
+#   - Agentmaster.cer                (public cert; import to Trusted People to install the bundle)
+#   - Agentmaster_<ver>_x64.zip      (portable; unzip & run, no install/cert needed)
+#   - Agentmaster_<ver>_arm64.zip    (portable)
+#
+# Heads-up (things a runner may need that this box has natively):
+#   * windows-2022 must have the VS2022 "Desktop development with C++" AND
+#     "Universal Windows Platform development" workloads + a recent Windows SDK
+#     (10.0.22621 / 26100). If the CascadiaPackage (.wapproj) build fails to find the
+#     UWP packaging targets, add a workload-install step (slow) or pin a known-good image.
+#   * vcpkg builds native deps from source on a cold cache (the long pole). Cached below.
+#
+# SIGNING: the manifest Publisher is "CN=Agentmaster" (package family Agentmaster_56k4f06dsfp9r).
+# An MSIX signature is only valid when the signing cert's subject is byte-identical to that
+# Publisher, so this workflow mints a self-signed "CN=Agentmaster" cert — its subject is read
+# from the manifest at runtime, so it always matches. Being self-signed, users must import
+# Agentmaster.cer to install the bundle; the portable ZIP needs no cert at all. To use a real
+# cert instead, set repo secrets SIGNING_PFX_BASE64 + SIGNING_PFX_PASSWORD (its subject must
+# still equal the manifest Publisher).
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version X.Y.Z (no leading v)"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write # create the GitHub Release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CONFIGURATION: Release
+  MANIFEST: src/cascadia/CascadiaPackage/Package-Dev.appxmanifest
+
+jobs:
+  # ----------------------------------------------------------------------------
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      ver3: ${{ steps.v.outputs.ver3 }}
+      ver4: ${{ steps.v.outputs.ver4 }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${{ github.event.inputs.version }}"
+          else
+            RAW="${GITHUB_REF_NAME#v}"
+          fi
+          # Keep the first three numeric components; force a 4-part .0 for the manifest.
+          IFS='.' read -r A B C _ <<< "$RAW"
+          A=${A:-0}; B=${B:-0}; C=${C:-0}
+          echo "ver3=${A}.${B}.${C}"   >> "$GITHUB_OUTPUT"
+          echo "ver4=${A}.${B}.${C}.0" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${A}.${B}.${C}.0 (from '${RAW}')"
+
+  # ----------------------------------------------------------------------------
+  build:
+    needs: prep
+    runs-on: windows-2022
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x64, platform: x64, xamlarch: x64 }
+          - { name: arm64, platform: ARM64, xamlarch: arm64 }
+    env:
+      VER4: ${{ needs.prep.outputs.ver4 }}
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg_cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.config', '**/*.vcxproj', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg_cache
+          key: vcpkg-${{ runner.os }}-${{ matrix.platform }}-${{ hashFiles('vcpkg.json', 'dep/vcpkg-overlay-ports/**') }}
+          restore-keys: vcpkg-${{ runner.os }}-${{ matrix.platform }}-
+
+      - name: Stamp version into the manifest
+        shell: pwsh
+        run: |
+          [xml]$x = Get-Content $env:MANIFEST
+          $x.Package.Identity.Version = $env:VER4
+          $x.Save((Resolve-Path $env:MANIFEST))
+          Write-Host "Identity Version -> $($x.Package.Identity.Version)"
+
+      - name: Detect / bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          $vs = & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -requires Microsoft.VisualStudio.Component.Vcpkg -property installationPath
+          if ([string]::IsNullOrEmpty($vs)) {
+            if ($env:VCPKG_INSTALLATION_ROOT -and (Test-Path $env:VCPKG_INSTALLATION_ROOT)) {
+              $root = $env:VCPKG_INSTALLATION_ROOT     # GitHub-hosted runners ship vcpkg here
+            } else {
+              Remove-Item -Recurse -Force dep/vcpkg -ErrorAction Ignore
+              git clone https://github.com/microsoft/vcpkg dep/vcpkg
+              & ./dep/vcpkg/bootstrap-vcpkg.bat
+              $root = (Resolve-Path dep/vcpkg).Path
+            }
+          } else {
+            $root = Join-Path $vs 'VC\vcpkg'
+          }
+          Write-Host "VCPKG_ROOT=$root"
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Restore (NuGet + solution)
+        shell: pwsh
+        run: |
+          # dep/nuget package set (the bundled nuget.exe can't parse .slnx, so restore the
+          # packages.config directly — mirrors tools/Build-Agentmaster.ps1).
+          & dep\nuget\nuget.exe restore dep\nuget\packages.config -PackagesDirectory packages
+          if (Test-Path build\packages.config) {
+            & dep\nuget\nuget.exe restore build\packages.config -PackagesDirectory packages
+          }
+          # PackageReference + project restore for the solution.
+          msbuild OpenConsole.slnx /t:Restore /m /p:Configuration=$env:CONFIGURATION /p:Platform=${{ matrix.platform }}
+
+      - name: Generate NOTICE.html
+        shell: pwsh
+        run: .\build\scripts\Generate-ThirdPartyNotices.ps1 -MarkdownNoticePath .\NOTICE.md -OutputPath .\src\cascadia\CascadiaPackage\NOTICE.html
+
+      - name: Build CascadiaPackage (Release, Dev branding = Agentmaster)
+        shell: pwsh
+        run: |
+          msbuild OpenConsole.slnx /m `
+            /p:Configuration=$env:CONFIGURATION `
+            /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTerminalBranding=Dev `
+            /p:AppxPackageSigningEnabled=false `
+            /t:Terminal\CascadiaPackage `
+            /bl:msbuild-${{ matrix.name }}.binlog
+
+      - name: Locate the MSIX + resolve the SDK
+        id: loc
+        shell: pwsh
+        run: |
+          $msix = Get-ChildItem -Recurse -Filter 'CascadiaPackage*.msix' |
+                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msix) { throw "No CascadiaPackage*.msix produced" }
+          $kit = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+                 Where-Object { Test-Path (Join-Path $_.FullName 'x64\makeappx.exe') } |
+                 Sort-Object Name -Descending | Select-Object -First 1
+          "msix=$($msix.FullName)"                          >> $env:GITHUB_OUTPUT
+          "makeappx=$(Join-Path $kit.FullName 'x64\makeappx.exe')" >> $env:GITHUB_OUTPUT
+          Write-Host "MSIX: $($msix.FullName)"
+
+      - name: Sanity-check the MSIX
+        shell: pwsh
+        continue-on-error: true
+        run: .\build\scripts\Test-WindowsTerminalPackage.ps1 -Verbose -Path "${{ steps.loc.outputs.msix }}"
+
+      - name: Build portable (unpackaged) distribution
+        shell: pwsh
+        run: |
+          $xaml = Get-ChildItem -Recurse -Path src\cascadia\CascadiaPackage\AppPackages -Filter 'Microsoft.UI.Xaml*.appx' |
+                  Where-Object { $_.FullName -match "\\Dependencies\\${{ matrix.xamlarch }}\\" } |
+                  Select-Object -First 1
+          if (-not $xaml) { throw "No Microsoft.UI.Xaml appx for ${{ matrix.xamlarch }}" }
+          New-Item -ItemType Directory -Force _unpackaged | Out-Null
+          .\build\scripts\New-UnpackagedTerminalDistribution.ps1 `
+            -TerminalAppX "${{ steps.loc.outputs.msix }}" `
+            -XamlAppX $xaml.FullName `
+            -Destination _unpackaged `
+            -MakeAppxPath "${{ steps.loc.outputs.makeappx }}"
+
+      - name: Stage the per-arch MSIX for bundling
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force _msix | Out-Null
+          Copy-Item "${{ steps.loc.outputs.msix }}" _msix\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix-${{ matrix.name }}
+          path: _msix/*.msix
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-${{ matrix.name }}
+          path: _unpackaged/*.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: binlog-${{ matrix.name }}
+          path: msbuild-${{ matrix.name }}.binlog
+
+  # ----------------------------------------------------------------------------
+  bundle:
+    needs: [prep, build]
+    runs-on: windows-2022
+    env:
+      VER4: ${{ needs.prep.outputs.ver4 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Download all per-arch MSIX
+        uses: actions/download-artifact@v4
+        with:
+          pattern: msix-*
+          path: msix-in
+          merge-multiple: true
+
+      - name: Create the multi-arch msixbundle
+        id: pack
+        shell: pwsh
+        run: |
+          $kit = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+                 Where-Object { Test-Path (Join-Path $_.FullName 'x64\makeappx.exe') } |
+                 Sort-Object Name -Descending | Select-Object -First 1
+          $makeappx = Join-Path $kit.FullName 'x64\makeappx.exe'
+          New-Item -ItemType Directory -Force out | Out-Null
+          $bundle = "out\Agentmaster_${env:VER4}.msixbundle"
+          .\build\scripts\Create-AppxBundle.ps1 `
+            -ProjectName CascadiaPackage `
+            -BundleVersion $env:VER4 `
+            -InputPath msix-in `
+            -OutputPath $bundle `
+            -MakeAppxPath $makeappx
+          "bundle=$bundle"   >> $env:GITHUB_OUTPUT
+          "signtool=$(Join-Path $kit.FullName 'x64\signtool.exe')" >> $env:GITHUB_OUTPUT
+
+      - name: Self-sign the bundle (or use a provided cert) + export public .cer
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          # The cert subject MUST equal the manifest Publisher or the signature is invalid.
+          [xml]$x = Get-Content $env:MANIFEST
+          $publisher = $x.Package.Identity.Publisher
+          Write-Host "Publisher (cert subject): $publisher"
+
+          if ($env:SIGNING_PFX_BASE64) {
+            [IO.File]::WriteAllBytes("$PWD\sign.pfx", [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+            $sec  = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath sign.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $sec
+            Write-Host "Using provided signing certificate."
+          } else {
+            $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $publisher `
+                      -CertStoreLocation Cert:\CurrentUser\My -FriendlyName "Agentmaster (self-signed)" `
+                      -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(5)
+            Write-Host "Minted an ephemeral self-signed certificate."
+          }
+
+          & "${{ steps.pack.outputs.signtool }}" sign /fd SHA256 /sha1 $cert.Thumbprint "${{ steps.pack.outputs.bundle }}"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed ($LASTEXITCODE)" }
+
+          Export-Certificate -Cert (Get-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)") `
+            -FilePath "out\Agentmaster.cer" | Out-Null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: |
+            out/*.msixbundle
+            out/*.cer
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------------------
+  release:
+    needs: [prep, build, bundle]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "{bundle,portable-*}"
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -R dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Agentmaster ${{ needs.prep.outputs.ver3 }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.prep.outputs.ver3) || github.ref_name }}
+          draft: true # flip to false once you've confirmed a run; lets you review assets first
+          files: |
+            dist/*.msixbundle
+            dist/*.cer
+            dist/*.zip
+          body: |
+            ## Agentmaster ${{ needs.prep.outputs.ver3 }}
+
+            A fork of Windows Terminal that manages multiple Claude Code sessions.
+
+            ### Install — portable (recommended, no cert)
+            1. Download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`).
+            2. Unzip anywhere and run `WindowsTerminal.exe` / `agentmaster.exe` in place.
+
+            ### Install — MSIX bundle (self-signed)
+            The `.msixbundle` is **self-signed** (see the cert caveat in the workflow). To install:
+            1. Download `Agentmaster.cer` and the `.msixbundle`.
+            2. Import the cert (admin PowerShell):
+               `Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`
+            3. Double-click the `.msixbundle`, or:
+               `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`

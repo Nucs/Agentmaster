@@ -462,7 +462,7 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
 - Build entry: **`OpenConsole.slnx`** (slnx format). No git submodules in 1.24
   (`doc/building.md` is stale on that point).
 - Toolchain: VS 2022 + C++/UWP workloads + Windows SDK 10.0.22621/26100.
-- **Package identity = `Agentmaster`** (PFN `Agentmaster_8wekyb3d8bbwe`), set in
+- **Package identity = `Agentmaster`** (PFN `Agentmaster_56k4f06dsfp9r`), set in
   `src/cascadia/CascadiaPackage/Package-Dev.appxmanifest` (the Debug branding). It is
   deliberately **distinct from `WindowsTerminalDev`** so it coexists with real Windows
   Terminal. ⚠️ There is a **separate `K:\source\windowsterminal` checkout on this machine
@@ -618,7 +618,7 @@ Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bi
 Launch any of these ways:
 - execution alias: **`agentmaster`**
 - Start menu: **“Agentmaster”**
-- `Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"`
+- `Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"`
 
 ### Concurrency lock (multi-agent) — REQUIRED before any build, launch, or deploy
 
@@ -663,7 +663,7 @@ Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenC
 # 2. build (full exe link)
 pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64
 # 3. relaunch
-Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"   # or: agentmaster
+Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"   # or: agentmaster
 ```
 ```bash
 # 4. release the mutex (always — even if a step above failed)

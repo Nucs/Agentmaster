@@ -121,7 +121,7 @@ Add-AppxPackage -Register ".\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxMani
 Then launch via the `agentmaster` execution alias, the **Agentmaster** Start-menu entry, or:
 
 ```powershell
-Start-Process "shell:appsFolder\Agentmaster_8wekyb3d8bbwe!App"
+Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
 ```
 
 Runtime/session state lives in `%USERPROFILE%\.agentmaster\`; tail `hooks.log` to confirm the

@@ -1,0 +1,97 @@
+# Agentmaster — CI build gate (no release).
+#
+# A build-only PR gate: it compiles + links the app (Terminal\CascadiaPackage, x64 Release) so a
+# pull request can't merge code that doesn't build. It does NOT package, sign, version-stamp, or
+# release anything — that is release.yml's job (tag/dispatch only). Release config here mirrors the
+# release build, so a green CI strongly predicts a green release.
+#
+# Same runner caveat as release.yml: windows-2022 must carry the VS2022 "Desktop development with
+# C++" + "Universal Windows Platform development" workloads and a recent Windows SDK; vcpkg builds
+# native deps from source on a cold cache (cached below).
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [agentmaster, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true # a newer push supersedes an in-flight gate
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg_cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.config', '**/*.vcxproj', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg_cache
+          key: vcpkg-${{ runner.os }}-x64-${{ hashFiles('vcpkg.json', 'dep/vcpkg-overlay-ports/**') }}
+          restore-keys: vcpkg-${{ runner.os }}-x64-
+
+      - name: Detect / bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          $vs = & 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe' -requires Microsoft.VisualStudio.Component.Vcpkg -property installationPath
+          if ([string]::IsNullOrEmpty($vs)) {
+            if ($env:VCPKG_INSTALLATION_ROOT -and (Test-Path $env:VCPKG_INSTALLATION_ROOT)) {
+              $root = $env:VCPKG_INSTALLATION_ROOT
+            } else {
+              Remove-Item -Recurse -Force dep/vcpkg -ErrorAction Ignore
+              git clone https://github.com/microsoft/vcpkg dep/vcpkg
+              & ./dep/vcpkg/bootstrap-vcpkg.bat
+              $root = (Resolve-Path dep/vcpkg).Path
+            }
+          } else {
+            $root = Join-Path $vs 'VC\vcpkg'
+          }
+          Write-Host "VCPKG_ROOT=$root"
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Restore (NuGet + solution)
+        shell: pwsh
+        run: |
+          & dep\nuget\nuget.exe restore dep\nuget\packages.config -PackagesDirectory packages
+          if (Test-Path build\packages.config) {
+            & dep\nuget\nuget.exe restore build\packages.config -PackagesDirectory packages
+          }
+          msbuild OpenConsole.slnx /t:Restore /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Build CascadiaPackage (x64 Release)
+        shell: pwsh
+        run: |
+          msbuild OpenConsole.slnx /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:WindowsTerminalBranding=Dev `
+            /p:AppxPackageSigningEnabled=false `
+            /t:Terminal\CascadiaPackage `
+            /bl:msbuild-ci.binlog
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: binlog-ci
+          path: msbuild-ci.binlog
