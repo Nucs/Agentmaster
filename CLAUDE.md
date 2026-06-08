@@ -116,7 +116,12 @@ per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1 -
 rows (**Restore here** = cherry-pick one into the current window); sessions in no record fall under
 "Other archived sessions". A clobber guard keeps a not-yet-laid-out window (no tabs AND no geometry, or
 pre-Initialized) from overwriting a good record on disk (`_FlushWindowRecord`), and the close-flush
-captures the final state before the gap-#1 teardown clears `_claudeTabs` (`CloseWindow`). Live-verified:
+captures the final state before the gap-#1 teardown clears `_claudeTabs` (`CloseWindow`). A reopened
+(claimed-record) window also **suppresses the default startup tab** — `_OnFirstLayout` gates
+`ProcessStartupActions` on `!_windowRecordClaimed`, because in DefaultProfile mode a reopen's `wt -w new
+-s <idx>` (where `ShouldUsePersistedLayout` is off) falls back to a default `newTab` that would otherwise
+append a spurious pwsh tab to every reopened window and **accumulate one shell per reopen cycle** in the
+record; a reopened window's content comes from the re-home, not the default action. Live-verified:
 a window with 1 Claude + 3 pwsh tabs closed → reopened at its geometry (1466×780 @ 14,173) with the
 Claude session resumed + all three pwsh tabs (title/cwd) replayed; the record round-tripped intact.
 **Still deferred:** exact left-to-right interleave of Claude vs Other tabs on reopen (Claude tabs land

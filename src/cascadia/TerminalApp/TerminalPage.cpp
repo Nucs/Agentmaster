@@ -2725,8 +2725,16 @@ namespace winrt::TerminalApp::implementation
             {
                 CreateTabFromConnection(std::move(_startupConnection));
             }
-            else if (!_startupActions.empty())
+            else if (!_startupActions.empty() && !_windowRecordClaimed)
             {
+                // Agentmaster (M10 window-grouped restore): a window restored from a claimed record gets
+                // its content from _RestoreWindowTabs above — NOT the default startup action. In our
+                // DefaultProfile mode ShouldUsePersistedLayout() is off, so a reopen's `wt -w new -s
+                // <idx>` ignores `-s` and falls back to GetStartupActions() = a default `newTab` (pwsh).
+                // Processing that here would append a spurious pwsh tab to every reopened window, which
+                // then gets captured into the record and ACCUMULATES one shell per reopen cycle. A
+                // record with no content tabs faithfully restores Manager-only. (A truly fresh window —
+                // no claimed record — still opens its default tab.)
                 ProcessStartupActions(std::move(_startupActions));
             }
 
