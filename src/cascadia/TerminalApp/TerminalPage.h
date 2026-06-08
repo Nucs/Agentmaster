@@ -408,6 +408,7 @@ namespace winrt::TerminalApp::implementation
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // Agentmaster (returns the created tab)
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
+        void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)
         void _SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind); // Agentmaster (OBSERVER.md §4/§11d): attach-or-update a registry-less "○ <kind> · unlinked" badge (pwsh / cmd / claude / codex) on a non-bound tab
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
@@ -450,6 +451,10 @@ namespace winrt::TerminalApp::implementation
         // open, each via `wt -w -1 -s <idx>` (the same new-window-by-persisted-index path the Emperor
         // uses at startup) — the Manager's "Reopen Windows (N)" recover button.
         safe_void_coroutine _ReopenSavedWindows();
+        // Agentmaster (M10 window-grouped restore): reopen ONE saved window by its canonical record index
+        // (`agentmaster -w -1 -s <idx>`) — the per-window "Reopen window" button in the grouped Archived
+        // overlay. Same single-instance handoff as _ReopenSavedWindows, for a single record.
+        safe_void_coroutine _ReopenSavedWindow(int index);
 
         void _OpenNewTerminalViaDropdown(const Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs);
 

@@ -508,10 +508,25 @@ launch, gated by a decide-prompt, + a recover button** for history). Commits `bf
   reopened a 2nd window at its saved geometry (`Left=692 Top=480`) via the `-s <idx>` runtime handoff,
   alongside the already-open window.
 - **`Other`-tab `actionsJson` capture** (non-Claude tab recreation) and session **re-home** (route a
-  restored session into the window whose record references it) — both still deferred.
+  restored session into the window whose record references it) — **both now SHIPPED & live-verified
+  (Increment 4, window-grouped restore).** `TerminalPage::_RestoreWindowTabs` (run from `_OnFirstLayout`
+  after `_RestoreClaudeSessions`, gated on a *claimed* record) walks the record's ordered tab refs and
+  rebuilds the window in place: a **Claude** ref resumes its session INTO this window
+  (`_LaunchClaudeSession`, lazy-start safe), an **Other** ref replays its captured startup actions
+  (`WindowLayout::FromJson` → one `ProcessStartupActions`) to recreate the shell tab with title + color
+  + cwd. Capture fills `actionsJson` via `BuildStartupActions(Persist)` → `WindowLayout::ToJson`
+  (`_CaptureWindowRecord`). The Archived overlay is **grouped by window** (`_RebuildArchiveList` over
+  `RecoverableWindows`): a per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1
+  -s <idx>`) over its session rows (**Restore here** cherry-picks one into the current window). A clobber
+  guard (`_FlushWindowRecord`: skip a no-tabs+no-geometry or pre-Initialized capture) + a close-flush
+  before the gap-#1 teardown keep the record intact. Live-verified: a 1-Claude + 3-pwsh window closed →
+  reopened at geometry with the session resumed + all shells (title/cwd) replayed; record round-tripped.
+  **Still deferred:** exact left-to-right interleave of Claude vs Other tabs on reopen (Claude first,
+  then shells — both kinds return, only the ordering is approximate).
 
 **Acceptance (§13.3) status:** #2 partial (lens), #3 (single-window unchanged; clean first run), and
 **#1 multi-window reopen at geometry/lens — DONE & verified.** The two refinements above are now also
 **DONE & verified** (the reopen set is exactly the open-at-exit windows; a mid-session-closed window is
 pruned; the in-session recover button brings back any saved-but-not-open window). **Increment 3 is
-complete bar the two still-deferred items (`Other`-tab content recreation + session re-home).**
+complete; Increment 4 (window-grouped restore: session re-home + `Other`-tab recreation + grouped
+Archive UI) is now also complete & live-verified.**

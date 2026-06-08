@@ -102,8 +102,25 @@ ONLY), not minted as a lens-less duplicate; the no-arg front-pop claim never dra
 naming only one → exactly that one reopens (silent) at its geometry; a fake id is dropped + the second
 never added (register rewrote to the live set); the manifest survives app-close (skip-empty); a
 gracefully closed window is pruned; and the recover path reopens a not-open record at its saved geometry.
-**Still deferred (not blocking):** `Other`-tab `actionsJson` capture (non-Claude tab recreation) +
-session re-home. See PERSISTENCE.md §13.5.
+**Window-grouped restore is now shipped + live-verified** — a reopened window re-homes its **whole
+workspace**, not just geometry + lens. `TerminalPage::_RestoreWindowTabs` (run from `_OnFirstLayout`
+after `_RestoreClaudeSessions`, gated on a *claimed* record) walks the record's ordered tab refs and
+rebuilds them in place: each **Claude** ref resumes its session INTO this window (`_LaunchClaudeSession`,
+lazy-start safe — no eager `connection.Start()`); each **Other** ref replays its captured WT startup
+actions (`WindowLayout::FromJson` → one `ProcessStartupActions`) to recreate the shell tab with its
+title + color + cwd. Capture fills the Other ref's `actionsJson` from `BuildStartupActions(Persist)` →
+`WindowLayout::ToJson` in `_CaptureWindowRecord` (so `windows/<id>.json` now carries the pwsh/cmd tabs,
+not just Claude refs). The Manager's **Archived** overlay is **grouped by window** (`_RebuildArchiveList`
+over `Engine::RecoverableWindows`): each not-currently-open record is a "Saved window" card with a
+per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1 -s <idx>`) over its session
+rows (**Restore here** = cherry-pick one into the current window); sessions in no record fall under
+"Other archived sessions". A clobber guard keeps a not-yet-laid-out window (no tabs AND no geometry, or
+pre-Initialized) from overwriting a good record on disk (`_FlushWindowRecord`), and the close-flush
+captures the final state before the gap-#1 teardown clears `_claudeTabs` (`CloseWindow`). Live-verified:
+a window with 1 Claude + 3 pwsh tabs closed → reopened at its geometry (1466×780 @ 14,173) with the
+Claude session resumed + all three pwsh tabs (title/cwd) replayed; the record round-tripped intact.
+**Still deferred:** exact left-to-right interleave of Claude vs Other tabs on reopen (Claude tabs land
+first, then shells — see PERSISTENCE.md §13.5).
 
 **The Fleet Observer (O1–O7, [`OBSERVER.md`](doc/agentmaster/OBSERVER.md)) is complete — built,
 deployed, and live-verified.** It is the **PULL** half of the state engine: a process- +
@@ -374,7 +391,11 @@ What works, by area:
   of every session). Schema + (de)serialize + `Save/Load/Delete/LoadWindowRecord` are done and
   unit-tested; the live **capture** (debounced autosave) and **restore** (re-apply geometry/lens,
   claim/re-claim a record by id) are **shipped + live-verified** (see Status + `PERSISTENCE.md` §13.5).
-  **Session re-home** (route a restored session into the window whose record references it) is deferred.
+  **Session re-home + Other-tab recreation are now shipped too** (`_RestoreWindowTabs`): a reopened
+  window resumes its Claude sessions and replays its shell tabs (title/color/cwd) from the record's tab
+  refs, in order — so closing and reopening a window brings the whole workspace back, not just
+  geometry + lens. The Manager's Archived overlay groups closed sessions **by window** with a per-window
+  "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Reopen · `⚙` ·
   Pause Autopilot · Archived — the cog sits *before* Pause Autopilot / Archived) opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),

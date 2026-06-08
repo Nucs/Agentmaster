@@ -1008,6 +1008,39 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
+    // Agentmaster (M10 window-grouped restore): reopen ONE saved window by its canonical sorted record
+    // index. Mirrors a single iteration of _ReopenSavedWindows (the recover-button loop): ShellExecute
+    // our execution alias BY NAME with `-w -1 -s <idx>` so the single-instance handoff routes it back to
+    // the running Emperor, which resolves records[idx] for geometry + claims it by id (geometry + lens +
+    // its re-homed tabs agree). Fired by the per-window "Reopen window" button in the grouped Archived
+    // overlay. `index` comes from RecoverableWindows() (computed in the content), so it is already valid.
+    safe_void_coroutine TerminalPage::_ReopenSavedWindow(int index)
+    {
+        if (index < 0)
+        {
+            co_return;
+        }
+        // ShellExecuteExW may block — dispatch off the UI thread (don't touch `this` past here).
+        co_await winrt::resume_background();
+        try
+        {
+            const std::wstring cmdline = L"-w -1 -s " + std::to_wstring(index);
+            const std::wstring exePath = L"agentmaster.exe"; // launch the alias BY NAME (see _ReopenSavedWindows)
+            SHELLEXECUTEINFOW seInfo{ 0 };
+            seInfo.cbSize = sizeof(seInfo);
+            seInfo.fMask = SEE_MASK_NOASYNC;
+            seInfo.lpVerb = L"open";
+            seInfo.lpFile = exePath.c_str();
+            seInfo.lpParameters = cmdline.c_str();
+            seInfo.nShow = SW_SHOWNORMAL;
+            const auto ok = ShellExecuteExW(&seInfo);
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[reopen] dispatch one -s " + std::to_wstring(index) + L" ok=" + (ok ? std::wstring{ L"1" } : std::wstring{ L"0" }) + L"\n");
+        }
+        CATCH_LOG();
+        co_return;
+    }
+
     void TerminalPage::_HandleNewWindow(const IInspectable& /*sender*/,
                                         const ActionEventArgs& actionArgs)
     {

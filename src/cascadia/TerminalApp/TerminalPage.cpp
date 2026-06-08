@@ -1002,7 +1002,27 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
-                entry.kind = ::Agentmaster::TabKind::Other; // actionsJson deferred to Increment 3
+                // Other (pwsh / cmd / any non-Claude) tab: capture its full WT restore blob so the
+                // reopened window can rebuild it with its title + color + cwd. BuildStartupActions(Persist)
+                // is exactly what WT's own PersistState() serializes per tab; wrap this one tab's actions
+                // in a WindowLayout and stringify via the public WindowLayout::ToJson (round-tripped on
+                // restore by WindowLayout::FromJson -> ProcessStartupActions in _RestoreWindowTabs).
+                // Best-effort: a tab that yields no actions stays an empty Other ref (nothing to rebuild).
+                entry.kind = ::Agentmaster::TabKind::Other;
+                try
+                {
+                    if (const auto t = _GetTabImpl(tab))
+                    {
+                        auto tabActions = t->BuildStartupActions(BuildStartupKind::Persist);
+                        if (!tabActions.empty())
+                        {
+                            WindowLayout layout;
+                            layout.TabLayout(winrt::single_threaded_vector<ActionAndArgs>(std::move(tabActions)));
+                            entry.actionsJson = std::wstring{ WindowLayout::ToJson(layout) };
+                        }
+                    }
+                }
+                CATCH_LOG();
             }
             rec.tabs.push_back(std::move(entry));
         }
@@ -1025,14 +1045,31 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (M10): capture + persist synchronously. The throttled autosave funnels here, and
-    // so does the close-flush (PersistState) so the last move/resize isn't lost past the debounce.
+    // so does the close-flush (CloseWindow) so the last move/resize isn't lost past the debounce.
     void TerminalPage::_FlushWindowRecord()
     {
         if (_windowId.empty())
         {
             return; // engine not initialized (no Manager tab) — nothing to persist
         }
-        _windowRecord = _CaptureWindowRecord();
+        // Anti-clobber (window-grouped restore): never overwrite a good record with a not-yet-started
+        // window's nothing. A transient single-instance/handoff window (e.g. a quick reopen that opens
+        // then closes before layout) would otherwise capture an EMPTY, geometry-less record over the
+        // real one and wipe the saved workspace — breaking the very next reopen. Two cheap guards:
+        //  (1) only flush once THIS window finished startup (a pre-Initialized window has no real state);
+        if (_startupState != StartupState::Initialized)
+        {
+            return;
+        }
+        auto rec = _CaptureWindowRecord();
+        //  (2) a capture with NEITHER content tabs NOR geometry is an un-laid-out window — keep the
+        //      record on disk (the live window's real save follows). A legitimately session-less window
+        //      still has geometry, so an empty-but-positioned window (just the Manager tab) still saves.
+        if (rec.tabs.empty() && !rec.geometry.hasPosition && !rec.geometry.hasSize)
+        {
+            return;
+        }
+        _windowRecord = std::move(rec);
         ::Agentmaster::SaveWindowRecord(_windowRecord);
     }
 
@@ -1332,6 +1369,95 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
+    // Agentmaster (M10 window-grouped restore; PERSISTENCE.md §13 Phase C): re-home THIS window's
+    // persisted tabs. A window reopened from its WindowRecord (claimed by id at engine init) comes back
+    // with just the pinned Manager tab; this rebuilds the rest from the record's ORDERED tab refs, in
+    // place, so "close the window -> reopen it" brings the whole workspace back — not just geometry +
+    // lens. Per ref, in record order:
+    //   • Claude -> resume its session INTO this window (claude --resume, the archived record's queue +
+    //     autopilot intact) via _LaunchClaudeSession — the Archived-button path, targeted here. Lazy-
+    //     start safe: the tab is created through the normal pane path (no eager connection.Start()), so
+    //     a background restored claude starts its conversation only when first focused (WT's lazy-tab
+    //     behavior) — never the eager-Start AV (see Gotchas). A session already live (open in another
+    //     window) or unknown to the registry (the process-once fleet load hasn't landed, or it was
+    //     pruned) is skipped — it stays in the Archived list rather than being guessed.
+    //   • Other -> replay its captured WT startup actions (WindowLayout::FromJson -> ProcessStartup-
+    //     Actions) to rebuild the shell tab with its title + color + cwd.
+    // Only a CLAIMED record restores (a fresh "+ new window" has nothing to re-home). v1 ordering: the
+    // Claude tabs (launched synchronously) land before the Other tabs (whose actions replay on the XAML
+    // dispatcher); exact left-to-right interleave of the two kinds is a deferred refinement.
+    void TerminalPage::_RestoreWindowTabs()
+    {
+        if (!_windowRecordClaimed || _windowRecord.tabs.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        using namespace winrt::Microsoft::Terminal::Settings::Model;
+        // Copy the refs first: _LaunchClaudeSession / ProcessStartupActions re-enter capture + autosave,
+        // which rewrites _windowRecord.tabs out from under us mid-loop.
+        const auto tabs = _windowRecord.tabs;
+        size_t resumed = 0, shells = 0, skipped = 0;
+
+        // Pass 1 — Claude sessions, synchronously, in record order.
+        for (const auto& entry : tabs)
+        {
+            if (entry.kind != ::Agentmaster::TabKind::Claude || entry.sessionId.empty())
+            {
+                continue;
+            }
+            if (_claudeTabs.find(entry.sessionId) != _claudeTabs.end())
+            {
+                continue; // already bound in this window (re-entrant restore)
+            }
+            const auto info = _sessionRegistry->Get(entry.sessionId);
+            if (!info || info->live)
+            {
+                ++skipped; // unknown (fleet not loaded yet / pruned) or already open elsewhere
+                continue;
+            }
+            _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            ++resumed;
+        }
+
+        // Pass 2 — Other (shell) tabs: accumulate ALL their captured actions in record order and replay
+        // them in ONE ProcessStartupActions call (the WT startup path appends a tab per newTab action).
+        // A single call keeps the shells in order AND avoids the re-entrant virtual-cwd save/restore race
+        // that per-tab calls would cause (ProcessStartupActions wraps its batch in a window cwd swap).
+        std::vector<ActionAndArgs> shellActions;
+        for (const auto& entry : tabs)
+        {
+            if (entry.kind != ::Agentmaster::TabKind::Other || entry.actionsJson.empty())
+            {
+                continue;
+            }
+            try
+            {
+                const auto layout = WindowLayout::FromJson(winrt::hstring{ entry.actionsJson });
+                if (layout)
+                {
+                    if (const auto tl = layout.TabLayout(); tl && tl.Size() > 0)
+                    {
+                        for (const auto& a : tl)
+                        {
+                            shellActions.push_back(a);
+                        }
+                        ++shells;
+                    }
+                }
+            }
+            CATCH_LOG();
+        }
+        if (!shellActions.empty())
+        {
+            ProcessStartupActions(std::move(shellActions));
+        }
+
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[rehome] window " + _windowId + L" resumed=" + std::to_wstring(resumed) +
+                                          L" shells=" + std::to_wstring(shells) + L" skipped=" + std::to_wstring(skipped) +
+                                          L" of " + std::to_wstring(tabs.size()) + L" refs\n");
+    }
+
     // Agentmaster: wire a freshly-created Manager content to the engine. Idempotently
     // ensures the engine exists, then hands the content the registry + the spawn / activate
     // / kill callbacks (all routed back through the page on the UI thread).
@@ -1446,6 +1572,13 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ReopenSavedWindows();
+            }
+        });
+        // M10 window-grouped restore: the grouped Archived overlay's per-window "Reopen window" button.
+        content->SetReopenWindowHandler([weakThis](int index) {
+            if (auto self = weakThis.get())
+            {
+                self->_ReopenSavedWindow(index);
             }
         });
 
@@ -2538,6 +2671,12 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: re-launch persisted sessions (claude --resume) so the app reopens
             // to the exact state it was closed in (DESIGN §13).
             _RestoreClaudeSessions();
+
+            // Agentmaster (M10 window-grouped restore): if THIS window was reopened from a saved record,
+            // re-home its persisted tabs — resume each Claude session + replay each shell tab, in order —
+            // so closing and reopening a window brings its whole workspace back, not just geometry + lens.
+            // No-op for a fresh window (nothing claimed). Runs after the fleet load so the sessions exist.
+            _RestoreWindowTabs();
 
             if (_startupConnection)
             {
@@ -4334,6 +4473,14 @@ namespace winrt::TerminalApp::implementation
                 co_return;
             }
         }
+
+        // Agentmaster (M10 window-grouped restore): capture this window's record ONE LAST TIME while it
+        // is still intact — the live geometry AND the ordered Claude/Other tab refs — BEFORE the archive
+        // below clears _claudeTabs. _CaptureWindowRecord reads sessionId refs out of _claudeTabs (via
+        // _ClaudeSessionForTab); if it ran after the teardown-archive, every Claude tab would degrade to
+        // an anonymous Other ref and lose its session, so the reopened window couldn't re-home it. This
+        // also pins the final move/resize past the 750ms autosave debounce (the close-flush, §13.5).
+        _FlushWindowRecord();
 
         // Agentmaster (lifecycle gap #1): archive this window's live sessions NOW — before the host
         // tears us down — so they don't linger as phantom cards on other windows or orphan claude.exe.
