@@ -2325,8 +2325,9 @@ namespace winrt::TerminalApp::implementation
             b.Padding(Thickness{ 0, 0, 0, 0 });
             b.MinWidth(0);
             b.MinHeight(0);
-            b.HorizontalAlignment(HorizontalAlignment::Left);
-            b.HorizontalContentAlignment(HorizontalAlignment::Left);
+            const bool leftAlign = (col == 1 || col == 2); // Title + Directory read left; the rest center
+            b.HorizontalAlignment(HorizontalAlignment::Stretch);
+            b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(ArchiveText(label + arrow, 11, true, 0.7));
             b.Click([this, col](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 // Defer: rebuilding the header here would destroy this very sort button mid-click (XAML
@@ -2447,6 +2448,7 @@ namespace winrt::TerminalApp::implementation
             CheckBox cb;
             cb.MinWidth(0);
             cb.VerticalAlignment(VerticalAlignment::Center);
+            cb.HorizontalAlignment(HorizontalAlignment::Center);
             cb.IsChecked(_archiveChecked.find(r.id) != _archiveChecked.end()); // set BEFORE handlers (no spurious fire)
             cb.Checked([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 _archiveChecked.insert(rid);
@@ -2468,13 +2470,15 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(dir, 2);
             g.Children().Append(dir);
             auto br = ArchiveText(winrt::hstring{ r.branch }, 12, false, 0.55);
-            br.Margin(Thickness{ 0, 0, 6, 0 });
+            br.HorizontalAlignment(HorizontalAlignment::Center);
             Grid::SetColumn(br, 3);
             g.Children().Append(br);
             auto cr = ArchiveText(winrt::hstring{ ArchiveAgo(r.createdUnixMs, now) }, 11, false, 0.6);
+            cr.HorizontalAlignment(HorizontalAlignment::Center);
             Grid::SetColumn(cr, 4);
             g.Children().Append(cr);
             auto la = ArchiveText(winrt::hstring{ ArchiveAgo(r.lastActivityUnixMs, now) }, 11, false, 0.6);
+            la.HorizontalAlignment(HorizontalAlignment::Center);
             Grid::SetColumn(la, 5);
             g.Children().Append(la);
             if (r.windowOrdinal > 0)
@@ -2483,7 +2487,7 @@ namespace winrt::TerminalApp::implementation
                 chip.Background(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ ArchiveWindowColor(r.windowOrdinal) });
                 chip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 3, 3, 3, 3 });
                 chip.Padding(Thickness{ 5, 1, 5, 1 });
-                chip.HorizontalAlignment(HorizontalAlignment::Left);
+                chip.HorizontalAlignment(HorizontalAlignment::Center);
                 chip.VerticalAlignment(VerticalAlignment::Center);
                 auto wt = ArchiveText(winrt::hstring{ L"W" + std::to_wstring(r.windowOrdinal) }, 10, true, 1.0);
                 chip.Child(wt);
