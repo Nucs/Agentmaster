@@ -484,6 +484,7 @@ namespace winrt::TerminalApp::implementation
         void _BuildArchivePageShell(); // one-time: host + header (Back/title/search) + table/detail split + footer
         void _GatherArchiveRows(); // fill _archiveRows from RecoverableWindows() + loose archived sessions (+ transcript-stat timing)
         void _RenderArchiveTable(); // apply _archiveFilter + sort to _archiveRows -> rebuild the table + sortable header + selection
+        void _UpdateArchiveSelectionHighlight(); // recolor row highlights for _archiveSelectedId WITHOUT a rebuild (deferred row-tap path)
         void _ShowArchiveDetail(const std::wstring& sessionId); // populate the right pane for one row
         void _RestoreCheckedArchived(); // bulk: restore every checked archived session
         void _UpdateArchiveBulkButton(); // refresh the footer "Restore selected (N)" label + enabled

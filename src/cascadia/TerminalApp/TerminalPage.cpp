@@ -2183,10 +2183,20 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_HideArchivePage()
     {
-        if (_archivePageHost)
+        if (!_archivePageHost)
         {
-            _archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
+            return;
         }
+        // Defer: this is called from Back / Restore here / Reopen — buttons INSIDE the page. Collapsing
+        // the page synchronously would remove the clicked button from the tree mid-click (the same XAML
+        // hit-test AV as the open/row crashes). Collapse on a clean tick instead.
+        Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+            auto self = weak.get();
+            if (self && self->_archivePageHost)
+            {
+                self->_archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
+            }
+        });
     }
 
     // Gather the archive data set: every saved-window record's archived Claude sessions (tagged with that
@@ -2319,16 +2329,25 @@ namespace winrt::TerminalApp::implementation
             b.HorizontalContentAlignment(HorizontalAlignment::Left);
             b.Content(ArchiveText(label + arrow, 11, true, 0.7));
             b.Click([this, col](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                if (_archiveSortColumn == col)
-                {
-                    _archiveSortAscending = !_archiveSortAscending;
-                }
-                else
-                {
-                    _archiveSortColumn = col;
-                    _archiveSortAscending = (col == 1 || col == 2 || col == 3); // text ascending, time/window descending
-                }
-                _RenderArchiveTable();
+                // Defer: rebuilding the header here would destroy this very sort button mid-click (XAML
+                // hit-test AV). Let the click finish routing, then re-sort + rebuild on a clean tick.
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), col]() {
+                    auto self = weak.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    if (self->_archiveSortColumn == col)
+                    {
+                        self->_archiveSortAscending = !self->_archiveSortAscending;
+                    }
+                    else
+                    {
+                        self->_archiveSortColumn = col;
+                        self->_archiveSortAscending = (col == 1 || col == 2 || col == 3); // text ascending, time/window descending
+                    }
+                    self->_RenderArchiveTable();
+                });
             });
             Grid::SetColumn(b, col);
             _archiveHeaderRow.Children().Append(b);
@@ -2476,10 +2495,24 @@ namespace winrt::TerminalApp::implementation
             row.Padding(Thickness{ 8, 5, 8, 5 });
             row.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
             row.Background(r.id == _archiveSelectedId ? ArchiveBrush(0x50, 0x4A, 0x6E, 0xA8) : ArchiveBrush(0x14, 0x80, 0x80, 0x80));
+            row.Tag(winrt::box_value(winrt::hstring{ rid })); // id, so _UpdateArchiveSelectionHighlight can recolor without a rebuild
             row.Child(g);
+            // Selecting a row must NOT rebuild the list synchronously here: this Tapped is mid-routing on
+            // the row, and clearing _archiveRowsHost would destroy the very element handling the event ->
+            // the XAML hit-test AV (the crash the user hit clicking a row). Defer to a clean tick, and only
+            // recolor the highlight (a property change) + refresh the detail pane — no structural change to
+            // the tapped row.
             row.Tapped([this, rid](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
-                _archiveSelectedId = rid;
-                _RenderArchiveTable();
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                    auto self = weak.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    self->_archiveSelectedId = rid;
+                    self->_UpdateArchiveSelectionHighlight();
+                    self->_ShowArchiveDetail(rid);
+                });
             });
             _archiveRowsHost.Children().Append(row);
         }
@@ -2505,6 +2538,28 @@ namespace winrt::TerminalApp::implementation
 
         _UpdateArchiveBulkButton();
         _ShowArchiveDetail(_archiveSelectedId);
+    }
+
+    // Recolor the row backgrounds to reflect _archiveSelectedId WITHOUT rebuilding the list (each row
+    // Border carries its session id as its Tag). A property change only, so it never restructures the
+    // tree under an in-flight pointer — safe to run from the deferred row-tap reaction.
+    void TerminalPage::_UpdateArchiveSelectionHighlight()
+    {
+        if (!_archiveRowsHost)
+        {
+            return;
+        }
+        using namespace winrt::Windows::UI::Xaml::Controls;
+        for (const auto& child : _archiveRowsHost.Children())
+        {
+            const auto border = child.try_as<Border>();
+            if (!border)
+            {
+                continue;
+            }
+            const std::wstring id{ winrt::unbox_value_or<winrt::hstring>(border.Tag(), L"") };
+            border.Background(id == _archiveSelectedId ? ArchiveBrush(0x50, 0x4A, 0x6E, 0xA8) : ArchiveBrush(0x14, 0x80, 0x80, 0x80));
+        }
     }
 
     // Populate the right pane for one archived session: metadata + a read-only Flight Plan (the persisted
