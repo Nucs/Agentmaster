@@ -1185,6 +1185,7 @@ namespace winrt::TerminalApp::implementation
             if (_archivePageHost && tab != _managerTab)
             {
                 _archivePageHost.Visibility(Visibility::Collapsed);
+                _archivePageVisible.store(false, std::memory_order_relaxed); // observer pre-filter mirror
             }
 
             // GH#7409: If the tab switcher is open, then we _don't_ want to

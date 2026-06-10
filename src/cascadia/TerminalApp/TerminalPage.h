@@ -4,6 +4,7 @@
 #pragma once
 
 #include <ThrottledFunc.h>
+#include <atomic>
 #include <unordered_set>
 
 #include "TerminalPage.g.h"
@@ -351,6 +352,14 @@ namespace winrt::TerminalApp::implementation
             int windowOrdinal{ 0 }; // 1-based "W{n}" display chip; 0 = loose (no saved window)
             int sentCount{ 0 };
             int totalCount{ 0 };
+            // Agentmaster: a synthetic "saved window" row (id = "window:<guid>") for a recoverable record
+            // with NO archived Claude sessions (a pure-shell workspace, or sessions live elsewhere). Without
+            // it such a window was invisible + un-reopenable from this page (only the toolbar's "Reopen
+            // Windows (N)" covered it). No checkbox / no "Restore here"; its detail shows the tab
+            // composition (counts below) + "Reopen its window".
+            bool windowOnly{ false };
+            int winClaudeTabs{ 0 };
+            int winShellTabs{ 0 };
         };
         winrt::Windows::UI::Xaml::Controls::Grid _archivePageHost{ nullptr };          // full-bleed page over Root
         winrt::Windows::UI::Xaml::Controls::Grid _archiveHeaderRow{ nullptr };         // LEFT: sortable column header
@@ -363,9 +372,35 @@ namespace winrt::TerminalApp::implementation
         std::wstring _archiveSelectedId;                  // the row whose detail is shown
         std::unordered_set<std::wstring> _archiveChecked;    // multi-select set (by session id)
         std::unordered_set<std::wstring> _archiveVisibleIds; // Agentmaster: ids currently passing the filter (rebuilt each render); bulk-restore + its "(N)" count act on checked ∩ visible only
+        std::vector<std::wstring> _archiveVisibleOrder;      // Agentmaster: the visible ids in TABLE (sorted) order — bulk restore follows it, so restored tabs open in display order, not the unordered_set's hash order
         int _archiveSortColumn{ 4 };                      // default sort column: Created (see _RenderArchiveTable)
         bool _archiveSortAscending{ false };              // default: newest first
         std::wstring _archiveFilter;                      // lowercased search text
+        // Agentmaster (Archive page live refresh): the registry changes while the page is open (a tab X
+        // archives a session, another window restores one, the liveness sweep archives a dead claude) —
+        // an observer (fires on ANY thread) pokes a throttled UI-thread re-gather while the page is
+        // visible; the search rebuild is debounced through its own throttle. _archivePageVisible mirrors
+        // the host's Visibility as an atomic so the observer thread can pre-filter without touching XAML.
+        // Token detached in ~TerminalPage (an ::Agentmaster::ObserverToken; uint64_t to avoid pulling
+        // SessionRegistry.h into this header — same pattern as _adoptionToken).
+        uint64_t _archiveRegistryObserverToken{ 0 };
+        std::shared_ptr<ThrottledFunc<>> _archiveRefreshThrottled{ nullptr };
+        std::shared_ptr<ThrottledFunc<>> _archiveFilterThrottled{ nullptr };
+        std::atomic<bool> _archivePageVisible{ false };
+        // Agentmaster (branch backfill): archived ids whose transcript head this run already read for a
+        // missing `branch` — SessionInfo.branch had NO live writer (only the JSON loader), so the Branch
+        // column + search were permanently empty; the backfill reads each transcript at most once per run.
+        std::unordered_set<std::wstring> _archiveBranchBackfilled;
+        // Agentmaster: one-entry transcript cache for the detail pane, validated by (id, transcript
+        // mtime) — _RenderArchiveTable re-shows the detail on every rebuild (search keystrokes, observer
+        // refreshes), and an uncached ReadTranscriptInfo was a synchronous <=128 KB UI-thread file read
+        // each time. Discrete fields so this header needn't pull ProcessInspect.h (TranscriptInfo).
+        std::wstring _archiveDetailTiId;
+        int64_t _archiveDetailTiMtime{ 0 };
+        int64_t _archiveDetailTiCreated{ 0 };
+        int64_t _archiveDetailTiLast{ 0 };
+        std::wstring _archiveDetailTiBranch;
+        std::vector<std::wstring> _archiveDetailTiPrompts;
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
@@ -500,6 +535,8 @@ namespace winrt::TerminalApp::implementation
         void _ShowArchiveDetail(const std::wstring& sessionId); // populate the right pane for one row
         void _RestoreCheckedArchived(); // bulk: restore every checked archived session
         void _UpdateArchiveBulkButton(); // refresh the footer "Restore selected (N)" label + enabled
+        void _RefreshArchivePageIfVisible(); // re-gather + re-render an OPEN page (registry-observer / backfill poke; UI thread, clean tick)
+        winrt::fire_and_forget _BackfillArchiveBranches(std::vector<std::pair<std::wstring, std::wstring>> idDirs); // (id, dir) pairs: head-read gitBranch off-thread -> UpdateQuiet + ONE SaveSessions + a page refresh
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 
