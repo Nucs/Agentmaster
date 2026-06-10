@@ -248,6 +248,70 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
 
 ---
 
+## 6a. Prior art — the user's own session tooling (dug from `~/.claude`)
+
+The user already built a CLI version of this page, an extraction engine, and a SessionEnd exit
+hook — outdated in places, but they encode **proven-useful display fields** (what he actually
+looks at, post-session). Key files: `hooks/session-end.js` (the live exit hook; `.sh`
+predecessor kept), `bash-ext/sessioninfo.sh` (`si` — the extraction engine, `--json` API),
+`bash-ext/clone.sh` (`cr`/`cf`/`rs` — resume / manual fork / **the CLI Sessions browser**),
+`scripts/session-end-autocommit.ps1`, `scripts/restart-discover.ps1` (UIA tab↔session
+correlation — superseded in-process by the Fleet Observer), `conversationlog.md` (the
+append-only cross-session log the hook maintains), `state/title-<sid>.txt` (his per-session
+saved titles), `summary-cache/` (AI summaries, file-size-keyed invalidation).
+
+**What the exit hook prints on claude exit** (SessionEnd → stderr + exit 2, so it rides the
+"hook failed:" display path) — the proven summary set:
+
+```
+ Session:  <sid> [🚪 exit | 🚀 plan-start | 📋 plan-end | 🧹 clear]
+ Parent:   <parent sid>                (plan-start: parsed from the first message's
+ Plan:     <plan file written/read>     "read the full transcript at: …jsonl" ref)
+ Dir / Folder / Resume:  <cwd> · <enc folder> · claude --resume <sid>
+ Duration: 25m 42s (15:32 -> 15:57)    Branch: <gitBranch>    Tasks: 3 completed / 1 pending
+ Messages: 1..N   (filtered, deduped, truncated user prompts)
+ Files Read: …    Files Edited: …      (basenames; the rs browser renders dir-grouped trees)
+```
+
+The `si --json` schema adds what the JS rewrite dropped: **`commits[{hash,message}]`** (a plain
+`git log --after=<start> --before=<end>` in the session's cwd — zero transcript parsing),
+`tool_count`, `size_kb`, `msg_count`.
+
+**Distilled for this page** (column ▸ detail-pane candidates, in his order of proven value):
+1. **Title, layered** — saved user title > AI summary (cached) > first prompt; the detail pane's
+   core artifact is the **numbered, filtered user-prompt list** (every tool of his shows it).
+2. **Session type + lineage** — exit / clear / plan-start / plan-end / *unexpected-exit* (= a
+   transcript with no clean end — our registry knows clean archives, so
+   transcript-without-archive ⇒ crashed/external), with **plan-mode parent→child chains**.
+3. **Timing** — duration + `(HH:MM → HH:MM)`, **date-suffixed when multi-day** (his `rs` fix
+   that the hook lacks; a left-open tab otherwise reads `94h 39m`).
+4. **Weight row** — `N msgs, M tools, K kb` (his standard one-liner; his `-m`/`--min-tools`
+   filters prove counts are how he separates real work from noise).
+5. **Files** — read vs edited; basenames in rows, **directory-grouped trees** in the detail.
+6. **Tasks** — last-TodoWrite completed/pending = a "did it finish" indicator.
+7. **Git** — branch + **commits made during the session window** (his autocommit stamps
+   `{session:short}` into commit messages, so commits→session reverse lookup exists too).
+8. **Resume everywhere** — every view prints `claude --resume <sid>`; pickers bind Enter=resume,
+   Ctrl-Y=copy-id ⇒ rows need one-click Restore/Adopt + copy-id.
+9. **His `rs` filter set == our search bar** — time window (6h/2d/1w…), dir glob, full-text over
+   prompts, min-msgs/min-tools, multi-select bulk open (`rs 1 3 5` / `all`).
+
+**Noise-suppression rules (adopt verbatim, §6.3/§6.4):** hide `agent-*` transcripts, 0-message
+sessions, `/clear`-only sessions, `queue-operation`-first task files; filter prompts matching
+`<command-message>`/`<command-name>`/`<local-command-`/`<bash-input|stdout|stderr>`/`^Caveat:`/
+`[Request interrupted` — **plus `<task-notification>`** (a post-hook schema addition his filter
+misses — today's log shows raw task-notification blobs as messages); dedupe repeated prompts;
+suppress `Branch: HEAD` (detached); harvest `file-history-snapshot.trackedFileBackups` as an
+extra edited-files source (his `si` does, the JS hook doesn't).
+
+**Gaps his tooling never solved that this page owns for free:** model/effort (Fleet Observer
+facts), **token usage / cost** (`message.usage` is in every assistant line, never tapped), live
+state (his is all post-mortem; we have the registry + observer), per-tab titles without the
+UIA/`Console.Title`-timer fights (`Tab::SetTabText` pinning, Rule #11), and principled
+tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency heuristics).
+
+---
+
 ## 7. Open questions (for review before coding)
 
 1. **Both toggles OFF** ⇒ title+dir-only search (§1a) — confirm.
