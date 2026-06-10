@@ -9,6 +9,7 @@
 #include "ClaudeSpawn.h" // ResolveClaudeTranscriptPath, AppendStateLog
 #include "Json.h"
 #include "SessionRegistry.h"
+#include "TranscriptStore.h" // IsNoiseUserPrompt — keep control markers out of the Flight-Plan back-fill
 
 #include <windows.h>
 
@@ -515,7 +516,14 @@ namespace Agentmaster
                 // into a running turn. (tool_result user lines don't reach here — they're filtered
                 // in ParseTranscriptDelta — so this only resets on a genuine human prompt.)
                 st.lastStopReason.clear();
-                _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
+                // Control markers that masquerade as user lines — interrupt markers, command
+                // echoes, task notifications (STATE.md §8 bug-2) — must not be back-filled into
+                // the Flight Plan as Typed prompts. They still clear the stop_reason above (the
+                // transcript moved past the prior end_turn either way).
+                if (!IsNoiseUserPrompt(ev.text))
+                {
+                    _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
+                }
             }
         }
     }

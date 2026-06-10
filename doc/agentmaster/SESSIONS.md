@@ -6,8 +6,9 @@
 > time window with full-text search; **(2)** the map it stands on — how Claude Code stores
 > sessions inside the global `~/.claude` folder and **every relationship between the session
 > files**, researched online (official docs + community parsers) and **verified against this
-> machine's live corpus** (Claude Code **2.1.170**; 2,635 top-level transcripts / 169 project
-> dirs / 4.2 GB; spot-checks re-run independently).
+> machine's live corpus** (Claude Code **2.1.170**; 2,635 top-level `.jsonl` = **1,817 uuid
+> session transcripts + 818 legacy `agent-*` files**, 169 project dirs, 4.2 GB; 499 sessions in
+> the 92-day window; spot-checks re-run independently).
 > Companions: [`STATE.md`](./STATE.md) (the state-bearing JSONL subset) · [`OBSERVER.md`](./OBSERVER.md) ·
 > [`DESIGN.md`](./DESIGN.md) · [`HOOKS.md`](./HOOKS.md).
 
@@ -176,9 +177,10 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
   `timestamp`, EXCEPT forks (detect `forkedFrom` in the head) → file birth time.
 - **mtime lies, three ways** (all measured locally): (1) `away_summary` appends ~3 min after the
   turn; (2) **exit-time flush** of untimestamped tail-state lines (observed +43 min); (3) **bulk
-  metadata passes** re-touching files 8–9 *days* after their last turn (drifts up to 775,697 s).
-  `mtime ≥ last-activity` always holds ⇒ mtime is a safe **superset filter** and a correct
-  **change detector**, never the displayed last-activity. (Same caveat STATE.md §2 hit.)
+  metadata passes** re-touching files 8–9 *days* after their last turn. Distribution over the 300
+  most recent transcripts (mtime − last-message-timestamp): **median ~63 min, p90 ~43 h, max
+  ~43 days**. `mtime ≥ last-activity` always holds ⇒ mtime is a safe **superset filter** and a
+  correct **change detector**, never the displayed last-activity. (Same caveat STATE.md §2 hit.)
 - **Retention:** the startup sweep deletes per-session artifacts older than `cleanupPeriodDays`
   (default **30 days**) — transcripts, subagents, tool-results, file-history, debug, paste-cache,
   session-env, tasks, … **`history.jsonl` and `stats-cache.json` are never swept** (they
@@ -187,6 +189,21 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
 ---
 
 ## 6. Implementation plan (page mechanics)
+
+> **Status: the store API layer is IMPLEMENTED + tested** — `AgentMaster/TranscriptStore.{h,cpp}`
+> (plain C++, standalone-harness covered; survey-grounded against the live 92-day corpus of 499
+> transcripts, versions 2.1.76→2.1.170, with old-strata tolerance back to 2.0.x):
+> **`EnumerateTranscripts(In)(sinceUnixMs)`** (uuid-stem filter — legacy `agent-*` / `memory/` /
+> `<sid>/` subdirs excluded; mtime superset window; newest first) · **`ScanTranscript`** (the
+> byte-offset-resumable line stream — the incremental indexer; >1 MiB lines + corrupt-run guard)
+> · **`AccumulateTranscriptStats`** (the resume-cursor stats fold: REAL-prompt / assistant / tool
+> counts, title set, first/last **message** timestamps, fork lineage, line-`cwd`, shrink ⇒
+> auto-rebuild) · **`ReadTranscriptQuickFacts`** (head + growing-tail windows: fork-aware
+> `created`, state-line/`away_summary`-proof `lastActivity`) · **`ClassifyTranscriptLine`** (the
+> pure per-line kind/text extractor behind the 👤/🤖 search scopes, caps enforced) ·
+> **`IsNoiseUserPrompt`** + **`PickDisplayTitle`** (the §6a rules, shared engine-wide — also now
+> applied inside `ReadTranscriptInfo`, which gained `aiTitle`/legacy `summary` +
+> `TranscriptDisplayTitle`). Remaining for the page: the cache files themselves (Q2) + the UI.
 
 1. **Enumeration.** Glob `projects/*/<36-char-uuid>.jsonl` (the UUID-name filter automatically
    excludes legacy `agent-*.jsonl`, `memory/`, and the `<sid>/` subdirs). Full stat of all 2,635

@@ -615,7 +615,10 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail), the **Fleet
     Observer** — `Activity.h` (data models), `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript
     primitives — id resolution + content: title / prompts / ctime·mtime timing),
-    `ProcessObserver.{h,cpp}` (the S-lane) — `Json.h`, `Persistence.{h,cpp}`, and
+    `ProcessObserver.{h,cpp}` (the S-lane) — `TranscriptStore.{h,cpp}` (the on-disk Claude-session
+    store API for the Sessions browser, SESSIONS.md §6: global transcript enumeration, the
+    byte-offset-resumable scan + stats fold, fork-aware quick row facts, and the shared
+    prompt-noise + title-precedence rules), `Json.h`, `Persistence.{h,cpp}`, and
     `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`).
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
