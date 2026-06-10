@@ -115,7 +115,7 @@ lazy-start safe — no eager `connection.Start()`); each **Other** ref replays i
 actions (`WindowLayout::FromJson` → one `ProcessStartupActions`) to recreate the shell tab with its
 title + color + cwd. Capture fills the Other ref's `actionsJson` from `BuildStartupActions(Persist)` →
 `WindowLayout::ToJson` in `_CaptureWindowRecord` (so `windows/<id>.json` now carries the pwsh/cmd tabs,
-not just Claude refs). The Manager's **Archived** overlay is **grouped by window** (`_RebuildArchiveList`
+not just Claude refs). The Manager's **Archived** UI (now the full-window Archive page, C1 UI) is **grouped by window** (`_GatherArchiveRows`
 over `Engine::RecoverableWindows`): each not-currently-open record is a "Saved window" card with a
 per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1 -s <idx>`) over its session
 rows (**Restore here** = cherry-pick one into the current window); sessions in no record fall under
@@ -161,7 +161,8 @@ What works, by area:
   on N threads); each `TerminalPage` copies the shared `shared_ptr`s and its Manager tab is a
   per-window *lens* over the one fleet. The `<pid>` pipe is unambiguous *because* there is exactly
   one bridge; one writer for `sessions.json`; restore loads process-once
-  (`Engine::restored.exchange`, so a 2nd window can't double-load the fleet).
+  under a load **barrier** (`Engine::restoreMutex` — a 2nd window blocks until the fleet is fully loaded, then
+  skips, so it can't double-load NOR race its tab re-home against a half-loaded registry).
   Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1). The wire
   line carries a 7th **`tabToken`** field (the hosting `WT_SESSION`, for adopting a hand-typed
   `claude` — see *Adopt any `claude`* below) and an 8th, **escaped `prompt`** field on
@@ -270,9 +271,15 @@ What works, by area:
   only horizontally). The Board header's **"Show all"** (clears the directory scope) is shown only
   when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
   already showing all directories. The Board/Tree show only
-  **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and listed
-  behind an **Archived (N)** toolbar button (the toolbar's rightmost, after the cog) — a modal list with per-row
-  **Restore** + **Restore all** (resume via `claude --resume`). Explorer `Enter`=Activate /
+  **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and opened from the
+  **Archived (N)** toolbar button (the toolbar's rightmost, after the cog) — a **full-window Archive page**
+  (`_BuildArchivePageShell`/`_ShowArchivePage`, mounted over `TerminalPage`'s Root content rows, ← Back to
+  dismiss; it REPLACES the old in-content modal). LEFT = a dense, **sortable + searchable** table of archived
+  sessions (Title · Directory · Branch · Created · Active · a saved-**window** chip), each row a checkbox for
+  **multi-select bulk Restore**; RIGHT = the selected row's **detail** — metadata + a read-only Flight Plan +
+  **Restore here** / **Reopen its window** (resume via `claude --resume`, transcript-gated). XAML-Islands hard
+  rule: every pointer handler **defers** its visual-tree mutation to the dispatcher (a synchronous tree change
+  mid-click AVs the hit-test), so row-select is highlight-only and open/sort/restore/back post to a clean tick. Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
   EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals),
   and after it a **sort toggle — NEWEST · OLDEST · MOST ACTIVE · A–Z · BY PID** (`_CycleTreeSort` /
@@ -362,7 +369,8 @@ What works, by area:
   time-bounded **pickup guard** (the `echoed` flag + `kPickupGuardMs`) holds the next send until
   the just-injected prompt is picked up, so a change-driven advance never drains the queue (one
   prompt per turn). `RequestAdvance` dedups; a failed inject (no injector bound yet, e.g.
-  mid-restore) rolls the prompt back to `Pending` rather than stranding a phantom `Sent`.
+  mid-restore) rolls the prompt back to `Pending` rather than stranding a phantom `Sent` — on **every** inject
+  path: auto-send, the SemiAuto `Confirm`, and the Manager's Send-now (Rule #4).
 - **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
   templates + the path-picker's recent-dirs MRU (de)serialize to JSON under
   `%USERPROFILE%\.agentmaster\`; sessions autosave on change. **Lifecycle = Open ⇄ Archived**
@@ -370,7 +378,7 @@ What works, by area:
   run (on the Board); Archived == shut down but kept restorable (behind the Archived button).
   On startup `_RestoreClaudeSessions()` loads each saved session into the registry as
   **Archived** and does **NOT** auto-launch it (Rule #6) — the app opens to just the Manager
-  tab; the prior fleet comes back via **Restore** / **Restore all**. Closing a session's tab
+  tab; the prior fleet comes back from the **Archive page** (per-row **Restore here** or **multi-select bulk Restore**). Closing a session's tab
   (the X, the tree `Del`, the Manager's Delete/Archive, or the Flight-Plan **Archive** button)
   all route through the ONE archive seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`):
   a single consequence confirm (gated by `confirmBeforeKill`), then `live=false` + clear injector
@@ -417,6 +425,29 @@ What works, by area:
     gated on rostered + resolved id, `ProcessObserver.cpp:427`) — no foreign-claude leak into the Archived
     list; cross-window double-bind is guarded (`HasInjector`; one ConPTY lives in one window); and
     resume-fresh drops the stale archived record (`:1218`).
+  - **Archive-page + resume/restore + persistence audit (round 2) — 13 findings, all ✅ FIXED**
+    (commit `b5768081e`; a read-only sweep of the Archive page, resume/restore, and the `WindowRecord`
+    layer). *Archive page:* the header count tracks the active filter ("K of N"); **Reopen its window**
+    re-resolves its target from the record's stable `windowId` at click time (a gather-time index goes stale
+    if the record set shifts while the page is open); `_GatherArchiveRows` indexes archived sessions by id
+    ONCE (was O(tabs·sessions)) + dedupes a session referenced by two records to a single row; the
+    Restore/Reopen/bulk handlers **defer** their tree mutation (the page's pointer-handler crash class);
+    bulk-restore + its "(N)" count act on **checked ∩ visible** only (a check hidden by a later search is
+    never silently restored) and stale checks are pruned each gather. *Persistence:* **quit-all now flushes**
+    each window's record (`RequestQuit` + the `~TerminalPage` catch-all, latched so the catch-all can't
+    clobber a good close-seam flush after `_claudeTabs` is cleared) — previously only the 750 ms debounce
+    saved it, losing trailing geometry/tab-order/lens on app quit; the process-once fleet load is now a true
+    **barrier** (`Engine::restoreMutex`) so a 2nd reopened window BLOCKS until the registry is populated
+    before re-homing, instead of skipping its not-yet-loaded sessions and flushing an EMPTY record over its
+    workspace; `_CaptureWindowRecord` stops persisting a **dead** per-tab Claude color (the dir-color system
+    owns it, Rule #12) and only records a focused shell-tab target that can actually be recreated. *Registry
+    / autopilot:* `SessionRegistry::Remove` now `_notify`s (a resume-fresh drop refreshes every window's
+    Archive list — no ghost row); `ObserveClaude`'s `live=true` revive is gated on a **different pid** so a
+    just-archived session whose claude is briefly still alive isn't bounced back (Rule #7); `Scheduler::Confirm`
+    (SemiAuto) + the Manager's Send-now now **roll a failed inject back to `Pending`** like the auto-send path
+    (Rule #4). *Primitive:* `ProcessAlive` prefers the unambiguous `WaitForSingleObject` liveness test (avoids
+    the `GetExitCodeProcess`==`STILL_ACTIVE`/259 false-alive), falling back to the query path when SYNCHRONIZE
+    is denied.
 - **Per-window records (M10 data layer, `Persistence`/`SessionModels`).** A `WindowRecord`
   (one file per window: `windows/<windowId>.json`) holds per-window **UI state** — geometry
   (position/size/launch-mode), the Manager **lens** (selection / dir scope / selected prompt /
@@ -430,7 +461,7 @@ What works, by area:
   **Session re-home + Other-tab recreation are now shipped too** (`_RestoreWindowTabs`): a reopened
   window resumes its Claude sessions and replays its shell tabs (title/color/cwd) from the record's tab
   refs, in order — so closing and reopening a window brings the whole workspace back, not just
-  geometry + lens. The Manager's Archived overlay groups closed sessions **by window** with a per-window
+  geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
   "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Reopen · `⚙` ·
   Pause Autopilot · Archived — the cog sits *before* Pause Autopilot / Archived) opens a
@@ -452,7 +483,7 @@ What works, by area:
 
 Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
-**Restore all** re-opens tabs lazily (a non-foreground restored tab starts its `claude` only
+**bulk Restore** (the Archive page's "Restore selected") re-opens tabs lazily (a non-foreground restored tab starts its `claude` only
 when first focused — WT's lazy-background-tab behavior; restore one at a time to force start);
 a one-time **"Restore your previous layout?"** launch prompt (offers **all archived sessions**;
 decided + **deferred** — it ships *after* the per-window `WindowRecord` capture is wired so it
@@ -553,7 +584,8 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   claude `ConptyConnection` (cmdline/cwd/env ours) and opens it as a normal terminal tab via
   `_MakePane(args, …, existingConnection)`; `_SpawnClaudeSession` = fresh,
   `_RestoreClaudeSessions()` = load the persisted fleet **as Archived** (process-once via
-  `Engine::restored`), `_RestoreArchivedSession()` = the on-demand resume.
+  the `Engine::restoreMutex` load barrier — a 2nd window blocks until it's loaded, then skips),
+  `_RestoreArchivedSession()` = the on-demand resume.
   `sessionId → Tab` lives in `_claudeTabs` (per window) for Activate / Archive / retitle. A
   session's **title is one value** (Explorer name == tab title == persisted `SessionInfo.title`):
   `_LaunchClaudeSession` **pins** it onto the tab (`Tab::SetTabText`); an Explorer rename routes
@@ -897,7 +929,8 @@ sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
     *because* there is one bridge). Each window registers its lens observer + adoption handler by
     **token** and detaches them on teardown (`RemoveObserver` in `~AgentManagerContent`,
     `RemoveAdoptionHandler` in `~TerminalPage`); the fleet loads **process-once**
-    (`Engine::restored.exchange`) so a second window can't double-insert. Per-window persisted UI
+    under the `Engine::restoreMutex` barrier (a second window blocks until it's loaded, then skips) so it can't
+    double-insert NOR race its tab re-home against a half-loaded registry. Per-window persisted UI
     state (geometry + lens + ordered tab refs) is the `WindowRecord` (`windows/<id>.json`) and it
     must **reference** sessions by id, never copy them — `sessions.json` + `SessionInfo.live`
     remain the one session source of truth (Option 1).
