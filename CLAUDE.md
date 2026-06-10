@@ -601,11 +601,22 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
 - Build entry: **`OpenConsole.slnx`** (slnx format). No git submodules in 1.24
   (`doc/building.md` is stale on that point).
 - Toolchain: VS 2022 + C++/UWP workloads + Windows SDK 10.0.22621/26100.
-- **Package identity = `Agentmaster`** (PFN `Agentmaster_56k4f06dsfp9r`), set in
+- **Package identity = `Agentmaster`** (Publisher **`CN=Agentmaster`**, PFN
+  `Agentmaster_56k4f06dsfp9r`), set in
   `src/cascadia/CascadiaPackage/Package-Dev.appxmanifest` (the Debug branding). It is
   deliberately **distinct from `WindowsTerminalDev`** so it coexists with real Windows
   Terminal. ⚠️ There is a **separate `K:\source\windowsterminal` checkout on this machine
   that owns the `WindowsTerminalDev` identity** — never reuse that identity here (see Gotchas).
+  The Publisher is **`CN=Agentmaster`** — an honest self-signed identity, NOT `CN=Microsoft
+  Corporation` — and it is what **derives the PFN hash `56k4f06dsfp9r`**, so the public-release
+  self-signed cert can carry that exact subject (an MSIX signature is valid only when the cert
+  subject == `<Identity Publisher>`; see *Releasing a public version*). **Renaming the Publisher
+  changes the PFN** — but no C++ hardcodes it (`GetWtExePath` keys on the `Agentmaster` name
+  *prefix*; `windowClassName` uses `GetCurrentPackageFamilyName()` at runtime), and the dev
+  loose-layout register is **unsigned** (no `CascadiaPackage_TemporaryKey.pfx` ⇒
+  `AppxPackageSigningEnabled=false` in the wapproj), so a rename only touches the manifest + the
+  `Agentmaster_<hash>` strings in docs (recompute the hash: SHA-256 the UTF-16LE Publisher, first
+  8 bytes, base32 over `0123456789abcdefghjkmnpqrstvwxyz`).
 - Our additions (all marked `Agentmaster`):
   - `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}` — the Manager tab content (C1 UI).
   - `src/cascadia/TerminalApp/AgentMaster/` — the engine (plain C++, no WinRT; the `.cpp`
@@ -640,6 +651,10 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
     `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*).
+  - `.github/workflows/ci.yml` + `.github/workflows/release.yml` — the GitHub Actions build gate
+    + public-release pipeline (see *Releasing a public version*). The **only** CI in the repo;
+    Windows Terminal's upstream Azure-Pipelines / OneBranch under `build/pipelines/` is
+    Microsoft-internal and never runs for this fork.
 - **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
@@ -826,6 +841,58 @@ Re-register **only** when `Package-Dev.appxmanifest` changes. (VS F5 on `Cascadi
 also builds + deploys.) Runtime/session state lives in `%USERPROFILE%\.agentmaster\`; tail
 `hooks.log` to confirm the engine is live (`[engine] bridge listening …`) and that spawned
 sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
+
+## Releasing a public version
+
+**Only when the user agrees / requests it.** Cutting a release builds, self-signs, and publishes
+a GitHub Release — it is outward-facing, so confirm the **version** with the user first and don't
+do it on your own initiative. (Local dev deploys via *Deploy & run* above; this is the public path.)
+
+Two GitHub Actions workflows are the repo's only CI:
+- **`.github/workflows/ci.yml`** — build-only gate on `pull_request` + push to `agentmaster`/`main`
+  (+ `workflow_dispatch`): restores vcpkg + nuget (cached) and builds `Terminal\CascadiaPackage`
+  x64 Release. No packaging / signing / release. **No path filter**, so a docs-only push still
+  triggers a full ~20-min build (add `paths-ignore: ['**.md','doc/**','LICENSE']` if that matters).
+- **`.github/workflows/release.yml`** — the public-release pipeline: triggers on a **tag `v*`**
+  push OR **`workflow_dispatch`** (a `version` input). No nightly, no Azure, no NuGet *publish*
+  (NuGet *restore* stays — it's a build dependency).
+
+**To cut a release (happy path):**
+```bash
+# agree X.Y.Z with the user, then either tag-push (real release) ...
+git tag vX.Y.Z && git push origin vX.Y.Z          # auto-triggers release.yml
+# ... or dispatch a DRAFT dry-run without creating a tag:
+gh workflow run release.yml --repo Nucs/Agentmaster -f version=X.Y.Z
+# find + watch the run (background it; it pings on exit; --exit-status => failure is non-zero):
+gh run list --repo Nucs/Agentmaster --workflow release.yml --limit 3
+gh run watch <run-id> --repo Nucs/Agentmaster --exit-status
+```
+The pipeline is **prep** (version from the tag/input, stamped into the manifest `Identity Version`)
+→ **build** matrix **x64 + arm64** (Release, `WindowsTerminalBranding=Dev` = our `Agentmaster`
+identity, `AppxPackageSigningEnabled=false`) → **bundle** (`build/scripts/Create-AppxBundle.ps1`
+merges both arches → `.msixbundle`, then self-signs; `New-UnpackagedTerminalDistribution.ps1` makes
+the portable zips) → **release** (`softprops/action-gh-release` creates a **DRAFT** GitHub Release
+with the `.msixbundle`, `Agentmaster.cer`, and both portable `.zip`s). It lands as a **draft** —
+review the assets, then **the user publishes it** (a draft creates no git tag until published; a
+`workflow_dispatch` draft is safe to delete). After publishing, refresh the release notes + README
+(capabilities / Download) if the feature set moved.
+
+**Signing.** The release self-signs with a **`CN=Agentmaster`** code-signing cert minted at runtime
+whose subject is **read from the manifest**, so it always equals the Publisher (this is *why* the
+Publisher is `CN=Agentmaster` — see Repo facts). Being self-signed, users must trust
+`Agentmaster.cer` once to install the `.msixbundle`; the **portable `.zip` needs no cert** (unzip +
+run `agentmaster.exe`). To sign with a real cert instead, set repo secrets **`SIGNING_PFX_BASE64`**
++ **`SIGNING_PFX_PASSWORD`** (its subject must still equal the Publisher).
+
+**One-time repo settings** (already done for `Nucs/Agentmaster`; a fresh fork needs them — Actions
+is **OFF by default on forks**, and the release job needs write to create the Release):
+```bash
+gh api -X PUT repos/<owner>/<repo>/actions/permissions -F enabled=true -f allowed_actions=all
+gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -f default_workflow_permissions=write
+```
+Verified end-to-end on a stock `windows-2022` runner (UWP workload + Windows SDK + vcpkg all
+present): `v0.1.0` ran green — CI ~21 min, release ~23 min (x64+arm64 in parallel). On failure the
+build **binlog uploads as an artifact** to diagnose the first run.
 
 ## Gotchas (learned the hard way)
 
