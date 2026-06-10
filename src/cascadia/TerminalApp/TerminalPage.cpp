@@ -1886,6 +1886,22 @@ namespace winrt::TerminalApp::implementation
         // only inside the loop body; the whole map is cleared AFTER the loop.
         for (const auto& [id, weakTab] : _claudeTabs)
         {
+            // "Is this session still mine?" A Claude tab/pane that moved to ANOTHER window (a cross-
+            // window tear-out / move that didn't synchronously evict — or the eventual-consistency
+            // backstop to the eviction hooks _DetachClaudeTab/PaneForMove) is ALIVE there. The Fleet
+            // Observer re-attributes such a session to its new host window (ownerWindowId, roster-derived
+            // — ProcessObserver), and the registry never clobbers a known owner with empty. So a non-empty
+            // owner that isn't us means the session is hosted in a DIFFERENT window: archiving it here
+            // would flip it live=false + clear the injector of a session in active use elsewhere (and,
+            // since the injector lambda holds the only strong ref, could tear down its connection). Skip
+            // it — leave it live + bound. (Empty ownerWindowId = ours / not-yet-correlated, e.g. a just-
+            // launched session before the first observer tick -> archive normally; a session we genuinely
+            // host reads ownerWindowId == _windowId by teardown.)
+            if (const auto s = _sessionRegistry->Get(id); s && !s->ownerWindowId.empty() && s->ownerWindowId != _windowId)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[teardown-archive] skip " + id + L" (now hosted by window " + s->ownerWindowId + L")\n");
+                continue;
+            }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 s.pendingConfirmPromptId.clear();
@@ -3029,6 +3045,85 @@ namespace winrt::TerminalApp::implementation
         _claudeOverlays.erase(id); // releases the overlay com_ptr -> detaches its registry observer
         _claudeTabs.erase(id); // drop the per-window binding; the injector + live flag stay untouched
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out] " + id + L" (Claude tab leaving this window; binding kept alive for the destination)\n");
+    }
+
+    // Agentmaster (cross-window move, pane-level): a single PANE is being moved to another window (the
+    // movePane action with a window target, _MovePane). Unlike a whole-tab move the hosting tab may
+    // SURVIVE — it keeps its other panes — so we must evict the per-window binding ONLY when the LEAVING
+    // pane is the one the session is bound to: the tab's first terminal pane, which is what
+    // _ObserverProbe / _AttachClaudeOverlay correlate to (one session per tab). If a sibling pane (a
+    // pwsh split, or a non-terminal pane) is what's moving, the session stays put and we do nothing.
+    // As with _DetachClaudeTabForMove the injector + live flag are left intact — the live connection
+    // moves with the pane (same claude.exe; the destination re-homes it by WT_SESSION on its next probe)
+    // — only THIS window's _claudeTabs + overlay binding is dropped. The pane is still attached and on
+    // this UI thread here (we run before _DetachPaneFromWindow / DetachPane).
+    void TerminalPage::_DetachClaudePaneForMove(const winrt::com_ptr<Tab>& tab, const std::shared_ptr<Pane>& movingPane)
+    {
+        if (!tab || !movingPane || _claudeTabs.empty())
+        {
+            return;
+        }
+        const auto projected = tab.try_as<winrt::TerminalApp::Tab>();
+        const std::wstring id = projected ? _ClaudeSessionForTab(projected) : std::wstring{};
+        if (id.empty())
+        {
+            return; // this tab hosts no managed session -> nothing to detach
+        }
+        // The terminal connection behind a pane (null if it is not a terminal pane).
+        const auto connOf = [](auto&& pane) -> TerminalConnection::ITerminalConnection {
+            if (const auto content = pane->GetContent())
+            {
+                if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                {
+                    if (const auto ctrl = term.GetTermControl())
+                    {
+                        return ctrl.Connection();
+                    }
+                }
+            }
+            return nullptr;
+        };
+        const auto movingConn = connOf(movingPane);
+        if (!movingConn)
+        {
+            return; // moving a non-terminal pane -> the session's pane stays in this tab
+        }
+        // The tab's FIRST terminal pane is the one the session is bound to (the bind walks the pane tree
+        // and takes the first TerminalPaneContent). A connection's SessionId is unique per pane, so
+        // equality here means the moving pane IS that bound pane.
+        TerminalConnection::ITerminalConnection firstConn{ nullptr };
+        if (const auto rootPane = tab->GetRootPane())
+        {
+            rootPane->WalkTree([&](auto&& pane) {
+                if (firstConn)
+                {
+                    return;
+                }
+                if (const auto c = connOf(pane))
+                {
+                    firstConn = c;
+                }
+            });
+        }
+        if (!firstConn || movingConn.SessionId() != firstConn.SessionId())
+        {
+            return; // a sibling (non-session) terminal pane is moving -> leave the binding intact
+        }
+        // The session's pane is leaving this window. Clear its overlay element from the moving pane's
+        // slot so the destination doesn't render a stale, no-longer-updating badge until it re-attaches.
+        if (const auto content = movingPane->GetContent())
+        {
+            if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+            {
+                if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(term))
+                {
+                    impl->SetAgentOverlay(nullptr);
+                }
+            }
+        }
+        _claudeOverlays.erase(id); // releases the overlay com_ptr -> detaches its registry observer
+        _claudeTabs.erase(id); // drop the per-window binding; the injector + live flag stay untouched
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out-pane] " + id + L" (Claude pane leaving this window; binding kept alive for the destination)\n");
     }
 
     // Agentmaster: rename a Claude session from the Manager's Explorer Tree. A session's title is
@@ -5824,6 +5919,7 @@ namespace winrt::TerminalApp::implementation
                 if (const auto pane{ tabImpl->GetActivePane() })
                 {
                     auto startupActions = pane->BuildStartupActions(0, 1, BuildStartupKind::MovePane);
+                    _DetachClaudePaneForMove(focusedTab, pane); // Agentmaster: if the moving pane is a managed session's pane, evict our binding (keep the injector) so teardown can't archive it; the destination re-homes it
                     _DetachPaneFromWindow(pane);
                     _MoveContent(std::move(startupActions.args), windowId, tabIdx);
                     focusedTab->DetachPane();
