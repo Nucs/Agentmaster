@@ -487,6 +487,36 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRowSpan(host, 2);
         _sessionsPageHost = host;
 
+        // Generic overlay registration: the tab-switch seam dismisses every registered page
+        // (TabManagement.cpp) — the extra hook closes the range Popup, which a collapsed host
+        // would NOT hide (popups render in the popup root, not under the parent).
+        _RegisterAgentPageOverlay(host, &_sessionsPageVisible, [weak = get_weak()]() {
+            if (const auto self = weak.get(); self && self->_sessRangePopup)
+            {
+                self->_sessRangePopup.IsOpen(false);
+            }
+        });
+
+        // Up/Down = move the selection through the visible rows (wraps; none selected => Down
+        // picks the first, Up the last). PREVIEW (tunneling) so it wins over the focused search
+        // box; the move itself is deferred to a clean tick (the page's mutation discipline —
+        // _ShowSessionsDetail rebuilds the detail pane).
+        host.PreviewKeyDown([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            const auto k = e.Key();
+            if (k != winrt::Windows::System::VirtualKey::Up && k != winrt::Windows::System::VirtualKey::Down)
+            {
+                return;
+            }
+            e.Handled(true);
+            const int delta = (k == winrt::Windows::System::VirtualKey::Down) ? 1 : -1;
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), delta]() {
+                if (auto self = weak.get())
+                {
+                    self->_MoveSessionsSelection(delta);
+                }
+            });
+        });
+
         // Keystroke/toggle debounce -> one search per burst (the Archive page's throttle shape).
         _sessionsSearchThrottled = std::make_shared<ThrottledFunc<>>(
             winrt::Windows::System::DispatcherQueue::GetForCurrentThread(),
@@ -520,6 +550,13 @@ namespace winrt::TerminalApp::implementation
             }
             self->_sessionsPageHost.Visibility(Visibility::Visible);
             self->_sessionsPageVisible.store(true, std::memory_order_relaxed);
+            if (self->_sessionsSearchBox)
+            {
+                // Focus INTO the page so keyboard events route through its host (a covered
+                // element behind the page would otherwise keep them on a sibling branch) —
+                // typing searches immediately, Up/Down navigate the rows.
+                self->_sessionsSearchBox.Focus(FocusState::Programmatic);
+            }
             self->_RefreshSessionsRows(); // gather + index on a background pass, then render
         });
     }
@@ -844,6 +881,7 @@ namespace winrt::TerminalApp::implementation
                 view.push_back(&r);
             }
         }
+        _sessionsVisibleOrder.clear(); // rebuilt below in final (sorted) order — the Up/Down nav list
         const int sortCol = _sessionsSortColumn;
         const bool asc = _sessionsSortAscending;
         std::sort(view.begin(), view.end(), [sortCol, asc](const _SessionsRow* a, const _SessionsRow* b) {
@@ -900,6 +938,7 @@ namespace winrt::TerminalApp::implementation
         for (const auto* rp : view)
         {
             const auto& r = *rp;
+            _sessionsVisibleOrder.push_back(r.id);
             Grid g;
             SessAddColumns(g);
             g.Padding(Thickness{ 6, 4, 6, 4 });
@@ -998,7 +1037,7 @@ namespace winrt::TerminalApp::implementation
                     if (auto self = weak.get())
                     {
                         self->_sessionsSelectedId = id;
-                        self->_RenderSessionsTable(); // re-render refreshes the highlight (bounded row count)
+                        self->_UpdateSessionsSelectionHighlight(); // recolor only — no table rebuild per click
                         self->_ShowSessionsDetail(id);
                     }
                 });
@@ -1284,5 +1323,92 @@ namespace winrt::TerminalApp::implementation
                                       L"[sessions-page->fork] source=" + parentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
         _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
         _HideSessionsPage(); // land on the freshly forked tab
+    }
+
+    // Recolor the row highlights for _sessionsSelectedId WITHOUT rebuilding the table (the
+    // archive page's _UpdateArchiveSelectionHighlight pattern) — row taps + keyboard nav.
+    void TerminalPage::_UpdateSessionsSelectionHighlight()
+    {
+        if (!_sessionsRowsHost)
+        {
+            return;
+        }
+        for (const auto& child : _sessionsRowsHost.Children())
+        {
+            const auto border = child.try_as<Border>();
+            if (!border)
+            {
+                continue;
+            }
+            const std::wstring id{ winrt::unbox_value_or<winrt::hstring>(border.Tag(), L"") };
+            border.Background(id == _sessionsSelectedId ? SessBrush(0x30, 0x60, 0xA0, 0xE0) : SessBrush(0x14, 0xFF, 0xFF, 0xFF));
+        }
+    }
+
+    // Up/Down keyboard navigation over the VISIBLE (sorted + filtered) rows. No selection yet:
+    // Down picks the first row, Up the last; with one, the selection moves ±1 and WRAPS at the
+    // ends (rotates). The selected row is scrolled into view.
+    void TerminalPage::_MoveSessionsSelection(int delta)
+    {
+        if (_sessionsVisibleOrder.empty() || !_sessionsRowsHost)
+        {
+            return;
+        }
+        const int n = static_cast<int>(_sessionsVisibleOrder.size());
+        int idx = -1;
+        if (!_sessionsSelectedId.empty())
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                if (_sessionsVisibleOrder[i] == _sessionsSelectedId)
+                {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+        // A selection filtered out of view counts as none (idx -1): Down = first, Up = last.
+        const int next = (idx < 0) ? (delta > 0 ? 0 : n - 1) : (((idx + delta) % n + n) % n);
+        _sessionsSelectedId = _sessionsVisibleOrder[next];
+        _UpdateSessionsSelectionHighlight();
+        _ShowSessionsDetail(_sessionsSelectedId);
+        for (const auto& child : _sessionsRowsHost.Children())
+        {
+            if (const auto b = child.try_as<Border>(); b && std::wstring{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") } == _sessionsSelectedId)
+            {
+                b.StartBringIntoView();
+                break;
+            }
+        }
+    }
+
+    // ===== the generic window-level page-overlay seam (_agentPageOverlays) ===================
+    // Cross-page infrastructure (it lives in this TU as the newest page's home): each full-window
+    // page registers ONCE at build; any global dismiss site — today the tab-switch handler in
+    // TabManagement.cpp — closes ALL of them without naming any page, so a future page binds
+    // automatically by registering.
+
+    void TerminalPage::_RegisterAgentPageOverlay(const Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss)
+    {
+        _agentPageOverlays.push_back(_AgentPageOverlay{ host, visibleMirror, std::move(onDismiss) });
+    }
+
+    void TerminalPage::_DismissAgentPageOverlays()
+    {
+        for (auto& p : _agentPageOverlays)
+        {
+            if (p.host)
+            {
+                p.host.Visibility(Visibility::Collapsed);
+            }
+            if (p.visibleMirror)
+            {
+                p.visibleMirror->store(false, std::memory_order_relaxed);
+            }
+            if (p.onDismiss)
+            {
+                p.onDismiss(); // e.g. close an owned Popup — a collapsed host does NOT hide those
+            }
+        }
     }
 }
