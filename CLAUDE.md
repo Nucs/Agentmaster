@@ -295,7 +295,12 @@ What works, by area:
   TU: drag state in a `shared_ptr` the handlers capture — no `TerminalPage` members; pointer deltas read
   relative to `nullptr` so no ancestor element is captured into a delegate cycle; star-width writes are
   layout-property changes, safe synchronously in pointer handlers — the defer-rule below is about tree
-  mutations). XAML-Islands hard
+  mutations). The split is **persisted GLOBALLY and window-size-RELATIVE**: drag release normalizes the
+  columns to `(f, 1-f)` STAR weights (a proportion, so a window resize keeps the ratio) and read-modify-writes
+  `AppSettings::archiveSplitFraction` into `settings.json` (freshest-disk merge of just this field — the
+  `treeSort` pattern — plus the window's in-memory copy, so a later cog Save can't regress it); every window's
+  shell seeds its columns from it at build (sane-band clamped on load, like the Manager layout fractions).
+  XAML-Islands hard
   rule: every pointer handler **defers** its visual-tree mutation to the dispatcher (a synchronous tree change
   mid-click AVs the hit-test), so row-select is highlight-only and open/sort/restore/back post to a clean tick. Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
@@ -516,9 +521,11 @@ What works, by area:
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box). It also carries non-cog global state set elsewhere in the
-  UI but persisted through the same file: `showTabOverlay` and **`treeSort`** (the Explorer Tree's
+  UI but persisted through the same file: `showTabOverlay`, **`treeSort`** (the Explorer Tree's
   NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
-  the cog). Loaded at engine init, seeded via `SetSettings`,
+  the cog), and **`archiveSplitFraction`** (the Archive page's table|detail split as the table's
+  fraction — written by the splitter's drag release via a read-modify-write of settings.json; star
+  ratios, so it scales with the window). Loaded at engine init, seeded via `SetSettings`,
   persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
   behavior, so a missing `settings.json` (or any unset field) is a no-op.
 

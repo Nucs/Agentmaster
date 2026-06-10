@@ -541,7 +541,10 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRow(header, 0);
         host.Children().Append(header);
 
-        // --- body: 50/50 table | detail, divided by a thin separator ---
+        // --- body: table | detail, divided by the draggable splitter below. The split is seeded
+        // from the persisted GLOBAL fraction (AppSettings::archiveSplitFraction, settings.json —
+        // written by the splitter's drag release) as STAR ratios, so it is window-size-RELATIVE:
+        // resizing the window keeps the proportion, and every window shares one setting. ---
         Grid body;
         body.Margin(Thickness{ 16, 0, 16, 0 });
         {
@@ -550,9 +553,10 @@ namespace winrt::TerminalApp::implementation
                 c.Width(GridLengthHelper::FromValueAndType(v, t));
                 body.ColumnDefinitions().Append(c);
             };
-            bcol(1, GridUnitType::Star); // table
+            const double split = _appSettings.archiveSplitFraction; // sane-clamped on load
+            bcol(split, GridUnitType::Star); // table
             bcol(0, GridUnitType::Auto); // separator
-            bcol(1, GridUnitType::Star); // detail
+            bcol(1.0 - split, GridUnitType::Star); // detail
         }
 
         // LEFT — sortable header over a scrolling rows host.
@@ -662,7 +666,7 @@ namespace winrt::TerminalApp::implementation
                 detailCol.Width(GridLengthHelper::FromValueAndType(total - newA, GridUnitType::Star));
                 e.Handled(true);
             });
-            const auto endDrag = [drag, grip, idleGrip](const winrt::IInspectable& s, const Input::PointerRoutedEventArgs& e) {
+            const auto endDrag = [drag, grip, idleGrip, tableCol, detailCol, weakThis = get_weak()](const winrt::IInspectable& s, const Input::PointerRoutedEventArgs& e) {
                 if (!drag->active)
                 {
                     return; // a capture-lost echo of our own release, or a stray event
@@ -674,6 +678,28 @@ namespace winrt::TerminalApp::implementation
                 }
                 grip.Background(idleGrip);
                 ArchiveApplyCursor(CoreCursorType::Arrow);
+                // Persist the split GLOBALLY as the table's FRACTION of the two columns. a/(a+b)
+                // is correct whether the weights are still the seed fractions (a stray click, sum
+                // == 1.0) or post-drag pixels (sum in the hundreds) — the Manager splitter's
+                // trick. Normalizing the columns back to (f, 1-f) star weights keeps the split
+                // window-size-relative from here on. Read-modify-write against the freshest
+                // settings.json (only this field — minimal clobber, the treeSort pattern), and
+                // keep this window's in-memory copy in step so a later cog Save can't regress it.
+                const double a = tableCol.Width().Value;
+                const double b = detailCol.Width().Value;
+                if (a + b > 0.0)
+                {
+                    const double f = std::clamp(a / (a + b), 0.05, 0.95);
+                    tableCol.Width(GridLengthHelper::FromValueAndType(f, GridUnitType::Star));
+                    detailCol.Width(GridLengthHelper::FromValueAndType(1.0 - f, GridUnitType::Star));
+                    if (const auto self = weakThis.get())
+                    {
+                        auto s2 = ::Agentmaster::LoadAppSettings();
+                        s2.archiveSplitFraction = f;
+                        ::Agentmaster::SaveAppSettings(s2);
+                        self->_appSettings.archiveSplitFraction = f;
+                    }
+                }
                 e.Handled(true);
             };
             bar.PointerReleased(endDrag);

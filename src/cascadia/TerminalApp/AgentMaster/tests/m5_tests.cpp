@@ -976,6 +976,7 @@ static void TestAppSettings()
         in.confirmBeforeKill = false;
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
+        in.archiveSplitFraction = 0.33;
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
         CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
@@ -987,6 +988,7 @@ static void TestAppSettings()
         CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
+        CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
     }
 
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
@@ -994,6 +996,7 @@ static void TestAppSettings()
         const auto out = DeserializeAppSettings(L"");
         CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
         CHECK(out.defaultAutopilotMode == AutopilotMode::Off && out.maxAutoSends == 100u, "settings autopilot defaults on empty");
+        CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
     }
@@ -1004,6 +1007,17 @@ static void TestAppSettings()
         CHECK(out.model == L"sonnet", "settings present model honored");
         CHECK(out.maxAutoSends == 3u, "settings present maxAutoSends honored");
         CHECK(out.skipPermissions == true, "settings missing skipPermissions -> default");
+    }
+
+    // archiveSplitFraction: a sane value is honored; an extreme/corrupt one falls back to 0.5
+    // (the same sane-band rule as the Manager layout fractions — a pane must never collapse).
+    {
+        const auto ok = DeserializeAppSettings(L"{\"settings\":{\"archiveSplitFraction\":0.7}}");
+        CHECK(ok.archiveSplitFraction > 0.699 && ok.archiveSplitFraction < 0.701, "settings archiveSplitFraction honored in-band");
+        const auto lo = DeserializeAppSettings(L"{\"settings\":{\"archiveSplitFraction\":0.001}}");
+        CHECK(lo.archiveSplitFraction > 0.499 && lo.archiveSplitFraction < 0.501, "settings archiveSplitFraction clamped (too small)");
+        const auto hi = DeserializeAppSettings(L"{\"settings\":{\"archiveSplitFraction\":1.5}}");
+        CHECK(hi.archiveSplitFraction > 0.499 && hi.archiveSplitFraction < 0.501, "settings archiveSplitFraction clamped (too large)");
     }
 }
 

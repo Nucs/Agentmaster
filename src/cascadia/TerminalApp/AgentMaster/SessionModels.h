@@ -248,6 +248,12 @@ namespace Agentmaster
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };
+        // Agentmaster: the Archive page's table|detail splitter position — the TABLE's share of
+        // the two columns, kept within (0.05, 0.95). Applied as STAR ratios, so the split scales
+        // with the window (window-size-relative, not pixels). GLOBAL like treeSort: written by
+        // the splitter itself on drag release (read-modify-write of settings.json, not the cog),
+        // seeded into every window's Archive shell. Default 0.5 == the original 50/50 split.
+        double archiveSplitFraction{ 0.5 };
     };
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====

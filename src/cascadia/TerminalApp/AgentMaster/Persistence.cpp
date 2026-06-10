@@ -415,6 +415,7 @@ namespace Agentmaster
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
+        o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         return o;
     }
 
@@ -434,6 +435,12 @@ namespace Agentmaster
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
+        {
+            // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value
+            // must not collapse a pane (fall back to the 50/50 default instead).
+            const double f = v.NumAt(L"archiveSplitFraction", 0.5);
+            s.archiveSplitFraction = (f > 0.05 && f < 0.95) ? f : 0.5;
+        }
         return s;
     }
 
