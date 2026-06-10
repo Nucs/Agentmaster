@@ -427,6 +427,14 @@ namespace winrt::TerminalApp::implementation
                 self->_ShowArchivePage();
             }
         });
+        // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button (right after
+        // Archived) opens the full-window browser over EVERY on-disk Claude Code session.
+        content->SetOpenSessionsHandler([weakThis]() {
+            if (auto self = weakThis.get())
+            {
+                self->_ShowSessionsPage();
+            }
+        });
 
         // M10 (PERSISTENCE.md §13): seed this window's Manager lens from its claimed record
         // (selection / scope / collapsed dirs / splitter sizes survive close/reopen), and have the
