@@ -44,6 +44,12 @@ namespace winrt::TerminalApp::implementation
         // top-right slot floated over the TermControl. Non-projected (call via get_self); a null
         // element collapses the slot, so a non-Claude pane is visually unchanged.
         void SetAgentOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay);
+        // Agentmaster: mark this pane's content as hosting a MANAGED Claude session (set on bind via
+        // _AttachClaudeOverlay). toggleBroadcastInput EXCLUDES such panes — a Claude session's stdin is
+        // driven by the orchestrator's injector / Flight Plan, never raw broadcast keystrokes, and a
+        // constantly-repainting Claude TUI is not a meaningful broadcast target. Non-projected (get_self).
+        void SetAgentManaged(bool value) noexcept { _agentManaged = value; }
+        bool AgentManaged() const noexcept { return _agentManaged; }
         winrt::Windows::Foundation::Size MinimumSize();
         void Focus(winrt::Windows::UI::Xaml::FocusState reason = winrt::Windows::UI::Xaml::FocusState::Programmatic);
         void Close();
@@ -80,6 +86,7 @@ namespace winrt::TerminalApp::implementation
         // top-right; _agentOverlaySlot hosts it (collapsed until SetAgentOverlay fills it).
         winrt::Windows::UI::Xaml::Controls::Grid _rootWrapper{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _agentOverlaySlot{ nullptr };
+        bool _agentManaged{ false }; // Agentmaster: hosts a managed Claude session -> excluded from broadcast input
         winrt::Microsoft::Terminal::TerminalConnection::ConnectionState _connectionState{ winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected };
         winrt::Microsoft::Terminal::Settings::Model::Profile _profile{ nullptr };
         std::shared_ptr<TerminalSettingsCache> _cache{};

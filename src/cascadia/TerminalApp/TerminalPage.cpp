@@ -1148,7 +1148,7 @@ namespace winrt::TerminalApp::implementation
     // restores its Flight Plan + autopilot from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -1178,7 +1178,9 @@ namespace winrt::TerminalApp::implementation
         // new conversation id. (Correctness Rule #6: restore == resume, never replay.)
         const bool wantResume = restored && !restored->id.empty() && ::Agentmaster::ClaudeConversationExists(restored->id);
         const std::wstring resumeId = wantResume ? restored->id : std::wstring{};
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings());
+        // forkFromId set (duplicate-tab -> fork) overrides resume/fresh: BuildClaudeSpawn mints a NEW id
+        // and the commandline forks the source conversation into it (the source transcript is untouched).
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), forkFromId);
 
         // Child environment: CCMGR_SESSION_ID + CCMGR_HOOK_PIPE so hook events correlate
         // back to this session's registry record (HOOKS.md).
@@ -1278,9 +1280,9 @@ namespace winrt::TerminalApp::implementation
             _AttachClaudeOverlay(tab, spec.sessionId);
         }
 
-        const std::wstring tag = wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ");
+        const std::wstring tag = !forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] "));
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      tag + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+                                      tag + spec.sessionId + (forkFromId.empty() ? L"" : (L" (forked from " + forkFromId + L")")) + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
         return tab;
     }
 
@@ -1326,6 +1328,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
             impl->SetAgentOverlay(overlay->Root());
+            impl->SetAgentManaged(true); // exclude this managed-session pane from broadcast input (item 2)
             _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");
         }

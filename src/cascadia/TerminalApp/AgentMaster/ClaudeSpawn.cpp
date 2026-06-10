@@ -278,7 +278,7 @@ try {
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autopilot + injected prompts) and gates risky
@@ -291,6 +291,22 @@ try {
         // When OFF, the flag is omitted and BuildHooksSettingsJson pins permissions.defaultMode
         // instead (normal prompts + trust apply).
         const std::wstring flag = skipPermissions ? L"--dangerously-skip-permissions " : L"";
+        if (!forkFromSessionId.empty())
+        {
+            // Fork (Agentmaster): resume the SOURCE conversation's history, but --fork-session writes to
+            // a NEW transcript whose id we pin with --session-id (`sessionId`, freshly minted by the
+            // caller). The source <forkFrom>.jsonl is never written to -> no two-writers corruption from
+            // duplicating a tab; and because the new id is known up front, the forked session registers
+            // and binds exactly like a fresh launch.
+            std::wstring cmd = L"claude " + flag + L"--resume ";
+            cmd += forkFromSessionId;
+            cmd += L" --fork-session --session-id ";
+            cmd += sessionId;
+            cmd += L" --settings \"";
+            cmd += settingsPath;
+            cmd += L"\"";
+            return cmd;
+        }
         if (resume)
         {
             // Resume the existing conversation by id; --resume implies the session id.
@@ -664,14 +680,18 @@ try {
         return out;
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
         spec.title = std::wstring{ title };
         spec.pipeName = std::wstring{ pipeName };
 
-        const bool resume = !resumeSessionId.empty();
+        // Fork wins over resume (mutually exclusive). A fork mints a FRESH id (the fork target — the
+        // commandline resumes the source but --fork-session writes to this new id); a resume reuses the
+        // given id; a fresh launch mints a new one.
+        const bool fork = !forkFromSessionId.empty();
+        const bool resume = !fork && !resumeSessionId.empty();
         spec.sessionId = resume ? std::wstring{ resumeSessionId } : NewSessionId();
 
         const auto stateDir = AgentmasterStateDir();
@@ -680,7 +700,7 @@ try {
         spec.forwarderPath = forwarderPath;
 
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId);
 
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
         spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);

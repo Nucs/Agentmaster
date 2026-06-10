@@ -3,6 +3,7 @@
 
 #include "pch.h"
 #include "Pane.h"
+#include "TerminalPaneContent.h" // Agentmaster: IsAgentManaged() reads the content's managed flag (broadcast exclusion)
 
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Windows::Graphics::Display;
@@ -2990,6 +2991,22 @@ void Pane::CollectTaskbarStates(std::vector<winrt::TerminalApp::TaskbarState>& s
     }
 }
 
+// Agentmaster: does this leaf pane host a MANAGED Claude session? (the bind sets the flag on the
+// TerminalPaneContent via _AttachClaudeOverlay). Broadcast input is excluded from such panes — the
+// orchestrator owns a Claude session's stdin (injector / Flight Plan), and a Claude TUI is not a
+// meaningful broadcast target. A branch pane / non-terminal / non-managed leaf returns false.
+bool Pane::IsAgentManaged() const noexcept
+{
+    if (_IsLeaf() && _content)
+    {
+        if (const auto term = _content.try_as<winrt::TerminalApp::TerminalPaneContent>())
+        {
+            return winrt::get_self<winrt::TerminalApp::implementation::TerminalPaneContent>(term)->AgentManaged();
+        }
+    }
+    return false;
+}
+
 void Pane::EnableBroadcast(bool enabled)
 {
     if (_IsLeaf())
@@ -3019,7 +3036,8 @@ void Pane::BroadcastKey(const winrt::Microsoft::Terminal::Control::TermControl& 
     WalkTree([&](const auto& pane) {
         if (const auto& termControl{ pane->GetTerminalControl() })
         {
-            if (termControl != sourceControl && !termControl.ReadOnly())
+            // Agentmaster: skip managed Claude panes — their stdin is the orchestrator's, not broadcast.
+            if (termControl != sourceControl && !termControl.ReadOnly() && !pane->IsAgentManaged())
             {
                 termControl.RawWriteKeyEvent(vkey, scanCode, modifiers, keyDown);
             }
@@ -3035,7 +3053,8 @@ void Pane::BroadcastChar(const winrt::Microsoft::Terminal::Control::TermControl&
     WalkTree([&](const auto& pane) {
         if (const auto& termControl{ pane->GetTerminalControl() })
         {
-            if (termControl != sourceControl && !termControl.ReadOnly())
+            // Agentmaster: skip managed Claude panes — their stdin is the orchestrator's, not broadcast.
+            if (termControl != sourceControl && !termControl.ReadOnly() && !pane->IsAgentManaged())
             {
                 termControl.RawWriteChar(character, scanCode, modifiers);
             }
@@ -3049,7 +3068,8 @@ void Pane::BroadcastString(const winrt::Microsoft::Terminal::Control::TermContro
     WalkTree([&](const auto& pane) {
         if (const auto& termControl{ pane->GetTerminalControl() })
         {
-            if (termControl != sourceControl && !termControl.ReadOnly())
+            // Agentmaster: skip managed Claude panes — their stdin is the orchestrator's, not broadcast.
+            if (termControl != sourceControl && !termControl.ReadOnly() && !pane->IsAgentManaged())
             {
                 termControl.RawWriteString(text);
             }

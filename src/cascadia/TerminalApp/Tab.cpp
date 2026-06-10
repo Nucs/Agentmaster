@@ -2218,7 +2218,10 @@ namespace winrt::TerminalApp::implementation
                     events.CharSent.revoke();
                     events.StringSent.revoke();
 
-                    if (newIsBroadcasting)
+                    // Agentmaster: a managed Claude pane is neither a broadcast SINK (skipped in
+                    // Pane::Broadcast*) nor a SOURCE — don't wire its KeySent/CharSent/StringSent, so its
+                    // input is never echoed into sibling shells. Its stdin is the orchestrator's alone.
+                    if (newIsBroadcasting && !p->IsAgentManaged())
                     {
                         _addBroadcastHandlers(control, events);
                     }

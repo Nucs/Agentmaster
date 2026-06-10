@@ -21,6 +21,11 @@
 #include "..\TerminalSettingsModel\FileUtils.h"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 
+// Agentmaster: _DuplicateTab forks a managed Claude session instead of re-running its commandline.
+#include "AgentMaster/SessionRegistry.h" // _sessionRegistry->Get()
+#include "AgentMaster/ClaudeSpawn.h" // ClaudeConversationExists / AppendStateLog
+#include "AgentMaster/Persistence.h" // DeriveSessionTitle
+
 #include <shlobj.h>
 
 using namespace winrt;
@@ -290,6 +295,39 @@ namespace winrt::TerminalApp::implementation
     // - tab: tab to duplicate
     void TerminalPage::_DuplicateTab(const Tab& tab)
     {
+        // Agentmaster: a managed Claude tab must NOT be naively duplicated. WT's duplicate re-runs the
+        // tab's commandline, which for a Claude session is either `claude --settings <f>` (a blank new
+        // conversation — harmless but pointless) or, for a resumed tab, `claude --resume <id> …` — a
+        // SECOND claude writing the SAME <id>.jsonl (two writers on one transcript -> corruption). Instead
+        // FORK the conversation: `claude --resume <id> --fork-session` branches its history into a new,
+        // independent session id with its own transcript (the source's is untouched), registered as a
+        // normal managed session ("<title> (fork)", fresh Flight Plan). A source that was never prompted
+        // has no transcript to fork -> fall back to a fresh session in the same dir.
+        if (_sessionRegistry)
+        {
+            std::wstring sourceId;
+            const auto* const self = &tab;
+            for (const auto& [id, weakTab] : _claudeTabs)
+            {
+                if (const auto t = weakTab.get(); t && winrt::get_self<winrt::TerminalApp::implementation::Tab>(t) == self)
+                {
+                    sourceId = id;
+                    break;
+                }
+            }
+            if (!sourceId.empty())
+            {
+                const auto src = _sessionRegistry->Get(sourceId);
+                const std::wstring dir = src ? src->workingDir : std::wstring{};
+                std::wstring ttl = (src && !src->title.empty()) ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
+                ttl += L" (fork)";
+                const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
+                _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+                return;
+            }
+        }
+
         try
         {
             // TODO: GH#5047 - We're duplicating the whole profile, which might

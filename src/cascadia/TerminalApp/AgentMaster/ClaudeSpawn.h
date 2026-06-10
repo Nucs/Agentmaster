@@ -66,7 +66,10 @@ namespace Agentmaster
     // (BuildHooksSettingsJson then carries permissions.defaultMode:"default" instead).
     // resume=false: claude [--dangerously-skip-permissions] --settings "<f>" --session-id <id>
     // resume=true : claude [--dangerously-skip-permissions] --resume <id> --settings "<f>"
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions);
+    // forkFromSessionId set (Agentmaster): claude [..] --resume <forkFrom> --fork-session --session-id
+    //   <id> --settings "<f>" — branch an existing conversation into a NEW id (`id`), leaving the
+    //   SOURCE transcript untouched (no two-writers-on-one-.jsonl). Overrides the resume/fresh forms.
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {});
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
@@ -148,5 +151,9 @@ namespace Agentmaster
     // live HooksBridge pipe (HookPipeName(pid)). If `resumeSessionId` is non-empty, the spec
     // RESUMES that conversation (claude --resume <id>) and reuses the id; otherwise a fresh
     // id is generated. The id is always exported as CCMGR_SESSION_ID for hook correlation.
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings);
+    // If `forkFromSessionId` is non-empty (Agentmaster), the spec FORKS that conversation: a fresh
+    // id is minted as the spec id (the fork TARGET) and the commandline resumes <forkFromSessionId>
+    // with --fork-session, so the source transcript is never written to. Mutually exclusive with
+    // resumeSessionId; if both are set, fork wins.
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {});
 }

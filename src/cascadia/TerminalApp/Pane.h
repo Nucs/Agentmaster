@@ -154,6 +154,11 @@ public:
     void BroadcastChar(const winrt::Microsoft::Terminal::Control::TermControl& sourceControl, const wchar_t vkey, const WORD scanCode, const winrt::Microsoft::Terminal::Core::ControlKeyStates modifiers);
     void BroadcastString(const winrt::Microsoft::Terminal::Control::TermControl& sourceControl, const winrt::hstring& text);
 
+    // Agentmaster: does this (leaf) pane host a MANAGED Claude session? Broadcast input is excluded
+    // from such panes (their stdin is the orchestrator's injector / Flight Plan). Checked by the
+    // broadcast walk (Pane::Broadcast*) and the handler-add (Tab::ToggleBroadcastInput).
+    bool IsAgentManaged() const noexcept;
+
     void UpdateResources(const PaneResources& resources);
 
     // Method Description:
