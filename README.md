@@ -181,3 +181,8 @@ host, shared components, general build/contribution guidance), refer to the upst
 Agentmaster is licensed under the [MIT License](LICENSE), the same license as upstream Windows
 Terminal. The original `Copyright (c) Microsoft Corporation` notice is retained alongside the fork
 author's copyright, per the terms of the MIT License.
+
+---
+
+> *This feels like the entire codebase went into `Form1.cs`, but patience and careful designing made
+> this little gem.*
