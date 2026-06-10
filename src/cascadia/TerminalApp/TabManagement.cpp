@@ -1132,6 +1132,20 @@ namespace winrt::TerminalApp::implementation
             _tabContent.Children().Clear();
             _tabContent.Children().Append(tab.Content());
 
+            // Agentmaster: the Archive page is a WINDOW-level overlay (mounted on Root, below the tab
+            // strip) opened from the Manager tab — it is NOT part of any tab's Content(), so the swap
+            // above doesn't remove it and it would keep covering the newly-selected tab (and still be
+            // there when returning to the Manager). Dismiss it whenever the selection moves OFF the
+            // Manager tab. Collapse synchronously: this is a SelectionChanged handler (already mutating
+            // the tree just above), NOT an in-page pointer handler, so the hit-test AV that makes
+            // _HideArchivePage defer doesn't apply — and a synchronous collapse avoids a one-frame bleed
+            // over the new tab. (The page is reopened from the Manager's Archived button; it does not
+            // auto-restore on returning to the Manager tab.)
+            if (_archivePageHost && tab != _managerTab)
+            {
+                _archivePageHost.Visibility(Visibility::Collapsed);
+            }
+
             // GH#7409: If the tab switcher is open, then we _don't_ want to
             // automatically focus the new tab here. The tab switcher wants
             // to be able to "preview" the selected tab as the user tabs
