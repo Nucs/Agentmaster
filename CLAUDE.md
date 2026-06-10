@@ -43,11 +43,13 @@ Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 Workspace persistence (window layer): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
 Per-tab link badge (overlay): [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md).
 Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md).
+Sessions browser + the `~/.claude` storage map: [`doc/agentmaster/SESSIONS.md`](doc/agentmaster/SESSIONS.md).
+Observer-owned session state (the PULL state engine — design, pre-implementation): [`doc/agentmaster/STATE.md`](doc/agentmaster/STATE.md).
 
 ## Status
 
 **All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **376/376** standalone
+`Agentmaster` identity, and verified running.** The engine passes **536/536** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -187,6 +189,43 @@ and **"Last assistant reply"** = where the conversation left off (a 64 KB off-th
 twin · branch · the **session id** · every queued prompt's label+text; window-only rows index their chip
 tip) with **whitespace-tokenized AND-matching**, so "remember that prompt I queued" — or a UUID pasted
 from `hooks.log` — finds its session. Detail: *C1 UI* + the audit bullets under *Persistence*.
+
+**The Sessions browser ([`SESSIONS.md`](doc/agentmaster/SESSIONS.md)) is implemented — engine + UI,
+lib-compiled green + engine-tested (the 536-check harness incl. a live-corpus smoke); it rides the
+next deploy cycle.** A **"Sessions"** toolbar button (right after Archived) opens a full-window page
+(the Archive page's structure + its deferred-pointer-handler discipline) listing **EVERY on-disk
+Claude Code session** (`~/.claude/projects/*/<uuid>.jsonl` — not just managed ones) in a selectable
+window: the `[1 month]` button click-cycles 1d/3d/7d/14d/1mo/3mo, hover opens a **From/To range
+popup** (plain text boxes — islands-safe). The search bar `[ search ] (👤)(🤖)(📁)(📄)(F)` runs
+**two-phase**: FAST = in-memory over per-session **sidecar indexes**
+(`~/.agentmaster/sessions-index/<sid>.json` — `(size,mtime)`-invalidated, **incrementally**
+re-accumulated from the stored byte offset; built by `TranscriptStore`) + the **`history.jsonl`
+accelerator**; SLOW = **ripgrep**-prefiltered transcript content (`rg -il`, PATH-resolved,
+batched under the cmdline cap, full in-process fallback), every match **scope-attributed
+in-process** (👤 typed prompts vs 🤖 assistant text/thinking + tool inputs/results — rg can't tell
+them apart, `ClassifyTranscriptLine` can), generation-cancelled on re-type. Both message scopes
+OFF ⇒ title+directory only; 📁/📄 match the **directories/files a session's tool calls touched**
+(`TranscriptStats::pathsAccessed`); (F) fuzzy has identical rg/in-process semantics
+(`BuildSearchRegex`/`MatchesQueryText`, tested as a pair). Rows carry fork-aware **created** (a
+fork duplicates its parent's lines verbatim with `forkedFrom` stamps — file birth is the truth),
+**line-derived last-activity** (file mtime lies: measured median ~1 h, max ~43 days —
+SESSIONS.md §5), the title precedence `customTitle > aiTitle > legacy summary > first REAL
+prompt`, the msgs·tools weight, and the session's **per-dir tab color** as a chip (solid = OPEN
+here, dim = on-disk) with a **presence ring** when claude's own heartbeat reports busy/idle/
+waiting. Detail = metadata + scope-tagged match snippets + the numbered prompt list (off-thread,
+(id,mtime)-cached); actions: **Jump** (OPEN here), **Resume here** (`_ResumeSessionFromDisk`: an
+unknown sid gets a minimal archived-shaped record, then the SAME transcript-gated `--resume` seam
+— title pinning, dir color, hook correlation all reused), **Open New Session Here**; double-click
+= resume. **Presence integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
+owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
+process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + the transient
+`SessionInfo.presenceStatus` fact through `ObserveClaude` (**never** `SessionState` — Rule #13).
+The same pass also fixed engine bugs: `ReadTranscriptInfo` now honors `ai-title`/legacy `summary`
++ skips sidechain/compact-summary lines, and the shared **noise filter** (`IsNoiseUserPrompt`)
+keeps interrupt markers / command echoes / task notifications out of titles, prompt lists, AND
+the scanner's Flight-Plan back-fill (STATE.md §8 bug-2 fixed). The button + header-declaration
+wiring (AgentManagerContent, TerminalPage.h, ProcessObserver.cpp, m5_tests.cpp) rides the
+in-flight working tree alongside the concurrent UIA work; the tree as a whole builds green.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -554,7 +593,8 @@ What works, by area:
   geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
   "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Reopen · `⚙` ·
-  Pause Autopilot · Archived — the cog sits *before* Pause Autopilot / Archived) opens a
+  Pause Autopilot · Archived · **Sessions** — the cog sits *before* Pause Autopilot / Archived; the
+  Sessions browser button comes right after Archived) opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
@@ -626,23 +666,28 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail), the **Fleet
     Observer** — `Activity.h` (data models), `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript
     primitives — id resolution + content: title / prompts / ctime·mtime timing),
-    `ProcessObserver.{h,cpp}` (the S-lane) — `TranscriptStore.{h,cpp}` (the on-disk Claude-session
+    `ProcessObserver.{h,cpp}` (the S-lane; also validates + publishes the `sessions/<pid>.json`
+    presence heartbeat) — `TranscriptStore.{h,cpp}` (the on-disk Claude-session
     store API for the Sessions browser, SESSIONS.md §6: global transcript enumeration, the
-    byte-offset-resumable scan + stats fold, fork-aware quick row facts, and the shared
-    prompt-noise + title-precedence rules), `Json.h`, `Persistence.{h,cpp}`, and
+    byte-offset-resumable scan + stats fold, fork-aware quick row facts, the per-session sidecar
+    index, the raw presence read, and the shared prompt-noise + title-precedence rules),
+    `SessionSearch.{h,cpp}` (the two-phase search: pure regex/match/snippet primitives + the
+    history.jsonl accelerator + the rg-prefiltered, scope-attributed content scan with in-process
+    fallback), `Json.h`, `Persistence.{h,cpp}`, and
     `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`).
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
-  - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,ArchivePage}.cpp`
-    — the TerminalPage-side Agentmaster *implementation*, split out of `TerminalPage.cpp` into five
-    same-class TUs (the upstream `TabManagement.cpp` pattern; a pure move, zero logic change):
+  - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,ArchivePage,SessionsPage}.cpp`
+    — the TerminalPage-side Agentmaster *implementation* in six same-class TUs (the upstream
+    `TabManagement.cpp` pattern; the original five were split out of `TerminalPage.cpp` as a pure
+    move — **SessionsPage** is new code):
     **Engine** (`~TerminalPage`, `_InitAgentmasterEngine`, the Manager tab, `_WireAgentManagerContent`),
     **Sessions** (spawn/launch/restore/archive/adopt-external, tab-title sync, smart naming + per-dir
     tab color), **Observer** (the per-tab overlay/badge, bind/reconcile/liveness, the UI lane
     `_ObserverProbe`), **WindowRecord** (M10 capture/flush/restore + reopen saved windows),
-    **ArchivePage** (the full-window Archive page). Declarations stay in `TerminalPage.h` (C++ has
-    no partial classes).
+    **ArchivePage** (the full-window Archive page), **SessionsPage** (the full-window Sessions
+    browser — SESSIONS.md). Declarations stay in `TerminalPage.h` (C++ has no partial classes).
   - small touches in `TerminalPage.{h,cpp}` (~20 integration seams left in the `.cpp`:
     `_OnFirstLayout` startup, `_MakePane`'s `agentManager` branch, close/quit record-flush +
     teardown-archive, tab-move detach, title/color sync hooks, `_restartPaneConnection` injector
@@ -659,7 +704,9 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
-  (per-working-directory tab colors), `settings.json`
+  (per-working-directory tab colors), `sessions-index/<sid>.json` (the Sessions browser's
+  per-session search/stats sidecar cache — `(size,mtime)`-keyed, incrementally re-accumulated
+  from the stored byte offset), `settings.json`
   (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
   one file per window; captured + autosaved + restored), `open-windows.json` (the M10 Increment-3
   open-at-exit manifest — the live window-id set the next launch reopens), `bridge.json`
