@@ -398,6 +398,12 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<ThrottledFunc<>> _archiveRefreshThrottled{ nullptr };
         std::shared_ptr<ThrottledFunc<>> _archiveFilterThrottled{ nullptr };
         std::atomic<bool> _archivePageVisible{ false };
+        // Agentmaster (tab status dot): this window's registry observer driving the tab-strip
+        // "[icon] ● <title>" dot — a state change recolors the hosting tab's dot in place (the same
+        // push that redraws the Manager board). Registered at engine init; detached in ~TerminalPage
+        // (an ::Agentmaster::ObserverToken; uint64_t to avoid pulling SessionRegistry.h here — the
+        // _adoptionToken pattern).
+        uint64_t _agentDotObserverToken{ 0 };
         // Agentmaster (branch backfill): archived ids whose transcript head this run already read for a
         // missing `branch` — SessionInfo.branch had NO live writer (only the JSON loader), so the Branch
         // column + search were permanently empty; the backfill reads each transcript at most once per run.
@@ -510,6 +516,8 @@ namespace winrt::TerminalApp::implementation
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)
         void _SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind); // Agentmaster (OBSERVER.md §4/§11d): attach-or-update a registry-less "○ <kind> · unlinked" badge (pwsh / cmd / claude / codex) on a non-bound tab
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
+        void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
+        void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume) an archived session + its Flight Plan

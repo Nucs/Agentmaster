@@ -94,6 +94,11 @@ namespace winrt::TerminalApp::implementation
         {
             _sessionRegistry->RemoveObserver(_archiveRegistryObserverToken);
         }
+        // Agentmaster (tab status dot): same Rule-#10 detach for the dot's registry observer.
+        if (_sessionRegistry && _agentDotObserverToken)
+        {
+            _sessionRegistry->RemoveObserver(_agentDotObserverToken);
+        }
         // Symmetric to the adoption handler: drop this window's liveness probe from the shared
         // scanner so a closed window's probe (it captures get_weak()) doesn't linger on the
         // process-wide scanner. The scanner outlives every window (held by SharedEngine).
@@ -246,6 +251,26 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_AdoptExternalSession(winrt::hstring{ id }, winrt::hstring{ cwd }, winrt::hstring{ tabToken });
                 }
+            });
+
+            // Agentmaster (tab status dot): live-update the tab strip's "[icon] ● <title>" dot on
+            // registry changes — the same push that redraws the Manager board recolors the hosting
+            // tab's dot (the Waiting->Idle cache decay rides this too, so the dot fades with the
+            // card). Observers fire on arbitrary threads (bridge/scanner) -> bounce to this window's
+            // dispatcher; the UI-thread reaction is one _claudeTabs lookup + a brush write, and
+            // _SetTabAgentDot is idempotent on an unchanged color. Token detached in ~TerminalPage
+            // (Rule #10 — a closed window's observer must not linger on the shared registry).
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _agentDotObserverToken = _sessionRegistry->AddObserver([weakThis, dispatcher](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
+                const std::wstring id = s.id;
+                const auto state = s.state;
+                const bool live = s.live;
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_UpdateTabAgentDot(id, state, live);
+                    }
+                });
             });
         }
 

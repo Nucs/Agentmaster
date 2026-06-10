@@ -18,6 +18,7 @@
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION keys)
 
 #include "AgentManagerContent.h" // push the External census / RefreshNow
+#include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
@@ -54,6 +55,65 @@ namespace winrt
 
 namespace winrt::TerminalApp::implementation
 {
+    // Agentmaster (tab status dot): show/recolor (or hide, nullopt) the tab-strip status dot —
+    // the "[icon] ● <title>" element TabHeaderControl.xaml binds to TerminalTabStatus. The dot is
+    // the Explorer Tree's state dot brought onto the tab strip itself: state-colored for a managed
+    // session, dim gray for an observed-only tab. It is a SEPARATE visual element, deliberately NOT
+    // part of the title string — the one-title invariant (Rule #11: Explorer name == tab title ==
+    // persisted SessionInfo.title) must never carry presentation glyphs through renames/persistence.
+    // Independent of AppSettings.showTabOverlay (that toggle is the in-terminal HUD). Idempotent on
+    // an unchanged color (a new SolidColorBrush per call would re-raise the INPC binding every
+    // observer tick), so the per-tick badge path can re-assert it for free. UI thread only.
+    void TerminalPage::_SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            const auto status = tab.TabStatus();
+            if (!status)
+            {
+                return;
+            }
+            if (!color)
+            {
+                status.AgentStatusVisible(false); // WINRT_OBSERVABLE_PROPERTY no-ops when already false
+                return;
+            }
+            if (status.AgentStatusVisible())
+            {
+                if (const auto cur = status.AgentStatusBrush().try_as<Media::SolidColorBrush>();
+                    cur && cur.Color() == *color)
+                {
+                    return; // already showing exactly this color — don't churn the binding
+                }
+            }
+            status.AgentStatusBrush(Media::SolidColorBrush{ *color });
+            status.AgentStatusVisible(true);
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster (tab status dot): the registry-observer reaction (bounced to this window's UI
+    // thread by the engine-init observer). A session state change recolors its hosting tab's dot in
+    // place; live=false hides it (the liveness sweep also hides explicitly before it drops the
+    // _claudeTabs entry — whichever lands first wins, both are idempotent). A session this window
+    // doesn't host is a cheap map-miss no-op (every window's observer sees every fleet event).
+    void TerminalPage::_UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        if (it == _claudeTabs.end())
+        {
+            return;
+        }
+        if (const auto tab = it->second.get())
+        {
+            _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt);
+        }
+    }
+
     // Agentmaster (TAB_OVERLAY.md): build the per-tab "link badge" overlay for a Claude session and
     // install it into its terminal pane's top-right slot. Gated on AppSettings.showTabOverlay. A
     // re-attach replaces the prior overlay for that id (the old com_ptr's release detaches its
@@ -110,7 +170,18 @@ namespace winrt::TerminalApp::implementation
     // claude resolves an id. Idempotent — ShowActivity skips a re-render when the kind is unchanged.
     void TerminalPage::_SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind)
     {
-        if (!_appSettings.showTabOverlay || !tab || wtSession.empty())
+        if (!tab || wtSession.empty())
+        {
+            return;
+        }
+        // Tab status dot: an OBSERVED-but-unmanaged tab (pwsh / cmd / unprompted claude / codex)
+        // carries a dim gray dot — same visual language as the tree/board (state color = managed,
+        // dim = merely observed). Set BEFORE the overlay gate below: the dot is tab-strip chrome,
+        // independent of the in-terminal HUD toggle. Re-asserted every probe tick; _SetTabAgentDot
+        // is idempotent on the unchanged color. (A tab that becomes managed gets its state-colored
+        // dot from the bind tail, which runs after this badge is dropped.)
+        _SetTabAgentDot(tab, winrt::Windows::UI::ColorHelper::FromArgb(0x70, 0x80, 0x80, 0x80));
+        if (!_appSettings.showTabOverlay)
         {
             return;
         }
@@ -363,6 +434,12 @@ namespace winrt::TerminalApp::implementation
         }
         _ApplyDirColorToTab(hostTab, cwd); // per-directory tab color
         _AttachClaudeOverlay(hostTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
+        // Tab status dot: managed now — seed the strip dot from the session's current state (the
+        // engine-init registry observer keeps it live from here on).
+        if (const auto s = _sessionRegistry->Get(id))
+        {
+            _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state));
+        }
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");
     }
@@ -486,6 +563,16 @@ namespace winrt::TerminalApp::implementation
         }
         for (const auto& id : dead)
         {
+            // Tab status dot: clear it BEFORE dropping the _claudeTabs entry — the sweep leaves the
+            // dead tab open for the user to read, and the registry-observer path can't reach it
+            // after the map erase (its Update bounce would land on a map miss).
+            if (const auto deadIt = _claudeTabs.find(id); deadIt != _claudeTabs.end())
+            {
+                if (const auto t = deadIt->second.get())
+                {
+                    _SetTabAgentDot(t, std::nullopt);
+                }
+            }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 s.pendingConfirmPromptId.clear();

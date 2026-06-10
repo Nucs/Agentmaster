@@ -56,6 +56,19 @@
                   FontSize="12"
                   Glyph="&#xEC05;"
                   Visibility="{x:Bind TabStatus.IsInputBroadcastActive, Mode=OneWay}" />
+        <!--  Agentmaster: the tab-strip status dot. Sits between the TabViewItem icon (outside this
+              control) and the title, so the header reads "[icon] (dot) (title)" — state-colored for a
+              managed Claude session (the Triage-Board palette via AgentStatusColors.h), dim gray for
+              an observed-only tab; collapsed on anything Agentmaster doesn't classify. A TextBlock
+              (not FontIcon) on purpose: it shares the title TextBlock's line-box behavior, so the
+              glyph rides the same baseline (the TextBlock/FontIcon alignment gotcha).  -->
+        <TextBlock x:Name="HeaderAgentStatusDot"
+                   Margin="0,0,6,0"
+                   VerticalAlignment="Center"
+                   FontSize="10"
+                   Foreground="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
+                   Text="&#x25CF;"
+                   Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />

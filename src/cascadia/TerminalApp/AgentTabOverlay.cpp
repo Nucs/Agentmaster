@@ -4,6 +4,7 @@
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
+#include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentMaster/SessionRegistry.h"
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
@@ -41,27 +42,12 @@ namespace
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
     }
 
-    // Color-matched to the Triage Board (AgentManagerContent's StateColor); kept in sync by hand —
-    // a small duplication until the palette is factored into a shared header.
+    // Color-matched to the Triage Board — now via the ONE shared palette (AgentStatusColors.h, the
+    // factoring the old hand-synced copy's comment promised), so the overlay badge and the
+    // tab-strip status dot can never drift apart.
     Color StateColor(SessionState s)
     {
-        using winrt::Windows::UI::Colors;
-        switch (s)
-        {
-        case SessionState::Running:
-            return Colors::DodgerBlue();
-        case SessionState::WaitingForInput:
-            return Colors::Goldenrod();
-        case SessionState::NeedsApproval:
-            return Colors::OrangeRed();
-        case SessionState::Error:
-            return Colors::Crimson();
-        case SessionState::Done:
-            return Colors::MediumSeaGreen();
-        case SessionState::Idle:
-        default:
-            return Colors::Gray();
-        }
+        return winrt::TerminalApp::implementation::AgentStatusColorFor(s);
     }
 
     const wchar_t* StateGlyph(SessionState s)

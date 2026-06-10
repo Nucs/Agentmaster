@@ -17,6 +17,7 @@
 
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION match)
 
+#include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
@@ -229,6 +230,12 @@ namespace winrt::TerminalApp::implementation
             _ApplyDirColorToTab(tab, dir);
             // Per-tab "link badge" overlay (TAB_OVERLAY.md): top-right status HUD for this session.
             _AttachClaudeOverlay(tab, spec.sessionId);
+            // Tab status dot: seed the strip dot from the (just-upserted) session's state — Idle
+            // gray for a fresh launch/restore; the registry observer recolors it live from here.
+            if (const auto s = _sessionRegistry->Get(spec.sessionId))
+            {
+                _SetTabAgentDot(tab, AgentStatusColorFor(s->state));
+            }
         }
 
         const std::wstring tag = !forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] "));

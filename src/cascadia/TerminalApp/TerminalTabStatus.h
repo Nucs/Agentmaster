@@ -21,6 +21,10 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(uint32_t, ProgressValue, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, IsInputBroadcastActive, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Color, TabColorIndicator, PropertyChanged.raise);
+        // Agentmaster: the tab-strip status dot (see the idl note) — driven by TerminalPage's
+        // registry observer / bind paths via Tab.TabStatus(); rendered by TabHeaderControl.xaml.
+        WINRT_OBSERVABLE_PROPERTY(bool, AgentStatusVisible, PropertyChanged.raise);
+        WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentStatusBrush, PropertyChanged.raise, nullptr);
     };
 }
 

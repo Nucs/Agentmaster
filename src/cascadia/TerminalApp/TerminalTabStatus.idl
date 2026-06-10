@@ -16,5 +16,11 @@ namespace TerminalApp
         Boolean IsReadOnlyActive { get; set; };
         Boolean IsInputBroadcastActive { get; set; };
         Windows.UI.Color TabColorIndicator { get; set; };
+
+        // Agentmaster: the tab-strip status dot ("[icon] ● <title>", bound by TabHeaderControl.xaml)
+        // — state-colored for a managed Claude session (the Triage-Board palette), dim gray for an
+        // observed-only tab. Hidden (the default) on tabs Agentmaster doesn't classify.
+        Boolean AgentStatusVisible { get; set; };
+        Windows.UI.Xaml.Media.Brush AgentStatusBrush { get; set; };
     }
 }
