@@ -275,6 +275,7 @@ namespace Agentmaster
     void Scheduler::Confirm(const std::wstring& sessionId, bool confirm)
     {
         std::wstring text;
+        std::wstring confirmedId;
         _registry->Update(sessionId, [&](SessionInfo& ss) {
             if (ss.pendingConfirmPromptId.empty())
             {
@@ -287,6 +288,7 @@ namespace Agentmaster
                     if (confirm && p.status == PromptStatus::Pending)
                     {
                         text = p.text;
+                        confirmedId = p.id; // remember it so a failed inject can roll it back (Rule #4)
                         p.status = PromptStatus::Sent;
                         p.sentAtUnixMs = NowMs();
                         p.attempts += 1;
@@ -304,8 +306,41 @@ namespace Agentmaster
         });
         if (confirm && !text.empty())
         {
-            _registry->Inject(sessionId, text + L"\r");
-            AppendStateLog(L"autopilot.log", L"[confirm-send] " + sessionId + L"\n");
+            // Agentmaster: check the inject result and roll back on failure — the SemiAuto
+            // confirm path was the mirror-image of the auto-send path in _process above but was MISSING
+            // its rollback: it marked the prompt Sent then injected and ignored the bool. If no injector
+            // is bound yet (confirming during a restore before the ConPTY is wired), the prompt was
+            // stranded as a phantom Sent that was never delivered AND never re-fires (the re-fire keys
+            // on Pending), violating Correctness Rule #4. Mirror _process: revert to Pending; the next
+            // advance re-decides AwaitConfirm and re-arms the confirm once the injector binds.
+            const bool delivered = _registry->Inject(sessionId, text + L"\r");
+            if (delivered)
+            {
+                AppendStateLog(L"autopilot.log", L"[confirm-send] " + sessionId + L"\n");
+            }
+            else
+            {
+                _registry->Update(sessionId, [&](SessionInfo& ss) {
+                    for (auto& p : ss.queue)
+                    {
+                        if (p.id == confirmedId && p.status == PromptStatus::Sent)
+                        {
+                            p.status = PromptStatus::Pending;
+                            p.echoed = false;
+                            if (p.attempts > 0)
+                            {
+                                p.attempts -= 1;
+                            }
+                            if (ss.autopilot.autoSendsThisRun > 0)
+                            {
+                                ss.autopilot.autoSendsThisRun -= 1;
+                            }
+                            break;
+                        }
+                    }
+                });
+                AppendStateLog(L"autopilot.log", L"[confirm-deferred] " + sessionId + L" (no injector yet)\n");
+            }
         }
     }
 }

@@ -511,10 +511,30 @@ namespace Agentmaster
 
     bool ProcessAlive(uint32_t pid)
     {
+        if (pid == 0)
+        {
+            return false;
+        }
+        // Agentmaster: prefer the UNAMBIGUOUS wait-based liveness test over GetExitCodeProcess == STILL_ACTIVE
+        // (259). The exit-code path has a classic footgun: a process that genuinely exits with code 259
+        // reads as "still active" forever. WaitForSingleObject(h, 0) has no such ambiguity — the process
+        // object is signaled (WAIT_OBJECT_0) once it has exited, and WAIT_TIMEOUT means it is still
+        // running. This needs SYNCHRONIZE rights, which we have on our own claude children (the common
+        // case). (Residual, still LOW: this keys on pid alone — a recycled pid for a NEW process reads as
+        // alive. Pairing the recorded process start-time would close that, but the callers don't thread a
+        // start-time through yet.)
+        if (const HANDLE hs = ::OpenProcess(SYNCHRONIZE, FALSE, pid))
+        {
+            const DWORD w = ::WaitForSingleObject(hs, 0);
+            ::CloseHandle(hs);
+            return w == WAIT_TIMEOUT; // signaled => exited; timeout => still running
+        }
+        // No SYNCHRONIZE rights (an elevated / other-user external claude). Fall back to the query path:
+        // an open failure here means gone/denied -> treat as not-alive for our cache (unchanged behavior).
         const HANDLE h = OpenForQuery(pid);
         if (h == nullptr)
         {
-            return false; // can't open (gone / denied) -> treat as not-alive for our cache
+            return false;
         }
         DWORD code = 0;
         bool alive = false;

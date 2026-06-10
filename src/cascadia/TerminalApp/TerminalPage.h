@@ -322,6 +322,13 @@ namespace winrt::TerminalApp::implementation
         // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
         // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
         bool _windowRecordClaimed{ false };
+        // Agentmaster (quit-all window-record loss): set once CloseWindow/RequestQuit has
+        // flushed the record at its deterministic close/quit seam, so ~TerminalPage's catch-all flush
+        // won't re-capture a post-teardown-archive state (where _claudeTabs is already cleared and every
+        // Claude tab would degrade to an anonymous Other ref) over that good record. Stays false on the
+        // quit-all path for the NON-initiating windows — they are torn down straight through the
+        // destructor with no per-window close, so the destructor is their only flush seam.
+        bool _windowRecordTeardownFlushed{ false };
         // Agentmaster (M10 Increment 3): the Emperor-assigned record id for a multi-window restore,
         // set by TerminalWindow before _OnFirstLayout. Empty => single-window (claim the front record).
         std::wstring _assignedWindowId;
@@ -339,7 +346,8 @@ namespace winrt::TerminalApp::implementation
             std::wstring branch;
             int64_t createdUnixMs{ 0 };
             int64_t lastActivityUnixMs{ 0 };
-            int windowIndex{ -1 };  // RecoverableWindow::index (for "Reopen its window"); -1 = loose
+            int windowIndex{ -1 };  // RecoverableWindow::index AT GATHER TIME (fallback for "Reopen its window"); -1 = loose
+            std::wstring windowId;  // Agentmaster: the record's stable GUID — reopen re-resolves the live index from this (the gather-time index goes stale if the record set shifts while the page is open)
             int windowOrdinal{ 0 }; // 1-based "W{n}" display chip; 0 = loose (no saved window)
             int sentCount{ 0 };
             int totalCount{ 0 };
@@ -353,7 +361,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _archiveRestoreSelBtn{ nullptr };   // footer bulk action
         std::vector<_ArchiveRow> _archiveRows;
         std::wstring _archiveSelectedId;                  // the row whose detail is shown
-        std::unordered_set<std::wstring> _archiveChecked; // multi-select set (by session id)
+        std::unordered_set<std::wstring> _archiveChecked;    // multi-select set (by session id)
+        std::unordered_set<std::wstring> _archiveVisibleIds; // Agentmaster: ids currently passing the filter (rebuilt each render); bulk-restore + its "(N)" count act on checked ∩ visible only
         int _archiveSortColumn{ 4 };                      // default sort column: Created (see _RenderArchiveTable)
         bool _archiveSortAscending{ false };              // default: newest first
         std::wstring _archiveFilter;                      // lowercased search text

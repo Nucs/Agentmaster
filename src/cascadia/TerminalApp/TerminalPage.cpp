@@ -247,6 +247,21 @@ namespace winrt::TerminalApp::implementation
     // registry itself outlives every window (held by SharedEngine), so this call stays valid.
     TerminalPage::~TerminalPage()
     {
+        // Agentmaster (quit-all window-record loss): persist this window's record BEFORE the
+        // teardown-archive below clears _claudeTabs — capturing after it would degrade every Claude tab
+        // to an anonymous Other ref (the hazard CloseWindow's flush note describes). This is the
+        // catch-all for the NON-initiating windows on a quit-all (QuitRequested), which are torn down
+        // straight through this destructor with no per-window CloseWindow/RequestQuit, so without this
+        // their final geometry / tab order / focus / lens never reaches disk past the 750ms autosave.
+        // Gated on the latch so it does NOT re-capture (and clobber) a good close/quit-seam flush after
+        // _claudeTabs was already cleared; the geometry fallback in _CaptureWindowRecord keeps the
+        // last-known position/size if the window is already too far torn down to read it live.
+        if (!_windowRecordTeardownFlushed)
+        {
+            _FlushWindowRecord();
+            _windowRecordTeardownFlushed = true;
+        }
+
         // Agentmaster (lifecycle gap #1): archive any of this window's still-live sessions before we
         // detach. Normally CloseWindow already did this (deterministically, before raising
         // CloseWindowRequested); this is the catch-all for quit-all / any teardown path that bypassed
@@ -976,6 +991,23 @@ namespace winrt::TerminalApp::implementation
             geo.x = static_cast<double>(pos.X.Value());
             geo.y = pos.Y ? static_cast<double>(pos.Y.Value()) : 0.0;
         }
+        // Agentmaster: fall back to the last-known geometry for any axis live-capture couldn't
+        // read. A close/quit/teardown flush may run when _tabContent has no size (0×0) or the window
+        // position request has no subscriber left, which would otherwise persist a geometry-less record
+        // and lose the saved position/size. During a normal live autosave both are captured fresh, so
+        // this is a no-op then. (_windowRecord still holds the prior save; rec is a copy of it.)
+        if (!geo.hasSize && _windowRecord.geometry.hasSize)
+        {
+            geo.hasSize = true;
+            geo.width = _windowRecord.geometry.width;
+            geo.height = _windowRecord.geometry.height;
+        }
+        if (!geo.hasPosition && _windowRecord.geometry.hasPosition)
+        {
+            geo.hasPosition = true;
+            geo.x = _windowRecord.geometry.x;
+            geo.y = _windowRecord.geometry.y;
+        }
         rec.geometry = geo;
 
         // --- ordered tab refs (+ which tab is focused) ---
@@ -1004,13 +1036,12 @@ namespace winrt::TerminalApp::implementation
             {
                 entry.kind = ::Agentmaster::TabKind::Claude;
                 entry.sessionId = sessionId;
-                if (const auto t = _GetTabImpl(tab))
-                {
-                    if (const auto c = t->GetRuntimeTabColor())
-                    {
-                        entry.tabColor = ClaudeColorToHex(*c);
-                    }
-                }
+                // Agentmaster: do NOT capture a per-tab color here. A Claude tab's color is ONE value per
+                // working directory (Rule #12) — owned by dir-colors.json and re-applied on restore by
+                // _ApplyDirColorToTab (the dir's persisted custom color, else a stable auto color hashed
+                // from the dir, which reproduces exactly what the tab had). The old entry.tabColor write
+                // was dead round-trip data: _RestoreWindowTabs never read it, and applying it WOULD break
+                // Rule #12 (one tab keeping a custom color while its dir-siblings revert to auto).
             }
             else
             {
@@ -1044,8 +1075,13 @@ namespace winrt::TerminalApp::implementation
                 {
                     rec.selectedSessionId = entry.sessionId;
                 }
-                else
+                else if (!entry.actionsJson.empty())
                 {
+                    // Agentmaster: only record a shell-tab focus target that can actually be RECREATED on
+                    // restore. A focused Other tab whose BuildStartupActions yielded nothing (empty
+                    // actionsJson) is skipped by _RestoreWindowTabs, so pointing selectedTabIndex at it
+                    // would silently drop focus restoration onto a tab that never reappears. Leaving it
+                    // unset falls back to the default focus (the natural choice for an un-recreatable tab).
                     rec.selectedTabIndex = static_cast<int>(rec.tabs.size()); // index this entry will occupy
                 }
             }
@@ -1364,32 +1400,43 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
-        // M9: the registry is a process singleton, so this load is a PROCESS-once action — the
-        // first window populates the shared registry from sessions.json; a later window must NOT
-        // re-load and double-insert. exchange() makes the first-window election race-free.
-        if (::Agentmaster::SharedEngine().restored.exchange(true))
+        // M9: loading sessions.json is a PROCESS-once action (the registry is a shared
+        // singleton), but election alone isn't enough — each window restores on its OWN thread, and the
+        // _RestoreWindowTabs call right after this needs the fleet ALREADY in the registry to re-home its
+        // tabs. So this is a true BARRIER: the loader holds restoreMutex across the whole LoadSessions +
+        // Upsert pass; a concurrent window BLOCKS here until it finishes, then sees restored==true and
+        // returns. Without it, the second window would skip its (not-yet-loaded) sessions and then flush
+        // an empty record over its saved workspace.
+        //
+        // The block below MUST stay strictly synchronous (no co_await): a fire_and_forget can resume on a
+        // different thread, and releasing a std::mutex on a thread other than the one that acquired it is
+        // undefined. Keep the lock_guard's scope co_await-free.
         {
-            co_return;
-        }
-
-        auto saved = ::Agentmaster::LoadSessions();
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived\n");
-
-        for (auto& s : saved)
-        {
-            if (s.id.empty() || s.workingDir.empty())
+            auto& eng = ::Agentmaster::SharedEngine();
+            std::lock_guard<std::mutex> restoreGuard{ eng.restoreMutex };
+            if (!eng.restored)
             {
-                continue;
+                auto saved = ::Agentmaster::LoadSessions();
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore] " + std::to_wstring(saved.size()) + L" session(s) loaded as archived\n");
+
+                for (auto& s : saved)
+                {
+                    if (s.id.empty() || s.workingDir.empty())
+                    {
+                        continue;
+                    }
+                    // Archived: present + restorable, but no live tab/claude. Reset the transient
+                    // runtime fields (a fresh process has no live state) and keep the persisted queue +
+                    // autopilot intact (Rule #6: restore == resume, never replay; Sent stays Sent).
+                    s.live = false;
+                    s.external = false;
+                    s.state = ::Agentmaster::SessionState::Idle;
+                    s.lastMessageWasQuestion = false;
+                    s.pendingConfirmPromptId.clear();
+                    _sessionRegistry->Upsert(std::move(s));
+                }
+                eng.restored = true; // publish ONLY after the registry is fully populated (still under the lock)
             }
-            // Archived: present + restorable, but no live tab/claude. Reset the transient
-            // runtime fields (a fresh process has no live state) and keep the persisted queue +
-            // autopilot intact (Rule #6: restore == resume, never replay; Sent stays Sent).
-            s.live = false;
-            s.external = false;
-            s.state = ::Agentmaster::SessionState::Idle;
-            s.lastMessageWasQuestion = false;
-            s.pendingConfirmPromptId.clear();
-            _sessionRegistry->Upsert(std::move(s));
         }
         co_return;
     }
@@ -2135,7 +2182,16 @@ namespace winrt::TerminalApp::implementation
         _archiveRestoreSelBtn = Button{};
         _archiveRestoreSelBtn.Content(winrt::box_value(winrt::hstring{ L"Restore selected" }));
         _archiveRestoreSelBtn.IsEnabled(false);
-        _archiveRestoreSelBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _RestoreCheckedArchived(); });
+        _archiveRestoreSelBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            // Agentmaster: DEFER — _RestoreCheckedArchived loops _RestoreArchivedSession (creates N tabs).
+            // Mutating the tree synchronously inside this Click is the page's documented crash class.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (auto self = weak.get())
+                {
+                    self->_RestoreCheckedArchived();
+                }
+            });
+        });
         footer.Children().Append(_archiveRestoreSelBtn);
         Grid::SetRow(footer, 2);
         host.Children().Append(footer);
@@ -2218,15 +2274,21 @@ namespace winrt::TerminalApp::implementation
         }
         CATCH_LOG();
 
-        const auto findArchived = [&sessions](const std::wstring& id) -> const ::Agentmaster::SessionInfo* {
-            for (const auto& s : sessions)
+        // Agentmaster: index the archived sessions by id ONCE (O(n)) instead of a linear scan per window tab
+        // (the old findArchived was O(tabs · sessions)). Snapshot() ids are unique (keyed off _order), so
+        // a flat map is exact; `sessions` outlives `archivedById`, so the borrowed pointers stay valid.
+        std::unordered_map<std::wstring, const ::Agentmaster::SessionInfo*> archivedById;
+        archivedById.reserve(sessions.size());
+        for (const auto& s : sessions)
+        {
+            if (!s.live)
             {
-                if (!s.live && s.id == id)
-                {
-                    return &s;
-                }
+                archivedById.emplace(s.id, &s);
             }
-            return nullptr;
+        }
+        const auto findArchived = [&archivedById](const std::wstring& id) -> const ::Agentmaster::SessionInfo* {
+            const auto it = archivedById.find(id);
+            return it != archivedById.end() ? it->second : nullptr;
         };
         const auto buildRow = [](const ::Agentmaster::SessionInfo& s, int windowIndex, int windowOrdinal) {
             _ArchiveRow r;
@@ -2257,14 +2319,21 @@ namespace winrt::TerminalApp::implementation
         int ordinal = 0;
         for (const auto& rw : recoverable)
         {
+            // Collect this record's still-archived Claude sessions, CLAIMING each into `grouped` as we go
+            // one session id can appear in more than one record's tab refs (e.g. it was
+            // restored from window A into window B, and both records persist) — claim-on-collect attributes
+            // it to the FIRST window only, so it never yields two rows / two "W{n}" chips, and the ordinal is
+            // bumped only when this record contributes a genuinely new session.
             std::vector<const ::Agentmaster::SessionInfo*> winSessions;
             for (const auto& t : rw.record.tabs)
             {
-                if (t.kind == ::Agentmaster::TabKind::Claude && !t.sessionId.empty())
+                if (t.kind == ::Agentmaster::TabKind::Claude && !t.sessionId.empty() &&
+                    grouped.find(t.sessionId) == grouped.end())
                 {
                     if (const auto* hit = findArchived(t.sessionId))
                     {
                         winSessions.push_back(hit);
+                        grouped.insert(t.sessionId);
                     }
                 }
             }
@@ -2276,7 +2345,7 @@ namespace winrt::TerminalApp::implementation
             for (const auto* s : winSessions)
             {
                 _archiveRows.push_back(buildRow(*s, rw.index, ordinal));
-                grouped.insert(s->id);
+                _archiveRows.back().windowId = rw.record.windowId; // Agentmaster: reopen re-resolves the live index from this
             }
         }
         for (const auto& s : sessions)
@@ -2286,6 +2355,22 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
             _archiveRows.push_back(buildRow(s, -1, 0));
+        }
+
+        // Agentmaster: drop checks for sessions that are no longer archived (restored / became live / removed)
+        // so a stale check can't bulk-restore a gone or already-open session, and the button count stays
+        // honest. (_RestoreArchivedSession also guards on !live, but pruning keeps the selection set clean.)
+        if (!_archiveChecked.empty())
+        {
+            std::unordered_set<std::wstring> present;
+            for (const auto& r : _archiveRows)
+            {
+                present.insert(r.id);
+            }
+            for (auto it = _archiveChecked.begin(); it != _archiveChecked.end();)
+            {
+                it = (present.find(*it) != present.end()) ? std::next(it) : _archiveChecked.erase(it);
+            }
         }
     }
 
@@ -2414,6 +2499,15 @@ namespace winrt::TerminalApp::implementation
             return asc ? (c < 0) : (c > 0);
         });
 
+        // Agentmaster: snapshot the ids currently visible (passing the filter) so the bulk-restore button's
+        // "(N)" count + _RestoreCheckedArchived operate on checked ∩ visible only — a check hidden by a
+        // later search must never be silently bulk-restored.
+        _archiveVisibleIds.clear();
+        for (const auto* r : view)
+        {
+            _archiveVisibleIds.insert(r->id);
+        }
+
         // --- keep a valid selection (default to the first visible row) ---
         bool selValid = false;
         for (const auto* r : view)
@@ -2524,15 +2618,28 @@ namespace winrt::TerminalApp::implementation
         // --- header counts ---
         if (_archiveCountText)
         {
+            // Agentmaster: when a filter is active, report what's SHOWN ("K of N archived sessions") and count the
+            // saved windows over the VISIBLE rows — so the summary tracks the table instead of always citing
+            // the full gathered set (which made "12 archived sessions" sit above a 1-row filtered view).
             std::unordered_set<int> ws;
-            for (const auto& r : _archiveRows)
+            for (const auto* r : view)
             {
-                if (r.windowOrdinal > 0)
+                if (r->windowOrdinal > 0)
                 {
-                    ws.insert(r.windowOrdinal);
+                    ws.insert(r->windowOrdinal);
                 }
             }
-            std::wstring counts = std::to_wstring(_archiveRows.size()) + (_archiveRows.size() == 1 ? L" archived session" : L" archived sessions");
+            const size_t total = _archiveRows.size();
+            const size_t shown = view.size();
+            std::wstring counts;
+            if (!_archiveFilter.empty() && shown != total)
+            {
+                counts = std::to_wstring(shown) + L" of " + std::to_wstring(total) + L" archived sessions";
+            }
+            else
+            {
+                counts = std::to_wstring(total) + (total == 1 ? L" archived session" : L" archived sessions");
+            }
             if (!ws.empty())
             {
                 counts += L"  \x00B7  " + std::to_wstring(ws.size()) + (ws.size() == 1 ? L" saved window" : L" saved windows");
@@ -2695,18 +2802,67 @@ namespace winrt::TerminalApp::implementation
         restore.Content(winrt::box_value(winrt::hstring{ L"Restore here" }));
         const winrt::hstring hid{ id };
         restore.Click([this, hid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-            _RestoreArchivedSession(hid);
-            _HideArchivePage();
+            // Agentmaster: DEFER — _RestoreArchivedSession creates a tab (mutates the visual tree). Doing that
+            // synchronously inside this button's Click (while the pointer event is still routing) is the
+            // exact class that crashed this page 3× (XAML hit-test AV). Run it on a clean tick like the
+            // page's other handlers; _HideArchivePage already defers too.
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), hid]() {
+                auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                self->_RestoreArchivedSession(hid);
+                self->_HideArchivePage();
+            });
         });
         actions.Children().Append(restore);
         if (row && row->windowIndex >= 0)
         {
             Button reopen;
             reopen.Content(winrt::box_value(winrt::hstring{ L"Reopen its window" }));
-            const int idx = row->windowIndex;
-            reopen.Click([this, idx](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                _ReopenSavedWindow(idx);
-                _HideArchivePage();
+            const int fallbackIdx = row->windowIndex;
+            const std::wstring wid = row->windowId;
+            reopen.Click([this, fallbackIdx, wid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                // Agentmaster: DEFER — run on a clean tick like the page's other handlers (collapsing/launching
+                // off the in-flight pointer event is the crash class; see "Restore here" above).
+                // Agentmaster: the captured windowIndex is the record's slot in the sorted set AT GATHER TIME; if
+                // the record set shifted while the page was open (a background window closed, or a record was
+                // pruned), that slot now names a DIFFERENT window. Re-resolve the live index from the stable
+                // windowId against a fresh RecoverableWindows() here. idx<0 (no longer recoverable — already
+                // reopened, or deleted) makes _ReopenSavedWindow a safe no-op. (A residual sub-ms cross-process
+                // race remains: the spawned agentmaster.exe re-loads records for `-s <idx>`; the full fix is to
+                // pass the windowId on the command line — a larger M10-Increment-3 change.)
+                Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), fallbackIdx, wid]() {
+                    auto self = weak.get();
+                    if (!self)
+                    {
+                        return;
+                    }
+                    int idx = fallbackIdx;
+                    if (!wid.empty())
+                    {
+                        idx = -1; // not found -> no-op (don't fall back to a possibly-stale slot)
+                        try
+                        {
+                            for (const auto& rw : ::Agentmaster::RecoverableWindows())
+                            {
+                                if (rw.record.windowId == wid)
+                                {
+                                    idx = rw.index;
+                                    break;
+                                }
+                            }
+                        }
+                        CATCH_LOG();
+                        if (idx < 0)
+                        {
+                            ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] window " + wid + L" no longer recoverable (already open or pruned)\n");
+                        }
+                    }
+                    self->_ReopenSavedWindow(idx);
+                    self->_HideArchivePage();
+                });
             });
             actions.Children().Append(reopen);
         }
@@ -2720,12 +2876,27 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const std::vector<std::wstring> ids(_archiveChecked.begin(), _archiveChecked.end());
+        // Agentmaster: restore ONLY checked rows that are currently visible (pass the filter) — a check hidden
+        // by a later search must not be silently bulk-restored. Leave any hidden checks intact (they
+        // restore once the filter reveals them again). _RestoreArchivedSession additionally guards on
+        // !live, so an id that became open/removed since checking is a safe no-op.
+        std::vector<std::wstring> ids;
+        for (const auto& id : _archiveChecked)
+        {
+            if (_archiveVisibleIds.find(id) != _archiveVisibleIds.end())
+            {
+                ids.push_back(id);
+            }
+        }
+        if (ids.empty())
+        {
+            return;
+        }
         for (const auto& id : ids)
         {
             _RestoreArchivedSession(winrt::hstring{ id });
+            _archiveChecked.erase(id);
         }
-        _archiveChecked.clear();
         _HideArchivePage();
     }
 
@@ -2735,7 +2906,16 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const auto n = _archiveChecked.size();
+        // Agentmaster: count only checked rows that are currently VISIBLE (pass the filter), so the button's
+        // "(N)" agrees with what _RestoreCheckedArchived will actually restore.
+        size_t n = 0;
+        for (const auto& id : _archiveChecked)
+        {
+            if (_archiveVisibleIds.find(id) != _archiveVisibleIds.end())
+            {
+                ++n;
+            }
+        }
         _archiveRestoreSelBtn.Content(winrt::box_value(n > 0 ?
                                                            winrt::hstring{ L"Restore selected (" + std::to_wstring(n) + L")" } :
                                                            winrt::hstring{ L"Restore selected" }));
@@ -5312,6 +5492,14 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster (quit-all window-record loss): flush THIS window's record at the
+        // deterministic quit seam (symmetric to CloseWindow) while it is still laid out, so the
+        // initiating window's final geometry / tab order / focus / lens reaches disk. The OTHER windows
+        // torn down by QuitRequested persist via the ~TerminalPage catch-all. Latch so our own
+        // destructor won't re-capture after the teardown-archive clears _claudeTabs (it would clobber).
+        _FlushWindowRecord();
+        _windowRecordTeardownFlushed = true;
+
         QuitRequested.raise(nullptr, nullptr);
     }
 
@@ -5477,6 +5665,7 @@ namespace winrt::TerminalApp::implementation
         // an anonymous Other ref and lose its session, so the reopened window couldn't re-home it. This
         // also pins the final move/resize past the 750ms autosave debounce (the close-flush, §13.5).
         _FlushWindowRecord();
+        _windowRecordTeardownFlushed = true; // claimed the deterministic flush — the destructor must NOT re-capture (it would clobber this record after the archive below clears _claudeTabs)
 
         // Agentmaster (lifecycle gap #1): archive this window's live sessions NOW — before the host
         // tears us down — so they don't linger as phantom cards on other windows or orphan claude.exe.

@@ -4270,6 +4270,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring composed = _addPromptBox ? std::wstring{ _addPromptBox.Text() } : std::wstring{};
 
         std::wstring textToSend;
+        std::wstring sentPromptId; // Agentmaster: the prompt just marked Sent, for rollback on a failed inject
         if (!composed.empty())
         {
             std::wstring label = composed.substr(0, 56);
@@ -4284,6 +4285,7 @@ namespace winrt::TerminalApp::implementation
                 p.attempts = 1;
                 p.sentAtUnixMs = NowMs(); // timestamp so it sorts into the "sent" summary
                 p.echoed = false; // await this injection's UserPromptSubmit echo (don't double-record)
+                sentPromptId = p.id; // remember it so a failed inject can roll it back (Rule #4)
                 s.queue.push_back(std::move(p));
             });
             textToSend = composed;
@@ -4322,6 +4324,7 @@ namespace winrt::TerminalApp::implementation
                 if (target)
                 {
                     textToSend = target->text;
+                    sentPromptId = target->id; // remember it so a failed inject can roll it back (Rule #4)
                     target->status = PromptStatus::Sent;
                     target->attempts += 1;
                     target->sentAtUnixMs = NowMs();
@@ -4334,7 +4337,30 @@ namespace winrt::TerminalApp::implementation
         {
             // Inject + submit. (Multiline bodies submit on the first CR for now; bracketed
             // paste for true multi-line prompts is a follow-up.)
-            _registry->Inject(_selectedId, textToSend + L"\r");
+            // Agentmaster: check the result and roll the prompt back to Pending on a
+            // failed inject. "Send now" marked it Sent above; if the selected session has no stdin
+            // injector bound (not a live/bound tab yet, or an observe-only external), injecting fails
+            // and the prompt would otherwise be a stranded phantom Sent that was never delivered
+            // (Correctness Rule #4). Reverting to Pending keeps it in the queue to retry.
+            const bool delivered = _registry->Inject(_selectedId, textToSend + L"\r");
+            if (!delivered && !sentPromptId.empty())
+            {
+                _registry->Update(_selectedId, [&](SessionInfo& s) {
+                    for (auto& p : s.queue)
+                    {
+                        if (p.id == sentPromptId && p.status == PromptStatus::Sent)
+                        {
+                            p.status = PromptStatus::Pending;
+                            p.echoed = false;
+                            if (p.attempts > 0)
+                            {
+                                p.attempts -= 1;
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
         }
         _Refresh();
     }

@@ -68,6 +68,15 @@ namespace Agentmaster
         // restore flips this; later windows skip. (M9; superseded by per-window records in M10.)
         std::atomic<bool> restored{ false };
 
+        // Agentmaster: the load BARRIER. `restored` alone (a flag the first window flips) lets a SECOND
+        // window's _RestoreClaudeSessions return early — but that window then races its _RestoreWindowTabs
+        // (which runs immediately after, on its own thread) against a still-loading registry: it sees its
+        // sessions as "unknown", skips them all, and the end-of-startup flush writes an EMPTY record over
+        // its saved workspace. This mutex turns the load into a real barrier — the loader holds it for the
+        // WHOLE LoadSessions + Upsert pass, and a concurrent window BLOCKS on it until the fleet is fully
+        // populated, then sees restored==true and proceeds. Guards only `restored` + the one-time load.
+        std::mutex restoreMutex;
+
         // M10 (window-record claiming; PERSISTENCE.md §13). Each window claims at most ONE
         // persisted WindowRecord at startup so two windows never adopt the same windowId and
         // clobber each other's windows/<id>.json. The set is loaded once (lazily, under the

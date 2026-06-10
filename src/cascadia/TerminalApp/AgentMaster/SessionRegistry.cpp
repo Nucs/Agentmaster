@@ -81,12 +81,31 @@ namespace Agentmaster
 
     void SessionRegistry::Remove(const std::wstring& id)
     {
+        SessionInfo snapshot;
+        bool existed = false;
         {
             std::lock_guard guard{ _mtx };
+            if (const auto it = _sessions.find(id); it != _sessions.end())
+            {
+                snapshot = it->second; // capture BEFORE erase so the notify can identify what left
+                existed = true;
+            }
             _sessions.erase(id);
             _injectors.erase(id);
             _lastHumanInput.erase(id);
             _order.erase(std::remove(_order.begin(), _order.end(), id), _order.end());
+        }
+        // Agentmaster: notify like Upsert/Update do — a removal IS a fleet change. Remove was
+        // the ONLY data mutator that silently skipped _notify, so a resume-fresh that drops a stale
+        // archived record (TerminalPage _LaunchClaudeSession -> Remove(restored->id)) left a GHOST
+        // "Archived" row on every OTHER window's observer-driven Manager/Archive list until some
+        // unrelated event happened to rebuild it. Fire outside the lock (observers may re-enter). Mark
+        // the snapshot not-live so the Scheduler's OnObserved short-circuits instead of trying to
+        // advance a session that no longer exists.
+        if (existed)
+        {
+            snapshot.live = false;
+            _notify(snapshot, HookEvent::Unknown);
         }
     }
 
@@ -309,6 +328,7 @@ namespace Agentmaster
                 created = true;
             }
             auto& s = it->second;
+            const auto prevPid = s.pid; // Agentmaster: the pid we last knew, captured BEFORE the enrichment below overwrites it
 
             // Enrichment merge (facts, never state). Track whether anything MEANINGFUL changed so a
             // steady-state re-observe is a no-op (no observer / persist / UI churn each heartbeat).
@@ -336,10 +356,22 @@ namespace Agentmaster
             assign(s.permissionMode, o.permissionMode);
             assign(s.background, o.background);
             assign(s.sessionName, o.sessionName);
+            // Agentmaster: do NOT bounce a session we INTENTIONALLY archived back to live while
+            // its claude.exe is still winding down. A tab-close / window-teardown archive flips live=false,
+            // but the process lingers (and may still sit in a window's published roster) for up to ~1
+            // survey, so the very next ObserveClaude would correlate the DYING process and revive a
+            // phantom live card until it finally exits. The lingering process keeps its pid, so revive
+            // only on a genuinely DIFFERENT pid (a real re-run of this conversation) — never the same
+            // (dying) one. Facts are still enriched above either way; the no-tab archive branch
+            // (_ArchiveClaudeSession) additionally ProcessAlive-guards. (A first-sight external claude is
+            // created live in the branch above — this gate only governs reviving an EXISTING !live record.)
             if (!s.live)
             {
-                s.live = true; // an observed claude is, by definition, running (Rule #7)
-                changed = true;
+                if (o.pid != 0 && o.pid != prevPid)
+                {
+                    s.live = true; // an observed claude on a NEW pid is genuinely running (Rule #7)
+                    changed = true;
+                }
             }
             if (s.workingDir.empty() && !o.cwd.empty())
             {
