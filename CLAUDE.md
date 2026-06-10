@@ -150,7 +150,9 @@ package: a no-hook `claude.exe` typed after a `cd` lands a Triage-Board card + p
 within ~3 s, classified `Agentmaster`; two claudes in one cwd bind to their **own** conversations;
 real-WindowsTerminal claudes are classified external + never bound; steady-state cost is µs.
 
-**The Archive UI is now a full-window page + a round-2 audit fixed 13 issues — both built + deployed.**
+**The Archive UI is now a full-window page; the round-2 audit's 13 fixes are deployed, and a round-3
+audit (10 more fixes) + a three-commit informativeness batch are built + lib-verified on top — they ride
+the next deploy cycle.**
 The **Archived** button opens a **full-window Archive page** (dense sortable + searchable table left;
 detail — metadata + read-only Flight Plan + **Restore here** / **Reopen its window** — right; multi-select
 **bulk Restore**) replacing the old in-content modal, mounted over `TerminalPage`'s Root content rows with
@@ -160,8 +162,31 @@ of that page, the resume/restore path, and the `WindowRecord` layer then **fixed
 (commit `b5768081e`): quit-all now flushes the window record, a fleet-load **barrier**
 (`Engine::restoreMutex`) stops a reopened window racing its tab re-home against a half-loaded registry, the
 `live=true` revive is gated on a changed pid, `SessionRegistry::Remove` notifies observers, inject-rollback
-covers every send path, and `ProcessAlive` uses a wait-based liveness test. Detail: *C1 UI* + the round-2
-audit bullet under *Persistence*.
+covers every send path, and `ProcessAlive` uses a wait-based liveness test. A **round-3 audit** then
+confirmed-in-code and fixed **10 more** (commit `6d463af2a`): `SessionInfo.branch` had **no live writer**
+(the Branch column + the search's branch term were permanently empty) — now **backfilled off-thread** from
+each transcript's first user line (quiet-update + ONE `SaveSessions`); an open page was a **stale
+snapshot** — a registry **observer** (token, detached in `~TerminalPage`) behind an atomic visibility
+mirror + a 400 ms trailing throttle keeps it **live**; the per-keystroke synchronous rebuild +
+transcript-read storm got a **200 ms search debounce** + an **(id, mtime)-validated detail cache**; a
+recoverable window with NO archived sessions was **invisible** here — now a synthetic, checkbox-less
+**"Saved window" row** (sentinel id `window:<guid>`, never collides with a session UUID); the
+gathered-but-never-rendered sent/total counts became a sortable **Plan column**; plus ago-phrasing
+("just now", `mo`/`y` units), full-Unicode lowercasing (`LCMapStringEx`) + a slash-flipped dir term in
+the search haystack, bulk restore in **view order** (was unordered_set hash order), and wider fixed
+columns (the sort arrow was ellipsized off the default sort column). The **informativeness batch** on
+top: hover **tooltips** on every truncating/abbreviating cell — absolute local datetimes behind
+Created/Active, full title/path/branch, and the **W{n} chip tip** ("W2 · 4 tabs (2 claude, 2 shell) ·
+1466×780 @ 14,173", `ArchiveWindowTip`, gather-stamped) (`af7bc5879`); **detail-pane depth**
+(`2e8e45b7f`) — the truncated conversation **id + Copy id / Copy path / Open transcript** (off-thread
+ShellExecute, Explorer `/select` fallback; all read-only — the no-delete design), an **always-on
+Conversation section** (the transcript's human prompts, which the queue's else-fallback used to hide),
+and **"Last assistant reply"** = where the conversation left off (a 64 KB off-thread **tail read**,
+`ArchiveReadFileTail` → `ParseTranscriptDelta`, cached by (id, mtime), empty results cached too); and
+**plan-text search** (`e2522e448`) — a gather-built per-row `searchBlob` (title · dir + slash-flipped
+twin · branch · the **session id** · every queued prompt's label+text; window-only rows index their chip
+tip) with **whitespace-tokenized AND-matching**, so "remember that prompt I queued" — or a UUID pasted
+from `hooks.log` — finds its session. Detail: *C1 UI* + the audit bullets under *Persistence*.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -288,9 +313,28 @@ What works, by area:
   **Archived (N)** toolbar button (the toolbar's rightmost, after the cog) — a **full-window Archive page**
   (`_BuildArchivePageShell`/`_ShowArchivePage`, mounted over `TerminalPage`'s Root content rows, ← Back to
   dismiss; it REPLACES the old in-content modal). LEFT = a dense, **sortable + searchable** table of archived
-  sessions (Title · Directory · Branch · Created · Active · a saved-**window** chip), each row a checkbox for
-  **multi-select bulk Restore**; RIGHT = the selected row's **detail** — metadata + a read-only Flight Plan +
-  **Restore here** / **Reopen its window** (resume via `claude --resume`, transcript-gated). The two halves are
+  sessions (Title · Directory · Branch · Created · Active · **Plan** `sent/total` · a saved-**window** chip),
+  each row a checkbox for **multi-select bulk Restore** (restores in **view order**); a recoverable window
+  with NO archived sessions still appears — a synthetic, checkbox-less **"Saved window" row** (sentinel id
+  `window:<guid>`, tab composition + record-file timing) so every saved window is visible + reopenable from
+  the page; **every truncating/abbreviating cell carries a hover tooltip** (full title/path/branch, absolute
+  local datetime behind the relative ages, "N of M prompts sent", and the **W{n} chip's** what-window-is-this
+  tip — tab composition + geometry + launch mode, `ArchiveWindowTip`, built once per record at gather). The
+  **search box** (200 ms debounced) matches a gather-built per-row **`searchBlob`** — title · dir + a
+  slash-flipped twin (`k:/source` matches `k:\source`) · branch · the **session id** · every queued prompt's
+  label+text — with **whitespace-tokenized AND-matching** (every token must hit, order-free); the **Branch
+  column backfills off-thread** (`_BackfillArchiveBranches`: `SessionInfo.branch` had no live writer — the
+  transcript's first user line carries it; quiet-update all + ONE save, then poke the page). An **open page
+  stays live**: a registry observer (token, detached in `~TerminalPage`) behind an atomic visibility mirror
+  (`_archivePageVisible`) + a 400 ms trailing throttle re-gathers when a session archives/restores/renames
+  anywhere. RIGHT = the selected row's **detail** — metadata, the truncated conversation **id** with
+  **Copy id / Copy path / Open transcript** mini-actions (off-thread ShellExecute, Explorer `/select`
+  fallback — all read-only, the no-delete design), a read-only Flight Plan, an **always-on Conversation
+  section** (the transcript's human prompts — head-read, (id, mtime)-cached), **"Last assistant reply"**
+  (where the conversation left off — 64 KB off-thread tail read via `ParseTranscriptDelta`, (id, mtime)-
+  cached, empty results too), and **Restore here** / **Reopen its window** (resume via `claude --resume`,
+  transcript-gated; Reopen re-resolves the live record index from the stable `windowId` at click time). The
+  two halves are
   divided by a **draggable splitter** (the Manager-tab `_MakeSplitter` recipe, self-contained in the archive
   TU: drag state in a `shared_ptr` the handlers capture — no `TerminalPage` members; pointer deltas read
   relative to `nullptr` so no ancestor element is captured into a delegate cycle; star-width writes are
