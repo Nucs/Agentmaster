@@ -560,6 +560,7 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _BackfillArchiveBranches(std::vector<std::pair<std::wstring, std::wstring>> idDirs); // (id, dir) pairs: head-read gitBranch off-thread -> UpdateQuiet + ONE SaveSessions + a page refresh
         winrt::fire_and_forget _LoadArchiveAssistantTail(std::wstring sessionId, std::wstring dir, int64_t mtime); // tail-read the transcript's LAST assistant message off-thread -> cache (id, mtime) + re-show the detail
         winrt::fire_and_forget _OpenArchiveTranscript(std::wstring path); // detail "Open transcript": ShellExecute the .jsonl (system open/picker; Explorer /select fallback) — read-only, off the UI thread
+        void _ReopenSavedWindowById(int fallbackIndex, const std::wstring& windowId); // re-resolve the live record index from the STABLE windowId at action time (a gather-time index goes stale), then _ReopenSavedWindow — shared by the detail "Reopen its window" + the row double-click
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 

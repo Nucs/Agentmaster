@@ -1366,6 +1366,39 @@ namespace winrt::TerminalApp::implementation
                     self->_ShowArchiveDetail(rid);
                 });
             });
+            // Double-click = the row's PRIMARY action (the detail pane's first button): a session row
+            // restores into this window; a synthetic "saved window" row reopens that window. The most
+            // common action took select -> travel to the detail pane -> click "Restore here"; this
+            // collapses it to one gesture. XAML raises Tapped for the FIRST tap and DoubleTapped for the
+            // second, so the first click still selects (above) and the detail pane previews what is
+            // about to be restored. DEFERRED like every pointer handler here (restore creates a tab,
+            // reopen launches a window — tree mutations, the page's documented crash class). Both seams
+            // are re-fire-safe: _RestoreArchivedSession no-ops on a live/unknown id (and the sentinel
+            // "window:<guid>" id is unknown by construction), _ReopenSavedWindow on idx < 0.
+            {
+                const bool isWindowRow = r.windowOnly;
+                const int fbIdx = r.windowIndex;
+                const std::wstring wid = r.windowId;
+                row.DoubleTapped([this, rid, isWindowRow, fbIdx, wid](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::DoubleTappedRoutedEventArgs& e) {
+                    e.Handled(true); // consume the gesture — property-only here; the action runs on a clean tick
+                    Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), rid, isWindowRow, fbIdx, wid]() {
+                        auto self = weak.get();
+                        if (!self)
+                        {
+                            return;
+                        }
+                        if (isWindowRow)
+                        {
+                            self->_ReopenSavedWindowById(fbIdx, wid);
+                        }
+                        else
+                        {
+                            self->_RestoreArchivedSession(winrt::hstring{ rid });
+                        }
+                        self->_HideArchivePage();
+                    });
+                });
+            }
             _archiveRowsHost.Children().Append(row);
         }
 
@@ -1477,42 +1510,15 @@ namespace winrt::TerminalApp::implementation
             reopen.Content(winrt::box_value(winrt::hstring{ L"Reopen its window" }));
             reopen.Click([this, fallbackIdx, wid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 // Agentmaster: DEFER — run on a clean tick like the page's other handlers (collapsing/launching
-                // off the in-flight pointer event is the crash class; see "Restore here" below).
-                // Agentmaster: the captured windowIndex is the record's slot in the sorted set AT GATHER TIME; if
-                // the record set shifted while the page was open (a background window closed, or a record was
-                // pruned), that slot now names a DIFFERENT window. Re-resolve the live index from the stable
-                // windowId against a fresh RecoverableWindows() here. idx<0 (no longer recoverable — already
-                // reopened, or deleted) makes _ReopenSavedWindow a safe no-op. (A residual sub-ms cross-process
-                // race remains: the spawned agentmaster.exe re-loads records for `-s <idx>`; the full fix is to
-                // pass the windowId on the command line — a larger M10-Increment-3 change.)
+                // off the in-flight pointer event is the crash class; see "Restore here" below). The stale-index
+                // re-resolution lives in _ReopenSavedWindowById (shared with the row double-click gesture).
                 Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), fallbackIdx, wid]() {
                     auto self = weak.get();
                     if (!self)
                     {
                         return;
                     }
-                    int idx = fallbackIdx;
-                    if (!wid.empty())
-                    {
-                        idx = -1; // not found -> no-op (don't fall back to a possibly-stale slot)
-                        try
-                        {
-                            for (const auto& rw : ::Agentmaster::RecoverableWindows())
-                            {
-                                if (rw.record.windowId == wid)
-                                {
-                                    idx = rw.index;
-                                    break;
-                                }
-                            }
-                        }
-                        CATCH_LOG();
-                        if (idx < 0)
-                        {
-                            ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] window " + wid + L" no longer recoverable (already open or pruned)\n");
-                        }
-                    }
-                    self->_ReopenSavedWindow(idx);
+                    self->_ReopenSavedWindowById(fallbackIdx, wid);
                     self->_HideArchivePage();
                 });
             });
@@ -1820,6 +1826,41 @@ namespace winrt::TerminalApp::implementation
             actions.Children().Append(makeReopenButton(row->windowIndex, row->windowId));
         }
         _archiveDetailHost.Children().Append(actions);
+    }
+
+    // Agentmaster: reopen a saved window by its STABLE windowId, re-resolving the live record index at
+    // action time. A captured windowIndex is the record's slot in the sorted set AT GATHER TIME; if the
+    // record set shifted while the page was open (a background window closed, or a record was pruned),
+    // that slot now names a DIFFERENT window — so re-resolve against a fresh RecoverableWindows() here.
+    // idx<0 (no longer recoverable — already reopened, or deleted) makes _ReopenSavedWindow a safe
+    // no-op. (A residual sub-ms cross-process race remains: the spawned agentmaster.exe re-loads records
+    // for `-s <idx>`; the full fix is to pass the windowId on the command line — a larger M10-Increment-3
+    // change.) Shared by the detail pane's "Reopen its window" and the table's row double-click; callers
+    // arrive on a clean dispatcher tick (the launch mutates no tree, but the callers also hide the page).
+    void TerminalPage::_ReopenSavedWindowById(int fallbackIndex, const std::wstring& windowId)
+    {
+        int idx = fallbackIndex;
+        if (!windowId.empty())
+        {
+            idx = -1; // not found -> no-op (don't fall back to a possibly-stale slot)
+            try
+            {
+                for (const auto& rw : ::Agentmaster::RecoverableWindows())
+                {
+                    if (rw.record.windowId == windowId)
+                    {
+                        idx = rw.index;
+                        break;
+                    }
+                }
+            }
+            CATCH_LOG();
+            if (idx < 0)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[reopen] window " + windowId + L" no longer recoverable (already open or pruned)\n");
+            }
+        }
+        _ReopenSavedWindow(idx);
     }
 
     // Bulk: restore every checked archived session into the current window, then close the page.
