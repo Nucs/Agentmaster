@@ -360,6 +360,11 @@ namespace winrt::TerminalApp::implementation
             bool windowOnly{ false };
             int winClaudeTabs{ 0 };
             int winShellTabs{ 0 };
+            // Agentmaster: the W{n} chip's hover tooltip — what that saved window IS ("W2 · 4 tabs
+            // (2 claude, 2 shell) · 1466×780 @ 14,173"), built ONCE per record at gather time from its
+            // WindowRecord (tab composition + geometry); the render loop only has the row. Empty for
+            // loose rows (no chip).
+            std::wstring windowTip;
         };
         winrt::Windows::UI::Xaml::Controls::Grid _archivePageHost{ nullptr };          // full-bleed page over Root
         winrt::Windows::UI::Xaml::Controls::Grid _archiveHeaderRow{ nullptr };         // LEFT: sortable column header

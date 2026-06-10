@@ -132,6 +132,76 @@ namespace winrt::TerminalApp::implementation
             return a == L"now" ? std::wstring{ L"just now" } : a + L" ago";
         }
 
+        // Absolute local datetime ("2026-06-10 14:32") for hover tooltips — the table cells show only
+        // the compact relative age ("3h" / "2d"), which answers "how long ago?" but not "which day was
+        // that?"; the tooltip carries the exact moment. "" when unknown (0) so the tooltip helper no-ops.
+        std::wstring ArchiveLocalDateTime(int64_t unixMs)
+        {
+            if (unixMs <= 0)
+            {
+                return L"";
+            }
+            const __time64_t t = unixMs / 1000;
+            struct tm local
+            {
+            };
+            if (_localtime64_s(&local, &t) != 0)
+            {
+                return L"";
+            }
+            wchar_t buf[24]{};
+            swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min);
+            return buf;
+        }
+
+        // Attach a hover tooltip to any element; no-op on empty (a cell with nothing beyond what it
+        // already shows stays tooltip-less). The table's cells truncate (CharacterEllipsis) or
+        // abbreviate ("3h", "3/7", "W2") — the tooltip carries the full value.
+        void ArchiveSetTip(const winrt::Windows::UI::Xaml::UIElement& el, const std::wstring& tip)
+        {
+            if (!tip.empty())
+            {
+                winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, winrt::box_value(winrt::hstring{ tip }));
+            }
+        }
+
+        // The W{n} chip's tooltip: what that saved window IS — tab composition + geometry from its
+        // WindowRecord, e.g. "W2 · 4 tabs (2 claude, 2 shell) · 1466×780 @ 14,173 · maximized". The
+        // chip alone says "W2" and nothing anywhere on the page said what W2 was. Built once per
+        // record at gather time and stamped on every row of that window.
+        std::wstring ArchiveWindowTip(int ordinal, int claudeTabs, int shellTabs, const ::Agentmaster::WindowGeometry& geo)
+        {
+            std::wstring tip = L"W" + std::to_wstring(ordinal);
+            const int total = claudeTabs + shellTabs;
+            tip += L" \x00B7 " + std::to_wstring(total) + (total == 1 ? L" tab" : L" tabs");
+            if (total > 0)
+            {
+                std::wstring comp;
+                if (claudeTabs > 0)
+                {
+                    comp += std::to_wstring(claudeTabs) + L" claude";
+                }
+                if (shellTabs > 0)
+                {
+                    comp += (comp.empty() ? std::wstring{} : std::wstring{ L", " }) + std::to_wstring(shellTabs) + L" shell";
+                }
+                tip += L" (" + comp + L")";
+            }
+            if (geo.hasSize)
+            {
+                tip += L" \x00B7 " + std::to_wstring(static_cast<long long>(geo.width)) + L"\x00D7" + std::to_wstring(static_cast<long long>(geo.height));
+            }
+            if (geo.hasPosition)
+            {
+                tip += (geo.hasSize ? std::wstring{ L" @ " } : std::wstring{ L" \x00B7 @ " }) + std::to_wstring(static_cast<long long>(geo.x)) + L"," + std::to_wstring(static_cast<long long>(geo.y));
+            }
+            if (!geo.launchMode.empty() && geo.launchMode != L"default")
+            {
+                tip += L" \x00B7 " + geo.launchMode;
+            }
+            return tip;
+        }
+
         // File times of a saved window's record (windows/<id>.json): ctime ≈ when the workspace was
         // first saved, mtime ≈ its last autosave. Sorts/labels the synthetic "saved window" rows.
         // (Same FILETIME→unix-ms conversion ProcessInspect uses internally — not exported there.)
@@ -604,6 +674,8 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             ++ordinal;
+            // The chip tooltip — composition + geometry — once per record; stamped on every row below.
+            const std::wstring wtip = ArchiveWindowTip(ordinal, claudeRefs, shellRefs, rw.record.geometry);
             if (winSessions.empty())
             {
                 // Agentmaster: a recoverable window with NO archived Claude sessions (a pure-shell
@@ -621,6 +693,7 @@ namespace winrt::TerminalApp::implementation
                 r.windowOrdinal = ordinal;
                 r.winClaudeTabs = claudeRefs;
                 r.winShellTabs = shellRefs;
+                r.windowTip = wtip;
                 std::wstring rowTitle = L"Saved window";
                 if (claudeRefs > 0)
                 {
@@ -643,6 +716,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _archiveRows.push_back(buildRow(*s, rw.index, ordinal));
                 _archiveRows.back().windowId = rw.record.windowId; // Agentmaster: reopen re-resolves the live index from this
+                _archiveRows.back().windowTip = wtip;
             }
         }
         for (const auto& s : sessions)
@@ -897,24 +971,31 @@ namespace winrt::TerminalApp::implementation
                 g.Children().Append(cb);
             }
 
+            // Tooltips throughout: every cell either truncates (CharacterEllipsis on Title/Dir/Branch)
+            // or abbreviates ("3h", "3/7", "W2") — hover carries the full value / exact moment.
             auto title = ArchiveText(r.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ r.title }, 13, true, r.windowOnly ? 0.7 : 0.95);
             title.Margin(Thickness{ 2, 0, 6, 0 });
+            ArchiveSetTip(title, r.title);
             Grid::SetColumn(title, 1);
             g.Children().Append(title);
             auto dir = ArchiveText(winrt::hstring{ r.dir }, 12, false, 0.6);
             dir.Margin(Thickness{ 0, 0, 6, 0 });
+            ArchiveSetTip(dir, r.dir); // the full path — the cell end-trims, losing the leaf
             Grid::SetColumn(dir, 2);
             g.Children().Append(dir);
             auto br = ArchiveText(winrt::hstring{ r.branch }, 12, false, 0.55);
             br.HorizontalAlignment(HorizontalAlignment::Center);
+            ArchiveSetTip(br, r.branch);
             Grid::SetColumn(br, 3);
             g.Children().Append(br);
             auto cr = ArchiveText(winrt::hstring{ ArchiveAgo(r.createdUnixMs, now) }, 11, false, 0.6);
             cr.HorizontalAlignment(HorizontalAlignment::Center);
+            ArchiveSetTip(cr, ArchiveLocalDateTime(r.createdUnixMs)); // absolute local datetime behind the relative age
             Grid::SetColumn(cr, 4);
             g.Children().Append(cr);
             auto la = ArchiveText(winrt::hstring{ ArchiveAgo(r.lastActivityUnixMs, now) }, 11, false, 0.6);
             la.HorizontalAlignment(HorizontalAlignment::Center);
+            ArchiveSetTip(la, ArchiveLocalDateTime(r.lastActivityUnixMs));
             Grid::SetColumn(la, 5);
             g.Children().Append(la);
             {
@@ -928,6 +1009,10 @@ namespace winrt::TerminalApp::implementation
                                       false,
                                       hasPlan ? 0.6 : 0.3);
                 pl.HorizontalAlignment(HorizontalAlignment::Center);
+                if (hasPlan)
+                {
+                    ArchiveSetTip(pl, std::to_wstring(r.sentCount) + L" of " + std::to_wstring(r.totalCount) + L" prompts sent");
+                }
                 Grid::SetColumn(pl, 6);
                 g.Children().Append(pl);
             }
@@ -941,6 +1026,8 @@ namespace winrt::TerminalApp::implementation
                 chip.VerticalAlignment(VerticalAlignment::Center);
                 auto wt = ArchiveText(winrt::hstring{ L"W" + std::to_wstring(r.windowOrdinal) }, 10, true, 1.0);
                 chip.Child(wt);
+                // What W{n} IS — the chip alone said "W2" and nothing on the page said what that was.
+                ArchiveSetTip(chip, r.windowTip);
                 Grid::SetColumn(chip, 7);
                 g.Children().Append(chip);
             }
@@ -1141,7 +1228,19 @@ namespace winrt::TerminalApp::implementation
             }
             if (!wmeta.empty())
             {
-                _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ wmeta }, 12, false, 0.6, true));
+                auto wmetaTb = ArchiveText(winrt::hstring{ wmeta }, 12, false, 0.6, true);
+                // Hover = the exact moments behind the relative phrases.
+                std::wstring wtipAbs;
+                if (const auto a = ArchiveLocalDateTime(row->createdUnixMs); !a.empty())
+                {
+                    wtipAbs += L"saved " + a;
+                }
+                if (const auto a = ArchiveLocalDateTime(row->lastActivityUnixMs); !a.empty())
+                {
+                    wtipAbs += (wtipAbs.empty() ? std::wstring{} : std::wstring{ L"  \x00B7  " }) + L"last updated " + a;
+                }
+                ArchiveSetTip(wmetaTb, wtipAbs);
+                _archiveDetailHost.Children().Append(wmetaTb);
             }
             {
                 Border d;
@@ -1212,7 +1311,19 @@ namespace winrt::TerminalApp::implementation
         }
         if (!meta.empty())
         {
-            _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ meta }, 12, false, 0.6, true));
+            auto metaTb = ArchiveText(winrt::hstring{ meta }, 12, false, 0.6, true);
+            // Hover = the exact moments behind the relative phrases.
+            std::wstring metaTip;
+            if (const auto a = ArchiveLocalDateTime(created); !a.empty())
+            {
+                metaTip += L"created " + a;
+            }
+            if (const auto a = ArchiveLocalDateTime(last); !a.empty())
+            {
+                metaTip += (metaTip.empty() ? std::wstring{} : std::wstring{ L"  \x00B7  " }) + L"last active " + a;
+            }
+            ArchiveSetTip(metaTb, metaTip);
+            _archiveDetailHost.Children().Append(metaTb);
         }
 
         {
