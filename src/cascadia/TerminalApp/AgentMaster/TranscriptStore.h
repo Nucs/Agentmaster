@@ -127,6 +127,10 @@ namespace Agentmaster
         std::wstring forkedFromId; // forkedFrom.sessionId when stamped (=> the file is a fork copy)
         std::wstring cwd; // the line's cwd field, when present
         std::wstring gitBranch; // the line's gitBranch field, when present
+        // Filesystem paths this line's tool calls touched (assistant tool_use inputs: file_path /
+        // notebook_path / path — Read/Edit/Write/Grep/Glob/...). Feeds the Sessions page's 📁/📄
+        // scope (filter by directories/files ACCESSED). Capped (8/line); always extracted (cheap).
+        std::vector<std::wstring> toolPaths;
     };
 
     // Classify + extract ONE transcript line (any stratum; tolerant of unknown types). Pure.
@@ -163,7 +167,12 @@ namespace Agentmaster
         std::wstring forkedFromId; // non-empty => this file is a fork copy of that session
         std::wstring cwd; // first cwd seen on a line (the REAL dir; the folder name is lossy)
         std::wstring gitBranch; // first gitBranch seen
+        // Deduped union of every tool-touched path (TranscriptLineFacts::toolPaths), capped at
+        // kMaxPathsAccessed — the 📁/📄 search scopes' haystack (dirs derive from these + cwd).
+        std::vector<std::wstring> pathsAccessed;
     };
+
+    inline constexpr size_t kMaxPathsAccessed = 512;
 
     // One incremental accumulate: scan [stats.parsedBytes, EOF) and fold into `stats`. Returns
     // false (stats.found=false) when the file is gone — the sweep deletes mid-listing; callers
@@ -190,4 +199,46 @@ namespace Agentmaster
         std::wstring cwd; // from the head window (the REAL dir for grouping; PathEq it)
     };
     TranscriptQuickFacts ReadTranscriptQuickFacts(const std::wstring& path, int64_t fileBirthMs);
+
+    // ===== live-session presence (`~/.claude/sessions/<pid>.json`) ===========================
+    // Claude Code's own heartbeat presence files: pid ↔ sessionId ↔ cwd plus a self-reported
+    // `status` (busy | idle | waiting | shell) and `updatedAt`. RAW reads — stale files linger
+    // after crashes, so the OBSERVER validates each row against its process snapshot (pid alive
+    // AND still a claude.exe) before publishing. Separation contract (SESSIONS.md §7-Q5): the
+    // STORE owns every claude-session domain read; everything live/changing is surfaced to the
+    // app through the Fleet Observer's published tables, never read ad-hoc by the UI.
+    struct SessionPresenceRow
+    {
+        uint32_t pid{};
+        std::wstring sessionId;
+        std::wstring cwd;
+        std::wstring status; // busy | idle | waiting | shell (claude's own heartbeat state)
+        std::wstring version; // claude version that wrote the file
+        int64_t startedAtMs{};
+        int64_t updatedAtMs{};
+    };
+    std::vector<SessionPresenceRow> ReadSessionPresenceIn(std::wstring_view sessionsDir);
+    // Against the live `<claude home>/sessions` (the sibling of ClaudeProjectsDir()).
+    std::vector<SessionPresenceRow> ReadSessionPresence();
+
+    // ===== the per-session sidecar index (`~/.agentmaster/sessions-index/<sid>.json`) ========
+    // The Sessions page's cache (SESSIONS.md §6.2): one sidecar per session holding the
+    // accumulated TranscriptStats + the (sizeBytes, mtimeMs) invalidation key. Load-or-refresh:
+    // key matches => parse the small sidecar only (no transcript IO); size grew => RESUME the
+    // accumulate from the stored parsedBytes (only the appended suffix is read) and rewrite;
+    // shrink => stats auto-rebuild. The fast search phase greps these sidecars + history.jsonl;
+    // only the slow phase touches transcripts.
+    struct SessionIndexEntry
+    {
+        bool valid{}; // the transcript existed and the entry is current
+        std::wstring sessionId;
+        std::wstring path; // transcript path at index time (key the CACHE by sid — /cd relocates files)
+        int64_t sizeBytes{};
+        int64_t mtimeMs{};
+        int64_t birthMs{};
+        TranscriptStats stats;
+    };
+    SessionIndexEntry LoadOrRefreshSessionIndexIn(const std::wstring& indexDir, const TranscriptRef& ref);
+    // Against the live index dir (<AgentmasterStateDir>\sessions-index, created on demand).
+    SessionIndexEntry LoadOrRefreshSessionIndex(const TranscriptRef& ref);
 }

@@ -356,6 +356,10 @@ namespace Agentmaster
             assign(s.permissionMode, o.permissionMode);
             assign(s.background, o.background);
             assign(s.sessionName, o.sessionName);
+            // Presence heartbeat (busy/idle/waiting/shell) — a display FACT, never SessionState
+            // (Rule #13). A flip notifies (turn-cadence, not per-survey noise) so a hook-less
+            // session's status chip updates live.
+            assign(s.presenceStatus, o.presenceStatus);
             // Agentmaster: do NOT bounce a session we INTENTIONALLY archived back to live while
             // its claude.exe is still winding down. A tab-close / window-teardown archive flips live=false,
             // but the process lingers (and may still sit in a window's published roster) for up to ~1

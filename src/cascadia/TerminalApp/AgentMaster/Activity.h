@@ -120,6 +120,10 @@ namespace Agentmaster
         RunningApp runningApp{ RunningApp::Unknown };
         bool background{};
         std::wstring model, effort, permissionMode, sessionName;
+        // Claude's self-reported presence heartbeat (busy/idle/waiting/shell) from
+        // ~/.claude/sessions/<pid>.json, pid-liveness-validated by the S-lane. A display FACT,
+        // never SessionState (Rule #13). Empty when no live presence file matches this claude.
+        std::wstring presenceStatus;
         int64_t observedUnixMs{};
         int64_t createdUnixMs{}; // transcript ctime (≈ conversation start) — per-session timing
         int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity) — per-session timing

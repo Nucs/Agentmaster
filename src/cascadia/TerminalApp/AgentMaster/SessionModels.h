@@ -174,6 +174,12 @@ namespace Agentmaster
         RunningApp runningApp{ RunningApp::Unknown }; // ours (Agentmaster) vs external (WindowsTerminal)
         std::wstring amSession; // owning Agentmaster instance stamp (empty if external)
         std::wstring ownerWindowId; // the window that hosts this session's tab (§19-Q1 attribution)
+        // Claude's OWN self-reported heartbeat state from its presence file
+        // (~/.claude/sessions/<pid>.json → "busy"/"idle"/"waiting"/"shell"; SESSIONS.md §7-Q5).
+        // A display-only FACT fed by the S-lane (validated against pid liveness) — deliberately
+        // NOT SessionState (push hooks + the transcript tail own state, Rule #13; STATE.md owns
+        // any future promotion). Empty when no live presence file backs this session.
+        std::wstring presenceStatus;
         bool hookWired{}; // have we received ANY hook for this id this run? (provenance)
         int64_t lastHookUnixMs{}; // last authoritative push (hook) — provenance vs the pull
         int64_t lastObservedUnixMs{}; // last pull observation (the S-lane survey)

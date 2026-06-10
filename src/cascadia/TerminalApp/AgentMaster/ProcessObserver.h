@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "Activity.h" // CorrelationRow, TabActivityRow, TabRosterEntry, ObservedClaude
+#include "TranscriptStore.h" // SessionPresenceRow (the validated presence table the S-lane publishes)
 
 namespace Agentmaster
 {
@@ -67,6 +68,13 @@ namespace Agentmaster
         // The external (RunningApp::WindowsTerminal) claude census — observe-only, surfaced by the
         // Manager as an "External (N)" group (O6 / §11c). Copy-under-lock like the other tables.
         std::vector<ExternalClaudeRow> External() const;
+        // Live-session presence (~/.claude/sessions/<pid>.json), VALIDATED each full survey against
+        // the same process snapshot (a stale file — its pid dead or no longer a claude — is dropped;
+        // crash leftovers linger on disk). The separation contract (SESSIONS.md §7-Q5): the
+        // TranscriptStore owns the raw read; everything live/changing reaches the app through THIS
+        // published table (and the per-session `presenceStatus` enrichment via ObserveClaude) —
+        // never an ad-hoc UI read. Copy-under-lock like the other tables.
+        std::vector<SessionPresenceRow> Presence() const;
 
     private:
         void _worker() noexcept; // heartbeat + Wake() loop (mirrors SessionScanner::_worker)
@@ -91,6 +99,7 @@ namespace Agentmaster
         std::vector<CorrelationRow> _correlation;
         std::vector<TabActivityRow> _activity;
         std::vector<ExternalClaudeRow> _external; // external (WindowsTerminal) claudes (O6)
+        std::vector<SessionPresenceRow> _presence; // pid-validated live-session presence (§7-Q5)
         std::vector<uint32_t> _knownPids; // claude pids that correlated this pass (M-lane liveness cross-check)
 
         // Worker-thread-only census-log throttle (no lock — touched only inside _surveyOnce).

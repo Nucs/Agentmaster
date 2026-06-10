@@ -185,6 +185,7 @@
     <ClInclude Include="AgentMaster\ProcessInspect.h" />
     <ClInclude Include="AgentMaster\ProcessObserver.h" />
     <ClInclude Include="AgentMaster\TranscriptStore.h" />
+    <ClInclude Include="AgentMaster\SessionSearch.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>
@@ -353,6 +354,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AgentMaster\TranscriptStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="AgentMaster\SessionSearch.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SnippetsPaneContent.cpp">

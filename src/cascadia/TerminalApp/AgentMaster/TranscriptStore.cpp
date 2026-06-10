@@ -116,6 +116,63 @@ namespace
                              nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     }
 
+    // Read a whole (small) file, capped. Empty on failure / oversize. Shared like OpenShared.
+    std::string ReadFileWhole(const std::wstring& path, size_t maxBytes)
+    {
+        const HANDLE h = OpenShared(path);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return {};
+        }
+        LARGE_INTEGER sz{};
+        ::GetFileSizeEx(h, &sz);
+        if (sz.QuadPart < 0 || static_cast<uint64_t>(sz.QuadPart) > maxBytes)
+        {
+            ::CloseHandle(h);
+            return {};
+        }
+        std::string bytes(static_cast<size_t>(sz.QuadPart), '\0');
+        size_t off = 0;
+        while (off < bytes.size())
+        {
+            DWORD got = 0;
+            if (!::ReadFile(h, bytes.data() + off, static_cast<DWORD>(std::min<size_t>(bytes.size() - off, kScanChunkBytes)), &got, nullptr) || got == 0)
+            {
+                break;
+            }
+            off += got;
+        }
+        ::CloseHandle(h);
+        bytes.resize(off);
+        return bytes;
+    }
+
+    // Write text as UTF-8 via a temp file + atomic replace (a torn sidecar must never survive).
+    bool WriteFileUtf8(const std::wstring& path, const std::wstring& text)
+    {
+        int n = ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+        std::string bytes(static_cast<size_t>(n > 0 ? n : 0), '\0');
+        if (n > 0)
+        {
+            ::WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), bytes.data(), n, nullptr, nullptr);
+        }
+        const std::wstring tmp = path + L".tmp";
+        const HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return false;
+        }
+        DWORD w = 0;
+        const BOOL ok = bytes.empty() ? TRUE : ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &w, nullptr);
+        ::CloseHandle(h);
+        if (!ok || w != bytes.size())
+        {
+            ::DeleteFileW(tmp.c_str());
+            return false;
+        }
+        return ::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    }
+
     // Read `want` bytes at `offset`. Returns the bytes actually read (short on EOF/error).
     std::string ReadAt(HANDLE h, int64_t offset, size_t want)
     {
@@ -573,11 +630,25 @@ namespace Agentmaster
                     {
                         ++f.toolUses;
                         AppendCapped(f.agentText, blk.StrAt(L"name"), maxAgentTextChars);
-                        if (maxAgentTextChars != 0 && f.agentText.size() < maxAgentTextChars)
+                        if (const auto* in = blk.Find(L"input"); in && in->type == json::Value::Type::Obj)
                         {
-                            if (const auto* in = blk.Find(L"input"); in && in->type == json::Value::Type::Obj)
+                            if (maxAgentTextChars != 0 && f.agentText.size() < maxAgentTextChars)
                             {
                                 AppendCapped(f.agentText, json::Dump(*in), maxAgentTextChars);
+                            }
+                            // Tool-touched paths (the 📁/📄 search scopes): the canonical path
+                            // keys across Read/Edit/Write/NotebookEdit/Grep/Glob inputs.
+                            for (const auto key : { L"file_path", L"notebook_path", L"path" })
+                            {
+                                if (f.toolPaths.size() >= 8)
+                                {
+                                    break;
+                                }
+                                const std::wstring p = in->StrAt(key);
+                                if (!p.empty() && p.size() <= 512)
+                                {
+                                    f.toolPaths.push_back(p);
+                                }
                             }
                         }
                     }
@@ -726,6 +797,27 @@ namespace Agentmaster
                 ++stats.assistantLines;
                 stats.toolUses += f.toolUses;
             }
+            // Deduped union of tool-touched paths (case-insensitive — Windows paths), capped.
+            for (const auto& p : f.toolPaths)
+            {
+                if (stats.pathsAccessed.size() >= kMaxPathsAccessed)
+                {
+                    break;
+                }
+                bool seen = false;
+                for (const auto& have : stats.pathsAccessed)
+                {
+                    if (have.size() == p.size() && ::_wcsicmp(have.c_str(), p.c_str()) == 0)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen)
+                {
+                    stats.pathsAccessed.push_back(p);
+                }
+            }
             if (!f.title.empty())
             {
                 switch (f.kind)
@@ -856,5 +948,181 @@ namespace Agentmaster
         }
         ::CloseHandle(h);
         return q;
+    }
+
+    // ===== live-session presence =============================================================
+
+    std::vector<SessionPresenceRow> ReadSessionPresenceIn(std::wstring_view sessionsDir)
+    {
+        std::vector<SessionPresenceRow> out;
+        if (sessionsDir.empty())
+        {
+            return out;
+        }
+        const std::wstring root{ sessionsDir };
+        WIN32_FIND_DATAW fd{};
+        const HANDLE h = ::FindFirstFileW((root + L"\\*.json").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return out;
+        }
+        do
+        {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                continue;
+            }
+            const std::string bytes = ReadFileWhole(root + L"\\" + fd.cFileName, 64 << 10);
+            if (bytes.empty())
+            {
+                continue;
+            }
+            const std::wstring wide = Utf8ToWide(bytes.data(), bytes.size());
+            const auto parsed = json::Parse(wide);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            SessionPresenceRow r;
+            r.pid = parsed->U32At(L"pid");
+            r.sessionId = parsed->StrAt(L"sessionId");
+            r.cwd = parsed->StrAt(L"cwd");
+            r.status = parsed->StrAt(L"status");
+            r.version = parsed->StrAt(L"version");
+            r.startedAtMs = parsed->I64At(L"startedAt");
+            r.updatedAtMs = parsed->I64At(L"updatedAt");
+            if (r.pid != 0 && !r.sessionId.empty())
+            {
+                out.push_back(std::move(r));
+            }
+        } while (::FindNextFileW(h, &fd));
+        ::FindClose(h);
+        return out;
+    }
+
+    std::vector<SessionPresenceRow> ReadSessionPresence()
+    {
+        // The presence dir is `<claude home>\sessions`, the sibling of `<claude home>\projects`.
+        std::wstring projects = ClaudeProjectsDir();
+        while (!projects.empty() && (projects.back() == L'\\' || projects.back() == L'/'))
+        {
+            projects.pop_back();
+        }
+        const size_t cut = projects.find_last_of(L"\\/");
+        if (cut == std::wstring::npos)
+        {
+            return {};
+        }
+        return ReadSessionPresenceIn(projects.substr(0, cut) + L"\\sessions");
+    }
+
+    // ===== the per-session sidecar index =====================================================
+
+    SessionIndexEntry LoadOrRefreshSessionIndexIn(const std::wstring& indexDir, const TranscriptRef& ref)
+    {
+        SessionIndexEntry e;
+        e.sessionId = ref.sessionId;
+        e.path = ref.path;
+        e.birthMs = ref.birthMs;
+        if (indexDir.empty() || ref.sessionId.empty())
+        {
+            return e;
+        }
+        const std::wstring sidecar = indexDir + L"\\" + ref.sessionId + L".json";
+
+        // Load the prior sidecar (if any) — its (size, mtime) is the invalidation key, its
+        // stats.parsedBytes the resume cursor.
+        int64_t cachedSize = -1, cachedMtime = -1;
+        {
+            const std::string bytes = ReadFileWhole(sidecar, 4 << 20);
+            if (!bytes.empty())
+            {
+                const std::wstring wide = Utf8ToWide(bytes.data(), bytes.size());
+                const auto parsed = json::Parse(wide);
+                if (parsed && parsed->type == json::Value::Type::Obj && parsed->StrAt(L"sid") == ref.sessionId)
+                {
+                    const auto& o = *parsed;
+                    cachedSize = o.I64At(L"size", -1);
+                    cachedMtime = o.I64At(L"mtime", -1);
+                    e.stats.parsedBytes = o.I64At(L"parsedBytes");
+                    e.stats.firstTimestampMs = o.I64At(L"firstTs");
+                    e.stats.lastTimestampMs = o.I64At(L"lastTs");
+                    e.stats.userPrompts = static_cast<int>(o.I64At(L"userPrompts"));
+                    e.stats.assistantLines = static_cast<int>(o.I64At(L"assistantLines"));
+                    e.stats.toolUses = static_cast<int>(o.I64At(L"toolUses"));
+                    e.stats.customTitle = o.StrAt(L"customTitle");
+                    e.stats.aiTitle = o.StrAt(L"aiTitle");
+                    e.stats.summary = o.StrAt(L"summary");
+                    e.stats.firstUserPrompt = o.StrAt(L"firstUserPrompt");
+                    e.stats.forkedFromId = o.StrAt(L"forkedFromId");
+                    e.stats.cwd = o.StrAt(L"cwd");
+                    e.stats.gitBranch = o.StrAt(L"gitBranch");
+                    if (const auto* paths = o.Find(L"paths"); paths && paths->type == json::Value::Type::Arr)
+                    {
+                        for (const auto& p : paths->arr)
+                        {
+                            if (p.type == json::Value::Type::Str && e.stats.pathsAccessed.size() < kMaxPathsAccessed)
+                            {
+                                e.stats.pathsAccessed.push_back(p.str);
+                            }
+                        }
+                    }
+                    e.stats.found = true;
+                }
+            }
+        }
+        if (cachedSize == ref.sizeBytes && cachedMtime == ref.mtimeMs && e.stats.found)
+        {
+            e.sizeBytes = cachedSize;
+            e.mtimeMs = cachedMtime;
+            e.valid = true;
+            return e; // cache hit: the sidecar IS current — zero transcript IO
+        }
+
+        // Stale / absent: resume the accumulate (only the appended suffix is read; a shrink
+        // auto-rebuilds inside AccumulateTranscriptStats) and rewrite the sidecar.
+        if (!AccumulateTranscriptStats(ref.path, e.stats))
+        {
+            e.valid = false; // transcript swept mid-listing
+            return e;
+        }
+        e.sizeBytes = ref.sizeBytes;
+        e.mtimeMs = ref.mtimeMs;
+        e.valid = true;
+
+        json::Value o = json::Value::MkObj();
+        o.Set(L"sid", json::Value::MkStr(ref.sessionId));
+        o.Set(L"path", json::Value::MkStr(ref.path));
+        o.Set(L"size", json::Value::MkNum(static_cast<double>(ref.sizeBytes)));
+        o.Set(L"mtime", json::Value::MkNum(static_cast<double>(ref.mtimeMs)));
+        o.Set(L"birth", json::Value::MkNum(static_cast<double>(ref.birthMs)));
+        o.Set(L"parsedBytes", json::Value::MkNum(static_cast<double>(e.stats.parsedBytes)));
+        o.Set(L"firstTs", json::Value::MkNum(static_cast<double>(e.stats.firstTimestampMs)));
+        o.Set(L"lastTs", json::Value::MkNum(static_cast<double>(e.stats.lastTimestampMs)));
+        o.Set(L"userPrompts", json::Value::MkNum(e.stats.userPrompts));
+        o.Set(L"assistantLines", json::Value::MkNum(e.stats.assistantLines));
+        o.Set(L"toolUses", json::Value::MkNum(e.stats.toolUses));
+        o.Set(L"customTitle", json::Value::MkStr(e.stats.customTitle));
+        o.Set(L"aiTitle", json::Value::MkStr(e.stats.aiTitle));
+        o.Set(L"summary", json::Value::MkStr(e.stats.summary));
+        o.Set(L"firstUserPrompt", json::Value::MkStr(e.stats.firstUserPrompt));
+        o.Set(L"forkedFromId", json::Value::MkStr(e.stats.forkedFromId));
+        o.Set(L"cwd", json::Value::MkStr(e.stats.cwd));
+        o.Set(L"gitBranch", json::Value::MkStr(e.stats.gitBranch));
+        json::Value paths = json::Value::MkArr();
+        for (const auto& p : e.stats.pathsAccessed)
+        {
+            paths.Push(json::Value::MkStr(p));
+        }
+        o.Set(L"paths", std::move(paths));
+        WriteFileUtf8(sidecar, json::Dump(o));
+        return e;
+    }
+
+    SessionIndexEntry LoadOrRefreshSessionIndex(const TranscriptRef& ref)
+    {
+        const std::wstring dir = AgentmasterStateDir() + L"\\sessions-index";
+        ::CreateDirectoryW(dir.c_str(), nullptr); // idempotent; parent exists (the state dir)
+        return LoadOrRefreshSessionIndexIn(dir, ref);
     }
 }
