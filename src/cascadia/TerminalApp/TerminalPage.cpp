@@ -2974,6 +2974,63 @@ namespace winrt::TerminalApp::implementation
         return {};
     }
 
+    // Agentmaster (cross-window move): a Claude tab is being MOVED to another window — NOT closed.
+    // Both the tear-out paths (_onTabDroppedOutside / a tab-strip drag onto another window, both via
+    // _sendDraggedTabToWindow) and the moveTab action with a window target (_MoveTab) transfer the
+    // tab's LIVE ConPTY content to a different TerminalPage in THIS same process: BuildStartupKind::
+    // Content serializes only a ContentId, and the destination re-attaches the SAME ITerminalConnection
+    // via the process-wide ContentManager — so the session keeps running on the same claude.exe; only
+    // the hosting window changes. Those paths call _RemoveTab directly, bypassing the archive seam
+    // (_HandleCloseTabRequested), so without this the moved session's entry LEAKS in this window's
+    // _claudeTabs. When this window later tears down, _ArchiveWindowSessionsOnTeardown would then flip
+    // that record live=false and clear its injector — severing (and possibly killing) a session that is
+    // now alive in ANOTHER window.
+    //
+    // So evict this window's per-window binding (the _claudeTabs entry + the per-tab overlay) — but
+    // deliberately leave the injector and the live flag ALONE: the injector lambda holds the strong ref
+    // that keeps the ConptyConnection (hence claude.exe) alive across the move and keeps the session
+    // drivable in the gap, and the session is not closing. The destination window correlates by
+    // WT_SESSION (stable across the move) and RE-HOMES it on its next _ObserverProbe tick (re-points the
+    // injector to its own tab + recreates the local binding + overlay — see the HasInjector branch in
+    // _ObserverProbe). A non-Claude tab (a plain pwsh/cmd tab, the Manager tab) reverse-looks-up to no
+    // session and is left untouched.
+    void TerminalPage::_DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab)
+    {
+        if (!tab || _claudeTabs.empty())
+        {
+            return;
+        }
+        const auto projected = tab.try_as<winrt::TerminalApp::Tab>();
+        const std::wstring id = projected ? _ClaudeSessionForTab(projected) : std::wstring{};
+        if (id.empty())
+        {
+            return; // not a Claude session tab -> nothing to detach
+        }
+        // Clear the overlay element out of the moving content's slot so the destination doesn't render a
+        // stale, no-longer-updating badge until adoption re-attaches a fresh one. Safe here: the content
+        // is still in this tab and on this UI thread (we run before _DetachTabFromWindow). Mirrors the
+        // first-terminal-pane walk in _AttachClaudeOverlay (one session per tab); clearing a pane that
+        // never had an overlay is a no-op.
+        if (const auto rootPane = tab->GetRootPane())
+        {
+            rootPane->WalkTree([](auto&& pane) {
+                if (const auto content = pane->GetContent())
+                {
+                    if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                    {
+                        if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(term))
+                        {
+                            impl->SetAgentOverlay(nullptr);
+                        }
+                    }
+                }
+            });
+        }
+        _claudeOverlays.erase(id); // releases the overlay com_ptr -> detaches its registry observer
+        _claudeTabs.erase(id); // drop the per-window binding; the injector + live flag stay untouched
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out] " + id + L" (Claude tab leaving this window; binding kept alive for the destination)\n");
+    }
+
     // Agentmaster: rename a Claude session from the Manager's Explorer Tree. A session's title is
     // ONE value — the Explorer-tree name, the persisted SessionInfo.title, and the WT tab title.
     // Write it to the shared registry (which persists it via the autosave-on-change observer and
@@ -3689,18 +3746,27 @@ namespace winrt::TerminalApp::implementation
 
             if (oursClaude && !it->second.sessionId.empty())
             {
-                // Resolved (the claude has a transcript / explicit id). Cross-window "already claimed"
-                // guard, then bind via the shared tail — keyed on the exact WT_SESSION, so a hand-typed
-                // claude after a `cd` binds to the right id even with no hook. The bound overlay
+                // This window hosts the connection NOW (it's in OUR roster, walked from _tabs), so we are
+                // its rightful local owner. Bind via the shared tail — keyed on the exact WT_SESSION, so a
+                // hand-typed claude after a `cd` binds to the right id even with no hook; the bound overlay
                 // replaces any pending badge in the slot.
-                if (_sessionRegistry->HasInjector(it->second.sessionId))
-                {
-                    _DropPendingOverlay(pt.wt);
-                    continue;
-                }
+                //
+                // HasInjector here does NOT mean "skip". Reaching this point means the tab is NOT in our
+                // _claudeTabs (the alreadyBound check above already `continue`d if it were). If the session
+                // ALSO already has an injector, it was bound by ANOTHER window and the tab just arrived
+                // here via a cross-window tear-out / move-to-window: WT moves the live ConPTY between
+                // TerminalPages, the origin evicted its stale entry in _DetachClaudeTabForMove, and
+                // WT_SESSION is stable across the move. RE-HOME it — a connection lives in exactly one
+                // window at a time, so this window provably owns it now and binding can't double-bind.
+                // _BindClaudeSessionToTab re-points the injector to THIS tab's surviving connection and
+                // recreates the local _claudeTabs entry + overlay, giving Activate / Archive / Rename a
+                // handle. (The old behavior — skipping on HasInjector — left a moved session headless in
+                // the destination: a visible card with no local control.)
+                const bool moved = _sessionRegistry->HasInjector(it->second.sessionId);
                 _DropPendingOverlay(pt.wt);
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + it->second.sessionId + L" cwd=" + it->second.cwd + L" (observer wt=" + pt.wt + L")\n");
-                _BindClaudeSessionToTab(hostTab, pt.conn, it->second.sessionId, it->second.cwd, L"observer wt=" + pt.wt);
+                const std::wstring why = (moved ? L"observer re-home (moved) wt=" : L"observer wt=") + pt.wt;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[discover] " + it->second.sessionId + L" cwd=" + it->second.cwd + L" (" + why + L")\n");
+                _BindClaudeSessionToTab(hostTab, pt.conn, it->second.sessionId, it->second.cwd, why);
                 continue;
             }
 
@@ -5897,6 +5963,7 @@ namespace winrt::TerminalApp::implementation
             if (tab)
             {
                 auto startupActions = tab->BuildStartupActions(BuildStartupKind::Content);
+                _DetachClaudeTabForMove(tab); // Agentmaster: a Claude tab is moving to another window — evict our binding (keep the injector) so teardown can't archive it; the destination re-homes it
                 _DetachTabFromWindow(tab);
                 _MoveContent(std::move(startupActions), windowId, 0);
                 _RemoveTab(*tab);
@@ -9155,6 +9222,7 @@ namespace winrt::TerminalApp::implementation
                                                std::optional<winrt::Windows::Foundation::Point> dragPoint)
     {
         auto startupActions = _stashed.draggedTab->BuildStartupActions(BuildStartupKind::Content);
+        _DetachClaudeTabForMove(_stashed.draggedTab); // Agentmaster: a Claude tab is being torn out / dragged to another window — evict our binding (keep the injector) so teardown can't archive it; the destination re-homes it
         _DetachTabFromWindow(_stashed.draggedTab);
 
         _MoveContent(std::move(startupActions), windowId, tabIndex, dragPoint);
