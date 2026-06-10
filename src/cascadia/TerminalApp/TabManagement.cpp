@@ -21,10 +21,12 @@
 #include "..\TerminalSettingsModel\FileUtils.h"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 
-// Agentmaster: _DuplicateTab forks a managed Claude session instead of re-running its commandline.
+// Agentmaster: _DuplicateTab forks a managed Claude session instead of re-running its commandline;
+// _HandleClosePaneRequested archives a managed session whose pane is explicitly closed.
 #include "AgentMaster/SessionRegistry.h" // _sessionRegistry->Get()
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeConversationExists / AppendStateLog
-#include "AgentMaster/Persistence.h" // DeriveSessionTitle
+#include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions
+#include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 
 #include <shlobj.h>
 
@@ -837,6 +839,45 @@ namespace winrt::TerminalApp::implementation
     // - pane: the pane to close.
     void TerminalPage::_HandleClosePaneRequested(std::shared_ptr<Pane> pane)
     {
+        // Agentmaster: closing a PANE (closePane / closeOtherPanes) bypasses the tab-X archive seam
+        // (_HandleCloseTabRequested -> _ArchiveAndCloseClaudeTab). If the pane being closed hosts a
+        // managed Claude session, archive it HERE so it doesn't linger live=true: the per-tab liveness
+        // sweep only fires once THIS session's connection is gone/Closed (a ~2s lag), and a SINGLE-pane
+        // Claude tab closed via closePane is removed before the sweep can ever see it (-> a permanent
+        // phantom card). Mirror _ArchiveAndCloseClaudeTab's bookkeeping minus the dialog + tab.Close()
+        // (the pane->Close() below tears the pane + connection down -> claude.exe exits). Matched by
+        // connection identity, so closing a shell SIBLING of a Claude pane (its WT_SESSION != any
+        // session's tabToken) is a no-op — only the actual Claude pane archives.
+        if (_sessionRegistry && pane)
+        {
+            std::vector<std::wstring> closing;
+            pane->WalkTree([&](auto&& p) {
+                if (const auto ctrl = p->GetTerminalControl())
+                {
+                    const auto id = _ClaudeSessionForConnection(ctrl.Connection());
+                    if (!id.empty())
+                    {
+                        closing.push_back(id);
+                    }
+                }
+            });
+            for (const auto& id : closing)
+            {
+                _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
+                    s.live = false;
+                    s.pendingConfirmPromptId.clear();
+                });
+                _sessionRegistry->SetInjector(id, nullptr);
+                _claudeTabs.erase(id);
+                _claudeOverlays.erase(id);
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[pane-close] archived " + id + L"\n");
+            }
+            if (!closing.empty())
+            {
+                ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+            }
+        }
+
         // Build the list of actions to recreate the closed pane,
         // BuildStartupActions returns the "first" pane and the rest of
         // its actions are assuming that first pane has been created first.

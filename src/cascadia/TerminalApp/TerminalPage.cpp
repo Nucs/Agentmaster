@@ -2993,6 +2993,41 @@ namespace winrt::TerminalApp::implementation
         return {};
     }
 
+    // Agentmaster: which managed Claude session (if any) is BOUND to THIS connection? Match the
+    // connection's WT_SESSION (== ITerminalConnection::SessionId()) against each session's tabToken (the
+    // bound connection's WT_SESSION, kept current by hooks + the observer) among the sessions THIS window
+    // hosts in _claudeTabs. This pinpoints the session bound to a SPECIFIC connection — NOT "a session
+    // whose tab merely contains this connection" (a split tab holds several), so closing the shell
+    // sibling of a Claude pane never false-matches the Claude session. Used to archive on an explicit
+    // pane-close (_HandleClosePaneRequested) and to re-point the injector across a restartConnection.
+    std::wstring TerminalPage::_ClaudeSessionForConnection(const TerminalConnection::ITerminalConnection& conn)
+    {
+        if (!_sessionRegistry || !conn)
+        {
+            return {};
+        }
+        const auto lower = [](std::wstring s) {
+            for (auto& c : s)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            return s;
+        };
+        const std::wstring wt = lower(::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId()));
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            const auto info = _sessionRegistry->Get(id);
+            if (info && !info->tabToken.empty() && lower(info->tabToken) == wt)
+            {
+                return id;
+            }
+        }
+        return {};
+    }
+
     // Agentmaster (cross-window move): a Claude tab is being MOVED to another window — NOT closed.
     // Both the tear-out paths (_onTabDroppedOutside / a tab-strip drag onto another window, both via
     // _sendDraggedTabToWindow) and the moveTab action with a window target (_MoveTab) transfer the
@@ -3569,8 +3604,24 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
+            // The session's OWN connection WT_SESSION (== its tabToken, kept current by hooks + the
+            // observer). When known, judge liveness by THIS session's connection specifically — NOT "any
+            // terminal in the tab" — so a Claude pane closed/dead beside a still-live shell sibling (a
+            // user split) is archived instead of lingering live=true (the sibling kept anyAlive true,
+            // so the old rule never fired -> the card lingered until the WHOLE tab died).
+            const auto info = _sessionRegistry->Get(id);
+            std::wstring sessionWt = info ? info->tabToken : std::wstring{};
+            for (auto& c : sessionWt)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
             bool sawTerminal = false;
             bool anyAlive = false;
+            bool foundSessionConn = false;
+            bool sessionConnAlive = false;
             tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
                 const auto content = pane->GetContent();
                 if (!content)
@@ -3589,14 +3640,44 @@ namespace winrt::TerminalApp::implementation
                 }
                 sawTerminal = true;
                 // < Closed == NotConnected / Connecting / Connected / Closing -> still alive.
-                if (ctrl.ConnectionState() < TerminalConnection::ConnectionState::Closed)
+                const bool alive = ctrl.ConnectionState() < TerminalConnection::ConnectionState::Closed;
+                anyAlive = anyAlive || alive;
+                if (!sessionWt.empty())
                 {
-                    anyAlive = true;
+                    if (const auto cc = ctrl.Connection())
+                    {
+                        std::wstring wt = ::Microsoft::Console::Utils::GuidToPlainString(cc.SessionId());
+                        for (auto& c : wt)
+                        {
+                            if (c >= L'A' && c <= L'Z')
+                            {
+                                c = static_cast<wchar_t>(c - L'A' + L'a');
+                            }
+                        }
+                        if (wt == sessionWt)
+                        {
+                            foundSessionConn = true;
+                            sessionConnAlive = alive;
+                        }
+                    }
                 }
             });
-            // Only archive a tab we positively saw a (dead) terminal in — never one whose content
-            // we couldn't read, and never one with any still-live terminal (e.g. a user split).
-            if (sawTerminal && !anyAlive)
+            bool isDead;
+            if (!sessionWt.empty() && sawTerminal)
+            {
+                // We can pinpoint THIS session's connection: dead iff its pane is GONE from the tab
+                // (closed — e.g. a closePane on one pane of a split) or its connection reached Closed
+                // (claude exited). A live sibling pane no longer protects it.
+                isDead = !foundSessionConn || !sessionConnAlive;
+            }
+            else
+            {
+                // No tabToken yet (a just-launched session before its first hook/observe) -> fall back to
+                // the original rule: archive only a tab we positively saw a dead terminal in, with no
+                // still-live terminal. (Never archive a tab whose content we couldn't read.)
+                isDead = sawTerminal && !anyAlive;
+            }
+            if (isDead)
             {
                 dead.push_back(id);
             }
@@ -7316,6 +7397,22 @@ namespace winrt::TerminalApp::implementation
         const TerminalApp::TerminalPaneContent& paneContent,
         const winrt::Windows::Foundation::IInspectable&)
     {
+        // Agentmaster: if this is a managed Claude pane, capture its session BEFORE the swap. The
+        // restart reuses the SAME commandline (claude --resume <id> / --session-id <id>; see
+        // _duplicateConnectionForRestart), so the new connection runs the SAME conversation as a fresh
+        // process — but with a NEW WT_SESSION. Our injector captured the OLD connection (which the swap
+        // below replaces -> writes would hit a dead pipe), so we re-point it to the new connection
+        // afterward, keeping the session driveable on the same conversation id. The observer would NOT
+        // fix this on its own: it sees the tab still bound to <id> (alreadyBound) and skips re-binding.
+        std::wstring claudeId;
+        if (_sessionRegistry && paneContent)
+        {
+            if (const auto ctrl = paneContent.GetTermControl())
+            {
+                claudeId = _ClaudeSessionForConnection(ctrl.Connection());
+            }
+        }
+
         // Note: callers are likely passing in `nullptr` as the args here, as
         // the TermControl.RestartTerminalRequested event doesn't actually pass
         // any args upwards itself. If we ever change this, make sure you check
@@ -7330,6 +7427,19 @@ namespace winrt::TerminalApp::implementation
             termControl.HardResetWithoutErase();
             termControl.Connection(connection);
             connection.Start();
+
+            // Agentmaster: re-point this session's stdin injector at the freshly-started connection
+            // (same conversation id; Correctness Rule #3 binds by sessionId). Without this, Autopilot /
+            // Send-now would keep writing to the replaced, dead connection.
+            if (!claudeId.empty() && _sessionRegistry)
+            {
+                const auto conn = connection;
+                _sessionRegistry->SetInjector(claudeId, [conn](const std::wstring& text) {
+                    const auto* begin = reinterpret_cast<const char16_t*>(text.data());
+                    conn.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
+                });
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] re-pointed injector for " + claudeId + L"\n");
+            }
         }
     }
 
