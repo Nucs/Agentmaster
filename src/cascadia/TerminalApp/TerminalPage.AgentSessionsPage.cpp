@@ -1126,6 +1126,25 @@ namespace winrt::TerminalApp::implementation
             });
             actions.Children().Append(resume);
         }
+        // Fork here — ALWAYS offered (unlike Resume it is safe on a LIVE session too: the fork
+        // writes its OWN new transcript, the parent's is untouched — no two-writers hazard).
+        {
+            Button forkBtn;
+            forkBtn.Content(winrt::box_value(winrt::hstring{ L"Fork here" }));
+            ToolTipService::SetToolTip(forkBtn, winrt::box_value(L"Fork into a NEW conversation (claude --resume \x00B7 --fork-session) — the original transcript is untouched"));
+            // A never-prompted row's display title is the page's placeholder — pass empty so the
+            // fork seam derives a smart name instead of "(no prompt yet) (fork)".
+            const std::wstring forkTitle = row->msgs > 0 ? title : std::wstring{};
+            forkBtn.Click([this, id, dir, forkTitle](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, forkTitle]() {
+                    if (auto self = weak.get())
+                    {
+                        self->_ForkSessionFromDisk(id, dir, forkTitle);
+                    }
+                });
+            });
+            actions.Children().Append(forkBtn);
+        }
         Button fresh;
         fresh.Content(winrt::box_value(winrt::hstring{ L"Open New Session Here" }));
         fresh.Click([this, dir](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
@@ -1244,5 +1263,26 @@ namespace winrt::TerminalApp::implementation
         }
         _RestoreArchivedSession(winrt::hstring{ sessionId });
         _HideSessionsPage(); // land on the freshly opened tab
+    }
+
+    // Fork ANY on-disk session into a NEW managed conversation — the duplicate-tab fork's exact
+    // recipe (TabManagement.cpp): `claude --resume <parent> --fork-session --session-id <new>`
+    // (BuildClaudeSpawn mints the new id, so hooks/registry correlate from the first event), the
+    // parent transcript untouched. Transcript-gated: a parent with no transcript (or one the
+    // cleanup sweep deleted mid-view) degrades to a FRESH session in the same dir rather than
+    // dying on "No conversation found". Safe on a LIVE parent — the fork writes its own file.
+    void TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title)
+    {
+        if (!_sessionRegistry || parentId.empty() || dir.empty())
+        {
+            return;
+        }
+        std::wstring ttl = !title.empty() ? title : ::Agentmaster::DeriveSessionTitle(dir);
+        ttl += L" (fork)";
+        const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(parentId) ? parentId : std::wstring{};
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[sessions-page->fork] source=" + parentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
+        _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+        _HideSessionsPage(); // land on the freshly forked tab
     }
 }
