@@ -552,9 +552,19 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
-  - small touches in `TerminalPage.{h,cpp}` (engine wiring, spawn/restore, tab-title sync, smart
-    naming + per-dir tab color, the observer UI lane `_ObserverProbe`, external-claude adopt
-    `_AdoptExternalClaude`), `Tab.{h,cpp}` (a
+  - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,ArchivePage}.cpp`
+    — the TerminalPage-side Agentmaster *implementation*, split out of `TerminalPage.cpp` into five
+    same-class TUs (the upstream `TabManagement.cpp` pattern; a pure move, zero logic change):
+    **Engine** (`~TerminalPage`, `_InitAgentmasterEngine`, the Manager tab, `_WireAgentManagerContent`),
+    **Sessions** (spawn/launch/restore/archive/adopt-external, tab-title sync, smart naming + per-dir
+    tab color), **Observer** (the per-tab overlay/badge, bind/reconcile/liveness, the UI lane
+    `_ObserverProbe`), **WindowRecord** (M10 capture/flush/restore + reopen saved windows),
+    **ArchivePage** (the full-window Archive page). Declarations stay in `TerminalPage.h` (C++ has
+    no partial classes).
+  - small touches in `TerminalPage.{h,cpp}` (~20 integration seams left in the `.cpp`:
+    `_OnFirstLayout` startup, `_MakePane`'s `agentManager` branch, close/quit record-flush +
+    teardown-archive, tab-move detach, title/color sync hooks, `_restartPaneConnection` injector
+    re-point), `Tab.{h,cpp}` (a
     `TabColorChanged` event + `GetRuntimeTabColor`), and `TabManagement.cpp`; registrations in
     `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
