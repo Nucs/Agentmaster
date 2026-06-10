@@ -1,6 +1,10 @@
 # Agentmaster — Sessions Browser (the "Sessions" page) + the `~/.claude` storage map
 
-> **Status: DESIGN (pre-implementation).** Two things in one doc: **(1)** the feature spec for a
+> **Status: IMPLEMENTED (engine + UI; pending deploy).** The store API (`TranscriptStore`), the
+> two-phase search (`SessionSearch`), the presence→observer integration, and the page itself
+> (`TerminalPage.AgentSessionsPage.cpp`, the "Sessions" toolbar button after Archived) are
+> built, lib-compiled green, and engine-tested (536 harness checks). §7 records the user's
+> decisions. Two things in one doc: **(1)** the feature spec for a
 > global **Sessions browser** — a full-window page behind a new **"Sessions"** toolbar button,
 > right after **Archived**, listing *every* Claude Code session on the machine in a selectable
 > time window with full-text search; **(2)** the map it stands on — how Claude Code stores
@@ -25,12 +29,17 @@
 - **Content:** all Claude Code sessions on this machine whose **last activity** falls inside the
   selected window (default **1 month**) — not just Agentmaster-managed ones: everything under
   `~/.claude/projects/`.
-- **Search bar:** `[ search for sessions ] (👤) (🤖) [1 month]`
-  - `(👤)` / `(🤖)` are **toggle buttons** (click = select/deselect, visible selected state):
+- **Search bar:** `[ search for sessions ] (👤) (🤖) (📁) (📄) (F) [1 month]`
+  - All five are **toggle buttons** (click = select/deselect, visible selected state):
     - `👤` selected ⇒ the search also scans **user messages** (typed prompts).
     - `🤖` selected ⇒ the search also scans **agent + tools** (everything *but* user messages:
-      assistant text/thinking, tool inputs/results, system/attachment payloads, subagents).
-  - `[1 month]` — the window selector: **hover** opens a calendar (Popup); **click** cycles
+      assistant text/thinking, tool inputs/results, system content).
+    - `📁` ⇒ match **directories accessed** (tool-call paths' directory parts + the cwd).
+    - `📄` ⇒ match **files accessed** (tool-call paths' leaves).
+    - `(F)` ⇒ **fuzzy** (query characters in order, gaps allowed — identical semantics in rg
+      and the in-process matcher).
+  - `[1 month]` — the window selector: **hover** opens a From/To **range popup** (text boxes
+    with placeholder dates — answer Q4); **click** cycles
     `1 day → 3 days → 7 days → 14 days → 1 month → 3 months → (wrap)`.
 - **Caching:** per-session search/index cache; **invalidated when the session's last-active
   changes** (mechanically: the `(size, mtime)` pair — see §6.2).
@@ -329,20 +338,27 @@ tab↔session correlation (`WT_SESSION` roster vs his creation-time-adjacency he
 
 ---
 
-## 7. Open questions (for review before coding)
+## 7. Open questions — ANSWERED (user decisions; all implemented)
 
-1. **Both toggles OFF** ⇒ title+dir-only search (§1a) — confirm.
-2. **Cache store** — one sidecar per session (`sessions-index/<sid>.json`, easy invalidation,
-   many small files) vs one consolidated index file (fewer handles, contended writes)?
-3. **Hit granularity** — rows-only this pass, or per-message hits with a click-through into a
-   read-only conversation view (the external Flight-Plan pattern)?
-4. **Calendar popup** — display-only preview of the cutoff, or a real range picker (then the
-   cycle presets become shortcuts)?
-5. **`sessions/<pid>.json`** (`status: busy|idle|waiting|shell`, heartbeat `updatedAt`) — also
-   feed it to the Fleet Observer / STATE.md as a free out-of-band status signal? (Separate
-   feature; noted here because this research surfaced it.)
-6. **`history.jsonl` accelerator** — use it for the 👤 scope v1 (fast, global, prebuilt) and only
-   fall back to transcript scans for sessions it misses?
+1. **Both toggles OFF** ⇒ title+dir-only search — **confirmed**; plus three more toggles: `📁`
+   (directories accessed — any tool call to a path), `📄` (files accessed), `(F)` (fuzzy).
+2. **Cache store** ⇒ sidecars (`sessions-index/<sid>.json`) AND a **two-phase search**: the fast
+   phase first (index + `history.jsonl`), then a separate slower content pass — built on
+   **ripgrep** (PATH-resolved, in-process fallback). Case-insensitive by default; fuzzy via the
+   rg regex (`a.*?b.*?c`).
+3. **Hit granularity** ⇒ (delegated) rows + per-row hit counts, with the selected row's detail
+   pane showing the matched-message **snippets** (scope-tagged) and the numbered prompt list;
+   a full read-only conversation click-through stays a later increment.
+4. **Calendar popup** ⇒ a **real From/To range picker** — plain text boxes with placeholder
+   dates (no islands-fragile calendar control); the click-cycle presets remain the shortcuts.
+5. **Presence** ⇒ **proper integration with separation**: the `TranscriptStore` owns the raw
+   `sessions/<pid>.json` read (claude-session domain logic, reusable); everything live/changing
+   is published **via the observer** — a pid-validated `Presence()` table each full survey, plus
+   the per-session `presenceStatus` enrichment through `ObserveClaude` (a display FACT, never
+   `SessionState` — Rule #13; STATE.md owns any future promotion).
+6. **`history.jsonl` accelerator** ⇒ yes, via **ripgrep** (rg filters the global prompt log;
+   every candidate line is re-verified by the in-process matcher; full in-process scan when rg
+   is absent).
 
 ---
 
