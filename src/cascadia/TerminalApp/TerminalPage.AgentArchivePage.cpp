@@ -84,6 +84,30 @@ namespace winrt::TerminalApp::implementation
             return s;
         }
 
+        // '\' <-> '/' flipped copy — a dir's search twin, so "k:/source" matches "k:\source" and
+        // vice versa (dirs are filesystem paths, not plain text — Rule #8 spirit). Applied to the
+        // DIR only, never the filter or branch ('/' is meaningful in "feature/x").
+        std::wstring ArchiveFlipSlashes(std::wstring s)
+        {
+            for (auto& ch : s)
+            {
+                ch = (ch == L'\\') ? L'/' : (ch == L'/' ? L'\\' : ch);
+            }
+            return s;
+        }
+
+        // Append one lowercased field + a '\n' fence to a row's search blob (the fence stops a
+        // token from false-matching across a field boundary). No-op on empty. Blobs are built ONCE
+        // per row at gather; _RenderArchiveTable AND-matches the filter's tokens against them.
+        void ArchiveAppendBlob(std::wstring& blob, const std::wstring& field)
+        {
+            if (!field.empty())
+            {
+                blob += ArchiveLower(field);
+                blob += L'\n';
+            }
+        }
+
         // "now" / "5m" / "3h" / "2d" / "3mo" / "1y" from a unix-ms timestamp; "" when unknown (0).
         // Single largest unit (table-cell compact); months(=30d)/years(=365d) so an old archive
         // reads "3mo", not "97d" (the old days cap).
@@ -491,7 +515,7 @@ namespace winrt::TerminalApp::implementation
         header.Children().Append(titleStack);
 
         TextBox search;
-        search.PlaceholderText(L"Search title, dir, branch\x2026");
+        search.PlaceholderText(L"Search title, dir, branch, prompts\x2026");
         search.Width(260);
         search.VerticalAlignment(VerticalAlignment::Center);
         _archiveSearchBox = search;
@@ -855,6 +879,18 @@ namespace winrt::TerminalApp::implementation
             r.branch = s.branch;
             r.windowIndex = windowIndex;
             r.windowOrdinal = windowOrdinal;
+            // The row's search haystack (tokenized AND-match in _RenderArchiveTable): title / dir
+            // (+ its slash-flipped twin) / branch / session id (paste a UUID from hooks.log to find
+            // its session), then every queued prompt's label + text below — so a half-remembered
+            // prompt ("that fix-the-parser one I queued") finds its session. The transcript's
+            // prompts are deliberately NOT here — indexing them would head-read N files at gather
+            // (the exact per-row I/O the detail pane's cache exists to avoid); the queue is already
+            // in memory.
+            ArchiveAppendBlob(r.searchBlob, s.title);
+            ArchiveAppendBlob(r.searchBlob, s.workingDir);
+            ArchiveAppendBlob(r.searchBlob, ArchiveFlipSlashes(s.workingDir));
+            ArchiveAppendBlob(r.searchBlob, s.branch);
+            ArchiveAppendBlob(r.searchBlob, s.id);
             for (const auto& p : s.queue)
             {
                 ++r.totalCount;
@@ -862,6 +898,8 @@ namespace winrt::TerminalApp::implementation
                 {
                     ++r.sentCount;
                 }
+                ArchiveAppendBlob(r.searchBlob, p.label);
+                ArchiveAppendBlob(r.searchBlob, p.text);
             }
             int64_t created = 0, last = 0;
             if (::Agentmaster::TranscriptTimes(s.workingDir, s.id, created, last))
@@ -938,6 +976,11 @@ namespace winrt::TerminalApp::implementation
                     rowTitle += L" \x00B7 empty";
                 }
                 r.title = std::move(rowTitle);
+                // Its search haystack: the synthetic title + the chip tip (composition / geometry /
+                // launch mode — "maximized" finds maximized saved windows) + the record's GUID.
+                ArchiveAppendBlob(r.searchBlob, r.title);
+                ArchiveAppendBlob(r.searchBlob, wtip);
+                ArchiveAppendBlob(r.searchBlob, rw.record.windowId);
                 ArchiveWindowRecordTimes(rw.record.windowId, r.createdUnixMs, r.lastActivityUnixMs);
                 _archiveRows.push_back(std::move(r));
                 continue;
@@ -1070,27 +1113,39 @@ namespace winrt::TerminalApp::implementation
         addHeader(7, L"Window", true);
 
         // --- filter + sort over the gathered rows ---
+        // Tokenized AND-match over each row's gather-built searchBlob (title / dir + slash-flipped
+        // twin / branch / id / queued prompt labels+texts): every whitespace-separated token must
+        // appear somewhere in the row, order-free — so "agent parser" finds the session whose dir
+        // says agentmaster and whose QUEUED PROMPT says parser. Replaces the verbatim single-
+        // substring over a title/dir/branch haystack rebuilt per row per render. An all-whitespace
+        // filter tokenizes to nothing => unfiltered, same as empty.
+        std::vector<std::wstring> tokens;
+        for (size_t i = 0; i < _archiveFilter.size();)
+        {
+            const size_t j = _archiveFilter.find_first_of(L" \t", i);
+            const size_t end = (j == std::wstring::npos) ? _archiveFilter.size() : j;
+            if (end > i)
+            {
+                tokens.emplace_back(_archiveFilter.substr(i, end - i));
+            }
+            i = end + 1;
+        }
         std::vector<const _ArchiveRow*> view;
         for (const auto& r : _archiveRows)
         {
-            if (!_archiveFilter.empty())
+            bool match = true;
+            for (const auto& t : tokens)
             {
-                // Agentmaster: include a slash-flipped twin of the dir so "k:/source" matches "k:\source"
-                // (and vice versa) — dirs are filesystem paths, not plain text (Rule #8 spirit). Branch
-                // stays verbatim ('/' is meaningful in "feature/x", so we never mangle the filter itself).
-                const std::wstring dirLow = ArchiveLower(r.dir);
-                std::wstring dirAlt = dirLow;
-                for (auto& ch : dirAlt)
+                if (r.searchBlob.find(t) == std::wstring::npos)
                 {
-                    ch = (ch == L'\\') ? L'/' : (ch == L'/' ? L'\\' : ch);
-                }
-                const std::wstring hay = ArchiveLower(r.title) + L"\n" + dirLow + L"\n" + dirAlt + L"\n" + ArchiveLower(r.branch);
-                if (hay.find(_archiveFilter) == std::wstring::npos)
-                {
-                    continue;
+                    match = false;
+                    break;
                 }
             }
-            view.push_back(&r);
+            if (match)
+            {
+                view.push_back(&r);
+            }
         }
         const int sortCol = _archiveSortColumn;
         const bool asc = _archiveSortAscending;
