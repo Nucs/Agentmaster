@@ -412,6 +412,7 @@ namespace Agentmaster
         o.Set(L"pauseOnHumanInput", json::Value::MkBool(s.pauseOnHumanInput));
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
+        o.Set(L"waitingDecayMinutes", json::Value::MkNum(s.waitingDecayMinutes));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
@@ -432,6 +433,8 @@ namespace Agentmaster
         s.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);
         s.confirmBeforeKill = v.BoolAt(L"confirmBeforeKill", true);
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
+        // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.
+        s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));

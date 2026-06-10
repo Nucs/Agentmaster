@@ -3641,6 +3641,12 @@ namespace winrt::TerminalApp::implementation
         _setConfirmKill = ToggleSwitch{};
         _setConfirmKill.Header(winrt::box_value(L"Confirm before archiving a session"));
         panel.Children().Append(_setConfirmKill);
+        _setWaitingDecay = TextBox{};
+        _setWaitingDecay.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after (minutes)"));
+        // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn — past that the
+        // session is no longer "hot", so the Triage Board demotes it out of Waiting-for-you.
+        _setWaitingDecay.PlaceholderText(L"5 \x2014 Claude's server cache lifetime; 0 = never");
+        panel.Children().Append(_setWaitingDecay);
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
@@ -3722,6 +3728,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
         }
+        if (_setWaitingDecay)
+        {
+            _setWaitingDecay.Text(winrt::hstring{ std::to_wstring(_appSettings.waitingDecayMinutes) });
+        }
         if (_setLaunchDir)
         {
             _setLaunchDir.Text(winrt::hstring{ _appSettings.defaultLaunchDir });
@@ -3794,6 +3804,23 @@ namespace winrt::TerminalApp::implementation
         if (_setConfirmKill)
         {
             _appSettings.confirmBeforeKill = _setConfirmKill.IsOn();
+        }
+        if (_setWaitingDecay)
+        {
+            const std::wstring t{ _setWaitingDecay.Text() };
+            uint32_t v = 0;
+            bool any = false;
+            for (const wchar_t c : t)
+            {
+                if (c >= L'0' && c <= L'9')
+                {
+                    v = v * 10 + static_cast<uint32_t>(c - L'0');
+                    any = true;
+                }
+            }
+            // Unlike maxAutoSends, an explicit 0 is MEANINGFUL here (= never decay); only an
+            // empty/garbage box falls back to the 5-minute default (the cache lifetime).
+            _appSettings.waitingDecayMinutes = any ? v : 5;
         }
         if (_setLaunchDir)
         {

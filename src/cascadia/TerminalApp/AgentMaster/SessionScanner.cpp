@@ -341,6 +341,7 @@ namespace Agentmaster
                 anyRunning = true;
             }
             _reconcileSession(s);
+            _maybeDecayWaiting(s, now);
         }
 
         // Drop tail cursors for sessions that are gone / archived (bounded memory).
@@ -525,6 +526,46 @@ namespace Agentmaster
                     _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
                 }
             }
+        }
+    }
+
+    // Agentmaster (cache-aware Waiting decay): a session in WaitingForInput is the Triage Board's
+    // "answer me NOW" signal — and it is only genuinely hot while Claude's SERVER-SIDE prompt cache
+    // is warm (~5 minutes after the last turn; past that, answering costs a full cache re-read
+    // either way). After the configured window with no activity, demote it to Idle so the
+    // Waiting-for-you column shows only sessions worth answering right now (the card moves to
+    // "Idle / Done"). Like the synthesized missed-Stop above, this is a deliberate TIME-derived
+    // transition layered on the hook-derived machine (Rule #7-adjacent — never screen-scraped):
+    // the mutator RE-CHECKS state + age UNDER the registry lock, so a hook landing between our
+    // snapshot and the update wins (a fresh Stop re-arms the full window; a prompt/turn flips the
+    // state and the condition no-ops). Autopilot semantics are unchanged: DecideAdvance treats
+    // Idle as ready exactly like WaitingForInput (Rule #1), so a queued plan still advances.
+    void SessionScanner::_maybeDecayWaiting(const SessionInfo& s, int64_t nowMs)
+    {
+        const uint32_t minutes = _waitingDecayMinutes.load();
+        if (minutes == 0 || s.state != SessionState::WaitingForInput || s.lastActivityUnixMs <= 0)
+        {
+            return; // disabled / not waiting / no timestamp to age against (never decay on 0)
+        }
+        const int64_t decayMs = static_cast<int64_t>(minutes) * 60000;
+        if (nowMs - s.lastActivityUnixMs < decayMs)
+        {
+            return; // still inside the cache window
+        }
+        bool decayed = false;
+        _registry->Update(s.id, [&](SessionInfo& live) {
+            if (live.state == SessionState::WaitingForInput && live.lastActivityUnixMs > 0 &&
+                nowMs - live.lastActivityUnixMs >= decayMs)
+            {
+                live.state = SessionState::Idle;
+                decayed = true;
+            }
+        });
+        if (decayed)
+        {
+            AppendStateLog(L"scanner.log",
+                           L"[decay-waiting] " + s.id + L" waited " + std::to_wstring((nowMs - s.lastActivityUnixMs) / 60000) +
+                               L"m (>= " + std::to_wstring(minutes) + L"m cache window) -> Idle\n");
         }
     }
 

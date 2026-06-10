@@ -393,6 +393,12 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
+                // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle
+                // window to the process-wide scanner so it applies immediately, not next launch.
+                if (self->_scanner)
+                {
+                    self->_scanner->SetWaitingDecayMinutes(s.waitingDecayMinutes);
+                }
                 // Re-materialize the shared --settings file so model / co-authored-by /
                 // permission-mode changes also reach an adopted hand-typed `claude` (the PATH
                 // shim points at this file). Fresh spawns rebuild it from settings regardless.

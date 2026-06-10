@@ -244,6 +244,14 @@ namespace Agentmaster
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
         std::wstring defaultLaunchDir{}; // "" => the Launch cwd box defaults to %USERPROFILE%
+        // Agentmaster: demote a session sitting in WaitingForInput (the Triage Board's
+        // "Waiting-for-you" column) to Idle after this many minutes with no activity. Rationale:
+        // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn, so past that
+        // window the session is no longer "hot" — answering it costs a full cache re-read either
+        // way — and Waiting-for-you should only surface sessions worth answering NOW. Enforced by
+        // the SessionScanner (a time-derived decay layered on the hook-derived machine; the card
+        // moves to the "Idle / Done" column). 0 == never decay. Default 5 == the cache lifetime.
+        uint32_t waitingDecayMinutes{ 5 };
         // How many recent working directories the Launch path-picker's "RECENT" section
         // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
         uint32_t recentDirsLimit{ 10 };

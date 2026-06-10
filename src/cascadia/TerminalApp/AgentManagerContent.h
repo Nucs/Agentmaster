@@ -351,6 +351,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setStopOnError{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecay{ nullptr }; // Waiting-for-you -> Idle after N minutes (0 = never; default 5 = Claude's server cache lifetime)
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session

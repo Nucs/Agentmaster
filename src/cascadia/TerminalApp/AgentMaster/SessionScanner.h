@@ -112,6 +112,17 @@ namespace Agentmaster
         // transcript-discovery enumeration this used to also start is retired (O7). Name kept for now.
         void ArmDiscovery();
 
+        // Agentmaster (cache-aware Waiting decay): how long a session may sit in WaitingForInput
+        // before the scanner demotes it to Idle (the Triage Board's "Waiting-for-you" column should
+        // only surface sessions still inside Claude's ~5-minute server-side prompt-cache window —
+        // past it, answering costs a full cache re-read either way). 0 == never decay. Seeded from
+        // AppSettings at engine init and re-pushed when the Settings cog saves. Atomic — the cog
+        // writes from a UI thread while the worker reads.
+        void SetWaitingDecayMinutes(uint32_t minutes) noexcept
+        {
+            _waitingDecayMinutes.store(minutes);
+        }
+
     private:
         // Per-session tail cursor (owned solely by the worker thread — no lock needed).
         struct ScanState
@@ -128,6 +139,7 @@ namespace Agentmaster
         void _reconcileSession(const SessionInfo& s);
         void _readDelta(ScanState& st, const SessionInfo& s, int64_t size);
         void _maybeSweepLiveness(int64_t nowMs, bool anyLive);
+        void _maybeDecayWaiting(const SessionInfo& s, int64_t nowMs); // WaitingForInput older than the decay window -> Idle
 
         std::shared_ptr<SessionRegistry> _registry;
         std::thread _thread;
@@ -145,5 +157,9 @@ namespace Agentmaster
         // sweep keep running). Set once via ArmDiscovery at engine init; the transcript-ENUMERATION
         // it used to also drive is retired (O7) — the Fleet Observer's PEB correlation subsumes it.
         std::atomic<bool> _discoverArmed{ false };
+
+        // Cache-aware Waiting decay window in minutes (see SetWaitingDecayMinutes). The default
+        // mirrors AppSettings::waitingDecayMinutes so the behavior holds even before the seed lands.
+        std::atomic<uint32_t> _waitingDecayMinutes{ 5 };
     };
 }
