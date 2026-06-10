@@ -150,6 +150,19 @@ package: a no-hook `claude.exe` typed after a `cd` lands a Triage-Board card + p
 within ~3 s, classified `Agentmaster`; two claudes in one cwd bind to their **own** conversations;
 real-WindowsTerminal claudes are classified external + never bound; steady-state cost is µs.
 
+**The Archive UI is now a full-window page + a round-2 audit fixed 13 issues — both built + deployed.**
+The **Archived** button opens a **full-window Archive page** (dense sortable + searchable table left;
+detail — metadata + read-only Flight Plan + **Restore here** / **Reopen its window** — right; multi-select
+**bulk Restore**) replacing the old in-content modal, mounted over `TerminalPage`'s Root content rows with
+**every pointer handler deferring** its tree mutation (a synchronous mid-click tree change AVs the
+XAML-Islands hit-test — pinned from two crash dumps, fixed + live-exercised crash-free). A read-only sweep
+of that page, the resume/restore path, and the `WindowRecord` layer then **fixed 13 correctness issues**
+(commit `b5768081e`): quit-all now flushes the window record, a fleet-load **barrier**
+(`Engine::restoreMutex`) stops a reopened window racing its tab re-home against a half-loaded registry, the
+`live=true` revive is gated on a changed pid, `SessionRegistry::Remove` notifies observers, inject-rollback
+covers every send path, and `ProcessAlive` uses a wait-based liveness test. Detail: *C1 UI* + the round-2
+audit bullet under *Persistence*.
+
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
   source of truth; **token-based** observers — `AddObserver`→token + `RemoveObserver` — and
@@ -425,7 +438,7 @@ What works, by area:
     gated on rostered + resolved id, `ProcessObserver.cpp:427`) — no foreign-claude leak into the Archived
     list; cross-window double-bind is guarded (`HasInjector`; one ConPTY lives in one window); and
     resume-fresh drops the stale archived record (`:1218`).
-  - **Archive-page + resume/restore + persistence audit (round 2) — 13 findings, all ✅ FIXED**
+  - **Archive-page + resume/restore + persistence audit (round 2) — 13 findings, all ✅ FIXED + deployed**
     (commit `b5768081e`; a read-only sweep of the Archive page, resume/restore, and the `WindowRecord`
     layer). *Archive page:* the header count tracks the active filter ("K of N"); **Reopen its window**
     re-resolves its target from the record's stable `windowId` at click time (a gather-time index goes stale
