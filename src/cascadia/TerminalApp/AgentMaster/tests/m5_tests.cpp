@@ -1495,6 +1495,31 @@ static void TestProcessInspectLive()
     CHECK(facts.startUnixMs > 0, "ReadClaudeFacts filled start time");
 }
 
+static void TestBringToFrontHeuristics()
+{
+    std::wprintf(L"Bring Window To Front heuristics (PathLeaf + ScoreClaudeTabName, PURE):\n");
+
+    // --- PathLeaf: last segment, separator-agnostic, trailing-slash tolerant ---
+    CHECK(PathLeaf(L"K:\\source\\Agentmaster") == L"Agentmaster", "PathLeaf backslash path");
+    CHECK(PathLeaf(L"K:\\source\\Agentmaster\\") == L"Agentmaster", "PathLeaf trailing backslash");
+    CHECK(PathLeaf(L"K:/source/api/") == L"api", "PathLeaf forward slashes");
+    CHECK(PathLeaf(L"api") == L"api", "PathLeaf bare leaf");
+    CHECK(PathLeaf(L"").empty(), "PathLeaf empty");
+
+    // --- ScoreClaudeTabName: claude word (100) > status glyph (80) > title head (60) > cwd leaf (40) ---
+    CHECK(ScoreClaudeTabName(L"Claude Code", L"", L"") == 100, "tab score: the word claude");
+    CHECK(ScoreClaudeTabName(L"my CLAUDE session", L"", L"") == 100, "tab score: claude case-insensitive");
+    CHECK(ScoreClaudeTabName(L"\x2733 Fixing the build", L"", L"") == 80, "tab score: leading OSC status glyph");
+    CHECK(ScoreClaudeTabName(L"fixing the build error", L"Fixing the build error in CI", L"") == 60, "tab score: title-hint head (name shorter than hint)");
+    CHECK(ScoreClaudeTabName(L"\x2734 fixing the build error", L"Fixing the build error in CI", L"") == 60, "tab score: title head found past a foreign prefix");
+    CHECK(ScoreClaudeTabName(L"short", L"shor", L"") == 0, "tab score: title hint under 8 chars never matches");
+    CHECK(ScoreClaudeTabName(L"ELI: Agentmaster", L"", L"Agentmaster") == 40, "tab score: cwd leaf");
+    CHECK(ScoreClaudeTabName(L"PowerShell", L"a long enough hint", L"src") == 0, "tab score: no signal");
+    CHECK(ScoreClaudeTabName(L"", L"whatever hint", L"dir") == 0, "tab score: empty name");
+    // priority: a claude-word name keeps 100 even when the weaker hints also match
+    CHECK(ScoreClaudeTabName(L"claude \x2014 Agentmaster", L"claude \x2014 Agentmaster and more", L"Agentmaster") == 100, "tab score: strongest signal wins");
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -1516,6 +1541,7 @@ int wmain()
     TestProcessInspectParse();
     TestTranscriptResolve();
     TestProcessInspectLive();
+    TestBringToFrontHeuristics();
     TestBridgeRoundTrip();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");

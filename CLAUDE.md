@@ -333,11 +333,22 @@ What works, by area:
   read-only plan — so a board click behaves exactly like a tree click. **Right-click** (on either the
   tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Adopt** (resume its
   conversation into a managed, controllable tab — `_AdoptExternalClaude` resolves the id via
-  `ResolveSessionId`, then `claude --resume`s it, leaving the original external running — Rule #13)
-  and, **as the last item, Open New Session Here** (spawn a managed session in that cwd, a new
-  independent conversation). **Open New Session Here is offered in EVERY scope** — it is also the
-  **last item** on the LOCAL/GLOBAL session-row menu (`_MakeSessionMenu`, after Rename / Archive),
-  spawning in that session's working dir. With no external selected the
+  `ResolveSessionId`, then `claude --resume`s it, leaving the original external running — Rule #13),
+  **Open New Session Here** (spawn a managed session in that cwd, a new independent conversation),
+  and, **as the last item, Bring Window To Front** (surface the external's HOSTING window:
+  `_BringExternalToFront` resolves the row's `hostPid`/title from the latest snapshot and hands the
+  OS work to a background thread — `ProcessInspect::BringClaudeWindowToFront` walks the claude's
+  ancestor chain to the nearest visible window (conhost children cover a classic console; a Win11
+  default-terminal HANDOFF console falls back to scanning foreign WT-class windows for a confident
+  tab match), restores it when minimized, foregrounds it, and — when the host is a Windows
+  Terminal-class window (`CASCADIA_HOSTING_WINDOW_CLASS`, real WT or our fork) — **also selects the
+  claude's tab** via UI Automation, picked by the pure `ScoreClaudeTabName` heuristic (claude word >
+  OSC status glyph > conversation-title head > cwd leaf; no signal ⇒ keep the current tab, never
+  guess). A non-WT host (cmd console / ConEmu / VS Code) is just foregrounded. Window activation
+  only — never input into the foreign session, upholding the Rule-#13 invariant). **Open New
+  Session Here is offered in EVERY scope** — it is also the **last item** on the LOCAL/GLOBAL
+  session-row menu (`_MakeSessionMenu`, after Rename / Archive), spawning in that session's working
+  dir. With no external selected the
   Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
   **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /
   active span / last-activity ago; `m`=month or minute by position, tooltip-explained;

@@ -8,8 +8,18 @@
 #include <windows.h>
 #include <tlhelp32.h> // CreateToolhelp32Snapshot
 
+// Bring Window To Front (BringClaudeWindowToFront): COM + UI Automation client for the WT tab
+// pick. Raw COM via WRL ComPtr — still no WinRT, still standalone-harness friendly. The explicit
+// objbase/oleauto includes keep this TU independent of WIN32_LEAN_AND_MEAN trimming windows.h.
+#include <objbase.h> // CoInitializeEx / CoCreateInstance
+#include <oleauto.h> // SysStringLen / SysFreeString (UIA names are BSTRs)
+#include <UIAutomation.h> // IUIAutomation* (tab enumeration + SelectionItem.Select)
+#include <wrl/client.h> // Microsoft::WRL::ComPtr
+
 #include <algorithm>
+#include <cwctype> // towlower (tab-name heuristics)
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
@@ -1089,5 +1099,440 @@ namespace Agentmaster
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
     {
         return ReadTranscriptInfoIn(ClaudeProjectsDir(), cwd, sessionId, maxBytes, maxPrompts);
+    }
+}
+
+// ============================================================================================
+// Bring Window To Front (the Manager's EXTERNAL right-click, last item) — find + surface the
+// top-level window that HOSTS a foreign claude, out-of-band: restore it when minimized,
+// foreground it, and when the host is a Windows Terminal-class window best-effort select the
+// claude's TAB via UI Automation. Window activation only — never console input (Rule #13).
+// ============================================================================================
+
+namespace
+{
+    // The visible terminal window class every Windows Terminal 1.x main window registers
+    // (IslandWindow's XAML_HOSTING_WINDOW_CLASS_NAME) — ours included (the fork's PFN suffix is
+    // on the Emperor's hidden MESSAGE-window class, not the island window). A window of this
+    // class is "WT-like": it carries a tab strip whose TabItems UIA can enumerate + select.
+    constexpr std::wstring_view kTerminalIslandClass = L"CASCADIA_HOSTING_WINDOW_CLASS";
+
+    std::wstring LowerCopy(std::wstring_view s)
+    {
+        std::wstring r{ s };
+        for (auto& c : r)
+        {
+            c = static_cast<wchar_t>(::towlower(c));
+        }
+        return r;
+    }
+
+    bool IsTerminalIslandWindow(HWND h)
+    {
+        wchar_t cls[64]{};
+        const int n = ::GetClassNameW(h, cls, ARRAYSIZE(cls));
+        return n > 0 && std::wstring_view{ cls, static_cast<size_t>(n) } == kTerminalIslandClass;
+    }
+
+    // All VISIBLE, unowned top-level windows of `pid`, in z-order (EnumWindows order, topmost
+    // first). Owned popups/tool windows are skipped. A minimized window is still WS_VISIBLE, so
+    // it IS found — restoring it is the whole point. (A headless ConPTY host / the Emperor's
+    // message window are not visible and never match.)
+    std::vector<HWND> TopLevelWindowsOfPid(uint32_t pid)
+    {
+        struct Ctx
+        {
+            uint32_t pid;
+            std::vector<HWND> wins;
+        } ctx{ pid, {} };
+        ::EnumWindows(
+            [](HWND h, LPARAM lp) -> BOOL {
+                auto& c = *reinterpret_cast<Ctx*>(lp);
+                DWORD wpid = 0;
+                ::GetWindowThreadProcessId(h, &wpid);
+                if (wpid == c.pid && ::IsWindowVisible(h) && ::GetWindow(h, GW_OWNER) == nullptr)
+                {
+                    c.wins.push_back(h);
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&ctx));
+        return ctx.wins;
+    }
+
+    // Every foreign (not-our-process) visible WT-class window, z-order topmost first. The
+    // default-terminal-handoff fallback scans these; our OWN windows are excluded — an external
+    // claude never lives in our roster (rostered == ours, Rule #13), and a managed claude tab of
+    // ours could otherwise false-match the heuristics.
+    std::vector<HWND> ForeignTerminalIslandWindows()
+    {
+        struct Ctx
+        {
+            DWORD selfPid;
+            std::vector<HWND> wins;
+        } ctx{ ::GetCurrentProcessId(), {} };
+        ::EnumWindows(
+            [](HWND h, LPARAM lp) -> BOOL {
+                auto& c = *reinterpret_cast<Ctx*>(lp);
+                DWORD wpid = 0;
+                ::GetWindowThreadProcessId(h, &wpid);
+                if (wpid != c.selfPid && ::IsWindowVisible(h) && ::GetWindow(h, GW_OWNER) == nullptr && IsTerminalIslandWindow(h))
+                {
+                    c.wins.push_back(h);
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&ctx));
+        return ctx.wins;
+    }
+
+    // Images the host-window ancestor walk stops AT: nothing meaningful for a terminal tab lives
+    // above these, and explorer.exe OWNS windows we must never foreground (the desktop/taskbar).
+    bool IsAncestorBoundaryImage(std::wstring_view image)
+    {
+        static constexpr std::wstring_view kStop[] = {
+            L"explorer.exe", L"svchost.exe", L"services.exe", L"wininit.exe", L"winlogon.exe",
+            L"csrss.exe", L"smss.exe", L"userinit.exe", L"dwm.exe", L"sihost.exe"
+        };
+        for (const auto s : kStop)
+        {
+            if (Agentmaster::ImageNameEq(image, s))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Restore-if-minimized + take foreground. Runs while OUR window is the foreground window (a
+    // Manager menu click), so SetForegroundWindow is permitted to hand foreground away;
+    // SwitchToThisWindow is the belt-and-braces fallback when the shell denies it anyway.
+    void RestoreAndForeground(HWND hwnd)
+    {
+        if (::IsIconic(hwnd))
+        {
+            ::ShowWindow(hwnd, SW_RESTORE);
+        }
+        ::SetForegroundWindow(hwnd);
+        if (::GetForegroundWindow() != hwnd)
+        {
+            ::SwitchToThisWindow(hwnd, TRUE);
+        }
+    }
+
+    // One TabItem of a WT-class window, as UIA exposes it: the element (kept for Select) + name.
+    struct UiaTab
+    {
+        Microsoft::WRL::ComPtr<IUIAutomationElement> element;
+        std::wstring name;
+    };
+
+    // Enumerate the TabItem descendants of `hwnd`. Empty on ANY failure (an elevated target —
+    // UIA is UIPI-blocked from a non-elevated client — or an island that isn't hydrated): the
+    // caller then simply foregrounds without a tab pick.
+    std::vector<UiaTab> UiaTabsOf(IUIAutomation* uia, HWND hwnd)
+    {
+        std::vector<UiaTab> tabs;
+        if (uia == nullptr)
+        {
+            return tabs;
+        }
+        Microsoft::WRL::ComPtr<IUIAutomationElement> root;
+        if (FAILED(uia->ElementFromHandle(hwnd, &root)) || !root)
+        {
+            return tabs;
+        }
+        VARIANT v{};
+        v.vt = VT_I4;
+        v.lVal = UIA_TabItemControlTypeId;
+        Microsoft::WRL::ComPtr<IUIAutomationCondition> cond;
+        if (FAILED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) || !cond)
+        {
+            return tabs;
+        }
+        Microsoft::WRL::ComPtr<IUIAutomationElementArray> found;
+        if (FAILED(root->FindAll(TreeScope_Descendants, cond.Get(), &found)) || !found)
+        {
+            return tabs;
+        }
+        int n = 0;
+        if (FAILED(found->get_Length(&n)))
+        {
+            return tabs;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            Microsoft::WRL::ComPtr<IUIAutomationElement> el;
+            if (FAILED(found->GetElement(i, &el)) || !el)
+            {
+                continue;
+            }
+            BSTR b = nullptr;
+            std::wstring name;
+            if (SUCCEEDED(el->get_CurrentName(&b)) && b != nullptr)
+            {
+                name.assign(b, ::SysStringLen(b));
+                ::SysFreeString(b);
+            }
+            tabs.push_back(UiaTab{ std::move(el), std::move(name) });
+        }
+        return tabs;
+    }
+
+    // The best-scoring claude tab of a window per ScoreClaudeTabName, or -1 when nothing scores.
+    int BestClaudeTabIn(const std::vector<UiaTab>& tabs, std::wstring_view titleHint, std::wstring_view cwdLeaf, int& outScore)
+    {
+        int best = -1;
+        outScore = 0;
+        for (size_t i = 0; i < tabs.size(); ++i)
+        {
+            const int s = Agentmaster::ScoreClaudeTabName(tabs[i].name, titleHint, cwdLeaf);
+            if (s > outScore)
+            {
+                outScore = s;
+                best = static_cast<int>(i);
+            }
+        }
+        return best;
+    }
+
+    // Select one tab. TabViewItem exposes SelectionItem (the real path); Invoke is just-in-case.
+    bool UiaSelectTab(const UiaTab& tab)
+    {
+        Microsoft::WRL::ComPtr<IUIAutomationSelectionItemPattern> sel;
+        if (SUCCEEDED(tab.element->GetCurrentPatternAs(UIA_SelectionItemPatternId, IID_PPV_ARGS(&sel))) && sel)
+        {
+            return SUCCEEDED(sel->Select());
+        }
+        Microsoft::WRL::ComPtr<IUIAutomationInvokePattern> inv;
+        if (SUCCEEDED(tab.element->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&inv))) && inv)
+        {
+            return SUCCEEDED(inv->Invoke());
+        }
+        return false;
+    }
+}
+
+namespace Agentmaster
+{
+    std::wstring PathLeaf(std::wstring_view path)
+    {
+        while (!path.empty() && (path.back() == L'\\' || path.back() == L'/'))
+        {
+            path.remove_suffix(1);
+        }
+        const auto cut = path.find_last_of(L"\\/");
+        return std::wstring{ cut == std::wstring_view::npos ? path : path.substr(cut + 1) };
+    }
+
+    int ScoreClaudeTabName(std::wstring_view tabName, std::wstring_view titleHint, std::wstring_view cwdLeaf)
+    {
+        if (tabName.empty())
+        {
+            return 0;
+        }
+        const std::wstring name = LowerCopy(tabName);
+        int score = 0;
+        if (name.find(L"claude") != std::wstring::npos)
+        {
+            score = 100; // the word itself — claude's own OSC title or a user rename
+        }
+        else if (tabName[0] == L'\x2733' || tabName[0] == L'\x2736' || tabName[0] == L'\x273D' || tabName[0] == L'\x2738')
+        {
+            score = 80; // claude's OSC status glyph leads the title it sets while working
+        }
+        if (score < 60)
+        {
+            // The conversation title (first prompt): claude often titles the tab with the task
+            // summary. Probe with the hint's HEAD, capped at 16 chars (so a name that is a strict
+            // prefix of the hint — or glyph-prefixed — still hits) and at least 8 (no noise).
+            const std::wstring hint = LowerCopy(titleHint);
+            const size_t cap = hint.size() < 16 ? hint.size() : 16;
+            if (cap >= 8 && name.find(hint.substr(0, cap)) != std::wstring::npos)
+            {
+                score = 60;
+            }
+        }
+        if (score < 40 && !cwdLeaf.empty())
+        {
+            // Weakest: the working-dir leaf (shells commonly title tabs by cwd).
+            if (name.find(LowerCopy(cwdLeaf)) != std::wstring::npos)
+            {
+                score = 40;
+            }
+        }
+        return score;
+    }
+
+    bool BringClaudeWindowToFront(uint32_t claudePid, uint32_t hostShellPid, std::wstring_view titleHint, std::wstring_view cwd)
+    {
+        const std::wstring cwdLeaf = PathLeaf(cwd);
+
+        // COM for the UIA client. MTA per UIA client guidance — we are on a worker thread, never
+        // the UI one. RPC_E_CHANGED_MODE (already initialized STA here) is still usable; it is
+        // just not ours to uninitialize.
+        const HRESULT coInit = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+        const bool ownCom = SUCCEEDED(coInit);
+
+        // Inner scope so every ComPtr (uia + cached tab elements) releases BEFORE CoUninitialize.
+        const bool ok = [&]() -> bool {
+            Microsoft::WRL::ComPtr<IUIAutomation> uia; // created lazily, only if a tab strip needs reading
+            const auto ensureUia = [&]() -> IUIAutomation* {
+                if (!uia)
+                {
+                    ::CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia));
+                }
+                return uia.Get();
+            };
+
+            const auto snap = SnapshotProcesses();
+            std::unordered_map<uint32_t, const ProcEntry*> byPid;
+            byPid.reserve(snap.size());
+            for (const auto& e : snap)
+            {
+                byPid[e.pid] = &e;
+            }
+
+            // 1) Ancestor chain, nearest-first: claude -> host shell -> ... -> the terminal/editor
+            //    that owns a visible window (WindowsTerminal.exe / ConEmu / Code.exe / ...).
+            //    Bounded + cycle-guarded (pids recycle); stops at explorer/system images.
+            //    hostShellPid roots the walk when the claude itself already exited (a dead pid is
+            //    simply absent from the snapshot — never a stale re-used one followed blindly).
+            std::vector<uint32_t> chain;
+            {
+                uint32_t cur = byPid.count(claudePid) != 0 ? claudePid :
+                                                             (byPid.count(hostShellPid) != 0 ? hostShellPid : 0);
+                for (int depth = 0; cur != 0 && depth < 16; ++depth)
+                {
+                    const auto it = byPid.find(cur);
+                    if (it == byPid.end() || IsAncestorBoundaryImage(it->second->image))
+                    {
+                        break;
+                    }
+                    chain.push_back(cur);
+                    const uint32_t parent = it->second->ppid;
+                    if (parent == cur)
+                    {
+                        break;
+                    }
+                    cur = parent;
+                }
+            }
+
+            HWND target = nullptr;
+            int tabIndex = -1; // the claude's tab in targetTabs, when already resolved
+            std::vector<UiaTab> targetTabs;
+
+            for (const auto pid : chain)
+            {
+                auto wins = TopLevelWindowsOfPid(pid);
+                if (wins.empty())
+                {
+                    // Classic console: the visible console window belongs to a conhost.exe CHILD
+                    // of the shell. (A headless ConPTY host — OpenConsole, or a conhost that
+                    // delegated to the default terminal — owns no visible window and falls through.)
+                    for (const auto child : ChildrenOf(snap, pid))
+                    {
+                        const auto cit = byPid.find(child);
+                        if (cit != byPid.end() && (ImageNameEq(cit->second->image, L"conhost.exe") || ImageNameEq(cit->second->image, L"openconsole.exe")))
+                        {
+                            wins = TopLevelWindowsOfPid(child);
+                            if (!wins.empty())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (wins.empty())
+                {
+                    continue;
+                }
+                target = wins.front(); // topmost in z-order
+                if (wins.size() > 1)
+                {
+                    // One process, several windows (a real WT hosts N windows in ONE
+                    // WindowsTerminal.exe): pick the window whose tab strip actually matches the
+                    // claude; the topmost stays the fallback when nothing scores.
+                    int bestScore = 0;
+                    for (const auto h : wins)
+                    {
+                        if (!IsTerminalIslandWindow(h))
+                        {
+                            continue;
+                        }
+                        auto tabs = UiaTabsOf(ensureUia(), h);
+                        int score = 0;
+                        const int idx = BestClaudeTabIn(tabs, titleHint, cwdLeaf, score);
+                        if (idx >= 0 && score > bestScore)
+                        {
+                            bestScore = score;
+                            target = h;
+                            tabIndex = idx;
+                            targetTabs = std::move(tabs);
+                        }
+                    }
+                }
+                break; // nearest ancestor with a visible window wins
+            }
+
+            // 2) The process tree owns no visible window: a Win11 DEFAULT-TERMINAL handoff console
+            //    (the chain's conhost delegated the session; the visible window is a Windows
+            //    Terminal in an UNRELATED process). Best-effort: scan foreign WT-class windows for
+            //    a CONFIDENT tab match — claude word / glyph / title summary, never the cwd leaf
+            //    alone (too generic to gamble a foreground on).
+            if (target == nullptr)
+            {
+                int bestScore = 59;
+                for (const auto h : ForeignTerminalIslandWindows())
+                {
+                    auto tabs = UiaTabsOf(ensureUia(), h);
+                    int score = 0;
+                    const int idx = BestClaudeTabIn(tabs, titleHint, cwdLeaf, score);
+                    if (idx >= 0 && score > bestScore)
+                    {
+                        bestScore = score;
+                        target = h;
+                        tabIndex = idx;
+                        targetTabs = std::move(tabs);
+                    }
+                }
+            }
+
+            if (target == nullptr)
+            {
+                return false;
+            }
+
+            RestoreAndForeground(target);
+
+            // 3) A WT-class host also gets the claude's TAB selected (the window may host many).
+            //    Probe now if the single-window path skipped it; select only on a real signal and
+            //    only when there IS another tab to switch from — never guess.
+            if (IsTerminalIslandWindow(target))
+            {
+                if (targetTabs.empty())
+                {
+                    targetTabs = UiaTabsOf(ensureUia(), target);
+                    int score = 0;
+                    tabIndex = BestClaudeTabIn(targetTabs, titleHint, cwdLeaf, score);
+                    if (score <= 0)
+                    {
+                        tabIndex = -1;
+                    }
+                }
+                if (tabIndex >= 0 && targetTabs.size() > 1)
+                {
+                    UiaSelectTab(targetTabs[static_cast<size_t>(tabIndex)]);
+                }
+            }
+            return true;
+        }();
+
+        if (ownCom)
+        {
+            ::CoUninitialize();
+        }
+        return ok;
     }
 }

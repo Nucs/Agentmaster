@@ -8,7 +8,7 @@
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 
 #include <algorithm>
 #include <chrono>
@@ -1102,7 +1102,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn = Button{};
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                ToolTipService::SetToolTip(_treeScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows; EXTERNAL: observe-only claudes in other hosts (right-click a row: Open New Session Here / Adopt)"));
+                ToolTipService::SetToolTip(_treeScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows; EXTERNAL: observe-only claudes in other hosts (right-click a row: Adopt / Open New Session Here / Bring Window To Front)"));
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
                 _UpdateTreeScopeButton();
@@ -1972,8 +1972,9 @@ namespace winrt::TerminalApp::implementation
         // The whole card is clickable — left-click SELECTS this external, EXACTLY like clicking its
         // row in the Explorer Tree (_SelectExternal): the Flight Plan shows its conversation read-only
         // and the tree syncs to EXTERNAL with this one highlighted (Linked Lenses). Right-click opens
-        // the SAME menu the tree row uses — Open New Session Here / Adopt. (No inline "observe"/"Adopt"
-        // affordance: the card itself is the observe action; Adopt lives on the right-click menu.)
+        // the SAME menu the tree row uses — Adopt / Open New Session Here / Bring Window To Front. (No
+        // inline "observe"/"Adopt" affordance: the card itself is the observe action; the rest lives
+        // on the right-click menu.)
         const bool selected = !ex.sessionId.empty() && ex.sessionId == _selectedExternalSessionId;
         auto card = Button{};
         card.Content(stack);
@@ -2034,7 +2035,8 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: EXTERNAL scope renders the Fleet Observer's observe-only external claudes
         // (the _externalClaudes table, a different source than the registry snapshot) grouped by cwd,
-        // with an Open New Session Here / Adopt right-click menu. Delegate and return.
+        // with an Adopt / Open New Session Here / Bring Window To Front right-click menu. Delegate
+        // and return.
         if (_treeScope == TreeScope::External)
         {
             _RebuildExternalTree();
@@ -2675,7 +2677,7 @@ namespace winrt::TerminalApp::implementation
 
                 // Left-click SELECTS this external -> the Flight Plan shows its conversation prompts
                 // read-only (observe-only; we host no ConPTY so we can't drive it). Right-click -> the
-                // Open New Session Here / Adopt menu.
+                // Adopt / Open New Session Here / Bring Window To Front menu.
                 rowBtn.ContextFlyout(_MakeExternalTreeMenu(ex.pid, ex.cwd));
                 const auto exId = ex.sessionId;
                 const auto exCwd = ex.cwd;
@@ -2688,11 +2690,13 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: the EXTERNAL-tree row right-click menu — Open New Session Here (spawn a managed session in the
-    // external's cwd, a new independent conversation) and Adopt (resume the external's conversation
-    // into a managed, controllable tab). Both defer one tick like _MakeSessionMenu so the closing
-    // flyout's focus restore doesn't race the spawn / tree rebuild. Acts on (pid, cwd) — an external
-    // has no registry session id.
+    // Agentmaster: the EXTERNAL-tree row right-click menu — Adopt (resume the external's conversation
+    // into a managed, controllable tab), Open New Session Here (spawn a managed session in the
+    // external's cwd, a new independent conversation), and Bring Window To Front (surface the
+    // external's hosting window: restore-if-minimized + foreground + best-effort WT tab select). All
+    // defer one tick like _MakeSessionMenu so the closing flyout's focus restore doesn't race the
+    // spawn / tree rebuild / foreground hand-off. Acts on (pid, cwd) — an external has no registry
+    // session id.
     MenuFlyout AgentManagerContent::_MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd)
     {
         MenuFlyout menu;
@@ -2717,8 +2721,8 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(adopt);
 
-        // Open New Session Here — the LAST option in every scope (matches _MakeSessionMenu's LOCAL/
-        // GLOBAL ordering): spawn a managed session in this external's cwd (a new, independent
+        // Open New Session Here — offered in every scope (matches _MakeSessionMenu's LOCAL/GLOBAL
+        // ordering): spawn a managed session in this external's cwd (a new, independent
         // conversation — distinct from Adopt, which resumes the external's existing conversation).
         MenuFlyoutItem openHere;
         openHere.Text(L"Open New Session Here");
@@ -2738,7 +2742,52 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(openHere);
 
+        // Bring Window To Front — the LAST option: surface the window HOSTING this external claude
+        // (unminimize + foreground; a Windows Terminal-class host also gets the claude's tab
+        // selected, best-effort). Observe-only safe: window activation only — it never writes into
+        // the foreign session (Rule #13). Defers a tick so the closing flyout's focus restore lands
+        // before foreground is handed to the other window.
+        MenuFlyoutItem bringFront;
+        bringFront.Text(L"Bring Window To Front");
+        ToolTipService::SetToolTip(bringFront, winrt::box_value(L"Unminimize + foreground the window hosting this claude; a Windows Terminal host also gets its tab selected (best-effort)"));
+        bringFront.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { self->_BringExternalToFront(pid, cwd); } });
+            }
+            else if (auto self = weak.get())
+            {
+                self->_BringExternalToFront(pid, cwd);
+            }
+        });
+        menu.Items().Append(bringFront);
+
         return menu;
+    }
+
+    // Agentmaster: Bring Window To Front (the EXTERNAL right-click's last item). Resolve the row's
+    // host facts from the latest observer snapshot — hostPid roots the window walk when the claude
+    // already exited; the title feeds the WT tab-match heuristics (the menu captured only pid +
+    // cwd) — then hand the actual window work to a BACKGROUND thread: BringClaudeWindowToFront
+    // takes a Toolhelp snapshot and does cross-process UI Automation reads (tens of ms, can block),
+    // so it must never run on the UI thread. Fire-and-forget — no UI mutation afterwards, so
+    // nothing posts back (and nothing captures `this` past the detach).
+    void AgentManagerContent::_BringExternalToFront(uint32_t pid, const std::wstring& cwd)
+    {
+        uint32_t hostPid = 0;
+        std::wstring title;
+        for (const auto& ex : _externalClaudes)
+        {
+            if (ex.pid == pid)
+            {
+                hostPid = ex.hostPid;
+                title = ex.title;
+                break;
+            }
+        }
+        std::thread([pid, hostPid, title = std::move(title), cwd]() {
+            ::Agentmaster::BringClaudeWindowToFront(pid, hostPid, title, cwd);
+        }).detach();
     }
 
     // Agentmaster: advance the Explorer Tree scope LOCAL -> GLOBAL -> EXTERNAL -> LOCAL, then rebuild
@@ -3787,7 +3836,7 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
-                _planHeaderHost.Children().Append(Text(L"External claudes are observe-only \x2014 click one in the tree to see its conversation (read-only), or right-click to Open New Session Here / Adopt.", 13, false, 0.6));
+                _planHeaderHost.Children().Append(Text(L"External claudes are observe-only \x2014 click one in the tree to see its conversation (read-only), or right-click to Adopt / Open New Session Here / Bring Window To Front.", 13, false, 0.6));
             }
             return;
         }

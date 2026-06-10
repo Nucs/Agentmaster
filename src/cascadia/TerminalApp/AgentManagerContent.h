@@ -120,8 +120,9 @@ namespace winrt::TerminalApp::implementation
         void _RebuildBoard(const std::vector<::Agentmaster::SessionInfo>& sessions);
         void _RebuildTree(const std::vector<::Agentmaster::SessionInfo>& sessions);
         // Agentmaster: the Explorer Tree's EXTERNAL scope — render the Fleet Observer's observe-only
-        // external claudes (_externalClaudes) grouped by working dir, each row carrying an Open New Session Here /
-        // Adopt right-click menu. Reads the member table, not the registry snapshot.
+        // external claudes (_externalClaudes) grouped by working dir, each row carrying an Adopt / Open
+        // New Session Here / Bring Window To Front right-click menu. Reads the member table, not the
+        // registry snapshot.
         void _RebuildExternalTree();
         void _RebuildPlan(const std::vector<::Agentmaster::SessionInfo>& sessions);
         // Agentmaster: select an EXTERNAL (observe-only) row in the tree's EXTERNAL scope -> the
@@ -212,11 +213,17 @@ namespace winrt::TerminalApp::implementation
         // Explorer-tree session actions: right-click context menu (Rename / Archive, then Open New
         // Session Here in the row's cwd as the last item) + double-click to activate.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id, const std::wstring& cwd);
-        // Agentmaster: the EXTERNAL-tree row right-click menu. Open New Session Here -> spawn a managed session in
-        // the external's cwd (an independent conversation); Adopt -> resume the external's conversation
-        // into a managed, controllable tab (via _adoptExternalHandler). Observe-only externals carry no
+        // Agentmaster: the EXTERNAL-tree row right-click menu. Adopt -> resume the external's conversation
+        // into a managed, controllable tab (via _adoptExternalHandler); Open New Session Here -> spawn a
+        // managed session in the external's cwd (an independent conversation); Bring Window To Front (last)
+        // -> surface the external's HOSTING window (_BringExternalToFront). Observe-only externals carry no
         // registry session, so this menu acts on (pid, cwd), not a session id.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd);
+        // Agentmaster: the EXTERNAL menu's Bring Window To Front — resolve the row's host facts
+        // (hostPid / title) from the latest _externalClaudes snapshot, then surface its hosting window
+        // on a BACKGROUND thread (ProcessInspect::BringClaudeWindowToFront: restore-if-minimized +
+        // foreground + best-effort WT tab select). Observe-only safe: window activation, never input.
+        void _BringExternalToFront(uint32_t pid, const std::wstring& cwd);
         // Flight-Plan message right-click menu: per-prompt Move up / Move down / Delete (only on
         // UPCOMING rows — a sent row can't be reordered) + Archive session (always). Queue ops act
         // on `promptId` (the right-clicked row), not the current selection.

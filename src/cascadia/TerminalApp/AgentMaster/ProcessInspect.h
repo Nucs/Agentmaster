@@ -203,4 +203,37 @@ namespace Agentmaster
     // verified 0/1842 over 90 days — so the first prompt is the title source.) Filesystem only.
     TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
+
+    // ===== window activation: surface an external claude's hosting window (Manager UI) ======
+
+    // The last path segment of a Windows/POSIX path ("K:\src\Agentmaster\" -> "Agentmaster";
+    // trailing separators ignored). Pure. (The cwd-leaf hint for ScoreClaudeTabName.)
+    std::wstring PathLeaf(std::wstring_view path);
+
+    // Score how strongly a terminal TAB NAME looks like the tab hosting a given claude, for the
+    // Bring-Window-To-Front tab pick: 100 = contains "claude" (claude's own OSC title / a user
+    // rename); 80 = leads with one of claude's OSC status glyphs (U+2733 / U+2736 / U+273D /
+    // U+2738); 60 = contains the head (16 chars, min 8) of the conversation-title hint (claude
+    // titles the tab with the task summary); 40 = contains the cwd leaf (shells commonly title
+    // tabs by cwd); 0 = no signal. Case-insensitive; hints may be empty. Pure. (Best-effort BY
+    // DESIGN — claude's OSC title is the CURRENT task summary, not a stable id; callers must
+    // treat 0 as "don't guess a tab".)
+    int ScoreClaudeTabName(std::wstring_view tabName, std::wstring_view titleHint, std::wstring_view cwdLeaf);
+
+    // Bring the top-level window HOSTING a claude to the foreground (the Manager's EXTERNAL
+    // right-click "Bring Window To Front"): restore it when minimized, foreground it, and — when
+    // the host is a Windows Terminal-class window (real WT or this fork; the island class
+    // CASCADIA_HOSTING_WINDOW_CLASS) — best-effort select the claude's TAB via UI Automation
+    // (ScoreClaudeTabName picks it; no signal => the window keeps its current tab). The window is
+    // found by walking the claude's ancestor chain (claude -> host shell -> the terminal/editor
+    // that owns a visible window; `hostShellPid` roots the walk when the claude itself already
+    // exited), checking conhost children for a classic console (the visible console window
+    // belongs to a conhost.exe CHILD of the shell), and — when the process tree owns no visible
+    // window at all (a Win11 default-terminal HANDOFF console, whose visible window is a Windows
+    // Terminal in an unrelated process) — scanning foreign WT-class windows for a CONFIDENT tab
+    // match. Strictly window activation — it never writes to the foreign session (the observer
+    // invariant, Rule #13). Returns false when no host window was found (elevated targets deny
+    // UIA/ShowWindow and degrade to whatever the shell permits). Call OFF the UI thread: it takes
+    // a Toolhelp snapshot and does cross-process UI Automation reads (tens of ms, can block).
+    bool BringClaudeWindowToFront(uint32_t claudePid, uint32_t hostShellPid, std::wstring_view titleHint, std::wstring_view cwd);
 }
