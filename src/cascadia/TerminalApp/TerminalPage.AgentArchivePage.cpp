@@ -17,11 +17,12 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
-#include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir (record-file stat)
+#include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir (record-file stat) / ClaudeProjectsDir (transcript path)
 #include "AgentMaster/Engine.h" // RecoverableWindows
 #include "AgentMaster/Persistence.h" // SaveSessions (branch backfill)
-#include "AgentMaster/ProcessInspect.h" // TranscriptTimes / ReadTranscriptInfo
+#include "AgentMaster/ProcessInspect.h" // TranscriptTimes / ReadTranscriptInfo / EncodeCwdToProjectDir
 #include "AgentMaster/SessionRegistry.h" // snapshot + UpdateQuiet + the live-refresh observer
+#include "AgentMaster/SessionScanner.h" // ParseTranscriptDelta (the detail pane's last-assistant tail read)
 
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
@@ -230,6 +231,129 @@ namespace winrt::TerminalApp::implementation
             return true;
         }
 
+        // The transcript .jsonl path for a (cwd, sessionId) — the same composition TranscriptTimesIn
+        // uses internally (projects root + encoded cwd + <id>.jsonl), for the detail pane's "Open
+        // transcript" action and the last-assistant tail read.
+        std::wstring ArchiveTranscriptPath(const std::wstring& cwd, const std::wstring& sessionId)
+        {
+            if (cwd.empty() || sessionId.empty())
+            {
+                return {};
+            }
+            return ::Agentmaster::ClaudeProjectsDir() + L"\\" + ::Agentmaster::EncodeCwdToProjectDir(cwd) + L"\\" + sessionId + L".jsonl";
+        }
+
+        // Read up to maxBytes from the END of a file (the head-read twin of ProcessInspect's
+        // ReadFileHead, same share flags so a live transcript reads while Claude writes). Empty on
+        // failure. The chunk may start mid-line / mid-UTF-8-sequence — callers skip to the first '\n'
+        // (0x0A never occurs inside a multi-byte UTF-8 sequence, so that also re-aligns the encoding).
+        std::string ArchiveReadFileTail(const std::wstring& path, size_t maxBytes)
+        {
+            if (path.empty() || maxBytes == 0)
+            {
+                return {};
+            }
+            const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                return {};
+            }
+            LARGE_INTEGER sz{};
+            ::GetFileSizeEx(h, &sz);
+            const uint64_t size = static_cast<uint64_t>(sz.QuadPart);
+            const uint64_t want = std::min<uint64_t>(size, maxBytes);
+            LARGE_INTEGER start{};
+            start.QuadPart = static_cast<LONGLONG>(size - want);
+            std::string bytes;
+            if (::SetFilePointerEx(h, start, nullptr, FILE_BEGIN))
+            {
+                bytes.resize(static_cast<size_t>(want), '\0');
+                size_t off = 0;
+                while (off < bytes.size())
+                {
+                    DWORD got = 0;
+                    const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(bytes.size() - off, 1u << 20));
+                    if (!::ReadFile(h, bytes.data() + off, chunk, &got, nullptr) || got == 0)
+                    {
+                        break;
+                    }
+                    off += got;
+                }
+                bytes.resize(off);
+            }
+            ::CloseHandle(h);
+            return bytes;
+        }
+
+        // Clamp a display string to maxLen chars (+ ellipsis), never splitting a surrogate pair.
+        std::wstring ArchiveClampText(std::wstring s, size_t maxLen)
+        {
+            if (s.size() > maxLen)
+            {
+                s.resize(maxLen);
+                if (!s.empty() && s.back() >= 0xD800 && s.back() <= 0xDBFF) // dangling high surrogate
+                {
+                    s.pop_back();
+                }
+                s += L" \x2026";
+            }
+            return s;
+        }
+
+        // The LAST assistant message in a transcript-tail byte chunk: skip the partial first line,
+        // UTF-8 -> wide, ParseTranscriptDelta (the scanner's pure parser), walk the events backwards
+        // for the last non-empty Assistant text. "" when none. ("Where did this conversation leave
+        // off?" — the head read can't answer it; ReadTranscriptInfo parses only the file's start.)
+        std::wstring ArchiveLastAssistantText(const std::string& tailBytes)
+        {
+            if (tailBytes.empty())
+            {
+                return {};
+            }
+            size_t begin = 0;
+            if (const auto nl = tailBytes.find('\n'); nl != std::string::npos)
+            {
+                begin = nl + 1; // re-align to a line (and UTF-8) boundary; a full-file read keeps 0 fine too
+            }
+            if (begin >= tailBytes.size())
+            {
+                return {};
+            }
+            const int wideLen = ::MultiByteToWideChar(CP_UTF8, 0, tailBytes.data() + begin, static_cast<int>(tailBytes.size() - begin), nullptr, 0);
+            if (wideLen <= 0)
+            {
+                return {};
+            }
+            std::wstring wide(static_cast<size_t>(wideLen), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, tailBytes.data() + begin, static_cast<int>(tailBytes.size() - begin), wide.data(), wideLen);
+            const auto parsed = ::Agentmaster::ParseTranscriptDelta(wide);
+            for (auto it = parsed.events.rbegin(); it != parsed.events.rend(); ++it)
+            {
+                if (it->kind == ::Agentmaster::TranscriptEvent::Kind::Assistant && !it->text.empty())
+                {
+                    return it->text;
+                }
+            }
+            return {};
+        }
+
+        // Copy text to the system clipboard (the detail pane's "Copy id" / "Copy path"). Best-effort;
+        // Flush so the content survives the app losing focus (it can refuse — non-fatal).
+        void ArchiveCopyToClipboard(const std::wstring& text)
+        {
+            try
+            {
+                winrt::Windows::ApplicationModel::DataTransfer::DataPackage pkg;
+                pkg.RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Copy);
+                pkg.SetText(winrt::hstring{ text });
+                winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
+                winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
+            }
+            CATCH_LOG();
+        }
+
         winrt::Windows::UI::Xaml::Media::SolidColorBrush ArchiveBrush(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
         {
             return winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(a, r, g, b) };
@@ -282,6 +406,17 @@ namespace winrt::TerminalApp::implementation
             col(64, GridUnitType::Pixel); // 5 last activity
             col(46, GridUnitType::Pixel); // 6 plan (sent/total prompts)
             col(64, GridUnitType::Pixel); // 7 window
+        }
+
+        // Set the window pointer cursor (the table|detail splitter's ↔ on hover, Arrow on exit).
+        // No per-element cursor in this XAML projection (ProtectedCursor needs a subclass), so we
+        // drive the CoreWindow cursor — the Manager tab's splitters do the same.
+        void ArchiveApplyCursor(winrt::Windows::UI::Core::CoreCursorType type)
+        {
+            if (const auto w = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread())
+            {
+                w.PointerCursor(winrt::Windows::UI::Core::CoreCursor{ type, 0 });
+            }
         }
 
         // A stable per-window chip color (cycled palette), keyed by the 1-based display ordinal.
@@ -422,12 +557,107 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(left, 0);
         body.Children().Append(left);
 
-        Border sep;
-        sep.Width(1);
-        sep.Background(ArchiveBrush(0x30, 0xC0, 0xC0, 0xC0));
-        sep.Margin(Thickness{ 10, 4, 10, 4 });
-        Grid::SetColumn(sep, 1);
-        body.Children().Append(sep);
+        // Splitter — a draggable grab-bar between the table and the detail (replaces the old static
+        // 1px separator): pin both star columns' sizes at press, then track the pointer 1:1 (the
+        // Manager tab's _MakeSplitter recipe, self-contained — drag state lives in a shared_ptr the
+        // handlers capture, so no TerminalPage members). Width writes are LAYOUT-property changes,
+        // not tree mutations, so they are safe synchronously inside pointer handlers (this page's
+        // defer-rule is about adding/removing elements mid-click). Pointer deltas are read relative
+        // to nullptr (the island origin) — only the delta matters, and not capturing an ancestor
+        // element in the handlers avoids a parent<->child delegate reference cycle.
+        {
+            struct SplitDrag
+            {
+                bool active{};
+                double origin{};
+                double sizeA{};
+                double sizeB{};
+            };
+            auto drag = std::make_shared<SplitDrag>();
+            const auto tableCol = body.ColumnDefinitions().GetAt(0);
+            const auto detailCol = body.ColumnDefinitions().GetAt(2);
+            const auto idleGrip = ArchiveBrush(0x40, 0x80, 0x80, 0x80);
+            const auto hotGrip = ArchiveBrush(0x90, 0xC0, 0xC0, 0xC0);
+
+            Border grip;
+            grip.Width(2);
+            grip.HorizontalAlignment(HorizontalAlignment::Center);
+            grip.VerticalAlignment(VerticalAlignment::Stretch);
+            grip.Margin(Thickness{ 0, 10, 0, 10 });
+            grip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 1, 1, 1, 1 });
+            grip.Background(idleGrip);
+
+            Border bar;
+            bar.Width(10);
+            bar.VerticalAlignment(VerticalAlignment::Stretch);
+            bar.Margin(Thickness{ 2, 4, 2, 4 });
+            bar.Background(ArchiveBrush(0x01, 0x80, 0x80, 0x80)); // ~invisible, yet hit-testable
+            bar.Child(grip);
+
+            bar.PointerEntered([grip, hotGrip](const winrt::IInspectable&, const Input::PointerRoutedEventArgs&) {
+                ArchiveApplyCursor(CoreCursorType::SizeWestEast);
+                grip.Background(hotGrip);
+            });
+            bar.PointerExited([drag, grip, idleGrip](const winrt::IInspectable&, const Input::PointerRoutedEventArgs&) {
+                if (!drag->active) // mid-drag the pointer may leave the thin bar — keep it hot
+                {
+                    ArchiveApplyCursor(CoreCursorType::Arrow);
+                    grip.Background(idleGrip);
+                }
+            });
+            bar.PointerPressed([drag, grip, hotGrip, tableCol, detailCol](const winrt::IInspectable& s, const Input::PointerRoutedEventArgs& e) {
+                drag->active = true;
+                drag->origin = e.GetCurrentPoint(nullptr).Position().X;
+                // ActualWidth is the exact star-space allotment, so star weights set to pixel
+                // values land pixel-perfect (the Manager splitter's trick).
+                drag->sizeA = tableCol.ActualWidth();
+                drag->sizeB = detailCol.ActualWidth();
+                if (const auto el = s.try_as<UIElement>())
+                {
+                    el.CapturePointer(e.Pointer());
+                }
+                grip.Background(hotGrip);
+                ArchiveApplyCursor(CoreCursorType::SizeWestEast);
+                e.Handled(true);
+            });
+            bar.PointerMoved([drag, tableCol, detailCol](const winrt::IInspectable&, const Input::PointerRoutedEventArgs& e) {
+                if (!drag->active)
+                {
+                    ArchiveApplyCursor(CoreCursorType::SizeWestEast); // re-assert while hovering (covers post-release)
+                    return;
+                }
+                const double cur = e.GetCurrentPoint(nullptr).Position().X;
+                const double total = drag->sizeA + drag->sizeB;
+                constexpr double minPx = 160.0; // keep both halves usable
+                if (total < (minPx * 2.0) + 1.0)
+                {
+                    return; // not enough room to split sensibly
+                }
+                const double newA = std::clamp(drag->sizeA + (cur - drag->origin), minPx, total - minPx);
+                tableCol.Width(GridLengthHelper::FromValueAndType(newA, GridUnitType::Star));
+                detailCol.Width(GridLengthHelper::FromValueAndType(total - newA, GridUnitType::Star));
+                e.Handled(true);
+            });
+            const auto endDrag = [drag, grip, idleGrip](const winrt::IInspectable& s, const Input::PointerRoutedEventArgs& e) {
+                if (!drag->active)
+                {
+                    return; // a capture-lost echo of our own release, or a stray event
+                }
+                drag->active = false; // clear BEFORE releasing capture so the re-entrant CaptureLost no-ops
+                if (const auto el = s.try_as<UIElement>())
+                {
+                    el.ReleasePointerCaptures();
+                }
+                grip.Background(idleGrip);
+                ArchiveApplyCursor(CoreCursorType::Arrow);
+                e.Handled(true);
+            };
+            bar.PointerReleased(endDrag);
+            bar.PointerCaptureLost(endDrag);
+
+            Grid::SetColumn(bar, 1);
+            body.Children().Append(bar);
+        }
 
         // RIGHT — detail/preview.
         _archiveDetailHost = StackPanel{};
@@ -1270,24 +1500,24 @@ namespace winrt::TerminalApp::implementation
         // _RenderArchiveTable re-shows the detail on every rebuild (search keystrokes, the registry-
         // observer refresh), and the uncached path was a synchronous <=128 KB UI-thread read + parse
         // EACH time. Stat first (cheap); re-read only when the id or the transcript mtime changed.
+        // The stat outcome stays in scope: it also gates the "Open transcript" action + the
+        // last-assistant tail read below (a never-prompted session has no file to open or tail).
+        int64_t statCreated = 0, statM = 0;
+        const bool transcriptOnDisk = ::Agentmaster::TranscriptTimes(info->workingDir, id, statCreated, statM);
+        if (id != _archiveDetailTiId || statM != _archiveDetailTiMtime)
         {
-            int64_t statCreated = 0, statM = 0;
-            ::Agentmaster::TranscriptTimes(info->workingDir, id, statCreated, statM);
-            if (id != _archiveDetailTiId || statM != _archiveDetailTiMtime)
+            ::Agentmaster::TranscriptInfo fresh{};
+            try
             {
-                ::Agentmaster::TranscriptInfo fresh{};
-                try
-                {
-                    fresh = ::Agentmaster::ReadTranscriptInfo(info->workingDir, id, 131072, 60);
-                }
-                CATCH_LOG();
-                _archiveDetailTiId = id;
-                _archiveDetailTiMtime = statM;
-                _archiveDetailTiCreated = fresh.createdUnixMs;
-                _archiveDetailTiLast = fresh.lastActivityUnixMs;
-                _archiveDetailTiBranch = fresh.gitBranch;
-                _archiveDetailTiPrompts = std::move(fresh.userPrompts);
+                fresh = ::Agentmaster::ReadTranscriptInfo(info->workingDir, id, 131072, 60);
             }
+            CATCH_LOG();
+            _archiveDetailTiId = id;
+            _archiveDetailTiMtime = statM;
+            _archiveDetailTiCreated = fresh.createdUnixMs;
+            _archiveDetailTiLast = fresh.lastActivityUnixMs;
+            _archiveDetailTiBranch = fresh.gitBranch;
+            _archiveDetailTiPrompts = std::move(fresh.userPrompts);
         }
 
         _archiveDetailHost.Children().Append(ArchiveText(info->title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ info->title }, 18, true, 1.0, true));
@@ -1324,6 +1554,70 @@ namespace winrt::TerminalApp::implementation
             }
             ArchiveSetTip(metaTb, metaTip);
             _archiveDetailHost.Children().Append(metaTb);
+        }
+
+        // --- id + read-only file actions row: the truncated conversation id (hover = full) with
+        // Copy id / Copy path / Open transcript. All read-only (no-delete design): the copies are
+        // clipboard-only, and Open hands the .jsonl to the system opener (never writes/moves it).
+        {
+            StackPanel idRow;
+            idRow.Orientation(Orientation::Horizontal);
+            idRow.Spacing(8);
+            idRow.Margin(Thickness{ 0, 2, 0, 0 });
+            auto idTb = ArchiveText(winrt::hstring{ L"id " + (id.size() > 12 ? id.substr(0, 8) + L"\x2026" : id) }, 11, false, 0.45);
+            ArchiveSetTip(idTb, id); // the full conversation UUID
+            idRow.Children().Append(idTb);
+
+            // Small, quiet action buttons (property-only click feedback — a content text change never
+            // restructures the tree, so these handlers are safe to run synchronously mid-click).
+            const auto makeMiniBtn = [](winrt::hstring label) {
+                Button b;
+                b.Background(ArchiveBrush(0x22, 0x80, 0x80, 0x80));
+                b.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                b.Padding(Thickness{ 8, 1, 8, 1 });
+                b.MinWidth(0);
+                b.MinHeight(0);
+                b.Content(ArchiveText(label, 11, false, 0.8));
+                return b;
+            };
+            auto copyIdBtn = makeMiniBtn(L"Copy id");
+            ArchiveSetTip(copyIdBtn, L"Copy the conversation id");
+            {
+                const auto fb = copyIdBtn.Content().try_as<TextBlock>();
+                copyIdBtn.Click([sid = id, fb](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    ArchiveCopyToClipboard(sid);
+                    if (fb)
+                    {
+                        fb.Text(L"Copied \x2713");
+                    }
+                });
+            }
+            idRow.Children().Append(copyIdBtn);
+            if (!info->workingDir.empty())
+            {
+                auto copyPathBtn = makeMiniBtn(L"Copy path");
+                ArchiveSetTip(copyPathBtn, L"Copy the working directory path");
+                const auto fb = copyPathBtn.Content().try_as<TextBlock>();
+                copyPathBtn.Click([dir = std::wstring{ info->workingDir }, fb](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    ArchiveCopyToClipboard(dir);
+                    if (fb)
+                    {
+                        fb.Text(L"Copied \x2713");
+                    }
+                });
+                idRow.Children().Append(copyPathBtn);
+            }
+            if (transcriptOnDisk)
+            {
+                const std::wstring tpath = ArchiveTranscriptPath(info->workingDir, id);
+                auto openBtn = makeMiniBtn(L"Open transcript");
+                ArchiveSetTip(openBtn, L"Open the conversation transcript (read-only)\n" + tpath);
+                openBtn.Click([this, tpath](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    _OpenArchiveTranscript(tpath); // fire-and-forget; ShellExecutes off-thread — no tree mutation here
+                });
+                idRow.Children().Append(openBtn);
+            }
+            _archiveDetailHost.Children().Append(idRow);
         }
 
         {
@@ -1363,16 +1657,52 @@ namespace winrt::TerminalApp::implementation
                 _archiveDetailHost.Children().Append(ArchiveText(tag + winrt::hstring{ bodyText } + suffix, 12, false, 0.8, true));
             }
         }
-        else if (!_archiveDetailTiPrompts.empty())
-        {
-            for (const auto& up : _archiveDetailTiPrompts)
-            {
-                _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ L"\x2023 " + up }, 12, false, 0.75, true));
-            }
-        }
         else
         {
-            _archiveDetailHost.Children().Append(ArchiveText(L"(no recorded prompts)", 12, false, 0.5, true));
+            // The transcript prompts used to render HERE as a fallback under the "Flight Plan" header
+            // (mislabeled); they now have their own Conversation section below, shown ALWAYS.
+            _archiveDetailHost.Children().Append(ArchiveText(_archiveDetailTiPrompts.empty() ? winrt::hstring{ L"(no recorded prompts)" } : winrt::hstring{ L"(no plan recorded)" }, 12, false, 0.5, true));
+        }
+
+        // --- Conversation: the transcript's human prompts, shown EVEN when a queue exists — the old
+        // else-fallback let the queue hide them, but the queue is only what the manager recorded
+        // while the transcript is the conversation's full human history (pre-adoption prompts, other
+        // windows, hook-less runs). Capped by the head read (60); each row display-clamped.
+        if (!_archiveDetailTiPrompts.empty())
+        {
+            const size_t n = _archiveDetailTiPrompts.size();
+            const std::wstring convHeader = (n >= 60) ?
+                                                std::wstring{ L"Conversation (first 60 prompts)" } :
+                                                L"Conversation (" + std::to_wstring(n) + (n == 1 ? L" prompt)" : L" prompts)");
+            auto h = ArchiveText(winrt::hstring{ convHeader }, 13, true, 0.9);
+            h.Margin(Thickness{ 0, 8, 0, 0 });
+            ArchiveSetTip(h, L"The transcript's human prompts, in order \x2014 the conversation's full history; the Flight Plan above is only what the manager recorded.");
+            _archiveDetailHost.Children().Append(h);
+            for (const auto& up : _archiveDetailTiPrompts)
+            {
+                _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ L"\x2023 " + ArchiveClampText(up, 400) }, 12, false, 0.75, true));
+            }
+        }
+
+        // --- Last assistant reply: where the conversation left off. The head read can't see the tail,
+        // so it is read OFF-THREAD once per (id, mtime) by _LoadArchiveAssistantTail, which re-shows
+        // this detail on completion (then the cache hits here). An attempted-but-empty tail caches ""
+        // (render nothing) so a reply-less transcript isn't re-read on every re-show.
+        if (id == _archiveDetailTailId && statM == _archiveDetailTailMtime)
+        {
+            if (!_archiveDetailTailText.empty())
+            {
+                auto h = ArchiveText(L"Last assistant reply", 13, true, 0.9);
+                h.Margin(Thickness{ 0, 8, 0, 0 });
+                ArchiveSetTip(h, L"The transcript's final assistant message \x2014 where this conversation left off.");
+                _archiveDetailHost.Children().Append(h);
+                _archiveDetailHost.Children().Append(ArchiveText(winrt::hstring{ ArchiveClampText(_archiveDetailTailText, 600) }, 12, false, 0.7, true));
+            }
+        }
+        else if (transcriptOnDisk && !_archiveDetailTailPending)
+        {
+            _archiveDetailTailPending = true;
+            _LoadArchiveAssistantTail(id, std::wstring{ info->workingDir }, statM);
         }
 
         {
@@ -1529,5 +1859,77 @@ namespace winrt::TerminalApp::implementation
         {
             self->_RefreshArchivePageIfVisible(); // fill the Branch cells in
         }
+    }
+
+    // Agentmaster (detail pane "last assistant reply"): tail-read the transcript OFF-THREAD (64 KB —
+    // ample for the final message), parse it with the scanner's pure ParseTranscriptDelta, keep the
+    // LAST non-empty assistant text, then cache it by (id, mtime) and re-show the detail (which now
+    // hits the cache and renders the line). An empty result still caches — attempted-but-reply-less
+    // must not re-read on every detail re-show. The pending flag (UI-thread-only) stops a re-show
+    // that arrives mid-read from kicking a second read of the same transcript.
+    winrt::fire_and_forget TerminalPage::_LoadArchiveAssistantTail(std::wstring sessionId, std::wstring dir, int64_t mtime)
+    {
+        const auto weakThis = get_weak();
+        const auto dispatcher = Dispatcher();
+        co_await winrt::resume_background();
+        std::wstring text;
+        try
+        {
+            text = ArchiveLastAssistantText(ArchiveReadFileTail(ArchiveTranscriptPath(dir, sessionId), 65536));
+        }
+        CATCH_LOG();
+        co_await wil::resume_foreground(dispatcher);
+        if (auto self = weakThis.get())
+        {
+            self->_archiveDetailTailPending = false;
+            self->_archiveDetailTailId = sessionId;
+            self->_archiveDetailTailMtime = mtime;
+            self->_archiveDetailTailText = std::move(text);
+            // Re-render only if this session is still the one on display (the user may have moved on —
+            // the next _ShowArchiveDetail of THIS id will hit the cache anyway).
+            if (self->_archiveSelectedId == sessionId && self->_archivePageVisible.load(std::memory_order_relaxed))
+            {
+                self->_ShowArchiveDetail(sessionId);
+            }
+        }
+    }
+
+    // Agentmaster (detail pane "Open transcript"): hand the .jsonl to the system opener — read-only
+    // (the no-delete design: the transcript is never written, moved, or deleted; Claude owns it).
+    // ShellExecuteExW may block, so dispatch from a background thread (the _ReopenSavedWindow
+    // pattern). With no .jsonl association Windows shows its "open with" picker; if the open verb
+    // FAILS outright, fall back to revealing the file in Explorer (/select).
+    winrt::fire_and_forget TerminalPage::_OpenArchiveTranscript(std::wstring path)
+    {
+        if (path.empty())
+        {
+            co_return;
+        }
+        co_await winrt::resume_background();
+        try
+        {
+            SHELLEXECUTEINFOW seInfo{ 0 };
+            seInfo.cbSize = sizeof(seInfo);
+            seInfo.fMask = SEE_MASK_NOASYNC;
+            seInfo.lpVerb = L"open";
+            seInfo.lpFile = path.c_str();
+            seInfo.nShow = SW_SHOWNORMAL;
+            bool ok = !!ShellExecuteExW(&seInfo);
+            if (!ok)
+            {
+                const std::wstring params = L"/select,\"" + path + L"\"";
+                SHELLEXECUTEINFOW fb{ 0 };
+                fb.cbSize = sizeof(fb);
+                fb.fMask = SEE_MASK_NOASYNC;
+                fb.lpVerb = L"open";
+                fb.lpFile = L"explorer.exe";
+                fb.lpParameters = params.c_str();
+                fb.nShow = SW_SHOWNORMAL;
+                ok = !!ShellExecuteExW(&fb);
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] open transcript ok=" + std::wstring{ ok ? L"1" : L"0" } + L" " + path + L"\n");
+        }
+        CATCH_LOG();
+        co_return;
     }
 }

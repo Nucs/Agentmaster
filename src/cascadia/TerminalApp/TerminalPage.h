@@ -365,6 +365,12 @@ namespace winrt::TerminalApp::implementation
             // WindowRecord (tab composition + geometry); the render loop only has the row. Empty for
             // loose rows (no chip).
             std::wstring windowTip;
+            // Agentmaster: the row's lowercase search haystack, built ONCE at gather — title / dir
+            // (+ a slash-flipped twin) / branch / session id, then every queued prompt's label + text
+            // ('\n'-fenced fields). _RenderArchiveTable AND-matches the filter's whitespace tokens
+            // against this, so "remember that prompt I queued" (or a UUID pasted from hooks.log) finds
+            // its session — the old per-render haystack covered only title/dir/branch.
+            std::wstring searchBlob;
         };
         winrt::Windows::UI::Xaml::Controls::Grid _archivePageHost{ nullptr };          // full-bleed page over Root
         winrt::Windows::UI::Xaml::Controls::Grid _archiveHeaderRow{ nullptr };         // LEFT: sortable column header
@@ -406,6 +412,16 @@ namespace winrt::TerminalApp::implementation
         int64_t _archiveDetailTiLast{ 0 };
         std::wstring _archiveDetailTiBranch;
         std::vector<std::wstring> _archiveDetailTiPrompts;
+        // Agentmaster: one-entry "last assistant reply" cache for the detail pane, keyed by (id,
+        // transcript mtime) like the head cache above. ReadTranscriptInfo is a HEAD read (title /
+        // branch / prompts); the LAST assistant message — "where did this conversation leave off?" —
+        // lives at the TAIL, so _LoadArchiveAssistantTail tail-reads + parses it OFF-THREAD and
+        // re-shows the detail on completion. An attempted (id, mtime) caches even an empty result so
+        // a reply-less transcript isn't re-read on every detail re-show.
+        std::wstring _archiveDetailTailId;
+        int64_t _archiveDetailTailMtime{ 0 };
+        std::wstring _archiveDetailTailText;
+        bool _archiveDetailTailPending{ false };
 
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
@@ -542,6 +558,8 @@ namespace winrt::TerminalApp::implementation
         void _UpdateArchiveBulkButton(); // refresh the footer "Restore selected (N)" label + enabled
         void _RefreshArchivePageIfVisible(); // re-gather + re-render an OPEN page (registry-observer / backfill poke; UI thread, clean tick)
         winrt::fire_and_forget _BackfillArchiveBranches(std::vector<std::pair<std::wstring, std::wstring>> idDirs); // (id, dir) pairs: head-read gitBranch off-thread -> UpdateQuiet + ONE SaveSessions + a page refresh
+        winrt::fire_and_forget _LoadArchiveAssistantTail(std::wstring sessionId, std::wstring dir, int64_t mtime); // tail-read the transcript's LAST assistant message off-thread -> cache (id, mtime) + re-show the detail
+        winrt::fire_and_forget _OpenArchiveTranscript(std::wstring path); // detail "Open transcript": ShellExecute the .jsonl (system open/picker; Explorer /select fallback) — read-only, off the UI thread
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 
