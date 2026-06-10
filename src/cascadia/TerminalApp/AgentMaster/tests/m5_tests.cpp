@@ -1497,7 +1497,7 @@ static void TestProcessInspectLive()
 
 static void TestBringToFrontHeuristics()
 {
-    std::wprintf(L"Bring Window To Front heuristics (PathLeaf + ScoreClaudeTabName, PURE):\n");
+    std::wprintf(L"Bring Window To Front heuristics (PathLeaf + tab scorers, PURE):\n");
 
     // --- PathLeaf: last segment, separator-agnostic, trailing-slash tolerant ---
     CHECK(PathLeaf(L"K:\\source\\Agentmaster") == L"Agentmaster", "PathLeaf backslash path");
@@ -1506,18 +1506,100 @@ static void TestBringToFrontHeuristics()
     CHECK(PathLeaf(L"api") == L"api", "PathLeaf bare leaf");
     CHECK(PathLeaf(L"").empty(), "PathLeaf empty");
 
-    // --- ScoreClaudeTabName: claude word (100) > status glyph (80) > title head (60) > cwd leaf (40) ---
-    CHECK(ScoreClaudeTabName(L"Claude Code", L"", L"") == 100, "tab score: the word claude");
-    CHECK(ScoreClaudeTabName(L"my CLAUDE session", L"", L"") == 100, "tab score: claude case-insensitive");
+    // --- ScoreClaudeTabName tiers: exact (100) > claude word (90) > glyph (80) > containment (70)
+    //     > title head (60) > cwd leaf (40) ---
+    CHECK(ScoreClaudeTabName(L"npyiter perf?", L"npyiter perf?", L"") == 100, "tab score: exact title match");
+    CHECK(ScoreClaudeTabName(L"  npyiter perf? ", L"npyiter PERF?", L"") == 100, "tab score: exact is trimmed + case-insensitive");
+    CHECK(ScoreClaudeTabName(L"Claude Code", L"", L"") == 90, "tab score: the word claude");
+    CHECK(ScoreClaudeTabName(L"my CLAUDE session", L"", L"") == 90, "tab score: claude case-insensitive");
     CHECK(ScoreClaudeTabName(L"\x2733 Fixing the build", L"", L"") == 80, "tab score: leading OSC status glyph");
-    CHECK(ScoreClaudeTabName(L"fixing the build error", L"Fixing the build error in CI", L"") == 60, "tab score: title-hint head (name shorter than hint)");
-    CHECK(ScoreClaudeTabName(L"\x2734 fixing the build error", L"Fixing the build error in CI", L"") == 60, "tab score: title head found past a foreign prefix");
-    CHECK(ScoreClaudeTabName(L"short", L"shor", L"") == 0, "tab score: title hint under 8 chars never matches");
+    CHECK(ScoreClaudeTabName(L"resume flow", L"the resume flow", L"") == 70, "tab score: name contained in hint");
+    CHECK(ScoreClaudeTabName(L"[1] the resume flow (wt)", L"the resume flow", L"") == 70, "tab score: hint contained in name");
+    CHECK(ScoreClaudeTabName(L"fixing the build error", L"Fixing the build error in CI", L"") == 70, "tab score: name is a prefix of the hint (containment)");
+    CHECK(ScoreClaudeTabName(L"\x2734 fixing the build error CI-side", L"Fixing the build error in CI", L"") == 60, "tab score: title head past a foreign prefix");
+    CHECK(ScoreClaudeTabName(L"short", L"shor", L"") == 0, "tab score: tiny hints never match");
     CHECK(ScoreClaudeTabName(L"ELI: Agentmaster", L"", L"Agentmaster") == 40, "tab score: cwd leaf");
     CHECK(ScoreClaudeTabName(L"PowerShell", L"a long enough hint", L"src") == 0, "tab score: no signal");
     CHECK(ScoreClaudeTabName(L"", L"whatever hint", L"dir") == 0, "tab score: empty name");
-    // priority: a claude-word name keeps 100 even when the weaker hints also match
-    CHECK(ScoreClaudeTabName(L"claude \x2014 Agentmaster", L"claude \x2014 Agentmaster and more", L"Agentmaster") == 100, "tab score: strongest signal wins");
+    // priority: a claude-word name keeps 90 even when weaker tiers also match
+    CHECK(ScoreClaudeTabName(L"claude \x2014 Agentmaster", L"claude \x2014 Agentmaster and more", L"Agentmaster") == 90, "tab score: strongest signal wins");
+
+    // --- ScoreTabNameTokens: hand-renamed tab labels vs the conversation corpus (whole words) ---
+    const auto corpus = TokenizeTextLower(L"Fix the --resume path so the archived session restores; also the npyiter migration plan.");
+    CHECK(ScoreTabNameTokens(L"am resume", corpus) == 50, "token overlap: every >=3-char token present ('am' dropped as noise)");
+    CHECK(ScoreTabNameTokens(L"npyiter migration", corpus) == 50, "token overlap: two tokens, both present");
+    CHECK(ScoreTabNameTokens(L"am runner", corpus) == 0, "token overlap: one missing token kills the match");
+    CHECK(ScoreTabNameTokens(L"npyiter perf", corpus) == 0, "token overlap: all-or-nothing");
+    CHECK(ScoreTabNameTokens(L"resumes", corpus) == 0, "token overlap: longer-than-corpus-word is a miss ('resumes' !~ 'resume')");
+    CHECK(ScoreTabNameTokens(L"am gh act", TokenizeTextLower(L"do we have gh actions publishes?")) == 50, "token overlap: tab token as a PREFIX of a corpus word (act ~ actions)");
+    CHECK(ScoreTabNameTokens(L"gh am", corpus) == 0, "token overlap: only short tokens -> no signal");
+    CHECK(ScoreTabNameTokens(L"am resume", {}) == 0, "token overlap: empty corpus");
+    CHECK(TokenizeTextLower(L"").empty(), "tokenize: empty text");
+    CHECK(TokenizeTextLower(L"a bb ccc").size() == 1, "tokenize: drops tokens under 3 chars");
+
+    // --- PickClaudeTab: the full per-window pick (subset disqualifier + head/full corpus tiers +
+    //     unique guard), over the real-world shape that motivated it: a WT window of hand-renamed
+    //     claude tabs. ---
+    {
+        const std::vector<std::wstring> tabs{
+            L"npyiter test all x all", L"npyiter perf?", L"npyiter multithread",
+            L"npyiter migrate", L"am resume", L"npyiter pr"
+        };
+        int score = 0;
+        bool unique = false;
+        // The resume conversation: its tab's one meaningful token is unique among the tabs.
+        auto corpus = TokenizeTextLower(L"please fix the --resume path so archived sessions restore");
+        int idx = PickClaudeTab(tabs, {}, L"", corpus, corpus, score, unique);
+        CHECK(idx == 4 && score == 50 && unique, "pick: token-unique renamed tab wins");
+        // The perf conversation mentions npyiter but never 'perf' — the generic-prefix tab
+        // ("npyiter pr" == {npyiter}, a strict subset of its siblings) must NOT win by tokens.
+        corpus = TokenizeTextLower(L"Can NpyIter make matmul or dot or argsort faster?");
+        idx = PickClaudeTab(tabs, {}, L"", corpus, corpus, score, unique);
+        CHECK(score == 0, "pick: generic-prefix tab disqualified (strict subset of a sibling)");
+        // An exact title hint wins outright.
+        idx = PickClaudeTab(tabs, { L"npyiter migrate" }, L"", {}, {}, score, unique);
+        CHECK(idx == 3 && score == 100 && unique, "pick: exact title hint wins uniquely");
+        // Tied scorers are reported non-unique (the caller must not select).
+        const std::vector<std::wstring> twins{ L"PowerShell", L"PowerShell", L"claude one", L"claude two" };
+        idx = PickClaudeTab(twins, {}, L"", {}, {}, score, unique);
+        CHECK(idx == 2 && score == 90 && !unique, "pick: tied claude tabs -> not unique");
+        // Equal token sets stay eligible and tie out (vs the strict-subset disqualifier).
+        const std::vector<std::wstring> same{ L"npyiter perf", L"npyiter perf?" };
+        corpus = TokenizeTextLower(L"npyiter perf work");
+        idx = PickClaudeTab(same, {}, L"", corpus, corpus, score, unique);
+        CHECK(score == 50 && !unique, "pick: equal token sets tie (not subset-disqualified)");
+        // Head corpus (title + FIRST prompt) outranks the full corpus: a tab named for the
+        // conversation's PURPOSE ("am gh act" ~ "gh actions" in the first prompt) beats a tab
+        // matching an incidental later-prompt word ("am changes" ~ "changes" said much later).
+        const std::vector<std::wstring> mixed{ L"am gh act", L"am changes" };
+        const auto head = TokenizeTextLower(L"Do we have publishes in the gh actions?");
+        const auto full = TokenizeTextLower(L"Do we have publishes in the gh actions? later: apply the changes to the workflow");
+        idx = PickClaudeTab(mixed, {}, L"", head, full, score, unique);
+        CHECK(idx == 0 && score == 50 && unique, "pick: head-corpus match (50) outranks full-corpus match (45)");
+    }
+
+    // --- ReadTranscriptInfoIn: custom-title lines (the LAST one wins) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_bringfront_test_" + std::to_wstring(::GetCurrentProcessId());
+        const std::wstring projRoot = root + L"\\projects";
+        const std::wstring cwd = L"C:\\AmBringFront\\proj";
+        const std::wstring dir = projRoot + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        const std::string content =
+            "{\"type\":\"custom-title\",\"customTitle\":\"old label\",\"sessionId\":\"ct\"}\n"
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello world prompt\"},\"gitBranch\":\"main\"}\n"
+            "{\"type\":\"custom-title\",\"customTitle\":\"am resume\",\"sessionId\":\"ct\"}\n";
+        MakeJsonl(dir + L"\\ct.jsonl", content, 5000, 1000);
+        const auto ti = ReadTranscriptInfoIn(projRoot, cwd, L"ct", 0, 10);
+        CHECK(ti.found, "custom-title: transcript read");
+        CHECK(ti.customTitle == L"am resume", "custom-title: the LAST custom-title line wins");
+        CHECK(ti.title == L"hello world prompt", "custom-title does not displace the first-prompt title field");
+        CHECK(ti.gitBranch == L"main", "custom-title lines don't break gitBranch capture");
+        std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
 }
 
 int wmain()

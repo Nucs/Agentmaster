@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Activity.h" // ClaudeProcessFacts, RunningApp
@@ -191,6 +192,7 @@ namespace Agentmaster
         int64_t createdUnixMs{}; // file ctime (≈ conversation start)
         int64_t lastActivityUnixMs{}; // file mtime (≈ last activity)
         std::wstring title; // a display title: the FIRST human prompt, collapsed to one trimmed line
+        std::wstring customTitle; // the user-SET conversation title, when any: the LAST {"type":"custom-title","customTitle":...} line (newer retitles win). Preferred over `title` for display + tab matching.
         std::wstring gitBranch; // the gitBranch recorded on the user lines (first seen), if any
         std::vector<std::wstring> userPrompts; // the human prompts in order (capped at maxPrompts)
     };
@@ -211,29 +213,61 @@ namespace Agentmaster
     std::wstring PathLeaf(std::wstring_view path);
 
     // Score how strongly a terminal TAB NAME looks like the tab hosting a given claude, for the
-    // Bring-Window-To-Front tab pick: 100 = contains "claude" (claude's own OSC title / a user
+    // Bring-Window-To-Front tab pick: 100 = EXACTLY equals the title hint (trimmed — a tab named
+    // by the conversation's title); 90 = contains "claude" (claude's own OSC title / a user
     // rename); 80 = leads with one of claude's OSC status glyphs (U+2733 / U+2736 / U+273D /
-    // U+2738); 60 = contains the head (16 chars, min 8) of the conversation-title hint (claude
-    // titles the tab with the task summary); 40 = contains the cwd leaf (shells commonly title
-    // tabs by cwd); 0 = no signal. Case-insensitive; hints may be empty. Pure. (Best-effort BY
-    // DESIGN — claude's OSC title is the CURRENT task summary, not a stable id; callers must
-    // treat 0 as "don't guess a tab".)
+    // U+2738); 70 = full containment either way (name in hint or hint in name, the contained
+    // side >= 6 chars); 60 = contains the head (16 chars, min 8) of the title hint; 40 = contains
+    // the cwd leaf (shells commonly title tabs by cwd); 0 = no signal. Case-insensitive; hints
+    // may be empty. Pure. (Best-effort BY DESIGN — a tab can be hand-renamed to anything; callers
+    // must treat 0 as "don't guess a tab". The token-overlap scorer below covers renamed tabs.)
     int ScoreClaudeTabName(std::wstring_view tabName, std::wstring_view titleHint, std::wstring_view cwdLeaf);
+
+    // Tokenize free text for the tab-vs-conversation overlap match: lowercased [a-z0-9]+ runs of
+    // length >= 3 (shorter ones — "am", "gh", "of" — are pure noise). Pure.
+    std::unordered_set<std::wstring> TokenizeTextLower(std::wstring_view text);
+
+    // The token-overlap tier of the tab pick, for HAND-RENAMED tabs (the common power-user real-WT
+    // setup: tabs carry short task labels like "am resume" that appear nowhere in any title): 50
+    // when EVERY (>= 1) token of the tab name occurs in the conversation corpus (title + human
+    // prompts) — as a whole word, or as a PREFIX of a corpus word (labels abbreviate: "act" ~
+    // "actions", "perf" ~ "performance"; the reverse direction is NOT a match, so "resumes" never
+    // hits "resume"). Deliberately all-or-nothing — a partial overlap on one generic word
+    // ("changes") is noise, and the caller's unique-best guard drops ties. Pure.
+    int ScoreTabNameTokens(std::wstring_view tabName, const std::unordered_set<std::wstring>& corpusTokens);
+
+    // The full tab pick over one window's tab NAMES (the unit-testable core of the UIA pick).
+    // Per-tab score = max of the title tiers over every hint (ScoreClaudeTabName, incl. the cwd
+    // leaf) and the token tier — 50 when the tab's tokens all hit the HEAD corpus (title + custom
+    // title + FIRST prompt: a tab is usually labeled for the conversation's PURPOSE), else 45
+    // when they all hit the FULL corpus (every prompt; an incidental later-prompt word like
+    // "changes" must not tie out a purpose match). The token tier is DISQUALIFIED for a tab whose
+    // token set is a STRICT subset of a sibling tab's ("npyiter pr" == {npyiter} beside "npyiter
+    // perf" == {npyiter, perf}): such a generic-prefix label would "uniquely" match ANY
+    // conversation that mentions the shared word, which is exactly the wrong-tab flip the pick
+    // must never make; only the title tiers may speak for it. Returns the best tab's index (-1
+    // when nothing scores); `outScore` its score; `outUnique` = strictly ahead of every other
+    // scoring tab — callers must SELECT only a unique best (a tie means "don't guess"). Pure.
+    int PickClaudeTab(const std::vector<std::wstring>& tabNames, const std::vector<std::wstring>& titleHints, std::wstring_view cwdLeaf, const std::unordered_set<std::wstring>& headCorpusTokens, const std::unordered_set<std::wstring>& fullCorpusTokens, int& outScore, bool& outUnique);
 
     // Bring the top-level window HOSTING a claude to the foreground (the Manager's EXTERNAL
     // right-click "Bring Window To Front"): restore it when minimized, foreground it, and — when
     // the host is a Windows Terminal-class window (real WT or this fork; the island class
-    // CASCADIA_HOSTING_WINDOW_CLASS) — best-effort select the claude's TAB via UI Automation
-    // (ScoreClaudeTabName picks it; no signal => the window keeps its current tab). The window is
-    // found by walking the claude's ancestor chain (claude -> host shell -> the terminal/editor
-    // that owns a visible window; `hostShellPid` roots the walk when the claude itself already
-    // exited), checking conhost children for a classic console (the visible console window
-    // belongs to a conhost.exe CHILD of the shell), and — when the process tree owns no visible
-    // window at all (a Win11 default-terminal HANDOFF console, whose visible window is a Windows
-    // Terminal in an unrelated process) — scanning foreign WT-class windows for a CONFIDENT tab
-    // match. Strictly window activation — it never writes to the foreign session (the observer
-    // invariant, Rule #13). Returns false when no host window was found (elevated targets deny
-    // UIA/ShowWindow and degrade to whatever the shell permits). Call OFF the UI thread: it takes
-    // a Toolhelp snapshot and does cross-process UI Automation reads (tens of ms, can block).
-    bool BringClaudeWindowToFront(uint32_t claudePid, uint32_t hostShellPid, std::wstring_view titleHint, std::wstring_view cwd);
+    // CASCADIA_HOSTING_WINDOW_CLASS) — best-effort select the claude's TAB via UI Automation.
+    // The tab is picked by scoring every tab name against several hints — the caller's display
+    // title, plus (when `sessionId` is given) the transcript's custom title / first prompt and a
+    // token-overlap match against the conversation corpus (ScoreClaudeTabName /
+    // ScoreTabNameTokens) — and is selected ONLY on a UNIQUE strict-best score (a tie or no
+    // signal keeps the window's current tab; never guess). The window is found by walking the
+    // claude's ancestor chain (claude -> host shell -> the terminal/editor that owns a visible
+    // window; `hostShellPid` roots the walk when the claude itself already exited), checking
+    // conhost children for a classic console (the visible console window belongs to a conhost.exe
+    // CHILD of the shell), and — when the process tree owns no visible window at all (a Win11
+    // default-terminal HANDOFF console, whose visible window is a Windows Terminal in an
+    // unrelated process) — scanning foreign WT-class windows for a CONFIDENT tab match. Strictly
+    // window activation — it never writes to the foreign session (the observer invariant, Rule
+    // #13). Returns false when no host window was found (elevated targets deny UIA/ShowWindow and
+    // degrade to whatever the shell permits). Call OFF the UI thread: it takes a Toolhelp
+    // snapshot, reads the transcript, and does cross-process UI Automation reads (tens of ms).
+    bool BringClaudeWindowToFront(uint32_t claudePid, uint32_t hostShellPid, std::wstring_view sessionId, std::wstring_view titleHint, std::wstring_view cwd);
 }

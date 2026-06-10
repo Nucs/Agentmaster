@@ -220,9 +220,11 @@ namespace winrt::TerminalApp::implementation
         // registry session, so this menu acts on (pid, cwd), not a session id.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd);
         // Agentmaster: the EXTERNAL menu's Bring Window To Front — resolve the row's host facts
-        // (hostPid / title) from the latest _externalClaudes snapshot, then surface its hosting window
-        // on a BACKGROUND thread (ProcessInspect::BringClaudeWindowToFront: restore-if-minimized +
-        // foreground + best-effort WT tab select). Observe-only safe: window activation, never input.
+        // (hostPid / sessionId / title) from the latest _externalClaudes snapshot, then surface its
+        // hosting window on a BACKGROUND thread (ProcessInspect::BringClaudeWindowToFront:
+        // restore-if-minimized + foreground + best-effort WT tab select — the worker reads the
+        // transcript for the custom title + prompt corpus the tab pick matches against).
+        // Observe-only safe: window activation, never input.
         void _BringExternalToFront(uint32_t pid, const std::wstring& cwd);
         // Flight-Plan message right-click menu: per-prompt Move up / Move down / Delete (only on
         // UPCOMING rows — a sent row can't be reordered) + Archive session (always). Queue ops act

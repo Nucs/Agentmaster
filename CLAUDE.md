@@ -290,7 +290,12 @@ What works, by area:
   dismiss; it REPLACES the old in-content modal). LEFT = a dense, **sortable + searchable** table of archived
   sessions (Title · Directory · Branch · Created · Active · a saved-**window** chip), each row a checkbox for
   **multi-select bulk Restore**; RIGHT = the selected row's **detail** — metadata + a read-only Flight Plan +
-  **Restore here** / **Reopen its window** (resume via `claude --resume`, transcript-gated). XAML-Islands hard
+  **Restore here** / **Reopen its window** (resume via `claude --resume`, transcript-gated). The two halves are
+  divided by a **draggable splitter** (the Manager-tab `_MakeSplitter` recipe, self-contained in the archive
+  TU: drag state in a `shared_ptr` the handlers capture — no `TerminalPage` members; pointer deltas read
+  relative to `nullptr` so no ancestor element is captured into a delegate cycle; star-width writes are
+  layout-property changes, safe synchronously in pointer handlers — the defer-rule below is about tree
+  mutations). XAML-Islands hard
   rule: every pointer handler **defers** its visual-tree mutation to the dispatcher (a synchronous tree change
   mid-click AVs the hit-test), so row-select is highlight-only and open/sort/restore/back post to a clean tick. Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
@@ -336,16 +341,28 @@ What works, by area:
   `ResolveSessionId`, then `claude --resume`s it, leaving the original external running — Rule #13),
   **Open New Session Here** (spawn a managed session in that cwd, a new independent conversation),
   and, **as the last item, Bring Window To Front** (surface the external's HOSTING window:
-  `_BringExternalToFront` resolves the row's `hostPid`/title from the latest snapshot and hands the
-  OS work to a background thread — `ProcessInspect::BringClaudeWindowToFront` walks the claude's
-  ancestor chain to the nearest visible window (conhost children cover a classic console; a Win11
-  default-terminal HANDOFF console falls back to scanning foreign WT-class windows for a confident
-  tab match), restores it when minimized, foregrounds it, and — when the host is a Windows
-  Terminal-class window (`CASCADIA_HOSTING_WINDOW_CLASS`, real WT or our fork) — **also selects the
-  claude's tab** via UI Automation, picked by the pure `ScoreClaudeTabName` heuristic (claude word >
-  OSC status glyph > conversation-title head > cwd leaf; no signal ⇒ keep the current tab, never
-  guess). A non-WT host (cmd console / ConEmu / VS Code) is just foregrounded. Window activation
-  only — never input into the foreign session, upholding the Rule-#13 invariant). **Open New
+  `_BringExternalToFront` resolves the row's `hostPid`/`sessionId`/title from the latest snapshot
+  and hands the OS work to a background thread — `ProcessInspect::BringClaudeWindowToFront` walks
+  the claude's ancestor chain to the nearest visible window (conhost children cover a classic
+  console; a Win11 default-terminal HANDOFF console falls back to scanning foreign WT-class windows
+  for a confident tab match), restores it when minimized, foregrounds it, and — when the host is a
+  Windows Terminal-class window (`CASCADIA_HOSTING_WINDOW_CLASS`, real WT or our fork) — **also
+  selects the claude's tab** via UI Automation. The pick is the pure, unit-tested `PickClaudeTab`
+  over the window's tab names: per-tab score = max of the title tiers (`ScoreClaudeTabName`: exact
+  title 100 > "claude" 90 > OSC status glyph 80 > containment 70 > title head 60 > cwd leaf 40 —
+  hints are the row title, the transcript's **custom title** (`TranscriptInfo::customTitle`, the
+  LAST `custom-title` line; it is also now preferred for the external row's display title), and the
+  first prompt) and a **token-overlap tier** for hand-renamed tab labels (`ScoreTabNameTokens` over
+  a 2 MB transcript read: every ≥3-char tab-name token present in the conversation corpus as a
+  whole word or word-PREFIX — "act" ~ "actions"; tokens hitting the title+**first-prompt** HEAD
+  corpus score 50 over 45 for later-prompt-only hits, so a purpose-named tab outranks an incidental
+  word match; and a tab whose token set is a **strict subset** of a sibling's ("npyiter pr" beside
+  "npyiter perf") is token-disqualified — a generic prefix would "uniquely" match any conversation
+  sharing the word). The tab is selected **only on a UNIQUE strict-best score** — a tie or no
+  signal keeps the window's current tab (a wrong-tab flip is worse than none; verified against the
+  live fleet via `tests/uia_probe.cpp` + `_run-uia-probe.bat`, the ad-hoc dry-run diagnostic). A
+  non-WT host (cmd console / ConEmu / VS Code) is just foregrounded. Window activation only — never
+  input into the foreign session, upholding the Rule-#13 invariant). **Open New
   Session Here is offered in EVERY scope** — it is also the **last item** on the LOCAL/GLOBAL
   session-row menu (`_MakeSessionMenu`, after Rename / Archive), spawning in that session's working
   dir. With no external selected the

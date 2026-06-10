@@ -2775,18 +2775,20 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::_BringExternalToFront(uint32_t pid, const std::wstring& cwd)
     {
         uint32_t hostPid = 0;
+        std::wstring sessionId;
         std::wstring title;
         for (const auto& ex : _externalClaudes)
         {
             if (ex.pid == pid)
             {
                 hostPid = ex.hostPid;
+                sessionId = ex.sessionId; // lets the worker read the transcript (custom title + prompt corpus) for the tab pick
                 title = ex.title;
                 break;
             }
         }
-        std::thread([pid, hostPid, title = std::move(title), cwd]() {
-            ::Agentmaster::BringClaudeWindowToFront(pid, hostPid, title, cwd);
+        std::thread([pid, hostPid, sessionId = std::move(sessionId), title = std::move(title), cwd]() {
+            ::Agentmaster::BringClaudeWindowToFront(pid, hostPid, sessionId, title, cwd);
         }).detach();
     }
 

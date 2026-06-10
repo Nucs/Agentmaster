@@ -1025,6 +1025,18 @@ namespace Agentmaster
                 continue;
             }
             const auto& obj = *parsed;
+            // A user-SET conversation title ({"type":"custom-title","customTitle":...}). The LAST
+            // one wins — a retitle appends a newer line. Display + tab matching prefer it over the
+            // first prompt (it is the user's own label for the conversation).
+            if (obj.StrAt(L"type") == L"custom-title")
+            {
+                const std::wstring ct = obj.StrAt(L"customTitle");
+                if (!ct.empty())
+                {
+                    info.customTitle = FirstLineTrim(ct);
+                }
+                continue;
+            }
             if (obj.StrAt(L"type") != L"user" || obj.BoolAt(L"isMeta"))
             {
                 continue;
@@ -1279,21 +1291,27 @@ namespace
         return tabs;
     }
 
-    // The best-scoring claude tab of a window per ScoreClaudeTabName, or -1 when nothing scores.
-    int BestClaudeTabIn(const std::vector<UiaTab>& tabs, std::wstring_view titleHint, std::wstring_view cwdLeaf, int& outScore)
+    // Everything a tab name can be matched against for ONE claude: the title hints (display title,
+    // custom title, first prompt — equal/containment/head rules), the cwd leaf, and the tokenized
+    // conversation corpus in two tiers (head = title + first prompt; full = every prompt).
+    struct TabPickHints
     {
-        int best = -1;
-        outScore = 0;
-        for (size_t i = 0; i < tabs.size(); ++i)
+        std::vector<std::wstring> titles;
+        std::wstring cwdLeaf;
+        std::unordered_set<std::wstring> headTokens;
+        std::unordered_set<std::wstring> fullTokens;
+    };
+
+    // UiaTab adapter over the pure pick (PickClaudeTab owns the scoring + the subset/unique rules).
+    int BestClaudeTabIn(const std::vector<UiaTab>& tabs, const TabPickHints& h, int& outScore, bool& outUnique)
+    {
+        std::vector<std::wstring> names;
+        names.reserve(tabs.size());
+        for (const auto& t : tabs)
         {
-            const int s = Agentmaster::ScoreClaudeTabName(tabs[i].name, titleHint, cwdLeaf);
-            if (s > outScore)
-            {
-                outScore = s;
-                best = static_cast<int>(i);
-            }
+            names.push_back(t.name);
         }
-        return best;
+        return Agentmaster::PickClaudeTab(names, h.titles, h.cwdLeaf, h.headTokens, h.fullTokens, outScore, outUnique);
     }
 
     // Select one tab. TabViewItem exposes SelectionItem (the real path); Invoke is just-in-case.
@@ -1325,28 +1343,198 @@ namespace Agentmaster
         return std::wstring{ cut == std::wstring_view::npos ? path : path.substr(cut + 1) };
     }
 
-    int ScoreClaudeTabName(std::wstring_view tabName, std::wstring_view titleHint, std::wstring_view cwdLeaf)
+    std::unordered_set<std::wstring> TokenizeTextLower(std::wstring_view text)
     {
-        if (tabName.empty())
+        std::unordered_set<std::wstring> tokens;
+        std::wstring cur;
+        const auto flush = [&]() {
+            if (cur.size() >= 3) // "am" / "gh" / "of" are pure noise
+            {
+                tokens.insert(cur);
+            }
+            cur.clear();
+        };
+        for (const wchar_t raw : text)
+        {
+            const wchar_t c = static_cast<wchar_t>(::towlower(raw));
+            if ((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9'))
+            {
+                cur.push_back(c);
+            }
+            else
+            {
+                flush();
+            }
+        }
+        flush();
+        return tokens;
+    }
+
+    int ScoreTabNameTokens(std::wstring_view tabName, const std::unordered_set<std::wstring>& corpusTokens)
+    {
+        if (corpusTokens.empty())
         {
             return 0;
         }
-        const std::wstring name = LowerCopy(tabName);
-        int score = 0;
-        if (name.find(L"claude") != std::wstring::npos)
+        const auto nameTokens = TokenizeTextLower(tabName);
+        if (nameTokens.empty())
         {
-            score = 100; // the word itself — claude's own OSC title or a user rename
+            return 0;
         }
-        else if (tabName[0] == L'\x2733' || tabName[0] == L'\x2736' || tabName[0] == L'\x273D' || tabName[0] == L'\x2738')
+        for (const auto& t : nameTokens)
+        {
+            if (corpusTokens.find(t) != corpusTokens.end())
+            {
+                continue; // exact whole word
+            }
+            // Tab labels abbreviate ("act" for actions, "perf" for performance): a token also
+            // matches as a PREFIX of a corpus word. One direction only — a tab token LONGER than
+            // the corpus word ("resumes" vs "resume") stays a miss.
+            bool prefixHit = false;
+            for (const auto& w : corpusTokens)
+            {
+                if (w.size() > t.size() && w.compare(0, t.size(), t) == 0)
+                {
+                    prefixHit = true;
+                    break;
+                }
+            }
+            if (!prefixHit)
+            {
+                return 0; // all-or-nothing — a partial overlap on one generic word is noise
+            }
+        }
+        return 50;
+    }
+
+    int PickClaudeTab(const std::vector<std::wstring>& tabNames, const std::vector<std::wstring>& titleHints, std::wstring_view cwdLeaf, const std::unordered_set<std::wstring>& headCorpusTokens, const std::unordered_set<std::wstring>& fullCorpusTokens, int& outScore, bool& outUnique)
+    {
+        // Token sets per tab, for the generic-prefix disqualifier (see the header): a tab whose
+        // token set is a STRICT subset of a sibling's may not win on the token tier.
+        std::vector<std::unordered_set<std::wstring>> tokenSets;
+        tokenSets.reserve(tabNames.size());
+        for (const auto& n : tabNames)
+        {
+            tokenSets.push_back(TokenizeTextLower(n));
+        }
+        const auto strictSubsetOfASibling = [&](size_t i) {
+            const auto& a = tokenSets[i];
+            if (a.empty())
+            {
+                return false;
+            }
+            for (size_t j = 0; j < tokenSets.size(); ++j)
+            {
+                const auto& b = tokenSets[j];
+                if (j == i || b.size() <= a.size())
+                {
+                    continue; // equal sets stay eligible — a genuine tie is the unique-guard's job
+                }
+                bool subset = true;
+                for (const auto& t : a)
+                {
+                    if (b.find(t) == b.end())
+                    {
+                        subset = false;
+                        break;
+                    }
+                }
+                if (subset)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        int best = -1;
+        outScore = 0;
+        outUnique = true;
+        for (size_t i = 0; i < tabNames.size(); ++i)
+        {
+            int s = 0;
+            if (titleHints.empty())
+            {
+                s = ScoreClaudeTabName(tabNames[i], {}, cwdLeaf); // claude-word/glyph/cwd rules still apply
+            }
+            for (const auto& t : titleHints)
+            {
+                const int v = ScoreClaudeTabName(tabNames[i], t, cwdLeaf);
+                s = v > s ? v : s;
+            }
+            if (!strictSubsetOfASibling(i))
+            {
+                // Head tier (50) over full tier (45): a purpose-named tab must outrank a tab that
+                // merely matches a word from some later prompt.
+                if (ScoreTabNameTokens(tabNames[i], headCorpusTokens) > 0)
+                {
+                    s = 50 > s ? 50 : s;
+                }
+                else if (ScoreTabNameTokens(tabNames[i], fullCorpusTokens) > 0)
+                {
+                    s = 45 > s ? 45 : s;
+                }
+            }
+            if (s > outScore)
+            {
+                outScore = s;
+                best = static_cast<int>(i);
+                outUnique = true;
+            }
+            else if (s == outScore && s > 0)
+            {
+                outUnique = false;
+            }
+        }
+        return best;
+    }
+
+    int ScoreClaudeTabName(std::wstring_view tabName, std::wstring_view titleHint, std::wstring_view cwdLeaf)
+    {
+        const auto trim = [](std::wstring_view s) {
+            while (!s.empty() && (s.front() == L' ' || s.front() == L'\t'))
+            {
+                s.remove_prefix(1);
+            }
+            while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
+            {
+                s.remove_suffix(1);
+            }
+            return s;
+        };
+        const std::wstring name = LowerCopy(trim(tabName));
+        if (name.empty())
+        {
+            return 0;
+        }
+        const std::wstring hint = LowerCopy(trim(titleHint));
+        int score = 0;
+        if (!hint.empty() && name == hint)
+        {
+            score = 100; // a tab named exactly the conversation title — the strongest signal
+        }
+        else if (name.find(L"claude") != std::wstring::npos)
+        {
+            score = 90; // the word itself — claude's own OSC title or a user rename
+        }
+        else if (name[0] == L'\x2733' || name[0] == L'\x2736' || name[0] == L'\x273D' || name[0] == L'\x2738')
         {
             score = 80; // claude's OSC status glyph leads the title it sets while working
         }
+        if (score < 70)
+        {
+            // Full containment either way (a tab named with the title plus decoration, or with a
+            // truncated title). The CONTAINED side must carry >= 6 chars of signal.
+            if ((hint.size() >= 6 && name.find(hint) != std::wstring::npos) ||
+                (name.size() >= 6 && !hint.empty() && hint.find(name) != std::wstring::npos))
+            {
+                score = 70;
+            }
+        }
         if (score < 60)
         {
-            // The conversation title (first prompt): claude often titles the tab with the task
-            // summary. Probe with the hint's HEAD, capped at 16 chars (so a name that is a strict
-            // prefix of the hint — or glyph-prefixed — still hits) and at least 8 (no noise).
-            const std::wstring hint = LowerCopy(titleHint);
+            // The hint's HEAD, capped at 16 chars (so a name that is a strict prefix of the hint —
+            // or glyph-prefixed — still hits) and at least 8 (no noise).
             const size_t cap = hint.size() < 16 ? hint.size() : 16;
             if (cap >= 8 && name.find(hint.substr(0, cap)) != std::wstring::npos)
             {
@@ -1364,9 +1552,54 @@ namespace Agentmaster
         return score;
     }
 
-    bool BringClaudeWindowToFront(uint32_t claudePid, uint32_t hostShellPid, std::wstring_view titleHint, std::wstring_view cwd)
+    bool BringClaudeWindowToFront(uint32_t claudePid, uint32_t hostShellPid, std::wstring_view sessionId, std::wstring_view titleHint, std::wstring_view cwd)
     {
-        const std::wstring cwdLeaf = PathLeaf(cwd);
+        // Everything a tab can be matched against. The caller's display title is one hint; the
+        // transcript (one head read) contributes the user-set custom title + the first prompt as
+        // further hints, and the conversation corpus (title + human prompts, tokenized) for the
+        // hand-renamed-tab overlap tier. Duplicated hints are harmless (scores are max-combined).
+        TabPickHints hints;
+        hints.cwdLeaf = PathLeaf(cwd);
+        if (!titleHint.empty())
+        {
+            hints.titles.emplace_back(titleHint);
+        }
+        if (!sessionId.empty())
+        {
+            // 2 MB head: human prompts are sparse among assistant/tool lines, and a 256 KB read
+            // proved too shallow on real transcripts (one giant first turn swallowed it — corpus
+            // of 1 prompt). One-shot on a click, off the UI thread — the depth is affordable.
+            const auto ti = ReadTranscriptInfo(cwd, sessionId, 2 * 1024 * 1024, 200);
+            if (ti.found)
+            {
+                if (!ti.customTitle.empty())
+                {
+                    hints.titles.push_back(ti.customTitle);
+                }
+                if (!ti.title.empty())
+                {
+                    hints.titles.push_back(ti.title);
+                }
+                // Head corpus = the conversation's PURPOSE (title + custom title + first prompt);
+                // full corpus = every prompt read. PickClaudeTab ranks head hits above full hits.
+                std::wstring head{ ti.title };
+                head += L'\n';
+                head += ti.customTitle;
+                if (!ti.userPrompts.empty())
+                {
+                    head += L'\n';
+                    head += ti.userPrompts.front();
+                }
+                std::wstring full{ head };
+                for (size_t i = 1; i < ti.userPrompts.size(); ++i)
+                {
+                    full += L'\n';
+                    full += ti.userPrompts[i];
+                }
+                hints.headTokens = TokenizeTextLower(head);
+                hints.fullTokens = TokenizeTextLower(full);
+            }
+        }
 
         // COM for the UIA client. MTA per UIA client guidance — we are on a worker thread, never
         // the UI one. RPC_E_CHANGED_MODE (already initialized STA here) is still usable; it is
@@ -1421,6 +1654,7 @@ namespace Agentmaster
 
             HWND target = nullptr;
             int tabIndex = -1; // the claude's tab in targetTabs, when already resolved
+            bool tabUnique = false; // selection requires a UNIQUE best (never flip to a guessed tab)
             std::vector<UiaTab> targetTabs;
 
             for (const auto pid : chain)
@@ -1463,12 +1697,14 @@ namespace Agentmaster
                         }
                         auto tabs = UiaTabsOf(ensureUia(), h);
                         int score = 0;
-                        const int idx = BestClaudeTabIn(tabs, titleHint, cwdLeaf, score);
+                        bool unique = true;
+                        const int idx = BestClaudeTabIn(tabs, hints, score, unique);
                         if (idx >= 0 && score > bestScore)
                         {
                             bestScore = score;
                             target = h;
                             tabIndex = idx;
+                            tabUnique = unique;
                             targetTabs = std::move(tabs);
                         }
                     }
@@ -1488,12 +1724,14 @@ namespace Agentmaster
                 {
                     auto tabs = UiaTabsOf(ensureUia(), h);
                     int score = 0;
-                    const int idx = BestClaudeTabIn(tabs, titleHint, cwdLeaf, score);
+                    bool unique = true;
+                    const int idx = BestClaudeTabIn(tabs, hints, score, unique);
                     if (idx >= 0 && score > bestScore)
                     {
                         bestScore = score;
                         target = h;
                         tabIndex = idx;
+                        tabUnique = unique;
                         targetTabs = std::move(tabs);
                     }
                 }
@@ -1515,13 +1753,13 @@ namespace Agentmaster
                 {
                     targetTabs = UiaTabsOf(ensureUia(), target);
                     int score = 0;
-                    tabIndex = BestClaudeTabIn(targetTabs, titleHint, cwdLeaf, score);
+                    tabIndex = BestClaudeTabIn(targetTabs, hints, score, tabUnique);
                     if (score <= 0)
                     {
                         tabIndex = -1;
                     }
                 }
-                if (tabIndex >= 0 && targetTabs.size() > 1)
+                if (tabIndex >= 0 && tabUnique && targetTabs.size() > 1)
                 {
                     UiaSelectTab(targetTabs[static_cast<size_t>(tabIndex)]);
                 }

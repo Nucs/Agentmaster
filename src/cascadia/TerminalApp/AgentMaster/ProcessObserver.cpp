@@ -556,11 +556,15 @@ namespace Agentmaster
                 }
                 else
                 {
-                    // One-time transcript head read (128 KB) for the first prompt (title) + gitBranch.
+                    // One-time transcript head read (128 KB) for the title + gitBranch. Prefer the
+                    // user-SET conversation title (custom-title line) over the first prompt — it is
+                    // the user's own label, and typically what a renamed hosting tab says too. (A
+                    // retitle past the 128 KB head is missed — best-effort; the Bring-Window-To-Front
+                    // worker re-reads deeper for its tab match.)
                     const auto ti = ReadTranscriptInfo(f.cwd, sid, 131072, 1);
-                    ex.title = ti.title;
+                    ex.title = !ti.customTitle.empty() ? ti.customTitle : ti.title;
                     ex.gitBranch = ti.gitBranch;
-                    _extInfoCache.emplace(sid, ExtInfo{ ti.title, ti.gitBranch });
+                    _extInfoCache.emplace(sid, ExtInfo{ ex.title, ti.gitBranch });
                 }
             }
             externalRows.push_back(std::move(ex));
