@@ -59,16 +59,21 @@
         <!--  Agentmaster: the tab-strip status dot. Sits between the TabViewItem icon (outside this
               control) and the title, so the header reads "[icon] (dot) (title)" — state-colored for a
               managed Claude session (the Triage-Board palette via AgentStatusColors.h), dim gray for
-              an observed-only tab; collapsed on anything Agentmaster doesn't classify. A TextBlock
-              (not FontIcon) on purpose: it shares the title TextBlock's line-box behavior, so the
-              glyph rides the same baseline (the TextBlock/FontIcon alignment gotcha).  -->
-        <TextBlock x:Name="HeaderAgentStatusDot"
-                   Margin="0,0,6,0"
-                   VerticalAlignment="Center"
-                   FontSize="10"
-                   Foreground="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
-                   Text="&#x25CF;"
-                   Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
+              an observed-only tab; collapsed on anything Agentmaster doesn't classify. An Ellipse
+              (originally a "●" TextBlock): a real filled shape renders BOLDER than the glyph's ink at
+              the same size, takes a thin black Stroke so the dot stays legible on ANY tab background
+              (per-dir colored tabs, the selected-tab highlight, light themes), and centers
+              deterministically — no font line-box / baseline concerns. The Fill binds the same
+              AgentStatusBrush the code already writes, so this is presentation-only.  -->
+        <Ellipse x:Name="HeaderAgentStatusDot"
+                 Width="10"
+                 Height="10"
+                 Margin="0,0,6,0"
+                 VerticalAlignment="Center"
+                 Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
+                 Stroke="Black"
+                 StrokeThickness="1"
+                 Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />
