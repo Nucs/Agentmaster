@@ -308,7 +308,10 @@ What works, by area:
   config + PowerShell forwarder). **M9:** one process-wide **`SharedEngine()`** (`Engine.{h,cpp}`)
   owns the registry/bridge/scheduler for ALL windows (the WindowEmperor is one process, N windows
   on N threads); each `TerminalPage` copies the shared `shared_ptr`s and its Manager tab is a
-  per-window *lens* over the one fleet. The `<pid>` pipe is unambiguous *because* there is exactly
+  per-window *lens* over the one fleet. The engine also carries the per-window **activate sinks**
+  (`Engine::RegisterWindowActivateHandler` / `ActivateSessionInOtherWindows` — the cross-window
+  Activate fan-out; see *C1 UI*), registered at engine init and token-detached in `~TerminalPage`
+  like the rest. The `<pid>` pipe is unambiguous *because* there is exactly
   one bridge; one writer for `sessions.json`; restore loads process-once
   under a load **barrier** (`Engine::restoreMutex` — a 2nd window blocks until the fleet is fully loaded, then
   skips, so it can't double-load NOR race its tab re-home against a half-loaded registry).
@@ -1301,9 +1304,10 @@ build **binlog uploads as an artifact** to diagnose the first run.
     Exactly ONE `SessionRegistry` / `HooksBridge` / `Scheduler` for the whole process
     (`SharedEngine()`), shared by every window — never re-create them per `TerminalPage`, and
     never key the bridge on anything that collides across windows (the `<pid>` pipe is fine
-    *because* there is one bridge). Each window registers its lens observer + adoption handler by
-    **token** and detaches them on teardown (`RemoveObserver` in `~AgentManagerContent`,
-    `RemoveAdoptionHandler` in `~TerminalPage`); the fleet loads **process-once**
+    *because* there is one bridge). Each window registers its lens observer + adoption handler +
+    activate sink by **token** and detaches them on teardown (`RemoveObserver` in
+    `~AgentManagerContent`; `RemoveAdoptionHandler` + `UnregisterWindowActivateHandler` in
+    `~TerminalPage`); the fleet loads **process-once**
     under the `Engine::restoreMutex` barrier (a second window blocks until it's loaded, then skips) so it can't
     double-insert NOR race its tab re-home against a half-loaded registry. Per-window persisted UI
     state (geometry + lens + ordered tab refs) is the `WindowRecord` (`windows/<id>.json`) and it
