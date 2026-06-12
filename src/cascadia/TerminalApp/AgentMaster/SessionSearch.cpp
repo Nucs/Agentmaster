@@ -286,6 +286,87 @@ namespace Agentmaster
         return out;
     }
 
+    bool IsGuidToken(std::wstring_view token)
+    {
+        if (token.size() >= 2 && token.front() == L'{' && token.back() == L'}')
+        {
+            token = token.substr(1, token.size() - 2);
+        }
+        if (token.size() != 36)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < token.size(); ++i)
+        {
+            const wchar_t c = token[i];
+            if (i == 8 || i == 13 || i == 18 || i == 23)
+            {
+                if (c != L'-')
+                {
+                    return false;
+                }
+                continue;
+            }
+            const bool hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+            if (!hex)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::vector<SearchTerm> ParseSessionQuery(std::wstring_view text)
+    {
+        std::vector<SearchTerm> out;
+        const auto isWs = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+        size_t i = 0;
+        while (i < text.size())
+        {
+            if (isWs(text[i]))
+            {
+                ++i;
+                continue;
+            }
+            SearchTerm t;
+            if (text[i] == L'"')
+            {
+                // "quoted phrase" — one EXACT term, spaces kept; unterminated runs to the end.
+                const size_t close = text.find(L'"', i + 1);
+                const size_t end = (close == std::wstring_view::npos) ? text.size() : close;
+                t.text.assign(text.substr(i + 1, end - (i + 1)));
+                t.exact = true;
+                i = (close == std::wstring_view::npos) ? text.size() : close + 1;
+            }
+            else
+            {
+                size_t end = i;
+                while (end < text.size() && !isWs(text[end]))
+                {
+                    ++end;
+                }
+                std::wstring_view tok = text.substr(i, end - i);
+                i = end;
+                if (IsGuidToken(tok))
+                {
+                    if (tok.front() == L'{')
+                    {
+                        tok = tok.substr(1, tok.size() - 2);
+                    }
+                    t.isGuid = true;
+                }
+                t.text.assign(tok);
+            }
+            if (t.text.empty())
+            {
+                continue; // "" — an empty term matches everything; drop it
+            }
+            t.textLower = FoldLower(t.text);
+            out.push_back(std::move(t));
+        }
+        return out;
+    }
+
     std::wstring BuildSearchRegex(std::wstring_view text, bool fuzzy)
     {
         static constexpr std::wstring_view kSpecials = LR"(\.^$|()[]{}*+?-)";
@@ -373,43 +454,70 @@ namespace Agentmaster
     {
         std::vector<std::wstring> out;
         out.reserve(entries.size());
-        if (q.text.empty())
+        const auto terms = ParseSessionQuery(q.text);
+        if (terms.empty())
         {
             for (const auto& e : entries)
             {
-                out.push_back(e.sessionId); // window-only listing
+                out.push_back(e.sessionId); // window-only listing (empty / whitespace / "" query)
             }
             return out;
         }
-        const std::wstring needle = FoldLower(q.text);
         for (const auto& e : entries)
         {
             const auto& st = e.stats;
-            bool hit =
+            // Fold each haystack ONCE per entry; every term tries them all (AND across terms,
+            // OR across fields — neighbor terms may hit different fields).
+            const std::wstring baseline[] = {
                 // Baseline (both message scopes OFF — and always useful): title + directory.
-                MatchesQueryText(FoldLower(st.customTitle), needle, q.fuzzy) ||
-                MatchesQueryText(FoldLower(st.aiTitle), needle, q.fuzzy) ||
-                MatchesQueryText(FoldLower(st.summary), needle, q.fuzzy) ||
-                MatchesQueryText(FoldLower(st.firstUserPrompt), needle, q.fuzzy) ||
-                MatchesQueryText(FoldLower(st.cwd), needle, q.fuzzy);
-            if (!hit && (q.scopeDirs || q.scopeFiles))
+                FoldLower(st.customTitle),
+                FoldLower(st.aiTitle),
+                FoldLower(st.summary),
+                FoldLower(st.firstUserPrompt),
+                FoldLower(st.cwd),
+            };
+            const std::wstring idLower = FoldLower(e.sessionId);
+            const std::wstring forkLower = FoldLower(st.forkedFromId);
+            bool all = true;
+            for (const auto& t : terms)
             {
-                for (const auto& p : st.pathsAccessed)
+                const bool fz = TermIsFuzzy(t, q.fuzzy);
+                // A whole-GUID token matches the session IDENTITY outright — its own id, or its
+                // fork-parent id (so a parent's guid surfaces the forks too). The text haystacks
+                // below still apply (additive).
+                bool hit = t.isGuid && (t.textLower == idLower || (!forkLower.empty() && t.textLower == forkLower));
+                for (const auto& h : baseline)
                 {
-                    const std::wstring lowered = FoldLower(p);
-                    if (q.scopeDirs && MatchesQueryText(DirPart(lowered), needle, q.fuzzy))
+                    if (hit)
                     {
-                        hit = true;
                         break;
                     }
-                    if (q.scopeFiles && MatchesQueryText(LeafPart(lowered), needle, q.fuzzy))
+                    hit = MatchesQueryText(h, t.textLower, fz);
+                }
+                if (!hit && (q.scopeDirs || q.scopeFiles))
+                {
+                    for (const auto& p : st.pathsAccessed)
                     {
-                        hit = true;
-                        break;
+                        const std::wstring lowered = FoldLower(p);
+                        if (q.scopeDirs && MatchesQueryText(DirPart(lowered), t.textLower, fz))
+                        {
+                            hit = true;
+                            break;
+                        }
+                        if (q.scopeFiles && MatchesQueryText(LeafPart(lowered), t.textLower, fz))
+                        {
+                            hit = true;
+                            break;
+                        }
                     }
                 }
+                if (!hit)
+                {
+                    all = false;
+                    break;
+                }
             }
-            if (hit)
+            if (all)
             {
                 out.push_back(e.sessionId);
             }
@@ -430,11 +538,28 @@ namespace Agentmaster
     std::unordered_map<std::wstring, SessionHit> SearchHistoryPrompts(const std::wstring& historyPath, const SessionQuery& q, size_t maxSnippetsPerSession)
     {
         std::unordered_map<std::wstring, SessionHit> out;
-        if (q.text.empty())
+        const auto terms = ParseSessionQuery(q.text);
+        const SearchTerm* snip = nullptr; // first text term — anchors the snippets
+        const SearchTerm* sel = nullptr; // longest text term — the most selective rg pattern
+        for (const auto& t : terms)
         {
-            return out;
+            if (t.isGuid)
+            {
+                continue;
+            }
+            if (!snip)
+            {
+                snip = &t;
+            }
+            if (!sel || t.text.size() > sel->text.size())
+            {
+                sel = &t;
+            }
         }
-        const std::wstring needle = FoldLower(q.text);
+        if (!snip)
+        {
+            return out; // empty or guid-only query — identity matching is the fast phase's job
+        }
         const auto onLine = [&](std::wstring_view line) {
             const auto parsed = json::Parse(line);
             if (!parsed || parsed->type != json::Value::Type::Obj)
@@ -447,8 +572,22 @@ namespace Agentmaster
                 return; // ancient pre-sessionId lines — unattributable
             }
             const std::wstring display = parsed->StrAt(L"display");
-            if (display.empty() || !MatchesQueryText(FoldLower(display), needle, q.fuzzy))
+            if (display.empty())
             {
+                return;
+            }
+            const std::wstring displayLower = FoldLower(display);
+            const std::wstring sidLower = FoldLower(sid);
+            for (const auto& t : terms)
+            {
+                // AND: a guid term is alternatively satisfied by the line's own session id
+                // ("<guid> word" = search "word" within that session); any term may hit the
+                // prompt text itself.
+                if ((t.isGuid && t.textLower == sidLower) ||
+                    MatchesQueryText(displayLower, t.textLower, TermIsFuzzy(t, q.fuzzy)))
+                {
+                    continue;
+                }
                 return;
             }
             auto& hit = out[sid];
@@ -456,18 +595,20 @@ namespace Agentmaster
             ++hit.hitCount;
             if (hit.snippets.size() < maxSnippetsPerSession)
             {
-                hit.snippets.push_back(MakeSnippet(display, needle, q.fuzzy, 160));
+                hit.snippets.push_back(MakeSnippet(display, snip->textLower, TermIsFuzzy(*snip, q.fuzzy), 160));
             }
         };
 
         const auto& rg = ResolveRipgrep();
         if (!rg.empty())
         {
-            // rg filters the (5 MB+, ever-growing) file to candidate lines; each candidate is
-            // still verified by the in-process matcher (identical semantics, exact attribution).
+            // rg filters the (5 MB+, ever-growing) file to candidate lines. One pattern can't
+            // AND several terms (Rust regex: no lookahead), so it filters on the LONGEST text
+            // term — a strict superset — and each candidate line is still verified against ALL
+            // terms by the in-process matcher (identical semantics, exact attribution).
             std::string raw;
             const std::wstring args = L"-i --no-config --no-messages --no-line-number --regexp " +
-                                      QuoteArg(BuildSearchRegex(q.text, q.fuzzy)) + L" -- " + QuoteArg(historyPath);
+                                      QuoteArg(BuildSearchRegex(sel->text, TermIsFuzzy(*sel, q.fuzzy))) + L" -- " + QuoteArg(historyPath);
             if (RunToolCapture(rg, args, kRgTimeoutMs, raw))
             {
                 for (const auto& line : CaptureLines(raw))
@@ -485,51 +626,75 @@ namespace Agentmaster
     std::vector<SessionHit> SearchTranscriptsSlow(const std::vector<TranscriptRef>& refs, const SessionQuery& q, size_t maxSnippetsPerSession, const std::function<bool()>& cancelled)
     {
         std::vector<SessionHit> out;
-        if (q.text.empty() || (!q.scopeUser && !q.scopeAgent))
+        if (!q.scopeUser && !q.scopeAgent)
         {
             return out; // content search only exists for the message scopes
         }
-        const std::wstring needle = FoldLower(q.text);
+        const auto terms = ParseSessionQuery(q.text);
+        const SearchTerm* snip = nullptr; // first text term — anchors the snippets
+        for (const auto& t : terms)
+        {
+            if (!t.isGuid)
+            {
+                snip = &t;
+                break;
+            }
+        }
+        if (!snip)
+        {
+            return out; // empty or guid-only query — identity matching is the fast phase's job
+        }
 
-        // ripgrep file-level filter: only files with at least one RAW match get the precise
-        // in-process scan. Raw-match is a superset of any scoped match (the scoped texts are
-        // substrings of their lines), so nothing is missed.
+        // ripgrep file-level filter, one round per TEXT term with the path list intersected
+        // (one pattern can't AND several terms): a message matching ALL terms needs every text
+        // term raw-present in its file, so each round narrows the next. Raw-match is a superset
+        // of any scoped match (the scoped texts are substrings of their lines), so nothing is
+        // missed. A guid term is satisfiable by file IDENTITY alone — it never filters files.
+        // A spawn failure keeps the current (still-correct) superset for the in-process scan.
         std::vector<const TranscriptRef*> candidates;
+        candidates.reserve(refs.size());
+        for (const auto& r : refs)
+        {
+            candidates.push_back(&r);
+        }
         const auto& rg = ResolveRipgrep();
-        bool filtered = false;
         if (!rg.empty())
         {
-            std::vector<std::wstring> paths;
-            paths.reserve(refs.size());
-            for (const auto& r : refs)
+            for (const auto& t : terms)
             {
-                paths.push_back(r.path);
-            }
-            std::vector<std::wstring> matched;
-            if (RgFilesWithMatches(rg, BuildSearchRegex(q.text, q.fuzzy), paths, matched))
-            {
+                if (t.isGuid || candidates.empty())
+                {
+                    continue;
+                }
+                std::vector<std::wstring> paths;
+                paths.reserve(candidates.size());
+                for (const auto* r : candidates)
+                {
+                    paths.push_back(r->path);
+                }
+                std::vector<std::wstring> matched;
+                if (!RgFilesWithMatches(rg, BuildSearchRegex(t.text, TermIsFuzzy(t, q.fuzzy)), paths, matched))
+                {
+                    break; // rg unavailable mid-run: scan the current superset in-process
+                }
+                std::vector<const TranscriptRef*> next;
+                next.reserve(matched.size());
                 for (const auto& m : matched)
                 {
-                    for (const auto& r : refs)
+                    for (const auto* r : candidates)
                     {
-                        if (m.size() == r.path.size() && ::_wcsicmp(m.c_str(), r.path.c_str()) == 0)
+                        if (m.size() == r->path.size() && ::_wcsicmp(m.c_str(), r->path.c_str()) == 0)
                         {
-                            candidates.push_back(&r);
+                            next.push_back(r);
                             break;
                         }
                     }
                 }
-                filtered = true;
-            }
-        }
-        if (!filtered)
-        {
-            for (const auto& r : refs)
-            {
-                candidates.push_back(&r); // no rg: scan everything (slower, same results)
+                candidates = std::move(next);
             }
         }
 
+        const bool snipFuzzy = TermIsFuzzy(*snip, q.fuzzy);
         for (const auto* ref : candidates)
         {
             if (cancelled && cancelled())
@@ -538,21 +703,41 @@ namespace Agentmaster
             }
             SessionHit hit;
             hit.sessionId = ref->sessionId;
-            ScanTranscript(ref->path, 0, q.scopeUser ? kScanTextBudget : 0, q.scopeAgent ? kScanTextBudget : 0, [&](const TranscriptLineFacts& f) {
-                if (q.scopeUser && !f.userText.empty() && MatchesQueryText(FoldLower(f.userText), needle, q.fuzzy))
+            // Terms this file's IDENTITY satisfies, resolved once: a guid term equal to the
+            // session id holds for EVERY message in the file ("<guid> word" = search "word"
+            // within that session); a guid that is NOT this file's id must appear in the
+            // message text like any other term.
+            const std::wstring sidLower = FoldLower(ref->sessionId);
+            std::vector<char> idSat(terms.size(), 0);
+            for (size_t i = 0; i < terms.size(); ++i)
+            {
+                idSat[i] = (terms[i].isGuid && terms[i].textLower == sidLower) ? 1 : 0;
+            }
+            const auto matchesAllTerms = [&](const std::wstring& textLower) {
+                for (size_t i = 0; i < terms.size(); ++i)
                 {
-                    ++hit.hitCount;
-                    if (hit.snippets.size() < maxSnippetsPerSession)
+                    if (!idSat[i] && !MatchesQueryText(textLower, terms[i].textLower, TermIsFuzzy(terms[i], q.fuzzy)))
                     {
-                        hit.snippets.push_back(L"👤 " + MakeSnippet(f.userText, needle, q.fuzzy, 160));
+                        return false;
                     }
                 }
-                if (q.scopeAgent && !f.agentText.empty() && MatchesQueryText(FoldLower(f.agentText), needle, q.fuzzy))
+                return true;
+            };
+            ScanTranscript(ref->path, 0, q.scopeUser ? kScanTextBudget : 0, q.scopeAgent ? kScanTextBudget : 0, [&](const TranscriptLineFacts& f) {
+                if (q.scopeUser && !f.userText.empty() && matchesAllTerms(FoldLower(f.userText)))
                 {
                     ++hit.hitCount;
                     if (hit.snippets.size() < maxSnippetsPerSession)
                     {
-                        hit.snippets.push_back(L"🤖 " + MakeSnippet(f.agentText, needle, q.fuzzy, 160));
+                        hit.snippets.push_back(L"👤 " + MakeSnippet(f.userText, snip->textLower, snipFuzzy, 160));
+                    }
+                }
+                if (q.scopeAgent && !f.agentText.empty() && matchesAllTerms(FoldLower(f.agentText)))
+                {
+                    ++hit.hitCount;
+                    if (hit.snippets.size() < maxSnippetsPerSession)
+                    {
+                        hit.snippets.push_back(L"🤖 " + MakeSnippet(f.agentText, snip->textLower, snipFuzzy, 160));
                     }
                 }
             });

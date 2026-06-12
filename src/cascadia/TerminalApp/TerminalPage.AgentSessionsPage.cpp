@@ -9,6 +9,9 @@
 //   📁 = match directories accessed             📄 = match files accessed
 //   (F) = fuzzy   ·   both message scopes OFF ⇒ title + directory only (§1a)
 //   [1 month] cycles 1d/3d/7d/14d/1mo/3mo on click; HOVER opens a From/To range popup (Q4).
+// Query grammar (ParseSessionQuery, SessionSearch.h): whitespace-split terms AND-match;
+// "quoted phrase" = exact contiguous match ((F) never applies inside quotes); a bare whole
+// session-id GUID matches that session + its forks by IDENTITY (paste from hooks.log works).
 // Backed by the TranscriptStore sidecar index (~/.agentmaster/sessions-index/<sid>.json,
 // (size,mtime)-invalidated, incrementally accumulated) and the two-phase SessionSearch:
 // FAST = in-memory over the index + the history.jsonl accelerator; SLOW = rg-prefiltered
@@ -282,6 +285,7 @@ namespace winrt::TerminalApp::implementation
         search.PlaceholderText(L"search for sessions");
         search.Width(240);
         search.VerticalAlignment(VerticalAlignment::Center);
+        ToolTipService::SetToolTip(search, winrt::box_value(L"Words AND-match (each may hit a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a whole session-id GUID to find that session (and its forks)"));
         _sessionsSearchBox = search;
         search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
             if (const auto tb = s.try_as<TextBox>())

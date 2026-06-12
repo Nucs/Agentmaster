@@ -1873,6 +1873,36 @@ static void TestSessionSearch()
         CHECK(!s.empty() && s.front() == L'…', "snippet: left-context ellipsis when clipped");
     }
 
+    // --- IsGuidToken / ParseSessionQuery: the term grammar ("quoted" exact + whole-guid id terms) ---
+    {
+        CHECK(IsGuidToken(L"dddddddd-dddd-4ddd-8ddd-dddddddddddd"), "guid: bare uuid accepted");
+        CHECK(IsGuidToken(L"{DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD}"), "guid: braced uppercase accepted");
+        CHECK(!IsGuidToken(L"dddddddd-dddd-4ddd-8ddd-ddddddddddd"), "guid: 35 chars rejected");
+        CHECK(!IsGuidToken(L"ddddddddxdddd-4ddd-8ddd-dddddddddddd"), "guid: misplaced dash rejected");
+        CHECK(!IsGuidToken(L"gddddddd-dddd-4ddd-8ddd-dddddddddddd"), "guid: non-hex rejected");
+        CHECK(!IsGuidToken(L""), "guid: empty rejected");
+
+        auto t = ParseSessionQuery(L"  foo   bar ");
+        CHECK(t.size() == 2 && t[0].text == L"foo" && t[1].text == L"bar" && !t[0].exact && !t[0].isGuid, "parse: whitespace-split plain terms");
+        t = ParseSessionQuery(L"\"foo bar\" baz");
+        CHECK(t.size() == 2 && t[0].text == L"foo bar" && t[0].exact && t[1].text == L"baz" && !t[1].exact, "parse: quoted phrase is ONE exact term");
+        t = ParseSessionQuery(L"\"unterminated tail");
+        CHECK(t.size() == 1 && t[0].text == L"unterminated tail" && t[0].exact, "parse: unterminated quote runs to the end");
+        CHECK(ParseSessionQuery(L"\"\"").empty(), "parse: empty quotes drop (no terms)");
+        CHECK(ParseSessionQuery(L"   ").empty(), "parse: whitespace-only -> no terms");
+        t = ParseSessionQuery(L"{dddddddd-dddd-4ddd-8ddd-dddddddddddd}");
+        CHECK(t.size() == 1 && t[0].isGuid && t[0].text == L"dddddddd-dddd-4ddd-8ddd-dddddddddddd", "parse: braced guid term, braces stripped");
+        t = ParseSessionQuery(L"\"dddddddd-dddd-4ddd-8ddd-dddddddddddd\"");
+        CHECK(t.size() == 1 && !t[0].isGuid && t[0].exact, "parse: QUOTED guid is a pure text term");
+        t = ParseSessionQuery(L"DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD");
+        CHECK(t.size() == 1 && t[0].isGuid && t[0].textLower == L"dddddddd-dddd-4ddd-8ddd-dddddddddddd", "parse: guid term pre-folded for the id compare");
+
+        const SearchTerm plain{ L"a", L"a", false, false };
+        const SearchTerm exact{ L"a", L"a", true, false };
+        const SearchTerm guid{ L"a", L"a", false, true };
+        CHECK(TermIsFuzzy(plain, true) && !TermIsFuzzy(exact, true) && !TermIsFuzzy(guid, true) && !TermIsFuzzy(plain, false), "terms: (F) applies to plain terms only");
+    }
+
     // --- SearchIndexFast: toggle semantics over canned entries ---
     {
         std::vector<SessionIndexEntry> entries(3);
@@ -1924,6 +1954,56 @@ static void TestSessionSearch()
         CHECK(!r.empty() && r[0] == L"s-title", "fast: fuzzy subsequence over the title");
     }
 
+    // --- SearchIndexFast: guid -> session-identity terms, quoted-exact, AND semantics ---
+    {
+        const std::wstring gidA = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const std::wstring gidB = L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        std::vector<SessionIndexEntry> entries(3);
+        entries[0].sessionId = gidA;
+        entries[0].stats.customTitle = L"Fix the BUILD pipeline";
+        entries[0].stats.cwd = L"K:\\source\\alpha";
+        entries[1].sessionId = gidB;
+        entries[1].stats.customTitle = L"fork child";
+        entries[1].stats.forkedFromId = gidA;
+        entries[1].stats.cwd = L"K:\\source\\alpha";
+        entries[2].sessionId = L"cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        entries[2].stats.customTitle = L"unrelated";
+        entries[2].stats.cwd = L"K:\\elsewhere";
+
+        SessionQuery q;
+        q.text = gidA;
+        auto r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 2 && r[0] == gidA && r[1] == gidB, "fast: whole-guid query matches the session id AND its fork");
+
+        q.text = L"{AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA}";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 2 && r[0] == gidA, "fast: guid id match is case-insensitive, braces tolerated");
+
+        q.text = gidA + L" build";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == gidA, "fast: guid + word AND — the fork lacks the word");
+
+        q.text = L"build alpha";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == gidA, "fast: AND terms may hit DIFFERENT fields (title + cwd)");
+
+        q.text = L"\"the build\"";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == gidA, "fast: quoted phrase exact-matches across a space");
+        q.text = L"\"build the\"";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: quoted phrase is order-exact (no token shuffle)");
+
+        q = {};
+        q.fuzzy = true;
+        q.text = L"fxbld";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == gidA, "fast: plain term fuzzy-matches under (F)");
+        q.text = L"\"fxbld\"";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: quotes suppress (F) for that term");
+    }
+
     // --- temp-root fixtures: history accelerator + presence + slow phase + index sidecar ---
     {
         wchar_t tmp[MAX_PATH]{};
@@ -1946,6 +2026,32 @@ static void TestSessionSearch()
         const auto hh = SearchHistoryPrompts(hist, q, 3);
         CHECK(hh.size() == 1 && hh.count(L"sid-1") == 1, "history: per-sid aggregation, case-insensitive, no-sid lines skipped");
         CHECK(hh.count(L"sid-1") && hh.at(L"sid-1").hitCount == 2 && hh.at(L"sid-1").snippets.size() == 2, "history: hit count + snippets");
+
+        // history2.jsonl: guid-sid lines — a guid term scopes hits to that session; "" = exact.
+        const std::wstring gid1 = L"11111111-1111-4111-8111-111111111111";
+        const std::wstring gid2 = L"22222222-2222-4222-8222-222222222222";
+        const std::wstring hist2 = root + L"\\history2.jsonl";
+        MakeJsonl(hist2,
+                  "{\"display\":\"refactor the parser module\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"timestamp\":1}\n"
+                  "{\"display\":\"refactor the lexer\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"timestamp\":2}\n",
+                  1000, 1000);
+        SessionQuery hq;
+        hq.scopeUser = true;
+        hq.text = gid1 + L" refactor";
+        auto hg = SearchHistoryPrompts(hist2, hq, 3);
+        CHECK(hg.size() == 1 && hg.count(gid1) == 1 && hg.at(gid1).hitCount == 1, "history: a guid term scopes hits to that session");
+        hq.text = gid1;
+        hg = SearchHistoryPrompts(hist2, hq, 3);
+        CHECK(hg.empty(), "history: guid-only query -> no content hits (identity is the fast phase's job)");
+        hq.text = L"\"the parser\"";
+        hg = SearchHistoryPrompts(hist2, hq, 3);
+        CHECK(hg.size() == 1 && hg.count(gid1) == 1, "history: quoted phrase exact-matches");
+        hq.text = L"\"parser the\"";
+        hg = SearchHistoryPrompts(hist2, hq, 3);
+        CHECK(hg.empty(), "history: quoted phrase is order-exact");
+        hq.text = L"refactor " + gid2;
+        hg = SearchHistoryPrompts(hist2, hq, 3);
+        CHECK(hg.size() == 1 && hg.count(gid2) == 1, "history: guid term position-independent (word + guid)");
 
         // presence: one row per file; bad/empty files tolerated.
         const std::wstring presDir = root + L"\\sessions";
@@ -1990,6 +2096,38 @@ static void TestSessionSearch()
         sq.scopeAgent = true;
         hits = SearchTranscriptsSlow({ ref }, sq, 4, cancelledImmediately);
         CHECK(hits.empty(), "slow: cancellation respected");
+
+        // slow phase, term grammar: guid = session-identity scope; "" = exact; per-MESSAGE AND.
+        SessionQuery gq;
+        gq.scopeUser = true;
+        gq.text = sidT + L" xyzzy";
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 1, "slow: guid+word — the file's own id satisfies the guid term");
+        gq.text = L"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee xyzzy";
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.empty(), "slow: a DIFFERENT guid excludes the session (id mismatch, not in text)");
+        gq.text = sidT;
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.empty(), "slow: guid-only query -> no content scan (identity is the fast phase's job)");
+        gq.text = L"\"magic word\"";
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 1, "slow: quoted phrase exact-matches the prompt");
+        gq.fuzzy = true;
+        gq.text = L"\"mgc wrd\"";
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.empty(), "slow: quotes suppress (F) inside the phrase");
+        gq.text = L"mgc wrd";
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 1, "slow: the same terms unquoted DO fuzzy-match");
+        gq.fuzzy = false;
+        gq.scopeAgent = true;
+        gq.text = L"magic plugh";
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.empty(), "slow: AND is per-MESSAGE — terms split across two messages don't hit");
+        gq.text = L"plugh xyzzy";
+        gq.scopeUser = false;
+        hits = SearchTranscriptsSlow({ ref }, gq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 1, "slow: both terms in ONE assistant message hit");
 
         // index sidecar: refresh -> hit -> incremental refresh.
         const std::wstring idxDir = root + L"\\sessions-index";

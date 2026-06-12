@@ -38,6 +38,17 @@
     - `📄` ⇒ match **files accessed** (tool-call paths' leaves).
     - `(F)` ⇒ **fuzzy** (query characters in order, gaps allowed — identical semantics in rg
       and the in-process matcher).
+  - **Query grammar** (`ParseSessionQuery`, `SessionSearch.h`): the text splits into
+    whitespace-separated terms that **AND-match** — every term must hit, each may hit a
+    *different* field (the Archive page's token semantics). `"quoted phrase"` = ONE **exact**
+    contiguous term (spaces kept; `(F)` never applies inside quotes; an unterminated quote runs
+    to the end; empty `""` is dropped). A bare **whole session-id GUID** token (8-4-4-4-12 hex,
+    `{braces}` tolerated) also matches the session's **identity** — its id *and* its
+    fork-parent id — so an id pasted from `hooks.log` / the detail pane finds that session plus
+    its forks; it still matches as literal text too (additive), quoting it makes it pure text,
+    and it is never fuzzied (a 36-char hex subsequence would match almost anything). In the
+    content phases a guid term **scopes** hits to that session (satisfied by the line's/file's
+    own session id); a guid-only query is answered by the fast phase's identity match alone.
   - `[1 month]` — the window selector: **hover** opens a From/To **range popup** (text boxes
     with placeholder dates — answer Q4); **click** cycles
     `1 day → 3 days → 7 days → 14 days → 1 month → 3 months → (wrap)`.

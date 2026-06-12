@@ -41,6 +41,7 @@ Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
 Milestones & build: [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md).
 Hooks bridge: [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md).
 Workspace persistence (window layer): [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md).
+Release/dev identities + per-install state profiles: [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md).
 Per-tab link badge (overlay): [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md).
 Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md).
 Sessions browser + the `~/.claude` storage map: [`doc/agentmaster/SESSIONS.md`](doc/agentmaster/SESSIONS.md).
@@ -206,7 +207,13 @@ in-process** (👤 typed prompts vs 🤖 assistant text/thinking + tool inputs/r
 them apart, `ClassifyTranscriptLine` can), generation-cancelled on re-type. Both message scopes
 OFF ⇒ title+directory only; 📁/📄 match the **directories/files a session's tool calls touched**
 (`TranscriptStats::pathsAccessed`); (F) fuzzy has identical rg/in-process semantics
-(`BuildSearchRegex`/`MatchesQueryText`, tested as a pair). Rows carry fork-aware **created** (a
+(`BuildSearchRegex`/`MatchesQueryText`, tested as a pair). The query parses into
+**whitespace-split AND terms** (`ParseSessionQuery` — every term must hit, each may hit a
+different field): `"quoted phrase"` = ONE **exact** contiguous term ((F) never applies inside
+quotes), and a bare **whole session-id GUID** token ({braces} tolerated, never fuzzied) also
+matches the session's **identity** — its id + fork-parent id — so a pasted id finds the session
+and its forks; in the content phases a guid term **scopes** hits to that session, and a
+guid-only query is answered by the fast phase alone. Rows carry fork-aware **created** (a
 fork duplicates its parent's lines verbatim with `forkedFrom` stamps — file birth is the truth),
 **line-derived last-activity** (file mtime lies: measured median ~1 h, max ~43 days —
 SESSIONS.md §5), the title precedence `customTitle > aiTitle > legacy summary > first REAL
@@ -673,22 +680,30 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
 - Build entry: **`OpenConsole.slnx`** (slnx format). No git submodules in 1.24
   (`doc/building.md` is stale on that point).
 - Toolchain: VS 2022 + C++/UWP workloads + Windows SDK 10.0.22621/26100.
-- **Package identity = `Agentmaster`** (Publisher **`CN=Agentmaster`**, PFN
-  `Agentmaster_56k4f06dsfp9r`), set in
-  `src/cascadia/CascadiaPackage/Package-Dev.appxmanifest` (the Debug branding). It is
-  deliberately **distinct from `WindowsTerminalDev`** so it coexists with real Windows
-  Terminal. ⚠️ There is a **separate `K:\source\windowsterminal` checkout on this machine
-  that owns the `WindowsTerminalDev` identity** — never reuse that identity here (see Gotchas).
-  The Publisher is **`CN=Agentmaster`** — an honest self-signed identity, NOT `CN=Microsoft
-  Corporation` — and it is what **derives the PFN hash `56k4f06dsfp9r`**, so the public-release
-  self-signed cert can carry that exact subject (an MSIX signature is valid only when the cert
-  subject == `<Identity Publisher>`; see *Releasing a public version*). **Renaming the Publisher
-  changes the PFN** — but no C++ hardcodes it (`GetWtExePath` keys on the `Agentmaster` name
-  *prefix*; `windowClassName` uses `GetCurrentPackageFamilyName()` at runtime), and the dev
-  loose-layout register is **unsigned** (no `CascadiaPackage_TemporaryKey.pfx` ⇒
-  `AppxPackageSigningEnabled=false` in the wapproj), so a rename only touches the manifest + the
-  `Agentmaster_<hash>` strings in docs (recompute the hash: SHA-256 the UTF-16LE Publisher, first
-  8 bytes, base32 over `0123456789abcdefghjkmnpqrstvwxyz`).
+- **TWO package identities, one branding** (`PROFILES.md`): the **release** identity
+  **`Agentmaster`** (PFN `Agentmaster_56k4f06dsfp9r`, alias `agentmaster.exe`,
+  `Package-Rel.appxmanifest` — selected by `/p:AgentmasterPackageIdentity=Release`, what
+  `release.yml` ships and what v0.1.x already shipped) and the **dev** identity
+  **`AgentmasterDev`** (PFN `AgentmasterDev_56k4f06dsfp9r`, alias `agentmasterdev.exe`, Start
+  menu "Agentmaster Dev", `Package-Dev.appxmanifest` — the default; what the local loose layout
+  registers). Distinct identities + per-identity aliases + the per-install state **profiles**
+  are what let the released app and the dev build install side by side with zero collision —
+  and both are deliberately **distinct from `WindowsTerminalDev`** so they coexist with real
+  Windows Terminal. ⚠️ There is a **separate `K:\source\windowsterminal` checkout on this
+  machine that owns the `WindowsTerminalDev` identity** — never reuse that identity here (see
+  Gotchas). The Publisher is **`CN=Agentmaster` for BOTH** — an honest self-signed identity,
+  NOT `CN=Microsoft Corporation` — and it is what **derives the PFN hash `56k4f06dsfp9r`**
+  (the hash depends on the Publisher ALONE, which is why both families share it), so the
+  public-release self-signed cert can carry that exact subject (an MSIX signature is valid only
+  when the cert subject == `<Identity Publisher>`; see *Releasing a public version*). No C++
+  hardcodes a PFN: `GetWtExePath` + the reopen dispatch key on the `AgentmasterDev`/`Agentmaster`
+  name *prefixes* (**Dev first** — `Agentmaster` is a prefix of `AgentmasterDev`);
+  `windowClassName` uses `GetCurrentPackageFamilyName()` at runtime. The dev loose-layout
+  register is **unsigned** (no `CascadiaPackage_TemporaryKey.pfx` ⇒
+  `AppxPackageSigningEnabled=false` in the wapproj). Hash recompute if a Publisher ever changes:
+  SHA-256 the UTF-16LE Publisher, first 8 bytes, base32 over `0123456789abcdefghjkmnpqrstvwxyz`.
+  Known shared seam: the defterm/shellext CLSIDs are upstream-Dev GUIDs in BOTH manifests — see
+  `PROFILES.md` §1/§5 (don't set the dev build as the OS default terminal).
 - Our additions (all marked `Agentmaster`):
   - `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}` — the Manager tab content (C1 UI).
   - `src/cascadia/TerminalApp/AgentMaster/` — the engine (plain C++, no WinRT; the `.cpp`
@@ -705,7 +720,12 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     index, the raw presence read, and the shared prompt-noise + title-precedence rules),
     `SessionSearch.{h,cpp}` (the two-phase search: pure regex/match/snippet primitives + the
     history.jsonl accelerator + the rg-prefiltered, scope-attributed content scan with in-process
-    fallback), `Json.h`, `Persistence.{h,cpp}`, and
+    fallback), `Json.h`, `Persistence.{h,cpp}`,
+    `ProfileBootstrap.h` (header-only, pure Win32 — the per-install state PROFILE: resolution
+    [env > portable marker > saved choice > per-identity default], the `.agentmaster.profiles`
+    choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,
+    Terminal-settings seeding, and the one-instance-per-profile kernel mutex; included by the
+    engine, AgentManagerContent, TerminalPage AND the WindowsTerminal EXE — PROFILES.md), and
     `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`).
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
@@ -732,13 +752,23 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `TerminalTabStatus.{h,idl}` (the tab-strip status dot: an `AgentStatusVisible`/
     `AgentStatusBrush`-bound Ellipse in the indicator row); registrations in
     `TerminalAppLib.vcxproj`.
-  - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
+  - `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in
+    `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`), a comctl32-v6 dependency in
+    `WindowsTerminal.manifest` (the profile picker's TaskDialog), the `AGENTMASTER_PROFILE`
+    redirect in `TerminalSettingsModel/FileUtils.cpp` (Terminal's own settings →
+    `<profile>\terminal\`), the profile bootstrap call in `WindowEmperor.cpp`,
+    `doc/agentmaster/`, `tools/Build-Agentmaster.ps1` (incl. `-ReleaseIdentity`),
     `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*).
   - `.github/workflows/ci.yml` + `.github/workflows/release.yml` — the GitHub Actions build gate
     + public-release pipeline (see *Releasing a public version*). The **only** CI in the repo;
     Windows Terminal's upstream Azure-Pipelines / OneBranch under `build/pipelines/` is
     Microsoft-internal and never runs for this fork.
-- **Runtime state dir: `%USERPROFILE%\.agentmaster\`** — `hooks-settings.json` +
+- **Runtime state dir = the ACTIVE PROFILE** (PROFILES.md; historically — and still, as the
+  release/unpackaged default — `%USERPROFILE%\.agentmaster\`; dev-package default
+  `%USERPROFILE%\.agentmaster-dev\`; resolution: env `AGENTMASTER_PROFILE` > `.portable` marker >
+  the `%USERPROFILE%\.agentmaster.profiles` per-install choice file > the per-identity default;
+  picked on an install's FIRST LAUNCH — Production / Development / Browse… — and changeable from
+  the cog's PROFILE row, applied on restart). Contents: `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
   `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
@@ -751,7 +781,11 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   (live-bridge discovery for the shim), `shim/` (the transparent `claude` PATH shim —
   `claude.cmd` + a POSIX `claude` — that auto-wires hand-typed sessions; see *Adopt any
   `claude`*), and `locks/` (the `build-launch` mutex — `tools/am-lock.sh`; see Deploy & run →
-  *Concurrency lock*). Deliberately NOT under `%LOCALAPPDATA%` — see Gotchas (MSIX).
+  *Concurrency lock*; the lock dir stays at the FIXED `%USERPROFILE%\.agentmaster\locks\` — it
+  guards the ONE build tree, not a profile), and `terminal/` (Terminal's OWN settings.json +
+  state.json — the `AGENTMASTER_PROFILE` redirect in `GetBaseSettingsPath`, seeded from the
+  install's previous location on first profile claim). Deliberately NOT under `%LOCALAPPDATA%`
+  — see Gotchas (MSIX).
 
 ## Integration points (1.24 pluggable pane-content model)
 
@@ -868,10 +902,18 @@ it must be deployed. Deploy the **loose layout** (what VS F5 does) — no signin
 Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
 ```
 
-Launch any of these ways:
-- execution alias: **`agentmaster`**
-- Start menu: **“Agentmaster”**
-- `Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"`
+Launch any of these ways (the loose layout registers the **DEV identity**, `AgentmasterDev` —
+the release MSIX owns `Agentmaster`/`agentmaster`; see PROFILES.md):
+- execution alias: **`agentmasterdev`**
+- Start menu: **“Agentmaster Dev”**
+- `Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"`
+
+⚠️ **One-time migration on this machine** (first deploy after the identity split): the old loose
+registration still owns `Agentmaster_56k4f06dsfp9r` (now the RELEASE family) and its on-disk
+manifest no longer matches it — `Remove-AppxPackage Agentmaster_56k4f06dsfp9r`, then register as
+above. First launch then shows the **profile picker** (current data lives in `~/.agentmaster`:
+either Browse… to it, or pick Development + the migrate checkbox to copy it to
+`~/.agentmaster-dev`). PROFILES.md §3 has the full recipe.
 
 ### Concurrency lock (multi-agent) — REQUIRED before any build, launch, or deploy
 
@@ -916,16 +958,18 @@ Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenC
 # 2. build (full exe link)
 pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64
 # 3. relaunch
-Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"   # or: agentmaster
+Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"   # or: agentmasterdev
 ```
 ```bash
 # 4. release the mutex (always — even if a step above failed)
 bash tools/am-lock.sh release --token "$TOKEN"
 ```
 Re-register **only** when `Package-Dev.appxmanifest` changes. (VS F5 on `CascadiaPackage`
-also builds + deploys.) Runtime/session state lives in `%USERPROFILE%\.agentmaster\`; tail
-`hooks.log` to confirm the engine is live (`[engine] bridge listening …`) and that spawned
-sessions' hooks arrive (`[SessionStart]`, `[Stop]`, …).
+also builds + deploys.) Runtime/session state lives in the dev install's **profile** (default
+`%USERPROFILE%\.agentmaster-dev\`, or wherever the picker pointed it — check
+`%USERPROFILE%\.agentmaster.profiles`); tail `hooks.log` there to confirm the engine is live
+(`[engine] bridge listening …`) and that spawned sessions' hooks arrive (`[SessionStart]`,
+`[Stop]`, …).
 
 ## Releasing a public version
 
@@ -952,11 +996,14 @@ gh workflow run release.yml --repo Nucs/Agentmaster -f version=X.Y.Z
 gh run list --repo Nucs/Agentmaster --workflow release.yml --limit 3
 gh run watch <run-id> --repo Nucs/Agentmaster --exit-status
 ```
-The pipeline is **prep** (version from the tag/input, stamped into the manifest `Identity Version`)
-→ **build** matrix **x64 + arm64** (Release, `WindowsTerminalBranding=Dev` = our `Agentmaster`
-identity, `AppxPackageSigningEnabled=false`) → **bundle** (`build/scripts/Create-AppxBundle.ps1`
-merges both arches → `.msixbundle`, then self-signs; `New-UnpackagedTerminalDistribution.ps1` makes
-the portable zips) → **release** (`softprops/action-gh-release` creates a **DRAFT** GitHub Release
+The pipeline is **prep** (version from the tag/input, stamped into `Package-Rel.appxmanifest`'s
+`Identity Version`) → **build** matrix **x64 + arm64** (Release, `WindowsTerminalBranding=Dev` +
+**`/p:AgentmasterPackageIdentity=Release`** = the `Agentmaster` RELEASE identity — never the dev
+`AgentmasterDev` manifest, `AppxPackageSigningEnabled=false`) → **bundle**
+(`build/scripts/Create-AppxBundle.ps1` merges both arches → `.msixbundle`, then self-signs;
+`New-UnpackagedTerminalDistribution.ps1 -PortableMode:$true` makes the portable zips — TRUE
+portable: `.portable` marker ⇒ WT settings in `<unzip>\settings`, the Agentmaster profile in
+`<unzip>\profile`) → **release** (`softprops/action-gh-release` creates a **DRAFT** GitHub Release
 with the `.msixbundle`, `Agentmaster.cer`, and both portable `.zip`s). It lands as a **draft** —
 review the assets, then **the user publishes it** (a draft creates no git tag until published; a
 `workflow_dispatch` draft is safe to delete). After publishing, refresh the release notes + README
