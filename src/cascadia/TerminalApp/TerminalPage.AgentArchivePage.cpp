@@ -244,6 +244,19 @@ namespace winrt::TerminalApp::implementation
                     ArchiveCloseTipsIn(child);
                 }
             }
+            else if (const auto content = root.try_as<winrt::Windows::UI::Xaml::Controls::ContentControl>())
+            {
+                // ScrollViewer is a ContentControl: the rows/detail hosts live INSIDE
+                // ScrollViewers, so the page-wide sweeps (hide / tab-switch) must pass
+                // through them to reach the row + detail tips.
+                if (const auto inner = content.Content())
+                {
+                    if (const auto child = inner.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                    {
+                        ArchiveCloseTipsIn(child);
+                    }
+                }
+            }
         }
 
         // The W{n} chip's tooltip: what that saved window IS — tab composition + geometry from its
@@ -1584,6 +1597,9 @@ namespace winrt::TerminalApp::implementation
         _archiveSelectedId = _archiveVisibleOrder[next];
         _UpdateArchiveSelectionHighlight();
         _ShowArchiveDetail(_archiveSelectedId);
+        // Key-nav scrolls WITHOUT pointer input — a row tip open under the stationary mouse
+        // never gets the PointerExited that would close it when its row scrolls away.
+        ArchiveCloseTipsIn(_archiveRowsHost);
         for (const auto& child : _archiveRowsHost.Children())
         {
             if (const auto b = child.try_as<winrt::Windows::UI::Xaml::Controls::Border>(); b && std::wstring{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") } == _archiveSelectedId)

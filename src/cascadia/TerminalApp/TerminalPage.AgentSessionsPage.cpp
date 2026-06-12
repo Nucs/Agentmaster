@@ -258,6 +258,19 @@ namespace winrt::TerminalApp::implementation
                     SessCloseTipsIn(child);
                 }
             }
+            else if (const auto content = root.try_as<ContentControl>())
+            {
+                // ScrollViewer is a ContentControl: the rows/detail hosts live INSIDE
+                // ScrollViewers, so the page-wide sweeps (hide / tab-switch) must pass
+                // through them to reach the row + detail tips.
+                if (const auto inner = content.Content())
+                {
+                    if (const auto child = inner.try_as<UIElement>())
+                    {
+                        SessCloseTipsIn(child);
+                    }
+                }
+            }
         }
 
         // Build the toggle buttons of the search bar: a compact glyph ToggleButton with a tooltip.
@@ -1468,6 +1481,9 @@ namespace winrt::TerminalApp::implementation
         _sessionsSelectedId = _sessionsVisibleOrder[next];
         _UpdateSessionsSelectionHighlight();
         _ShowSessionsDetail(_sessionsSelectedId);
+        // Key-nav scrolls WITHOUT pointer input — a row tip open under the stationary mouse
+        // never gets the PointerExited that would close it when its row scrolls away.
+        SessCloseTipsIn(_sessionsRowsHost);
         for (const auto& child : _sessionsRowsHost.Children())
         {
             if (const auto b = child.try_as<Border>(); b && std::wstring{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") } == _sessionsSelectedId)
