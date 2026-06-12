@@ -107,7 +107,7 @@ namespace winrt::TerminalApp::implementation
         void Close();
         winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(BuildStartupKind kind) const;
 
-        winrt::hstring Title() { return L"Agent Manager"; }
+        winrt::hstring Title(); // "Agent Manager", or "Agent Manager Dev" on the AgentmasterDev package (defined in the .cpp — needs ProfileBootstrap)
         uint64_t TaskbarState() { return 0; }
         uint64_t TaskbarProgress() { return 0; }
         bool ReadOnly() { return false; }

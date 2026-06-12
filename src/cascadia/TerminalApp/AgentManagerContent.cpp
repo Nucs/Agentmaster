@@ -807,6 +807,17 @@ namespace winrt::TerminalApp::implementation
     {
         return BaseContentArgs(L"agentManager");
     }
+    winrt::hstring AgentManagerContent::Title()
+    {
+        // The Manager tab's title doubles as the at-a-glance which-install-am-I marker: the
+        // DEV package (AgentmasterDev — the loose-layout deploy) reads "Agent Manager Dev",
+        // the release install plain "Agent Manager". Runtime identity, not a build flag, so
+        // one binary serves both installs; cached — the package family never changes mid-run.
+        static const winrt::hstring title = ::Agentmaster::Profiles::IsDevPackage() ?
+                                                winrt::hstring{ L"Agent Manager Dev" } :
+                                                winrt::hstring{ L"Agent Manager" };
+        return title;
+    }
     winrt::hstring AgentManagerContent::Icon() const
     {
         static constexpr std::wstring_view glyph{ L"\xE71D" }; // AllApps
@@ -1485,9 +1496,23 @@ namespace winrt::TerminalApp::implementation
             {
                 addPart(L"bg");
             }
+            // Presence heartbeat (#5): claude's OWN ~/.claude/sessions/<pid>.json status
+            // (busy/idle/waiting), observer-validated against the live process snapshot — an
+            // independent PULL signal beside the hook-derived state dot, so a stuck push state
+            // (dropped hooks) is visible at a glance. Display FACT only, never SessionState
+            // (Rule #13); empty (cleared by ObserveClaude) when no live heartbeat row exists.
+            if (!s.presenceStatus.empty())
+            {
+                addPart(L"hb:" + s.presenceStatus);
+            }
             if (!me.empty())
             {
-                stack.Children().Append(Text(winrt::hstring{ me }, 10, false, 0.55));
+                auto meText = Text(winrt::hstring{ me }, 10, false, 0.55);
+                if (!s.presenceStatus.empty())
+                {
+                    ToolTipService::SetToolTip(meText, winrt::box_value(L"hb = claude's own heartbeat (busy/idle/waiting), observer-validated — independent of the hook-derived state dot"));
+                }
+                stack.Children().Append(meText);
             }
         }
 

@@ -7,7 +7,9 @@ if errorlevel 1 (
   exit /b 2
 )
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests"
-cl /std:c++20 /EHsc /nologo /W3 /Fe:uia_probe.exe uia_probe.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\ProcessInspect.cpp ole32.lib user32.lib oleaut32.lib
+REM TranscriptStore.cpp: IsNoiseUserPrompt + PickDisplayTitle moved there (the Sessions-browser
+REM split) — SessionScanner/ProcessInspect reference them (mirrors run-m5-tests.bat's TU list).
+cl /std:c++20 /EHsc /nologo /W3 /Fe:uia_probe.exe uia_probe.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\TranscriptStore.cpp ole32.lib user32.lib oleaut32.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1
