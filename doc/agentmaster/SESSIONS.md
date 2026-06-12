@@ -38,6 +38,13 @@
     - `📄` ⇒ match **files accessed** (tool-call paths' leaves).
     - `(F)` ⇒ **fuzzy** (query characters in order, gaps allowed — identical semantics in rg
       and the in-process matcher).
+  - **Defaults:** `📁` + `📄` start **ON** — they ride the FAST phase only (in-memory match
+    over the sidecar index's `pathsAccessed`; no rg, no transcript IO — effectively free), so
+    path queries work out of the box. `👤` / `🤖` start **OFF** (either one enables the SLOW
+    rg-prefiltered transcript content scan per search; `🤖` is the heaviest — agent/tool text
+    raw-matches almost any query, so the file prefilter passes most of the window). `(F)`
+    starts **OFF** (a semantics toggle — subsequence matches are noisy as a default and its
+    `.*?` patterns inflate the slow phase's candidate set).
   - **Query grammar** (`ParseSessionQuery`, `SessionSearch.h`): the text splits into
     whitespace-separated terms that **AND-match** — every term must hit, each may hit a
     *different* field (the Archive page's token semantics). `"quoted phrase"` = ONE **exact**

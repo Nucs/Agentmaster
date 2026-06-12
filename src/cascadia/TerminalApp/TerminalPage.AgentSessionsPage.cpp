@@ -8,6 +8,8 @@
 //   👤 = also search user (typed) messages      🤖 = also search agent + tools text
 //   📁 = match directories accessed             📄 = match files accessed
 //   (F) = fuzzy   ·   both message scopes OFF ⇒ title + directory only (§1a)
+//   Defaults: 📁+📄 ON (fast-phase-only — in-memory, no IO); 👤/🤖/(F) OFF (either message
+//   scope flips on the SLOW rg+transcript content scan; fuzzy is a noisy default).
 //   [1 month] cycles 1d/3d/7d/14d/1mo/3mo on click; HOVER opens a From/To range popup (Q4).
 // Query grammar (ParseSessionQuery, SessionSearch.h): whitespace-split terms AND-match;
 // "quoted phrase" = exact contiguous match ((F) never applies inside quotes); a bare whole
@@ -306,16 +308,26 @@ namespace winrt::TerminalApp::implementation
                 _sessionsSearchThrottled->Run();
             }
         };
+        // Defaults: 📁/📄 ON — they ride the FAST phase only (in-memory match over the sidecar
+        // index's pathsAccessed: no rg, no transcript IO — effectively free at the debounce),
+        // so path queries "just work". 👤/🤖 OFF — either one flips on the SLOW phase (rg across
+        // every transcript in the window + in-process rescans per search; 🤖 is the heaviest:
+        // tool dumps raw-match almost any query, so the prefilter passes most files). (F) OFF —
+        // a semantics toggle (subsequence matching is noisy as a default, and its `.*?`-joined
+        // rg patterns inflate the slow phase's candidate set). IsChecked is set BEFORE Click is
+        // wired — and programmatic IsChecked never raises Click anyway (no spurious search).
         _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Also search USER messages (typed prompts)");
         _sessScopeUserBtn.Click(onToggle);
         bar.Children().Append(_sessScopeUserBtn);
         _sessScopeAgentBtn = SessToggle(L"\U0001F916", L"Also search AGENT + TOOLS (everything but user messages)");
         _sessScopeAgentBtn.Click(onToggle);
         bar.Children().Append(_sessScopeAgentBtn);
-        _sessScopeDirsBtn = SessToggle(L"\U0001F4C1", L"Match DIRECTORIES accessed (tool-call paths + working dir)");
+        _sessScopeDirsBtn = SessToggle(L"\U0001F4C1", L"Match DIRECTORIES accessed (tool-call paths + working dir) \x00B7 on by default (in-memory, free)");
+        _sessScopeDirsBtn.IsChecked(true);
         _sessScopeDirsBtn.Click(onToggle);
         bar.Children().Append(_sessScopeDirsBtn);
-        _sessScopeFilesBtn = SessToggle(L"\U0001F4C4", L"Match FILES accessed (tool-call paths)");
+        _sessScopeFilesBtn = SessToggle(L"\U0001F4C4", L"Match FILES accessed (tool-call paths) \x00B7 on by default (in-memory, free)");
+        _sessScopeFilesBtn.IsChecked(true);
         _sessScopeFilesBtn.Click(onToggle);
         bar.Children().Append(_sessScopeFilesBtn);
         _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy search (characters in order, gaps allowed)");

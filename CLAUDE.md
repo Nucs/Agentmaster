@@ -211,7 +211,9 @@ batched under the cmdline cap, full in-process fallback), every match **scope-at
 in-process** (👤 typed prompts vs 🤖 assistant text/thinking + tool inputs/results — rg can't tell
 them apart, `ClassifyTranscriptLine` can), generation-cancelled on re-type. Both message scopes
 OFF ⇒ title+directory only; 📁/📄 match the **directories/files a session's tool calls touched**
-(`TranscriptStats::pathsAccessed`); (F) fuzzy has identical rg/in-process semantics
+(`TranscriptStats::pathsAccessed`) and **default ON** (fast-phase-only — in-memory over the
+sidecar, no rg/transcript IO; 👤/🤖/(F) default OFF — either message scope flips on the SLOW
+content scan); (F) fuzzy has identical rg/in-process semantics
 (`BuildSearchRegex`/`MatchesQueryText`, tested as a pair). The query parses into
 **whitespace-split AND terms** (`ParseSessionQuery` — every term must hit, each may hit a
 different field): `"quoted phrase"` = ONE **exact** contiguous term ((F) never applies inside
@@ -259,7 +261,9 @@ the concurrent UIA work; the tree as a whole builds green.
 
 **The tab strip itself now carries the state dot.** Every classified tab's header reads
 `[icon] ● <title>`: a state-colored **Ellipse** (thin black stroke for contrast on any tab
-chrome) in `TabHeaderControl.xaml`'s indicator row right before the title — one more
+chrome; dipped **2px below slot-center** via an asymmetric `0,2,6,-2` Margin — dead-center read
+optically high against the title, and the +2/−2 pair keeps the 10px slot so the header row
+doesn't grow) in `TabHeaderControl.xaml`'s indicator row right before the title — one more
 `x:Bind`'ed element over `TerminalTabStatus` (two new observable properties,
 `AgentStatusVisible`/`AgentStatusBrush`; `Tab.idl` already projects `TabStatus{get;}`, so no
 `Tab.{h,cpp}` changes — the page drives it idempotently via `_SetTabAgentDot(tab, color?)`). A
