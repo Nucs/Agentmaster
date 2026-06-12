@@ -317,6 +317,65 @@ namespace Agentmaster
         return { e.liveWindowIds.begin(), e.liveWindowIds.end() };
     }
 
+    uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.activateMutex);
+        const auto token = e.nextActivateToken++;
+        e.activateSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterWindowActivateHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.activateMutex);
+        for (auto it = e.activateSinks.begin(); it != e.activateSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.activateSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void ActivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the registry's _notify pattern): each sink
+        // hops into its own window's dispatcher, and holding the engine lock across foreign-window
+        // marshaling would be a needless ordering hazard.
+        std::vector<std::function<void(const std::wstring&)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.activateMutex);
+            sinks.reserve(e.activateSinks.size());
+            for (const auto& s : e.activateSinks)
+            {
+                if (s.fn && s.windowId != sourceWindowId)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(sessionId); // fire-and-forget; the (single) hosting window selects + foregrounds, the rest miss
+        }
+    }
+
     std::vector<RecoverableWindow> RecoverableWindows()
     {
         auto& e = SharedEngine();

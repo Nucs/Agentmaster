@@ -298,22 +298,55 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
-    // Agentmaster: jump to (focus) a session's terminal tab. This is the Explorer Tree's
-    // "Activate" — it NEVER injects into the connection (Correctness Rule #2).
+    // Agentmaster: jump to (focus) a session's terminal tab. This is the Explorer Tree's /
+    // Triage Board's "Activate" — it NEVER injects into the connection (Correctness Rule #2).
+    // Local first: a session hosted in THIS window is a plain tab select. Hosted ELSEWHERE
+    // (the board + the tree's GLOBAL scope show the whole fleet), fan out through the engine's
+    // per-window activate sinks — the (single) window holding the tab selects it and brings
+    // itself to the foreground. No host anywhere (archived / mid-bind) -> a no-op, as before.
     void TerminalPage::_ActivateClaudeSession(winrt::hstring sessionId)
     {
-        const auto it = _claudeTabs.find(std::wstring{ sessionId });
-        if (it == _claudeTabs.end())
+        const std::wstring id{ sessionId };
+        if (_FocusClaudeSessionTab(id, /*bringWindowToFront*/ false))
         {
             return;
         }
-        if (const auto tab = it->second.get())
+        ::Agentmaster::ActivateSessionInOtherWindows(id, _windowId);
+    }
+
+    // Agentmaster (cross-window activate): select `sessionId`'s tab IN THIS WINDOW — the local
+    // half of _ActivateClaudeSession and the receiving half of the engine's activate fan-out.
+    // With `bringWindowToFront` (a remote window asked us to surface the session) also restore +
+    // foreground this window's HWND: the user's click happened in ANOTHER window of THIS process,
+    // so the process holds foreground and SetForegroundWindow may hand it over (the same
+    // restore/foreground/SwitchToThisWindow recipe ProcessInspect uses for foreign windows).
+    // Returns false when this window doesn't host the session's tab.
+    bool TerminalPage::_FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
         {
-            if (const auto& item = tab.TabViewItem())
+            return false;
+        }
+        if (const auto& item = tab.TabViewItem())
+        {
+            _tabView.SelectedItem(item);
+        }
+        if (bringWindowToFront && _hostingHwnd)
+        {
+            const HWND hwnd = *_hostingHwnd;
+            if (::IsIconic(hwnd))
             {
-                _tabView.SelectedItem(item);
+                ::ShowWindow(hwnd, SW_RESTORE);
+            }
+            ::SetForegroundWindow(hwnd);
+            if (::GetForegroundWindow() != hwnd)
+            {
+                ::SwitchToThisWindow(hwnd, TRUE); // belt-and-braces when the shell denies the hand-off
             }
         }
+        return true;
     }
 
     // Agentmaster: archive a session (the Manager's Delete / Archive / tree Del / Flight-Plan
@@ -717,13 +750,17 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out-pane] " + id + L" (Claude pane leaving this window; binding kept alive for the destination)\n");
     }
 
-    // Agentmaster: rename a Claude session from the Manager's Explorer Tree. A session's title is
-    // ONE value — the Explorer-tree name, the persisted SessionInfo.title, and the WT tab title.
+    // Agentmaster: rename a Claude session from the Manager's Explorer Tree (or a Triage-Board
+    // card's menu — same editor). A session's title is ONE value — the Explorer-tree name, the
+    // persisted SessionInfo.title, and the WT tab title.
     // Write it to the shared registry (which persists it via the autosave-on-change observer and
     // refreshes every window's Triage Board / Explorer Tree / Flight Plan) and, when THIS window
-    // hosts the session's tab, retitle the tab strip to match. The tab's own rename path mirrors
-    // the other direction (_SyncClaudeTitleFromTab); the SetTabText below re-enters it once and
-    // settles immediately (the registry title already equals the new text).
+    // hosts the session's tab, retitle the tab strip to match. A session hosted in ANOTHER window
+    // is retitled there by that window's registry observer (_SyncClaudeTabTitleFromRegistry rides
+    // the tab-dot push), so the rename lands on the right tab no matter which window ran it. The
+    // tab's own rename path mirrors the other direction (_SyncClaudeTitleFromTab); the SetTabText
+    // below re-enters it once and settles immediately (the registry title already equals the new
+    // text).
     void TerminalPage::_RenameClaudeSession(winrt::hstring sessionId, winrt::hstring title)
     {
         if (!_sessionRegistry)
@@ -784,6 +821,35 @@ namespace winrt::TerminalApp::implementation
             return; // already in sync (our own pin / an Explorer-driven rename) -> no write, no loop
         }
         _sessionRegistry->Update(id, [&text](::Agentmaster::SessionInfo& s) { s.title = text; });
+    }
+
+    // Agentmaster (cross-window rename; Rule #11): the registry-observer reaction (bounced to this
+    // window's UI thread by the engine-init observer, riding the same hop as the tab dot). When the
+    // session's ONE title changes anywhere — an Explorer-tree/board-card rename in ANOTHER window,
+    // a restore, the smart-naming — the window actually HOSTING the tab re-pins it here. A session
+    // this window doesn't host is a cheap map-miss no-op (every window's observer sees every fleet
+    // event). Equality-guarded: re-pinning an already-matching tab writes nothing, and the
+    // SetTabText below re-enters _SyncClaudeTitleFromTab once, which sees registry == tab and also
+    // writes nothing — so the two sync directions settle instead of looping.
+    void TerminalPage::_SyncClaudeTabTitleFromRegistry(const std::wstring& sessionId, const std::wstring& title)
+    {
+        if (title.empty())
+        {
+            return; // never clear a pinned tab title from the registry side (the pin re-asserts on empty)
+        }
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
+        {
+            return;
+        }
+        if (const auto impl = _GetTabImpl(tab))
+        {
+            if (std::wstring{ impl->GetTabText() } != title)
+            {
+                impl->SetTabText(winrt::hstring{ title });
+            }
+        }
     }
 
     // Agentmaster: paint a Claude tab from its working directory's color — the persisted color for

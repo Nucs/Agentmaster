@@ -23,6 +23,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -106,6 +108,25 @@ namespace Agentmaster
         // than being cleared by the last window's teardown. Guarded by windowMutex (same lock as the
         // record-claim set; the two are touched at disjoint times so there is no re-entrancy).
         std::set<std::wstring> liveWindowIds;
+
+        // Agentmaster (cross-window activate; Linked Lenses): per-window "focus this session's tab"
+        // sinks. The Manager's Triage Board / Explorer Tree (GLOBAL) show the WHOLE fleet, but a
+        // session's tab lives in exactly ONE window (its _claudeTabs) — so Activate (board/tree
+        // double-click, tree Enter, the Flight Plan's eye) on a session hosted ELSEWHERE must reach
+        // that window. Each TerminalPage registers a sink at engine init — "select this session's
+        // tab + bring your window to the foreground if YOU host it"; the sink hops to its own UI
+        // thread and no-ops on a miss — and detaches it at teardown (Rule #10). Guarded by its own
+        // mutex, taken only to snapshot/mutate the list; sinks are invoked OUTSIDE it (the
+        // registry's _notify pattern), since each one marshals into a window dispatcher.
+        struct WindowActivateSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(const std::wstring& sessionId)> fn;
+        };
+        std::mutex activateMutex;
+        std::vector<WindowActivateSink> activateSinks;
+        uint64_t nextActivateToken{ 1 };
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -139,6 +160,17 @@ namespace Agentmaster
     void RegisterLiveWindow(const std::wstring& windowId);
     void UnregisterLiveWindow(const std::wstring& windowId);
     std::vector<std::wstring> LiveWindowIds();
+
+    // Agentmaster (cross-window activate): register THIS window's activate sink (returns a
+    // monotonic token; detach with UnregisterWindowActivateHandler — removing a stale token is a
+    // no-op, the registry-token pattern). ActivateSessionInOtherWindows fans `sessionId` out to
+    // every registered sink EXCEPT `sourceWindowId`'s (the caller already checked its own
+    // _claudeTabs): exactly one window hosts a session's tab (cross-window moves evict the old
+    // binding), so at most one sink acts; with no host anywhere (archived / mid-bind) every sink
+    // misses and the call is a no-op, matching the old local-only behavior.
+    uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
+    void UnregisterWindowActivateHandler(uint64_t token);
+    void ActivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
 
     // M10 Increment 3 (recover button). A saved window record that is NOT currently open, paired with
     // its `-s <idx>` (its index in the canonical sorted LoadWindowRecords order) so the Manager can

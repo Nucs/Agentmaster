@@ -296,6 +296,11 @@ namespace winrt::TerminalApp::implementation
         // Closed. Detached in ~TerminalPage. (An ::Agentmaster::LivenessToken; uint64_t to avoid
         // pulling SessionScanner.h into this header.)
         uint64_t _livenessToken{ 0 };
+        // Agentmaster (cross-window activate): this window's activate sink on the shared engine —
+        // another window's Activate (board/tree double-click, tree Enter, the Flight Plan's eye) on
+        // a session hosted HERE hops to this window's UI thread, selects the session's tab, and
+        // brings this window to the foreground. Detached in ~TerminalPage (Rule #10).
+        uint64_t _windowActivateToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
@@ -594,7 +599,8 @@ namespace winrt::TerminalApp::implementation
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
-        void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab
+        void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
+        bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume) an archived session + its Flight Plan
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd); // Agentmaster (Fleet Observer): resume an EXTERNAL claude's conversation into a managed tab (resolve id -> claude --resume; fresh if none)
@@ -604,6 +610,7 @@ namespace winrt::TerminalApp::implementation
         void _DetachClaudePaneForMove(const winrt::com_ptr<Tab>& tab, const std::shared_ptr<Pane>& movingPane); // Agentmaster (cross-window move, pane-level): the movePane-to-window case — evict only if the LEAVING pane is the session's bound (first-terminal) pane; the tab may survive with its other panes
         void _RenameClaudeSession(winrt::hstring sessionId, winrt::hstring title); // Agentmaster: Explorer-tree rename -> registry title (persist) + retitle the session's tab
         void _SyncClaudeTitleFromTab(const TerminalApp::Tab& tab); // Agentmaster: a Claude tab rename -> mirror back into the registry title (the one title)
+        void _SyncClaudeTabTitleFromRegistry(const std::wstring& sessionId, const std::wstring& title); // Agentmaster (cross-window rename, Rule #11): the registry-observer reaction — re-pin THIS window's hosting tab when the shared title changed elsewhere; UI thread; equality-guarded, map-miss no-op
         void _ApplyDirColorToTab(const TerminalApp::Tab& tab, const std::wstring& dir); // Agentmaster: paint a tab from its working dir's persisted/auto color
         void _ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex); // Agentmaster: recolor every live tab in a dir
         void _OnClaudeTabColorChanged(const TerminalApp::Tab& tab); // Agentmaster: user changed a tab color -> persist per dir + propagate to same-dir tabs

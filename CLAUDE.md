@@ -386,7 +386,25 @@ What works, by area:
   within the board instead of clipping past the bottom edge (the board's own ScrollViewer scrolls
   only horizontally). The Board header's **"Show all"** (clears the directory scope) is shown only
   when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
-  already showing all directories. The Board/Tree show only
+  already showing all directories. A managed **board card** mirrors the Explorer-Tree row's
+  interactions (one card/row, one action set): single-click selects, **double-click Activates**
+  (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row
+  (`_MakeSessionMenu` — Rename… / Archive… / Open New Session Here; a board-invoked Rename first
+  makes the tree row renderable — un-collapses its dir, widens a LOCAL scope to GLOBAL for a
+  session hosted elsewhere — since the in-place editor lives in the tree). **Activate is
+  cross-window**: the board and the tree's GLOBAL scope show the WHOLE fleet, but a session's tab
+  lives in exactly one window, so `_ActivateClaudeSession` selects locally when this window hosts
+  the tab and otherwise fans out through the engine's per-window **activate sinks**
+  (`Engine::RegisterWindowActivateHandler` / `ActivateSessionInOtherWindows`; registered at engine
+  init, token-detached in `~TerminalPage`, Rule #10) — the (single) hosting window hops to its UI
+  thread, re-checks its `_claudeTabs`, selects the tab, and **foregrounds itself**
+  (`_FocusClaudeSessionTab`: restore-if-minimized + `SetForegroundWindow` + the
+  `SwitchToThisWindow` fallback — same-process, so the hand-off is permitted). Board/tree
+  double-click, tree `Enter`, the Flight-Plan eye, and the Sessions page's Jump all ride this one
+  seam. **Rename is cross-window too**: the rename writes the shared registry; the window hosting
+  the tab re-pins its title via the registry observer (`_SyncClaudeTabTitleFromRegistry`, riding
+  the tab-dot push — equality-guarded both directions, so the settled case is a no-op; Rule #11).
+  The Board/Tree show only
   **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and opened from the
   **Archived (N)** toolbar button (the toolbar's rightmost, after the cog) — a **full-window Archive page**
   (`_BuildArchivePageShell`/`_ShowArchivePage`, mounted over `TerminalPage`'s Root content rows, ← Back to
@@ -1245,7 +1263,10 @@ build **binlog uploads as an artifact** to diagnose the first run.
     Explorer-tree **Rename…** routes through the `rename` callback → `_RenameClaudeSession` (registry
     + tab); a WT tab rename (double-click / right-click **Rename Tab** / `renameTab` action — all
     funnel through `Tab::SetTabText` → `PropertyChanged("Title")` → `_UpdateTitle`) flows back via
-    `_SyncClaudeTitleFromTab`. Equality guards make an already-in-step sync a no-op (no loops); an
+    `_SyncClaudeTitleFromTab`. The sync is **cross-window**: a rename run in a window that does NOT
+    host the tab (the board/tree show the whole fleet) writes the registry, and the hosting
+    window's registry observer re-pins its tab (`_SyncClaudeTabTitleFromRegistry`, riding the
+    tab-dot push). Equality guards make an already-in-step sync a no-op (no loops); an
     emptied override (`ResetTabText`) re-pins. On **adopt**, a name the user already gave the `+` tab
     wins (mirrored into the registry); else the tab is pinned to the managed name. Don't reintroduce
     a separate tab title or scrape claude's OSC title for the name.

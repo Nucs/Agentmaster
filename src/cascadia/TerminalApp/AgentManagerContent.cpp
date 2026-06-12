@@ -1519,6 +1519,10 @@ namespace winrt::TerminalApp::implementation
                 _SelectSession(id);
             }
         });
+        // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
+        // row — Rename… / Archive… / Open New Session Here — one card/row, one action set
+        // (Linked Lenses). The menu acts on the captured id/cwd, never "the selected session".
+        card.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
         return card;
     }
 
@@ -3057,6 +3061,57 @@ namespace winrt::TerminalApp::implementation
         if (id.empty())
         {
             return;
+        }
+        // Agentmaster: the rename editor is IN-PLACE in the Explorer Tree — it only exists once
+        // _RebuildTree renders this session's row. Invoked from a Triage-Board card (the board
+        // shows the WHOLE fleet) that row may not currently render: the tree sits in EXTERNAL
+        // scope, the session is hosted by ANOTHER window while the scope is LOCAL, or its
+        // directory group is collapsed. Make the row renderable first — widen the lens, never the
+        // data — so the editor always appears. The tree/F2 path (whose row is already visible)
+        // passes every check unchanged.
+        if (_treeScope == TreeScope::External)
+        {
+            _treeScope = TreeScope::Local;
+            // Leaving EXTERNAL: drop the external (read-only) selection, as _ToggleTreeScope does.
+            _selectedExternalSessionId.clear();
+            _selectedExternalCwd.clear();
+            _selectedExternalTitle.clear();
+            _externalPlanLoadedFor.clear();
+            _externalPlanPrompts.clear();
+        }
+        if (_treeScope == TreeScope::Local && _localScopeProvider)
+        {
+            const auto localIds = _localScopeProvider();
+            if (localIds.find(id) == localIds.end())
+            {
+                _treeScope = TreeScope::Global; // hosted by another window — its row only renders in GLOBAL
+            }
+        }
+        _UpdateTreeScopeButton();
+        if (_registry)
+        {
+            if (const auto s = _registry->Get(id))
+            {
+                // Un-collapse the session's directory group (PathEq-aware: the collapsed set keeps
+                // the first-seen spelling, which can differ from workingDir by case/slashes).
+                bool uncollapsed = false;
+                for (auto it = _collapsedDirs.begin(); it != _collapsedDirs.end();)
+                {
+                    if (PathEq(*it, s->workingDir))
+                    {
+                        it = _collapsedDirs.erase(it);
+                        uncollapsed = true;
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+                if (uncollapsed)
+                {
+                    _NotifyLensChanged(); // collapsed dirs are part of the per-window lens (M10)
+                }
+            }
         }
         _renamingId = id;
         _renameBox = nullptr; // bootstrap: force the next rebuild to create + focus the editor

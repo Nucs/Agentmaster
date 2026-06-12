@@ -106,6 +106,13 @@ namespace winrt::TerminalApp::implementation
         {
             _scanner->RemoveLivenessProbe(_livenessToken);
         }
+        // Agentmaster (cross-window activate): drop this window's activate sink from the shared
+        // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
+        // get_weak() + an agile dispatcher), this keeps the engine's sink list bounded (Rule #10).
+        if (_windowActivateToken)
+        {
+            ::Agentmaster::UnregisterWindowActivateHandler(_windowActivateToken);
+        }
         // Fleet Observer (OBSERVER.md §10/§12): drop THIS window's tab roster from the process-wide
         // observer so a closed window's tabs aren't surveyed/correlated after teardown (Rule #10).
         if (_observer && !_windowId.empty())
@@ -223,6 +230,26 @@ namespace winrt::TerminalApp::implementation
         // session lands in the manifest and reopens next run. Unregistered in ~TerminalPage.
         ::Agentmaster::RegisterLiveWindow(_windowId);
 
+        // Cross-window activate sink (Linked Lenses): the Manager board/tree show the WHOLE fleet,
+        // but a session's tab lives in exactly one window — when ANOTHER window's Activate
+        // (board/tree double-click, tree Enter, the Flight Plan's eye) targets a session hosted
+        // HERE, this sink hops to this window's UI thread, re-checks _claudeTabs there (the host
+        // can change while the hop is in flight), and on a hit selects the tab + brings this
+        // window to the foreground. A miss is a no-op — the engine fans out to every window, and
+        // only the (single) host acts. Detached in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowActivateToken = ::Agentmaster::RegisterWindowActivateHandler(_windowId, [weakThis, dispatcher](const std::wstring& id) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true);
+                    }
+                });
+            });
+        }
+
         // Debounced autosave of the window record (750ms trailing): structural/lens churn (drag a
         // splitter, reorder tabs, resize the window) collapses to one write; never per keystroke.
         _saveWindowRecordThrottled = std::make_shared<ThrottledFunc<>>(
@@ -258,17 +285,23 @@ namespace winrt::TerminalApp::implementation
             // tab's dot (the Waiting->Idle cache decay rides this too, so the dot fades with the
             // card). Observers fire on arbitrary threads (bridge/scanner) -> bounce to this window's
             // dispatcher; the UI-thread reaction is one _claudeTabs lookup + a brush write, and
-            // _SetTabAgentDot is idempotent on an unchanged color. Token detached in ~TerminalPage
+            // _SetTabAgentDot is idempotent on an unchanged color. The SAME hop also re-pins the
+            // hosting tab's TITLE when the registry title changed (cross-window rename, Rule #11:
+            // an Explorer-tree/board rename in ANOTHER window writes the shared registry; only the
+            // window holding the tab can retitle it — the equality guards on both sync directions
+            // make the settled case a no-op, so this never loops). Token detached in ~TerminalPage
             // (Rule #10 — a closed window's observer must not linger on the shared registry).
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
             _agentDotObserverToken = _sessionRegistry->AddObserver([weakThis, dispatcher](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
                 const std::wstring id = s.id;
                 const auto state = s.state;
                 const bool live = s.live;
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live]() {
+                const std::wstring title = s.title;
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live, title]() {
                     if (auto self = weakThis.get())
                     {
                         self->_UpdateTabAgentDot(id, state, live);
+                        self->_SyncClaudeTabTitleFromRegistry(id, title);
                     }
                 });
             });
