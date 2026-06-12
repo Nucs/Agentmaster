@@ -49,7 +49,7 @@ namespace Agentmaster
     inline constexpr int64_t kScanMaxDeltaBytes = 1 << 20; // read at most 1 MiB of new transcript per tick
     inline constexpr int64_t kScanForceConsumeBytes = 4 << 20; // a 4 MiB run with no newline -> skip it (corrupt/binary guard)
     inline constexpr int64_t kScanDiscoverMs = 1500; // idle keep-ticking cadence (drives each window's observer probe + liveness sweep when nothing is live)
-    inline constexpr int64_t kScanRunRepairFreshMs = 15000; // a consumed turn event must be this FRESH (file mtime) to synthesize a missed UserPromptSubmit — blocks the initial history replay of a restored/adopted transcript from reviving a stale state
+    inline constexpr int64_t kScanRunRepairFreshMs = 15000; // a consumed turn event must be this FRESH (file mtime) to synthesize a missed UserPromptSubmit — a stalled/late scan must not revive an old write (belt+suspenders BEHIND the primed-cursor gate below, which is what actually blocks the history replay: mtime alone cannot — a window closed mid-turn and reopened within the window replays a FRESH file)
 
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
     struct TranscriptEvent
@@ -87,14 +87,19 @@ namespace Agentmaster
     // unnoticed. Same for the FOLDED variant (the next prompt's UserPromptSubmit lands mid-turn /
     // before the prior turn's late Stop, which then flips Running back to Waiting mid-turn).
     // Fires only when: this pass consumed ≥1 turn event (a human prompt or an assistant line — the
-    // repair piggybacks on transcript appends, never on a quiet file), the tail says a turn is IN
-    // PROGRESS (lastStopReason != "end_turn": a user line cleared it / an assistant line is
-    // mid-turn; end_turn is the missed-Stop's territory), the write is FRESH (sinceWriteMs <=
-    // kScanRunRepairFreshMs — an initial history replay of a restored/adopted transcript must not
-    // revive a stale state), and the session sits in one of the two states a missed prompt strands
-    // it in (Idle / WaitingForInput — Running needs no repair, and NeedsApproval / Error / Done are
-    // "needs you / ended" states a mere transcript line must never clear).
-    bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept;
+    // repair piggybacks on transcript appends, never on a quiet file); the cursor was PRIMED before
+    // this pass (`primedBeforePass`: the tail had already caught up with the file end, so the
+    // consumed events are a LIVE append — the initial history replay of a restored/adopted session
+    // reads the WHOLE transcript from offset 0, and a window closed mid-turn leaves that history
+    // ending "turn in progress" with a FRESH mtime, so without this gate a just-resumed, idle
+    // claude lit up Running and STUCK there — recon-stop needs an end_turn tail to clear it); the
+    // tail says a turn is IN PROGRESS (lastStopReason != "end_turn": a user line cleared it / an
+    // assistant line is mid-turn; end_turn is the missed-Stop's territory); the write is FRESH
+    // (sinceWriteMs <= kScanRunRepairFreshMs — a stalled scan must not revive an old write); and
+    // the session sits in one of the two states a missed prompt strands it in (Idle /
+    // WaitingForInput — Running needs no repair, and NeedsApproval / Error / Done are "needs you /
+    // ended" states a mere transcript line must never clear).
+    bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept;
 
     // Ticked on the scanner thread on the slow cadence; the probe marshals to ITS OWN UI thread
     // and archives any of its claude tabs whose ConPTY connection has Closed. One per window (M9).
@@ -150,6 +155,13 @@ namespace Agentmaster
             int64_t lastSize{ -1 }; // last observed file size (the cheap change-gate)
             std::wstring lastAssistantText; // latest assistant text seen (for the missed-Stop question)
             std::wstring lastStopReason; // latest assistant stop_reason ("end_turn" => turn complete)
+            // Has the cursor ever CAUGHT UP with the file end? False while the initial backlog
+            // (a restored/adopted session's whole history, read from offset 0 in 1 MiB chunks) is
+            // still being consumed; true from the first pass that reached the current end. Only
+            // events consumed AFTER priming are a live append — the run-repair gate
+            // (ShouldSynthesizeRunning) reads the value from BEFORE the pass, so the pass that
+            // finishes the replay cannot itself synthesize. Reset with the truncation rewind.
+            bool primed{ false };
         };
 
         void _worker() noexcept;

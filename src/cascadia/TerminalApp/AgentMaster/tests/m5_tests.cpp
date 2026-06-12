@@ -1453,19 +1453,27 @@ static void TestTranscriptScan()
     }
 
     // Missed/folded-UserPromptSubmit repair — the PURE gate (ShouldSynthesizeRunning), the Running
-    // mirror of the missed-Stop synthesis: fires only off a freshly-appended turn event whose tail
-    // says a turn is in progress, and only out of the two states a missed prompt strands a session in.
+    // mirror of the missed-Stop synthesis: fires only off a freshly-appended turn event consumed by
+    // an already-PRIMED cursor (the initial history replay never counts) whose tail says a turn is
+    // in progress, and only out of the two states a missed prompt strands a session in.
     {
-        CHECK(ShouldSynthesizeRunning(SessionState::WaitingForInput, true, L"", 500), "run-repair: fresh user line + Waiting -> synthesize");
-        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, L"tool_use", 500), "run-repair: assistant mid-turn line + Idle -> synthesize");
-        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, L"", -200), "run-repair: future mtime (clock skew) counts as fresh");
-        CHECK(!ShouldSynthesizeRunning(SessionState::Running, true, L"", 500), "run-repair: already Running -> no-op");
-        CHECK(!ShouldSynthesizeRunning(SessionState::NeedsApproval, true, L"", 500), "run-repair: NeedsApproval never cleared by a transcript line");
-        CHECK(!ShouldSynthesizeRunning(SessionState::Error, true, L"", 500), "run-repair: Error never cleared by inference");
-        CHECK(!ShouldSynthesizeRunning(SessionState::Done, true, L"", 500), "run-repair: Done never revived");
-        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, L"end_turn", 500), "run-repair: end_turn tail is missed-Stop territory, not Running");
-        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, false, L"", 500), "run-repair: no new turn event this pass -> no synthesis");
-        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, L"", kScanRunRepairFreshMs + 1), "run-repair: stale write (history replay) -> no synthesis");
+        CHECK(ShouldSynthesizeRunning(SessionState::WaitingForInput, true, true, L"", 500), "run-repair: fresh user line + Waiting -> synthesize");
+        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, true, L"tool_use", 500), "run-repair: assistant mid-turn line + Idle -> synthesize");
+        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, true, L"", -200), "run-repair: future mtime (clock skew) counts as fresh");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Running, true, true, L"", 500), "run-repair: already Running -> no-op");
+        CHECK(!ShouldSynthesizeRunning(SessionState::NeedsApproval, true, true, L"", 500), "run-repair: NeedsApproval never cleared by a transcript line");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Error, true, true, L"", 500), "run-repair: Error never cleared by inference");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Done, true, true, L"", 500), "run-repair: Done never revived");
+        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, true, L"end_turn", 500), "run-repair: end_turn tail is missed-Stop territory, not Running");
+        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, false, true, L"", 500), "run-repair: no new turn event this pass -> no synthesis");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, true, L"", kScanRunRepairFreshMs + 1), "run-repair: stale write (late scan) -> no synthesis");
+        // THE window-restore bug: a session closed MID-TURN and resumed leaves a transcript whose
+        // history ends "turn in progress" with a FRESH mtime; the first scanner pass replays it
+        // from offset 0 (cursor not yet primed) — that replay must NOT light the idle, just-resumed
+        // claude Running (it then STUCK blue: recon-stop needs an end_turn tail to clear it).
+        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, false, L"", 500), "run-repair: unprimed cursor (history replay) -> no synthesis even when FRESH");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, false, L"tool_use", 500), "run-repair: unprimed replay of a mid-turn tail (killed mid-turn) -> no synthesis");
+        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, false, L"", -200), "run-repair: unprimed beats even a future mtime");
     }
     // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts
     // stamped (refreshes the decay anchor), EMPTY promptText (no Flight-Plan side effects — the

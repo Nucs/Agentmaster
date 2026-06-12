@@ -217,11 +217,21 @@ namespace Agentmaster
         return out;
     }
 
-    bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept
+    bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept
     {
         if (!consumedTurnEvent)
         {
             return false; // nothing new this pass — never re-fire on a quiet transcript
+        }
+        if (!primedBeforePass)
+        {
+            // The cursor had NOT caught up with the file before this pass, so the consumed events
+            // are the initial HISTORY REPLAY (a restored/adopted session reads its whole transcript
+            // from offset 0) — not a live append. A window closed mid-turn leaves that history
+            // ending "turn in progress" with a FRESH mtime (and `--resume` can touch the file), so
+            // the freshness check below cannot catch this case: without this gate a just-resumed,
+            // actually-idle claude lit up Running and STUCK (recon-stop needs an end_turn tail).
+            return false;
         }
         if (lastStopReason == L"end_turn")
         {
@@ -229,7 +239,7 @@ namespace Agentmaster
         }
         if (sinceWriteMs > kScanRunRepairFreshMs)
         {
-            return false; // an old write: the initial history replay of a restored/adopted transcript, not a live turn
+            return false; // an old write surfacing late (stalled scan) — not a live turn
         }
         // Only the two states a missed UserPromptSubmit strands a session in. Running needs no
         // repair; NeedsApproval / Error / Done are "needs you / ended" states a mere transcript
@@ -418,10 +428,17 @@ namespace Agentmaster
         if (size < st.offset)
         {
             // Truncated / rewritten under us (shouldn't happen for an append-only transcript, but
-            // be safe): restart the tail from the top.
+            // be safe): restart the tail from the top. The re-read is a fresh HISTORY REPLAY, so
+            // the primed flag drops with it — its events must not feed the run-repair either.
             st.offset = 0;
             st.lastSize = -1;
+            st.primed = false;
         }
+        // Captured BEFORE the read: events consumed by a not-yet-primed cursor are the initial
+        // backlog replay (offset 0 -> end on a restored/adopted session), and the pass that
+        // FINISHES the replay sets primed for the NEXT pass — so replayed history can never count
+        // as the live append the run-repair keys on (no matter how fresh the file mtime is).
+        const bool wasPrimed = st.primed;
         bool consumedTurnEvent = false;
         if (size != st.lastSize)
         {
@@ -436,14 +453,16 @@ namespace Agentmaster
         // WaitingForInput mid-new-turn) used to run start-to-finish showing WaitingForInput/Idle —
         // and, never being Running, it disarmed the missed-Stop backstop below, so the turn's END
         // went unnoticed too (until the decay shuffled the card to Idle). The PURE gate
-        // (ShouldSynthesizeRunning, unit-tested) fires only off a freshly-appended turn event whose
+        // (ShouldSynthesizeRunning, unit-tested) fires only off a freshly-appended turn event —
+        // consumed by an already-PRIMED cursor (wasPrimed: the initial history replay of a
+        // restored/adopted transcript must never light a just-resumed idle claude Running) — whose
         // tail says a turn is in progress; the synthesized event goes through the ONE state machine
         // (OnHookEvent) exactly like the missed-Stop: ts stamped (also refreshes the decay anchor),
         // EMPTY promptText (no Flight-Plan side effects — NoteExternalPrompt in _readDelta owns the
         // prompt back-fill, and the echo bookkeeping stays push-owned, so a late real
         // UserPromptSubmit lands on Running -> Running, a no-op). The re-Get mirrors the
         // missed-Stop's freshest-state re-check: a real hook that landed mid-pass wins.
-        if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, st.lastStopReason, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
+        if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, wasPrimed, st.lastStopReason, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))
@@ -496,6 +515,7 @@ namespace Agentmaster
         const int64_t avail = size - st.offset;
         if (avail <= 0)
         {
+            st.primed = true; // nothing past the cursor: it IS the file end — caught up
             return false;
         }
         const DWORD want = static_cast<DWORD>(avail < kScanMaxDeltaBytes ? avail : kScanMaxDeltaBytes);
@@ -541,12 +561,26 @@ namespace Agentmaster
             if (avail > kScanForceConsumeBytes)
             {
                 st.offset = size;
+                st.primed = true; // skipped to the end — caught up
+            }
+            else if (avail <= kScanMaxDeltaBytes && static_cast<int64_t>(got) == avail)
+            {
+                st.primed = true; // the whole remainder is one partial line in flight — caught up on complete lines
             }
             return false;
         }
         const size_t completeBytes = nl + 1;
         const std::wstring wide = Utf8ToUtf16(bytes.data(), static_cast<int>(completeBytes));
         st.offset += static_cast<int64_t>(completeBytes);
+        if (avail <= kScanMaxDeltaBytes && static_cast<int64_t>(got) == avail)
+        {
+            // This read reached the file's current end (everything available fit the window):
+            // the cursor is caught up — anything consumed on a LATER pass is a live append, so
+            // the run-repair may key on it. (A capped backlog chunk — avail > the window — is
+            // still mid-replay and does NOT prime; the pass that finishes the replay primes for
+            // the NEXT one.)
+            st.primed = true;
+        }
 
         const auto parsed = ParseTranscriptDelta(wide);
         for (const auto& ev : parsed.events)
