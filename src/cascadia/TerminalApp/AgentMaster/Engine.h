@@ -143,6 +143,10 @@ namespace Agentmaster
     // M10 Increment 3 (recover button). A saved window record that is NOT currently open, paired with
     // its `-s <idx>` (its index in the canonical sorted LoadWindowRecords order) so the Manager can
     // reopen it the same way the Emperor does at startup (wt -w -1 -s <idx>). See PERSISTENCE.md §13.5.
+    // Records with NO tab refs (a window that held only the Manager tab) are EXCLUDED — reopening one
+    // reconstructs exactly what "+ new window" gives, so it is never offered; UnregisterLiveWindow
+    // additionally DELETES such a record on a mid-session close (the last window out keeps its —
+    // possibly empty — record: it is the open-at-exit snapshot the next launch claims for geometry).
     struct RecoverableWindow
     {
         int index{ 0 };

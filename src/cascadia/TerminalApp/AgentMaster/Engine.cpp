@@ -275,6 +275,20 @@ namespace Agentmaster
         {
             SaveOpenWindows({ e.liveWindowIds.begin(), e.liveWindowIds.end() });
         }
+        // Agentmaster (discard Manager-only windows): a mid-session-closed window whose record has NO
+        // tab refs held nothing but the Manager tab — reopening it would reconstruct exactly what
+        // "+ new window" gives (every window auto-creates the Manager tab), so the record is pure
+        // noise: DELETE it instead of pooling it, and it stops accumulating in windows/ (and polluting
+        // the next launch's front-pop claim order). Mirrors the manifest's skip-empty above: the LAST
+        // window out (quit / single-window close, live set now empty) KEEPS its record even when
+        // empty — that record is the open-at-exit snapshot the next launch claims for geometry + lens,
+        // so a pure-Manager single-window workflow still reopens at its position. (RecoverableWindows
+        // filters empty records anyway, so a kept-empty final record is never OFFERED for reopen.)
+        if (reclaim && reclaim->tabs.empty() && !e.liveWindowIds.empty())
+        {
+            DeleteWindowRecord(windowId);
+            reclaim.reset();
+        }
         // Return the record to the reclaimable pool so a later in-session reopen (the recover button)
         // re-claims THIS record (real id + lens) rather than minting a duplicate. Dedup the re-add so a
         // double teardown can't stack two copies. The startup pool is left alone — reclaim is by id only.
@@ -316,6 +330,19 @@ namespace Agentmaster
         const auto records = LoadWindowRecords(); // canonical sorted order -> the index IS the `-s <idx>`
         for (int i = 0; i < static_cast<int>(records.size()); ++i)
         {
+            // Agentmaster (discard Manager-only windows): a record with NO tab refs is a window that
+            // held nothing but the Manager tab — and every window auto-creates the Manager tab at
+            // index 0, so reopening it reconstructs exactly what "+ new window" gives (plus stale
+            // geometry/lens). Offering it is noise: skip it from every recover surface (the "Reopen
+            // Windows (N)" count, the Archive page's "Saved window" rows, reopen-all, the per-row
+            // windowId re-resolution — they all flow through here). The loop keeps `i` as the
+            // CANONICAL LoadWindowRecords index, so the surviving entries' `-s <idx>` still addresses
+            // the right record. (The Emperor's startup open-at-exit reopen reads windows/*.json
+            // directly and is deliberately untouched — restoring what was open at exit is faithful.)
+            if (records[i].tabs.empty())
+            {
+                continue;
+            }
             if (live.find(records[i].windowId) == live.end())
             {
                 out.push_back({ i, records[i] });
