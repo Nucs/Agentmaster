@@ -46,7 +46,16 @@
     <AppxManifest Include="Package-Can.appxmanifest" Condition="'$(WindowsTerminalBranding)'=='Canary'">
       <SubType>Designer</SubType>
     </AppxManifest>
-    <AppxManifest Include="Package-Dev.appxmanifest" Condition="'$(WindowsTerminalBranding)'=='' or '$(WindowsTerminalBranding)'=='Dev'">
+    <!-- Agentmaster: the Dev BRANDING (our only branding — same code, features, assets) carries
+         TWO package identities. /p:AgentmasterPackageIdentity=Release selects the RELEASE
+         manifest (Name=Agentmaster, alias agentmaster.exe — what .github/workflows/release.yml
+         ships); the default is the DEV manifest (Name=AgentmasterDev, alias agentmasterdev.exe —
+         the local loose-layout deploy). Distinct identities are what let the released app and
+         the dev build install side by side with zero collision. -->
+    <AppxManifest Include="Package-Rel.appxmanifest" Condition="('$(WindowsTerminalBranding)'=='' or '$(WindowsTerminalBranding)'=='Dev') and '$(AgentmasterPackageIdentity)'=='Release'">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <AppxManifest Include="Package-Dev.appxmanifest" Condition="('$(WindowsTerminalBranding)'=='' or '$(WindowsTerminalBranding)'=='Dev') and '$(AgentmasterPackageIdentity)'!='Release'">
       <SubType>Designer</SubType>
     </AppxManifest>
   </ItemGroup>

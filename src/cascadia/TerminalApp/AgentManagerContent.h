@@ -359,6 +359,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecay{ nullptr }; // Waiting-for-you -> Idle after N minutes (0 = never; default 5 = Claude's server cache lifetime)
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };

@@ -38,6 +38,30 @@ namespace winrt::Microsoft::Terminal::Settings::Model
                 return modulePath;
             }
 
+            // Agentmaster: when a state PROFILE is active (AGENTMASTER_PROFILE — exported by the
+            // WindowEmperor's startup bootstrap BEFORE any settings load; see
+            // TerminalApp/AgentMaster/ProfileBootstrap.h), Terminal's own settings.json /
+            // state.json live INSIDE the profile, under <profile>\terminal\ — the profile folder
+            // is the ONE place an install persists anything, so side-by-side release/dev installs
+            // (or any two profiles) can never share or clobber each other's Terminal settings.
+            // Headless hosts that never ran the bootstrap (tests, tools) take the stock paths.
+            {
+                std::wstring profile;
+                if (const DWORD need = ::GetEnvironmentVariableW(L"AGENTMASTER_PROFILE", nullptr, 0); need > 0)
+                {
+                    profile.resize(need);
+                    const DWORD got = ::GetEnvironmentVariableW(L"AGENTMASTER_PROFILE", profile.data(), need);
+                    profile.resize(got > 0 && got < need ? got : 0);
+                }
+                if (!profile.empty())
+                {
+                    std::filesystem::path p{ std::move(profile) };
+                    p /= L"terminal";
+                    std::filesystem::create_directories(p);
+                    return p;
+                }
+            }
+
             wil::unique_cotaskmem_string localAppDataFolder;
             // KF_FLAG_FORCE_APP_DATA_REDIRECTION, when engaged, causes SHGet... to return
             // the new AppModel paths (Packages/xxx/RoamingState, etc.) for standard path requests.

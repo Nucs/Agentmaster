@@ -6,6 +6,7 @@
 
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
+#include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
@@ -1503,8 +1504,9 @@ namespace winrt::TerminalApp::implementation
         card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
         const auto id = s.id;
         // Single click = select; double click (within the OS threshold) = Activate (jump to
-        // the session's live terminal tab), mirroring the Explorer Tree rows. A Button
-        // swallows DoubleTapped, so we time the successive clicks ourselves.
+        // the session's live terminal tab — the page fans out to the hosting WINDOW when the
+        // tab lives in another one), mirroring the Explorer Tree rows. A Button swallows
+        // DoubleTapped, so we time the successive clicks ourselves.
         card.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
             const auto nowTick = ::GetTickCount64();
             const bool dbl = (id == _lastCardClickId) && (nowTick - _lastCardClickTick) <= ::GetDoubleClickTime();
@@ -3723,6 +3725,50 @@ namespace winrt::TerminalApp::implementation
         _setRecentDirsLimit.PlaceholderText(L"10");
         panel.Children().Append(_setRecentDirsLimit);
 
+        // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
+        // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
+        // the choice file / env, never inside the profile it selects). Read-only display +
+        // "Change…", which re-runs the same picker the first launch shows and applies on the
+        // NEXT start (the running engine cannot re-home its state mid-run).
+        panel.Children().Append(Text(L"PROFILE", 11, true, 0.6));
+        _setProfileDir = TextBlock{};
+        _setProfileDir.TextWrapping(TextWrapping::Wrap);
+        _setProfileDir.Opacity(0.85);
+        _setProfileDir.FontSize(12);
+        panel.Children().Append(_setProfileDir);
+        auto changeProfile = Button{};
+        changeProfile.Content(winrt::box_value(L"Change profile folder\x2026"));
+        changeProfile.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            // Defer off the click tick (the XAML-Islands pointer-handler rule), then run the
+            // pure-Win32 picker — a Win32 modal gets its keyboard input directly in islands.
+            if (_dispatcher)
+            {
+                _dispatcher.TryEnqueue([this]() {
+                    const std::wstring active = ::Agentmaster::Profiles::ResolveProfileDir();
+                    const auto pick = ::Agentmaster::Profiles::ShowProfilePicker(::GetActiveWindow(), false, active);
+                    if (!pick.chosen)
+                    {
+                        return;
+                    }
+                    ::Agentmaster::Profiles::SaveChoice(pick.dir);
+                    if (pick.migrate)
+                    {
+                        ::Agentmaster::Profiles::MigrateProfileData(active, pick.dir);
+                    }
+                    ::Agentmaster::Profiles::SeedTerminalSettings(pick.dir);
+                    if (_setProfileDir)
+                    {
+                        _setProfileDir.Text(winrt::hstring{ active + L"  \x2192  " + pick.dir + L" (after restart)" });
+                    }
+                    ::MessageBoxW(::GetActiveWindow(),
+                                  (L"Profile saved:\n\n    " + pick.dir + L"\n\nIt applies the next time Agentmaster starts.").c_str(),
+                                  L"Agentmaster",
+                                  MB_OK | MB_ICONINFORMATION);
+                });
+            }
+        });
+        panel.Children().Append(changeProfile);
+
         // Cancel / Save
         auto buttons = StackPanel{};
         buttons.Orientation(Orientation::Horizontal);
@@ -3806,6 +3852,20 @@ namespace winrt::TerminalApp::implementation
         if (_setRecentDirsLimit)
         {
             _setRecentDirsLimit.Text(winrt::hstring{ std::to_wstring(_appSettings.recentDirsLimit) });
+        }
+        if (_setProfileDir)
+        {
+            // The ACTIVE profile (this run) — a pending Change… is re-shown as pending until restart.
+            const std::wstring active = ::Agentmaster::Profiles::ResolveProfileDir();
+            const std::wstring saved = ::Agentmaster::Profiles::ReadSavedChoice();
+            if (!saved.empty() && !::Agentmaster::Profiles::detail::SamePath(saved, active))
+            {
+                _setProfileDir.Text(winrt::hstring{ active + L"  \x2192  " + saved + L" (after restart)" });
+            }
+            else
+            {
+                _setProfileDir.Text(winrt::hstring{ active });
+            }
         }
         _settingsOverlay.Visibility(Visibility::Visible);
     }

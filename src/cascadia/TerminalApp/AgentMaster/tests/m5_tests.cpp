@@ -34,6 +34,7 @@
 #include "../Json.h"
 #include "../Persistence.h"
 #include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
+#include "../ProfileBootstrap.h" // the per-install state PROFILE (choice file / resolution / migrate)
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)
@@ -505,17 +506,133 @@ static void TestSpawnBuilders()
         CHECK(bad.size() == 1 && bad[0].first == L"GOOD", "env parse: skips malformed/empty entries");
     }
 
-    const auto fwd = BuildForwarderScript();
+    // PsSingleQuote: PowerShell single-quoted literal (only escape = doubled quote).
+    CHECK(PsSingleQuote(L"C:\\Users\\x\\.agentmaster") == L"'C:\\Users\\x\\.agentmaster'", "ps quote: plain path verbatim");
+    CHECK(PsSingleQuote(L"C:\\Users\\o'brien") == L"'C:\\Users\\o''brien'", "ps quote: embedded quote doubled");
+    CHECK(PsSingleQuote(L"$env:FOO") == L"'$env:FOO'", "ps quote: $ stays inert");
+
+    const auto fwd = BuildForwarderScript(L"C:\\Users\\x\\.agentmaster-dev");
     CHECK(fwd.find(L"NamedPipeClientStream") != std::wstring::npos, "forwarder uses NamedPipeClientStream");
     CHECK(fwd.find(L"CCMGR_SESSION_ID") != std::wstring::npos, "forwarder reads CCMGR_SESSION_ID");
     CHECK(fwd.find(L"CCMGR_HOOK_PIPE") != std::wstring::npos, "forwarder reads CCMGR_HOOK_PIPE");
     CHECK(fwd.find(L"session_id") != std::wstring::npos, "forwarder falls back to payload session_id");
     CHECK(fwd.find(L"WT_SESSION") != std::wstring::npos, "forwarder emits WT_SESSION tabToken");
-    CHECK(fwd.find(L"bridge.json") != std::wstring::npos, "forwarder falls back to bridge.json discovery");
+    // The bridge-discovery fallback is PER-PROFILE: the stateDir is baked in (PS-single-quoted);
+    // no profile-blind $env:USERPROFILE\.agentmaster path and no unexpanded placeholder remain.
+    CHECK(fwd.find(L"$disc = 'C:\\Users\\x\\.agentmaster-dev\\bridge.json'") != std::wstring::npos, "forwarder discovery is the per-profile bridge.json");
+    CHECK(fwd.find(L"Join-Path $env:USERPROFILE") == std::wstring::npos, "forwarder discovery is not profile-blind");
+    CHECK(fwd.find(L"{{AM_BRIDGE_JSON}}") == std::wstring::npos, "forwarder placeholder fully substituted");
 
     const auto id = NewSessionId();
     CHECK(id.size() == 36, "uuid length 36");
     CHECK(id[8] == L'-' && id[13] == L'-' && id[18] == L'-' && id[23] == L'-', "uuid hyphens");
+}
+
+// Agentmaster: the per-install state PROFILE (ProfileBootstrap.h) — the pure pieces: the choice
+// file round-trip, the resolution precedence's env override, and the per-identity defaults.
+// (The picker itself is UI; the packaged-PFN branches need a package context — both untestable
+// headless. Tests run unpackaged, so PackageKey() must be "Unpackaged" and the silent default
+// must be the HISTORICAL ~/.agentmaster — that invariant is what keeps this harness writing to
+// the same state dir it always did.)
+static void TestProfileBootstrap()
+{
+    namespace P = ::Agentmaster::Profiles;
+    std::wprintf(L"ProfileBootstrap (profiles):\n");
+
+    CHECK(P::PackageFamilyName().empty(), "unpackaged: no package family");
+    CHECK(!P::IsDevPackage(), "unpackaged: not the dev package");
+    CHECK(P::PackageKey() == L"Unpackaged", "unpackaged: choice key");
+
+    const auto rel = P::DefaultReleaseProfileDir();
+    const auto dev = P::DefaultDevProfileDir();
+    CHECK(rel.size() > 12 && rel.compare(rel.size() - 12, 12, L".agentmaster") == 0, "release default ends .agentmaster");
+    CHECK(dev.size() > 16 && dev.compare(dev.size() - 16, 16, L".agentmaster-dev") == 0, "dev default ends .agentmaster-dev");
+    CHECK(P::DefaultProfileDir() == rel, "unpackaged silent default == the historical ~/.agentmaster");
+
+    // Choice-file round-trip on a temp path (never the real %USERPROFILE% map).
+    wchar_t tmpDir[MAX_PATH];
+    ::GetTempPathW(MAX_PATH, tmpDir);
+    const std::wstring file = std::wstring{ tmpDir } + L"am-profiles-test-" + NewSessionId() + L".txt";
+    {
+        CHECK(P::ReadChoiceFile(file).empty(), "choice file: missing -> empty map");
+        std::map<std::wstring, std::wstring> m;
+        m[L"Agentmaster_56k4f06dsfp9r"] = L"C:\\Users\\x\\.agentmaster";
+        m[L"AgentmasterDev_56k4f06dsfp9r"] = L"C:\\Users\\x\\.agentmaster-dev";
+        m[L"Unpackaged"] = L"Q:\\profiles\\portable one"; // space survives (no quoting needed)
+        CHECK(P::WriteChoiceFile(file, m), "choice file: write");
+        const auto r = P::ReadChoiceFile(file);
+        CHECK(r.size() == 3, "choice file: three entries back");
+        CHECK(r.at(L"Agentmaster_56k4f06dsfp9r") == L"C:\\Users\\x\\.agentmaster", "choice file: release slot");
+        CHECK(r.at(L"AgentmasterDev_56k4f06dsfp9r") == L"C:\\Users\\x\\.agentmaster-dev", "choice file: dev slot");
+        CHECK(r.at(L"Unpackaged") == L"Q:\\profiles\\portable one", "choice file: path with space");
+        // Read-modify-write keeps other installs' slots (the SaveChoice contract).
+        auto r2 = r;
+        r2[L"Unpackaged"] = L"D:\\elsewhere";
+        CHECK(P::WriteChoiceFile(file, r2), "choice file: rewrite");
+        const auto r3 = P::ReadChoiceFile(file);
+        CHECK(r3.size() == 3 && r3.at(L"Unpackaged") == L"D:\\elsewhere" &&
+                  r3.at(L"Agentmaster_56k4f06dsfp9r") == L"C:\\Users\\x\\.agentmaster",
+              "choice file: update preserves other slots");
+        ::DeleteFileW(file.c_str());
+        ::DeleteFileW((file + L".tmp").c_str());
+    }
+
+    // Resolution precedence: the env override beats everything (and is what the WindowEmperor
+    // bootstrap exports, so dll-side resolution always agrees with the exe).
+    {
+        const std::wstring fake = std::wstring{ tmpDir } + L"am-profile-env-" + NewSessionId();
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", fake.c_str());
+        CHECK(P::ResolveProfileDirUncached() == fake, "resolve: env override wins");
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", nullptr);
+        const auto silent = P::ResolveProfileDirUncached();
+        CHECK(!silent.empty(), "resolve: silent resolution non-empty");
+        ::RemoveDirectoryW(fake.c_str());
+    }
+
+    // SamePath: the filesystem-aware-enough comparison the migrate guard uses.
+    CHECK(P::detail::SamePath(L"C:\\A\\b\\", L"c:/a/B"), "SamePath: case/slash/trailing-insensitive");
+    CHECK(!P::detail::SamePath(L"C:\\A\\b", L"C:\\A\\b2"), "SamePath: distinct dirs differ");
+
+    // MigrateProfileData: copies content, skips locks/shim/bridge.json, never clobbers.
+    {
+        const std::wstring src = std::wstring{ tmpDir } + L"am-mig-src-" + NewSessionId();
+        const std::wstring dst = std::wstring{ tmpDir } + L"am-mig-dst-" + NewSessionId();
+        std::filesystem::create_directories(std::filesystem::path{ src } / L"windows");
+        std::filesystem::create_directories(std::filesystem::path{ src } / L"locks");
+        std::filesystem::create_directories(std::filesystem::path{ src } / L"shim");
+        auto put = [](const std::filesystem::path& p, const char* bytes) {
+            std::ofstream f{ p, std::ios::binary };
+            f << bytes;
+        };
+        put(std::filesystem::path{ src } / L"sessions.json", "{\"v\":1}");
+        put(std::filesystem::path{ src } / L"bridge.json", "{\"pipe\":\"stale\"}");
+        put(std::filesystem::path{ src } / L"windows" / L"w1.json", "{\"id\":\"w1\"}");
+        put(std::filesystem::path{ src } / L"locks" / L"x", "lock");
+        put(std::filesystem::path{ src } / L"shim" / L"claude.cmd", "rem old");
+        std::filesystem::create_directories(std::filesystem::path{ dst });
+        put(std::filesystem::path{ dst } / L"settings.json", "{\"keep\":true}");
+        put(std::filesystem::path{ src } / L"settings.json", "{\"keep\":false}");
+
+        P::MigrateProfileData(src, dst);
+        namespace fs = std::filesystem;
+        CHECK(fs::exists(fs::path{ dst } / L"sessions.json"), "migrate: copies sessions.json");
+        CHECK(fs::exists(fs::path{ dst } / L"windows" / L"w1.json"), "migrate: copies windows/ recursively");
+        CHECK(!fs::exists(fs::path{ dst } / L"bridge.json"), "migrate: skips bridge.json (stale pipe)");
+        CHECK(!fs::exists(fs::path{ dst } / L"locks"), "migrate: skips locks/");
+        CHECK(!fs::exists(fs::path{ dst } / L"shim"), "migrate: skips shim/ (regenerated)");
+        {
+            std::ifstream f{ fs::path{ dst } / L"settings.json", std::ios::binary };
+            std::string body{ std::istreambuf_iterator<char>{ f }, std::istreambuf_iterator<char>{} };
+            CHECK(body == "{\"keep\":true}", "migrate: never clobbers existing target files");
+        }
+        // Same-path call is a no-op (the guard the picker's checkbox relies on).
+        P::MigrateProfileData(src, src + L"\\");
+        CHECK(fs::exists(fs::path{ src } / L"bridge.json"), "migrate: same-path no-op leaves source intact");
+
+        std::error_code ec;
+        fs::remove_all(src, ec);
+        fs::remove_all(dst, ec);
+    }
 }
 
 static bool WriteLineToPipe(const std::wstring& pipeName, const std::string& utf8Line)
@@ -2200,6 +2317,7 @@ int wmain()
     TestTypedCapture();
     TestObserveClaude();
     TestSpawnBuilders();
+    TestProfileBootstrap();
     TestScheduler();
     TestTranscriptScan();
     TestPersistence();

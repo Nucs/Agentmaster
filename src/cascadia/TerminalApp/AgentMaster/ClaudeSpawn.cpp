@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "ProcessInspect.h" // SnapshotProcesses / FindDescendantByImage / ReadProcessCwd (moved here)
+#include "ProfileBootstrap.h" // the per-install state PROFILE (AgentmasterStateDir now resolves through it)
 
 namespace
 {
@@ -134,12 +135,36 @@ namespace Agentmaster
         return out;
     }
 
-    std::wstring BuildForwarderScript()
+    std::wstring PsSingleQuote(std::wstring_view s)
+    {
+        // PowerShell single-quoted literal: the only escape inside '…' is doubling the quote
+        // itself; backslashes and $ are inert. So any absolute Windows path round-trips.
+        std::wstring out;
+        out.reserve(s.size() + 2);
+        out.push_back(L'\'');
+        for (const wchar_t c : s)
+        {
+            out.push_back(c);
+            if (c == L'\'')
+            {
+                out.push_back(L'\'');
+            }
+        }
+        out.push_back(L'\'');
+        return out;
+    }
+
+    std::wstring BuildForwarderScript(const std::wstring& stateDir)
     {
         // Pure-ASCII PowerShell. Reads the hook JSON from stdin, correlates via env, and
         // posts one HookWire.h line to the named pipe. Best-effort throughout: any failure
         // is swallowed so a hook never breaks the Claude turn.
-        return LR"PSHOOK(param([string]$Event = "")
+        //
+        // The bridge DISCOVERY fallback must point into THIS profile's stateDir (each profile
+        // runs its own engine + pipe + bridge.json) — a fixed ~/.agentmaster path would route
+        // a dev-profile session's hooks to the release instance's bridge. The placeholder is
+        // substituted below with the PowerShell-quoted per-profile path.
+        std::wstring script = LR"PSHOOK(param([string]$Event = "")
 $ErrorActionPreference = "SilentlyContinue"
 try {
   $raw = ""
@@ -161,7 +186,7 @@ try {
   $pipe = $env:CCMGR_HOOK_PIPE
   if ([string]::IsNullOrEmpty($pipe)) {
     try {
-      $disc = Join-Path $env:USERPROFILE ".agentmaster\bridge.json"
+      $disc = {{AM_BRIDGE_JSON}}
       if (Test-Path -LiteralPath $disc) {
         $b = (Get-Content -LiteralPath $disc -Raw) | ConvertFrom-Json
         if ($b.pipe) { $pipe = [string]$b.pipe }
@@ -236,6 +261,14 @@ try {
   }
 } catch { }
 )PSHOOK";
+
+        const std::wstring token = L"{{AM_BRIDGE_JSON}}";
+        const auto at = script.find(token);
+        if (at != std::wstring::npos)
+        {
+            script.replace(at, token.size(), PsSingleQuote(stateDir + L"\\bridge.json"));
+        }
+        return script;
     }
 
     std::wstring BuildHooksSettingsJson(std::wstring_view forwarderPath, std::wstring_view model, bool includeCoAuthoredBy, bool skipPermissions)
@@ -439,28 +472,19 @@ try {
         // passes this path to `claude --settings` and the hook forwarder script lives here.
         // A packaged app's %LOCALAPPDATA% is redirected to the package's LocalCache, so a
         // path string under %LOCALAPPDATA% would point an external process at an empty real
-        // folder. %USERPROFILE% is NOT redirected, so anchor under it (mirrors ~/.claude).
-        std::wstring base = GetEnvW(L"USERPROFILE");
-        std::wstring dir;
-        if (!base.empty())
-        {
-            dir = base + L"\\.agentmaster";
-        }
-        else
-        {
-            std::wstring fallback = GetEnvW(L"LOCALAPPDATA");
-            if (fallback.empty())
-            {
-                fallback = GetEnvW(L"TEMP");
-            }
-            if (fallback.empty())
-            {
-                fallback = L".";
-            }
-            dir = fallback + L"\\Agentmaster";
-        }
+        // folder. The profile defaults anchor under %USERPROFILE% (mirrors ~/.claude).
+        //
+        // The location is the ACTIVE PROFILE (ProfileBootstrap.h): env AGENTMASTER_PROFILE
+        // (exported by the WindowEmperor's startup bootstrap/picker, BEFORE any engine code
+        // runs) > the portable marker > the saved per-install choice > the per-identity
+        // default — ~/.agentmaster for the release package AND for unpackaged runs (tests,
+        // tools: the historical location, unchanged), ~/.agentmaster-dev for AgentmasterDev.
+        // Cached process-wide by ResolveProfileDir(): a profile cannot change mid-run.
+        const std::wstring dir = Profiles::ResolveProfileDir();
         try
         {
+            // Re-assert per call (the resolver created it once; this heals a mid-run delete,
+            // matching the pre-profile behavior).
             std::filesystem::create_directories(std::filesystem::path{ dir });
         }
         catch (...)
@@ -495,7 +519,7 @@ try {
 
         const auto forwarderFwd = ToForwardSlashes(forwarderPath);
 
-        if (!WriteFileUtf8(forwarderPath, BuildForwarderScript()))
+        if (!WriteFileUtf8(forwarderPath, BuildForwarderScript(stateDir)))
         {
             return { std::wstring{}, std::wstring{} };
         }

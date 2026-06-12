@@ -28,6 +28,11 @@
 #include <iterator>
 #include <unordered_set>
 
+// Agentmaster: the per-install state PROFILE — resolved (and, on an install's first launch,
+// PICKED: Production / Development / Browse…) before anything reads persisted state. Header-only
+// on purpose: the Emperor links TerminalApp.dll, not the TerminalAppLib static lib.
+#include "../TerminalApp/AgentMaster/ProfileBootstrap.h"
+
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
 using namespace winrt::Microsoft::Terminal::Settings::Model;
@@ -518,6 +523,25 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         __assume(false);
     }
 
+    // Agentmaster: WE are the one instance — resolve the per-install state PROFILE before
+    // ANYTHING reads or writes persisted state: Terminal's own settings/state (ReloadSettings
+    // below routes through GetBaseSettingsPath's AGENTMASTER_PROFILE redirect), the reopen
+    // scan further down, and — much later — the engine's AgentmasterStateDir(). An install's
+    // first launch (no saved choice) shows the one-time picker (Production / Development /
+    // Browse…); a `-Embedding` COM activation (defterm handoff) must never block on UI, so it
+    // resolves silently and the picker waits for the next real launch. A false return means
+    // the profile is live in ANOTHER instance (release+dev pointed at one folder) and the user
+    // declined to continue — exit like a handoff, before any state is touched.
+    {
+        const std::wstring_view cmdline{ GetCommandLineW() };
+        const bool embedding = cmdline.find(L"-Embedding") != std::wstring_view::npos;
+        if (!::Agentmaster::Profiles::EnsureProfileResolvedAtStartup(!embedding))
+        {
+            TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
+            __assume(false);
+        }
+    }
+
     _app = winrt::TerminalApp::App{};
     _app.Logic().ReloadSettings();
 
@@ -576,11 +600,11 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             std::vector<uint32_t> reopenIdx;
             try
             {
-                wchar_t profile[MAX_PATH];
-                const auto n = ::GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
-                if (n > 0 && n < MAX_PATH)
+                // The ACTIVE PROFILE dir (resolved + exported by the bootstrap above) — the same
+                // dir TerminalApp.dll's AgentmasterStateDir()/LoadWindowRecords read, so the
+                // `-s <idx>` indices agree across the exe/dll boundary.
+                const std::filesystem::path stateDir{ ::Agentmaster::Profiles::ResolveProfileDir() };
                 {
-                    const std::filesystem::path stateDir = std::filesystem::path{ profile } / L".agentmaster";
                     const std::filesystem::path windowsDir = stateDir / L"windows";
 
                     // Canonical sorted record ids (filename stems). Sort by filename, identical to

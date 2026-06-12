@@ -18,6 +18,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Engine.h" // RecoverableWindows (the reopen dispatch)
 #include "AgentMaster/Persistence.h" // SaveWindowRecord
+#include "AgentMaster/ProfileBootstrap.h" // PackageFamilyName/IsDevPackage (the per-identity reopen alias)
 #include "AgentMaster/SessionRegistry.h" // _RestoreWindowTabs reads the fleet
 
 using namespace winrt;
@@ -399,6 +400,36 @@ namespace winrt::TerminalApp::implementation
     // hands off to this same Emperor process -> a new AppHost -> TerminalWindow resolves records[idx]
     // for geometry and TerminalPage claims it by id (geometry + lens agree). RecoverableWindows()
     // already pairs each not-open record with that index, so we just dispatch one wt per entry.
+    // Agentmaster: what a reopen dispatch ShellExecutes. Packaged: OUR identity's execution
+    // alias leaf (release = agentmaster.exe, AgentmasterDev = agentmasterdev.exe — distinct on
+    // purpose, so two side-by-side installs can never reopen windows into each other; resolved
+    // by NAME through the WindowsApps PATH dir + APPEXECLINK reparse). Unpackaged (portable
+    // zip): the alias doesn't exist — launch the neighbor WindowsTerminal.exe directly; its
+    // wWinMain routes through the same single-instance handoff (previously this case silently
+    // no-opped on the missing alias).
+    static std::wstring _AgentmasterReopenTarget()
+    {
+        if (!::Agentmaster::Profiles::PackageFamilyName().empty())
+        {
+            return ::Agentmaster::Profiles::IsDevPackage() ? L"agentmasterdev.exe" : L"agentmaster.exe";
+        }
+        wchar_t buf[MAX_PATH * 2];
+        const DWORD n = ::GetModuleFileNameW(nullptr, buf, ARRAYSIZE(buf));
+        if (n > 0 && n < ARRAYSIZE(buf))
+        {
+            try
+            {
+                std::filesystem::path exe{ std::wstring{ buf, n } };
+                exe.replace_filename(L"WindowsTerminal.exe");
+                return exe.wstring();
+            }
+            catch (...)
+            {
+            }
+        }
+        return L"agentmaster.exe"; // last-resort: the historical by-name launch
+    }
+
     safe_void_coroutine TerminalPage::_ReopenSavedWindows()
     {
         // Everything before the first co_await runs on the UI thread; a throw here would escape into
@@ -413,15 +444,17 @@ namespace winrt::TerminalApp::implementation
         }
         CATCH_LOG();
 
-        // Our package registers the `agentmaster.exe` execution alias (Package-Dev.appxmanifest);
-        // GetWtExePath() assumes a wt.exe/wtd.exe alias and returns a NON-EXISTENT <PFN>\wt.exe (so the
-        // ShellExecute would silently no-op — the original bug). ShellExecute the alias BY NAME: the
-        // alias dir (%LOCALAPPDATA%\Microsoft\WindowsApps) is on PATH, and ShellExecuteExW resolves it
-        // + follows the APPEXECLINK reparse to our packaged app; the single-instance handoff then routes
+        // Our packages register per-IDENTITY execution aliases (release = agentmaster.exe,
+        // AgentmasterDev = agentmasterdev.exe; Package-Rel/-Dev.appxmanifest); GetWtExePath() once
+        // assumed a wt.exe/wtd.exe alias and returned a NON-EXISTENT <PFN>\wt.exe (so the ShellExecute
+        // would silently no-op — the original bug). ShellExecute OUR alias BY NAME: the alias dir
+        // (%LOCALAPPDATA%\Microsoft\WindowsApps) is on PATH, and ShellExecuteExW resolves it + follows
+        // the APPEXECLINK reparse to our packaged app; the single-instance handoff then routes
         // `-s <idx>` back to the running Emperor (verified: claims the record + restores its geometry).
         // Launch by NAME, NOT the full reparse-point path — a full-path launch can bypass the alias
-        // resolution and cascade a fresh, record-less window instead.
-        const std::wstring exePath = L"agentmaster.exe";
+        // resolution and cascade a fresh, record-less window instead. The distinct per-identity names
+        // also guarantee a side-by-side release+dev pair never reopens windows into EACH OTHER.
+        const std::wstring exePath = _AgentmasterReopenTarget();
 
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[reopen] recoverable=" + std::to_wstring(recoverable.size()) + L" exe=" + exePath + L"\n");
@@ -477,7 +510,7 @@ namespace winrt::TerminalApp::implementation
         try
         {
             const std::wstring cmdline = L"-w -1 -s " + std::to_wstring(index);
-            const std::wstring exePath = L"agentmaster.exe"; // launch the alias BY NAME (see _ReopenSavedWindows)
+            const std::wstring exePath = _AgentmasterReopenTarget(); // OUR per-identity alias, BY NAME (see _ReopenSavedWindows)
             SHELLEXECUTEINFOW seInfo{ 0 };
             seInfo.cbSize = sizeof(seInfo);
             seInfo.fMask = SEE_MASK_NOASYNC;

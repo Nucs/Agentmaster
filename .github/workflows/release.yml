@@ -6,12 +6,20 @@
 #   - NO Azure / OneBranch / 1ES, NO ESRP signing, NO symbol publishing, NO vpack
 #   - NO nightly (tag/dispatch only), NO NuGet *publishing* (restore stays — it's a build dep)
 #   - the Microsoft-internal "terminal-internal" Universal Package + WindowsTerminalOfficialBuild
-#     are NOT used; we build the Dev branding, which is our Agentmaster identity.
+#     are NOT used; we build the Dev BRANDING with the RELEASE package identity
+#     (/p:AgentmasterPackageIdentity=Release -> Package-Rel.appxmanifest, Name=Agentmaster,
+#     alias agentmaster.exe). The local dev loose layout uses the DEV identity
+#     (Package-Dev.appxmanifest, Name=AgentmasterDev, alias agentmasterdev.exe), so the
+#     released app installs SIDE BY SIDE with a dev build — different package family,
+#     Start-menu entry, alias, single-instance identity, and (via the first-launch profile
+#     picker) state profile. See doc/agentmaster/PROFILES.md.
 #
 # Produces, attached to a GitHub Release:
 #   - Agentmaster_<ver>.msixbundle   (x64+arm64; SELF-SIGNED — see the .cer caveat below)
 #   - Agentmaster.cer                (public cert; import to Trusted People to install the bundle)
-#   - Agentmaster_<ver>_x64.zip      (portable; unzip & run, no install/cert needed)
+#   - Agentmaster_<ver>_x64.zip      (TRUE portable: ships the .portable marker — Terminal
+#     settings live in <unzip>\settings and the Agentmaster profile in <unzip>\profile, fully
+#     self-contained; unzip & run, no install/cert needed)
 #   - Agentmaster_<ver>_arm64.zip    (portable)
 #
 # Heads-up (things a runner may need that this box has natively):
@@ -21,13 +29,14 @@
 #     UWP packaging targets, add a workload-install step (slow) or pin a known-good image.
 #   * vcpkg builds native deps from source on a cold cache (the long pole). Cached below.
 #
-# SIGNING: the manifest Publisher is "CN=Agentmaster" (package family Agentmaster_56k4f06dsfp9r).
-# An MSIX signature is only valid when the signing cert's subject is byte-identical to that
-# Publisher, so this workflow mints a self-signed "CN=Agentmaster" cert — its subject is read
-# from the manifest at runtime, so it always matches. Being self-signed, users must import
-# Agentmaster.cer to install the bundle; the portable ZIP needs no cert at all. To use a real
-# cert instead, set repo secrets SIGNING_PFX_BASE64 + SIGNING_PFX_PASSWORD (its subject must
-# still equal the manifest Publisher).
+# SIGNING: the manifest Publisher is "CN=Agentmaster" (package family Agentmaster_56k4f06dsfp9r —
+# the hash derives from the Publisher ALONE, which the dev identity shares: it is
+# AgentmasterDev_56k4f06dsfp9r). An MSIX signature is only valid when the signing cert's subject
+# is byte-identical to that Publisher, so this workflow mints a self-signed "CN=Agentmaster"
+# cert — its subject is read from the manifest at runtime, so it always matches. Being
+# self-signed, users must import Agentmaster.cer to install the bundle; the portable ZIP needs
+# no cert at all. To use a real cert instead, set repo secrets SIGNING_PFX_BASE64 +
+# SIGNING_PFX_PASSWORD (its subject must still equal the manifest Publisher).
 
 name: release
 
@@ -50,7 +59,9 @@ concurrency:
 
 env:
   CONFIGURATION: Release
-  MANIFEST: src/cascadia/CascadiaPackage/Package-Dev.appxmanifest
+  # The RELEASE-identity manifest (Name=Agentmaster). Package-Dev.appxmanifest is the local
+  # dev loose layout's AgentmasterDev identity and must NEVER ship from here.
+  MANIFEST: src/cascadia/CascadiaPackage/Package-Rel.appxmanifest
 
 jobs:
   # ----------------------------------------------------------------------------
@@ -154,13 +165,14 @@ jobs:
         shell: pwsh
         run: .\build\scripts\Generate-ThirdPartyNotices.ps1 -MarkdownNoticePath .\NOTICE.md -OutputPath .\src\cascadia\CascadiaPackage\NOTICE.html
 
-      - name: Build CascadiaPackage (Release, Dev branding = Agentmaster)
+      - name: Build CascadiaPackage (Release, Dev branding + RELEASE package identity)
         shell: pwsh
         run: |
           msbuild OpenConsole.slnx /m `
             /p:Configuration=$env:CONFIGURATION `
             /p:Platform=${{ matrix.platform }} `
             /p:WindowsTerminalBranding=Dev `
+            /p:AgentmasterPackageIdentity=Release `
             /p:AppxPackageSigningEnabled=false `
             /t:Terminal\CascadiaPackage `
             /bl:msbuild-${{ matrix.name }}.binlog
@@ -192,11 +204,17 @@ jobs:
                   Select-Object -First 1
           if (-not $xaml) { throw "No Microsoft.UI.Xaml appx for ${{ matrix.xamlarch }}" }
           New-Item -ItemType Directory -Force _unpackaged | Out-Null
+          # -PortableMode: ship the .portable marker, so the zip is TRULY self-contained —
+          # Terminal settings in <unzip>\settings (upstream portable mode) and the Agentmaster
+          # state profile in <unzip>\profile (ProfileBootstrap's portable branch; never asks,
+          # never touches ~/.agentmaster). Without it the zip would share the global unpackaged
+          # settings dir with any other unpackaged Terminal.
           .\build\scripts\New-UnpackagedTerminalDistribution.ps1 `
             -TerminalAppX "${{ steps.loc.outputs.msix }}" `
             -XamlAppX $xaml.FullName `
             -Destination _unpackaged `
-            -MakeAppxPath "${{ steps.loc.outputs.makeappx }}"
+            -MakeAppxPath "${{ steps.loc.outputs.makeappx }}" `
+            -PortableMode:$true
 
       - name: Stage the per-arch MSIX for bundling
         shell: pwsh
@@ -328,7 +346,11 @@ jobs:
 
             ### Install — portable (recommended, no cert)
             1. Download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`).
-            2. Unzip anywhere and run `WindowsTerminal.exe` / `agentmaster.exe` in place.
+            2. Unzip anywhere and run `WindowsTerminal.exe` in place.
+
+            The zip is **fully self-contained** (it ships a `.portable` marker): Terminal
+            settings live in `<unzip>\settings` and all Agentmaster state in `<unzip>\profile`.
+            Nothing outside the folder is touched.
 
             ### Install — MSIX bundle (self-signed)
             The `.msixbundle` is **self-signed** (see the cert caveat in the workflow). To install:
@@ -337,3 +359,14 @@ jobs:
                `Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`
             3. Double-click the `.msixbundle`, or:
                `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`
+
+            Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
+
+            ### Profiles & coexistence with a dev build
+            On **first launch** Agentmaster asks which **profile folder** to use — Production
+            (`%USERPROFILE%\.agentmaster`), Development (`%USERPROFILE%\.agentmaster-dev`), or
+            **Browse…** for any folder. A profile holds *everything* the app persists (sessions,
+            Flight Plans, window layouts, settings — including Terminal's own settings). Each
+            install remembers its own choice (change it later: Manager tab → ⚙ → Profile), so
+            this release coexists with a locally-built **Agentmaster Dev** (`AgentmasterDev`
+            package, `agentmasterdev` alias) without sharing or clobbering any state.

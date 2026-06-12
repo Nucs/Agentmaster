@@ -49,8 +49,10 @@ Observer-owned session state (the PULL state engine — design, pre-implementati
 
 ## Status
 
-**All milestones M0–M8 + session restore are complete, built, deployed under the
-`Agentmaster` identity, and verified running.** The engine passes **536/536** standalone
+**All milestones M0–M8 + session restore are complete, built, deployed (until the next deploy
+cycle, still under the pre-split `Agentmaster` loose registration — the dev identity is now
+`AgentmasterDev`, see *Deploy & run* migration), and verified running.** The engine passes
+**604/604** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -192,7 +194,7 @@ tip) with **whitespace-tokenized AND-matching**, so "remember that prompt I queu
 from `hooks.log` — finds its session. Detail: *C1 UI* + the audit bullets under *Persistence*.
 
 **The Sessions browser ([`SESSIONS.md`](doc/agentmaster/SESSIONS.md)) is implemented — engine + UI,
-lib-compiled green + engine-tested (the 536-check harness incl. a live-corpus smoke); it rides the
+lib-compiled green + engine-tested (the 604-check harness incl. a live-corpus smoke); it rides the
 next deploy cycle.** A **"Sessions"** toolbar button (right after Archived) opens a full-window page
 (the Archive page's structure + its deferred-pointer-handler discipline) listing **EVERY on-disk
 Claude Code session** (`~/.claude/projects/*/<uuid>.jsonl` — not just managed ones) in a selectable
@@ -265,6 +267,30 @@ NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab t
 title) must never carry presentation glyphs through renames/persistence. The state palette now
 lives ONCE in **`AgentStatusColors.h`** (the overlay's hand-synced copy folded in — board dot,
 per-tab overlay, and tab-strip dot read the same table).
+
+**Release/dev separation + per-install state PROFILES ([`PROFILES.md`](doc/agentmaster/PROFILES.md))
+is implemented — lib-compiled green + engine-tested (604/604 incl. new profile checks); it rides the
+next deploy cycle (and needs the one-time `Remove-AppxPackage`/re-register migration documented in
+Deploy & run).** The GitHub release now ships its OWN identity (`Package-Rel.appxmanifest`:
+`Agentmaster`/`agentmaster.exe`, selected by `/p:AgentmasterPackageIdentity=Release`) while the dev
+loose layout becomes **`AgentmasterDev`**/`agentmasterdev.exe`/"Agentmaster Dev" — so both install
+side by side; `GetWtExePath`-class launchers and the reopen dispatch (`_AgentmasterReopenTarget`) pick
+the alias by PFN prefix (Dev first). ALL persisted state — engine files AND Terminal's own
+settings.json/state.json (a `GetBaseSettingsPath` redirect to `<profile>\terminal\`) — lives in ONE
+**profile folder** per install: resolved env `AGENTMASTER_PROFILE` > `.portable` marker
+(`<exedir>\profile`, true-portable zips now pass `-PortableMode`) > the per-install slot in
+`~/.agentmaster.profiles` > per-identity default (`~/.agentmaster` release+unpackaged /
+`~/.agentmaster-dev` dev). An install's **first launch shows a picker** (TaskDialog command links —
+comctl32 v6 dep added to `WindowsTerminal.manifest`): **Production / Development / Browse…** (+ a
+"copy existing data from `~/.agentmaster`" checkbox; skips `locks/`+`shim/`+`bridge.json`, never
+clobbers), runs from `WindowEmperor::HandleCommandlineArgs` AFTER the single-instance handoff and
+BEFORE any state read (`-Embedding` defterm activations resolve silently); the choice persists
+per-package-family, is changeable from the cog's new **PROFILE** row (applies on restart), and a
+kernel **profile mutex** warns if two live instances point at one folder. The generated hook
+forwarder's bridge discovery is now per-profile too (`BuildForwarderScript(stateDir)` — was a
+hardcoded `~/.agentmaster/bridge.json`, a cross-instance hook-routing bug). Engine code is
+otherwise untouched: `AgentmasterStateDir()` simply resolves through `ProfileBootstrap.h`, so
+unpackaged/test runs keep the historical `~/.agentmaster`.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -1031,7 +1057,8 @@ review the assets, then **the user publishes it** (a draft creates no git tag un
 whose subject is **read from the manifest**, so it always equals the Publisher (this is *why* the
 Publisher is `CN=Agentmaster` — see Repo facts). Being self-signed, users must trust
 `Agentmaster.cer` once to install the `.msixbundle`; the **portable `.zip` needs no cert** (unzip +
-run `agentmaster.exe`). To sign with a real cert instead, set repo secrets **`SIGNING_PFX_BASE64`**
+run `WindowsTerminal.exe` — fully self-contained: settings + profile live inside the unzip dir).
+To sign with a real cert instead, set repo secrets **`SIGNING_PFX_BASE64`**
 + **`SIGNING_PFX_PASSWORD`** (its subject must still equal the Publisher).
 
 **One-time repo settings** (already done for `Nucs/Agentmaster`; a fresh fork needs them — Actions

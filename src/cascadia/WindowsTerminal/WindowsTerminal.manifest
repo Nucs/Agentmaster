@@ -32,4 +32,19 @@
       <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
     </windowsSettings>
   </application>
+
+  <!-- Agentmaster: Common Controls v6 — TaskDialogIndirect (the first-launch profile picker and
+       the Settings cog's "Change profile folder…", see AgentMaster/ProfileBootstrap.h) fails with
+       the v5 default activation context. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*" />
+    </dependentAssembly>
+  </dependency>
 </assembly>

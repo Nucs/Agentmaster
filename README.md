@@ -85,15 +85,27 @@ tracker.
 Grab the latest build from [**Releases**](https://github.com/Nucs/Agentmaster/releases):
 
 - **Portable (recommended)** — download `Agentmaster_<version>_x64.zip` (or `_arm64`), unzip
-  anywhere, and run `agentmaster.exe` in place. No install and no certificate required.
+  anywhere, and run `WindowsTerminal.exe` in place. No install and no certificate required. The zip
+  is **fully self-contained**: Terminal settings live in `<unzip>\settings` and all Agentmaster
+  state in `<unzip>\profile` — nothing outside the folder is touched.
 - **MSIX bundle** — the `.msixbundle` is self-signed, so trust `Agentmaster.cer` once
   (`Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`),
-  then double-click the bundle or `Add-AppxPackage` it.
+  then double-click the bundle or `Add-AppxPackage` it. Installed, it runs as the `agentmaster`
+  execution alias / the **Agentmaster** Start-menu entry.
+
+On **first launch** the installed app asks which **profile folder** to use — Production
+(`%USERPROFILE%\.agentmaster`), Development (`%USERPROFILE%\.agentmaster-dev`), or **Browse…** for
+any folder. A profile holds *everything* the app persists (sessions, Flight Plans, window layouts,
+settings — including Terminal's own settings under `<profile>\terminal\`); each install remembers
+its own choice (change it later: Manager tab → ⚙ → Profile). See
+[`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md).
 
 Requires Windows 10 2004 (19041) or later, on x64 or arm64, with
 [Claude Code](https://www.anthropic.com/claude-code) (`claude`) installed and on `PATH`. Agentmaster
 installs side-by-side under its own package identity, so any existing Windows Terminal install is
-left untouched. (To build from source instead, see [Building](#building) below.)
+left untouched — and the release identity (`Agentmaster`, alias `agentmaster`) is likewise distinct
+from a from-source dev build (`AgentmasterDev`, alias `agentmasterdev`), so the two coexist without
+sharing any state. (To build from source instead, see [Building](#building) below.)
 
 ## Architecture & docs
 
@@ -105,6 +117,8 @@ left untouched. (To build from source instead, see [Building](#building) below.)
   pull correlation + activity).
 - [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) — the per-tab link badge.
 - [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md) — workspace persistence (M9–M14).
+- [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md) — release/dev package identities +
+  the per-install state profiles (first-launch picker, migration, coexistence).
 - [`CLAUDE.md`](CLAUDE.md) — the working notes: status by area, build/deploy details, gotchas, and
   the correctness rules.
 
@@ -121,8 +135,10 @@ stays cheap:
 - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge overlay.
 - Small touches in `TerminalPage.{h,cpp}`, `Tab.{h,cpp}`, and `TabManagement.cpp` at the
   integration points, plus the registrations in `TerminalAppLib.vcxproj`.
-- `src/cascadia/CascadiaPackage/Package-Dev.appxmanifest` — the distinct `Agentmaster` package
-  identity (so it coexists with real Windows Terminal).
+- `src/cascadia/CascadiaPackage/Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` — the two
+  package identities: `Agentmaster` (what releases ship; alias `agentmaster`) and `AgentmasterDev`
+  (the local dev loose layout; alias `agentmasterdev`) — distinct from each other *and* from real
+  Windows Terminal, so all of them coexist.
 
 ## Building
 
@@ -158,14 +174,18 @@ Deploy the loose layout (what Visual Studio F5 does — no signing/cert/admin):
 Add-AppxPackage -Register ".\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
 ```
 
-Then launch via the `agentmaster` execution alias, the **Agentmaster** Start-menu entry, or:
+The loose layout registers the **dev identity** (`AgentmasterDev` — deliberately distinct from the
+released `Agentmaster` package, so both can be installed at once). Launch via the `agentmasterdev`
+execution alias, the **Agentmaster Dev** Start-menu entry, or:
 
 ```powershell
-Start-Process "shell:appsFolder\Agentmaster_56k4f06dsfp9r!App"
+Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
 ```
 
-Runtime/session state lives in `%USERPROFILE%\.agentmaster\`; tail `hooks.log` to confirm the
-engine is live and that spawned sessions' hooks arrive.
+Runtime/session state lives in the install's **profile folder** (picked on first launch; the dev
+default is `%USERPROFILE%\.agentmaster-dev\` — see
+[`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md)); tail `hooks.log` there to confirm
+the engine is live and that spawned sessions' hooks arrive.
 
 ## Relationship to Windows Terminal
 

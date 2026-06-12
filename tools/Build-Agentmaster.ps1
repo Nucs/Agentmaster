@@ -39,7 +39,14 @@ param(
     [int]$ClMpCount = 0, # 0 => unbounded /MP (already on); set e.g. 6 to cap RAM use
     [switch]$Full, # build the entire solution instead of just the app
     [switch]$Clean,
-    [switch]$NoRestore
+    [switch]$NoRestore,
+    # Build with the RELEASE package identity (Package-Rel.appxmanifest: Name=Agentmaster,
+    # alias agentmaster.exe — what the GitHub release ships) instead of the default DEV
+    # identity (Package-Dev.appxmanifest: Name=AgentmasterDev, alias agentmasterdev.exe).
+    # Local smoke-testing of the release-identity package only; the inner dev loop never
+    # needs it. NOTE: a layout built this way registers/replaces the RELEASE package family
+    # (Agentmaster_56k4f06dsfp9r), i.e. an installed GitHub release.
+    [switch]$ReleaseIdentity
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,6 +84,7 @@ $msbuildArgs = @(
     '/v:m'
 )
 if ($ClMpCount -gt 0) { $msbuildArgs += "/p:CL_MPCount=$ClMpCount" }
+if ($ReleaseIdentity) { $msbuildArgs += '/p:AgentmasterPackageIdentity=Release' }
 if ($Clean) { $msbuildArgs += '/t:Clean' }
 elseif (-not $Full -and $Target) { $msbuildArgs += "/t:$Target" }
 

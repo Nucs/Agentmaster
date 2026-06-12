@@ -45,10 +45,13 @@ namespace Agentmaster
     // Escape a string for embedding inside a JSON string literal.
     std::wstring JsonEscape(std::wstring_view s);
 
-    // The PowerShell forwarder script content. Static across sessions: it reads
+    // The PowerShell forwarder script content. Static across sessions of ONE profile: it reads
     // CCMGR_SESSION_ID + CCMGR_HOOK_PIPE from the environment and the hook JSON from stdin,
-    // then writes one wire line to the pipe. `-Event <Name>` selects the event.
-    std::wstring BuildForwarderScript();
+    // then writes one wire line to the pipe. `-Event <Name>` selects the event. `stateDir` (the
+    // ACTIVE profile dir) is baked into the bridge-discovery fallback (<stateDir>\bridge.json) —
+    // each profile runs its own engine + pipe, so a fixed ~/.agentmaster path would route a
+    // dev-profile session's hooks to the release instance's bridge.
+    std::wstring BuildForwarderScript(const std::wstring& stateDir);
 
     // The Claude settings JSON: always wires each consumed hook event to the forwarder, and
     // additionally carries the optional Claude-session settings the user sets via the cog:
@@ -74,6 +77,12 @@ namespace Agentmaster
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
 
+    // Quote a string as a PowerShell single-quoted literal: 'text', with every embedded
+    // single quote doubled (the ONLY escape that exists inside PS single quotes — backslashes
+    // and $ are inert there). Used to embed the per-profile bridge.json path into the
+    // generated forwarder script. Pure + unit-tested.
+    std::wstring PsSingleQuote(std::wstring_view s);
+
     // Parse a ';'-delimited list of NAME=VALUE assignments (e.g. "FOO=bar;BAZ=qux") into pairs,
     // for AppSettings.env (extra environment applied to every spawned session). Entries without
     // '=' or with an empty NAME are skipped; whitespace around an entry and around NAME is
@@ -82,7 +91,12 @@ namespace Agentmaster
 
     // --- OS-touching ---
 
-    // %LOCALAPPDATA%\Agentmaster (falls back to %TEMP%\Agentmaster). Created if absent.
+    // The ACTIVE PROFILE dir — where this install persists everything (sessions.json,
+    // windows/<id>.json, hooks files, the shim, settings.json, ...). Resolved ONCE per process
+    // via ProfileBootstrap.h: env AGENTMASTER_PROFILE (exported by the WindowEmperor's
+    // first-launch bootstrap/picker) > the portable marker > the per-install saved choice >
+    // the per-identity default (~/.agentmaster for the release package and unpackaged runs —
+    // the historical location — or ~/.agentmaster-dev for AgentmasterDev). Created if absent.
     std::wstring AgentmasterStateDir();
 
     // Append a line to <AgentmasterStateDir>\<fileLeaf> as UTF-8. Thread-safe, best-effort

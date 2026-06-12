@@ -17,24 +17,26 @@
   xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
   IgnorableNamespaces="uap mp rescap uap3 uap17 desktop6 virtualization">
 
-  <!-- Agentmaster: the DEV identity — what the local loose-layout deploy registers (the
-       default manifest when AgentmasterPackageIdentity != Release; the GitHub release ships
-       Package-Rel.appxmanifest's Name=Agentmaster instead). Distinct from BOTH the release
-       identity and WindowsTerminalDev, so all three coexist: different package family
-       (AgentmasterDev_56k4f06dsfp9r — the hash derives from the Publisher ALONE, which both
-       our identities share), Start-menu entry ("Agentmaster Dev"), execution alias
-       (agentmasterdev.exe vs the release's agentmaster.exe), single-instance mutex/window
-       class (windowClassName appends the PFN), and state profile (the first-launch picker,
-       AgentMaster/ProfileBootstrap.h; dev default ~/.agentmaster-dev). Publisher stays
-       CN=Agentmaster; the dev loose layout registers UNSIGNED (no
-       CascadiaPackage_TemporaryKey.pfx => AppxPackageSigningEnabled=false in the wapproj). -->
+  <!-- Agentmaster: the RELEASE identity — what the GitHub release pipeline ships
+       (.github/workflows/release.yml builds with /p:AgentmasterPackageIdentity=Release; see the
+       CascadiaPackage.wapproj manifest selection). It is deliberately DISTINCT from the local
+       dev loose layout's Package-Dev.appxmanifest (Name=AgentmasterDev, alias agentmasterdev.exe)
+       so a user — or this repo's own machine — can install the released app NEXT TO the dev
+       build with zero collision: different package family, Start-menu entry, execution alias,
+       single-instance mutex/window class (windowClassName appends the PFN), and — via the
+       first-launch profile picker (AgentMaster/ProfileBootstrap.h) — a different state profile.
+       Publisher stays CN=Agentmaster for BOTH identities: the PFN hash derives from the
+       Publisher alone, so this package is Agentmaster_56k4f06dsfp9r and the dev one is
+       AgentmasterDev_56k4f06dsfp9r, and the release self-signing (cert subject == Publisher,
+       read from this manifest at runtime) is unchanged. This file carries the SAME identity
+       earlier releases (v0.1.x) shipped, so existing installs upgrade in place. -->
   <Identity
-    Name="AgentmasterDev"
+    Name="Agentmaster"
     Publisher="CN=Agentmaster"
     Version="0.0.1.0" />
 
   <Properties>
-    <DisplayName>Agentmaster Dev</DisplayName>
+    <DisplayName>Agentmaster</DisplayName>
     <PublisherDisplayName>Agentmaster</PublisherDisplayName>
     <Logo>Images\StoreLogo.png</Logo>
     <!-- Older versions of Windows 10 respect this -->
@@ -61,8 +63,8 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="$targetentrypoint$">
       <uap:VisualElements
-        DisplayName="Agentmaster Dev"
-        Description="Manage multiple Claude Code sessions (development build)"
+        DisplayName="Agentmaster"
+        Description="Manage multiple Claude Code sessions"
         BackgroundColor="transparent"
         Square150x150Logo="Images\Square150x150Logo.png"
         Square44x44Logo="Images\Square44x44Logo.png">
@@ -70,7 +72,7 @@
           Wide310x150Logo="Images\Wide310x150Logo.png"
           Square71x71Logo="Images\SmallTile.png"
           Square310x310Logo="Images\LargeTile.png"
-          ShortName="Agentmaster Dev">
+          ShortName="Agentmaster">
           <uap:ShowNameOnTiles>
             <uap:ShowOn Tile="square150x150Logo"/>
             <uap:ShowOn Tile="wide310x150Logo"/>
@@ -80,28 +82,28 @@
       </uap:VisualElements>
 
       <Extensions>
-        <!-- The alias is per-IDENTITY (the release manifest registers agentmaster.exe): shell
-             launches and the app's own reopen-window dispatch can never hit the other install. -->
         <uap3:Extension Category="windows.appExecutionAlias" Executable="wtd.exe" EntryPoint="Windows.FullTrustApplication">
           <uap3:AppExecutionAlias>
-            <desktop:ExecutionAlias Alias="agentmasterdev.exe" />
+            <desktop:ExecutionAlias Alias="agentmaster.exe" />
           </uap3:AppExecutionAlias>
         </uap3:Extension>
         <uap5:Extension Category="windows.startupTask">
           <uap5:StartupTask
             TaskId="StartTerminalOnLoginTask"
             Enabled="false"
-            DisplayName="Agentmaster Dev" />
+            DisplayName="Agentmaster" />
         </uap5:Extension>
         <uap3:Extension Category="windows.appExtensionHost">
               <uap3:AppExtensionHost>
                 <uap3:Name>com.microsoft.windows.terminal.settings</uap3:Name>
               </uap3:AppExtensionHost>
         </uap3:Extension>
-        <!-- NOTE: the defterm/handoff CLSIDs below are upstream's DEV-branding GUIDs, SHARED with
-             Package-Rel.appxmanifest (and any real WindowsTerminalDev) — don't set THIS dev build
-             as the OS "default terminal application" when the release install is present; see the
-             follow-up in doc/agentmaster/PROFILES.md. -->
+        <!-- NOTE: the defterm/handoff CLSIDs below are upstream's DEV-branding GUIDs and are
+             SHARED with Package-Dev.appxmanifest (and with any real WindowsTerminalDev). If both
+             our installs are present, "default terminal application" handoff resolves to
+             whichever package the OS picks for these CLSIDs — prefer setting the RELEASE install
+             as the default terminal. Minting per-identity CLSIDs (manifest + the compiled-in
+             coclass GUIDs) is tracked as a follow-up in doc/agentmaster/PROFILES.md. -->
         <uap3:Extension Category="windows.appExtension">
             <uap3:AppExtension Name="com.microsoft.windows.console.host"
                 Id="OpenConsole-Dev"
