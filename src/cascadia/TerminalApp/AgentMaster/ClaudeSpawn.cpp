@@ -158,14 +158,29 @@ namespace Agentmaster
     {
         // Pure-ASCII PowerShell. Reads the hook JSON from stdin, correlates via env, and
         // posts one HookWire.h line to the named pipe. Best-effort throughout: any failure
-        // is swallowed so a hook never breaks the Claude turn.
+        // is swallowed so a hook never breaks the Claude turn — but no longer SILENTLY (#5):
+        // each dropped delivery appends one line to the per-profile forwarder-errors.log. The
+        // engine's hooks.log is written by the BRIDGE, which a failed delivery never reaches,
+        // so a dead pipe / stale bridge.json used to leave state stale (e.g. stuck Running off
+        // a dropped Stop) with zero trace anywhere. The note itself is try/catch-wrapped —
+        // diagnostics must never break the turn either.
         //
         // The bridge DISCOVERY fallback must point into THIS profile's stateDir (each profile
         // runs its own engine + pipe + bridge.json) — a fixed ~/.agentmaster path would route
-        // a dev-profile session's hooks to the release instance's bridge. The placeholder is
-        // substituted below with the PowerShell-quoted per-profile path.
+        // a dev-profile session's hooks to the release instance's bridge. The placeholders are
+        // substituted below with the PowerShell-quoted per-profile paths.
         std::wstring script = LR"PSHOOK(param([string]$Event = "")
 $ErrorActionPreference = "SilentlyContinue"
+$AmErrLog = {{AM_FWD_ERRLOG}}
+function NoteFwdDrop([string]$why) {
+  # Local fallback trace for a hook delivery the engine never received (otherwise INVISIBLE -
+  # the bridge-side hooks.log only sees lines that arrived). One short ASCII line, append-only;
+  # own try/catch so the diagnostic can never break the Claude turn.
+  try {
+    $stamp = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff") + "Z"
+    Add-Content -LiteralPath $AmErrLog -Value ($stamp + " " + $Event + " sid=" + $sid + " " + $why)
+  } catch { }
+}
 try {
   # Hook FIRE time (unix ms, UTC) - stamped FIRST, before stdin/transcript work, so the wire
   # `ts` field orders events even when this forwarder runs slow (the Stop path reads the
@@ -183,7 +198,7 @@ try {
   # so a session we did NOT launch (a hand-typed `claude` in a `+` tab) still correlates.
   $sid = $env:CCMGR_SESSION_ID
   if ([string]::IsNullOrEmpty($sid) -and $j -ne $null -and $j.session_id) { $sid = [string]$j.session_id }
-  if ([string]::IsNullOrEmpty($sid)) { return }
+  if ([string]::IsNullOrEmpty($sid)) { NoteFwdDrop "drop: no session id (env CCMGR_SESSION_ID unset and payload had no session_id)"; return }
 
   # Pipe: prefer the inherited env; otherwise the bridge discovery file (covers a shell that
   # did not inherit CCMGR_HOOK_PIPE).
@@ -197,7 +212,7 @@ try {
       }
     } catch { }
   }
-  if ([string]::IsNullOrEmpty($pipe)) { return }
+  if ([string]::IsNullOrEmpty($pipe)) { NoteFwdDrop "drop: no pipe (env CCMGR_HOOK_PIPE unset; bridge.json missing or empty)"; return }
 
   $cwd = ""
   $isQ = "0"
@@ -263,7 +278,10 @@ try {
   } finally {
     $client.Dispose()
   }
-} catch { }
+} catch {
+  # The pipe connect/write path lands here (engine gone, stale bridge.json -> ~1s timeout, ...).
+  NoteFwdDrop ("drop: " + $_.Exception.Message)
+}
 )PSHOOK";
 
         const std::wstring token = L"{{AM_BRIDGE_JSON}}";
@@ -271,6 +289,13 @@ try {
         if (at != std::wstring::npos)
         {
             script.replace(at, token.size(), PsSingleQuote(stateDir + L"\\bridge.json"));
+        }
+        // The silent-drop fallback log — per-profile like the bridge discovery (#5).
+        const std::wstring errToken = L"{{AM_FWD_ERRLOG}}";
+        const auto errAt = script.find(errToken);
+        if (errAt != std::wstring::npos)
+        {
+            script.replace(errAt, errToken.size(), PsSingleQuote(stateDir + L"\\forwarder-errors.log"));
         }
         return script;
     }
@@ -406,9 +431,10 @@ try {
 
     std::wstring ClaudeCwdForShell(uint32_t shellPid)
     {
-        // Find a claude.exe under this shell (shell -> claude, or shell -> cmd-shim -> claude) and
-        // read ITS process cwd from the PEB. The helpers now live in ProcessInspect (the Observer's
-        // reusable primitives); this stays a thin convenience over a fresh snapshot.
+        // Find the claude.exe serving this tab (descendant-or-self: the pid itself when a
+        // Manager-launched claude IS the ConPTY root, else shell -> claude or shell -> cmd-shim
+        // -> claude) and read ITS process cwd from the PEB. The helpers now live in ProcessInspect
+        // (the Observer's reusable primitives); this stays a thin convenience over a fresh snapshot.
         const auto snap = SnapshotProcesses();
         const uint32_t claudePid = FindDescendantByImage(snap, shellPid, L"claude.exe");
         if (claudePid == 0)

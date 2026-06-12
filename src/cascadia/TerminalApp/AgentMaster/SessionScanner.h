@@ -79,6 +79,19 @@ namespace Agentmaster
     // the UserPromptSubmit hook is the primary path and this only back-fills a dropped one.
     TranscriptParse ParseTranscriptDelta(std::wstring_view chunk);
 
+    // PURE: does this assistant stop_reason mark the TURN as complete? "end_turn" is the common
+    // case, but "stop_sequence" / "max_tokens" / "refusal" equally end the turn (nothing further
+    // is coming without new input) — gating the reconcilers on end_turn ONLY left a turn that
+    // ended any other way stuck Running forever (the missed-Stop backstop never fired) and let
+    // the run-repair read its tail as "turn in progress". "tool_use" (mid-turn), "" (a user line
+    // cleared it / none seen yet), and any UNKNOWN future reason read as in-flight — that is the
+    // pre-existing default (everything != end_turn), so a new reason degrades to the old
+    // behavior instead of inventing a turn boundary.
+    inline bool IsTerminalStopReason(std::wstring_view reason) noexcept
+    {
+        return reason == L"end_turn" || reason == L"stop_sequence" || reason == L"max_tokens" || reason == L"refusal";
+    }
+
     // PURE + total: should the reconciler synthesize a missed/folded UserPromptSubmit (-> Running)?
     // The Running MIRROR of the missed-Stop synthesis. A dropped UserPromptSubmit hook used to be
     // half-repaired: the scanner back-filled the PROMPT (NoteExternalPrompt) but never the STATE, so
@@ -92,9 +105,10 @@ namespace Agentmaster
     // consumed events are a LIVE append — the initial history replay of a restored/adopted session
     // reads the WHOLE transcript from offset 0, and a window closed mid-turn leaves that history
     // ending "turn in progress" with a FRESH mtime, so without this gate a just-resumed, idle
-    // claude lit up Running and STUCK there — recon-stop needs an end_turn tail to clear it); the
-    // tail says a turn is IN PROGRESS (lastStopReason != "end_turn": a user line cleared it / an
-    // assistant line is mid-turn; end_turn is the missed-Stop's territory); the write is FRESH
+    // claude lit up Running and STUCK there — recon-stop needs a terminal-stop tail to clear
+    // it); the tail says a turn is IN PROGRESS (!IsTerminalStopReason(lastStopReason) — a user
+    // line cleared it / an assistant line is mid-turn; a terminal tail is the missed-Stop's
+    // territory); the write is FRESH
     // (sinceWriteMs <= kScanRunRepairFreshMs — a stalled scan must not revive an old write); and
     // the session sits in one of the two states a missed prompt strands it in (Idle /
     // WaitingForInput — Running needs no repair, and NeedsApproval / Error / Done are "needs you /
@@ -154,7 +168,7 @@ namespace Agentmaster
             int64_t offset{ 0 }; // BYTE offset already consumed (only complete lines advance it)
             int64_t lastSize{ -1 }; // last observed file size (the cheap change-gate)
             std::wstring lastAssistantText; // latest assistant text seen (for the missed-Stop question)
-            std::wstring lastStopReason; // latest assistant stop_reason ("end_turn" => turn complete)
+            std::wstring lastStopReason; // latest assistant stop_reason (IsTerminalStopReason => turn complete)
             // Has the cursor ever CAUGHT UP with the file end? False while the initial backlog
             // (a restored/adopted session's whole history, read from offset 0 in 1 MiB chunks) is
             // still being consumed; true from the first pass that reached the current end. Only

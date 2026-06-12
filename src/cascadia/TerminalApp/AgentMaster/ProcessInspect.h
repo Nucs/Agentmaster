@@ -69,9 +69,12 @@ namespace Agentmaster
     // Case-insensitive compare of two leaf image names ("Claude.exe" == "claude.exe"). Pure.
     bool ImageNameEq(std::wstring_view a, std::wstring_view b);
 
-    // BFS the process tree under `root` and return the pid of the SHALLOWEST descendant whose leaf
-    // image matches `imageLeaf` (e.g. L"claude.exe"): root -> shell -> [cmd-shim ->] claude. 0 if
-    // none. Pure over the snapshot — no extra Toolhelp/PEB calls. Replaces FindClaudeDescendantPid.
+    // BFS the process tree rooted at `root` — descendant-OR-SELF — and return the pid of the
+    // SHALLOWEST process whose leaf image matches `imageLeaf` (e.g. L"claude.exe"): the root
+    // itself (a Manager-launched claude IS the ConPTY root — no shell in between), else
+    // root -> shell -> [cmd-shim ->] claude. 0 if none (the root must exist in the snapshot to
+    // self-match). Pure over the snapshot — no extra Toolhelp/PEB calls. Replaces
+    // FindClaudeDescendantPid (which, children-only, never correlated a Launched claude).
     uint32_t FindDescendantByImage(const std::vector<ProcEntry>& snap, uint32_t root, std::wstring_view imageLeaf);
 
     // The pids whose parent is `parent`, in snapshot order. Pure.

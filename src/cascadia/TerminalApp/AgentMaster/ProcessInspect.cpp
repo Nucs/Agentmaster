@@ -581,6 +581,19 @@ namespace Agentmaster
         {
             return 0;
         }
+        // Descendant-OR-SELF: the root itself may BE the image. A Manager-launched claude is the
+        // ConPTY ROOT (direct CreateProcessW — no shell in between), so the old children-only walk
+        // never matched it: the observer's roster correlation read the tab as "no claude here",
+        // the tab's activity misclassified, and the registry never received the out-of-band
+        // enrichment (conversation timing / presence / model facts) for Launched sessions. The
+        // root must EXIST in the snapshot to match (an unknown pid still returns 0).
+        for (const auto& e : snap)
+        {
+            if (e.pid == root && ImageNameEq(e.image, imageLeaf))
+            {
+                return root;
+            }
+        }
         std::vector<uint32_t> frontier{ root };
         std::unordered_set<uint32_t> seen{ root };
         for (size_t i = 0; i < frontier.size(); ++i)

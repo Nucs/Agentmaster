@@ -230,10 +230,10 @@ namespace Agentmaster
             // from offset 0) — not a live append. A window closed mid-turn leaves that history
             // ending "turn in progress" with a FRESH mtime (and `--resume` can touch the file), so
             // the freshness check below cannot catch this case: without this gate a just-resumed,
-            // actually-idle claude lit up Running and STUCK (recon-stop needs an end_turn tail).
+            // actually-idle claude lit up Running and STUCK (recon-stop needs a terminal tail).
             return false;
         }
-        if (lastStopReason == L"end_turn")
+        if (IsTerminalStopReason(lastStopReason))
         {
             return false; // the tail says the turn COMPLETED — missed-Stop territory, not Running
         }
@@ -478,12 +478,13 @@ namespace Agentmaster
         }
 
         // Missed-Stop reconciliation: the transcript's last assistant message ended the turn
-        // (stop_reason == "end_turn") and the file has gone quiescent, yet we are STILL Running —
-        // the Stop hook was dropped. Synthesize a Stop identical to the real one (-> WaitingForInput
-        // + the question-guard + the Autopilot advance). The Running gate (re-checked against the
-        // freshest state right before firing) makes a real Stop that already landed win, so this
-        // never double-fires.
-        if (s.state == SessionState::Running && st.lastStopReason == L"end_turn")
+        // (a TERMINAL stop_reason — end_turn / stop_sequence / max_tokens / refusal; gated on
+        // end_turn alone, a turn that ended any other way stayed Running forever) and the file
+        // has gone quiescent, yet we are STILL Running — the Stop hook was dropped. Synthesize a
+        // Stop identical to the real one (-> WaitingForInput + the question-guard + the Autopilot
+        // advance). The Running gate (re-checked against the freshest state right before firing)
+        // makes a real Stop that already landed win, so this never double-fires.
+        if (s.state == SessionState::Running && IsTerminalStopReason(st.lastStopReason))
         {
             const int64_t quietForMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
             if (quietForMs >= kScanStopQuiescenceMs)

@@ -157,7 +157,9 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   no `turnComplete`, so Autopilot does not inject into the already-starting turn (Rule #1's one
   prompt per turn).
 - **Quiescent `Stop`** — the scanner's synthesized missed-Stop (`HookMessage::quiescentStop`,
-  never on the wire) comes from a ≥2 s-quiet transcript whose tail says `end_turn`, so it is
+  never on the wire) comes from a ≥2 s-quiet transcript whose tail carries a **terminal**
+  stop_reason (`IsTerminalStopReason`: `end_turn` / `stop_sequence` / `max_tokens` / `refusal`
+  — gated on `end_turn` alone, a turn ended any other way stayed Running forever), so it is
   authoritative "idle NOW": it always lands `WaitingForInput` and zeroes the accounting,
   regardless of `ts` or a recorded type-ahead (consumed or canceled by then).
 

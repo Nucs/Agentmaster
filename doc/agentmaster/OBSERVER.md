@@ -245,7 +245,8 @@ namespace Agentmaster
     int64_t      ProcessStartUnixMs(uint32_t pid);                  // GetProcessTimes(creation)
     bool         ProcessAlive(uint32_t pid);                        // OpenProcess + GetExitCodeProcess
 
-    // Tree helpers over a snapshot (no extra syscalls).
+    // Tree helpers over a snapshot (no extra syscalls). Descendant-OR-SELF: the root itself
+    // may BE the image — a Manager-launched claude is the ConPTY root (no shell in between).
     uint32_t                 FindDescendantByImage(const std::vector<ProcEntry>&, uint32_t root,
                                                    std::wstring_view imageLeaf); // e.g. L"claude.exe"
     std::vector<uint32_t>    ChildrenOf(const std::vector<ProcEntry>&, uint32_t parent);
@@ -346,7 +347,8 @@ for f in factsByPid: f.runningApp = classify(f.amSession, f.wtSession, amSession
 roster = merge(_rosterByWindow)                             // all windows' tabs
 corr = {}; act = {}
 for tab in roster:
-    # activity: deepest meaningful descendant of the tab's shell
+    # activity: the tab's shell itself or its deepest meaningful descendant (descendant-or-
+    # self: a Manager-launched claude IS the ConPTY root — shellPid == claude pid)
     cpid = FindDescendantByImage(snap, tab.shellPid, "claude.exe")
     if cpid:
         f = factsByPid[cpid]

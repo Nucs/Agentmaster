@@ -672,6 +672,13 @@ static void TestSpawnBuilders()
     CHECK(fwd.find(L"$disc = 'C:\\Users\\x\\.agentmaster-dev\\bridge.json'") != std::wstring::npos, "forwarder discovery is the per-profile bridge.json");
     CHECK(fwd.find(L"Join-Path $env:USERPROFILE") == std::wstring::npos, "forwarder discovery is not profile-blind");
     CHECK(fwd.find(L"{{AM_BRIDGE_JSON}}") == std::wstring::npos, "forwarder placeholder fully substituted");
+    // #5 (forwarder silent failures): every dropped delivery leaves a local trace — the bridge's
+    // hooks.log only sees lines that ARRIVED, so a dead pipe / stale bridge.json was invisible.
+    CHECK(fwd.find(L"$AmErrLog = 'C:\\Users\\x\\.agentmaster-dev\\forwarder-errors.log'") != std::wstring::npos, "forwarder error log is per-profile");
+    CHECK(fwd.find(L"{{AM_FWD_ERRLOG}}") == std::wstring::npos, "error-log placeholder fully substituted");
+    CHECK(fwd.find(L"NoteFwdDrop \"drop: no session id") != std::wstring::npos, "no-sid drop is noted");
+    CHECK(fwd.find(L"NoteFwdDrop \"drop: no pipe") != std::wstring::npos, "no-pipe drop is noted");
+    CHECK(fwd.find(L"NoteFwdDrop (\"drop: \" + $_.Exception.Message)") != std::wstring::npos, "pipe connect/write failure is noted");
 
     const auto id = NewSessionId();
     CHECK(id.size() == 36, "uuid length 36");
@@ -1470,10 +1477,21 @@ static void TestTranscriptScan()
         // THE window-restore bug: a session closed MID-TURN and resumed leaves a transcript whose
         // history ends "turn in progress" with a FRESH mtime; the first scanner pass replays it
         // from offset 0 (cursor not yet primed) — that replay must NOT light the idle, just-resumed
-        // claude Running (it then STUCK blue: recon-stop needs an end_turn tail to clear it).
+        // claude Running (it then STUCK blue: recon-stop needs a terminal-stop tail to clear it).
         CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, false, L"", 500), "run-repair: unprimed cursor (history replay) -> no synthesis even when FRESH");
         CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, false, L"tool_use", 500), "run-repair: unprimed replay of a mid-turn tail (killed mid-turn) -> no synthesis");
         CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, false, L"", -200), "run-repair: unprimed beats even a future mtime");
+        // #3 (recon gates were end_turn-ONLY): every TERMINAL stop_reason ends the turn, not just
+        // end_turn — a stop_sequence/max_tokens/refusal-ended turn previously read as "in
+        // progress" here (wrongly re-lighting Running off its own tail) and never qualified for
+        // the missed-Stop synthesis (stuck Running forever). An UNKNOWN reason stays in-flight —
+        // the pre-existing default (everything != end_turn), e.g. pause_turn genuinely continues.
+        CHECK(IsTerminalStopReason(L"end_turn") && IsTerminalStopReason(L"stop_sequence") && IsTerminalStopReason(L"max_tokens") && IsTerminalStopReason(L"refusal"), "stop-reason: all four terminal reasons recognized");
+        CHECK(!IsTerminalStopReason(L"tool_use") && !IsTerminalStopReason(L"") && !IsTerminalStopReason(L"pause_turn"), "stop-reason: mid-turn / empty / unknown read as in-flight");
+        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, true, L"stop_sequence", 500), "run-repair: stop_sequence tail ended the turn -> not Running");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, true, L"max_tokens", 500), "run-repair: max_tokens tail ended the turn -> not Running");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, true, L"refusal", 500), "run-repair: refusal tail ended the turn -> not Running");
+        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, true, L"pause_turn", 500), "run-repair: an unknown stop_reason stays in-flight (old default)");
     }
     // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts
     // stamped (refreshes the decay anchor), EMPTY promptText (no Flight-Plan side effects — the
@@ -1507,7 +1525,8 @@ static void TestTranscriptScan()
 
 // A canned snapshot modelling one WindowsTerminal hosting three tabs: pwsh->claude (tab A),
 // cmd->cmd-shim->claude (tab B, 2 levels deep), pwsh->git (tab C, no claude). 201 (claude) also
-// has a node child, so a claude-rooted search must still exclude the root.
+// has a node child; a claude-rooted search must match the ROOT itself (descendant-or-self —
+// the Manager-launched shape: claude IS the ConPTY root, no shell in between).
 static std::vector<ProcEntry> CannedSnapshot()
 {
     return {
@@ -1538,8 +1557,9 @@ static void TestProcessInspectTree()
     CHECK(FindDescendantByImage(snap, 400, L"claude.exe") == 0, "no claude under a git tab");
     CHECK(FindDescendantByImage(snap, 999, L"claude.exe") == 0, "unknown root -> 0");
     CHECK(FindDescendantByImage(snap, 100, L"claude.exe") == 201, "BFS finds the shallowest claude (tab A)");
-    CHECK(FindDescendantByImage(snap, 201, L"claude.exe") == 0, "descendant search excludes the root itself");
+    CHECK(FindDescendantByImage(snap, 201, L"claude.exe") == 201, "descendant-or-self: the root itself matches (a Manager-launched claude IS the ConPTY root)");
     CHECK(FindDescendantByImage(snap, 201, L"node.exe") == 202, "descendant of a claude found");
+    CHECK(FindDescendantByImage(snap, 201, L"pwsh.exe") == 0, "never matches upward (the root's parent shell is out of scope)");
 
     const auto kids = ChildrenOf(snap, 100);
     CHECK(kids.size() == 3, "ChildrenOf(WT) count");

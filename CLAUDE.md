@@ -855,7 +855,9 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   picked on an install's FIRST LAUNCH — Production / Development / Browse… — and changeable from
   the cog's PROFILE row, applied on restart). Contents: `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
-  `hooks.log` + `autopilot.log` (engine traces), `sessions.json` (persisted fleet),
+  `hooks.log` + `autopilot.log` (engine traces), `forwarder-errors.log` (the hook forwarder's
+  local silent-drop trace — a delivery that never reached the bridge: no sid / no pipe / a dead
+  pipe's connect timeout; the bridge-side hooks.log only sees lines that ARRIVED), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
   (per-working-directory tab colors), `sessions-index/<sid>.json` (the Sessions browser's
   per-session search/stats sidecar cache — `(size,mtime)`-keyed, incrementally re-accumulated
