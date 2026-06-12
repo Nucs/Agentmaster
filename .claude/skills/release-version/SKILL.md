@@ -25,6 +25,14 @@ The authoritative source is **`CLAUDE.md`** → *Deploy & run*, *Concurrency loc
 *Releasing a public version*. This skill is the runnable checklist; if it ever disagrees with
 CLAUDE.md, CLAUDE.md wins — re-read it (it changes).
 
+For the LOCAL machine's build flavors, the production (Release-layout) install, the
+self-kill check before closing an instance, and the build/registration troubleshooting
+matrix (PRI210, 0x80070020 re-register collisions, stale mutex), see the **`build-install`**
+skill — it owns the local how; this skill owns the release pipeline. NOTE: Path B's
+pre-validation build (B1) relinks the PRODUCTION instance's Release layout in place —
+close production first (path filter `'*\bin\x64\Release\*'`), and re-stamp the layout
+version afterwards if you re-register it (build-install §4).
+
 ---
 
 ## Hard rules (both paths)
