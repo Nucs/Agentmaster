@@ -193,6 +193,73 @@ namespace winrt::TerminalApp::implementation
             col(48, GridUnitType::Pixel); // hits
         }
 
+        // Attach a hover tooltip wrapped in an explicit ToolTip object — NOT a boxed string —
+        // and close it from the element's own PointerExited. ToolTipService's auto-dismiss
+        // bookkeeping is unreliable under XAML Islands (a tip routinely outlives the hover;
+        // MinMaxCloseControl fights the same bug for the caption buttons), and a boxed-string
+        // tip can't even be reached programmatically (GetToolTip returns the string, not a
+        // ToolTip). The forced IsOpen(false) rides the ToolTip template's Closed fade.
+        void SessSetTip(const UIElement& el, const winrt::hstring& tip)
+        {
+            if (tip.empty())
+            {
+                return;
+            }
+            ToolTip t;
+            t.Content(winrt::box_value(tip));
+            ToolTipService::SetToolTip(el, t);
+            el.PointerExited([](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+                // Popup open/close is NOT a tree mutation — safe synchronously in a pointer
+                // handler (the range-popup card's PointerExited does the same).
+                if (const auto owner = s.try_as<UIElement>())
+                {
+                    if (const auto tt = ToolTipService::GetToolTip(owner))
+                    {
+                        if (const auto open = tt.try_as<ToolTip>())
+                        {
+                            open.IsOpen(false);
+                        }
+                    }
+                }
+            });
+        }
+
+        // Force-close every SessSetTip tooltip under root — for hosts about to Clear() or
+        // collapse. Removing (or hiding) a hovered element ORPHANS its open tip: tooltips are
+        // popups rendered in the popup root, so no PointerExited ever comes to close them and
+        // the tip floats over whatever shows next.
+        void SessCloseTipsIn(const UIElement& root)
+        {
+            if (const auto tt = ToolTipService::GetToolTip(root))
+            {
+                if (const auto open = tt.try_as<ToolTip>())
+                {
+                    open.IsOpen(false);
+                }
+            }
+            if (const auto panel = root.try_as<Panel>())
+            {
+                for (const auto& child : panel.Children())
+                {
+                    SessCloseTipsIn(child);
+                }
+            }
+            else if (const auto border = root.try_as<Border>())
+            {
+                if (const auto child = border.Child())
+                {
+                    SessCloseTipsIn(child);
+                }
+            }
+            else if (const auto popup = root.try_as<Primitives::Popup>())
+            {
+                if (const auto child = popup.Child())
+                {
+                    SessCloseTipsIn(child);
+                }
+            }
+        }
+
         // Build the toggle buttons of the search bar: a compact glyph ToggleButton with a tooltip.
         Primitives::ToggleButton SessToggle(const winrt::hstring& glyph, const winrt::hstring& tip)
         {
@@ -201,7 +268,7 @@ namespace winrt::TerminalApp::implementation
             b.Padding(Thickness{ 6, 2, 6, 2 });
             b.MinWidth(0);
             b.MinHeight(0);
-            ToolTipService::SetToolTip(b, winrt::box_value(tip));
+            SessSetTip(b, tip);
             return b;
         }
 
@@ -287,7 +354,7 @@ namespace winrt::TerminalApp::implementation
         search.PlaceholderText(L"search for sessions");
         search.Width(240);
         search.VerticalAlignment(VerticalAlignment::Center);
-        ToolTipService::SetToolTip(search, winrt::box_value(L"Words AND-match (each may hit a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a whole session-id GUID to find that session (and its forks)"));
+        SessSetTip(search, L"Words AND-match (each may hit a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a whole session-id GUID to find that session (and its forks)");
         _sessionsSearchBox = search;
         search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
             if (const auto tb = s.try_as<TextBox>())
@@ -337,7 +404,7 @@ namespace winrt::TerminalApp::implementation
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
         _sessWindowBtn.Content(winrt::box_value(winrt::hstring{ kSessPresets[_sessionsWindowPreset].label }));
-        ToolTipService::SetToolTip(_sessWindowBtn, winrt::box_value(L"Click: cycle 1d → 3d → 7d → 14d → 1mo → 3mo · Hover: pick a From/To range"));
+        SessSetTip(_sessWindowBtn, L"Click: cycle 1d → 3d → 7d → 14d → 1mo → 3mo · Hover: pick a From/To range");
         _sessWindowBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Defer — the cycle re-gathers + re-renders the table (tree mutation).
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
@@ -396,7 +463,7 @@ namespace winrt::TerminalApp::implementation
             actions.Children().Append(apply);
             Button clear;
             clear.Content(winrt::box_value(winrt::hstring{ L"Preset" }));
-            ToolTipService::SetToolTip(clear, winrt::box_value(L"Drop the custom range, back to the preset window"));
+            SessSetTip(clear, L"Drop the custom range, back to the preset window");
             clear.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                     if (auto self = weak.get())
@@ -507,9 +574,16 @@ namespace winrt::TerminalApp::implementation
         // (TabManagement.cpp) — the extra hook closes the range Popup, which a collapsed host
         // would NOT hide (popups render in the popup root, not under the parent).
         _RegisterAgentPageOverlay(host, &_sessionsPageVisible, [weak = get_weak()]() {
-            if (const auto self = weak.get(); self && self->_sessRangePopup)
+            if (const auto self = weak.get())
             {
-                self->_sessRangePopup.IsOpen(false);
+                if (self->_sessRangePopup)
+                {
+                    self->_sessRangePopup.IsOpen(false);
+                }
+                if (self->_sessionsPageHost)
+                {
+                    SessCloseTipsIn(self->_sessionsPageHost); // tooltips don't collapse with the host either
+                }
             }
         });
 
@@ -587,6 +661,9 @@ namespace winrt::TerminalApp::implementation
             auto self = weak.get();
             if (self && self->_sessionsPageHost)
             {
+                // Tooltips are popups too — collapsing the host does NOT hide an open one
+                // (the same popup-root reason the range popup is closed explicitly here).
+                SessCloseTipsIn(self->_sessionsPageHost);
                 self->_sessionsPageHost.Visibility(Visibility::Collapsed);
                 self->_sessionsPageVisible.store(false, std::memory_order_relaxed);
                 if (self->_sessRangePopup)
@@ -950,6 +1027,7 @@ namespace winrt::TerminalApp::implementation
             return nullptr;
         };
 
+        SessCloseTipsIn(_sessionsRowsHost); // a re-render under the pointer must not orphan an open tip
         _sessionsRowsHost.Children().Clear();
         for (const auto* rp : view)
         {
@@ -987,18 +1065,18 @@ namespace winrt::TerminalApp::implementation
                 {
                     tip += L" \x00B7 fork of " + r.forkedFromId.substr(0, 8);
                 }
-                ToolTipService::SetToolTip(chip, winrt::box_value(winrt::hstring{ tip }));
+                SessSetTip(chip, winrt::hstring{ tip });
                 Grid::SetColumn(chip, 0);
                 g.Children().Append(chip);
             }
 
             auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
-            ToolTipService::SetToolTip(title, winrt::box_value(winrt::hstring{ r.title + L"\n" + r.id }));
+            SessSetTip(title, winrt::hstring{ r.title + L"\n" + r.id });
             Grid::SetColumn(title, 1);
             g.Children().Append(title);
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
-            ToolTipService::SetToolTip(dir, winrt::box_value(winrt::hstring{ r.dir }));
+            SessSetTip(dir, winrt::hstring{ r.dir });
             Grid::SetColumn(dir, 2);
             g.Children().Append(dir);
 
@@ -1019,7 +1097,7 @@ namespace winrt::TerminalApp::implementation
             const std::wstring weight = std::to_wstring(r.msgs) + L"\x00B7" + std::to_wstring(r.tools);
             auto w = SessText(winrt::hstring{ weight }, 11, false, 0.6);
             w.HorizontalAlignment(HorizontalAlignment::Center);
-            ToolTipService::SetToolTip(w, winrt::box_value(winrt::hstring{ std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB" }));
+            SessSetTip(w, winrt::hstring{ std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB" });
             Grid::SetColumn(w, 6);
             g.Children().Append(w);
 
@@ -1046,6 +1124,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
+                SessCloseTipsIn(b); // a click dismisses the row's tip (the standard behavior the islands stack drops)
                 const std::wstring id{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") };
                 e.Handled(true);
                 // Defer: selection re-renders the detail pane (tree mutation) — the page's crash class.
@@ -1108,6 +1187,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        SessCloseTipsIn(_sessionsDetailHost); // a detail re-render under the pointer must not orphan an open tip
         _sessionsDetailHost.Children().Clear();
         const _SessionsRow* row = nullptr;
         for (const auto& r : _sessionsRows)
@@ -1170,7 +1250,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button resume;
             resume.Content(winrt::box_value(winrt::hstring{ L"Resume here" }));
-            ToolTipService::SetToolTip(resume, winrt::box_value(L"claude --resume into a managed tab (Flight Plan + Autopilot)"));
+            SessSetTip(resume, L"claude --resume into a managed tab (Flight Plan + Autopilot)");
             resume.Click([this, id, dir, title](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, title]() {
                     if (auto self = weak.get())
@@ -1186,7 +1266,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button forkBtn;
             forkBtn.Content(winrt::box_value(winrt::hstring{ L"Fork here" }));
-            ToolTipService::SetToolTip(forkBtn, winrt::box_value(L"Fork into a NEW conversation (claude --resume \x00B7 --fork-session) — the original transcript is untouched"));
+            SessSetTip(forkBtn, L"Fork into a NEW conversation (claude --resume \x00B7 --fork-session) — the original transcript is untouched");
             // A never-prompted row's display title is the page's placeholder — pass empty so the
             // fork seam derives a smart name instead of "(no prompt yet) (fork)".
             const std::wstring forkTitle = row->msgs > 0 ? title : std::wstring{};

@@ -181,11 +181,68 @@ namespace winrt::TerminalApp::implementation
         // Attach a hover tooltip to any element; no-op on empty (a cell with nothing beyond what it
         // already shows stays tooltip-less). The table's cells truncate (CharacterEllipsis) or
         // abbreviate ("3h", "3/7", "W2") — the tooltip carries the full value.
+        // The tip is an explicit ToolTip object — NOT a boxed string — closed from the element's
+        // own PointerExited: ToolTipService's auto-dismiss bookkeeping is unreliable under XAML
+        // Islands (a tip outlives the hover; MinMaxCloseControl fights the same bug for the
+        // caption buttons), and a boxed-string tip can't be reached programmatically (GetToolTip
+        // returns the string, not a ToolTip). Popup open/close is not a tree mutation — safe
+        // synchronously in a pointer handler (the defer rule is about tree changes).
         void ArchiveSetTip(const winrt::Windows::UI::Xaml::UIElement& el, const std::wstring& tip)
         {
-            if (!tip.empty())
+            if (tip.empty())
             {
-                winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, winrt::box_value(winrt::hstring{ tip }));
+                return;
+            }
+            winrt::Windows::UI::Xaml::Controls::ToolTip t;
+            t.Content(winrt::box_value(winrt::hstring{ tip }));
+            winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, t);
+            el.PointerExited([](const winrt::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+                if (const auto owner = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                {
+                    if (const auto tt = winrt::Windows::UI::Xaml::Controls::ToolTipService::GetToolTip(owner))
+                    {
+                        if (const auto open = tt.try_as<winrt::Windows::UI::Xaml::Controls::ToolTip>())
+                        {
+                            open.IsOpen(false);
+                        }
+                    }
+                }
+            });
+        }
+
+        // Force-close every ArchiveSetTip tooltip under root — for hosts about to Clear() or
+        // collapse. Removing (or hiding) a hovered element ORPHANS its open tip: tooltips are
+        // popups rendered in the popup root, so no PointerExited ever comes to close them and
+        // the tip floats over whatever shows next.
+        void ArchiveCloseTipsIn(const winrt::Windows::UI::Xaml::UIElement& root)
+        {
+            if (const auto tt = winrt::Windows::UI::Xaml::Controls::ToolTipService::GetToolTip(root))
+            {
+                if (const auto open = tt.try_as<winrt::Windows::UI::Xaml::Controls::ToolTip>())
+                {
+                    open.IsOpen(false);
+                }
+            }
+            if (const auto panel = root.try_as<winrt::Windows::UI::Xaml::Controls::Panel>())
+            {
+                for (const auto& child : panel.Children())
+                {
+                    ArchiveCloseTipsIn(child);
+                }
+            }
+            else if (const auto border = root.try_as<winrt::Windows::UI::Xaml::Controls::Border>())
+            {
+                if (const auto child = border.Child())
+                {
+                    ArchiveCloseTipsIn(child);
+                }
+            }
+            else if (const auto popup = root.try_as<winrt::Windows::UI::Xaml::Controls::Primitives::Popup>())
+            {
+                if (const auto child = popup.Child())
+                {
+                    ArchiveCloseTipsIn(child);
+                }
             }
         }
 
@@ -759,8 +816,14 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: register with the GENERIC window-level overlay seam — the tab-switch
         // handler (TabManagement.cpp) dismisses every registered page, so this page (and any
-        // future one) closes on tab switch without a page-specific call there.
-        _RegisterAgentPageOverlay(host, &_archivePageVisible, nullptr);
+        // future one) closes on tab switch without a page-specific call there. The dismiss
+        // hook closes any open tooltip — a popup, which a collapsed host does NOT hide.
+        _RegisterAgentPageOverlay(host, &_archivePageVisible, [weak = get_weak()]() {
+            if (const auto self = weak.get(); self && self->_archivePageHost)
+            {
+                ArchiveCloseTipsIn(self->_archivePageHost);
+            }
+        });
 
         // Agentmaster: Up/Down = move the selection through the visible rows (wraps; none
         // selected => Down picks the first, Up the last). PREVIEW (tunneling) so it wins over
@@ -886,6 +949,8 @@ namespace winrt::TerminalApp::implementation
             auto self = weak.get();
             if (self && self->_archivePageHost)
             {
+                // Tooltips are popups — collapsing the host does NOT hide an open one.
+                ArchiveCloseTipsIn(self->_archivePageHost);
                 self->_archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Collapsed);
                 self->_archivePageVisible.store(false, std::memory_order_relaxed); // observer pre-filter mirror
             }
@@ -1278,6 +1343,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // --- data rows ---
+        ArchiveCloseTipsIn(_archiveRowsHost); // a re-render under the pointer must not orphan an open tip
         _archiveRowsHost.Children().Clear();
         if (view.empty())
         {
@@ -1384,7 +1450,11 @@ namespace winrt::TerminalApp::implementation
             // the XAML hit-test AV (the crash the user hit clicking a row). Defer to a clean tick, and only
             // recolor the highlight (a property change) + refresh the detail pane — no structural change to
             // the tapped row.
-            row.Tapped([this, rid](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+            row.Tapped([this, rid](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+                if (const auto b = s.try_as<Border>())
+                {
+                    ArchiveCloseTipsIn(b); // a click dismisses the row's tip (popup close — not a tree mutation)
+                }
                 Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
                     auto self = weak.get();
                     if (!self)
@@ -1553,6 +1623,7 @@ namespace winrt::TerminalApp::implementation
         }
         using namespace winrt::Windows::UI::Xaml;
         using namespace winrt::Windows::UI::Xaml::Controls;
+        ArchiveCloseTipsIn(_archiveDetailHost); // a detail re-render under the pointer must not orphan an open tip
         _archiveDetailHost.Children().Clear();
         if (id.empty() || !_sessionRegistry)
         {
