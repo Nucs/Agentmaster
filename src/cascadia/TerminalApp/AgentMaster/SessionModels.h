@@ -114,6 +114,20 @@ namespace Agentmaster
         ApprovalPolicy approval{};
     };
 
+    // Agentmaster (event ordering + turn identity): per-session turn accounting for the
+    // hook-driven state machine. Each hook is an independent fire-and-forget forwarder process,
+    // so events can arrive LATE (the Stop path does transcript work the UserPromptSubmit path
+    // doesn't) and prompts can be TYPED AHEAD (Claude Code fires UserPromptSubmit at Enter-time
+    // for a prompt queued behind the in-flight turn, then consumes the queued batch as the next
+    // turn with NO further UserPromptSubmit). NextSessionStateOrdered (HookEvents.h) reads/writes
+    // this so a stale Stop cannot demote a newer turn and a Stop with a queued prompt behind it
+    // stays Running. ALL transient (NOT persisted — turn identity is meaningless across restarts).
+    struct TurnAccounting
+    {
+        int64_t lastPromptUnixMs{ 0 }; // hook FIRE time (wire ts) of the newest UserPromptSubmit
+        int32_t queuedPrompts{ 0 }; // prompts submitted while a turn was in flight (type-ahead), pending behind it
+    };
+
     // One Claude Code session = one claude.exe on a ConPTY connection, tracked by the
     // SessionRegistry. `id` is also injected into the child as CCMGR_SESSION_ID so hooks
     // can be correlated back to this record (see HOOKS.md).
@@ -149,6 +163,10 @@ namespace Agentmaster
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
         bool lastMessageWasQuestion{ false };
+        // Transient (NOT persisted): turn accounting for the ordered state machine — see
+        // TurnAccounting above / NextSessionStateOrdered (HookEvents.h). Reset on
+        // SessionStart / SessionEnd (a resume must not inherit stale turn identity).
+        TurnAccounting turns{};
         // Transient (NOT persisted): the latest assistant message text the interval reconciler
         // (SessionScanner) tailed from this session's transcript. Hooks don't carry assistant
         // output — this captures it (the foundation for a live Flight-Plan "peek"). Written via

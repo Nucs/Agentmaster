@@ -167,6 +167,10 @@ namespace Agentmaster
         std::wstring script = LR"PSHOOK(param([string]$Event = "")
 $ErrorActionPreference = "SilentlyContinue"
 try {
+  # Hook FIRE time (unix ms, UTC) - stamped FIRST, before stdin/transcript work, so the wire
+  # `ts` field orders events even when this forwarder runs slow (the Stop path reads the
+  # transcript below). Matches C++ NowMs(); see HookWire.h + NextSessionStateOrdered.
+  $ts = [string][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $raw = ""
   try { $raw = [Console]::In.ReadToEnd() } catch { }
 
@@ -246,7 +250,7 @@ try {
   $bs = $pipe.LastIndexOf("\")
   if ($bs -ge 0) { $name = $pipe.Substring($bs + 1) }
 
-  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab, $prompt) -join "`t"
+  $line = ($Event, $sid, $cwd, $isQ, $perm, $tool, $tab, $prompt, $ts) -join "`t"
 
   $client = New-Object System.IO.Pipes.NamedPipeClientStream(".", $name, [System.IO.Pipes.PipeDirection]::Out)
   try {

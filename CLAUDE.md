@@ -52,7 +52,7 @@ Observer-owned session state (the PULL state engine — design, pre-implementati
 **All milestones M0–M8 + session restore are complete, built, deployed (until the next deploy
 cycle, still under the pre-split `Agentmaster` loose registration — the dev identity is now
 `AgentmasterDev`, see *Deploy & run* migration), and verified running.** The engine passes
-**604/604** standalone
+**651/651** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -317,12 +317,24 @@ What works, by area:
   skips, so it can't double-load NOR race its tab re-home against a half-loaded registry).
   Hooks → wire line → registry → hook-driven `SessionState` (Correctness Rule #1). The wire
   line carries a 7th **`tabToken`** field (the hosting `WT_SESSION`, for adopting a hand-typed
-  `claude` — see *Adopt any `claude`* below) and an 8th, **escaped `prompt`** field on
+  `claude` — see *Adopt any `claude`* below), an 8th, **escaped `prompt`** field on
   `UserPromptSubmit` (`WireEscape`/
   `WireUnescape`: `\ \t \r \n`), so the registry records **every** message a session got — a
   prompt typed straight into the ConPTY becomes a `Sent`/`Typed` Flight-Plan entry, while the
   `UserPromptSubmit` echo of a prompt WE injected is recognized (text + a recency window + the
-  transient `QueuedPrompt::echoed` flag) and NOT double-recorded.
+  transient `QueuedPrompt::echoed` flag) and NOT double-recorded — and a trailing 9th **`ts`**
+  field (the hook's FIRE time, stamped by the forwarder before its slow Stop-path transcript
+  work; old 8-field lines parse with ts=0 → arrival order). `ts` drives the **ordered state
+  machine** (`NextSessionStateOrdered` + `SessionInfo.turns`, HOOKS.md *State machine*): a
+  **stale Stop** (fired before the newest prompt — the slow Stop forwarder lands it after the
+  next turn's `UserPromptSubmit`) keeps state + suppresses its question-bit/advance, and a
+  **type-ahead** prompt (`UserPromptSubmit` at Enter-time mid-turn; the queued batch then runs
+  as the next turn with NO further hook) is counted so that turn's `Stop` stays **Running**
+  instead of stranding the whole follow-on turn in `WaitingForInput` — the "second turn never
+  shows Running" bug. The scanner's synthesized missed-Stop is `quiescentStop` (≥2s-quiet
+  transcript): always lands `WaitingForInput`, never stale, never held by the queue. Hook `ts`
+  also refreshes `lastActivityUnixMs` monotonically (real hooks previously never updated the
+  Waiting→Idle decay anchor — it only moved on synthesized events).
 - **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
   type yourself into any tab (the WT `+` button → `cd` → `claude`) is managed too, not just
   Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env

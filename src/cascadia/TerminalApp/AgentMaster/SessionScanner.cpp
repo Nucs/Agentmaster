@@ -217,6 +217,26 @@ namespace Agentmaster
         return out;
     }
 
+    bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept
+    {
+        if (!consumedTurnEvent)
+        {
+            return false; // nothing new this pass — never re-fire on a quiet transcript
+        }
+        if (lastStopReason == L"end_turn")
+        {
+            return false; // the tail says the turn COMPLETED — missed-Stop territory, not Running
+        }
+        if (sinceWriteMs > kScanRunRepairFreshMs)
+        {
+            return false; // an old write: the initial history replay of a restored/adopted transcript, not a live turn
+        }
+        // Only the two states a missed UserPromptSubmit strands a session in. Running needs no
+        // repair; NeedsApproval / Error / Done are "needs you / ended" states a mere transcript
+        // line must never clear (a real hook still can, through the state machine).
+        return state == SessionState::Idle || state == SessionState::WaitingForInput;
+    }
+
     SessionScanner::SessionScanner(std::shared_ptr<SessionRegistry> registry) :
         _registry{ std::move(registry) }
     {
@@ -402,10 +422,40 @@ namespace Agentmaster
             st.offset = 0;
             st.lastSize = -1;
         }
+        bool consumedTurnEvent = false;
         if (size != st.lastSize)
         {
-            _readDelta(st, s, size); // advances st.offset past the complete lines it consumed
+            consumedTurnEvent = _readDelta(st, s, size); // advances st.offset past the complete lines it consumed
             st.lastSize = size;
+        }
+
+        // Missed/folded-UserPromptSubmit reconciliation — the Running MIRROR of the missed-Stop
+        // synthesis below. A turn whose UserPromptSubmit was dropped (the forwarder is
+        // fire-and-forget) or FOLDED (the prompt was typed/queued mid-turn, so its hook landed
+        // while already Running and the prior turn's Stop then flipped the session back to
+        // WaitingForInput mid-new-turn) used to run start-to-finish showing WaitingForInput/Idle —
+        // and, never being Running, it disarmed the missed-Stop backstop below, so the turn's END
+        // went unnoticed too (until the decay shuffled the card to Idle). The PURE gate
+        // (ShouldSynthesizeRunning, unit-tested) fires only off a freshly-appended turn event whose
+        // tail says a turn is in progress; the synthesized event goes through the ONE state machine
+        // (OnHookEvent) exactly like the missed-Stop: ts stamped (also refreshes the decay anchor),
+        // EMPTY promptText (no Flight-Plan side effects — NoteExternalPrompt in _readDelta owns the
+        // prompt back-fill, and the echo bookkeeping stays push-owned, so a late real
+        // UserPromptSubmit lands on Running -> Running, a no-op). The re-Get mirrors the
+        // missed-Stop's freshest-state re-check: a real hook that landed mid-pass wins.
+        if (ShouldSynthesizeRunning(s.state, consumedTurnEvent, st.lastStopReason, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))
+            {
+                HookMessage run;
+                run.event = HookEvent::UserPromptSubmit;
+                run.sessionId = s.id;
+                run.cwd = s.workingDir;
+                run.ts = NowMs();
+                _registry->OnHookEvent(run);
+                AppendStateLog(L"scanner.log", L"[recon-run] " + s.id + L" (turn in progress, prompt hook missed/folded)\n");
+            }
         }
 
         // Missed-Stop reconciliation: the transcript's last assistant message ended the turn
@@ -427,6 +477,11 @@ namespace Agentmaster
                     stop.sessionId = s.id;
                     stop.cwd = s.workingDir;
                     stop.ts = NowMs();
+                    // Synthesized from a >=2s-QUIESCENT transcript: turn identity is settled, so
+                    // the ordered machine (NextSessionStateOrdered) lands WaitingForInput
+                    // unconditionally — never held Running by a recorded type-ahead (already
+                    // consumed or canceled), never treated as stale.
+                    stop.quiescentStop = true;
                     stop.lastMessageIsQuestion = EndsWithQuestion(st.lastAssistantText);
                     _registry->OnHookEvent(stop);
                     AppendStateLog(L"scanner.log",
@@ -436,12 +491,12 @@ namespace Agentmaster
         }
     }
 
-    void SessionScanner::_readDelta(ScanState& st, const SessionInfo& s, int64_t size)
+    bool SessionScanner::_readDelta(ScanState& st, const SessionInfo& s, int64_t size)
     {
         const int64_t avail = size - st.offset;
         if (avail <= 0)
         {
-            return;
+            return false;
         }
         const DWORD want = static_cast<DWORD>(avail < kScanMaxDeltaBytes ? avail : kScanMaxDeltaBytes);
 
@@ -455,14 +510,14 @@ namespace Agentmaster
                                        nullptr);
         if (h == INVALID_HANDLE_VALUE)
         {
-            return;
+            return false;
         }
         LARGE_INTEGER li{};
         li.QuadPart = st.offset;
         if (!::SetFilePointerEx(h, li, nullptr, FILE_BEGIN))
         {
             ::CloseHandle(h);
-            return;
+            return false;
         }
         std::string bytes;
         bytes.resize(want);
@@ -471,7 +526,7 @@ namespace Agentmaster
         ::CloseHandle(h);
         if (!ok || got == 0)
         {
-            return;
+            return false;
         }
         bytes.resize(got);
 
@@ -487,7 +542,7 @@ namespace Agentmaster
             {
                 st.offset = size;
             }
-            return;
+            return false;
         }
         const size_t completeBytes = nl + 1;
         const std::wstring wide = Utf8ToUtf16(bytes.data(), static_cast<int>(completeBytes));
@@ -527,6 +582,9 @@ namespace Agentmaster
                 }
             }
         }
+        // ≥1 turn event consumed -> the caller may synthesize a missed UserPromptSubmit off it
+        // (meta / tool_result / garbage lines never reach `events`, so they can't trigger it).
+        return !parsed.events.empty();
     }
 
     // Agentmaster (cache-aware Waiting decay): a session in WaitingForInput is the Triage Board's

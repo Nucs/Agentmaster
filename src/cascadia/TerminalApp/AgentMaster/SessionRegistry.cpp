@@ -193,18 +193,24 @@ namespace Agentmaster
             {
                 s.tabToken = msg.tabToken;
             }
-            const auto next = NextSessionState(s.state, msg);
-            s.state = next;
-            if (msg.ts != 0)
+            // Ordered transition (HookEvents.h): stale-Stop + type-ahead aware. The wire `ts` is
+            // the hook's FIRE time — events can arrive out of order (the Stop forwarder does
+            // transcript work first), and a prompt typed mid-turn produces a follow-on turn with
+            // NO further UserPromptSubmit — both used to wrongly land WaitingForInput mid-turn.
+            const auto ordered = NextSessionStateOrdered(s.state, msg, s.turns);
+            s.state = ordered.state;
+            if (msg.ts > s.lastActivityUnixMs)
             {
-                s.lastActivityUnixMs = msg.ts;
+                s.lastActivityUnixMs = msg.ts; // monotonic: a stale event must not regress the decay anchor
             }
             if (s.workingDir.empty() && !msg.cwd.empty())
             {
                 s.workingDir = msg.cwd;
             }
-            if (msg.event == HookEvent::Stop)
+            if (msg.event == HookEvent::Stop && !ordered.staleStop)
             {
+                // A stale Stop describes an OLDER turn — its question bit must not overwrite the
+                // current turn's (the duplicate [Stop][Stop] pairs a slow forwarder produces).
                 s.lastMessageWasQuestion = msg.lastMessageIsQuestion;
             }
 
@@ -244,8 +250,12 @@ namespace Agentmaster
 
             snapshot = s;
             found = true;
-            // Only a clean turn-complete advances the Flight Plan (Correctness Rule #1).
-            triggerAdvance = (msg.event == HookEvent::Stop && next == SessionState::WaitingForInput);
+            // Only a clean turn-complete advances the Flight Plan (Correctness Rule #1). The
+            // ordered machine narrows this further: a Stop consumed by a queued type-ahead
+            // prompt stays Running (the next turn is already starting — injecting now would
+            // interleave), and a STALE Stop must not re-fire an advance for a turn that
+            // already advanced.
+            triggerAdvance = ordered.turnComplete;
         }
 
         if (found)

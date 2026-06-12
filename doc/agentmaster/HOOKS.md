@@ -64,7 +64,7 @@ bridge needs no JSON dependency; the **PowerShell forwarder** — which *does* h
 ### The wire line
 
 ```
-event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \n
+event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \t ts \n
 ```
 
 | # | Field | Notes |
@@ -77,20 +77,29 @@ event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t pro
 | 6 | `tool` | associated tool name, when applicable |
 | 7 | `tabToken` | the hosting `WT_SESSION` GUID (for adopting a hand-typed `claude`) |
 | 8 | `prompt` | **escaped**; set ONLY on `UserPromptSubmit` (so the Flight Plan records *every* message a session got) |
+| 9 | `ts` | the hook's **fire time** (unix ms, UTC) — the event-ORDERING key (see *State machine*) |
 
 Fields 1–2 are required; the rest are optional (a tolerant parser accepts older/edge forwarders
 that omit the tail). `cwd`, `tool`, and `tabToken` are assumed free of TAB/newline (true for
-Windows paths, Claude tool names, and a plain `WT_SESSION` GUID). The trailing **`prompt`** is the
+Windows paths, Claude tool names, and a plain `WT_SESSION` GUID). The **`prompt`** is the
 one field that can carry TAB/newline, so it is **escaped** — `\` → `\\` first, then tab/CR/LF →
 `\t \r \n` — by **both** the forwarder and `BuildWireLine`, and un-escaped on parse. The
 PowerShell escape (`-replace '\\','\\'` first, then the whitespace replaces) must mirror
 `WireEscape` byte-for-byte; this is the one seam the C++ tests can't cover (verify with a parity
 check — see Gotchas in `CLAUDE.md`).
 
-Note there is **no `ts` on the wire** — the registry stamps arrival time (`NowMs()`) when the
-event lands. The canonical format + the (de)serializers live in **`HookWire.h`**:
-`BuildWireLine` / `ParseWireLine` / `WireEscape` / `WireUnescape` — shared verbatim by the bridge
-and the unit tests so the format has one source of truth.
+The trailing **`ts`** is the hook's **fire time** (`[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()`,
+stamped FIRST in the forwarder — before the stdin read and the Stop path's transcript work — and
+mirroring C++ `NowMs()`). It exists because hooks are independent fire-and-forget processes whose
+arrival order is NOT their fire order: the `Stop` forwarder tails the transcript before connecting,
+so turn N's `Stop` can land *after* turn N+1's `UserPromptSubmit` — the ordered state machine
+(below) uses `ts` to detect that. Appended LAST deliberately: an old 8-field line parses with
+`ts == 0` (the registry then falls back to arrival order), and an old parser ignores the extra
+field — both skew directions across a deploy stay compatible. `ts == 0` also keeps a non-numeric /
+overlong value out (the parser is digits-only + bounded). The canonical format + the
+(de)serializers live in **`HookWire.h`**: `BuildWireLine` / `ParseWireLine` / `WireEscape` /
+`WireUnescape` — shared verbatim by the bridge and the unit tests so the format has one source of
+truth.
 
 ## Events consumed
 
@@ -129,6 +138,36 @@ SubagentStop      -> unchanged
 SessionEnd        -> Done
 Unknown           -> unchanged
 ```
+
+**The ordered layer — `NextSessionStateOrdered(current, msg, turns)`** (`HookEvents.h`, applied by
+`OnHookEvent`; `TurnAccounting` lives on `SessionInfo.turns`, transient). The base machine is pure
+on (state, event) and cannot see two real-world facts, both of which used to leave a session
+showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never shows Running" bug):
+
+- **Stale `Stop`** — hooks are independent processes; the `Stop` forwarder does transcript work
+  first, so turn N's `Stop` can arrive after turn N+1's `UserPromptSubmit` and would flip the
+  Running turn back to `WaitingForInput`. A non-quiescent `Stop` whose wire `ts` predates the
+  newest `UserPromptSubmit` (`turns.lastPromptUnixMs`) is **stale**: state is kept, and its
+  question bit + Autopilot advance are suppressed (it described an older turn).
+- **Type-ahead** — Claude Code fires `UserPromptSubmit` at **Enter-time** for a prompt typed while
+  a turn is still running (measured live: 21 `UserPromptSubmit` vs 4 `Stop` on one heavy session),
+  queues it, then consumes the queued batch as the next turn with **no further hook**. A
+  `UserPromptSubmit` landing while `Running`/`NeedsApproval` increments `turns.queuedPrompts`; the
+  next non-quiescent `Stop` **consumes** the batch (`queuedPrompts -> 0`) and stays `Running` —
+  no `turnComplete`, so Autopilot does not inject into the already-starting turn (Rule #1's one
+  prompt per turn).
+- **Quiescent `Stop`** — the scanner's synthesized missed-Stop (`HookMessage::quiescentStop`,
+  never on the wire) comes from a ≥2 s-quiet transcript whose tail says `end_turn`, so it is
+  authoritative "idle NOW": it always lands `WaitingForInput` and zeroes the accounting,
+  regardless of `ts` or a recorded type-ahead (consumed or canceled by then).
+
+Self-healing by construction: every applied `Stop` zeroes `queuedPrompts` (drift cannot
+accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never starts an API turn —
+costs at most one wrong-`Running` interval, which the scanner's quiescence reconciliation ends),
+`SessionStart`/`SessionEnd` reset the accounting, and `ts == 0` events (an old forwarder) degrade
+to plain arrival order. Only a `turnComplete` transition fires the Autopilot advance; the wire
+`ts` also feeds `lastActivityUnixMs` (monotonic — a stale event can't regress the
+WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all).
 
 On any hook `OnHookEvent` also sets `s.hookWired = true` and `s.lastHookUnixMs` (provenance for
 the observer — see below), remembers the `tabToken`, and — on `SessionStart` for an id it doesn't

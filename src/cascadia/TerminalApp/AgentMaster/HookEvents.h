@@ -122,6 +122,12 @@ namespace Agentmaster
         // hand-typed `claude` in a `+` tab) back to its ConPTY connection so it can bind a
         // stdin injector — i.e. ADOPT it into full observe+control. Empty when unavailable.
         std::wstring tabToken;
+        // Engine-internal (never on the wire): set ONLY by the SessionScanner's missed-Stop
+        // reconciliation. That Stop is synthesized from a ≥2s-QUIESCENT transcript whose last
+        // assistant message ended the turn, so it is authoritative "the conversation is idle
+        // NOW": the ordered machine lands on WaitingForInput unconditionally — it is never
+        // stale and never held Running for a type-ahead prompt (already consumed or canceled).
+        bool quiescentStop{ false };
     };
 
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current
@@ -156,5 +162,90 @@ namespace Agentmaster
         default:
             return current;
         }
+    }
+
+    // Agentmaster (event ordering + turn identity). NextSessionState above is PURE on
+    // (state, event) — it cannot tell a fresh Stop from a STALE one (the Stop forwarder reads
+    // the transcript before connecting, so turn N's Stop can land AFTER turn N+1's
+    // UserPromptSubmit and would wrongly demote a Running turn to WaitingForInput), and it
+    // cannot see TYPE-AHEAD (Claude Code fires UserPromptSubmit at Enter-time for a prompt
+    // queued mid-turn, then runs the queued batch as the next turn with NO further
+    // UserPromptSubmit — so that batch turn used to run entirely in "WaitingForInput"). This
+    // layer adds the two missing facts via TurnAccounting (SessionModels.h) + the wire `ts`
+    // (the hook's FIRE time, stamped by the forwarder BEFORE any slow work):
+    //   * stale Stop   — a non-quiescent Stop whose ts predates the newest UserPromptSubmit
+    //     ended an OLDER turn: keep the current state; suppress its question-flag + advance.
+    //   * type-ahead   — a UserPromptSubmit landing while a turn is in flight (Running /
+    //     NeedsApproval) increments queuedPrompts; the next non-quiescent Stop CONSUMES the
+    //     batch (queuedPrompts -> 0) and stays Running — Claude immediately processes the
+    //     queued prompts as one next turn — instead of declaring turn-complete mid-conversation.
+    //   * quiescent Stop — the scanner's synthesized missed-Stop (HookMessage::quiescentStop):
+    //     the transcript is provably idle, so it always lands WaitingForInput and zeroes the
+    //     accounting (a queued prompt that never produced a turn was consumed or canceled).
+    // Self-healing by construction: every applied Stop zeroes queuedPrompts, so a phantom
+    // UserPromptSubmit (e.g. a slash command that never starts an API turn) costs at most one
+    // wrong-Running interval, which the scanner's quiescence reconciliation then ends. PURE on
+    // its inputs (mutates only `turns`); ts==0 (an old forwarder) disables the stale check and
+    // falls back to arrival order — exactly the pre-ordering behavior.
+    inline constexpr int32_t kMaxQueuedPrompts = 8; // type-ahead cap (collapse-on-Stop bounds drift anyway)
+
+    struct OrderedTransition
+    {
+        SessionState state{ SessionState::Idle }; // the next state
+        bool staleStop{ false }; // Stop predated the newest prompt: bookkeeping-only (no question-flag, no advance)
+        bool turnComplete{ false }; // a Stop cleanly completed the LAST outstanding turn (drives question-guard + advance)
+    };
+
+    inline OrderedTransition NextSessionStateOrdered(SessionState current, const HookMessage& m, TurnAccounting& turns) noexcept
+    {
+        OrderedTransition out;
+        out.state = NextSessionState(current, m);
+        switch (m.event)
+        {
+        case HookEvent::SessionStart:
+        case HookEvent::SessionEnd:
+            turns = {}; // a (re)start / end settles turn identity
+            break;
+        case HookEvent::UserPromptSubmit:
+            // A prompt submitted while a turn is in flight (Running, or blocked on a permission
+            // request) is QUEUED behind it — Claude consumes it as the next turn with no
+            // further hook, so remember that the conversation outlives the next Stop.
+            if (current == SessionState::Running || current == SessionState::NeedsApproval)
+            {
+                if (turns.queuedPrompts < kMaxQueuedPrompts)
+                {
+                    ++turns.queuedPrompts;
+                }
+            }
+            if (m.ts > turns.lastPromptUnixMs)
+            {
+                turns.lastPromptUnixMs = m.ts; // monotonic: a late-arriving older prompt must not regress it
+            }
+            break;
+        case HookEvent::Stop:
+            if (!m.quiescentStop && m.ts != 0 && turns.lastPromptUnixMs != 0 && m.ts < turns.lastPromptUnixMs)
+            {
+                // STALE: this Stop FIRED before the newest prompt was submitted, so it ends an
+                // older turn — the conversation has already moved on. Keep the current state.
+                out.state = current;
+                out.staleStop = true;
+                break;
+            }
+            if (!m.quiescentStop && turns.queuedPrompts > 0)
+            {
+                // Type-ahead: prompts are queued behind the turn that just ended; Claude
+                // immediately consumes the batch as the next turn (no further UserPromptSubmit),
+                // so the session is still mid-conversation — NOT waiting for the user.
+                turns.queuedPrompts = 0;
+                out.state = SessionState::Running;
+                break;
+            }
+            turns.queuedPrompts = 0;
+            out.turnComplete = true; // out.state is already WaitingForInput (the base machine)
+            break;
+        default:
+            break;
+        }
+        return out;
     }
 }

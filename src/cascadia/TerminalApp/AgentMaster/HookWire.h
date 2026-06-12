@@ -7,15 +7,20 @@
 //
 // One hook invocation -> one UTF-8, newline-terminated, TAB-separated record:
 //
-//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \n
+//     event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t prompt \t ts \n
 //
 // Fields after `sessionId` are optional (older/edge forwarders may omit them). `cwd`,
 // `tool` and `tabToken` are assumed free of TAB/newline (true for Windows paths, Claude
-// tool names, and the plain WT_SESSION GUID). The trailing `prompt` (set only on
+// tool names, and the plain WT_SESSION GUID). The `prompt` (set only on
 // UserPromptSubmit, so the Flight Plan can show EVERY message a session received, not just
 // ones we queued) is the one field that CAN contain TAB/newline, so it is escaped
 // (\ \t \r \n) by both the forwarder and BuildWireLine and un-escaped on parse — keeping
-// the record single-line and the field split unambiguous.
+// the record single-line and the field split unambiguous. The trailing `ts` is the hook's
+// FIRE time (unix ms, UTC), stamped by the forwarder FIRST — before any slow work (the Stop
+// path reads the transcript) — so the registry can ORDER events that arrive out of order
+// (a slow Stop landing after the next turn's UserPromptSubmit; see NextSessionStateOrdered).
+// It is appended LAST so an old 8-field line still parses (ts -> 0 == arrival-order
+// fallback) and an old parser simply ignores the extra field.
 // We deliberately avoid JSON on the wire so the bridge needs no JSON dependency; the
 // forwarder (which DOES have PowerShell's ConvertFrom-Json) does the parsing and emits
 // these few flat fields.
@@ -127,6 +132,8 @@ namespace Agentmaster
         s.append(m.tabToken);
         s.push_back(kWireFieldSep);
         s.append(WireEscape(m.promptText));
+        s.push_back(kWireFieldSep);
+        s.append(std::to_wstring(m.ts)); // hook fire time (unix ms) — the ordering key
         return s;
     }
 
@@ -192,6 +199,32 @@ namespace Agentmaster
         {
             // The prompt is the only field that may carry escaped TAB/newline (see WireEscape).
             m.promptText = WireUnescape(fields[7]);
+        }
+        if (fields.size() > 8)
+        {
+            // ts: the hook's FIRE time (unix ms), stamped by the forwarder before any slow work,
+            // so the registry can order out-of-order arrivals. Digits-only + bounded (a 13-digit
+            // ms epoch fits well inside 18); anything else (an old forwarder, garbage) leaves 0
+            // and the ordered machine falls back to arrival order.
+            const auto f = fields[8];
+            if (!f.empty() && f.size() <= 18)
+            {
+                int64_t v = 0;
+                bool ok = true;
+                for (const wchar_t c : f)
+                {
+                    if (c < L'0' || c > L'9')
+                    {
+                        ok = false;
+                        break;
+                    }
+                    v = v * 10 + (c - L'0');
+                }
+                if (ok)
+                {
+                    m.ts = v;
+                }
+            }
         }
         return m;
     }

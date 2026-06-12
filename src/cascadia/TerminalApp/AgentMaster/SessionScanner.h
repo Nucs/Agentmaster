@@ -49,6 +49,7 @@ namespace Agentmaster
     inline constexpr int64_t kScanMaxDeltaBytes = 1 << 20; // read at most 1 MiB of new transcript per tick
     inline constexpr int64_t kScanForceConsumeBytes = 4 << 20; // a 4 MiB run with no newline -> skip it (corrupt/binary guard)
     inline constexpr int64_t kScanDiscoverMs = 1500; // idle keep-ticking cadence (drives each window's observer probe + liveness sweep when nothing is live)
+    inline constexpr int64_t kScanRunRepairFreshMs = 15000; // a consumed turn event must be this FRESH (file mtime) to synthesize a missed UserPromptSubmit — blocks the initial history replay of a restored/adopted transcript from reviving a stale state
 
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
     struct TranscriptEvent
@@ -77,6 +78,23 @@ namespace Agentmaster
     // `isMeta` lines skipped) so a tool_result or meta line is never mistaken for a typed prompt;
     // the UserPromptSubmit hook is the primary path and this only back-fills a dropped one.
     TranscriptParse ParseTranscriptDelta(std::wstring_view chunk);
+
+    // PURE + total: should the reconciler synthesize a missed/folded UserPromptSubmit (-> Running)?
+    // The Running MIRROR of the missed-Stop synthesis. A dropped UserPromptSubmit hook used to be
+    // half-repaired: the scanner back-filled the PROMPT (NoteExternalPrompt) but never the STATE, so
+    // the whole turn ran showing WaitingForInput/Idle — and with the session never Running, the
+    // missed-Stop backstop (gated on Running) was disarmed too, so the turn's END also went
+    // unnoticed. Same for the FOLDED variant (the next prompt's UserPromptSubmit lands mid-turn /
+    // before the prior turn's late Stop, which then flips Running back to Waiting mid-turn).
+    // Fires only when: this pass consumed ≥1 turn event (a human prompt or an assistant line — the
+    // repair piggybacks on transcript appends, never on a quiet file), the tail says a turn is IN
+    // PROGRESS (lastStopReason != "end_turn": a user line cleared it / an assistant line is
+    // mid-turn; end_turn is the missed-Stop's territory), the write is FRESH (sinceWriteMs <=
+    // kScanRunRepairFreshMs — an initial history replay of a restored/adopted transcript must not
+    // revive a stale state), and the session sits in one of the two states a missed prompt strands
+    // it in (Idle / WaitingForInput — Running needs no repair, and NeedsApproval / Error / Done are
+    // "needs you / ended" states a mere transcript line must never clear).
+    bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept;
 
     // Ticked on the scanner thread on the slow cadence; the probe marshals to ITS OWN UI thread
     // and archives any of its claude tabs whose ConPTY connection has Closed. One per window (M9).
@@ -137,7 +155,9 @@ namespace Agentmaster
         void _worker() noexcept;
         int64_t _scanOnce(); // one coalesced pass; returns the next sleep ms (<0 == sleep until woken)
         void _reconcileSession(const SessionInfo& s);
-        void _readDelta(ScanState& st, const SessionInfo& s, int64_t size);
+        // Returns true when ≥1 turn event (user prompt / assistant line) was consumed this call —
+        // the trigger for the missed-UserPromptSubmit repair in _reconcileSession.
+        bool _readDelta(ScanState& st, const SessionInfo& s, int64_t size);
         void _maybeSweepLiveness(int64_t nowMs, bool anyLive);
         void _maybeDecayWaiting(const SessionInfo& s, int64_t nowMs); // WaitingForInput older than the decay window -> Idle
 

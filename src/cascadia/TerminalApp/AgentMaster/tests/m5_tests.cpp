@@ -118,6 +118,127 @@ static void TestStateMachine()
     CHECK(ParseHookEvent(L"bogus") == HookEvent::Unknown, "ParseHookEvent(bogus) -> Unknown");
 }
 
+// Agentmaster (event ordering + turn identity): the layer over NextSessionState that makes the
+// machine immune to out-of-order Stops (the Stop forwarder runs slow — transcript work — so turn
+// N's Stop can land after turn N+1's UserPromptSubmit) and aware of TYPE-AHEAD (a prompt typed
+// mid-turn fires UserPromptSubmit at Enter-time; the queued batch then runs as the next turn with
+// NO further hook). See NextSessionStateOrdered (HookEvents.h) + TurnAccounting (SessionModels.h).
+static void TestOrderedStateMachine()
+{
+    std::wprintf(L"Ordered state machine (event ordering + turn identity):\n");
+
+    const auto at = [](HookEvent ev, int64_t ts) {
+        HookMessage m;
+        m.sessionId = L"a";
+        m.event = ev;
+        m.ts = ts;
+        return m;
+    };
+
+    { // Type-ahead: a UPS mid-turn queues; the next Stop consumes the batch and STAYS Running.
+        TurnAccounting t;
+        auto r1 = NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        CHECK(r1.state == SessionState::Running && t.queuedPrompts == 0, "ordered: first UPS -> Running, nothing queued");
+        auto r2 = NextSessionStateOrdered(r1.state, at(HookEvent::UserPromptSubmit, 2000), t);
+        CHECK(r2.state == SessionState::Running && t.queuedPrompts == 1, "ordered: UPS mid-turn queues (type-ahead)");
+        auto r3 = NextSessionStateOrdered(r2.state, at(HookEvent::Stop, 3000), t);
+        CHECK(r3.state == SessionState::Running && !r3.turnComplete && t.queuedPrompts == 0, "ordered: Stop behind a queued prompt stays Running (batch turn), no advance");
+        auto r4 = NextSessionStateOrdered(r3.state, at(HookEvent::Stop, 4000), t);
+        CHECK(r4.state == SessionState::WaitingForInput && r4.turnComplete, "ordered: final Stop -> WaitingForInput + advance");
+    }
+    { // Type-ahead behind a permission request: NeedsApproval queues too; Stop resumes Running.
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        auto r2 = NextSessionStateOrdered(SessionState::NeedsApproval, at(HookEvent::UserPromptSubmit, 2000), t);
+        CHECK(r2.state == SessionState::Running && t.queuedPrompts == 1, "ordered: UPS while NeedsApproval queues (turn still in flight)");
+        auto r3 = NextSessionStateOrdered(r2.state, at(HookEvent::Stop, 3000), t);
+        CHECK(r3.state == SessionState::Running && t.queuedPrompts == 0, "ordered: the approval-interlude turn's Stop still honors the queue");
+    }
+    { // Stale Stop: FIRED before the newest prompt -> it ends an older turn -> keep state, no advance.
+        TurnAccounting t;
+        auto r1 = NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        auto r2 = NextSessionStateOrdered(r1.state, at(HookEvent::Stop, 1500), t); // turn 1 done
+        CHECK(r2.state == SessionState::WaitingForInput, "ordered: clean Stop -> Waiting");
+        auto r3 = NextSessionStateOrdered(r2.state, at(HookEvent::UserPromptSubmit, 2000), t); // turn 2
+        CHECK(r3.state == SessionState::Running, "ordered: turn-2 UPS -> Running");
+        auto r4 = NextSessionStateOrdered(r3.state, at(HookEvent::Stop, 1400), t); // turn 1's LATE duplicate
+        CHECK(r4.state == SessionState::Running && r4.staleStop && !r4.turnComplete, "ordered: stale Stop (ts < newest prompt) keeps Running");
+        auto r5 = NextSessionStateOrdered(r4.state, at(HookEvent::Stop, 2500), t); // turn 2's real end
+        CHECK(r5.state == SessionState::WaitingForInput && r5.turnComplete, "ordered: fresh Stop after the stale one completes the turn");
+    }
+    { // Quiescent (scanner-synthesized) Stop overrides everything: the transcript is provably idle.
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 2000), t); // queue one
+        CHECK(t.queuedPrompts == 1, "ordered: type-ahead recorded before the quiescent stop");
+        HookMessage q = at(HookEvent::Stop, 500); // even with an ANCIENT ts...
+        q.quiescentStop = true;
+        auto r3 = NextSessionStateOrdered(SessionState::Running, q, t);
+        CHECK(r3.state == SessionState::WaitingForInput && r3.turnComplete && !r3.staleStop && t.queuedPrompts == 0,
+              "ordered: quiescent Stop always lands WaitingForInput + zeroes the queue");
+    }
+    { // ts==0 (an old forwarder): the stale check is off — arrival order, the pre-ordering behavior.
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 0), t);
+        auto r = NextSessionStateOrdered(SessionState::Running, at(HookEvent::Stop, 0), t);
+        CHECK(r.state == SessionState::WaitingForInput && r.turnComplete, "ordered: ts-less events fall back to arrival order");
+    }
+    { // SessionStart resets the accounting (a /resume must not inherit stale turn identity).
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 2000), t);
+        CHECK(t.queuedPrompts == 1 && t.lastPromptUnixMs == 2000, "ordered: accounting accumulated");
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::SessionStart, 3000), t);
+        CHECK(t.queuedPrompts == 0 && t.lastPromptUnixMs == 0, "ordered: SessionStart resets turn accounting");
+    }
+    { // The cap bounds a pathological type-ahead burst (collapse-on-Stop bounds drift anyway).
+        TurnAccounting t;
+        for (int i = 0; i < kMaxQueuedPrompts + 5; ++i)
+        {
+            NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 1000 + i), t);
+        }
+        CHECK(t.queuedPrompts == kMaxQueuedPrompts, "ordered: queuedPrompts capped");
+    }
+    { // Registry integration: the full OnHookEvent path applies the ordered machine + advance seam.
+        SessionRegistry reg;
+        auto s = MakeSession(L"ord-1");
+        s.live = true;
+        reg.Upsert(s);
+        std::atomic<int> advances{ 0 };
+        reg.SetAdvanceHandler([&](const std::wstring&) { advances.fetch_add(1); });
+
+        auto ups = at(HookEvent::UserPromptSubmit, 1000);
+        ups.sessionId = L"ord-1";
+        reg.OnHookEvent(ups); // turn 1
+        auto ups2 = at(HookEvent::UserPromptSubmit, 2000);
+        ups2.sessionId = L"ord-1";
+        reg.OnHookEvent(ups2); // type-ahead, queued behind turn 1
+        auto stop1 = at(HookEvent::Stop, 3000);
+        stop1.sessionId = L"ord-1";
+        reg.OnHookEvent(stop1); // consumed by the queued prompt
+        CHECK(reg.Get(L"ord-1")->state == SessionState::Running, "registry: Stop behind a queued prompt stays Running");
+        CHECK(advances.load() == 0, "registry: no advance mid-batch (Rule #1, one prompt per turn)");
+        CHECK(reg.Get(L"ord-1")->lastActivityUnixMs == 3000, "registry: wire ts drives the activity/decay anchor");
+
+        auto stale = at(HookEvent::Stop, 900); // fired before the newest prompt
+        stale.sessionId = L"ord-1";
+        stale.lastMessageIsQuestion = true;
+        reg.OnHookEvent(stale);
+        const auto after = reg.Get(L"ord-1");
+        CHECK(after && after->state == SessionState::Running, "registry: stale Stop ignored (state kept)");
+        CHECK(after && !after->lastMessageWasQuestion, "registry: stale Stop's question bit suppressed");
+        CHECK(after && after->lastActivityUnixMs == 3000, "registry: a stale ts does not regress the anchor");
+
+        auto stop2 = at(HookEvent::Stop, 4000);
+        stop2.sessionId = L"ord-1";
+        stop2.lastMessageIsQuestion = true;
+        reg.OnHookEvent(stop2);
+        CHECK(reg.Get(L"ord-1")->state == SessionState::WaitingForInput, "registry: final Stop -> Waiting");
+        CHECK(reg.Get(L"ord-1")->lastMessageWasQuestion, "registry: a FRESH Stop's question bit applies");
+        CHECK(advances.load() == 1, "registry: exactly one advance for the whole batch");
+    }
+}
+
 static void TestWire()
 {
     std::wprintf(L"Wire format:\n");
@@ -186,6 +307,35 @@ static void TestWire()
         // A line literally carrying an escaped prompt decodes back to TAB + newline.
         auto m = ParseWireLine(L"UserPromptSubmit\tsid\t\t0\t0\t\t\tfoo\\tbar\\nbaz");
         CHECK(m && m->promptText == L"foo\tbar\nbaz", "literal escaped prompt decodes");
+    }
+    {
+        // 9th field: `ts` — the hook's FIRE time (unix ms) — appended LAST (after the escaped,
+        // TAB-free prompt) so both directions stay compatible across forwarder versions.
+        HookMessage m;
+        m.event = HookEvent::Stop;
+        m.sessionId = L"sid";
+        m.ts = 1718000000123;
+        auto rt = ParseWireLine(BuildWireLine(m));
+        CHECK(rt && rt->ts == 1718000000123, "wire ts round-trips");
+        // The exact line shape the PowerShell forwarder emits.
+        auto p = ParseWireLine(L"Stop\tabc\tK:/api\t0\t0\t\twt-1\t\t1718000000456");
+        CHECK(p && p->ts == 1718000000456, "wire ts parsed from a forwarder-shaped line");
+        // An old 8-field line (pre-ts forwarder) and garbage both land on 0 (arrival-order fallback).
+        auto old8 = ParseWireLine(L"Stop\tabc\tK:/api\t0\t0\t\twt-1\tprompt");
+        CHECK(old8 && old8->ts == 0 && old8->promptText == L"prompt", "8-field line (old forwarder) -> ts 0, prompt intact");
+        auto bad = ParseWireLine(L"Stop\tabc\tK:/api\t0\t0\t\twt-1\t\t17abc");
+        CHECK(bad && bad->ts == 0, "non-numeric ts -> 0");
+        auto huge = ParseWireLine(L"Stop\tabc\tK:/api\t0\t0\t\twt-1\t\t9999999999999999999999");
+        CHECK(huge && huge->ts == 0, "over-long ts -> 0 (overflow guard)");
+        // A ts-bearing UserPromptSubmit keeps the escaped prompt unambiguous (prompt is TAB-free
+        // on the wire, so the trailing ts field can never be mistaken for prompt text).
+        HookMessage up;
+        up.event = HookEvent::UserPromptSubmit;
+        up.sessionId = L"sid";
+        up.promptText = L"a\tb\nc";
+        up.ts = 42;
+        auto urt = ParseWireLine(BuildWireLine(up));
+        CHECK(urt && urt->promptText == L"a\tb\nc" && urt->ts == 42, "escaped prompt + trailing ts round-trip together");
     }
     {
         CHECK(HookPipeName(1234) == L"\\\\.\\pipe\\agentmaster.1234", "pipe name format");
@@ -1301,6 +1451,36 @@ static void TestTranscriptScan()
         const auto after3 = reg.Get(L"s1");
         CHECK(after3 && after3->queue.size() == n0 + 1, "NoteExternalPrompt ignores empty text");
     }
+
+    // Missed/folded-UserPromptSubmit repair — the PURE gate (ShouldSynthesizeRunning), the Running
+    // mirror of the missed-Stop synthesis: fires only off a freshly-appended turn event whose tail
+    // says a turn is in progress, and only out of the two states a missed prompt strands a session in.
+    {
+        CHECK(ShouldSynthesizeRunning(SessionState::WaitingForInput, true, L"", 500), "run-repair: fresh user line + Waiting -> synthesize");
+        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, L"tool_use", 500), "run-repair: assistant mid-turn line + Idle -> synthesize");
+        CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, L"", -200), "run-repair: future mtime (clock skew) counts as fresh");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Running, true, L"", 500), "run-repair: already Running -> no-op");
+        CHECK(!ShouldSynthesizeRunning(SessionState::NeedsApproval, true, L"", 500), "run-repair: NeedsApproval never cleared by a transcript line");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Error, true, L"", 500), "run-repair: Error never cleared by inference");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Done, true, L"", 500), "run-repair: Done never revived");
+        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, L"end_turn", 500), "run-repair: end_turn tail is missed-Stop territory, not Running");
+        CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, false, L"", 500), "run-repair: no new turn event this pass -> no synthesis");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, L"", kScanRunRepairFreshMs + 1), "run-repair: stale write (history replay) -> no synthesis");
+    }
+    // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts
+    // stamped (refreshes the decay anchor), EMPTY promptText (no Flight-Plan side effects — the
+    // prompt back-fill stays NoteExternalPrompt's job).
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"run1", SessionState::WaitingForInput));
+        HookMessage synth = Msg(L"run1", HookEvent::UserPromptSubmit);
+        synth.ts = 777;
+        reg.OnHookEvent(synth);
+        const auto got = reg.Get(L"run1");
+        CHECK(got && got->state == SessionState::Running, "synthesized UserPromptSubmit -> Running (one state machine)");
+        CHECK(got && got->lastActivityUnixMs == 777, "synthesized ts stamps lastActivityUnixMs (decay anchor refreshed)");
+        CHECK(got && got->queue.empty(), "empty promptText -> no Flight-Plan entry recorded");
+    }
     // UpdateQuiet mutates the record (and, by contract, fires no observer — exercised here for the mutation)
     {
         SessionRegistry reg;
@@ -2318,6 +2498,7 @@ int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestStateMachine();
+    TestOrderedStateMachine();
     TestWire();
     TestRegistry();
     TestRegistryFanout();
