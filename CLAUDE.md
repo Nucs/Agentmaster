@@ -52,7 +52,7 @@ Observer-owned session state (the PULL state engine — design, pre-implementati
 **All milestones M0–M8 + session restore are complete, built, deployed (until the next deploy
 cycle, still under the pre-split `Agentmaster` loose registration — the dev identity is now
 `AgentmasterDev`, see *Deploy & run* migration), and verified running.** The engine passes
-**651/651** standalone
+**666/666** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
