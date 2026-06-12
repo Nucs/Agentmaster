@@ -324,6 +324,12 @@ namespace Agentmaster
         std::wstring selectedPromptId; // selected Flight-Plan row
         std::vector<std::wstring> collapsedDirs; // Explorer-tree dirs the user collapsed
         ManagerLayout layout{}; // splitter fractions (was the global layout.json; now per-window)
+        // Agentmaster: the ONE session scope behind BOTH toggles — the Explorer Tree's 3-way cycle
+        // (LOCAL/GLOBAL/EXTERNAL) and the Triage Board's 2-way LOCAL/GLOBAL (the board has no
+        // External mode; it reads External as Global). 0=LOCAL 1=GLOBAL 2=EXTERNAL. Persisted per
+        // window in the lens so a reopened window keeps its scope; absent in an older record => 0
+        // (LOCAL, the prior in-memory default).
+        int treeScope{ 0 };
     };
 
     // Per-window UI state: geometry + lens + ordered tab refs. One file per window

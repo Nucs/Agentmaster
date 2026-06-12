@@ -303,14 +303,24 @@ namespace winrt::TerminalApp::implementation
         std::wstring _selectedExternalTitle;
         std::wstring _externalPlanLoadedFor;
         std::vector<std::wstring> _externalPlanPrompts;
-        // Agentmaster: Explorer Tree scope (3-way toggle after the "EXPLORER TREE" title).
+        // Agentmaster: the ONE session scope behind BOTH toggles — the Explorer Tree's 3-way cycle
+        // (after the "EXPLORER TREE" title) and the Triage Board's 2-way LOCAL/GLOBAL (after the
+        // "TRIAGE BOARD" title; the board has no External mode — it reads External as Global, and
+        // a click there flips the shared scope to LOCAL).
         //   Local    == this window's sessions only (the page's _claudeTabs)
         //   Global   == every window's sessions (the whole process-wide registry)
         //   External == the Fleet Observer's observe-only external claudes (_externalClaudes), grouped
-        //               by cwd; right-click a row for Open New Session Here / Adopt. In-memory only (NOT part of
-        //               the persisted ManagerState lens, like the prior LOCAL/GLOBAL flag).
+        //               by cwd; right-click a row for Open New Session Here / Adopt.
+        // PERSISTED per window in the lens (ManagerState.treeScope) — no longer in-memory-only —
+        // so a reopened window keeps its scope; both buttons reflect the one state.
         enum class TreeScope { Local, Global, External };
         TreeScope _treeScope{ TreeScope::Local };
+        // Agentmaster: the ONE scope mutator behind both toggles — handles the External enter/leave
+        // selection cleanup, reflects BOTH buttons, pushes the lens (persisted), and refreshes
+        // (skippable when the caller refreshes itself, e.g. _OnRenameSession). _UpdateBoardScopeButton
+        // paints the board toggle's LOCAL/GLOBAL label (External shows as GLOBAL).
+        void _SetTreeScope(TreeScope scope, bool refresh = true);
+        void _UpdateBoardScopeButton();
         std::unordered_set<std::wstring> _collapsedDirs;
         bool _suppressAutopilotEvent{ false };
         // Agentmaster (O6): the observer's External (WindowsTerminal) claudes, pushed by the page's
@@ -321,9 +331,10 @@ namespace winrt::TerminalApp::implementation
 
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _boardHost{ nullptr }; // horizontal columns
-        winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr }; // Agentmaster: "[scope: <dir>]" — shown ONLY while a directory is scoped (the old "[all directories]" placeholder is gone; it was display-only)
         winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped
-        winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL toggle after the "EXPLORER TREE" title
+        winrt::Windows::UI::Xaml::Controls::Button _boardScopeBtn{ nullptr }; // Agentmaster: the board's LOCAL/GLOBAL toggle after the "TRIAGE BOARD" title — same state as _treeScopeBtn (External reads GLOBAL)
+        winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL/EXTERNAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
         winrt::Windows::UI::Xaml::Controls::Button _treeRefreshBtn{ nullptr }; // Agentmaster: the ↻ refresh button after the sort toggle (reload the current scope's data)
         winrt::Windows::UI::Xaml::Controls::StackPanel _treeHost{ nullptr };

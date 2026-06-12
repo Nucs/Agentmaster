@@ -481,8 +481,17 @@ What works, by area:
   rule: every pointer handler **defers** its visual-tree mutation to the dispatcher (a synchronous tree change
   mid-click AVs the hit-test), so row-select is highlight-only and open/sort/restore/back post to a clean tick. Explorer `Enter`=Activate /
   `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
-  EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals),
-  and after it a **sort toggle — NEWEST · OLDEST · MOST ACTIVE · A–Z · BY PID** (`_CycleTreeSort` /
+  EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals);
+  the **Triage Board header carries a 2-way LOCAL/GLOBAL twin** (`_boardScopeBtn`, same style) over
+  the **same ONE state** — `_SetTreeScope` is the single mutator behind both buttons, the board
+  reads EXTERNAL as GLOBAL (it has no External mode; a click there flips the shared scope to
+  LOCAL), and in LOCAL the board filters its five state columns to this window's sessions (the
+  External census column is never scoped — externals belong to no window). The scope is **persisted
+  per window in the lens** (`ManagerState.treeScope`, riding the `WindowRecord` autosave — no
+  longer in-memory-only; an older record without the field reads LOCAL, the prior default). The
+  board's old `[all directories]` placeholder is **gone** (it was display-only); the `[scope: …]`
+  label now appears only while a directory IS scoped, next to "Show all". After the tree's scope
+  toggle comes a **sort toggle — NEWEST · OLDEST · MOST ACTIVE · A–Z · BY PID** (`_CycleTreeSort` /
   `_UpdateTreeSortButton`) that orders **both the directory groups and the rows within each, in every
   scope** (a dir's rank is an aggregate over its sessions: NEWEST/OLDEST by conversation ctime, MOST
   ACTIVE by recency with a currently-**Running** session pinned to the top, A–Z by name, **BY PID** by
@@ -490,7 +499,7 @@ What works, by area:
   color-coded pid underline, so same-window rows group together; managed: the claude pid — **then by
   most active** within each pid group; ctime/mtime via the same transcript timing as the adornment,
   `SortKey`/`MakeSortKey`/`SortKeyLess`). Unlike the
-  per-window in-memory scope, the sort is a **GLOBAL, persisted** setting (`AppSettings::treeSort` →
+  per-window scope (lens-persisted, above), the sort is a **GLOBAL, persisted** setting (`AppSettings::treeSort` →
   `settings.json`, via the same settings sink the cog uses) — it survives restart and seeds every
   window (the changing window re-sorts live; others adopt it on next launch). After the sort comes a
   **↻ refresh button** (`_treeRefreshBtn`) that **reloads the data for the current scope**: it redraws
@@ -675,7 +684,8 @@ What works, by area:
 - **Per-window records (M10 data layer, `Persistence`/`SessionModels`).** A `WindowRecord`
   (one file per window: `windows/<windowId>.json`) holds per-window **UI state** — geometry
   (position/size/launch-mode), the Manager **lens** (selection / dir scope / selected prompt /
-  collapsed dirs / splitter fractions), and an **ordered list of tab refs** (a Claude tab = just
+  collapsed dirs / splitter fractions / the shared tree+board LOCAL·GLOBAL·EXTERNAL scope,
+  `treeScope`), and an **ordered list of tab refs** (a Claude tab = just
   its `sessionId`; a non-Claude tab = an opaque WT `actionsJson`). This is **Option 1** — a thin
   layer OVER the archive model: it records tab order + window↔session affinity + geometry/lens
   WITHOUT duplicating session data (`sessions.json` stays the session truth, so there is one copy

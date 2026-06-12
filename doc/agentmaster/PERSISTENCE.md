@@ -113,7 +113,10 @@ WindowRecord {
   windowId:  stable GUID (generated once per window, embedded in the Manager tab args)
   geometry:  { InitialPosition, InitialSize, LaunchMode }   // from WT WindowLayout
   tabs:      [ TabEntry... ]   // ORDERED
-  manager:   { selectedId, scopeDir, selectedPromptId, collapsedDirs[], splitterFractions }
+  manager:   { selectedId, scopeDir, selectedPromptId, collapsedDirs[], splitterFractions,
+               treeScope }   // treeScope: 0=LOCAL 1=GLOBAL 2=EXTERNAL — the ONE scope behind the
+                             // Explorer Tree's 3-way toggle AND the Triage Board's 2-way twin
+                             // (the board reads External as Global); absent => 0 (older records)
 }
 
 TabEntry =
@@ -333,7 +336,8 @@ Phases A–B are identical either way, so coding starts before this is locked.
 - `TerminalPage::_windowId` (a GUID `hstring`), minted once at engine init; a restored window
   adopts its record's id instead (Phase C).
 - `AgentManagerContent::GetManagerState()` → `ManagerState` (selection / scopeDir /
-  selectedPromptId / collapsed dirs / `_layout`) — a pure getter over existing members.
+  selectedPromptId / collapsed dirs / `_layout` / `treeScope` — the shared tree+board
+  LOCAL·GLOBAL·EXTERNAL scope, added later) — a pure getter over existing members.
 - *Files:* `TerminalPage.{h,cpp}`, `AgentManagerContent.{h,cpp}`.
 - *Done when:* both compile (lib check) and a debug line can dump a window's id + lens.
 

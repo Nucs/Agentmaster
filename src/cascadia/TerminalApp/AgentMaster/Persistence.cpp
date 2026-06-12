@@ -541,6 +541,7 @@ namespace Agentmaster
         }
         o.Set(L"collapsedDirs", std::move(cd));
         o.Set(L"layout", ToJson(m.layout));
+        o.Set(L"treeScope", json::Value::MkNum(static_cast<double>(m.treeScope)));
         return o;
     }
 
@@ -550,6 +551,12 @@ namespace Agentmaster
         m.selectedId = v.StrAt(L"selectedId");
         m.scopeDir = v.StrAt(L"scopeDir");
         m.selectedPromptId = v.StrAt(L"selectedPromptId");
+        // The shared tree/board scope (0=LOCAL 1=GLOBAL 2=EXTERNAL); clamp an out-of-range value
+        // (a hand-edited record) back to LOCAL rather than indexing a nonexistent mode.
+        {
+            const int scope = static_cast<int>(v.NumAt(L"treeScope", 0.0));
+            m.treeScope = (scope >= 0 && scope <= 2) ? scope : 0;
+        }
         if (const auto* cd = v.Find(L"collapsedDirs"); cd && cd->type == json::Value::Type::Arr)
         {
             for (const auto& dv : cd->arr)

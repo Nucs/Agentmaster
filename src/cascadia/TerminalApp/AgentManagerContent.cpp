@@ -720,6 +720,7 @@ namespace winrt::TerminalApp::implementation
         st.selectedPromptId = _selectedPromptId;
         st.collapsedDirs.assign(_collapsedDirs.begin(), _collapsedDirs.end());
         st.layout = _layout;
+        st.treeScope = static_cast<int>(_treeScope); // the shared tree/board scope (persisted)
         return st;
     }
 
@@ -730,6 +731,14 @@ namespace winrt::TerminalApp::implementation
         _selectedPromptId = state.selectedPromptId;
         _collapsedDirs.clear();
         _collapsedDirs.insert(state.collapsedDirs.begin(), state.collapsedDirs.end());
+        // The shared tree/board scope. Direct assignment, NOT _SetTreeScope: this is a seed, not a
+        // user transition — no enter/leave-External selection cleanup (the persisted lens is already
+        // self-consistent: entering External cleared the managed selection before it was saved), and
+        // no lens push (we are APPLYING the lens). Range-guarded like the loader (a hand-built
+        // state isn't necessarily clamped).
+        _treeScope = (state.treeScope >= 0 && state.treeScope <= 2) ? static_cast<TreeScope>(state.treeScope) : TreeScope::Local;
+        _UpdateTreeScopeButton();
+        _UpdateBoardScopeButton();
         // A restored per-window layout overrides the global default loaded in the ctor; push the
         // fractions into the live tracks so the splitters land where the window left them.
         _layout = state.layout;
@@ -1056,7 +1065,25 @@ namespace winrt::TerminalApp::implementation
             header.Orientation(Orientation::Horizontal);
             header.Spacing(8);
             header.Children().Append(Text(L"TRIAGE BOARD", 12, true, 0.8));
-            _boardScope = Text(L"[all directories]", 12, false, 0.6);
+            // Agentmaster: the board's LOCAL/GLOBAL scope toggle — ONE state with the Explorer
+            // Tree's 3-way toggle (same style, same per-window lens persistence): LOCAL shows only
+            // this window's sessions, GLOBAL every window's. While the tree sits in EXTERNAL the
+            // board reads GLOBAL (it has no External mode); a click then flips the shared scope to
+            // LOCAL. _SetTreeScope is the one mutator behind both buttons.
+            _boardScopeBtn = Button{};
+            _boardScopeBtn.FontSize(11);
+            _boardScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            ToolTipService::SetToolTip(_boardScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows. One state with the Explorer Tree's toggle (EXTERNAL there reads as GLOBAL here); persisted per window."));
+            _boardScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _SetTreeScope(_treeScope == TreeScope::Local ? TreeScope::Global : TreeScope::Local);
+            });
+            header.Children().Append(_boardScopeBtn);
+            _UpdateBoardScopeButton();
+            // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
+            // next to the "Show all" clear button). The old unscoped "[all directories]"
+            // placeholder is gone — it was display-only, restating the default.
+            _boardScope = Text(L"", 12, false, 0.6);
+            _boardScope.Visibility(Visibility::Collapsed);
             header.Children().Append(_boardScope);
             _showAllBtn = Button{};
             _showAllBtn.Content(winrt::box_value(L"Show all"));
@@ -1722,12 +1749,28 @@ namespace winrt::TerminalApp::implementation
         _boardHost.Children().Clear();
         if (_boardScope)
         {
-            _boardScope.Text(_scopeDir.empty() ? winrt::hstring{ L"[all directories]" } : (winrt::hstring{ L"[scope: " } + winrt::hstring{ _scopeDir } + L"]"));
+            // The label exists only WHILE a directory is scoped (paired with "Show all"); unscoped
+            // it collapses — the old "[all directories]" placeholder was display-only noise.
+            _boardScope.Text(_scopeDir.empty() ? winrt::hstring{} : (winrt::hstring{ L"[scope: " } + winrt::hstring{ _scopeDir } + L"]"));
+            _boardScope.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
         }
         if (_showAllBtn)
         {
             // "Show all" disappears when we ARE showing all (no scope) and reappears once a dir is scoped.
             _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
+        }
+
+        // Agentmaster: the board's LOCAL/GLOBAL scope (the toggle next to the title — ONE state
+        // with the Explorer Tree's; External there reads GLOBAL here). LOCAL keeps only THIS
+        // window's sessions (the page's _claudeTabs via _localScopeProvider), computed once for
+        // all five columns; with no provider (mid-init / standalone tests) everything counts as
+        // local — no filter — exactly like the tree. The External (N) census column below is NOT
+        // scoped by this: externals are not managed sessions of any window.
+        const bool boardLocal = (_treeScope == TreeScope::Local) && static_cast<bool>(_localScopeProvider);
+        std::unordered_set<std::wstring> boardLocalIds;
+        if (boardLocal)
+        {
+            boardLocalIds = _localScopeProvider();
         }
 
         struct Col
@@ -1748,13 +1791,17 @@ namespace winrt::TerminalApp::implementation
             auto colStack = StackPanel{};
             colStack.Spacing(0);
 
-            // collect matching sessions (respecting the directory scope)
+            // collect matching sessions (respecting the LOCAL/GLOBAL scope + the directory scope)
             std::vector<const SessionInfo*> matches;
             for (const auto& s : sessions)
             {
                 if (!s.live)
                 {
                     continue; // archived (closed) sessions live in the "Archived" overlay, not the board
+                }
+                if (boardLocal && boardLocalIds.find(s.id) == boardLocalIds.end())
+                {
+                    continue; // LOCAL scope: hosted by another window
                 }
                 if (!_scopeDir.empty() && !PathEq(s.workingDir, _scopeDir))
                 {
@@ -2810,30 +2857,43 @@ namespace winrt::TerminalApp::implementation
         }).detach();
     }
 
-    // Agentmaster: advance the Explorer Tree scope LOCAL -> GLOBAL -> EXTERNAL -> LOCAL, then rebuild
-    // from the current snapshot. The toggle is per-window, in-memory state (not persisted in the lens).
+    // Agentmaster: advance the Explorer Tree scope LOCAL -> GLOBAL -> EXTERNAL -> LOCAL. The scope
+    // is ONE state shared with the Triage Board's 2-way toggle and persisted per window in the lens
+    // (ManagerState.treeScope); _SetTreeScope is the single mutator behind both buttons.
     void AgentManagerContent::_ToggleTreeScope()
     {
-        // Cycle LOCAL -> GLOBAL -> EXTERNAL -> LOCAL.
         switch (_treeScope)
         {
         case TreeScope::Local:
-            _treeScope = TreeScope::Global;
+            _SetTreeScope(TreeScope::Global);
             break;
         case TreeScope::Global:
-            _treeScope = TreeScope::External;
+            _SetTreeScope(TreeScope::External);
             break;
         default:
-            _treeScope = TreeScope::Local;
+            _SetTreeScope(TreeScope::Local);
             break;
         }
+    }
+
+    // Agentmaster: the ONE scope mutator behind BOTH toggles — the tree's 3-way cycle above and the
+    // board's LOCAL/GLOBAL flip (which reads External as Global, so from EXTERNAL its click lands on
+    // LOCAL). Handles the External enter/leave selection cleanup, reflects both buttons, pushes the
+    // lens (the scope is persisted per window now), and refreshes — skippable when the caller
+    // refreshes itself (e.g. _OnRenameSession, which refreshes once after its other mutations).
+    void AgentManagerContent::_SetTreeScope(TreeScope scope, bool refresh)
+    {
+        if (_treeScope == scope)
+        {
+            return;
+        }
+        _treeScope = scope;
         // Entering EXTERNAL: externals are observe-only, so drop any managed session selection — the
         // Flight Plan then reads "nothing selected" until an external row is clicked (read-only).
         if (_treeScope == TreeScope::External && !_selectedId.empty())
         {
             _selectedId.clear();
             _selectedPromptId.clear();
-            _NotifyLensChanged(); // selection is part of the per-window lens (M10)
         }
         // Leaving EXTERNAL: drop the external (read-only) selection so the Flight Plan returns to the
         // managed view cleanly.
@@ -2846,9 +2906,14 @@ namespace winrt::TerminalApp::implementation
             _externalPlanPrompts.clear();
         }
         _UpdateTreeScopeButton();
-        // _Refresh (not just _RebuildTree) so the board selection highlight + the Flight Plan
-        // re-render to match the cleared selection when entering/leaving EXTERNAL.
-        _Refresh();
+        _UpdateBoardScopeButton();
+        _NotifyLensChanged(); // the scope (and any selection it cleared) is part of the per-window lens
+        if (refresh)
+        {
+            // _Refresh (not just _RebuildTree) so the board re-filters (LOCAL/GLOBAL), the selection
+            // highlight tracks, and the Flight Plan re-renders when entering/leaving EXTERNAL.
+            _Refresh();
+        }
     }
 
     // Reflect the current scope on the toggle button's label.
@@ -2860,6 +2925,18 @@ namespace winrt::TerminalApp::implementation
                                    : (_treeScope == TreeScope::External) ? L"EXTERNAL"
                                                                          : L"LOCAL";
             _treeScopeBtn.Content(winrt::box_value(label));
+        }
+    }
+
+    // Reflect the shared scope on the BOARD toggle's label — 2-way: the board has no External mode,
+    // so EXTERNAL (a tree-only view) reads as GLOBAL here (the board then shows every window's
+    // sessions, which is what it renders in that scope).
+    void AgentManagerContent::_UpdateBoardScopeButton()
+    {
+        if (_boardScopeBtn)
+        {
+            const wchar_t* label = (_treeScope == TreeScope::Local) ? L"LOCAL" : L"GLOBAL";
+            _boardScopeBtn.Content(winrt::box_value(label));
         }
     }
 
@@ -3073,23 +3150,18 @@ namespace winrt::TerminalApp::implementation
         // passes every check unchanged.
         if (_treeScope == TreeScope::External)
         {
-            _treeScope = TreeScope::Local;
-            // Leaving EXTERNAL: drop the external (read-only) selection, as _ToggleTreeScope does.
-            _selectedExternalSessionId.clear();
-            _selectedExternalCwd.clear();
-            _selectedExternalTitle.clear();
-            _externalPlanLoadedFor.clear();
-            _externalPlanPrompts.clear();
+            // _SetTreeScope handles the leaving-EXTERNAL selection cleanup + both toggle labels +
+            // the lens push; skip its refresh — this method refreshes once at the end.
+            _SetTreeScope(TreeScope::Local, /*refresh*/ false);
         }
         if (_treeScope == TreeScope::Local && _localScopeProvider)
         {
             const auto localIds = _localScopeProvider();
             if (localIds.find(id) == localIds.end())
             {
-                _treeScope = TreeScope::Global; // hosted by another window — its row only renders in GLOBAL
+                _SetTreeScope(TreeScope::Global, /*refresh*/ false); // hosted by another window — its row only renders in GLOBAL
             }
         }
-        _UpdateTreeScopeButton();
         if (_registry)
         {
             if (const auto s = _registry->Get(id))

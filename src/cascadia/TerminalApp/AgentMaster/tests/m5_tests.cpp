@@ -1013,6 +1013,7 @@ static void TestWindowRecord()
     in.manager.collapsedDirs.push_back(L"K:/old");
     in.manager.layout.boardFraction = 0.5;
     in.manager.layout.treeFraction = 0.45;
+    in.manager.treeScope = 2; // EXTERNAL — non-default so a dropped field fails the round-trip
 
     const auto out = DeserializeWindowRecord(SerializeWindowRecord(in));
 
@@ -1039,6 +1040,7 @@ static void TestWindowRecord()
     CHECK(out.manager.selectedPromptId == L"q1", "lens selectedPromptId round-trip");
     CHECK(out.manager.collapsedDirs.size() == 1 && out.manager.collapsedDirs[0] == L"K:/old", "lens collapsedDirs round-trip");
     CHECK(approx(out.manager.layout.boardFraction, 0.5) && approx(out.manager.layout.treeFraction, 0.45), "lens splitter fractions round-trip");
+    CHECK(out.manager.treeScope == 2, "lens treeScope (shared tree/board scope) round-trip");
 
     // Tolerant of a missing / corrupt document.
     {
@@ -1046,6 +1048,11 @@ static void TestWindowRecord()
         CHECK(empty.windowId.empty() && empty.tabs.empty(), "empty text -> empty record (no throw)");
         const auto garbage = DeserializeWindowRecord(L"}{not json");
         CHECK(garbage.windowId.empty(), "garbage text -> empty record (no throw)");
+        // An older record (no treeScope key) and an out-of-range value both land on LOCAL (0).
+        const auto legacy = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"selectedId\":\"s\"}}");
+        CHECK(legacy.manager.treeScope == 0, "missing treeScope -> LOCAL (older record)");
+        const auto outOfRange = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"treeScope\":7}}");
+        CHECK(outOfRange.manager.treeScope == 0, "out-of-range treeScope clamps to LOCAL");
     }
 
     // Disk round-trip (one file per window under .agentmaster\windows\). Uses a sentinel id and
