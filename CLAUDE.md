@@ -215,17 +215,49 @@ here, dim = on-disk) with a **presence ring** when claude's own heartbeat report
 waiting. Detail = metadata + scope-tagged match snippets + the numbered prompt list (off-thread,
 (id,mtime)-cached); actions: **Jump** (OPEN here), **Resume here** (`_ResumeSessionFromDisk`: an
 unknown sid gets a minimal archived-shaped record, then the SAME transcript-gated `--resume` seam
-— title pinning, dir color, hook correlation all reused), **Open New Session Here**; double-click
-= resume. **Presence integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
+— title pinning, dir color, hook correlation all reused), **Fork here** (`_ForkSessionFromDisk` —
+the duplicate-tab fork's recipe: `claude --resume <parent> --fork-session --session-id <new>`, the
+new id minted by us so hooks/registry correlate from the first event; offered on EVERY row
+**including a LIVE one** — a fork writes its OWN transcript, so the adopt path's two-writers
+hazard doesn't apply; transcript-gated → fresh; titled `"<title> (fork)"`, logged
+`[sessions-page->fork]`), **Open New Session Here**; double-click = resume. **Presence
+integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
 owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
 process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + the transient
 `SessionInfo.presenceStatus` fact through `ObserveClaude` (**never** `SessionState` — Rule #13).
 The same pass also fixed engine bugs: `ReadTranscriptInfo` now honors `ai-title`/legacy `summary`
 + skips sidechain/compact-summary lines, and the shared **noise filter** (`IsNoiseUserPrompt`)
 keeps interrupt markers / command echoes / task notifications out of titles, prompt lists, AND
-the scanner's Flight-Plan back-fill (STATE.md §8 bug-2 fixed). The button + header-declaration
-wiring (AgentManagerContent, TerminalPage.h, ProcessObserver.cpp, m5_tests.cpp) rides the
-in-flight working tree alongside the concurrent UIA work; the tree as a whole builds green.
+the scanner's Flight-Plan back-fill (STATE.md §8 bug-2 fixed). **Both full-window pages (Archive +
+Sessions) now share generic chrome:** a window-level **overlay registry** — each page
+`_RegisterAgentPageOverlay`s its host + atomic visibility mirror + an optional dismiss hook (the
+Sessions page closes its range Popup there: popups render in the popup ROOT, a collapsed host
+does NOT hide them) and the tab-switch seam (`TabManagement.cpp`) calls
+`_DismissAgentPageOverlays()` — every page closes on tab switch with no page named there, so a
+future page binds automatically by registering. **Up/Down navigate the visible (sorted +
+filtered) rows** in both pages — nothing selected ⇒ Down picks the FIRST row, Up the LAST; then
+±1 **wrapping** at the ends — via `PreviewKeyDown` on the page host (tunneling, so it beats the
+focused search box), deferred to a clean tick, recolor-only highlight
+(`_UpdateArchive/SessionsSelectionHighlight`) + `StartBringIntoView`; both pages **focus their
+search box on show** (keyboard events only route through the page when focus is INSIDE it —
+typing filters immediately, arrows work from the first keystroke). The button +
+header-declaration wiring (AgentManagerContent, TerminalPage.h, ProcessObserver.cpp,
+m5_tests.cpp, the Archive-TU registration/key-hook) rides the in-flight working tree alongside
+the concurrent UIA work; the tree as a whole builds green.
+
+**The tab strip itself now carries the state dot.** Every classified tab's header reads
+`[icon] ● <title>`: a state-colored **Ellipse** (thin black stroke for contrast on any tab
+chrome) in `TabHeaderControl.xaml`'s indicator row right before the title — one more
+`x:Bind`'ed element over `TerminalTabStatus` (two new observable properties,
+`AgentStatusVisible`/`AgentStatusBrush`; `Tab.idl` already projects `TabStatus{get;}`, so no
+`Tab.{h,cpp}` changes — the page drives it idempotently via `_SetTabAgentDot(tab, color?)`). A
+**managed** session's tab wears its Triage-Board state color (Running blue · Waiting goldenrod ·
+NeedsApproval orange-red · Error crimson · Done green · Idle gray); an observed-but-unmanaged tab
+(pwsh / cmd / unprompted-claude / codex) a **dim gray** dot; the Manager tab none. Deliberately
+NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab title == persisted
+title) must never carry presentation glyphs through renames/persistence. The state palette now
+lives ONCE in **`AgentStatusColors.h`** (the overlay's hand-synced copy folded in — board dot,
+per-tab overlay, and tab-strip dot read the same table).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -678,6 +710,9 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
+  - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
+    (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
+    overlay's hand-synced palette copy).
   - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,ArchivePage,SessionsPage}.cpp`
     — the TerminalPage-side Agentmaster *implementation* in six same-class TUs (the upstream
     `TabManagement.cpp` pattern; the original five were split out of `TerminalPage.cpp` as a pure
@@ -692,7 +727,10 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `_OnFirstLayout` startup, `_MakePane`'s `agentManager` branch, close/quit record-flush +
     teardown-archive, tab-move detach, title/color sync hooks, `_restartPaneConnection` injector
     re-point), `Tab.{h,cpp}` (a
-    `TabColorChanged` event + `GetRuntimeTabColor`), and `TabManagement.cpp`; registrations in
+    `TabColorChanged` event + `GetRuntimeTabColor`), `TabManagement.cpp` (incl. the generic
+    `_DismissAgentPageOverlays` tab-switch seam), `TabHeaderControl.xaml` +
+    `TerminalTabStatus.{h,idl}` (the tab-strip status dot: an `AgentStatusVisible`/
+    `AgentStatusBrush`-bound Ellipse in the indicator row); registrations in
     `TerminalAppLib.vcxproj`.
   - `Package-Dev.appxmanifest` (identity), `doc/agentmaster/`, `tools/Build-Agentmaster.ps1`,
     `tools/am-lock.sh` (the global build/launch mutex — see Deploy & run → *Concurrency lock*).
