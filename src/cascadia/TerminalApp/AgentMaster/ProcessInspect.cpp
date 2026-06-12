@@ -24,6 +24,7 @@
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
 #include "Json.h" // transcript line parsing (ReadTranscriptInfo)
+#include "TranscriptStore.h" // IsNoiseUserPrompt + PickDisplayTitle (the shared prompt-noise + title-precedence rules)
 
 namespace
 {
@@ -1025,10 +1026,11 @@ namespace Agentmaster
                 continue;
             }
             const auto& obj = *parsed;
+            const std::wstring lineType = obj.StrAt(L"type");
             // A user-SET conversation title ({"type":"custom-title","customTitle":...}). The LAST
             // one wins — a retitle appends a newer line. Display + tab matching prefer it over the
             // first prompt (it is the user's own label for the conversation).
-            if (obj.StrAt(L"type") == L"custom-title")
+            if (lineType == L"custom-title")
             {
                 const std::wstring ct = obj.StrAt(L"customTitle");
                 if (!ct.empty())
@@ -1037,7 +1039,29 @@ namespace Agentmaster
                 }
                 continue;
             }
-            if (obj.StrAt(L"type") != L"user" || obj.BoolAt(L"isMeta"))
+            // The async-generated picker title (second precedence) + the LEGACY summary line
+            // (v2.0.75-2.1.25 only — kept so 100-versions-old transcripts still title sensibly).
+            if (lineType == L"ai-title")
+            {
+                const std::wstring at = obj.StrAt(L"aiTitle");
+                if (!at.empty())
+                {
+                    info.aiTitle = FirstLineTrim(at);
+                }
+                continue;
+            }
+            if (lineType == L"summary")
+            {
+                const std::wstring sm = obj.StrAt(L"summary");
+                if (!sm.empty())
+                {
+                    info.summary = FirstLineTrim(sm);
+                }
+                continue;
+            }
+            // isCompactSummary == the synthetic post-compaction recap; isSidechain == an inline
+            // subagent line (old strata wrote them into the main file) — neither is a human prompt.
+            if (lineType != L"user" || obj.BoolAt(L"isMeta") || obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isSidechain"))
             {
                 continue;
             }
@@ -1091,9 +1115,9 @@ namespace Agentmaster
                     prompt = text;
                 }
             }
-            if (prompt.empty())
+            if (prompt.empty() || IsNoiseUserPrompt(prompt))
             {
-                continue;
+                continue; // command echoes / task notifications / interrupts / reminders — control markers, not human messages
             }
             if (firstPrompt.empty())
             {
@@ -1111,6 +1135,11 @@ namespace Agentmaster
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
     {
         return ReadTranscriptInfoIn(ClaudeProjectsDir(), cwd, sessionId, maxBytes, maxPrompts);
+    }
+
+    std::wstring TranscriptDisplayTitle(const TranscriptInfo& info)
+    {
+        return PickDisplayTitle(info.customTitle, info.aiTitle, info.summary, info.title);
     }
 }
 

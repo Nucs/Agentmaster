@@ -37,6 +37,8 @@
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)
+#include "../SessionSearch.h" // the Sessions page's two-phase search (SESSIONS.md §6)
+#include "../TranscriptStore.h" // the on-disk Claude-session store API (SESSIONS.md §6)
 
 using namespace Agentmaster;
 
@@ -1619,6 +1621,437 @@ static void TestBringToFrontHeuristics()
     }
 }
 
+static void TestTranscriptStore()
+{
+    std::wprintf(L"TranscriptStore (enumerate + classify + stats + quick facts):\n");
+
+    // --- IsSessionIdStem: the uuid filename filter (excludes legacy agent-* files) ---
+    CHECK(IsSessionIdStem(L"3f98f88e-b122-41b5-9048-4b93a39fe5fa"), "uuid stem accepted");
+    CHECK(!IsSessionIdStem(L"agent-a05bb6b"), "legacy agent-* stem rejected");
+    CHECK(!IsSessionIdStem(L"3f98f88e-b122-41b5-9048-4b93a39fe5f"), "35 chars rejected");
+    CHECK(!IsSessionIdStem(L"3f98f88e-b122-41b5-9048_4b93a39fe5fa"), "wrong separator rejected");
+
+    // --- ParseTranscriptTimestamp: ISO-Z (the entire recent corpus) + epoch strata ---
+    CHECK(ParseTranscriptTimestamp(L"1970-01-01T00:00:00.000Z") == 0, "epoch-zero ISO -> 0 (degenerate, treated as unset)");
+    CHECK(ParseTranscriptTimestamp(L"2026-06-10T00:00:00Z") == 1781049600000LL, "ISO without millis");
+    CHECK(ParseTranscriptTimestamp(L"2026-06-10T00:00:00.250Z") == 1781049600250LL, "ISO with millis");
+    CHECK(ParseTranscriptTimestamp(L"2026-06-10T00:00:00.2Z") == 1781049600200LL, "ISO with 1-digit fraction scales to ms");
+    CHECK(ParseTranscriptTimestamp(L"1781049600000") == 1781049600000LL, "pure-digit epoch ms");
+    CHECK(ParseTranscriptTimestamp(L"1781049600") == 1781049600000LL, "pure-digit epoch seconds -> ms");
+    CHECK(ParseTranscriptTimestamp(L"garbage") == 0, "garbage -> 0");
+    CHECK(ParseTranscriptTimestamp(L"") == 0, "empty -> 0");
+
+    // --- IsNoiseUserPrompt: the §6a control-marker rule set ---
+    CHECK(IsNoiseUserPrompt(L"<command-name>/clear</command-name>"), "command-name echo is noise");
+    CHECK(IsNoiseUserPrompt(L"  <command-message>x</command-message>"), "command-message (leading ws) is noise");
+    CHECK(IsNoiseUserPrompt(L"<local-command-stdout>x"), "local-command wrapper is noise");
+    CHECK(IsNoiseUserPrompt(L"<bash-input>ls</bash-input>"), "bash-input echo is noise");
+    CHECK(IsNoiseUserPrompt(L"<task-notification>done</task-notification>"), "task-notification is noise");
+    CHECK(IsNoiseUserPrompt(L"<system-reminder>r</system-reminder>"), "system-reminder is noise");
+    CHECK(IsNoiseUserPrompt(L"Caveat: the messages below were generated"), "Caveat preamble is noise");
+    CHECK(IsNoiseUserPrompt(L"[Request interrupted by user]"), "interrupt marker is noise");
+    CHECK(IsNoiseUserPrompt(L"[Request interrupted by user for tool use]"), "tool interrupt marker is noise");
+    CHECK(!IsNoiseUserPrompt(L"fix the build please"), "a real prompt is NOT noise");
+    CHECK(!IsNoiseUserPrompt(L"explain <command-name> semantics"), "marker NOT at start is not noise");
+
+    // --- PickDisplayTitle precedence ---
+    CHECK(PickDisplayTitle(L"c", L"a", L"s", L"f") == L"c", "customTitle wins");
+    CHECK(PickDisplayTitle(L"", L"a", L"s", L"f") == L"a", "aiTitle second");
+    CHECK(PickDisplayTitle(L"", L"", L"s", L"f") == L"s", "legacy summary third");
+    CHECK(PickDisplayTitle(L"", L"", L"", L"f") == L"f", "first prompt last");
+
+    // --- ClassifyTranscriptLine: canned lines from the real schema ---
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"user","timestamp":"2026-06-10T00:00:00Z","cwd":"K:\\x","gitBranch":"main","message":{"role":"user","content":"hello there"}})", 100, 100);
+        CHECK(f.kind == TranscriptLineKind::UserPrompt && !f.meta, "user string content -> REAL UserPrompt");
+        CHECK(f.userText == L"hello there", "userText extracted");
+        CHECK(f.timestampMs == 1781049600000LL, "timestamp parsed");
+        CHECK(f.cwd == L"K:\\x" && f.gitBranch == L"main", "cwd + gitBranch extracted");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"user","message":{"content":"[Request interrupted by user]"}})", 100, 100);
+        CHECK(f.kind == TranscriptLineKind::UserPrompt && f.meta && f.userText.empty(), "interrupt marker -> meta, no userText");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}})", 100, 100);
+        CHECK(f.meta, "isCompactSummary -> meta");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"42 passed"}]},"toolUseResult":{"stdout":"ok!","stderr":""}})", 100, 100);
+        CHECK(f.kind == TranscriptLineKind::UserToolResult, "tool_result blocks -> UserToolResult");
+        CHECK(f.agentText.find(L"42 passed") != std::wstring::npos, "tool_result content in agentText");
+        CHECK(f.agentText.find(L"ok!") != std::wstring::npos, "toolUseResult stdout in agentText");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"assistant","timestamp":"2026-06-10T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm secret"},{"type":"text","text":"done."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git log"}},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"a.cpp"}}]}})", 0, 200);
+        CHECK(f.kind == TranscriptLineKind::Assistant, "assistant line classified");
+        CHECK(f.toolUses == 2, "two tool_use blocks counted");
+        CHECK(f.agentText.find(L"done.") != std::wstring::npos && f.agentText.find(L"hmm secret") != std::wstring::npos, "text + thinking in agentText");
+        CHECK(f.agentText.find(L"Bash") != std::wstring::npos && f.agentText.find(L"git log") != std::wstring::npos, "tool name + input in agentText");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"assistant","isSidechain":true,"timestamp":"2026-06-10T00:00:02Z","message":{"content":[{"type":"text","text":"sub"}]}})", 0, 50);
+        CHECK(f.sidechain, "isSidechain flagged");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"custom-title","customTitle":"am resume"})");
+        CHECK(f.kind == TranscriptLineKind::CustomTitle && f.title == L"am resume", "custom-title payload");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"ai-title","aiTitle":"Fixing the build"})");
+        CHECK(f.kind == TranscriptLineKind::AiTitle && f.title == L"Fixing the build", "ai-title payload");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"summary","summary":"Legacy summary","leafUuid":"x"})");
+        CHECK(f.kind == TranscriptLineKind::Summary && f.title == L"Legacy summary", "legacy summary payload");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"user","forkedFrom":{"sessionId":"f100e8de-b6c5-4fb8-bbe3-9f98eb63ab11","messageUuid":"m1"},"message":{"content":"copied"}})", 50, 0);
+        CHECK(f.forkedFromId == L"f100e8de-b6c5-4fb8-bbe3-9f98eb63ab11", "forkedFrom.sessionId extracted");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(LR"({"type":"system","subtype":"away_summary","timestamp":"2026-06-10T01:00:00Z","content":"While you were away..."})", 0, 100);
+        CHECK(f.kind == TranscriptLineKind::System && f.agentText.find(L"away") != std::wstring::npos, "system content in agentText");
+    }
+    {
+        const auto f = ClassifyTranscriptLine(L"not json at all");
+        CHECK(f.kind == TranscriptLineKind::Other, "non-JSON line tolerated as Other");
+    }
+    {
+        // Caps respected: a 100-char budget truncates, 0 budget extracts nothing.
+        const std::wstring big(500, L'x');
+        const auto f = ClassifyTranscriptLine(LR"({"type":"user","message":{"content":")" + big + LR"("}})", 100, 0);
+        CHECK(f.userText.size() <= 100, "maxUserTextChars cap respected");
+        const auto f0 = ClassifyTranscriptLine(LR"({"type":"user","message":{"content":"hi"}})", 0, 0);
+        CHECK(f0.userText.empty(), "0 budget -> no text extraction");
+    }
+
+    // --- Enumerate + Scan + Stats + QuickFacts over a temp projects root ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_store_test_" + std::to_wstring(::GetCurrentProcessId());
+        const std::wstring projRoot = root + L"\\projects";
+        const std::wstring dirA = projRoot + L"\\K--source-AmStoreA";
+        const std::wstring dirB = projRoot + L"\\K--source-AmStoreB";
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ dirA + L"\\11111111-1111-1111-1111-111111111111" }, ec); // a <sid>/ subdir (subagents home) — must NOT enumerate
+        std::filesystem::create_directories(std::filesystem::path{ dirB }, ec);
+
+        const std::string sessA = // a realistic mini-transcript
+            "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n"
+            "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"cwd\":\"K:\\\\source\\\\AmStoreA\",\"gitBranch\":\"dev\",\"message\":{\"content\":\"Caveat: injected preamble\"}}\n"
+            "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:05Z\",\"cwd\":\"K:\\\\source\\\\AmStoreA\",\"message\":{\"content\":\"build the thing\"}}\n"
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:09Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"on it\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"build\"}}]}}\n"
+            "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:20Z\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n"
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:30Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stop_reason\":\"end_turn\"}}\n"
+            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"timestamp\":\"2026-06-01T10:30:00Z\",\"content\":\"away note\"}\n"
+            "{\"type\":\"custom-title\",\"customTitle\":\"store test A\"}\n"
+            "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n";
+        const std::wstring sidA = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        MakeJsonl(dirA + L"\\" + sidA + L".jsonl", sessA, 5000, 1000);
+        MakeJsonl(dirA + L"\\agent-a05bb6b.jsonl", "{}", 6000, 1000); // legacy subagent file — must NOT enumerate
+        const std::wstring sidB = L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        MakeJsonl(dirB + L"\\" + sidB + L".jsonl", "{\"type\":\"mode\",\"mode\":\"normal\"}\n", 9000, 8000); // never-prompted prefix-only
+
+        const auto all = EnumerateTranscriptsIn(projRoot, 0);
+        CHECK(all.size() == 2, "enumerate: exactly the 2 uuid transcripts (agent-*/subdirs excluded)");
+        CHECK(all.size() == 2 && all[0].sessionId == sidB && all[1].sessionId == sidA, "enumerate: newest-mtime first");
+        CHECK(all.size() == 2 && all[1].projectDirLeaf == L"K--source-AmStoreA" && all[1].sizeBytes > 0, "enumerate: leaf + size filled");
+        const auto windowed = EnumerateTranscriptsIn(projRoot, 7000);
+        CHECK(windowed.size() == 1 && windowed[0].sessionId == sidB, "enumerate: sinceUnixMs window filters by mtime");
+        CHECK(EnumerateTranscriptsIn(projRoot + L"\\missing", 0).empty(), "enumerate: missing root -> empty");
+
+        // Stats: one accumulate over session A.
+        TranscriptStats st;
+        CHECK(AccumulateTranscriptStats(dirA + L"\\" + sidA + L".jsonl", st), "stats: accumulate ok");
+        CHECK(st.userPrompts == 1, "stats: ONE real prompt (Caveat + tool_result filtered)");
+        CHECK(st.firstUserPrompt == L"build the thing", "stats: first REAL prompt captured");
+        CHECK(st.assistantLines == 2 && st.toolUses == 1, "stats: assistant lines + tool uses counted");
+        CHECK(st.customTitle == L"store test A", "stats: custom title captured");
+        CHECK(st.firstTimestampMs == 1780308000000LL, "stats: first timestamp (2026-06-01T10:00:00Z)");
+        CHECK(st.lastTimestampMs == 1780308030000LL, "stats: last activity is the LAST MESSAGE (10:00:30), NOT the away_summary");
+        CHECK(st.cwd == L"K:\\source\\AmStoreA" && st.gitBranch == L"dev", "stats: cwd + branch from the lines");
+        CHECK(st.parsedBytes == static_cast<int64_t>(sessA.size()), "stats: cursor consumed the whole file");
+        CHECK(PickDisplayTitle(st.customTitle, st.aiTitle, st.summary, st.firstUserPrompt) == L"store test A", "stats: display title = custom title");
+
+        // Incremental: append a new turn; re-accumulate picks up ONLY the suffix.
+        {
+            const std::string more =
+                "{\"type\":\"user\",\"timestamp\":\"2026-06-01T11:00:00Z\",\"message\":{\"content\":\"and another thing\"}}\n";
+            const HANDLE h = ::CreateFileW((dirA + L"\\" + sidA + L".jsonl").c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            DWORD w = 0;
+            ::WriteFile(h, more.data(), static_cast<DWORD>(more.size()), &w, nullptr);
+            ::CloseHandle(h);
+            CHECK(AccumulateTranscriptStats(dirA + L"\\" + sidA + L".jsonl", st), "stats: incremental accumulate ok");
+            CHECK(st.userPrompts == 2, "stats: appended prompt counted once");
+            CHECK(st.lastTimestampMs == 1780311600000LL, "stats: last activity advanced to the appended turn (11:00:00)");
+            CHECK(st.firstUserPrompt == L"build the thing", "stats: first prompt unchanged across resume");
+        }
+        // Replaced (shrunk) file: stats self-reset and rebuild.
+        {
+            MakeJsonl(dirA + L"\\" + sidA + L".jsonl", "{\"type\":\"user\",\"timestamp\":\"2026-06-02T00:00:00Z\",\"message\":{\"content\":\"fresh\"}}\n", 9500, 9500);
+            CHECK(AccumulateTranscriptStats(dirA + L"\\" + sidA + L".jsonl", st), "stats: shrink-rebuild ok");
+            CHECK(st.userPrompts == 1 && st.firstUserPrompt == L"fresh", "stats: shrink resets and rebuilds from 0");
+        }
+        TranscriptStats gone;
+        CHECK(!AccumulateTranscriptStats(dirA + L"\\missing.jsonl", gone) && !gone.found, "stats: vanished file -> found=false");
+
+        // QuickFacts: created from the first timestamped line; last activity skips the
+        // trailing away_summary + state lines; fork detection flips created to file birth.
+        MakeJsonl(dirA + L"\\" + sidA + L".jsonl", sessA, 5000, 1000); // restore the full fixture
+        {
+            const auto q = ReadTranscriptQuickFacts(dirA + L"\\" + sidA + L".jsonl", 1000);
+            CHECK(q.found, "quick: read ok");
+            CHECK(q.createdMs == 1780308000000LL, "quick: created = first line timestamp (not file birth)");
+            CHECK(q.lastActivityMs == 1780308030000LL, "quick: last activity = last MESSAGE ts (away_summary + custom-title + permission-mode tail skipped)");
+            CHECK(!q.fork && q.cwd == L"K:\\source\\AmStoreA", "quick: not a fork; cwd from head");
+        }
+        {
+            const std::string fork =
+                "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:05Z\",\"forkedFrom\":{\"sessionId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"messageUuid\":\"m1\"},\"message\":{\"content\":\"build the thing\"}}\n";
+            const std::wstring sidF = L"cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+            MakeJsonl(dirA + L"\\" + sidF + L".jsonl", fork, 9990, 9990);
+            const auto q = ReadTranscriptQuickFacts(dirA + L"\\" + sidF + L".jsonl", 9990);
+            CHECK(q.fork && q.forkedFromId == sidA, "quick: fork detected with parent id");
+            CHECK(q.createdMs == 9990, "quick: a fork's created = file birth (copied line timestamps lie)");
+        }
+        {
+            const auto q = ReadTranscriptQuickFacts(dirB + L"\\" + sidB + L".jsonl", 8000);
+            CHECK(q.found && q.createdMs == 0 && q.lastActivityMs == 0, "quick: prefix-only (never-prompted) file -> zeros (caller falls back to birth/mtime)");
+        }
+
+        std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
+
+    // --- live smoke over the REAL corpus (guarded: skips silently when absent) ---
+    {
+        const auto recent = EnumerateTranscripts(NowMsTest() - 92LL * 24 * 3600 * 1000);
+        if (!recent.empty())
+        {
+            bool allUuid = true;
+            for (const auto& r : recent)
+            {
+                if (!IsSessionIdStem(r.sessionId))
+                {
+                    allUuid = false;
+                }
+            }
+            CHECK(allUuid, "live: every enumerated stem is a session uuid");
+            const auto q = ReadTranscriptQuickFacts(recent[0].path, recent[0].birthMs);
+            CHECK(q.found, "live: quick facts read the newest real transcript");
+            CHECK(q.lastActivityMs == 0 || q.lastActivityMs <= recent[0].mtimeMs + 60000, "live: last-activity <= mtime (+clock slack) — mtime is the superset");
+            std::wprintf(L"  [info] live corpus: %zu transcripts in 92d window; newest lastActivity-vs-mtime gap %lld s\n",
+                         recent.size(), q.lastActivityMs ? (recent[0].mtimeMs - q.lastActivityMs) / 1000 : -1);
+        }
+    }
+}
+
+static void TestSessionSearch()
+{
+    std::wprintf(L"SessionSearch (regex/match/snippet + fast phase + history + presence + index):\n");
+
+    // --- BuildSearchRegex: literal escape + fuzzy lazy-gap join ---
+    CHECK(BuildSearchRegex(L"a.b", false) == LR"(a\.b)", "regex: literal dot escaped");
+    CHECK(BuildSearchRegex(L"abc", true) == LR"(a.*?b.*?c)", "regex: fuzzy lazy-gap join");
+    CHECK(BuildSearchRegex(L"a c", true) == LR"(a.*?c)", "regex: fuzzy drops whitespace");
+    CHECK(BuildSearchRegex(L"x(y)", false) == LR"(x\(y\))", "regex: parens escaped");
+
+    // --- MatchesQueryText (pre-folded inputs) ---
+    CHECK(MatchesQueryText(L"the quick brown fox", L"quick", false), "match: substring");
+    CHECK(!MatchesQueryText(L"the quick brown fox", L"quirk", false), "match: non-substring misses");
+    CHECK(MatchesQueryText(L"the quick brown fox", L"qbf", true), "match: fuzzy subsequence");
+    CHECK(!MatchesQueryText(L"the quick brown fox", L"fbq", true), "match: fuzzy order matters");
+    CHECK(MatchesQueryText(L"anything", L"", true), "match: empty query matches");
+
+    // --- MakeSnippet ---
+    {
+        const std::wstring text = L"prefix prefix prefix prefix prefix prefix THE-NEEDLE suffix\nsecond line";
+        const auto s = MakeSnippet(text, L"the-needle", false, 60);
+        CHECK(s.find(L"THE-NEEDLE") != std::wstring::npos, "snippet: contains the match");
+        CHECK(s.find(L'\n') == std::wstring::npos, "snippet: single-line collapsed");
+        CHECK(!s.empty() && s.front() == L'…', "snippet: left-context ellipsis when clipped");
+    }
+
+    // --- SearchIndexFast: toggle semantics over canned entries ---
+    {
+        std::vector<SessionIndexEntry> entries(3);
+        entries[0].sessionId = L"s-title";
+        entries[0].stats.customTitle = L"Fix the BUILD pipeline";
+        entries[0].stats.cwd = L"K:\\source\\alpha";
+        entries[1].sessionId = L"s-dir";
+        entries[1].stats.firstUserPrompt = L"unrelated";
+        entries[1].stats.cwd = L"K:\\source\\BravoProj";
+        entries[1].stats.pathsAccessed = { L"K:\\source\\BravoProj\\src\\widget.cpp" };
+        entries[2].sessionId = L"s-file";
+        entries[2].stats.cwd = L"K:\\elsewhere";
+        entries[2].stats.pathsAccessed = { L"C:\\temp\\notes\\Findings.md" };
+
+        SessionQuery q;
+        q.text = L"build";
+        auto r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-title", "fast: title matches (case-insensitive), both scopes off");
+
+        q.text = L"bravoproj";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-dir", "fast: cwd matches in the baseline");
+
+        q.text = L"findings.md";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: an accessed FILE does not match without the file scope");
+        q.scopeFiles = true;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-file", "fast: file scope matches the path LEAF");
+
+        q = {};
+        q.text = L"temp\\notes";
+        q.scopeDirs = true;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-file", "fast: dir scope matches the path's DIRECTORY part");
+        q.scopeDirs = false;
+        q.scopeFiles = true;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: dir text does not match the file scope's leaf");
+
+        q = {};
+        q.text = L"";
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 3, "fast: empty text lists everything (window-only)");
+
+        q.text = L"fbp";
+        q.fuzzy = true;
+        r = SearchIndexFast(entries, q);
+        CHECK(!r.empty() && r[0] == L"s-title", "fast: fuzzy subsequence over the title");
+    }
+
+    // --- temp-root fixtures: history accelerator + presence + slow phase + index sidecar ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_search_test_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ root }, ec);
+
+        // history.jsonl: two sids, one ancient line without a sessionId.
+        const std::wstring hist = root + L"\\history.jsonl";
+        MakeJsonl(hist,
+                  "{\"display\":\"please fix the flaky test\",\"project\":\"K:\\\\a\",\"sessionId\":\"sid-1\",\"timestamp\":1}\n"
+                  "{\"display\":\"deploy the build\",\"project\":\"K:\\\\a\",\"sessionId\":\"sid-2\",\"timestamp\":2}\n"
+                  "{\"display\":\"fix it again (flaky)\",\"project\":\"K:\\\\a\",\"sessionId\":\"sid-1\",\"timestamp\":3}\n"
+                  "{\"display\":\"ancient flaky line, no sid\",\"timestamp\":4}\n",
+                  1000, 1000);
+        SessionQuery q;
+        q.text = L"FLAKY";
+        q.scopeUser = true;
+        const auto hh = SearchHistoryPrompts(hist, q, 3);
+        CHECK(hh.size() == 1 && hh.count(L"sid-1") == 1, "history: per-sid aggregation, case-insensitive, no-sid lines skipped");
+        CHECK(hh.count(L"sid-1") && hh.at(L"sid-1").hitCount == 2 && hh.at(L"sid-1").snippets.size() == 2, "history: hit count + snippets");
+
+        // presence: one row per file; bad/empty files tolerated.
+        const std::wstring presDir = root + L"\\sessions";
+        std::filesystem::create_directories(std::filesystem::path{ presDir }, ec);
+        MakeJsonl(presDir + L"\\123.json", "{\"pid\":123,\"sessionId\":\"sid-1\",\"cwd\":\"K:\\\\a\",\"status\":\"busy\",\"version\":\"2.1.170\",\"startedAt\":111,\"updatedAt\":222}", 1, 1);
+        MakeJsonl(presDir + L"\\999.json", "not json", 1, 1);
+        const auto pres = ReadSessionPresenceIn(presDir);
+        CHECK(pres.size() == 1 && pres[0].pid == 123 && pres[0].sessionId == L"sid-1" && pres[0].status == L"busy" && pres[0].updatedAtMs == 222, "presence: parsed row; garbage tolerated");
+
+        // slow phase over a transcript (in-process fallback semantics; rg, when present, only
+        // pre-filters files — same results either way since this file DOES match).
+        const std::wstring projDir = root + L"\\projects\\K--a";
+        std::filesystem::create_directories(std::filesystem::path{ projDir }, ec);
+        const std::wstring sidT = L"dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+        MakeJsonl(projDir + L"\\" + sidT + L".jsonl",
+                  "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"message\":{\"content\":\"the magic word is xyzzy\"}}\n"
+                  "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:05Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"plugh and xyzzy acknowledged\"}]}}\n",
+                  2000, 2000);
+        TranscriptRef ref;
+        ref.sessionId = sidT;
+        ref.path = projDir + L"\\" + sidT + L".jsonl";
+        ref.sizeBytes = 0;
+        ref.mtimeMs = 2000;
+        ref.birthMs = 2000;
+
+        SessionQuery sq;
+        sq.text = L"xyzzy";
+        sq.scopeUser = true;
+        auto hits = SearchTranscriptsSlow({ ref }, sq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 1, "slow: user scope hits ONLY the prompt line");
+        sq.scopeAgent = true;
+        hits = SearchTranscriptsSlow({ ref }, sq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 2, "slow: both scopes hit prompt + assistant");
+        sq.scopeUser = false;
+        sq.text = L"plugh";
+        hits = SearchTranscriptsSlow({ ref }, sq, 4, nullptr);
+        CHECK(hits.size() == 1 && hits[0].hitCount == 1 && !hits[0].snippets.empty(), "slow: agent-only scope with snippet");
+        sq.scopeAgent = false;
+        hits = SearchTranscriptsSlow({ ref }, sq, 4, nullptr);
+        CHECK(hits.empty(), "slow: no message scope -> no content search");
+        const auto cancelledImmediately = []() { return true; };
+        sq.scopeAgent = true;
+        hits = SearchTranscriptsSlow({ ref }, sq, 4, cancelledImmediately);
+        CHECK(hits.empty(), "slow: cancellation respected");
+
+        // index sidecar: refresh -> hit -> incremental refresh.
+        const std::wstring idxDir = root + L"\\sessions-index";
+        std::filesystem::create_directories(std::filesystem::path{ idxDir }, ec);
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        ::GetFileAttributesExW(ref.path.c_str(), GetFileExInfoStandard, &fad);
+        ref.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+
+        auto e1 = LoadOrRefreshSessionIndexIn(idxDir, ref);
+        CHECK(e1.valid && e1.stats.userPrompts == 1 && e1.stats.assistantLines == 1, "index: first refresh builds stats");
+        CHECK(std::filesystem::exists(std::filesystem::path{ idxDir + L"\\" + sidT + L".json" }), "index: sidecar written");
+        auto e2 = LoadOrRefreshSessionIndexIn(idxDir, ref);
+        CHECK(e2.valid && e2.stats.userPrompts == 1 && e2.stats.parsedBytes == e1.stats.parsedBytes, "index: (size,mtime) hit loads the sidecar only");
+        {
+            const std::string more = "{\"type\":\"user\",\"timestamp\":\"2026-06-01T11:00:00Z\",\"message\":{\"content\":\"second prompt\"}}\n";
+            const HANDLE h = ::CreateFileW(ref.path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            DWORD w = 0;
+            ::WriteFile(h, more.data(), static_cast<DWORD>(more.size()), &w, nullptr);
+            ::CloseHandle(h);
+            ::GetFileAttributesExW(ref.path.c_str(), GetFileExInfoStandard, &fad);
+            ref.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            ref.mtimeMs = 3000; // changed key
+            auto e3 = LoadOrRefreshSessionIndexIn(idxDir, ref);
+            CHECK(e3.valid && e3.stats.userPrompts == 2, "index: stale key resumes the accumulate incrementally");
+        }
+
+        // pathsAccessed flow into the index + the file/dir scopes end-to-end.
+        {
+            const std::wstring sidP = L"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+            MakeJsonl(projDir + L"\\" + sidP + L".jsonl",
+                      "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Read\",\"input\":{\"file_path\":\"K:\\\\proj\\\\deep\\\\Widget.xaml\"}}]}}\n",
+                      4000, 4000);
+            TranscriptRef rp;
+            rp.sessionId = sidP;
+            rp.path = projDir + L"\\" + sidP + L".jsonl";
+            ::GetFileAttributesExW(rp.path.c_str(), GetFileExInfoStandard, &fad);
+            rp.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            rp.mtimeMs = 4000;
+            const auto ep = LoadOrRefreshSessionIndexIn(idxDir, rp);
+            CHECK(ep.valid && ep.stats.pathsAccessed.size() == 1 && ep.stats.pathsAccessed[0] == L"K:\\proj\\deep\\Widget.xaml", "index: tool-touched path captured");
+            SessionQuery fq;
+            fq.text = L"widget.xaml";
+            fq.scopeFiles = true;
+            const auto fr = SearchIndexFast({ ep }, fq);
+            CHECK(fr.size() == 1, "index->fast: file scope finds the accessed file");
+        }
+
+        std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
+
+    // --- rg integration smoke (only when ripgrep is on PATH) ---
+    if (!ResolveRipgrep().empty())
+    {
+        std::wprintf(L"  [info] rg resolved: %ls\n", ResolveRipgrep().c_str());
+        CHECK(ResolveRipgrep().find(L"rg") != std::wstring::npos, "rg: resolved path names rg");
+    }
+    else
+    {
+        std::wprintf(L"  [info] rg not on PATH — in-process fallback paths exercised above\n");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
@@ -1639,6 +2072,8 @@ int wmain()
     TestProcessInspectTree();
     TestProcessInspectParse();
     TestTranscriptResolve();
+    TestTranscriptStore();
+    TestSessionSearch();
     TestProcessInspectLive();
     TestBringToFrontHeuristics();
     TestBridgeRoundTrip();

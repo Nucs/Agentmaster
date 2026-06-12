@@ -71,6 +71,9 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (Archive page): the Manager's Archived button opens the full-window Archive PAGE
         // (mounted on TerminalPage's Root, over the tab strip) instead of the old in-content overlay.
         void SetOpenArchiveHandler(std::function<void()> handler);
+        // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button (right after
+        // Archived) opens the full-window browser over EVERY on-disk Claude Code session.
+        void SetOpenSessionsHandler(std::function<void()> handler);
         // Agentmaster: the Explorer Tree's "refresh" button (after the sort toggle) — reload the data
         // for the CURRENT scope. The content redraws immediately; this fires so the page can force the
         // Fleet Observer to re-survey now (re-enrich the registry + recompute the External census)
@@ -282,6 +285,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
         std::function<void(int)> _reopenWindowHandler; // Agentmaster (M10): reopen ONE saved window by record index (per-window "Reopen window")
         std::function<void()> _openArchiveHandler; // Agentmaster (Archive page): open the full-window Archive page (TerminalPage-hosted)
+        std::function<void()> _openSessionsHandler; // Agentmaster (Sessions page): open the full-window global Sessions browser (TerminalPage-hosted)
         std::function<void()> _refreshHandler; // Agentmaster: Explorer Tree refresh -> page re-surveys the Fleet Observer (reload the current scope's data)
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
@@ -337,6 +341,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
         winrt::Windows::UI::Xaml::Controls::Button _archivedBtn{ nullptr }; // "Archived (N)" (next to the cog) -> opens the archive overlay
+        winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" (right after Archived) -> the global on-disk sessions browser
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
         // ---- Archived-sessions overlay (the "Archived" button) ----
         winrt::Windows::UI::Xaml::Controls::Grid _archiveOverlay{ nullptr }; // dimmed modal layer listing archived sessions

@@ -41,6 +41,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
 // because restore passes a SessionInfo by value.
 #include "AgentMaster/SessionModels.h"
+#include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
 #include <optional>
 namespace Agentmaster
 {
@@ -429,6 +430,81 @@ namespace winrt::TerminalApp::implementation
         std::wstring _archiveDetailTailText;
         bool _archiveDetailTailPending{ false };
 
+        // Agentmaster (Sessions page; SESSIONS.md): the full-window browser over EVERY on-disk
+        // Claude Code session (not just managed ones), opened by the Manager's "Sessions" button
+        // (right after Archived). Duplicates the Archive page's structure — search bar at the top:
+        // [ text ] (👤)(🤖)(📁)(📄)(F) [window] — backed by the TranscriptStore sidecar index +
+        // the two-phase SessionSearch (fast in-memory + history.jsonl; slow rg-prefiltered content).
+        struct _SessionsRow
+        {
+            std::wstring id; // the conversation/session uuid (== transcript stem)
+            std::wstring path; // transcript path at gather time
+            std::wstring title; // PickDisplayTitle(custom > ai > legacy summary > first prompt)
+            std::wstring dir; // the REAL cwd from the lines (folder names are lossy)
+            std::wstring branch;
+            int64_t createdMs{ 0 }; // fork-aware (a fork's copied line stamps lie -> file birth)
+            int64_t lastActivityMs{ 0 }; // last MESSAGE timestamp (mtime only as fallback)
+            int64_t sizeBytes{ 0 };
+            int msgs{ 0 }; // REAL user prompts
+            int tools{ 0 }; // assistant tool_use blocks
+            bool fork{ false };
+            std::wstring forkedFromId;
+        };
+        winrt::Windows::UI::Xaml::Controls::Grid _sessionsPageHost{ nullptr }; // full-bleed page over Root rows 1-2
+        winrt::Windows::UI::Xaml::Controls::Grid _sessionsHeaderRow{ nullptr }; // LEFT: sortable column header
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sessionsRowsHost{ nullptr }; // LEFT: table data rows
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sessionsDetailHost{ nullptr }; // RIGHT: detail/preview
+        winrt::Windows::UI::Xaml::Controls::TextBox _sessionsSearchBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessionsCountText{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeUserBtn{ nullptr }; // 👤 search user messages
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeAgentBtn{ nullptr }; // 🤖 search agent + tools
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeDirsBtn{ nullptr }; // 📁 dirs accessed
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeFilesBtn{ nullptr }; // 📄 files accessed
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessFuzzyBtn{ nullptr }; // (F) fuzzy
+        winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sessRangePopup{ nullptr }; // hover: From/To range picker (answer Q4 — text boxes)
+        winrt::Windows::UI::Xaml::Controls::TextBox _sessFromBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _sessToBox{ nullptr };
+        int _sessionsWindowPreset{ 4 }; // index into {1d,3d,7d,14d,1mo,3mo}; default 1 month
+        int64_t _sessionsFromMs{ 0 }; // custom range (popup Apply); 0 = use the preset
+        int64_t _sessionsToMs{ 0 }; // 0 = now
+        std::vector<_SessionsRow> _sessionsRows; // gathered for the current window (UI thread)
+        std::vector<::Agentmaster::SessionIndexEntry> _sessionsEntries; // the sidecar index entries behind the rows (fast-phase haystack)
+        std::unordered_map<std::wstring, int> _sessionsHitCounts; // sid -> matched messages (history + slow phase)
+        std::unordered_map<std::wstring, std::vector<std::wstring>> _sessionsHitSnippets; // sid -> display snippets
+        std::unordered_set<std::wstring> _sessionsFastIds; // fast-phase (title/dir/paths) matches
+        std::wstring _sessionsSelectedId;
+        int _sessionsSortColumn{ 5 }; // default: Active (last activity), newest first
+        bool _sessionsSortAscending{ false };
+        std::wstring _sessionsQueryText; // the raw search text (folding happens in the engine)
+        std::atomic<bool> _sessionsPageVisible{ false };
+        std::atomic<uint64_t> _sessionsSearchGen{ 0 }; // bumps per query — a stale slow search self-cancels
+        std::atomic<bool> _sessionsIndexing{ false }; // a background gather/index pass is running
+        std::shared_ptr<ThrottledFunc<>> _sessionsSearchThrottled{ nullptr }; // keystroke debounce
+        // One-entry detail prompt-list cache, keyed by (id, transcript mtime) — the archive
+        // detail's pattern: the head read happens off-thread once, re-shows hit the cache.
+        std::wstring _sessionsDetailTiId;
+        int64_t _sessionsDetailTiMtime{ 0 };
+        std::vector<std::wstring> _sessionsDetailPrompts;
+        bool _sessionsDetailPending{ false };
+        // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
+        // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
+        std::vector<std::wstring> _sessionsVisibleOrder;
+
+        // Agentmaster: WINDOW-LEVEL page overlays (Archive, Sessions, any future full-window
+        // page mounted over Root) — each registers itself ONCE at build (host + its atomic
+        // visibility mirror + an optional extra-dismiss hook, e.g. closing an owned Popup,
+        // which the collapsed host would NOT hide — popups render in the popup root). Generic
+        // dismiss sites (the tab-switch seam in TabManagement.cpp) close ALL of them without
+        // knowing any page by name, so a new page binds automatically by registering.
+        struct _AgentPageOverlay
+        {
+            winrt::Windows::UI::Xaml::Controls::Grid host{ nullptr };
+            std::atomic<bool>* visibleMirror{ nullptr };
+            std::function<void()> onDismiss; // optional (close popups etc.); may be empty
+        };
+        std::vector<_AgentPageOverlay> _agentPageOverlays;
+
         bool _isInFocusMode{ false };
         bool _isFullscreen{ false };
         bool _isMaximized{ false };
@@ -569,6 +645,32 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _LoadArchiveAssistantTail(std::wstring sessionId, std::wstring dir, int64_t mtime); // tail-read the transcript's LAST assistant message off-thread -> cache (id, mtime) + re-show the detail
         winrt::fire_and_forget _OpenArchiveTranscript(std::wstring path); // detail "Open transcript": ShellExecute the .jsonl (system open/picker; Explorer /select fallback) — read-only, off the UI thread
         void _ReopenSavedWindowById(int fallbackIndex, const std::wstring& windowId); // re-resolve the live record index from the STABLE windowId at action time (a gather-time index goes stale), then _ReopenSavedWindow — shared by the detail "Reopen its window" + the row double-click
+
+        // Agentmaster (Sessions page; SESSIONS.md): the global Claude-sessions browser — every
+        // on-disk session in a selectable window (default 1 month), two-phase searched (fast
+        // sidecar-index + history.jsonl; slow rg-prefiltered transcript content), rows enriched by
+        // the registry (OPEN sessions get the per-dir color + state) + the observer's presence
+        // table. Opened by the Manager's "Sessions" button via SetOpenSessionsHandler.
+        void _ShowSessionsPage(); // build-if-needed + gather + render + show (deferred — the page-open crash class)
+        void _HideSessionsPage(); // hide (the Back button), deferred
+        void _BuildSessionsPageShell(); // one-time: host + search bar (text + scope toggles + window selector) + table/detail split
+        winrt::fire_and_forget _RefreshSessionsRows(); // BG: enumerate the window + load-or-refresh each sidecar index -> UI: rows + render
+        void _RenderSessionsTable(); // apply the current search result set + sort -> rebuild the table
+        void _ShowSessionsDetail(const std::wstring& sessionId); // populate the right pane (metadata + hit snippets + prompts + actions)
+        winrt::fire_and_forget _RunSessionsSearch(); // the two-phase search: fast inline, slow on a background pass (generation-cancelled)
+        winrt::fire_and_forget _LoadSessionsPrompts(std::wstring sessionId, std::wstring dir, int64_t mtime); // detail: off-thread prompt-list read (head), cached by (id, mtime)
+        void _CycleSessionsWindow(); // [1 month] click: 1d -> 3d -> 7d -> 14d -> 1mo -> 3mo -> wrap (clears a custom range)
+        void _ApplySessionsRange(); // the hover popup's Apply: parse From/To (YYYY-MM-DD) into a custom range
+        int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)
+        void _ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title); // resume ANY on-disk session into a managed tab: live here -> Jump; archived -> Restore; unknown -> minimal record + the transcript-gated resume seam
+        void _ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title); // fork ANY on-disk session into a NEW managed conversation (`--resume <parent> --fork-session --session-id <new>`) — the parent transcript is untouched, so it is safe even while the parent is LIVE; transcript-gated (no transcript -> fresh), the duplicate-tab fork's convention ("<title> (fork)")
+        void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
+        void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends
+        // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
+        // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.
+        void _RegisterAgentPageOverlay(const winrt::Windows::UI::Xaml::Controls::Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss);
+        void _DismissAgentPageOverlays(); // synchronous collapse of EVERY registered page (safe outside in-page pointer handlers)
+        void _MoveArchiveSelection(int delta); // Up/Down keyboard nav over _archiveVisibleOrder (same rotate semantics as the Sessions page)
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
 

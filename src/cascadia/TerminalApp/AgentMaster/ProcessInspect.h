@@ -191,10 +191,12 @@ namespace Agentmaster
         bool found{};
         int64_t createdUnixMs{}; // file ctime (≈ conversation start)
         int64_t lastActivityUnixMs{}; // file mtime (≈ last activity)
-        std::wstring title; // a display title: the FIRST human prompt, collapsed to one trimmed line
+        std::wstring title; // a display title: the FIRST REAL human prompt (noise-filtered — IsNoiseUserPrompt), collapsed to one trimmed line
         std::wstring customTitle; // the user-SET conversation title, when any: the LAST {"type":"custom-title","customTitle":...} line (newer retitles win). Preferred over `title` for display + tab matching.
+        std::wstring aiTitle; // the async-generated picker title ({"type":"ai-title"}), when any: the LAST one. Second in display precedence.
+        std::wstring summary; // a LEGACY {"type":"summary"} line's text (v2.0.75-2.1.25 stratum only; zero in recent files). Third in precedence.
         std::wstring gitBranch; // the gitBranch recorded on the user lines (first seen), if any
-        std::vector<std::wstring> userPrompts; // the human prompts in order (capped at maxPrompts)
+        std::vector<std::wstring> userPrompts; // the REAL human prompts in order (noise/meta/sidechain filtered; capped at maxPrompts)
     };
 
     // Read <projectsDir>/<encode(cwd)>/<sessionId>.jsonl out-of-band. Always stats (created/last);
@@ -205,6 +207,10 @@ namespace Agentmaster
     // verified 0/1842 over 90 days — so the first prompt is the title source.) Filesystem only.
     TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
+
+    // The ONE display-title precedence over a TranscriptInfo (SESSIONS.md §6.3): customTitle >
+    // aiTitle > legacy summary > title (the first REAL prompt). Pure.
+    std::wstring TranscriptDisplayTitle(const TranscriptInfo& info);
 
     // ===== window activation: surface an external claude's hosting window (Manager UI) ======
 

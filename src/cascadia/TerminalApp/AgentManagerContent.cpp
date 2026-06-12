@@ -669,6 +669,10 @@ namespace winrt::TerminalApp::implementation
     {
         _openArchiveHandler = std::move(handler);
     }
+    void AgentManagerContent::SetOpenSessionsHandler(std::function<void()> handler)
+    {
+        _openSessionsHandler = std::move(handler);
+    }
     void AgentManagerContent::SetRefreshHandler(std::function<void()> handler)
     {
         _refreshHandler = std::move(handler);
@@ -1028,6 +1032,14 @@ namespace winrt::TerminalApp::implementation
             ToolTipService::SetToolTip(_archivedBtn, winrt::box_value(L"Restore archived (closed) sessions"));
             _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openArchiveHandler) { _openArchiveHandler(); } });
             bar.Children().Append(_archivedBtn);
+
+            // Agentmaster (Sessions page; SESSIONS.md): the global on-disk Claude-sessions browser —
+            // EVERY session on the machine in a selectable window, searchable. RIGHT AFTER Archived.
+            _sessionsBtn = Button{};
+            _sessionsBtn.Content(winrt::box_value(L"Sessions"));
+            ToolTipService::SetToolTip(_sessionsBtn, winrt::box_value(L"Browse + search ALL Claude Code sessions on this machine (last month by default)"));
+            _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
+            bar.Children().Append(_sessionsBtn);
 
             Grid::SetRow(bar, 0);
             _root.Children().Append(bar);

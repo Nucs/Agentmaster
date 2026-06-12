@@ -230,6 +230,12 @@ namespace Agentmaster
         return _external;
     }
 
+    std::vector<SessionPresenceRow> ProcessObserver::Presence() const
+    {
+        std::lock_guard lk{ _tableMtx };
+        return _presence;
+    }
+
     void ProcessObserver::_worker() noexcept
     {
         bool forced = true; // the first survey is always a full one (no prior state to debounce against)
@@ -339,6 +345,20 @@ namespace Agentmaster
             factsByPid.emplace(e.pid, std::move(f));
         }
 
+        // 1b) Live-session presence (SESSIONS.md §7-Q5): the store's RAW read of
+        //     ~/.claude/sessions/<pid>.json, validated against THIS snapshot — a row whose pid is
+        //     gone, or no longer a claude.exe (stale crash leftovers, PID reuse), is dropped. The
+        //     surviving rows are published as a table AND feed the per-session `presenceStatus`
+        //     enrichment below (a display FACT — never SessionState, Rule #13).
+        std::vector<SessionPresenceRow> presence = ReadSessionPresence();
+        presence.erase(std::remove_if(presence.begin(), presence.end(), [&factsByPid](const SessionPresenceRow& r) { return factsByPid.find(r.pid) == factsByPid.end(); }),
+                       presence.end());
+        std::unordered_map<std::wstring, std::wstring> presenceBySid;
+        for (const auto& r : presence)
+        {
+            presenceBySid[r.sessionId] = r.status;
+        }
+
         // 2) Merge every window's roster (one entry per tab; a wtSession lives in exactly one
         //    window). Track the owning windowId per tab (the _rosterByWindow key) — this is the
         //    robust per-window attribution that covers BOTH Launched and hand-typed claudes (§19-Q1).
@@ -439,6 +459,10 @@ namespace Agentmaster
                     o.effort = f.effort;
                     o.permissionMode = f.permissionMode;
                     o.sessionName = f.sessionName;
+                    if (const auto pit = presenceBySid.find(sid); pit != presenceBySid.end())
+                    {
+                        o.presenceStatus = pit->second; // claude's own heartbeat (busy/idle/waiting/shell)
+                    }
                     o.observedUnixMs = now;
                     o.createdUnixMs = convCreated;
                     o.lastActivityUnixMs = convLast;
@@ -556,13 +580,14 @@ namespace Agentmaster
                 }
                 else
                 {
-                    // One-time transcript head read (128 KB) for the title + gitBranch. Prefer the
-                    // user-SET conversation title (custom-title line) over the first prompt — it is
-                    // the user's own label, and typically what a renamed hosting tab says too. (A
+                    // One-time transcript head read (128 KB) for the title + gitBranch. The ONE
+                    // precedence (TranscriptDisplayTitle): the user-SET custom-title > the picker's
+                    // ai-title > legacy summary > the first REAL prompt — the custom title is the
+                    // user's own label, and typically what a renamed hosting tab says too. (A
                     // retitle past the 128 KB head is missed — best-effort; the Bring-Window-To-Front
                     // worker re-reads deeper for its tab match.)
                     const auto ti = ReadTranscriptInfo(f.cwd, sid, 131072, 1);
-                    ex.title = !ti.customTitle.empty() ? ti.customTitle : ti.title;
+                    ex.title = TranscriptDisplayTitle(ti);
                     ex.gitBranch = ti.gitBranch;
                     _extInfoCache.emplace(sid, ExtInfo{ ex.title, ti.gitBranch });
                 }
@@ -644,6 +669,7 @@ namespace Agentmaster
             _correlation.swap(corr);
             _activity.swap(act);
             _external.swap(externalRows);
+            _presence.swap(presence);
             _knownPids.swap(correlatedPids);
         }
     }

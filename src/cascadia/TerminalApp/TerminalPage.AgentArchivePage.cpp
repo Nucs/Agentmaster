@@ -40,7 +40,6 @@ using namespace winrt::Windows::UI::Xaml::Controls;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Media;
 using namespace ::TerminalApp;
-using namespace ::Microsoft::Console;
 using namespace ::Microsoft::Terminal::Core;
 using namespace std::chrono_literals;
 
@@ -758,6 +757,30 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRowSpan(host, 2);
         _archivePageHost = host;
 
+        // Agentmaster: register with the GENERIC window-level overlay seam — the tab-switch
+        // handler (TabManagement.cpp) dismisses every registered page, so this page (and any
+        // future one) closes on tab switch without a page-specific call there.
+        _RegisterAgentPageOverlay(host, &_archivePageVisible, nullptr);
+
+        // Agentmaster: Up/Down = move the selection through the visible rows (wraps; none
+        // selected => Down picks the first, Up the last). PREVIEW (tunneling) so it wins over
+        // the focused search box; deferred to a clean tick (_ShowArchiveDetail mutates the tree).
+        host.PreviewKeyDown([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            const auto k = e.Key();
+            if (k != winrt::Windows::System::VirtualKey::Up && k != winrt::Windows::System::VirtualKey::Down)
+            {
+                return;
+            }
+            e.Handled(true);
+            const int delta = (k == winrt::Windows::System::VirtualKey::Down) ? 1 : -1;
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weak = get_weak(), delta]() {
+                if (auto self = weak.get())
+                {
+                    self->_MoveArchiveSelection(delta);
+                }
+            });
+        });
+
         // Agentmaster: the search-filter debounce (see the TextChanged handler above) — 200ms trailing,
         // so a typing burst rebuilds once instead of per keystroke.
         _archiveFilterThrottled = std::make_shared<ThrottledFunc<>>(
@@ -840,6 +863,13 @@ namespace winrt::TerminalApp::implementation
             self->_RenderArchiveTable();
             self->_archivePageHost.Visibility(winrt::Windows::UI::Xaml::Visibility::Visible);
             self->_archivePageVisible.store(true, std::memory_order_relaxed); // observer pre-filter mirror
+            if (self->_archiveSearchBox)
+            {
+                // Focus INTO the page so keyboard events route through its host (focus left on a
+                // covered element keeps them on a sibling branch) — typing filters immediately,
+                // Up/Down navigate the rows.
+                self->_archiveSearchBox.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+            }
         });
     }
 
@@ -1457,6 +1487,43 @@ namespace winrt::TerminalApp::implementation
     // Recolor the row backgrounds to reflect _archiveSelectedId WITHOUT rebuilding the list (each row
     // Border carries its session id as its Tag). A property change only, so it never restructures the
     // tree under an in-flight pointer — safe to run from the deferred row-tap reaction.
+    // Agentmaster: Up/Down keyboard navigation over the VISIBLE (sorted + filtered) rows
+    // (_archiveVisibleOrder — already maintained per render for the bulk-restore ordering). No
+    // selection (or one filtered out of view): Down picks the first row, Up the last; otherwise
+    // the selection moves ±1 and WRAPS at the ends (rotates). Scrolls the row into view.
+    void TerminalPage::_MoveArchiveSelection(int delta)
+    {
+        if (_archiveVisibleOrder.empty() || !_archiveRowsHost)
+        {
+            return;
+        }
+        const int n = static_cast<int>(_archiveVisibleOrder.size());
+        int idx = -1;
+        if (!_archiveSelectedId.empty())
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                if (_archiveVisibleOrder[i] == _archiveSelectedId)
+                {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+        const int next = (idx < 0) ? (delta > 0 ? 0 : n - 1) : (((idx + delta) % n + n) % n);
+        _archiveSelectedId = _archiveVisibleOrder[next];
+        _UpdateArchiveSelectionHighlight();
+        _ShowArchiveDetail(_archiveSelectedId);
+        for (const auto& child : _archiveRowsHost.Children())
+        {
+            if (const auto b = child.try_as<winrt::Windows::UI::Xaml::Controls::Border>(); b && std::wstring{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") } == _archiveSelectedId)
+            {
+                b.StartBringIntoView();
+                break;
+            }
+        }
+    }
+
     void TerminalPage::_UpdateArchiveSelectionHighlight()
     {
         if (!_archiveRowsHost)
