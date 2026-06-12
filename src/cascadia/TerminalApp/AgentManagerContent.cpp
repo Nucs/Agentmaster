@@ -4,6 +4,7 @@
 #include "pch.h"
 #include "AgentManagerContent.h"
 
+#include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
@@ -33,6 +34,9 @@ using namespace winrt::Windows::UI::Xaml::Media; // brushes
 using namespace winrt::Windows::System; // DispatcherQueue, VirtualKey
 using namespace winrt::Microsoft::Terminal::Settings::Model;
 using namespace Agentmaster;
+// The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
+// helpers below (e.g. TimingText) can call it unqualified too.
+using winrt::TerminalApp::implementation::AgentSetTip;
 
 namespace
 {
@@ -289,7 +293,7 @@ namespace
             return nullptr;
         }
         auto t = Text(winrt::hstring{ s }, 10, false, 0.45);
-        ToolTipService::SetToolTip(t, winrt::box_value(winrt::hstring{ kTimingTooltip }));
+        AgentSetTip(t, winrt::hstring{ kTimingTooltip });
         return t;
     }
 
@@ -1012,7 +1016,7 @@ namespace winrt::TerminalApp::implementation
             _reopenBtn = Button{};
             _reopenBtn.Content(winrt::box_value(L"Reopen Windows"));
             _reopenBtn.Visibility(Visibility::Collapsed);
-            ToolTipService::SetToolTip(_reopenBtn, winrt::box_value(L"Reopen previously-saved windows that aren't currently open"));
+            AgentSetTip(_reopenBtn, L"Reopen previously-saved windows that aren't currently open");
             _reopenBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnReopenWindows(); });
             bar.Children().Append(_reopenBtn);
 
@@ -1024,7 +1028,7 @@ namespace winrt::TerminalApp::implementation
                 cog.Glyph(L"\xE713"); // Settings (cog)
                 _settingsBtn.Content(cog);
             }
-            ToolTipService::SetToolTip(_settingsBtn, winrt::box_value(L"Settings"));
+            AgentSetTip(_settingsBtn, L"Settings");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             bar.Children().Append(_settingsBtn);
 
@@ -1050,7 +1054,7 @@ namespace winrt::TerminalApp::implementation
             // Placed AFTER the Settings cog (alongside Pause Autopilot).
             _archivedBtn = Button{};
             _archivedBtn.Content(winrt::box_value(L"Archived"));
-            ToolTipService::SetToolTip(_archivedBtn, winrt::box_value(L"Restore archived (closed) sessions"));
+            AgentSetTip(_archivedBtn, L"Restore archived (closed) sessions");
             _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openArchiveHandler) { _openArchiveHandler(); } });
             bar.Children().Append(_archivedBtn);
 
@@ -1058,7 +1062,7 @@ namespace winrt::TerminalApp::implementation
             // EVERY session on the machine in a selectable window, searchable. RIGHT AFTER Archived.
             _sessionsBtn = Button{};
             _sessionsBtn.Content(winrt::box_value(L"Sessions"));
-            ToolTipService::SetToolTip(_sessionsBtn, winrt::box_value(L"Browse + search ALL Claude Code sessions on this machine (last month by default)"));
+            AgentSetTip(_sessionsBtn, L"Browse + search ALL Claude Code sessions on this machine (last month by default)");
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             bar.Children().Append(_sessionsBtn);
 
@@ -1084,7 +1088,7 @@ namespace winrt::TerminalApp::implementation
             _boardScopeBtn = Button{};
             _boardScopeBtn.FontSize(11);
             _boardScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            ToolTipService::SetToolTip(_boardScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows. One state with the Explorer Tree's toggle (EXTERNAL there reads as GLOBAL here); persisted per window."));
+            AgentSetTip(_boardScopeBtn, L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows. One state with the Explorer Tree's toggle (EXTERNAL there reads as GLOBAL here); persisted per window.");
             _boardScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _SetTreeScope(_treeScope == TreeScope::Local ? TreeScope::Global : TreeScope::Local);
             });
@@ -1153,7 +1157,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn = Button{};
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                ToolTipService::SetToolTip(_treeScopeBtn, winrt::box_value(L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows; EXTERNAL: observe-only claudes in other hosts (right-click a row: Adopt / Open New Session Here / Bring Window To Front)"));
+                AgentSetTip(_treeScopeBtn, L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows; EXTERNAL: observe-only claudes in other hosts (right-click a row: Adopt / Open New Session Here / Bring Window To Front)");
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
                 _UpdateTreeScopeButton();
@@ -1165,7 +1169,7 @@ namespace winrt::TerminalApp::implementation
                 _treeSortBtn = Button{};
                 _treeSortBtn.FontSize(11);
                 _treeSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                ToolTipService::SetToolTip(_treeSortBtn, winrt::box_value(L"Sort \x2014 NEWEST / OLDEST / MOST ACTIVE (currently-running first) / A\x2013Z / BY PID (group by host window/shell \x2014 same as the pid underline color \x2014 then most active). Applies to every scope; global \x2014 it persists and applies to all windows."));
+                AgentSetTip(_treeSortBtn, L"Sort \x2014 NEWEST / OLDEST / MOST ACTIVE (currently-running first) / A\x2013Z / BY PID (group by host window/shell \x2014 same as the pid underline color \x2014 then most active). Applies to every scope; global \x2014 it persists and applies to all windows.");
                 _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
                 hdrow.Children().Append(_treeSortBtn);
                 _UpdateTreeSortButton();
@@ -1179,7 +1183,7 @@ namespace winrt::TerminalApp::implementation
                 _treeRefreshBtn.FontSize(11);
                 _treeRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
                 _treeRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
-                ToolTipService::SetToolTip(_treeRefreshBtn, winrt::box_value(L"Refresh \x2014 reload the tree's data for the current scope (LOCAL / GLOBAL / EXTERNAL): re-survey now + redraw."));
+                AgentSetTip(_treeRefreshBtn, L"Refresh \x2014 reload the tree's data for the current scope (LOCAL / GLOBAL / EXTERNAL): re-survey now + redraw.");
                 _treeRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                     _Refresh(); // immediate redraw from current data (recomputes the "ago" timing)
                     if (_refreshHandler)
@@ -1261,7 +1265,7 @@ namespace winrt::TerminalApp::implementation
                     btn.Content(glyph);
                     btn.Padding(Thickness{ 9, 6, 9, 6 });
                     btn.VerticalAlignment(VerticalAlignment::Top);
-                    ToolTipService::SetToolTip(btn, winrt::box_value(tip));
+                    AgentSetTip(btn, tip);
                     btn.Click([fn](const IInspectable&, const RoutedEventArgs&) { fn(); });
                     return btn;
                 };
@@ -1364,7 +1368,7 @@ namespace winrt::TerminalApp::implementation
                 _autopilotBtn = Button{};
                 _autopilotBtn.FontSize(11);
                 _autopilotBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                ToolTipService::SetToolTip(_autopilotBtn, winrt::box_value(L"Autopilot \x2014 click to cycle Off / Semi-auto / Full for the selected session"));
+                AgentSetTip(_autopilotBtn, L"Autopilot \x2014 click to cycle Off / Semi-auto / Full for the selected session");
                 _autopilotBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutopilot(); });
                 headerLabel.Children().Append(_autopilotBtn);
                 _UpdateAutopilotButton(AutopilotMode::Off, false);
@@ -1510,7 +1514,7 @@ namespace winrt::TerminalApp::implementation
                 auto meText = Text(winrt::hstring{ me }, 10, false, 0.55);
                 if (!s.presenceStatus.empty())
                 {
-                    ToolTipService::SetToolTip(meText, winrt::box_value(L"hb = claude's own heartbeat (busy/idle/waiting), observer-validated — independent of the hook-derived state dot"));
+                    AgentSetTip(meText, L"hb = claude's own heartbeat (busy/idle/waiting), observer-validated — independent of the hook-derived state dot");
                 }
                 stack.Children().Append(meText);
             }
@@ -2741,7 +2745,7 @@ namespace winrt::TerminalApp::implementation
                     underline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
                     underline.HorizontalAlignment(HorizontalAlignment::Stretch); // span the "pid N" width
                     underline.Background(SolidColorBrush{ WindowKeyColor(key) });
-                    ToolTipService::SetToolTip(underline, winrt::box_value(winrt::hstring{ L"Host window/shell pid " } + winrt::to_hstring(key) + L" \x2014 rows with the same underline color share a terminal window/tab"));
+                    AgentSetTip(underline, winrt::hstring{ L"Host window/shell pid " } + winrt::to_hstring(key) + L" \x2014 rows with the same underline color share a terminal window/tab");
                     pidCol.Children().Append(underline);
                     row.Children().Append(pidCol);
                 }
@@ -2795,7 +2799,7 @@ namespace winrt::TerminalApp::implementation
 
         MenuFlyoutItem adopt;
         adopt.Text(L"Adopt");
-        ToolTipService::SetToolTip(adopt, winrt::box_value(L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)"));
+        AgentSetTip(adopt, L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)");
         adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
@@ -2816,7 +2820,7 @@ namespace winrt::TerminalApp::implementation
         // conversation — distinct from Adopt, which resumes the external's existing conversation).
         MenuFlyoutItem openHere;
         openHere.Text(L"Open New Session Here");
-        ToolTipService::SetToolTip(openHere, winrt::box_value(L"Launch a managed Claude session in this directory (a new, independent conversation)"));
+        AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
         openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
@@ -2839,7 +2843,7 @@ namespace winrt::TerminalApp::implementation
         // before foreground is handed to the other window.
         MenuFlyoutItem bringFront;
         bringFront.Text(L"Bring Window To Front");
-        ToolTipService::SetToolTip(bringFront, winrt::box_value(L"Unminimize + foreground the window hosting this claude; a Windows Terminal host also gets its tab selected (best-effort)"));
+        AgentSetTip(bringFront, L"Unminimize + foreground the window hosting this claude; a Windows Terminal host also gets its tab selected (best-effort)");
         bringFront.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
@@ -3060,7 +3064,7 @@ namespace winrt::TerminalApp::implementation
         // is fixed at launch).
         MenuFlyoutItem openHere;
         openHere.Text(L"Open New Session Here");
-        ToolTipService::SetToolTip(openHere, winrt::box_value(L"Launch a managed Claude session in this directory (a new, independent conversation)"));
+        AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
         openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {

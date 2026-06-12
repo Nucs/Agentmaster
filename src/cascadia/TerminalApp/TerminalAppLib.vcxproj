@@ -170,6 +170,7 @@
     <!-- Agentmaster -->
     <ClInclude Include="AgentManagerContent.h" />
     <ClInclude Include="AgentStatusColors.h" />
+    <ClInclude Include="AgentTipHelpers.h" />
     <ClInclude Include="AgentTabOverlay.h" />
     <ClInclude Include="AgentMaster\SessionModels.h" />
     <ClInclude Include="AgentMaster\HookEvents.h" />

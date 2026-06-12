@@ -29,6 +29,7 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
 #include "AgentMaster/Persistence.h" // GetDirColor / AutoDirColorHex (the per-dir color chip)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (detail prompts)
@@ -193,84 +194,20 @@ namespace winrt::TerminalApp::implementation
             col(48, GridUnitType::Pixel); // hits
         }
 
-        // Attach a hover tooltip wrapped in an explicit ToolTip object — NOT a boxed string —
-        // and close it from the element's own PointerExited. ToolTipService's auto-dismiss
-        // bookkeeping is unreliable under XAML Islands (a tip routinely outlives the hover;
-        // MinMaxCloseControl fights the same bug for the caption buttons), and a boxed-string
-        // tip can't even be reached programmatically (GetToolTip returns the string, not a
-        // ToolTip). The forced IsOpen(false) rides the ToolTip template's Closed fade.
+        // Hover tooltips with working dismissal — TU-local names over the ONE shared recipe
+        // (AgentTipHelpers.h: an explicit ToolTip closed on the owner's PointerExited +
+        // Unloaded; the sweep walks Panel/Border/Popup/ContentControl — ScrollViewer is a
+        // ContentControl, and the rows/detail hosts live inside ScrollViewers).
         void SessSetTip(const UIElement& el, const winrt::hstring& tip)
         {
-            if (tip.empty())
-            {
-                return;
-            }
-            ToolTip t;
-            t.Content(winrt::box_value(tip));
-            ToolTipService::SetToolTip(el, t);
-            el.PointerExited([](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-                // Popup open/close is NOT a tree mutation — safe synchronously in a pointer
-                // handler (the range-popup card's PointerExited does the same).
-                if (const auto owner = s.try_as<UIElement>())
-                {
-                    if (const auto tt = ToolTipService::GetToolTip(owner))
-                    {
-                        if (const auto open = tt.try_as<ToolTip>())
-                        {
-                            open.IsOpen(false);
-                        }
-                    }
-                }
-            });
+            AgentSetTip(el, tip);
         }
 
-        // Force-close every SessSetTip tooltip under root — for hosts about to Clear() or
-        // collapse. Removing (or hiding) a hovered element ORPHANS its open tip: tooltips are
-        // popups rendered in the popup root, so no PointerExited ever comes to close them and
-        // the tip floats over whatever shows next.
+        // Force-close every tooltip under root — for hosts about to Clear() or be HIDDEN
+        // (a Visibility toggle doesn't unload; a collapsed host does not hide a popup).
         void SessCloseTipsIn(const UIElement& root)
         {
-            if (const auto tt = ToolTipService::GetToolTip(root))
-            {
-                if (const auto open = tt.try_as<ToolTip>())
-                {
-                    open.IsOpen(false);
-                }
-            }
-            if (const auto panel = root.try_as<Panel>())
-            {
-                for (const auto& child : panel.Children())
-                {
-                    SessCloseTipsIn(child);
-                }
-            }
-            else if (const auto border = root.try_as<Border>())
-            {
-                if (const auto child = border.Child())
-                {
-                    SessCloseTipsIn(child);
-                }
-            }
-            else if (const auto popup = root.try_as<Primitives::Popup>())
-            {
-                if (const auto child = popup.Child())
-                {
-                    SessCloseTipsIn(child);
-                }
-            }
-            else if (const auto content = root.try_as<ContentControl>())
-            {
-                // ScrollViewer is a ContentControl: the rows/detail hosts live INSIDE
-                // ScrollViewers, so the page-wide sweeps (hide / tab-switch) must pass
-                // through them to reach the row + detail tips.
-                if (const auto inner = content.Content())
-                {
-                    if (const auto child = inner.try_as<UIElement>())
-                    {
-                        SessCloseTipsIn(child);
-                    }
-                }
-            }
+            AgentCloseTipsIn(root);
         }
 
         // Build the toggle buttons of the search bar: a compact glyph ToggleButton with a tooltip.

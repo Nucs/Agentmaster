@@ -17,6 +17,7 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir (record-file stat) / ClaudeProjectsDir (transcript path)
 #include "AgentMaster/Engine.h" // RecoverableWindows
 #include "AgentMaster/Persistence.h" // SaveSessions (branch backfill)
@@ -180,83 +181,21 @@ namespace winrt::TerminalApp::implementation
 
         // Attach a hover tooltip to any element; no-op on empty (a cell with nothing beyond what it
         // already shows stays tooltip-less). The table's cells truncate (CharacterEllipsis) or
-        // abbreviate ("3h", "3/7", "W2") — the tooltip carries the full value.
-        // The tip is an explicit ToolTip object — NOT a boxed string — closed from the element's
-        // own PointerExited: ToolTipService's auto-dismiss bookkeeping is unreliable under XAML
-        // Islands (a tip outlives the hover; MinMaxCloseControl fights the same bug for the
-        // caption buttons), and a boxed-string tip can't be reached programmatically (GetToolTip
-        // returns the string, not a ToolTip). Popup open/close is not a tree mutation — safe
-        // synchronously in a pointer handler (the defer rule is about tree changes).
+        // abbreviate ("3h", "3/7", "W2") — the tooltip carries the full value. TU-local name over
+        // the ONE shared dismissal recipe (AgentTipHelpers.h: an explicit ToolTip closed on the
+        // owner's PointerExited + Unloaded — ToolTipService's own auto-dismiss is unreliable
+        // under XAML Islands).
         void ArchiveSetTip(const winrt::Windows::UI::Xaml::UIElement& el, const std::wstring& tip)
         {
-            if (tip.empty())
-            {
-                return;
-            }
-            winrt::Windows::UI::Xaml::Controls::ToolTip t;
-            t.Content(winrt::box_value(winrt::hstring{ tip }));
-            winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, t);
-            el.PointerExited([](const winrt::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-                if (const auto owner = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
-                {
-                    if (const auto tt = winrt::Windows::UI::Xaml::Controls::ToolTipService::GetToolTip(owner))
-                    {
-                        if (const auto open = tt.try_as<winrt::Windows::UI::Xaml::Controls::ToolTip>())
-                        {
-                            open.IsOpen(false);
-                        }
-                    }
-                }
-            });
+            AgentSetTip(el, winrt::hstring{ tip });
         }
 
-        // Force-close every ArchiveSetTip tooltip under root — for hosts about to Clear() or
-        // collapse. Removing (or hiding) a hovered element ORPHANS its open tip: tooltips are
-        // popups rendered in the popup root, so no PointerExited ever comes to close them and
-        // the tip floats over whatever shows next.
+        // Force-close every tooltip under root — for hosts about to Clear() or be HIDDEN
+        // (a Visibility toggle doesn't unload; a collapsed host does not hide a popup). The
+        // shared walk passes through ScrollViewers (ContentControl) to the rows/detail hosts.
         void ArchiveCloseTipsIn(const winrt::Windows::UI::Xaml::UIElement& root)
         {
-            if (const auto tt = winrt::Windows::UI::Xaml::Controls::ToolTipService::GetToolTip(root))
-            {
-                if (const auto open = tt.try_as<winrt::Windows::UI::Xaml::Controls::ToolTip>())
-                {
-                    open.IsOpen(false);
-                }
-            }
-            if (const auto panel = root.try_as<winrt::Windows::UI::Xaml::Controls::Panel>())
-            {
-                for (const auto& child : panel.Children())
-                {
-                    ArchiveCloseTipsIn(child);
-                }
-            }
-            else if (const auto border = root.try_as<winrt::Windows::UI::Xaml::Controls::Border>())
-            {
-                if (const auto child = border.Child())
-                {
-                    ArchiveCloseTipsIn(child);
-                }
-            }
-            else if (const auto popup = root.try_as<winrt::Windows::UI::Xaml::Controls::Primitives::Popup>())
-            {
-                if (const auto child = popup.Child())
-                {
-                    ArchiveCloseTipsIn(child);
-                }
-            }
-            else if (const auto content = root.try_as<winrt::Windows::UI::Xaml::Controls::ContentControl>())
-            {
-                // ScrollViewer is a ContentControl: the rows/detail hosts live INSIDE
-                // ScrollViewers, so the page-wide sweeps (hide / tab-switch) must pass
-                // through them to reach the row + detail tips.
-                if (const auto inner = content.Content())
-                {
-                    if (const auto child = inner.try_as<winrt::Windows::UI::Xaml::UIElement>())
-                    {
-                        ArchiveCloseTipsIn(child);
-                    }
-                }
-            }
+            AgentCloseTipsIn(root);
         }
 
         // The W{n} chip's tooltip: what that saved window IS — tab composition + geometry from its
