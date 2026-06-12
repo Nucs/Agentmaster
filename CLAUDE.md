@@ -102,8 +102,11 @@ kills the threads before they unregister leaves the full set). So a window close
 **pruned** from the manifest (won't be re-offered) while its record stays on disk. The Manager's
 **"Reopen Windows (N)"** recover button (next to Archived, shown when N>0 == records-minus-live,
 `Engine::RecoverableWindows`) is the "if I answered No" path: it reopens each not-currently-open record
-via `agentmaster.exe -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows` ShellExecutes our execution
-alias **by name** — not the upstream `wt.exe`, which doesn't exist for our package — and the
+via `<our alias> -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows` ShellExecutes
+**`_AgentmasterReopenTarget()`** — the per-IDENTITY execution alias **by name**, `agentmaster.exe`
+release / `agentmasterdev.exe` dev, so side-by-side installs never reopen into each other; not the
+upstream `wt.exe`, which doesn't exist for our packages; unpackaged falls back to the neighbor
+`WindowsTerminal.exe` — and the
 single-instance handoff routes it back to the Emperor) — the runtime analog of the Emperor loop. A
 window claimed-then-closed THIS session is **re-claimed** (its real id + lens) from a second
 **reclaimable pool** (`Engine::reclaimableWindowRecords`, fed by `UnregisterLiveWindow`, drawn by id
@@ -316,7 +319,8 @@ What works, by area:
 - **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
   type yourself into any tab (the WT `+` button → `cd` → `claude`) is managed too, not just
   Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env
-  and prepend a transparent **`claude` PATH shim** (`~/.agentmaster/shim/` — `claude.cmd` for
+  and prepend a transparent **`claude` PATH shim** (`<profile>\shim\` — the ACTIVE profile dir,
+  default `~/.agentmaster/shim/`; `claude.cmd` for
   cmd/PowerShell + a POSIX `claude`) that injects `--settings <ours>` then execs the real claude
   (`ResolveRealClaude`, resolved BEFORE the PATH prepend so it never finds the shim); every new
   tab is *meant* to inherit this env so a bare `claude` self-wires for hooks (but WT's env
@@ -584,8 +588,9 @@ What works, by area:
   mid-restore) rolls the prompt back to `Pending` rather than stranding a phantom `Sent` — on **every** inject
   path: auto-send, the SemiAuto `Confirm`, and the Manager's Send-now (Rule #4).
 - **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
-  templates + the path-picker's recent-dirs MRU (de)serialize to JSON under
-  `%USERPROFILE%\.agentmaster\`; sessions autosave on change. **Lifecycle = Open ⇄ Archived**
+  templates + the path-picker's recent-dirs MRU (de)serialize to JSON under the **ACTIVE
+  PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`, dev package
+  `…\.agentmaster-dev\`; PROFILES.md); sessions autosave on change. **Lifecycle = Open ⇄ Archived**
   (the transient `SessionInfo::live` flag, never persisted): Open == has a live tab/claude this
   run (on the Board); Archived == shut down but kept restorable (behind the Archived button).
   On startup `_RestoreClaudeSessions()` loads each saved session into the registry as
@@ -687,7 +692,12 @@ What works, by area:
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
-  `defaultLaunchDir` seeds the cwd box). It also carries non-cog global state set elsewhere in the
+  `defaultLaunchDir` seeds the cwd box). A **PROFILE row** (read-only path + **Change profile
+  folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
+  deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored
+  in the `.agentmaster.profiles` choice file / env, never inside the profile it selects); a change
+  applies on the NEXT start and is shown staged as `current → new (after restart)` until then
+  (PROFILES.md). It also carries non-cog global state set elsewhere in the
   UI but persisted through the same file: `showTabOverlay`, **`treeSort`** (the Explorer Tree's
   NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
   the cog), and **`archiveSplitFraction`** (the Archive page's table|detail split as the table's
@@ -696,7 +706,9 @@ What works, by area:
   persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
   behavior, so a missing `settings.json` (or any unset field) is a no-op.
 
-Follow-ups (not blocking): feed `pauseOnHumanInput` from a TermControl input tap;
+Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellext CLSIDs — the one
+shared seam left between the release and dev packages; distinct dev iconography; profile
+export/import); feed `pauseOnHumanInput` from a TermControl input tap;
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
 **bulk Restore** (the Archive page's "Restore selected") re-opens tabs lazily (a non-foreground restored tab starts its `claude` only
 when first focused — WT's lazy-background-tab behavior; restore one at a time to force start);
@@ -1119,20 +1131,27 @@ build **binlog uploads as an artifact** to diagnose the first run.
   it and fails with a file-in-use lock (`0x80073CF6 / 0x80070020`) when its
   `OpenConsoleProxy.dll` is loaded. Our distinct `Agentmaster` identity sidesteps this.
 - **Upstream "wt identity" assumptions are package-BLIND and break under our rename** (commit
-  `404c04f72`). Several WT helpers hardcode the `wt.exe`/`WindowsTerminal` identity and silently
-  misbehave for the `Agentmaster` package: (1) **`GetWtExePath()`** (`WtExeUtils.h`) resolves
-  `<PFN>\wt.exe`/`wtd.exe`, which **doesn't exist** (our manifest registers the **`agentmaster.exe`**
-  execution alias) — so every launcher built on it (`_OpenNewWindow`, the Reopen-Windows button, Jump
+  `404c04f72`; per-identity since the profiles split). Several WT helpers hardcode the
+  `wt.exe`/`WindowsTerminal` identity and silently
+  misbehave for our packages: (1) **`GetWtExePath()`** (`WtExeUtils.h`) resolves
+  `<PFN>\wt.exe`/`wtd.exe`, which **doesn't exist** (our manifests register the **`agentmaster.exe`**
+  / **`agentmasterdev.exe`** execution aliases) — so every launcher built on it (`_OpenNewWindow`,
+  the Reopen-Windows button, Jump
   List shortcuts) silently no-ops; (2) **`windowClassName`** (`WindowEmperor.cpp` — it seeds BOTH the
   single-instance **mutex** and the **window class**) is built from `WT_BRANDING` only, so our Debug
   "Windows Terminal Dev" branding **shared one single-instance identity with the real
   `WindowsTerminalDev`** (a launch could hand its commandline to the *other* window — defeating the
-  whole point of the rename). Fix (both, package-aware): `GetWtExePath` picks `agentmaster.exe` when the
-  package family starts with `Agentmaster`; `windowClassName` appends `GetCurrentPackageFamilyName()`
-  for packaged builds. So coexistence with `WindowsTerminalDev` needs a distinct package identity (above)
-  AND package-distinct **runtime** identifiers. Launch the alias by **name** (`agentmaster.exe`) — it
+  whole point of the rename). Fix (both, package-aware): `GetWtExePath` picks the alias by PFN
+  prefix — **`AgentmasterDev` FIRST, then `Agentmaster`** (the former contains the latter as a
+  prefix; same ordering rule in `_AgentmasterReopenTarget`) —
+  and `windowClassName` appends `GetCurrentPackageFamilyName()`
+  for packaged builds. So coexistence (with `WindowsTerminalDev` AND between our own release/dev
+  pair) needs distinct package identities (above)
+  AND package-distinct **runtime** identifiers. Launch the alias by **name** (`agentmaster.exe` /
+  `agentmasterdev.exe` — per-identity, so it can never activate the other install) — it
   resolves on PATH + follows the APPEXECLINK reparse and hands off; a full reparse-path
-  `CreateProcess`/`Start-Process` bypasses the alias and cascades a fresh window instead.
+  `CreateProcess`/`Start-Process` bypasses the alias and cascades a fresh window instead
+  (ShellExecuteEx on the full `<PFN>\<alias>` path is the verified exception — see `GetWtExePath`).
 - **Closing instances to relink.** Auto-closing **our** dev instance for the deploy inner
   loop is standing-authorized ("always auto deploy"): filter by
   `ExecutablePath -like 'K:\source\Agentmaster\*'` (matches our `WindowsTerminal.exe` *and*
@@ -1151,10 +1170,13 @@ build **binlog uploads as an artifact** to diagnose the first run.
 - **MSIX virtualizes a packaged app's `%LOCALAPPDATA%`** to the package LocalCache, but the
   spawned **`claude.exe` is external** and resolves paths against the real filesystem. So
   the hooks files + `--settings` path **must** live somewhere un-virtualized that both
-  agree on — Agentmaster uses **`%USERPROFILE%\.agentmaster`** (`AgentmasterStateDir()`).
+  agree on — Agentmaster anchors the **profile defaults under `%USERPROFILE%`**
+  (`AgentmasterStateDir()` == the ACTIVE PROFILE: default `~\.agentmaster`, dev package
+  `~\.agentmaster-dev`; a Browse…-picked profile inherits this constraint — it must be a real
+  filesystem folder, which `FOS_FORCEFILESYSTEM` enforces).
   Using `%LOCALAPPDATA%` here silently breaks hooks for spawned sessions (the app writes to
   LocalCache; Claude reads the empty real path). Verified live: with the fix, a spawned
-  session's `SessionStart`/`UserPromptSubmit` reach the registry (`~/.agentmaster/hooks.log`).
+  session's `SessionStart`/`UserPromptSubmit` reach the registry (`<profile>\hooks.log`).
 - **`--dangerously-skip-permissions` also skips the startup "trust this folder" dialog.**
   Spawned sessions run with the flag by default (`AppSettings.skipPermissions`): besides
   auto-accepting tool prompts, permission mode `bypassPermissions` makes claude skip the
@@ -1334,6 +1356,23 @@ build **binlog uploads as an artifact** to diagnose the first run.
     until its first prompt — §11d) rather than collapsing it onto a stale leftover transcript. An
     explicit `--session-id` / `--resume <guid>` is authoritative and wins (collision-free, known
     before the transcript exists).
+15. **One profile per install, resolved ONCE, before ANY state read; everything persists inside
+    it.** The WindowEmperor resolves the profile (and shows the first-launch picker) **after**
+    winning the single-instance handoff and **before** the first settings/state read — never show
+    the picker from a handed-off process or a `-Embedding` (defterm) activation, and never read or
+    write persisted state (engine files, Terminal settings, window records, the reopen scan)
+    through any path that isn't `AgentmasterStateDir()` / the `AGENTMASTER_PROFILE`-redirected
+    `GetBaseSettingsPath()`. The resolution is cached for the process lifetime — a profile change
+    (the cog's Change…) applies on restart only; never re-home state mid-run. The ONLY data outside
+    a profile: the `.agentmaster.profiles` choice file + the env override (the pointer must live
+    outside what it points at) and the fixed `~/.agentmaster/locks/` build mutex (it guards the ONE
+    build tree, not a profile). Library-side resolution (`ProfileBootstrap::ResolveProfileDir`)
+    must never show UI — headless hosts (tests, tools) silently land on the per-identity default,
+    which for unpackaged runs is the historical `~/.agentmaster` (don't regress that — it's what
+    keeps the test harness and old tooling stable). Generated artifacts that embed paths or live
+    endpoints (the shim, hooks-settings, the forwarder's `bridge.json` discovery) must be derived
+    from the ACTIVE profile at engine init — a fixed `~/.agentmaster` literal in generated content
+    is a cross-instance routing bug (the forwarder had exactly that).
 
 ## Conventions
 
