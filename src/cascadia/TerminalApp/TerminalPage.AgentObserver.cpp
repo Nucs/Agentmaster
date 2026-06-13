@@ -925,11 +925,22 @@ namespace winrt::TerminalApp::implementation
                     kind = L"cmd";
                     break;
                 case ::Agentmaster::TabActivity::Codex:
-                    // Codex is observe-only (Phase C1) — enrich the badge with the model when resolved:
-                    // "○ codex · gpt-5.5 · unlinked" (the kind string is the badge's idempotency key, so
-                    // it re-renders once the model lands).
-                    kind = arow.model.empty() ? std::wstring{ L"codex" } : (std::wstring{ L"codex  \x00B7  " } + arow.model);
+                {
+                    // Codex is observe-only — enrich the badge with the model + turn state (Phase C2):
+                    // "○ codex · gpt-5.5 · running · unlinked" (the kind string is the badge's
+                    // idempotency key, so it re-renders as the model lands / the turn flips).
+                    std::wstring k = arow.model.empty() ? std::wstring{ L"codex" } : (std::wstring{ L"codex  \x00B7  " } + arow.model);
+                    if (arow.codexState == ::Agentmaster::CodexState::Running)
+                    {
+                        k += L"  \x00B7  running";
+                    }
+                    else if (arow.codexState == ::Agentmaster::CodexState::Waiting)
+                    {
+                        k += L"  \x00B7  waiting";
+                    }
+                    kind = std::move(k);
                     break;
+                }
                 case ::Agentmaster::TabActivity::ClaudeCode:
                     kind = L"claude"; // activity caught the claude before correlation did
                     break;

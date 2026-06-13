@@ -139,6 +139,11 @@ namespace Agentmaster
             int64_t createdUnixMs{};
             int64_t lastActivityUnixMs{};
             bool resolved{}; // the rollout was found + head-read once (don't re-resolve a known one)
+            // Phase C2 turn-state: a byte cursor into the rollout + the last-derived state. The cursor
+            // advances past complete lines each survey (ReadCodexStateDelta), so steady-state is a few
+            // KB read per active codex; gated on a changed mtime so an idle codex does zero IO.
+            CodexState state{ CodexState::Unknown };
+            int64_t rolloutOffset{ 0 };
         };
         std::unordered_map<uint32_t, CodexInfo> _codexInfoByPid;
         std::vector<std::pair<uint32_t, int64_t>> _lastCodexAlive; // (pid,start) of codex seen last full survey — folded into the O7 liveness set so a codex birth/exit forces a full survey

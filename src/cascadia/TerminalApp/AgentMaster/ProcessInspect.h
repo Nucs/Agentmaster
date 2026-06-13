@@ -357,6 +357,41 @@ namespace Agentmaster
     // file) -> ParseCodexRolloutText. Filesystem only. (Phase C1)
     CodexRolloutInfo ReadCodexRolloutInfo(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts);
 
+    // ===== Codex turn-state (Phase C2): rollout-tail -> Running / Waiting / Idle ===============
+    // Codex's turn lifecycle is EXPLICIT in the rollout (no stop_reason guessing): the event_msg
+    // payloads `task_started` (open a turn) and `task_complete` / `turn_aborted` / `thread_rolled_back`
+    // (close it). Rollout timestamps are MONOTONIC (verified across the live corpus), so the LAST
+    // boundary in file order is the current state — a caller need only feed forward deltas and keep
+    // the last non-None result. (No approval/error event exists in the rollout, so this is a 3-state
+    // floor; NeedsApproval/Error are not PULL-derivable — that is C3.)
+
+    // One classified rollout line's turn-boundary verdict.
+    struct CodexBoundary
+    {
+        bool isBoundary{}; // true iff this line is a task_started / task_complete / turn_aborted / thread_rolled_back
+        CodexState state{ CodexState::Unknown }; // Running for task_started; Waiting for the three closers
+        std::wstring lastAgentMessage; // task_complete.last_agent_message (else empty)
+    };
+
+    // PURE + total: classify ONE rollout JSONL line. A RolloutLine {type,payload}; only an
+    // `event_msg` whose payload.type is a turn-boundary returns isBoundary=true. Trailing CR/LF are
+    // tolerated; a non-event_msg / non-JSON / non-boundary line returns {false, Unknown, ""}. (The
+    // testable heart of ReadCodexStateDelta.)
+    CodexBoundary ClassifyCodexLine(std::wstring_view jsonLine);
+
+    // OS-touching: derive a codex rollout's CURRENT turn state by reading forward from `offsetInOut`
+    // (advancing the byte cursor past complete lines) — or, on FIRST sight (offsetInOut <= 0), a
+    // rotated/truncated file (cursor past EOF), or a survey that fell too far behind, by SEEKING to
+    // the tail window and scanning only the last bytes (so first-sight state is instant on a multi-MB
+    // rollout instead of catching up a chunk per survey — the last boundary is always near EOF, since
+    // task_complete ends every at-rest session). Returns the LAST boundary's state seen this read,
+    // else `prior` (sticky — a quiet read keeps the known state). The caller (the S-lane, per codex
+    // pid) persists `offsetInOut` + the returned state in its CodexInfo cache and gates the call on a
+    // changed mtime, so steady-state cost is a few KB per active codex per survey, zero when idle.
+    // `lastAgentMessageOut` (optional) receives the latest task_complete message seen. Pure-IO; never
+    // writes. (Phase C2.)
+    CodexState ReadCodexStateDelta(std::wstring_view rolloutPath, int64_t& offsetInOut, CodexState prior, std::wstring* lastAgentMessageOut = nullptr);
+
     // ===== window activation: surface an external claude's hosting window (Manager UI) ======
 
     // The last path segment of a Windows/POSIX path ("K:\src\Agentmaster\" -> "Agentmaster";

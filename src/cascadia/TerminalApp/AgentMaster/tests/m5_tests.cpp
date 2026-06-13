@@ -2100,6 +2100,92 @@ static void TestCodexObserve()
 
         std::filesystem::remove_all(std::filesystem::path{ home }, ec);
     }
+
+    // ===== Phase C2: rollout-tail turn state (Running / Waiting / Idle) =====================
+    std::wprintf(L"Codex (Phase C2) turn-state from rollout tail:\n");
+
+    // --- ClassifyCodexLine: the pure per-line turn-boundary verdict ---
+    {
+        auto cl = [](const std::string& s) { return ClassifyCodexLine(std::wstring(s.begin(), s.end())); };
+        CHECK(cl(R"({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}})").isBoundary &&
+                  cl(R"({"type":"event_msg","payload":{"type":"task_started"}})").state == CodexState::Running,
+              "task_started -> Running boundary");
+        {
+            const auto b = cl(R"({"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"all done"}})");
+            CHECK(b.isBoundary && b.state == CodexState::Waiting, "task_complete -> Waiting boundary");
+            CHECK(b.lastAgentMessage == L"all done", "task_complete carries last_agent_message");
+        }
+        CHECK(cl(R"({"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}})").state == CodexState::Waiting, "turn_aborted -> Waiting");
+        CHECK(cl(R"({"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}})").state == CodexState::Waiting, "thread_rolled_back -> Waiting");
+        CHECK(!cl(R"({"type":"event_msg","payload":{"type":"user_message","message":"hi"}})").isBoundary, "user_message is not a turn boundary");
+        CHECK(!cl(R"({"type":"event_msg","payload":{"type":"token_count"}})").isBoundary, "token_count is not a boundary");
+        CHECK(!cl(R"({"type":"response_item","payload":{"type":"function_call"}})").isBoundary, "response_item is not a boundary");
+        CHECK(!cl("not json at all").isBoundary, "non-JSON line -> no boundary");
+        CHECK(!cl("").isBoundary, "empty line -> no boundary");
+    }
+
+    // --- ReadCodexStateDelta: forward byte-cursor + first-sight tail-seek + partial-line safety ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_codex_state_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ root }, ec);
+        const std::wstring path = root + L"\\rollout-state.jsonl";
+        const auto writeFile = [](const std::wstring& p, const std::string& b) {
+            const HANDLE h = ::CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                return;
+            }
+            DWORD wr = 0;
+            ::WriteFile(h, b.data(), static_cast<DWORD>(b.size()), &wr, nullptr);
+            ::CloseHandle(h);
+        };
+
+        const std::string turn1 =
+            R"({"type":"session_meta","payload":{"cwd":"K:/x"}})" "\n"
+            R"({"type":"turn_context","payload":{"model":"gpt-5.5"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"agent_message","message":"working"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"done 1"}})" "\n";
+        writeFile(path, turn1);
+        int64_t off = 0;
+        std::wstring lastMsg;
+        CHECK(ReadCodexStateDelta(path, off, CodexState::Unknown, &lastMsg) == CodexState::Waiting, "first read: tail ends on task_complete -> Waiting");
+        CHECK(lastMsg == L"done 1", "delta surfaces last_agent_message");
+        CHECK(off == static_cast<int64_t>(turn1.size()), "cursor advanced to EOF (whole file consumed)");
+
+        const int64_t offAtEof = off;
+        CHECK(ReadCodexStateDelta(path, off, CodexState::Waiting) == CodexState::Waiting && off == offAtEof, "no new bytes -> sticky state, cursor steady");
+
+        // A new turn OPENS (append task_started, no complete) -> Running, reading only the delta.
+        const std::string turn2open = turn1 +
+            R"({"type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"agent_message","message":"thinking"}})" "\n";
+        writeFile(path, turn2open);
+        CHECK(ReadCodexStateDelta(path, off, CodexState::Waiting) == CodexState::Running, "appended task_started (open turn) -> Running");
+
+        const std::string turn2done = turn2open +
+            R"({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","last_agent_message":"done 2"}})" "\n";
+        writeFile(path, turn2done);
+        CHECK(ReadCodexStateDelta(path, off, CodexState::Running) == CodexState::Waiting, "appended task_complete -> Waiting");
+
+        // First-sight (offset 0) tail-seek: a fresh reader derives state from the file end.
+        int64_t offRest = 0;
+        CHECK(ReadCodexStateDelta(path, offRest, CodexState::Unknown) == CodexState::Waiting, "fresh reader, at-rest file -> Waiting");
+        writeFile(path, turn2open); // a file whose last boundary is an OPEN turn
+        int64_t offMid = 0;
+        CHECK(ReadCodexStateDelta(path, offMid, CodexState::Unknown) == CodexState::Running, "fresh reader, mid-turn file -> Running");
+
+        // A partial trailing line (append in flight, no newline) is NOT consumed — the last COMPLETE
+        // boundary wins, and the cursor stops before the partial so the next read re-sees it whole.
+        writeFile(path, turn2done + R"({"type":"event_msg","payload":{"type":"task_started")"); // truncated, no newline
+        int64_t offPartial = 0;
+        CHECK(ReadCodexStateDelta(path, offPartial, CodexState::Unknown) == CodexState::Waiting, "partial trailing line ignored -> last complete boundary (Waiting) wins");
+
+        std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
 }
 
 static void TestProcessInspectLive()

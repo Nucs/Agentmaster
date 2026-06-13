@@ -196,6 +196,41 @@ namespace
         }
     }
 
+    // Phase C2: an OBSERVED Codex session's rollout-derived turn state -> the SAME status palette as
+    // managed sessions (Running blue / Waiting goldenrod / Idle-or-unknown gray). Codex exposes no
+    // NeedsApproval/Error via PULL (the rollout records neither — that is C3), so it maps onto a
+    // 3-state subset. Colors the External Codex row's state dot.
+    Color CodexStateColor(::Agentmaster::CodexState s)
+    {
+        switch (s)
+        {
+        case ::Agentmaster::CodexState::Running:
+            return Colors::DodgerBlue();
+        case ::Agentmaster::CodexState::Waiting:
+            return Colors::Goldenrod();
+        case ::Agentmaster::CodexState::Idle:
+        case ::Agentmaster::CodexState::Unknown:
+        default:
+            return Color{ 0xFF, 0x9E, 0x9E, 0x9E }; // the external observe-only gray
+        }
+    }
+
+    winrt::hstring CodexStateLabel(::Agentmaster::CodexState s)
+    {
+        switch (s)
+        {
+        case ::Agentmaster::CodexState::Running:
+            return L"running";
+        case ::Agentmaster::CodexState::Waiting:
+            return L"waiting-for-you";
+        case ::Agentmaster::CodexState::Idle:
+            return L"idle";
+        case ::Agentmaster::CodexState::Unknown:
+        default:
+            return L"observe-only";
+        }
+    }
+
     winrt::hstring StateLabel(SessionState s)
     {
         switch (s)
@@ -2040,7 +2075,25 @@ namespace winrt::TerminalApp::implementation
         {
             title = title.substr(0, 61) + L"\x2026";
         }
-        stack.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
+        // Phase C2: a Codex row leads its title with a state dot (rollout-derived turn state — blue
+        // running / gold waiting / gray idle). A Claude external carries no PULL state -> plain title.
+        if (ex.kind == AgentKind::Codex)
+        {
+            auto titleRow = StackPanel{};
+            titleRow.Orientation(Orientation::Horizontal);
+            titleRow.Spacing(6);
+            titleRow.VerticalAlignment(VerticalAlignment::Center);
+            auto sd = Text(L"\x25CF", 11, false, 1.0);
+            sd.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
+            AgentSetTip(sd, winrt::hstring{ L"Codex turn state: " } + CodexStateLabel(ex.codexState));
+            titleRow.Children().Append(sd);
+            titleRow.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
+            stack.Children().Append(titleRow);
+        }
+        else
+        {
+            stack.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
+        }
         // Agentmaster (Phase C1): a Codex row carries a teal "codex" agent pill so a mixed External
         // group reads at a glance (Claude is the implicit default — no pill, visuals unchanged).
         if (ex.kind == AgentKind::Codex)
@@ -2163,7 +2216,8 @@ namespace winrt::TerminalApp::implementation
             // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
             if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
                 a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid ||
-                a.kind != b.kind || a.sandbox != b.sandbox || a.approvalMode != b.approvalMode) // Phase C1: a codex row gaining its model/sandbox a tick after first sight triggers one refresh
+                a.kind != b.kind || a.sandbox != b.sandbox || a.approvalMode != b.approvalMode || // Phase C1: a codex row gaining its model/sandbox a tick after first sight triggers one refresh
+                a.codexState != b.codexState) // Phase C2: a Codex turn flip (running<->waiting) repaints the row's state dot
             {
                 same = false;
             }
@@ -2734,8 +2788,19 @@ namespace winrt::TerminalApp::implementation
                 auto row = StackPanel{};
                 row.Orientation(Orientation::Horizontal);
                 row.Spacing(6);
-                auto g = Text(L"\x25CF", 12, false, 1.0); // ● gray — external / observe-only
-                g.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E));
+                // ● state dot. A Claude external carries no PULL state -> gray (observe-only). For a
+                // Codex row (Phase C2) the rollout-derived turn state colors it: blue running / gold
+                // waiting / gray idle.
+                auto g = Text(L"\x25CF", 12, false, 1.0);
+                if (ex.kind == AgentKind::Codex)
+                {
+                    g.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
+                    AgentSetTip(g, winrt::hstring{ L"Codex turn state: " } + CodexStateLabel(ex.codexState));
+                }
+                else
+                {
+                    g.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E));
+                }
                 row.Children().Append(g);
                 // Agentmaster (Phase C1): a teal "codex" agent pill on Codex rows (Claude = default, no pill).
                 if (ex.kind == AgentKind::Codex)

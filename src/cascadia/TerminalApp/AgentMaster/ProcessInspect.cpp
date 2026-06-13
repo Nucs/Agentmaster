@@ -1946,6 +1946,162 @@ namespace Agentmaster
         ParseCodexRolloutText(Utf8ToWide(bytes), maxBytes != 0, maxPrompts, info);
         return info;
     }
+
+    // ===== Codex turn-state (Phase C2): rollout-tail -> Running / Waiting / Idle ===============
+
+    CodexBoundary ClassifyCodexLine(std::wstring_view jsonLine)
+    {
+        CodexBoundary b;
+        while (!jsonLine.empty() && (jsonLine.back() == L'\r' || jsonLine.back() == L'\n'))
+        {
+            jsonLine.remove_suffix(1);
+        }
+        if (jsonLine.empty())
+        {
+            return b;
+        }
+        const auto parsed = json::Parse(jsonLine);
+        if (!parsed || parsed->type != json::Value::Type::Obj)
+        {
+            return b;
+        }
+        const auto& obj = *parsed;
+        if (obj.StrAt(L"type") != L"event_msg") // only event_msg payloads carry the turn lifecycle
+        {
+            return b;
+        }
+        const auto* pl = obj.Find(L"payload");
+        if (!pl || pl->type != json::Value::Type::Obj)
+        {
+            return b;
+        }
+        const std::wstring pt = pl->StrAt(L"type");
+        if (pt == L"task_started")
+        {
+            b.isBoundary = true;
+            b.state = CodexState::Running; // a turn opened -> the agent is working
+        }
+        else if (pt == L"task_complete")
+        {
+            b.isBoundary = true;
+            b.state = CodexState::Waiting; // turn done -> waiting for the user
+            b.lastAgentMessage = pl->StrAt(L"last_agent_message");
+        }
+        else if (pt == L"turn_aborted" || pt == L"thread_rolled_back")
+        {
+            b.isBoundary = true;
+            b.state = CodexState::Waiting; // user-interrupted / rolled back -> the turn ended; waiting
+        }
+        return b;
+    }
+
+    CodexState ReadCodexStateDelta(std::wstring_view rolloutPath, int64_t& offsetInOut, CodexState prior, std::wstring* lastAgentMessageOut)
+    {
+        if (rolloutPath.empty())
+        {
+            return prior;
+        }
+        // The last bytes that always contain the most-recent boundary (task_complete ends every
+        // at-rest session; turns are frequent enough that ~1 MiB covers several on the heaviest
+        // sessions measured). First sight / fall-behind seeks here; a steady forward delta is tiny.
+        constexpr int64_t kCodexTailWindowBytes = 1 << 20; // 1 MiB
+        constexpr int64_t kCodexMaxCatchupBytes = 4 << 20; // a forward delta beyond this -> tail-seek instead
+
+        const std::wstring path{ rolloutPath };
+        const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return prior;
+        }
+        LARGE_INTEGER szli{};
+        if (!::GetFileSizeEx(h, &szli) || szli.QuadPart <= 0)
+        {
+            ::CloseHandle(h);
+            return prior;
+        }
+        const int64_t size = szli.QuadPart;
+
+        int64_t start = offsetInOut;
+        bool skipPartialLead = false;
+        if (start <= 0 || start > size || (size - start) > kCodexMaxCatchupBytes)
+        {
+            start = (size > kCodexTailWindowBytes) ? (size - kCodexTailWindowBytes) : 0;
+            skipPartialLead = (start > 0); // a tail seek lands mid-line — drop the partial leading line
+        }
+        if (start >= size) // nothing new since the last read
+        {
+            ::CloseHandle(h);
+            return prior;
+        }
+
+        LARGE_INTEGER mv{};
+        mv.QuadPart = start;
+        if (!::SetFilePointerEx(h, mv, nullptr, FILE_BEGIN))
+        {
+            ::CloseHandle(h);
+            return prior;
+        }
+        std::string buf(static_cast<size_t>(size - start), '\0');
+        size_t got = 0;
+        while (got < buf.size())
+        {
+            DWORD rd = 0;
+            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(buf.size() - got, 1u << 20));
+            if (!::ReadFile(h, buf.data() + got, chunk, &rd, nullptr) || rd == 0)
+            {
+                break;
+            }
+            got += rd;
+        }
+        buf.resize(got);
+        ::CloseHandle(h);
+
+        const size_t lastNl = buf.rfind('\n');
+        if (lastNl == std::string::npos)
+        {
+            return prior; // no complete line yet (a partial append, or a line longer than the window) — don't advance
+        }
+        size_t lineStart = 0;
+        if (skipPartialLead)
+        {
+            const size_t firstNl = buf.find('\n');
+            lineStart = (firstNl == std::string::npos) ? buf.size() : firstNl + 1;
+        }
+
+        CodexState result = prior;
+        bool saw = false;
+        std::wstring lastMsg;
+        size_t ls = lineStart;
+        for (size_t i = lineStart; i <= lastNl; ++i)
+        {
+            if (buf[i] != '\n')
+            {
+                continue;
+            }
+            if (i > ls)
+            {
+                const CodexBoundary b = ClassifyCodexLine(Utf8ToWide(buf.substr(ls, i - ls)));
+                if (b.isBoundary)
+                {
+                    result = b.state;
+                    saw = true;
+                    if (!b.lastAgentMessage.empty())
+                    {
+                        lastMsg = b.lastAgentMessage;
+                    }
+                }
+            }
+            ls = i + 1;
+        }
+        offsetInOut = start + static_cast<int64_t>(lastNl) + 1; // byte cursor past the last consumed newline
+        if (saw && lastAgentMessageOut && !lastMsg.empty())
+        {
+            *lastAgentMessageOut = lastMsg;
+        }
+        return saw ? result : prior;
+    }
 }
 
 // ============================================================================================

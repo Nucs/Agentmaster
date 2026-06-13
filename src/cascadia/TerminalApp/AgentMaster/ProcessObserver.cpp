@@ -420,7 +420,9 @@ namespace Agentmaster
             auto it = _codexInfoByPid.find(f.pid);
             if (it != _codexInfoByPid.end() && it->second.resolved)
             {
-                // Known rollout: just refresh the mtime (codex appends as it works); no re-resolve.
+                // Known rollout: refresh the mtime (codex appends as it works); no re-resolve. When the
+                // file GREW since last survey, advance the turn-state cursor over the new delta (Phase
+                // C2 — gated on the mtime so a quiescent codex does zero IO).
                 if (!it->second.rolloutPath.empty())
                 {
                     int64_t c = 0, l = 0;
@@ -430,9 +432,14 @@ namespace Agentmaster
                         {
                             it->second.createdUnixMs = c;
                         }
+                        const bool grew = (l != 0 && l != it->second.lastActivityUnixMs);
                         if (l)
                         {
                             it->second.lastActivityUnixMs = l;
+                        }
+                        if (grew)
+                        {
+                            it->second.state = ReadCodexStateDelta(it->second.rolloutPath, it->second.rolloutOffset, it->second.state);
                         }
                     }
                 }
@@ -475,6 +482,10 @@ namespace Agentmaster
                     ci.lastActivityUnixMs = ri.lastActivityUnixMs;
                 }
                 ci.resolved = true;
+                // Phase C2: seed the turn state on first sight — offset 0 makes ReadCodexStateDelta
+                // SEEK to the tail window, so a just-discovered (possibly multi-MB) rollout reports
+                // Running/Waiting immediately instead of catching up over many surveys.
+                ci.state = ReadCodexStateDelta(ci.rolloutPath, ci.rolloutOffset, ci.state);
             }
             // Command-line facts fill any gaps (model/sandbox/approval can be on the line when not
             // carried by config.toml). They never override the rollout's authoritative values.
@@ -644,7 +655,9 @@ namespace Agentmaster
                 if (const auto cf = codexByPid.find(xpid); cf != codexByPid.end())
                 {
                     ar.cwd = cf->second.cwd;
-                    ar.model = getCodexInfo(cf->second).model;
+                    const CodexInfo ci = getCodexInfo(cf->second); // resolved + state-advanced once per pid (cached)
+                    ar.model = ci.model;
+                    ar.codexState = ci.state; // Phase C2: enrich the badge with the turn state
                 }
             }
             else
@@ -858,6 +871,7 @@ namespace Agentmaster
             ex.gitBranch = ci.gitBranch;
             ex.createdUnixMs = ci.createdUnixMs;
             ex.lastActivityUnixMs = ci.lastActivityUnixMs;
+            ex.codexState = ci.state; // Phase C2: rollout-tail-derived turn state -> the row's state dot
             externalRows.push_back(std::move(ex));
         }
 

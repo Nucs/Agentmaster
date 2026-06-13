@@ -53,6 +53,21 @@ namespace Agentmaster
         Codex
     };
 
+    // The turn state of an OBSERVED Codex session, derived PULL-only from its rollout tail (Phase C2,
+    // OBSERVER.md §19-Q3 follow-up). The rollout's turn lifecycle is explicit + unambiguous (unlike
+    // Claude's stop_reason heuristics): `task_started` opens a turn -> Running; `task_complete` /
+    // `turn_aborted` / `thread_rolled_back` close it -> Waiting; no turn yet -> Idle. Codex records NO
+    // approval/permission/error event in the rollout (verified across the live corpus), so
+    // NeedsApproval / Error are deliberately NOT here — they are not PULL-derivable (that is C3's
+    // PUSH hooks). A 3-state observe-only floor; `Unknown` = the rollout has not been read yet.
+    enum class CodexState
+    {
+        Unknown,
+        Idle,
+        Running,
+        Waiting
+    };
+
     // Raw facts read out-of-band from one claude.exe (S-lane, ~15 µs/process). The PEB reads
     // (cwd/cmdline/env) plus the parsed flags Claude's command line + CLAUDE_* env expose.
     // (OBSERVER.md §5a)
@@ -141,6 +156,7 @@ namespace Agentmaster
         bool busy{}; // shell has a running child (a command in progress)
         std::wstring sessionId; // when activity == ClaudeCode (mirror of the CorrelationRow)
         std::wstring model; // when activity == Codex: the model (from the rollout turn_context), to enrich the observe badge "○ codex · <model>"
+        CodexState codexState{ CodexState::Unknown }; // when activity == Codex (Phase C2): rollout-tail-derived turn state, to enrich the badge ("○ codex · <model> · running")
         int64_t observedUnixMs{};
     };
 
@@ -208,5 +224,6 @@ namespace Agentmaster
         std::wstring sandbox; // Codex sandbox mode (read-only / workspace-write / danger-full-access); empty for Claude
         std::wstring approvalMode; // Codex approval policy (untrusted / on-request / never); empty for Claude
         std::wstring rolloutPath; // Codex: the resolved rollout .jsonl path (date-sharded — not derivable from cwd+id); drives the read-only plan + "open rollout". Empty for Claude (its path derives from cwd+id).
+        CodexState codexState{ CodexState::Unknown }; // Codex (Phase C2): rollout-tail-derived turn state (Running/Waiting/Idle), drives the row's state dot. Unknown for Claude (external claudes carry no PULL-derived state).
     };
 }
