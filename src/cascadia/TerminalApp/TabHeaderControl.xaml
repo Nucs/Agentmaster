@@ -84,12 +84,19 @@
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />
+        <!--  Agentmaster: AcceptsReturn + Wrap make this a MULTI-LINE rename box — Return inserts a
+              newline (titles can hold line breaks; see TabHeaderControl.cpp's KeyUp, where Return no
+              longer commits) instead of saving. Commit by clicking away (LostFocus); Escape cancels.
+              MinHeight keeps the one-line look; MaxHeight caps the growth for a tall title.  -->
         <TextBox x:Name="HeaderRenamerTextBox"
-                 Height="24"
-                 MinHeight="0"
+                 MinHeight="24"
+                 MaxHeight="96"
+                 MinWidth="0"
                  MaxWidth="{x:Bind RenamerMaxWidth, Mode=OneWay}"
                  Padding="4,4,4,3"
                  FontSize="12"
+                 AcceptsReturn="True"
+                 TextWrapping="Wrap"
                  IsSpellCheckEnabled="False"
                  LostFocus="RenameBoxLostFocusHandler"
                  MaxLength="1024"

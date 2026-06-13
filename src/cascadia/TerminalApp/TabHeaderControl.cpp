@@ -39,12 +39,11 @@ namespace winrt::TerminalApp::implementation
         HeaderRenamerTextBox().KeyUp([&](auto&&, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
             if (_receivedKeyDown)
             {
-                if (e.OriginalKey() == Windows::System::VirtualKey::Enter)
-                {
-                    // User is done making changes, close the rename box
-                    _CloseRenameBox();
-                }
-                else if (e.OriginalKey() == Windows::System::VirtualKey::Escape)
+                // Agentmaster: Return is NO LONGER a commit — the box is AcceptsReturn (multi-line),
+                // so Return inserts a newline into the title (the TextBox handles + marks it). The
+                // user commits by clicking away (RenameBoxLostFocusHandler) or focusing elsewhere.
+                // Escape still discards the in-progress edit.
+                if (e.OriginalKey() == Windows::System::VirtualKey::Escape)
                 {
                     // User wants to discard the changes they made,
                     // set _renameCancelled to true and close the rename box
@@ -120,7 +119,16 @@ namespace winrt::TerminalApp::implementation
         _CloseRenameBox();
         if (!_renameCancelled)
         {
-            TitleChangeRequested.raise(HeaderRenamerTextBox().Text());
+            // Agentmaster: the box is now multi-line (AcceptsReturn). Trim SURROUNDING whitespace /
+            // newlines — a title typed then ended with a habitual Return shouldn't pad the tab with a
+            // blank line — while preserving INTERNAL line breaks. Mirrors the Explorer-tree editor's
+            // _CommitRename so both rename paths land the same value (Rule #11). An all-whitespace
+            // result raises empty, which resets the tab to its auto/managed title (unchanged behavior).
+            std::wstring text{ HeaderRenamerTextBox().Text() };
+            const auto first = text.find_first_not_of(L" \t\r\n");
+            const auto last = text.find_last_not_of(L" \t\r\n");
+            text = (first == std::wstring::npos) ? std::wstring{} : text.substr(first, last - first + 1);
+            TitleChangeRequested.raise(winrt::hstring{ text });
         }
     }
 

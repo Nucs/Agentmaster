@@ -268,6 +268,34 @@ namespace
         return t;
     }
 
+    // Agentmaster: collapse a (possibly multi-line) title to ONE line for the dense Explorer
+    // rows / board cards / detail headers — each run of CR/LF/TAB becomes a single space, with
+    // no leading/trailing filler. Titles can now carry newlines (the tab-rename + tree-rename
+    // boxes accept Return), and the tab HEADER renders the true multi-line form; the lists,
+    // which assume single-line rows, would otherwise grow/clip. Rule #11 keeps the stored value
+    // identical across surfaces — this only changes how the compact views PRESENT it.
+    winrt::hstring OneLine(std::wstring_view s)
+    {
+        std::wstring out;
+        out.reserve(s.size());
+        bool pendingSpace = false;
+        for (const wchar_t c : s)
+        {
+            if (c == L'\r' || c == L'\n' || c == L'\t')
+            {
+                pendingSpace = !out.empty(); // collapse the whitespace run; never lead with a space
+                continue;
+            }
+            if (pendingSpace)
+            {
+                out.push_back(L' ');
+                pendingSpace = false;
+            }
+            out.push_back(c);
+        }
+        return winrt::hstring{ out };
+    }
+
     // A small colored "pill" showing a state label.
     Border Pill(const winrt::hstring& label, const Color& accent)
     {
@@ -1477,7 +1505,7 @@ namespace winrt::TerminalApp::implementation
         auto stack = StackPanel{};
         stack.Spacing(2);
 
-        stack.Children().Append(Text(s.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ s.title }, 14, true, 1.0));
+        stack.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0));
         stack.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
 
         // model · effort · kind adornment (O6, Fleet Observer enrichment): only the parts we know.
@@ -2381,13 +2409,14 @@ namespace winrt::TerminalApp::implementation
                     auto box = TextBox{};
                     box.Text(s.title);
                     box.Margin(Thickness{ 16, 0, 0, 4 });
+                    // Multi-line titles: Return INSERTS a newline (AcceptsReturn) rather than
+                    // committing — matching the WT tab-rename box (TabHeaderControl). The commit
+                    // is focus-loss (click away / select another row); Escape still cancels. The
+                    // TextBox marks Return handled, so it won't bubble to the row's Enter=Activate.
+                    box.AcceptsReturn(true);
+                    box.TextWrapping(TextWrapping::Wrap);
                     box.KeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
-                        if (e.Key() == VirtualKey::Enter)
-                        {
-                            _CommitRename();
-                            e.Handled(true);
-                        }
-                        else if (e.Key() == VirtualKey::Escape)
+                        if (e.Key() == VirtualKey::Escape)
                         {
                             _CancelRename();
                             e.Handled(true);
@@ -2413,7 +2442,7 @@ namespace winrt::TerminalApp::implementation
                 auto g = Text(StateGlyph(s.state), 12, false, 1.0);
                 g.Foreground(SolidColorBrush{ StateColor(s.state) });
                 row.Children().Append(g);
-                row.Children().Append(Text(s.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ s.title }, 13, false, 1.0));
+                row.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 13, false, 1.0));
                 row.Children().Append(Text(StateLabel(s.state), 11, false, 0.5));
                 // Agentmaster: a gray "outside" tag marks a session hosted in another window (only
                 // possible in GLOBAL scope; in LOCAL every row is this window's). It sits at the end
@@ -3460,7 +3489,7 @@ namespace winrt::TerminalApp::implementation
             auto infoCol = StackPanel{};
             infoCol.Spacing(1);
             infoCol.VerticalAlignment(VerticalAlignment::Center);
-            infoCol.Children().Append(Text(s.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ s.title }, 14, true, 1.0));
+            infoCol.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0));
             infoCol.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
             if (!s.queue.empty())
             {
@@ -4110,7 +4139,7 @@ namespace winrt::TerminalApp::implementation
         auto titleRow = StackPanel{};
         titleRow.Orientation(Orientation::Horizontal);
         titleRow.Spacing(8);
-        titleRow.Children().Append(Text(sel->title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ sel->title }, 16, true, 1.0));
+        titleRow.Children().Append(Text(OneLine(sel->title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ sel->title }), 16, true, 1.0));
         titleRow.Children().Append(Pill(StateLabel(sel->state), StateColor(sel->state)));
         _planHeaderHost.Children().Append(titleRow);
         _planHeaderHost.Children().Append(Text(winrt::hstring{ sel->workingDir }, 12, false, 0.6));

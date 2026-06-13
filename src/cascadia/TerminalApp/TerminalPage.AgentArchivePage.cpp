@@ -416,6 +416,32 @@ namespace winrt::TerminalApp::implementation
             return tb;
         }
 
+        // Agentmaster: collapse a (now possibly multi-line) title to ONE line for the dense table
+        // row — each CR/LF/TAB run becomes a single space. Titles can carry newlines (the rename
+        // boxes accept Return); the full form rides the row tooltip (ArchiveSetTip) and the wrapping
+        // detail header. Mirrors AgentManagerContent::OneLine (separate TU — no shared header).
+        winrt::hstring ArchiveOneLine(std::wstring_view s)
+        {
+            std::wstring out;
+            out.reserve(s.size());
+            bool pendingSpace = false;
+            for (const wchar_t c : s)
+            {
+                if (c == L'\r' || c == L'\n' || c == L'\t')
+                {
+                    pendingSpace = !out.empty();
+                    continue;
+                }
+                if (pendingSpace)
+                {
+                    out.push_back(L' ');
+                    pendingSpace = false;
+                }
+                out.push_back(c);
+            }
+            return winrt::hstring{ out };
+        }
+
         // The dense table's 8 columns (shared by the header + every data row): select · Title · Dir ·
         // Branch · Created · Active · Plan · Window. Pixel for the fixed ends, star for the elastic
         // middle. The fixed time/window columns are sized for "Created ▼" at 11px SemiBold — at the
@@ -1332,7 +1358,7 @@ namespace winrt::TerminalApp::implementation
 
             // Tooltips throughout: every cell either truncates (CharacterEllipsis on Title/Dir/Branch)
             // or abbreviates ("3h", "3/7", "W2") — hover carries the full value / exact moment.
-            auto title = ArchiveText(r.title.empty() ? winrt::hstring{ L"(untitled)" } : winrt::hstring{ r.title }, 13, true, r.windowOnly ? 0.7 : 0.95);
+            auto title = ArchiveText(r.title.empty() ? winrt::hstring{ L"(untitled)" } : ArchiveOneLine(r.title), 13, true, r.windowOnly ? 0.7 : 0.95);
             title.Margin(Thickness{ 2, 0, 6, 0 });
             ArchiveSetTip(title, r.title);
             Grid::SetColumn(title, 1);
