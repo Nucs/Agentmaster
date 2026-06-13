@@ -189,4 +189,27 @@
   <Import Project="$(OpenConsoleDir)src\common.nugetversions.targets" />
 
   <Import Project="$(SolutionDir)build\rules\CollectWildcardResources.targets" />
+
+  <!-- Agentmaster: copy package image assets to the deployment layout root so that
+       Add-AppxPackage -Register finds them at Images\* relative to AppxManifest.xml.
+       The standard WAP Deploy step (VS F5) copies content to AppX\ and registers from
+       there; the manual build + register workflow registers from bin\<Plat>\<Config>\
+       (where AppxManifest.xml lands), so images must be physically present in
+       bin\<Plat>\<Config>\Images\ as well.
+       $(WindowsTerminalAssetSuffix) is set above: -Dev for Dev/empty branding (both
+       Agentmaster identities), -Pre/-Can for Preview/Canary. -->
+  <Target Name="CopyAgentmasterImagesToLayout"
+          AfterTargets="Build"
+          Condition="Exists('$(OpenConsoleDir)res\terminal\images$(WindowsTerminalAssetSuffix)')">
+    <PropertyGroup>
+      <_AgentmasterLayoutRoot>$(MSBuildProjectDirectory)\bin\$(Platform)\$(Configuration)\</_AgentmasterLayoutRoot>
+    </PropertyGroup>
+    <ItemGroup>
+      <_AgentmasterImages Include="$(OpenConsoleDir)res\terminal\images$(WindowsTerminalAssetSuffix)\**\*" />
+    </ItemGroup>
+    <MakeDir Directories="$(_AgentmasterLayoutRoot)Images" />
+    <Copy SourceFiles="@(_AgentmasterImages)"
+          DestinationFiles="@(_AgentmasterImages->'$(_AgentmasterLayoutRoot)Images\%(RecursiveDir)%(FileName)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>
