@@ -64,14 +64,18 @@
               the same size, takes a thin black Stroke so the dot stays legible on ANY tab background
               (per-dir colored tabs, the selected-tab highlight, light themes), and centers
               deterministically — no font line-box / baseline concerns. The Fill binds the same
-              AgentStatusBrush the code already writes, so this is presentation-only. The
-              asymmetric Margin (top +1 / bottom -1) dips the dot 1px below the slot's center —
-              dead-center read optically HIGH against the title's visual midline — while the
-              consumed height stays 10px (no header-row growth).  -->
+              AgentStatusBrush the code already writes, so this is presentation-only. Margin
+              "-6,1,6,-1": the NEGATIVE left (-6) pulls the dot toward the profile icon to its
+              left — the MUX TabViewItem template seats our header after an icon column (16px) +
+              a 10px TabViewItemHeaderIconMargin, and -6 tightens that icon→dot gap to ~4px
+              WITHOUT touching the shared global margin every other tab uses; the title (the next
+              StackPanel element) left-shifts with it, so the +6 right keeps the dot→title gap.
+              Top +1 / bottom -1 dips the dot 1px below slot-center (dead-center reads optically
+              HIGH against the title) while the consumed height stays 10px (no header-row growth).  -->
         <Ellipse x:Name="HeaderAgentStatusDot"
                  Width="10"
                  Height="10"
-                 Margin="0,1,6,-1"
+                 Margin="-6,1,6,-1"
                  VerticalAlignment="Center"
                  Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
                  Stroke="Black"

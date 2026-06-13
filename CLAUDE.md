@@ -261,9 +261,12 @@ the concurrent UIA work; the tree as a whole builds green.
 
 **The tab strip itself now carries the state dot.** Every classified tab's header reads
 `[icon] ● <title>`: a state-colored **Ellipse** (thin black stroke for contrast on any tab
-chrome; dipped **1px below slot-center** via an asymmetric `0,1,6,-1` Margin — dead-center read
-optically high against the title, and the +1/−1 pair keeps the 10px slot so the header row
-doesn't grow) in `TabHeaderControl.xaml`'s indicator row right before the title — one more
+chrome; Margin `-6,1,6,-1` — the **negative left (-6)** pulls the dot toward the profile icon,
+tightening the MUX `TabViewItemHeaderIconMargin` (10px) icon→dot gap to ~4px WITHOUT touching the
+shared global margin other tabs use (the title left-shifts with it; +6 right keeps the dot→title
+gap); **+1/−1** dips it 1px below slot-center — dead-center reads optically high against the
+title — while keeping the 10px slot so the header row doesn't grow) in
+`TabHeaderControl.xaml`'s indicator row right before the title — one more
 `x:Bind`'ed element over `TerminalTabStatus` (two new observable properties,
 `AgentStatusVisible`/`AgentStatusBrush`; `Tab.idl` already projects `TabStatus{get;}`, so no
 `Tab.{h,cpp}` changes — the page drives it idempotently via `_SetTabAgentDot(tab, color?)`). A
