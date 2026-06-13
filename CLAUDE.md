@@ -159,30 +159,59 @@ package: a no-hook `claude.exe` typed after a `cd` lands a Triage-Board card + p
 within ~3 s, classified `Agentmaster`; two claudes in one cwd bind to their **own** conversations;
 real-WindowsTerminal claudes are classified external + never bound; steady-state cost is µs.
 
-**Codex (the OpenAI Codex CLI, `codex.exe`) is now a first-class OBSERVED agent — Phase C1,
-observe-only; lib-compiled green + engine-tested (744/744 incl. new Codex checks), rides the next
-deploy cycle (OBSERVER.md §19-Q3 resolved).** The Fleet Observer promotes `codex.exe` from
-bare-acknowledge to full out-of-band enrichment (zero writes to `~/.codex`): `ReadCodexFacts` (PEB
-cwd/cmdline/env → model `--model`/`-m` · sandbox `--sandbox`/`-s` · approval `--ask-for-approval`/`-a`
-· `WT_SESSION`/`AM_SESSION`/`CODEX_HOME` · an explicit `resume <guid>`), a **date-sharded rollout
-resolver** (Codex shards by LOCAL date — `<CODEX_HOME|~/.codex>/sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl`,
-the uuid IS the conversation id, so the Claude cwd-encoded glob does NOT apply: scan the start-day ±1,
-confirm each candidate's cwd by a cheap head-scan of its `session_meta` line, pick by **ctime≈start
-identity** with a **newest-mtime-in-cwd fallback for a `resume`d** session whose rollout predates the
-process), and a rollout reader (`RolloutLine`/`payload` JSONL — model/effort/sandbox/approval from the
-first `turn_context`; title + human prompts from `event_msg`/`user_message`, skipping the AGENTS.md
-`response_item` blobs). Every codex is surfaced **observe-only in the External group** (Triage Board +
-Explorer **EXTERNAL**) with a teal **`codex`** pill + `model · sandbox · approval` + timing, a per-tab
-**`○ codex · <model>` observe badge**, and a **read-only Flight Plan** read from the rollout; the
-right-click menu is kind-aware — it **omits Adopt / Open New Session Here** (those resume/spawn a
-CLAUDE) keeping the agent-agnostic Bring-Window-To-Front, because **Codex control is a later phase**. A
-codex is **never** fed to the registry (`ObserveClaude` untouched — observe-only, Rule #13). Built as
-the light **external-row + `AgentKind`** path: `ExternalClaudeRow` gained `kind` (Claude default /
-Codex), `sandbox`, `approvalMode`, and the Codex `rolloutPath`; `Activity.h` gained `AgentKind` +
-`CodexProcessFacts`. **Deferred to later phases:** C2 = state via a Codex rollout-tail PULL reconciler
-(still no `~/.codex` writes); C3 = low-latency PUSH via Codex hooks/`notify` (a GLOBAL
-`~/.codex/config.toml` mutation — a product decision, no per-session `--settings` like Claude); C4 =
-bind a stdin injector + Autopilot (launch is PULL-correlated — Codex can't pin a session id at launch).
+**Codex (the OpenAI Codex CLI, `codex.exe`) is now a first-class MANAGED agent — observe (C1) +
+state (C2) + the full LAUNCH / RESTORE / WINDOW-RESTORE / ADOPT lifecycle, *lifecycle + state only*;
+lib-compiled green + engine-tested (771/771 incl. new Codex checks), rides the next deploy cycle
+(OBSERVER.md §11f / §19-Q3).** Codex graduated in four steps on top of the C1 observe-only census,
+each a focused commit — all zero writes to `~/.codex` (every read is out-of-band, Rule #13):
+
+- **C1 — observe-only enrichment (done).** The Fleet Observer reads every `codex.exe` out-of-band:
+  `ReadCodexFacts` (PEB cwd/cmdline/env → model `--model`/`-m` · sandbox `--sandbox`/`-s` · approval
+  `--ask-for-approval`/`-a` · `WT_SESSION`/`AM_SESSION`/`CODEX_HOME` · an explicit `resume <guid>`), a
+  **date-sharded rollout resolver** (Codex shards by LOCAL date —
+  `<CODEX_HOME|~/.codex>/sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl`, the uuid IS the conversation
+  id, so the Claude cwd-encoded glob does NOT apply: scan the start-day ±1, confirm each candidate's cwd
+  by a head-scan of its `session_meta` line, pick by **ctime≈start identity** with a **newest-mtime-in-cwd
+  fallback for a `resume`d** session whose rollout predates the process), and a rollout reader
+  (`RolloutLine`/`payload` JSONL — model/effort/sandbox/approval from the first `turn_context`; title +
+  human prompts from `event_msg`/`user_message`, skipping the AGENTS.md `response_item` blobs).
+- **C2 — state via a rollout-tail PULL reconciler (done, commit `b91018a77`).** `ClassifyCodexLine`
+  (pure: an `event_msg` payload → a turn-boundary verdict) + `ReadCodexStateDelta` (a byte-cursor forward
+  delta over the rollout — first-sight tail-seek of the last 1 MiB, a 4 MiB catch-up cap, a partial
+  trailing line left unconsumed, sticky on a quiet read) derive **Idle / Running / Waiting** from the
+  transcript tail: `task_started` → Running; `task_complete` / `turn_aborted(interrupted)` /
+  `thread_rolled_back` → Waiting; **last-boundary-wins** (proven over 33 live rollouts: timestamps are
+  100 % monotonic, file-order = truth). **NeedsApproval / Error are NOT PULL-derivable** — no
+  approval/permission/error event exists in a rollout — so Codex runs on a **3-state floor**
+  (Running / Waiting / Idle); the new `Activity.h` `CodexState` maps onto the board + tree state dot.
+- **Managed lifecycle — launch / restore / window-restore / adopt (done, commits `64b2472e7` Part 1 ·
+  `9922e4658` Part 2 · `51a8ca51d` Part 3 · `efaa586e2` Part 4; mirrors Claude — "do what we do there").**
+  A managed Codex is a real registry citizen via a **two-id model** (the §19-Q3 follow-on, resolved to
+  the **first-class `AgentKind` path**, not a parallel one): `SessionInfo.id` = OUR minted durable handle
+  (the registry / persistence / `_claudeTabs` key — Codex can't pin a session id at launch, so we never
+  re-key), `SessionInfo.codexSessionId` = the real rollout uuid (the `codex resume` target + the "does a
+  transcript exist" gate), filled by the observer's `_ReconcileManagedCodex` on the first prompt.
+  `SessionInfo` gained **`kind`** (Claude default) + `codexSessionId`; `TabKind` gained **Codex** (the
+  window-record tab refs + persistence (de)serialize it). **Launch** — the primary launch bar carries a
+  **Claude⇄Codex toggle** (Part 4, the scope/sort/autopilot toggle idiom; Codex is *directory-only* — no
+  typed-id resume/fork, button reads "Launch Codex"), and the EXTERNAL menu's **Open New Codex Session
+  Here** spawns one in a running codex's cwd → `_SpawnCodexSession` → `_LaunchCodexSession`
+  (`BuildCodexCommandline` = `codex` / `codex resume <uuid>`; immediate managed card, `AM_SESSION` stamp,
+  no `CCMGR_*`). **Restore** — the Archive page's Restore here branches on `kind` (`_RestoreArchivedSession`
+  → `_LaunchCodexSession`, transcript-gated on the rollout existing, else fresh — Rule #6). **Window-restore**
+  — `_RestoreWindowTabs` re-homes a Codex tab ref via `_LaunchCodexSession`. **Adopt** — the EXTERNAL menu's
+  Adopt resumes an external codex's rollout into a managed tab (`_AdoptExternalCodex` → `codex resume <uuid>`,
+  original left running). A managed Codex reads distinct everywhere via a teal **`codex` pill** (Part 3 —
+  board card + tree row, the same teal as the External pill). **Lifecycle + state ONLY** — NO stdin
+  injector / Autopilot / Send-now (driving the Codex TUI is C4); a managed codex's `autopilot.mode` is Off.
+
+The observer still **never** feeds a codex to `ObserveClaude` (the External census stays observe-only); a
+MANAGED codex is registered by the launch path and reconciled (state + `codexSessionId` + `tabToken`) by
+the UI-lane `_ReconcileManagedCodex`, and is **deduped out of the External census** (`managedCodexTokens`)
+so it shows once. **Lib-compiled green; not yet full-exe deployed** (rides the next deploy cycle).
+**Deferred:** **C3** = low-latency PUSH via Codex `notify` / `~/.codex/hooks.json` (a GLOBAL config
+mutation — a product decision, no per-session `--settings` like Claude); **C4** = bind a stdin injector +
+Autopilot (drive the Codex TUI; launch is PULL-correlated, resume=`codex resume <id>`).
 
 **The Archive UI is now a full-window page; the round-2 audit's 13 fixes are deployed, and a round-3
 audit (10 more fixes) + a three-commit informativeness batch are built + lib-verified on top — they ride
@@ -297,8 +326,9 @@ title — while keeping the 10px slot so the header row doesn't grow) in
 `AgentStatusVisible`/`AgentStatusBrush`; `Tab.idl` already projects `TabStatus{get;}`, so no
 `Tab.{h,cpp}` changes — the page drives it idempotently via `_SetTabAgentDot(tab, color?)`). A
 **managed** session's tab wears its Triage-Board state color (Running blue · Waiting goldenrod ·
-NeedsApproval orange-red · Error crimson · Done green · Idle gray); an observed-but-unmanaged tab
-(pwsh / cmd / unprompted-claude / codex) a **dim gray** dot; the Manager tab none. Deliberately
+NeedsApproval orange-red · Error crimson · Done green · Idle gray — a MANAGED Codex tab wears the
+same dot at its 3-state floor: Running blue · Waiting goldenrod · Idle gray); an observed-but-unmanaged
+tab (pwsh / cmd / unprompted-claude / external codex) a **dim gray** dot; the Manager tab none. Deliberately
 NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab title == persisted
 title) must never carry presentation glyphs through renames/persistence. The state palette now
 lives ONCE in **`AgentStatusColors.h`** (the overlay's hand-synced copy folded in — board dot,
@@ -508,12 +538,15 @@ What works, by area:
     **title** (first prompt), `gitBranch`, host kind (`wt` / `cmd` / shell leaf), and `created/lastActivity`
     timing. Observe-only — surfaced on the board AND the Explorer Tree's **EXTERNAL** scope, where a row's
     **Open New Session Here** / **Adopt** lives on the right-click menu and a **left-click → a read-only Flight Plan**
-    of the conversation. **Codex C1 (observe-only) rides this same External group** (`ExternalClaudeRow.kind
-    == Codex`): a parallel `codex.exe` census enriches each from its date-sharded rollout (model · effort ·
-    sandbox · approval · title · timing) — a teal `codex` pill, an `○ codex · <model>` per-tab badge, a
-    read-only Flight Plan from the rollout — but the kind-aware menu omits Adopt / Open-New (Codex control
-    is a later phase) and a codex is **never** registered (`ObserveClaude` untouched). See the Codex C1
-    status block above + OBSERVER.md §11f / §19-Q3.
+    of the conversation. **Codex rides this same External group** (`ExternalClaudeRow.kind == Codex`): a
+    parallel `codex.exe` census enriches each from its date-sharded rollout (model · effort · sandbox ·
+    approval · title · timing + the C2 rollout-tail state) — a teal `codex` pill, an `○ codex · <model>`
+    per-tab badge, a read-only Flight Plan from the rollout — and the kind-aware menu now offers **Adopt**
+    (resume its rollout into a managed tab) / **Open New Codex Session Here** (a fresh managed codex in the
+    cwd), routing to the Codex launch handler (the managed-lifecycle work, above). The OBSERVER still
+    **never** feeds a codex to `ObserveClaude` (the External census stays observe-only); a MANAGED codex is
+    registered by the launch path + reconciled by the UI lane (`_ReconcileManagedCodex`) and deduped out of
+    this census (`managedCodexTokens`). See the Codex status block above + OBSERVER.md §11f / §19-Q3.
   - **Hardening (O7).** Steady-state is µs: the survey skips the Toolhelp snapshot when the roster is
     byte-identical to last tick AND every correlated `(pid, start-time)` pair is still alive (the start time
     is paired — per the rule that PIDs reuse — so a recycled PID can't masquerade as alive), except on the
@@ -726,8 +759,12 @@ What works, by area:
   **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
   that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived
   record is dropped. A never-prompted session has no transcript and a blind `--resume` would die
-  with "No conversation found" (Rule #6). `Sent` prompts are never replayed. Templates: save a
-  session's queue, apply it, or broadcast to a whole directory.
+  with "No conversation found" (Rule #6). `Sent` prompts are never replayed. **Restore is agent-aware:**
+  `_RestoreArchivedSession` branches on `SessionInfo.kind` — a **Codex** record re-launches via
+  `_LaunchCodexSession`, transcript-gated on its **rollout** (`codex resume <codexSessionId>` only when
+  that uuid still has a rollout on disk, else fresh), and the durable `id` handle is reused either way so
+  the record flips live without re-keying (Codex can't pin a session id at launch — the two-id model).
+  Templates: save a session's queue, apply it, or broadcast to a whole directory.
   - **Lifecycle coverage — audit of the add-tab / launch / close / archive / resume paths
     end-to-end. #1 & #2 are ✅ FIXED since the audit; #3 (by design), #4 (mitigated), #5 (moot),
     #6 (cosmetic) remain — all low-severity.** The tab-X archive seam above is sound; the *non-tab-X*
@@ -790,15 +827,16 @@ What works, by area:
   (one file per window: `windows/<windowId>.json`) holds per-window **UI state** — geometry
   (position/size/launch-mode), the Manager **lens** (selection / dir scope / selected prompt /
   collapsed dirs / splitter fractions / the shared tree+board LOCAL·GLOBAL·EXTERNAL scope,
-  `treeScope`), and an **ordered list of tab refs** (a Claude tab = just
-  its `sessionId`; a non-Claude tab = an opaque WT `actionsJson`). This is **Option 1** — a thin
+  `treeScope`), and an **ordered list of tab refs** (a Claude OR Codex tab = its `sessionId` + a
+  `TabKind` discriminator; a shell tab = an opaque WT `actionsJson`). This is **Option 1** — a thin
   layer OVER the archive model: it records tab order + window↔session affinity + geometry/lens
   WITHOUT duplicating session data (`sessions.json` stays the session truth, so there is one copy
   of every session). Schema + (de)serialize + `Save/Load/Delete/LoadWindowRecord` are done and
   unit-tested; the live **capture** (debounced autosave) and **restore** (re-apply geometry/lens,
   claim/re-claim a record by id) are **shipped + live-verified** (see Status + `PERSISTENCE.md` §13.5).
   **Session re-home + Other-tab recreation are now shipped too** (`_RestoreWindowTabs`): a reopened
-  window resumes its Claude sessions and replays its shell tabs (title/color/cwd) from the record's tab
+  window resumes its Claude **and Codex** sessions (re-launched by `TabKind` — `_LaunchClaudeSession` /
+  `_LaunchCodexSession`) and replays its shell tabs (title/color/cwd) from the record's tab
   refs, in order — so closing and reopening a window brings the whole workspace back, not just
   geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
   "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
@@ -885,12 +923,15 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
 - Our additions (all marked `Agentmaster`):
   - `src/cascadia/TerminalApp/AgentManagerContent.{h,cpp}` — the Manager tab content (C1 UI).
   - `src/cascadia/TerminalApp/AgentMaster/` — the engine (plain C++, no WinRT; the `.cpp`
-    are `<PrecompiledHeader>NotUsing`): `SessionModels.h`, `HookEvents.h`, `HookWire.h`,
-    `SessionRegistry.{h,cpp}`, `HooksBridge.{h,cpp}`, `ClaudeSpawn.{h,cpp}`,
+    are `<PrecompiledHeader>NotUsing`): `SessionModels.h` (`SessionInfo` + the managed-Codex two-id
+    model — `AgentKind kind` / `codexSessionId` — and `TabKind::Codex`), `HookEvents.h`, `HookWire.h`,
+    `SessionRegistry.{h,cpp}`, `HooksBridge.{h,cpp}`, `ClaudeSpawn.{h,cpp}` (+ `BuildCodexCommandline`),
     `Scheduler.{h,cpp}`, `Engine.{h,cpp}` (the M9 process-wide `SharedEngine`),
     `SessionScanner.{h,cpp}` (the interval reconciler / PULL transcript tail), the **Fleet
-    Observer** — `Activity.h` (data models), `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript
-    primitives — id resolution + content: title / prompts / ctime·mtime timing),
+    Observer** — `Activity.h` (data models — incl. `AgentKind` / `CodexProcessFacts` / `CodexState`),
+    `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript primitives — id resolution + content: title /
+    prompts / ctime·mtime timing; the Codex date-sharded rollout resolver + `ReadCodexFacts` + the C2
+    rollout-tail state deriver `ClassifyCodexLine`/`ReadCodexStateDelta`),
     `ProcessObserver.{h,cpp}` (the S-lane; also validates + publishes the `sessions/<pid>.json`
     presence heartbeat) — `TranscriptStore.{h,cpp}` (the on-disk Claude-session
     store API for the Sessions browser, SESSIONS.md §6: global transcript enumeration, the
@@ -920,9 +961,11 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `TabManagement.cpp` pattern; the original five were split out of `TerminalPage.cpp` as a pure
     move — **SessionsPage** is new code):
     **Engine** (`~TerminalPage`, `_InitAgentmasterEngine`, the Manager tab, `_WireAgentManagerContent`),
-    **Sessions** (spawn/launch/restore/archive/adopt-external, tab-title sync, smart naming + per-dir
-    tab color), **Observer** (the per-tab overlay/badge, bind/reconcile/liveness, the UI lane
-    `_ObserverProbe`), **WindowRecord** (M10 capture/flush/restore + reopen saved windows),
+    **Sessions** (spawn/launch/restore/archive/adopt-external for **both** Claude and Codex —
+    `_LaunchCodexSession`/`_SpawnCodexSession`/`_AdoptExternalCodex` mirror the Claude seams — tab-title
+    sync, smart naming + per-dir tab color), **Observer** (the per-tab overlay/badge, bind/reconcile/
+    liveness incl. the managed-Codex state reconcile `_ReconcileManagedCodex`, the UI lane
+    `_ObserverProbe`), **WindowRecord** (M10 capture/flush/restore + reopen saved windows; Codex tab refs),
     **ArchivePage** (the full-window Archive page), **SessionsPage** (the full-window Sessions
     browser — SESSIONS.md). Declarations stay in `TerminalPage.h` (C++ has no partial classes).
   - small touches in `TerminalPage.{h,cpp}` (~20 integration seams left in the `.cpp`:
@@ -1007,13 +1050,23 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   `_DiscoverClaudeTabsByCwd`): publish this window's tab roster, then bind via the observer's
   Correlation table. `~TerminalPage` calls `_observer->UnpublishWindow(_windowId)` (Rule #10).
   `_WireAgentManagerContent()` hands the content the shared registry + spawn / activate / archive
-  / restore / rename / adopt-external / pause / confirm callbacks + the cog's settings seed/persist
+  / restore / rename / adopt-external / **codex-launch** / pause / confirm callbacks + the cog's
+  settings seed/persist
   (`SetSettings`/`SetSettingsHandler`). `_LaunchClaudeSession(dir, title, restored)` builds a
   claude `ConptyConnection` (cmdline/cwd/env ours) and opens it as a normal terminal tab via
   `_MakePane(args, …, existingConnection)`; `_SpawnClaudeSession` = fresh,
   `_RestoreClaudeSessions()` = load the persisted fleet **as Archived** (process-once via
   the `Engine::restoreMutex` load barrier — a 2nd window blocks until it's loaded, then skips),
   `_RestoreArchivedSession()` = the on-demand resume.
+  **Codex mirrors these seams (lifecycle + state only — NO injector/Autopilot):**
+  `_LaunchCodexSession(dir, title, restored)` builds a `codex` / `codex resume <uuid>`
+  `ConptyConnection` (`BuildCodexCommandline`; `AM_SESSION` stamp, no `CCMGR_*`) and opens it as a
+  normal tab; `_SpawnCodexSession` = fresh, the Archive page's Restore + `_RestoreWindowTabs` re-launch
+  a Codex record by `SessionInfo::kind`, and `_AdoptExternalCodex` resumes an external codex's rollout.
+  The launch bar's **Claude⇄Codex toggle** retargets the cwd box's Launch button to `_SpawnCodexSession`.
+  A managed codex's rollout state (the C2 deriver) is folded onto the registry by the UI lane's
+  `_ReconcileManagedCodex` (which also fills `codexSessionId` + `tabToken` on first prompt) —
+  `ObserveClaude` is never used for it (Rule #13).
   `sessionId → Tab` lives in `_claudeTabs` (per window) for Activate / Archive / retitle. A
   session's **title is one value** (Explorer name == tab title == persisted `SessionInfo.title`):
   `_LaunchClaudeSession` **pins** it onto the tab (`Tab::SetTabText`); an Explorer rename routes

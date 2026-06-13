@@ -265,6 +265,10 @@ tryAdvance(s):
 ## 17. Extensibility / future
 
 - **Multi-agent:** the same model hosts Codex/Gemini/etc. (anything that runs in a PTY with hooks/state signals).
+  **Codex is already realized** — observe (C1) + state (C2, a rollout-tail PULL deriver) + the full
+  launch / restore / window-restore / adopt lifecycle (*lifecycle + state only*; driving the Codex TUI is a
+  later phase, C4) via a first-class `AgentKind` on `SessionInfo` (a two-id model — our durable handle +
+  the rollout uuid). See OBSERVER.md §11f.
 - **Agent teams:** visualize orchestrator→subagent topology (ties to WT agent-teams; mind `--teammate-mode in-process`).
 - **Alternate Manager views:** Mission-Control wall, command palette, spatial graph as toggles over the registry.
 - **Remote/mobile monitoring:** expose the registry read-only over a local server (opt-in).
