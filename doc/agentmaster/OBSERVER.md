@@ -418,6 +418,21 @@ return stem(pick(candidates, startUnixMs))
 `C--Users-ELI-Desktop`). If encoding ever drifts, fall back to scanning each project dir's head line
 for a matching `"cwd"` (slower; cache id→cwd).
 
+**Bind precedence (`ResolveObservedId` → presence override).** The id a correlated tab BINDS to is
+resolved in this order, **most-authoritative first**: (1) Claude's own **presence heartbeat**
+`sessions/<pid>.json` (pid-keyed) — its self-reported *current* conversation; (2) an explicit
+`--session-id` / `--resume <guid>` from the cmdline (`ResolveObservedId`); (3) the cwd→newest
+transcript fallback (§8b). Presence wins because a launched session's id can **diverge** from the
+cmdline `--session-id`: `/resume`, `/clear` and `/compact` switch the live conversation while the
+cmdline stays pinned at spawn — so binding by the cmdline showed the tab (and its tab-strip dot)
+the **stale launch id's** state (e.g. a phantom `NeedsApproval`/`Idle`) instead of the conversation
+actually running. Presence is pid-keyed, so it is immune to the cwd-density mis-bind Rule #14 warns
+of; bind-grade trust is **stricter** than the `presenceStatus` enrichment — the row must belong to
+the **same live process** (pid alive *and* its recorded `startedAt` within an init window of the OS
+process-create time), so a stale file from a **reused pid** can never mis-bind. A brand-new spawn
+that hasn't written presence yet (or a denied PEB start time) is absent and falls back to (2) — the
+launch id, which is correct until a divergence. (Same precedence the `agentmaster` CLI uses.)
+
 ### 8c. Trigger & cadence
 
 | Trigger | Action |

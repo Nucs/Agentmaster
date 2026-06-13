@@ -22,11 +22,21 @@ CCMGR_SESSION_ID=<guid>     # == Claude's own --session-id  (the correlation key
 CCMGR_HOOK_PIPE=\\.\pipe\agentmaster.<pid>   # where to post (the live bridge)
 ```
 
-`CCMGR_SESSION_ID` is the same GUID passed to claude as `--session-id`, so the hook payload's
-`session_id`, the wire `sessionId`, and the `SessionInfo.id` in the registry are **one value**.
-The forwarder resolves the id with a fallback chain so a session we did **not** launch still
-correlates: `CCMGR_SESSION_ID` → else the hook payload's `session_id`. `cwd` rides every record
-as a secondary key (the `M` working directory).
+`CCMGR_SESSION_ID` is the GUID passed to claude as `--session-id`, so for a session's **first**
+conversation the hook payload's `session_id`, the wire `sessionId`, and the `SessionInfo.id` in
+the registry are **one value**. The forwarder resolves the id **payload-first**: the hook
+payload's `session_id` (Claude's *current* conversation) → else `CCMGR_SESSION_ID` (the
+launch-time fallback, and the only id a session we did **not** launch has when its payload lacks
+one). Payload-first is load-bearing because Claude's conversation id can **diverge** from the
+launch id — `/resume` (into another conversation), `/clear`, and `/compact` all switch the active
+`session_id`, while the env (and the cmdline `--session-id`) stay **pinned at spawn**. Env-FIRST
+stranded such a session: every post-divergence hook fed the dead launch id, which owns no
+transcript of its own, so the missed-`Stop` reconciler (it reads a terminal `stop_reason` from
+the transcript tail) could never release it — it stuck in the last mis-attributed state (a
+permission `NeedsApproval` that never cleared, or `Idle` while the real conversation ran). For a
+normal spawn the first conversation's payload id == our `--session-id` == the env, so this is a
+no-op until a real divergence. `cwd` rides every record as a secondary key (the `M` working
+directory).
 
 For sessions the Manager did not spawn (a hand-typed `claude` in a `+` tab), two discovery
 fallbacks make it self-wire:
@@ -70,7 +80,7 @@ event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t pro
 | # | Field | Notes |
 | --- | --- | --- |
 | 1 | `event` | `SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SubagentStop` / `SessionEnd` |
-| 2 | `sessionId` | == `CCMGR_SESSION_ID` == Claude's `--session-id` (**required**) |
+| 2 | `sessionId` | Claude's **current** conversation id (payload `session_id`; == `--session-id` == `CCMGR_SESSION_ID` until `/resume`/`/clear`/`/compact` diverge it) (**required**) |
 | 3 | `cwd` | the session's working directory |
 | 4 | `isQuestion` | `1`/`0` — set on `Stop`: did the agent's last message end in `?` (question-guard) |
 | 5 | `permission` | `1`/`0` — a `Notification` requesting tool permission (vs. an idle notice) |

@@ -1444,6 +1444,29 @@ build **binlog uploads as an artifact** to diagnose the first run.
   ModuleListStream → `TerminalApp.dll` base/size) + scanning the stack for in-module return addresses,
   symbolized through the same DIA session, reconstructs the stack top-down. This is how the re-home
   use-after-free above was pinned exactly.
+- **A managed session's conversation id can DIVERGE from its launch id — attribute state + bind by
+  Claude's CURRENT conversation, never the pinned launch id.** `/resume` (into another
+  conversation), `/clear`, and `/compact` all switch a live claude's active `session_id`, while the
+  id we launched it with stays **pinned** on the process **cmdline** (`--session-id`) AND in the
+  **`CCMGR_SESSION_ID`** env. Two places trusted the launch id and stranded the session — confirmed
+  live: a claude launched `--session-id A` was running conversation `B` (per its OWN presence
+  heartbeat `sessions/<pid>.json` + the `B` transcript), with every hook mis-filed under `A` and
+  **no transcript under `A`**. (1) The **hook forwarder** resolved the id ENV-first, so every
+  post-divergence hook fed the dead `A` record — which owns no transcript, so the SessionScanner's
+  missed-`Stop` reconciler (it reads a terminal `stop_reason` from the transcript tail) could never
+  release it → stuck `NeedsApproval`, then `Idle` while `B` ran (the `/compact` `SessionStart` reset
+  it to Idle and the auto-continuation fires no `UserPromptSubmit`). (2) The **Fleet Observer** bound
+  the tab via the cmdline `--session-id` (`ResolveObservedId`), so the tab-strip dot showed `A`'s
+  phantom state, not `B`. **Fix:** the forwarder is **payload-first** (the hook `session_id` is
+  Claude's current conversation; the env is only the fallback), and the observer prefers Claude's
+  **own presence heartbeat** (pid-keyed, `startedAt`-validated against PID reuse) over the cmdline id
+  when they disagree — matching the `agentmaster` CLI's bind precedence (HOOKS.md *Session
+  correlation*, OBSERVER.md §8b). Both are no-ops until an actual divergence (a fresh spawn's first
+  conversation has payload id == `--session-id` == the env). **Latent corollaries (not fixed):** the
+  scanner can't reconcile a LIVE session with **no transcript at all** (`ShouldSynthesizeStop` needs
+  a tail — a `live + active-state + zero-transcript + quiescent → release` safety net would
+  self-heal one); and `/resume`-ing an already-open conversation into a managed tab is **two writers**
+  on one transcript (the adopt-external hazard, now reachable manually).
 
 ## Correctness rules (do not regress)
 
