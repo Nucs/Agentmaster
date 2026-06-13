@@ -2025,6 +2025,15 @@ namespace winrt::TerminalApp::implementation
             title = title.substr(0, 61) + L"\x2026";
         }
         stack.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
+        // Agentmaster (Phase C1): a Codex row carries a teal "codex" agent pill so a mixed External
+        // group reads at a glance (Claude is the implicit default — no pill, visuals unchanged).
+        if (ex.kind == AgentKind::Codex)
+        {
+            auto p = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+            p.Opacity(0.9);
+            p.HorizontalAlignment(HorizontalAlignment::Left);
+            stack.Children().Append(p);
+        }
         if (!ex.cwd.empty())
         {
             stack.Children().Append(Text(winrt::hstring{ ex.cwd }, 11, false, 0.55));
@@ -2077,6 +2086,8 @@ namespace winrt::TerminalApp::implementation
             };
             addPart(ex.model);
             addPart(ex.effort);
+            addPart(ex.sandbox); // Codex only (empty for Claude) — model · effort · sandbox · approval
+            addPart(ex.approvalMode); // Codex only
             if (ex.background)
             {
                 addPart(L"bg");
@@ -2110,12 +2121,14 @@ namespace winrt::TerminalApp::implementation
         card.Background(Fill(selected ? 0x40 : 0x18, 0x80, 0x80, 0x80));
         card.BorderBrush(Fill(selected ? 0xFF : 0x60, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
         card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
-        card.ContextFlyout(_MakeExternalTreeMenu(ex.pid, ex.cwd));
+        card.ContextFlyout(_MakeExternalTreeMenu(ex));
         const auto exId = ex.sessionId;
         const auto exCwd = ex.cwd;
         const auto exTitle = title;
-        card.Click([this, exId, exCwd, exTitle](const IInspectable&, const RoutedEventArgs&) {
-            _SelectExternal(exId, exCwd, exTitle);
+        const auto exKind = ex.kind; // Phase C1: Claude vs Codex selects the read-only-plan reader
+        const auto exRollout = ex.rolloutPath; // Codex rollout path (empty for Claude)
+        card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
+            _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
         });
         return card;
     }
@@ -2133,7 +2146,8 @@ namespace winrt::TerminalApp::implementation
             // host a tick after first sight triggers one refresh. Timestamps are deliberately NOT
             // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
             if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
-                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid)
+                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid ||
+                a.kind != b.kind || a.sandbox != b.sandbox || a.approvalMode != b.approvalMode) // Phase C1: a codex row gaining its model/sandbox a tick after first sight triggers one refresh
             {
                 same = false;
             }
@@ -2707,6 +2721,13 @@ namespace winrt::TerminalApp::implementation
                 auto g = Text(L"\x25CF", 12, false, 1.0); // ● gray — external / observe-only
                 g.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E));
                 row.Children().Append(g);
+                // Agentmaster (Phase C1): a teal "codex" agent pill on Codex rows (Claude = default, no pill).
+                if (ex.kind == AgentKind::Codex)
+                {
+                    auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+                    cp.Opacity(0.9);
+                    row.Children().Append(cp);
+                }
                 row.Children().Append(Text(winrt::hstring{ title }, 13, false, 1.0));
 
                 // host tag: the foreign host this claude runs in — "Windows Terminal" (real WT) vs
@@ -2757,6 +2778,8 @@ namespace winrt::TerminalApp::implementation
                     };
                     addPart(ex.model);
                     addPart(ex.effort);
+                    addPart(ex.sandbox); // Codex only (empty for Claude)
+                    addPart(ex.approvalMode); // Codex only
                     if (ex.background)
                     {
                         addPart(L"bg");
@@ -2806,78 +2829,95 @@ namespace winrt::TerminalApp::implementation
                 // Left-click SELECTS this external -> the Flight Plan shows its conversation prompts
                 // read-only (observe-only; we host no ConPTY so we can't drive it). Right-click -> the
                 // Adopt / Open New Session Here / Bring Window To Front menu.
-                rowBtn.ContextFlyout(_MakeExternalTreeMenu(ex.pid, ex.cwd));
+                rowBtn.ContextFlyout(_MakeExternalTreeMenu(ex));
                 const auto exId = ex.sessionId;
                 const auto exCwd = ex.cwd;
                 const auto exTitle = title;
-                rowBtn.Click([this, exId, exCwd, exTitle](const IInspectable&, const RoutedEventArgs&) {
-                    _SelectExternal(exId, exCwd, exTitle);
+                const auto exKind = ex.kind; // Phase C1
+                const auto exRollout = ex.rolloutPath;
+                rowBtn.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
+                    _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
                 });
                 _treeHost.Children().Append(rowBtn);
             }
         }
     }
 
-    // Agentmaster: the EXTERNAL-tree row right-click menu — Adopt (resume the external's conversation
-    // into a managed, controllable tab), Open New Session Here (spawn a managed session in the
-    // external's cwd, a new independent conversation), and Bring Window To Front (surface the
-    // external's hosting window: restore-if-minimized + foreground + best-effort WT tab select). All
+    // Agentmaster: the EXTERNAL-tree row right-click menu. For a CLAUDE row: Adopt (resume the
+    // conversation into a managed, controllable tab), Open New Session Here (spawn a managed session
+    // in the cwd), and Bring Window To Front. For a CODEX row (kind=Codex, observe-only in Phase C1):
+    // Adopt + Open-New are omitted (both drive CLAUDE; Codex control is a later phase) — a disabled
+    // note says so — and only the agent-agnostic Bring Window To Front is offered. All clickable items
     // defer one tick like _MakeSessionMenu so the closing flyout's focus restore doesn't race the
-    // spawn / tree rebuild / foreground hand-off. Acts on (pid, cwd) — an external has no registry
-    // session id.
-    MenuFlyout AgentManagerContent::_MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd)
+    // spawn / tree rebuild / foreground hand-off. Acts on the row's (pid, cwd) — an external/observe-
+    // only row has no registry session id.
+    MenuFlyout AgentManagerContent::_MakeExternalTreeMenu(const ::Agentmaster::ExternalClaudeRow& ex)
     {
         MenuFlyout menu;
         auto disp = _dispatcher;
         auto weak = get_weak();
+        const uint32_t pid = ex.pid;
+        const std::wstring cwd = ex.cwd;
 
-        MenuFlyoutItem adopt;
-        adopt.Text(L"Adopt");
-        AgentSetTip(adopt, L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)");
-        adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_adoptExternalHandler) { self->_adoptExternalHandler(pid, winrt::hstring{ cwd }); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (self->_adoptExternalHandler)
+        if (ex.kind == AgentKind::Codex)
+        {
+            // Observe-only: explain why Adopt/Open-New aren't here (they resume/spawn a CLAUDE session).
+            MenuFlyoutItem note;
+            note.Text(L"Adopt \x2014 Codex control is a later phase");
+            note.IsEnabled(false);
+            AgentSetTip(note, L"Phase C1 surfaces Codex sessions read-only (left-click for its conversation). Adopting / driving Codex is a later phase.");
+            menu.Items().Append(note);
+        }
+        else
+        {
+            MenuFlyoutItem adopt;
+            adopt.Text(L"Adopt");
+            AgentSetTip(adopt, L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)");
+            adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
                 {
-                    self->_adoptExternalHandler(pid, winrt::hstring{ cwd });
+                    disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_adoptExternalHandler) { self->_adoptExternalHandler(pid, winrt::hstring{ cwd }); } } });
                 }
-            }
-        });
-        menu.Items().Append(adopt);
-
-        // Open New Session Here — offered in every scope (matches _MakeSessionMenu's LOCAL/GLOBAL
-        // ordering): spawn a managed session in this external's cwd (a new, independent
-        // conversation — distinct from Adopt, which resumes the external's existing conversation).
-        MenuFlyoutItem openHere;
-        openHere.Text(L"Open New Session Here");
-        AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
-        openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (self->_spawnHandler)
+                else if (auto self = weak.get())
                 {
-                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                    if (self->_adoptExternalHandler)
+                    {
+                        self->_adoptExternalHandler(pid, winrt::hstring{ cwd });
+                    }
                 }
-            }
-        });
-        menu.Items().Append(openHere);
+            });
+            menu.Items().Append(adopt);
 
-        // Bring Window To Front — the LAST option: surface the window HOSTING this external claude
-        // (unminimize + foreground; a Windows Terminal-class host also gets the claude's tab
-        // selected, best-effort). Observe-only safe: window activation only — it never writes into
-        // the foreign session (Rule #13). Defers a tick so the closing flyout's focus restore lands
-        // before foreground is handed to the other window.
+            // Open New Session Here — offered in every scope (matches _MakeSessionMenu's LOCAL/GLOBAL
+            // ordering): spawn a managed session in this external's cwd (a new, independent
+            // conversation — distinct from Adopt, which resumes the external's existing conversation).
+            MenuFlyoutItem openHere;
+            openHere.Text(L"Open New Session Here");
+            AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
+            openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
+                }
+                else if (auto self = weak.get())
+                {
+                    if (self->_spawnHandler)
+                    {
+                        self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                    }
+                }
+            });
+            menu.Items().Append(openHere);
+        }
+
+        // Bring Window To Front — the LAST option, for BOTH agents: surface the window HOSTING this
+        // session (unminimize + foreground; a Windows Terminal-class host also gets the tab selected,
+        // best-effort). Observe-only safe: window activation only — it never writes into the foreign
+        // session (Rule #13). Defers a tick so the closing flyout's focus restore lands before
+        // foreground is handed to the other window.
         MenuFlyoutItem bringFront;
         bringFront.Text(L"Bring Window To Front");
-        AgentSetTip(bringFront, L"Unminimize + foreground the window hosting this claude; a Windows Terminal host also gets its tab selected (best-effort)");
+        AgentSetTip(bringFront, L"Unminimize + foreground the window hosting this session; a Windows Terminal host also gets its tab selected (best-effort)");
         bringFront.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
@@ -4318,17 +4358,26 @@ namespace winrt::TerminalApp::implementation
     // (Rule #9/#13). The header offers Adopt as the path to make it controllable.
     void AgentManagerContent::_RebuildExternalPlan()
     {
+        const bool isCodex = (_selectedExternalKind == ::Agentmaster::AgentKind::Codex);
         auto titleRow = StackPanel{};
         titleRow.Orientation(Orientation::Horizontal);
         titleRow.Spacing(8);
-        titleRow.Children().Append(Text(_selectedExternalTitle.empty() ? winrt::hstring{ L"claude" } : winrt::hstring{ _selectedExternalTitle }, 16, true, 1.0));
-        titleRow.Children().Append(Pill(L"external \x00B7 observe-only", Colors::Gray()));
+        titleRow.Children().Append(Text(_selectedExternalTitle.empty() ? winrt::hstring{ isCodex ? L"codex" : L"claude" } : winrt::hstring{ _selectedExternalTitle }, 16, true, 1.0));
+        if (isCodex)
+        {
+            titleRow.Children().Append(Pill(L"codex \x00B7 observe-only", Color{ 0xFF, 0x4E, 0xC9, 0xB0 }));
+        }
+        else
+        {
+            titleRow.Children().Append(Pill(L"external \x00B7 observe-only", Colors::Gray()));
+        }
         _planHeaderHost.Children().Append(titleRow);
         if (!_selectedExternalCwd.empty())
         {
             _planHeaderHost.Children().Append(Text(winrt::hstring{ _selectedExternalCwd }, 12, false, 0.6));
         }
-        _planHeaderHost.Children().Append(Text(L"Read-only \x2014 runs outside Agentmaster. Right-click it in the tree and “Adopt” to resume the conversation into a managed tab.", 11, false, 0.5));
+        // Codex is observe-only in Phase C1 (no Adopt yet); Claude can be adopted from the tree.
+        _planHeaderHost.Children().Append(Text(isCodex ? winrt::hstring{ L"Read-only \x2014 an OpenAI Codex session. Driving/adopting Codex is a later phase." } : winrt::hstring{ L"Read-only \x2014 runs outside Agentmaster. Right-click it in the tree and “Adopt” to resume the conversation into a managed tab." }, 11, false, 0.5));
 
         if (_selectedExternalSessionId.empty())
         {
@@ -4426,13 +4475,15 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: select an EXTERNAL (observe-only) row -> the Flight Plan shows its conversation
     // READ-ONLY. We host no ConPTY for it (Rule #9/#13), so this never binds an injector; it only
     // surfaces what was prompted. Clears the managed selection (one Flight-Plan surface).
-    void AgentManagerContent::_SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title)
+    void AgentManagerContent::_SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath)
     {
         _selectedId.clear();
         _selectedPromptId.clear();
         _selectedExternalSessionId = sessionId;
         _selectedExternalCwd = cwd;
         _selectedExternalTitle = title;
+        _selectedExternalKind = kind; // Phase C1: the read-only plan reader (Claude transcript vs Codex rollout)
+        _selectedExternalRolloutPath = rolloutPath;
         // Linked Lenses: selecting an external — from the Explorer Tree OR a Triage-Board External
         // card — puts all three regions in agreement. Switch the tree to EXTERNAL so it lists the
         // externals with this one highlighted, and the Flight Plan renders its read-only conversation
@@ -4443,7 +4494,7 @@ namespace winrt::TerminalApp::implementation
             _treeScope = TreeScope::External;
             _UpdateTreeScopeButton();
         }
-        _LoadExternalPlan(sessionId, cwd); // kicks off the (cached) background transcript read
+        _LoadExternalPlan(sessionId, cwd, kind, rolloutPath); // kicks off the (cached) background transcript/rollout read
         _NotifyLensChanged();
         _Refresh();
     }
@@ -4452,7 +4503,7 @@ namespace winrt::TerminalApp::implementation
     // multi-MB; never parse it on the UI thread), then post the result back via the dispatcher. Cached
     // per id (_externalPlanLoadedFor) so re-selecting the same external doesn't re-read. A session
     // with no transcript yet (empty id) loads nothing (the plan shows "not prompted yet").
-    void AgentManagerContent::_LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd)
+    void AgentManagerContent::_LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath)
     {
         if (_externalPlanLoadedFor == sessionId && !sessionId.empty())
         {
@@ -4466,14 +4517,18 @@ namespace winrt::TerminalApp::implementation
         }
         auto weak = get_weak();
         auto disp = _dispatcher;
-        std::thread([weak, disp, sessionId, cwd]() {
-            // Whole transcript (maxBytes 0), cap the prompt count so a giant conversation stays bounded.
-            auto info = ::Agentmaster::ReadTranscriptInfo(cwd, sessionId, 0, 1000);
+        std::thread([weak, disp, sessionId, cwd, kind, rolloutPath]() {
+            // Whole transcript (maxBytes 0), cap the prompt count so a giant conversation stays
+            // bounded. Codex (Phase C1) reads its date-sharded rollout (the path carried on the row);
+            // Claude reads <projects>/<encode(cwd)>/<id>.jsonl. Both yield the human prompts in order.
+            std::vector<std::wstring> prompts = (kind == ::Agentmaster::AgentKind::Codex)
+                                                    ? ::Agentmaster::ReadCodexRolloutInfo(rolloutPath, 0, 1000).userPrompts
+                                                    : ::Agentmaster::ReadTranscriptInfo(cwd, sessionId, 0, 1000).userPrompts;
             if (!disp)
             {
                 return;
             }
-            disp.TryEnqueue([weak, sessionId, prompts = std::move(info.userPrompts)]() mutable {
+            disp.TryEnqueue([weak, sessionId, prompts = std::move(prompts)]() mutable {
                 auto self = weak.get();
                 if (!self)
                 {

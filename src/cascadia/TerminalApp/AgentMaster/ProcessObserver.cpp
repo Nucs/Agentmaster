@@ -27,6 +27,34 @@ namespace
             .count();
     }
 
+    // Stat a file's creation + last-write times as Unix ms (Codex rollout timing refresh — the
+    // mtime ticks as codex appends, so the per-pid cache re-stats cheaply each survey). false if
+    // the file is absent/a directory. (Phase C1.)
+    bool FileTimesOf(const std::wstring& path, int64_t& createdMs, int64_t& lastMs)
+    {
+        createdMs = 0;
+        lastMs = 0;
+        if (path.empty())
+        {
+            return false;
+        }
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad) || (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return false;
+        }
+        const auto toMs = [](const FILETIME& ft) -> int64_t {
+            ULARGE_INTEGER u;
+            u.LowPart = ft.dwLowDateTime;
+            u.HighPart = ft.dwHighDateTime;
+            constexpr uint64_t kEpoch = 116444736000000000ull; // 1601 -> 1970 in 100ns
+            return u.QuadPart < kEpoch ? 0 : static_cast<int64_t>((u.QuadPart - kEpoch) / 10000ull);
+        };
+        createdMs = toMs(fad.ftCreationTime);
+        lastMs = toMs(fad.ftLastWriteTime);
+        return true;
+    }
+
     // A short label for a TabActivity (the [activity] event + any logging). (O6)
     const wchar_t* ActivityName(TabActivity a)
     {
@@ -311,6 +339,18 @@ namespace Agentmaster
                     break;
                 }
             }
+            // Codex liveness too (Phase C1): a codex exit/birth must reclassify its External row.
+            for (const auto& [pid, start] : _lastCodexAlive)
+            {
+                if (!allAlive)
+                {
+                    break;
+                }
+                if (start == 0 || ProcessStartUnixMs(pid) != start)
+                {
+                    allAlive = false;
+                }
+            }
             if (allAlive)
             {
                 return; // nothing changed -> keep the last published tables; µs cost
@@ -357,6 +397,102 @@ namespace Agentmaster
             }
             factsByPid.emplace(e.pid, std::move(f));
         }
+
+        // 1a) Codex (Phase C1, OBSERVER.md §19-Q3): read every codex.exe's facts out-of-band (no
+        //     GUI-desktop sibling to exclude, unlike claude). Classified ours/external by AM_SESSION
+        //     like claude — but Codex is OBSERVE-ONLY, so it is never fed to ObserveClaude and never
+        //     bound; it is surfaced as an External row, enriched from its rollout. `getCodexInfo`
+        //     resolves the date-sharded rollout (+ reads model/effort/sandbox/approval/title) ONCE per
+        //     codex PID (cached, mtime re-stat'd each survey) — shared by the per-tab badge + the census.
+        std::unordered_map<uint32_t, CodexProcessFacts> codexByPid;
+        for (const auto& e : snap)
+        {
+            if (!ImageNameEq(e.image, L"codex.exe"))
+            {
+                continue;
+            }
+            CodexProcessFacts f = ReadCodexFacts(e.pid);
+            f.parentPid = e.ppid;
+            f.runningApp = ClassifyRunningApp(f.amSession, f.wtSession, _amSession);
+            codexByPid.emplace(e.pid, std::move(f));
+        }
+        const auto getCodexInfo = [this](const CodexProcessFacts& f) -> CodexInfo {
+            auto it = _codexInfoByPid.find(f.pid);
+            if (it != _codexInfoByPid.end() && it->second.resolved)
+            {
+                // Known rollout: just refresh the mtime (codex appends as it works); no re-resolve.
+                if (!it->second.rolloutPath.empty())
+                {
+                    int64_t c = 0, l = 0;
+                    if (FileTimesOf(it->second.rolloutPath, c, l))
+                    {
+                        if (c)
+                        {
+                            it->second.createdUnixMs = c;
+                        }
+                        if (l)
+                        {
+                            it->second.lastActivityUnixMs = l;
+                        }
+                    }
+                }
+                return it->second;
+            }
+            // Resolve once: an explicit `codex resume <guid>` is authoritative; else cwd+start
+            // discovery over the date-sharded rollouts. A codex with no rollout yet (never prompted,
+            // §11d) stays unresolved and is retried next survey until its first turn writes the file.
+            CodexInfo ci;
+            const std::wstring home = !f.codexHome.empty() ? f.codexHome : CodexDefaultHome();
+            CodexSession sess;
+            if (!f.resumeTarget.empty())
+            {
+                sess.sessionId = f.resumeTarget;
+                sess.rolloutPath = ResolveCodexRolloutPathIn(home, f.resumeTarget);
+            }
+            else
+            {
+                sess = ResolveCodexSessionIn(home, f.cwd, f.startUnixMs);
+            }
+            ci.sessionId = sess.sessionId;
+            ci.rolloutPath = sess.rolloutPath;
+            ci.createdUnixMs = sess.createdUnixMs;
+            ci.lastActivityUnixMs = sess.lastActivityUnixMs;
+            if (!ci.rolloutPath.empty())
+            {
+                const auto ri = ReadCodexRolloutInfo(ci.rolloutPath, 131072, 1); // 128 KB head: model + first prompt
+                ci.title = ri.title;
+                ci.model = ri.model;
+                ci.effort = ri.effort;
+                ci.sandbox = ri.sandbox;
+                ci.approvalMode = ri.approvalMode;
+                ci.gitBranch = ri.gitBranch;
+                if (ri.createdUnixMs)
+                {
+                    ci.createdUnixMs = ri.createdUnixMs;
+                }
+                if (ri.lastActivityUnixMs)
+                {
+                    ci.lastActivityUnixMs = ri.lastActivityUnixMs;
+                }
+                ci.resolved = true;
+            }
+            // Command-line facts fill any gaps (model/sandbox/approval can be on the line when not
+            // carried by config.toml). They never override the rollout's authoritative values.
+            if (ci.model.empty())
+            {
+                ci.model = f.model;
+            }
+            if (ci.sandbox.empty())
+            {
+                ci.sandbox = f.sandbox;
+            }
+            if (ci.approvalMode.empty())
+            {
+                ci.approvalMode = f.approvalMode;
+            }
+            _codexInfoByPid[f.pid] = ci; // cache (resolved=false => re-resolve next survey until the rollout appears)
+            return ci;
+        };
 
         // 1b) Live-session presence (SESSIONS.md §7-Q5): the store's RAW read of
         //     ~/.claude/sessions/<pid>.json, validated against THIS snapshot — a row whose pid is
@@ -498,10 +634,18 @@ namespace Agentmaster
             ar.wtSession = wtSession;
             ar.shellPid = tab.shellPid;
             ar.observedUnixMs = now;
-            if (FindDescendantByImage(snap, tab.shellPid, L"codex.exe") != 0)
+            if (const uint32_t xpid = FindDescendantByImage(snap, tab.shellPid, L"codex.exe"))
             {
                 ar.activity = TabActivity::Codex;
                 ar.image = L"codex.exe";
+                ar.busy = HasActiveChild(snap, xpid); // codex with a live tool child == mid-turn
+                // Enrich the observe badge with the model + cwd (Phase C1). getCodexInfo is cached per
+                // pid, so this rollout read is amortized. Observe-only — no ObserveClaude, no bind.
+                if (const auto cf = codexByPid.find(xpid); cf != codexByPid.end())
+                {
+                    ar.cwd = cf->second.cwd;
+                    ar.model = getCodexInfo(cf->second).model;
+                }
             }
             else
             {
@@ -661,11 +805,69 @@ namespace Agentmaster
             }
             externalRows.push_back(std::move(ex));
         }
+
+        // 4c) Codex census (Phase C1, OBSERVER.md §19-Q3): EVERY codex.exe is observe-only, so it is
+        //     surfaced as an External row (kind=Codex) regardless of host — even one in OUR own tab
+        //     (Codex is never adopted/driven in C1). Same orphan skip + host labeling as the claude
+        //     census; enriched from its rollout via getCodexInfo. NOT fed to ObserveClaude.
+        int codexCount = 0;
+        for (const auto& [pid, f] : codexByPid)
+        {
+            // Orphan skip (mirror the claude census): a codex whose host shell/terminal has exited is
+            // a dead session, not a live external. PID-reuse guard: a present parent started no later.
+            bool parentLive = false;
+            for (const auto& e : snap)
+            {
+                if (e.pid == f.parentPid)
+                {
+                    parentLive = (f.startUnixMs == 0) || (ProcessStartUnixMs(f.parentPid) <= f.startUnixMs + 2000);
+                    break;
+                }
+            }
+            if (!parentLive)
+            {
+                if (_orphanLogged.insert(pid).second)
+                {
+                    AppendStateLog(L"hooks.log", L"[observer] skipping orphaned codex (host exited) pid=" + std::to_wstring(pid) + L" cwd=" + f.cwd + L"\n");
+                }
+                continue;
+            }
+            ++codexCount;
+            const CodexInfo ci = getCodexInfo(f);
+            ExternalClaudeRow ex;
+            ex.kind = AgentKind::Codex;
+            ex.pid = pid;
+            ex.hostPid = f.parentPid ? f.parentPid : pid; // the host shell (codex's parent) — the "same window/tab" color key
+            ex.wtSession = f.wtSession;
+            ex.cwd = f.cwd;
+            ex.model = ci.model;
+            ex.effort = ci.effort;
+            ex.sandbox = ci.sandbox;
+            ex.approvalMode = ci.approvalMode;
+            ex.startUnixMs = f.startUnixMs;
+            ex.observedUnixMs = now;
+            ex.host = f.runningApp; // WindowsTerminal / Agentmaster(-Dev) / Other (cmd-hosted)
+            if (f.runningApp != RunningApp::WindowsTerminal)
+            {
+                ex.hostImage = parentImageOf(pid);
+            }
+            ex.hostLabel = ResolveExternalHostLabel(snap, pid, !f.amSession.empty());
+            ex.sessionId = ci.sessionId;
+            ex.rolloutPath = ci.rolloutPath; // date-sharded — carried so the read-only plan + "open rollout" need no re-resolve
+            ex.title = ci.title;
+            ex.gitBranch = ci.gitBranch;
+            ex.createdUnixMs = ci.createdUnixMs;
+            ex.lastActivityUnixMs = ci.lastActivityUnixMs;
+            externalRows.push_back(std::move(ex));
+        }
+
         std::sort(externalRows.begin(), externalRows.end(), [](const ExternalClaudeRow& a, const ExternalClaudeRow& b) { return a.pid < b.pid; });
         std::sort(oursPids.begin(), oursPids.end());
         {
             std::wstring sig = std::to_wstring(factsByPid.size()) + L":" + std::to_wstring(ours) + L":" +
-                               std::to_wstring(external) + L":" + std::to_wstring(other);
+                               std::to_wstring(external) + L":" + std::to_wstring(other) + L":" + std::to_wstring(orphan) +
+                               L":c" + std::to_wstring(codexCount); // codex births/deaths re-log the census
+            sig += std::to_wstring(codexByPid.size());
             for (const auto p : oursPids)
             {
                 sig += L"," + std::to_wstring(p);
@@ -677,7 +879,9 @@ namespace Agentmaster
                 AppendStateLog(L"hooks.log",
                                L"[observer] census claudes=" + std::to_wstring(factsByPid.size()) +
                                    L" ours=" + std::to_wstring(ours) + L" wt=" + std::to_wstring(external) +
-                                   L" other=" + std::to_wstring(other) + L" rostered=" + std::to_wstring(correlatedPids.size()) + L"\n");
+                                   L" other=" + std::to_wstring(other) + L" orphan=" + std::to_wstring(orphan) +
+                                   L" codex=" + std::to_wstring(codexCount) +
+                                   L" rostered=" + std::to_wstring(correlatedPids.size()) + L"\n");
                 // Detail for OUR claudes only (privacy + signal; model/effort aren't secrets, cwd is
                 // local). `rostered` == bound to one of our tabs; `stamp` == identified by AM_SESSION.
                 for (const auto p : oursPids)
@@ -728,6 +932,18 @@ namespace Agentmaster
         {
             const auto it = factsByPid.find(pid);
             _lastCorrelated.emplace_back(pid, it != factsByPid.end() ? it->second.startUnixMs : 0);
+        }
+        // Codex liveness set + prune the per-pid codex cache to live codex pids (Phase C1; bounds the
+        // cache across a long run, and lets a codex birth/exit collapse the fast-tick skip above).
+        _lastCodexAlive.clear();
+        _lastCodexAlive.reserve(codexByPid.size());
+        for (const auto& [pid, f] : codexByPid)
+        {
+            _lastCodexAlive.emplace_back(pid, f.startUnixMs);
+        }
+        for (auto it = _codexInfoByPid.begin(); it != _codexInfoByPid.end();)
+        {
+            it = (codexByPid.find(it->first) == codexByPid.end()) ? _codexInfoByPid.erase(it) : std::next(it);
         }
 
         // 5) Publish the snapshots (copy-out readers hold no lock while iterating).

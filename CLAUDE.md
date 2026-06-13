@@ -159,6 +159,31 @@ package: a no-hook `claude.exe` typed after a `cd` lands a Triage-Board card + p
 within ~3 s, classified `Agentmaster`; two claudes in one cwd bind to their **own** conversations;
 real-WindowsTerminal claudes are classified external + never bound; steady-state cost is µs.
 
+**Codex (the OpenAI Codex CLI, `codex.exe`) is now a first-class OBSERVED agent — Phase C1,
+observe-only; lib-compiled green + engine-tested (744/744 incl. new Codex checks), rides the next
+deploy cycle (OBSERVER.md §19-Q3 resolved).** The Fleet Observer promotes `codex.exe` from
+bare-acknowledge to full out-of-band enrichment (zero writes to `~/.codex`): `ReadCodexFacts` (PEB
+cwd/cmdline/env → model `--model`/`-m` · sandbox `--sandbox`/`-s` · approval `--ask-for-approval`/`-a`
+· `WT_SESSION`/`AM_SESSION`/`CODEX_HOME` · an explicit `resume <guid>`), a **date-sharded rollout
+resolver** (Codex shards by LOCAL date — `<CODEX_HOME|~/.codex>/sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl`,
+the uuid IS the conversation id, so the Claude cwd-encoded glob does NOT apply: scan the start-day ±1,
+confirm each candidate's cwd by a cheap head-scan of its `session_meta` line, pick by **ctime≈start
+identity** with a **newest-mtime-in-cwd fallback for a `resume`d** session whose rollout predates the
+process), and a rollout reader (`RolloutLine`/`payload` JSONL — model/effort/sandbox/approval from the
+first `turn_context`; title + human prompts from `event_msg`/`user_message`, skipping the AGENTS.md
+`response_item` blobs). Every codex is surfaced **observe-only in the External group** (Triage Board +
+Explorer **EXTERNAL**) with a teal **`codex`** pill + `model · sandbox · approval` + timing, a per-tab
+**`○ codex · <model>` observe badge**, and a **read-only Flight Plan** read from the rollout; the
+right-click menu is kind-aware — it **omits Adopt / Open New Session Here** (those resume/spawn a
+CLAUDE) keeping the agent-agnostic Bring-Window-To-Front, because **Codex control is a later phase**. A
+codex is **never** fed to the registry (`ObserveClaude` untouched — observe-only, Rule #13). Built as
+the light **external-row + `AgentKind`** path: `ExternalClaudeRow` gained `kind` (Claude default /
+Codex), `sandbox`, `approvalMode`, and the Codex `rolloutPath`; `Activity.h` gained `AgentKind` +
+`CodexProcessFacts`. **Deferred to later phases:** C2 = state via a Codex rollout-tail PULL reconciler
+(still no `~/.codex` writes); C3 = low-latency PUSH via Codex hooks/`notify` (a GLOBAL
+`~/.codex/config.toml` mutation — a product decision, no per-session `--settings` like Claude); C4 =
+bind a stdin injector + Autopilot (launch is PULL-correlated — Codex can't pin a session id at launch).
+
 **The Archive UI is now a full-window page; the round-2 audit's 13 fixes are deployed, and a round-3
 audit (10 more fixes) + a three-commit informativeness batch are built + lib-verified on top — they ride
 the next deploy cycle.**
@@ -474,7 +499,8 @@ What works, by area:
     overlay + title + per-dir color). Detached via `_observer->UnpublishWindow(_windowId)` in
     `~TerminalPage` (Rule #10).
   - **Activity + adornments (O6).** Full `TabActivity` taxonomy (Powershell / Cmd / ClaudeCode / Codex
-    (bare acknowledge, image+pid only) / Other), enriched `[activity]` events, `model · effort · kind`
+    (now **observe-only enrichment** — Codex C1, below; formerly bare image+pid acknowledge) / Other),
+    enriched `[activity]` events, `model · effort · kind`
     adornments on the Manager cards + per-tab overlay, and an **External (N)** group. The external
     census now includes **cmd-/console-hosted** claudes too (the `Other` bucket — previously counted but
     hidden), not only real-WindowsTerminal, and each `ExternalClaudeRow` is **enriched from its
@@ -482,7 +508,12 @@ What works, by area:
     **title** (first prompt), `gitBranch`, host kind (`wt` / `cmd` / shell leaf), and `created/lastActivity`
     timing. Observe-only — surfaced on the board AND the Explorer Tree's **EXTERNAL** scope, where a row's
     **Open New Session Here** / **Adopt** lives on the right-click menu and a **left-click → a read-only Flight Plan**
-    of the conversation.
+    of the conversation. **Codex C1 (observe-only) rides this same External group** (`ExternalClaudeRow.kind
+    == Codex`): a parallel `codex.exe` census enriches each from its date-sharded rollout (model · effort ·
+    sandbox · approval · title · timing) — a teal `codex` pill, an `○ codex · <model>` per-tab badge, a
+    read-only Flight Plan from the rollout — but the kind-aware menu omits Adopt / Open-New (Codex control
+    is a later phase) and a codex is **never** registered (`ObserveClaude` untouched). See the Codex C1
+    status block above + OBSERVER.md §11f / §19-Q3.
   - **Hardening (O7).** Steady-state is µs: the survey skips the Toolhelp snapshot when the roster is
     byte-identical to last tick AND every correlated `(pid, start-time)` pair is still alive (the start time
     is paired — per the rule that PIDs reuse — so a recycled PID can't masquerade as alive), except on the

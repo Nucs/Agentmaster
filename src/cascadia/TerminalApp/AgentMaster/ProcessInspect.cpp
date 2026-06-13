@@ -1403,6 +1403,549 @@ namespace Agentmaster
     {
         return PickDisplayTitle(info.customTitle, info.aiTitle, info.summary, info.title);
     }
+
+    // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
+    // File-local helpers (internal linkage). They reuse the anon-namespace primitives above
+    // (GlobTranscripts / ReadFileHead / Utf8ToWide / FileTimeToUnixMs / FirstLineTrim) and the
+    // public TU functions (ExtractCwdFromTranscriptHead / PickNewestTranscript / EnvLookup /
+    // ExtractCmdlineArg / TokenizeCmdline).
+
+    // Our OWN process environment variable (CODEX_HOME / USERPROFILE). Empty if unset.
+    static std::wstring GetOwnEnvW(const wchar_t* name)
+    {
+        const DWORD need = ::GetEnvironmentVariableW(name, nullptr, 0); // includes NUL; 0 == absent
+        if (need == 0)
+        {
+            return {};
+        }
+        std::wstring v(need, L'\0');
+        const DWORD got = ::GetEnvironmentVariableW(name, v.data(), need); // got == chars w/o NUL
+        v.resize(got);
+        return v;
+    }
+
+    static std::wstring TrimTrailingSlashes(std::wstring s)
+    {
+        while (!s.empty() && (s.back() == L'\\' || s.back() == L'/'))
+        {
+            s.pop_back();
+        }
+        return s;
+    }
+
+    // A 36-char hyphenated UUID (8-4-4-4-12). Codex uses time-ordered UUIDv7, still this shape.
+    static bool LooksLikeGuidStr(std::wstring_view s)
+    {
+        if (s.size() != 36)
+        {
+            return false;
+        }
+        for (size_t i = 0; i < 36; ++i)
+        {
+            const wchar_t c = s[i];
+            if (i == 8 || i == 13 || i == 18 || i == 23)
+            {
+                if (c != L'-')
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                const bool hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+                if (!hex)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static int64_t NowUnixMsSrc() // current unix ms (the startUnixMs == 0 day-dir anchor)
+    {
+        FILETIME ft{};
+        ::GetSystemTimeAsFileTime(&ft);
+        return FileTimeToUnixMs(ft);
+    }
+
+    static std::wstring PadNum(unsigned v, size_t width)
+    {
+        std::wstring s = std::to_wstring(v);
+        while (s.size() < width)
+        {
+            s.insert(s.begin(), L'0');
+        }
+        return s;
+    }
+
+    // "YYYY\\MM\\DD" in LOCAL time for a unix-ms instant ("" on failure). Codex shards rollouts by
+    // the LOCAL date (the filename uses local wall-clock; session_meta.timestamp is UTC), so the
+    // day dir is derived in local time.
+    static std::wstring CodexDayDirLocal(int64_t unixMs)
+    {
+        if (unixMs <= 0)
+        {
+            return {};
+        }
+        ULARGE_INTEGER u;
+        u.QuadPart = static_cast<uint64_t>(unixMs) * 10000ull + 116444736000000000ull; // unix ms -> FILETIME (100ns since 1601)
+        FILETIME ut;
+        ut.dwLowDateTime = u.LowPart;
+        ut.dwHighDateTime = u.HighPart;
+        FILETIME lt{};
+        if (!::FileTimeToLocalFileTime(&ut, &lt))
+        {
+            return {};
+        }
+        SYSTEMTIME st{};
+        if (!::FileTimeToSystemTime(&lt, &st))
+        {
+            return {};
+        }
+        return PadNum(st.wYear, 4) + L"\\" + PadNum(st.wMonth, 2) + L"\\" + PadNum(st.wDay, 2);
+    }
+
+    // Filesystem-aware cwd compare (Windows): normalize '/'->'\\', trim trailing separators, then
+    // ordinal case-insensitive. The codex PEB cwd ("K:\\source\\proxmox") vs session_meta.cwd.
+    static bool CodexPathEq(std::wstring_view a, std::wstring_view b)
+    {
+        const auto norm = [](std::wstring_view s) {
+            std::wstring r;
+            r.reserve(s.size());
+            for (const wchar_t c : s)
+            {
+                r.push_back(c == L'/' ? L'\\' : c);
+            }
+            while (!r.empty() && r.back() == L'\\')
+            {
+                r.pop_back();
+            }
+            return r;
+        };
+        const std::wstring na = norm(a), nb = norm(b);
+        return ::CompareStringOrdinal(na.c_str(), static_cast<int>(na.size()), nb.c_str(), static_cast<int>(nb.size()), TRUE) == CSTR_EQUAL;
+    }
+
+    // The immediate subdirectory NAMES of `dir` (no "." / ".."). Used to walk the year/month/day
+    // shards when resolving a rollout by a known uuid.
+    static std::vector<std::wstring> ListSubdirs(const std::wstring& dir)
+    {
+        std::vector<std::wstring> out;
+        WIN32_FIND_DATAW fd{};
+        const HANDLE h = ::FindFirstFileW((dir + L"\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return out;
+        }
+        do
+        {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                continue;
+            }
+            const std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..")
+            {
+                continue;
+            }
+            out.push_back(name);
+        } while (::FindNextFileW(h, &fd));
+        ::FindClose(h);
+        return out;
+    }
+
+    std::wstring CodexDefaultHome()
+    {
+        std::wstring base = GetOwnEnvW(L"CODEX_HOME");
+        if (base.empty())
+        {
+            const std::wstring home = GetOwnEnvW(L"USERPROFILE");
+            if (home.empty())
+            {
+                return {};
+            }
+            base = home + L"\\.codex";
+        }
+        return TrimTrailingSlashes(std::move(base));
+    }
+
+    void ParseCodexFacts(std::wstring_view commandline, const std::unordered_map<std::wstring, std::wstring>& env, CodexProcessFacts& facts)
+    {
+        facts.wtSession = EnvLookup(env, L"WT_SESSION");
+        facts.amSession = EnvLookup(env, L"AM_SESSION");
+        facts.codexHome = EnvLookup(env, L"CODEX_HOME");
+
+        // model: --model X / -m X (often absent — config.toml carries it; read from the rollout then)
+        if (const auto v = ExtractCmdlineArg(commandline, L"--model"))
+        {
+            facts.model = *v;
+        }
+        if (facts.model.empty())
+        {
+            if (const auto v = ExtractCmdlineArg(commandline, L"-m"))
+            {
+                facts.model = *v;
+            }
+        }
+        // sandbox: --sandbox X / -s X
+        if (const auto v = ExtractCmdlineArg(commandline, L"--sandbox"))
+        {
+            facts.sandbox = *v;
+        }
+        if (facts.sandbox.empty())
+        {
+            if (const auto v = ExtractCmdlineArg(commandline, L"-s"))
+            {
+                facts.sandbox = *v;
+            }
+        }
+        // approval: --ask-for-approval X / -a X
+        if (const auto v = ExtractCmdlineArg(commandline, L"--ask-for-approval"))
+        {
+            facts.approvalMode = *v;
+        }
+        if (facts.approvalMode.empty())
+        {
+            if (const auto v = ExtractCmdlineArg(commandline, L"-a"))
+            {
+                facts.approvalMode = *v;
+            }
+        }
+        // explicit `codex resume <guid>` (authoritative id — beats cwd->rollout discovery): the
+        // first non-flag token after a `resume` token, when it is a guid.
+        const auto toks = TokenizeCmdline(commandline);
+        for (size_t i = 0; i + 1 < toks.size(); ++i)
+        {
+            if (toks[i] == L"resume")
+            {
+                for (size_t j = i + 1; j < toks.size(); ++j)
+                {
+                    if (!toks[j].empty() && toks[j][0] == L'-')
+                    {
+                        continue; // skip flags (--last / --all / -C ...)
+                    }
+                    if (LooksLikeGuidStr(toks[j]))
+                    {
+                        facts.resumeTarget = toks[j];
+                    }
+                    break;
+                }
+                break;
+            }
+        }
+    }
+
+    CodexProcessFacts ReadCodexFacts(uint32_t pid)
+    {
+        CodexProcessFacts f;
+        f.pid = pid;
+        f.startUnixMs = ProcessStartUnixMs(pid);
+        f.cwd = ReadProcessCwd(pid);
+        f.commandline = ReadProcessCommandLine(pid);
+        f.subsystem = ReadProcessImageSubsystem(pid);
+        const auto env = ReadProcessEnv(pid);
+        ParseCodexFacts(f.commandline, env, f);
+        f.alive = true;
+        return f;
+    }
+
+    std::wstring CodexRolloutUuid(std::wstring_view rolloutStem)
+    {
+        if (rolloutStem.size() < 36)
+        {
+            return {};
+        }
+        const std::wstring_view tail = rolloutStem.substr(rolloutStem.size() - 36);
+        return LooksLikeGuidStr(tail) ? std::wstring{ tail } : std::wstring{};
+    }
+
+    CodexSession ResolveCodexSessionIn(std::wstring_view codexHome, std::wstring_view cwd, int64_t startUnixMs)
+    {
+        CodexSession out;
+        if (codexHome.empty() || cwd.empty())
+        {
+            return out;
+        }
+        const std::wstring sessions = std::wstring{ codexHome } + L"\\sessions";
+        const int64_t anchor = startUnixMs > 0 ? startUnixMs : NowUnixMsSrc();
+
+        // Candidate day dirs: the start's local day ± 1 (midnight boundary / small clock skew).
+        std::vector<std::wstring> days;
+        for (const int delta : { -1, 0, 1 })
+        {
+            const std::wstring d = CodexDayDirLocal(anchor + static_cast<int64_t>(delta) * 86400000ll);
+            if (!d.empty() && std::find(days.begin(), days.end(), d) == days.end())
+            {
+                days.push_back(d);
+            }
+        }
+
+        // Gather rollout candidates (uuid + ctime/mtime + path) across those day dirs. The uuid is in
+        // the filename, so no read is needed for the id — only the cwd confirmation below reads.
+        struct Cand
+        {
+            std::wstring uuid;
+            std::wstring path;
+            int64_t ctime{};
+            int64_t mtime{};
+        };
+        std::vector<Cand> cands;
+        for (const auto& day : days)
+        {
+            const std::wstring dir = sessions + L"\\" + day;
+            for (const auto& tc : GlobTranscripts(dir))
+            {
+                const std::wstring uuid = CodexRolloutUuid(tc.stem);
+                if (uuid.empty())
+                {
+                    continue;
+                }
+                cands.push_back({ uuid, dir + L"\\" + tc.stem + L".jsonl", tc.ctimeMs, tc.mtimeMs });
+            }
+        }
+        if (cands.empty())
+        {
+            return out;
+        }
+
+        // Newest-mtime first, then bound the cwd-confirm head reads (the date dir mixes all cwds, so
+        // each candidate must be confirmed against the target cwd before the start-time pick).
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.mtime > b.mtime; });
+        constexpr size_t kMaxConfirm = 64;
+        if (cands.size() > kMaxConfirm)
+        {
+            cands.resize(kMaxConfirm);
+        }
+
+        std::vector<TranscriptCandidate> cwdCands;
+        std::unordered_map<std::wstring, Cand> byUuid;
+        for (const auto& c : cands)
+        {
+            const std::string head = ReadFileHead(c.path, 4096); // session_meta is line 1; cwd precedes the bulky base_instructions
+            if (head.empty())
+            {
+                continue;
+            }
+            const std::wstring rcwd = ExtractCwdFromTranscriptHead(Utf8ToWide(head));
+            if (rcwd.empty() || !CodexPathEq(rcwd, cwd))
+            {
+                continue;
+            }
+            TranscriptCandidate t;
+            t.stem = c.uuid;
+            t.ctimeMs = c.ctime;
+            t.mtimeMs = c.mtime;
+            cwdCands.push_back(t);
+            byUuid[c.uuid] = c;
+        }
+        if (cwdCands.empty())
+        {
+            return out;
+        }
+
+        // ctime ≈ start IDENTITY for a FRESH session (rejects rollouts created before this process);
+        // newest-mtime-in-cwd FALLBACK for a RESUMED one (its rollout predates the process, so the
+        // identity path rejects it). Mirrors PickNewestTranscript's two modes.
+        std::wstring pick = PickNewestTranscript(cwdCands, startUnixMs);
+        if (pick.empty())
+        {
+            pick = PickNewestTranscript(cwdCands, 0);
+        }
+        if (pick.empty())
+        {
+            return out;
+        }
+        const auto it = byUuid.find(pick);
+        if (it == byUuid.end())
+        {
+            return out;
+        }
+        out.sessionId = it->second.uuid;
+        out.rolloutPath = it->second.path;
+        out.createdUnixMs = it->second.ctime;
+        out.lastActivityUnixMs = it->second.mtime;
+        return out;
+    }
+
+    CodexSession ResolveCodexSession(std::wstring_view cwd, int64_t startUnixMs)
+    {
+        return ResolveCodexSessionIn(CodexDefaultHome(), cwd, startUnixMs);
+    }
+
+    std::wstring ResolveCodexRolloutPathIn(std::wstring_view codexHome, std::wstring_view sessionId)
+    {
+        if (codexHome.empty() || sessionId.empty() || !LooksLikeGuidStr(sessionId))
+        {
+            return {};
+        }
+        const std::wstring sessions = std::wstring{ codexHome } + L"\\sessions";
+        const std::wstring needle = L"*" + std::wstring{ sessionId } + L".jsonl";
+        // Walk year\month\day. The uuid is unique, so the first match is THE rollout. (The explicit
+        // `codex resume <guid>` path; the cwd-discovery path above carries the path directly.)
+        for (const auto& year : ListSubdirs(sessions))
+        {
+            const std::wstring ydir = sessions + L"\\" + year;
+            for (const auto& month : ListSubdirs(ydir))
+            {
+                const std::wstring mdir = ydir + L"\\" + month;
+                for (const auto& day : ListSubdirs(mdir))
+                {
+                    const std::wstring ddir = mdir + L"\\" + day;
+                    WIN32_FIND_DATAW fd{};
+                    const HANDLE h = ::FindFirstFileW((ddir + L"\\" + needle).c_str(), &fd);
+                    if (h != INVALID_HANDLE_VALUE)
+                    {
+                        std::wstring found;
+                        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                        {
+                            found = ddir + L"\\" + fd.cFileName;
+                        }
+                        ::FindClose(h);
+                        if (!found.empty())
+                        {
+                            return found;
+                        }
+                    }
+                }
+            }
+        }
+        return {};
+    }
+
+    void ParseCodexRolloutText(std::wstring_view text, bool truncated, size_t maxPrompts, CodexRolloutInfo& out)
+    {
+        std::wstring firstPrompt;
+        bool haveTurnCtx = false;
+        size_t start = 0;
+        for (size_t i = 0; i <= text.size(); ++i)
+        {
+            if (i < text.size() && text[i] != L'\n')
+            {
+                continue;
+            }
+            if (i == text.size() && truncated)
+            {
+                break; // a head read may end mid-line — leave the partial segment for a fuller read
+            }
+            std::wstring_view line = text.substr(start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+            const std::wstring lineType = obj.StrAt(L"type");
+            const auto* pl = obj.Find(L"payload");
+            if (!pl || pl->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            if (lineType == L"session_meta")
+            {
+                if (out.cwd.empty())
+                {
+                    out.cwd = pl->StrAt(L"cwd");
+                }
+                if (out.gitBranch.empty())
+                {
+                    if (const auto* git = pl->Find(L"git"); git && git->type == json::Value::Type::Obj)
+                    {
+                        out.gitBranch = git->StrAt(L"branch"); // best-effort (codex may record git info)
+                    }
+                }
+                continue;
+            }
+            if (lineType == L"turn_context")
+            {
+                if (!haveTurnCtx) // the FIRST turn_context carries the session's model/effort/sandbox/approval
+                {
+                    haveTurnCtx = true;
+                    out.model = pl->StrAt(L"model");
+                    out.approvalMode = pl->StrAt(L"approval_policy");
+                    if (const auto* sp = pl->Find(L"sandbox_policy"); sp && sp->type == json::Value::Type::Obj)
+                    {
+                        out.sandbox = sp->StrAt(L"type");
+                    }
+                    else
+                    {
+                        out.sandbox = pl->StrAt(L"sandbox_mode"); // flat fallback
+                    }
+                    std::wstring eff;
+                    if (const auto* cm = pl->Find(L"collaboration_mode"); cm && cm->type == json::Value::Type::Obj)
+                    {
+                        if (const auto* se = cm->Find(L"settings"); se && se->type == json::Value::Type::Obj)
+                        {
+                            eff = se->StrAt(L"reasoning_effort");
+                        }
+                    }
+                    if (eff.empty())
+                    {
+                        eff = pl->StrAt(L"reasoning_effort");
+                    }
+                    if (eff.empty())
+                    {
+                        eff = pl->StrAt(L"model_reasoning_effort");
+                    }
+                    out.effort = eff;
+                }
+                continue;
+            }
+            if (lineType == L"event_msg" && pl->StrAt(L"type") == L"user_message")
+            {
+                // event_msg/user_message is the CLEAN human prompt (the AGENTS.md / context blobs are
+                // response_item user messages, skipped). Noise-filter via the shared rule.
+                std::wstring msg = pl->StrAt(L"message");
+                if (msg.empty() || IsNoiseUserPrompt(msg))
+                {
+                    continue;
+                }
+                if (firstPrompt.empty())
+                {
+                    firstPrompt = msg;
+                }
+                if (out.userPrompts.size() < maxPrompts)
+                {
+                    out.userPrompts.push_back(std::move(msg));
+                }
+            }
+        }
+        out.title = FirstLineTrim(firstPrompt);
+    }
+
+    CodexRolloutInfo ReadCodexRolloutInfo(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts)
+    {
+        CodexRolloutInfo info;
+        if (rolloutPath.empty())
+        {
+            return info;
+        }
+        const std::wstring path{ rolloutPath };
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad) || (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return info; // not found
+        }
+        info.found = true;
+        info.createdUnixMs = FileTimeToUnixMs(fad.ftCreationTime);
+        info.lastActivityUnixMs = FileTimeToUnixMs(fad.ftLastWriteTime);
+        const std::string bytes = ReadFileHead(path, maxBytes);
+        if (bytes.empty())
+        {
+            return info; // times only
+        }
+        ParseCodexRolloutText(Utf8ToWide(bytes), maxBytes != 0, maxPrompts, info);
+        return info;
+    }
 }
 
 // ============================================================================================

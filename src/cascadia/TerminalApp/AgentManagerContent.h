@@ -132,8 +132,11 @@ namespace winrt::TerminalApp::implementation
         // Flight Plan shows that conversation's prompts READ-ONLY (we host no ConPTY, so we can't
         // drive it). _LoadExternalPlan reads the transcript prompts on a background thread (one-shot
         // per id) and posts them back via the dispatcher; _RebuildExternalPlan renders them.
-        void _SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title);
-        void _LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd);
+        // `kind` (Claude vs Codex) + `rolloutPath` (Codex's date-sharded .jsonl, carried on the row)
+        // select the right read-only-plan reader: Claude -> ReadTranscriptInfo(cwd,id); Codex ->
+        // ReadCodexRolloutInfo(rolloutPath). (Phase C1.)
+        void _SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath);
+        void _LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath);
         void _RebuildExternalPlan();
 
         // Agentmaster: Explorer Tree scope toggle, cycling LOCAL -> GLOBAL -> EXTERNAL (this
@@ -220,8 +223,11 @@ namespace winrt::TerminalApp::implementation
         // into a managed, controllable tab (via _adoptExternalHandler); Open New Session Here -> spawn a
         // managed session in the external's cwd (an independent conversation); Bring Window To Front (last)
         // -> surface the external's HOSTING window (_BringExternalToFront). Observe-only externals carry no
-        // registry session, so this menu acts on (pid, cwd), not a session id.
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeExternalTreeMenu(uint32_t pid, const std::wstring& cwd);
+        // registry session, so this menu acts on the row's facts, not a session id. For a CODEX row
+        // (kind=Codex, observe-only in Phase C1) Adopt + Open New Session Here are omitted (those drive
+        // CLAUDE) and an "Open rollout file" item is offered instead; Bring Window To Front (agent-
+        // agnostic window activation) stays.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeExternalTreeMenu(const ::Agentmaster::ExternalClaudeRow& ex);
         // Agentmaster: the EXTERNAL menu's Bring Window To Front — resolve the row's host facts
         // (hostPid / sessionId / title) from the latest _externalClaudes snapshot, then surface its
         // hosting window on a BACKGROUND thread (ProcessInspect::BringClaudeWindowToFront:
@@ -301,6 +307,8 @@ namespace winrt::TerminalApp::implementation
         std::wstring _selectedExternalSessionId;
         std::wstring _selectedExternalCwd;
         std::wstring _selectedExternalTitle;
+        ::Agentmaster::AgentKind _selectedExternalKind{ ::Agentmaster::AgentKind::Claude }; // Phase C1: which reader the read-only plan uses (Claude transcript vs Codex rollout)
+        std::wstring _selectedExternalRolloutPath; // Codex: the rollout .jsonl path for the read-only plan (Claude leaves empty)
         std::wstring _externalPlanLoadedFor;
         std::vector<std::wstring> _externalPlanPrompts;
         // Agentmaster: the ONE session scope behind BOTH toggles — the Explorer Tree's 3-way cycle

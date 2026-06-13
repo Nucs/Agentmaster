@@ -277,6 +277,86 @@ namespace Agentmaster
     // aiTitle > legacy summary > title (the first REAL prompt). Pure.
     std::wstring TranscriptDisplayTitle(const TranscriptInfo& info);
 
+    // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
+    // Codex is the Claude analog with three divergences: its config home is CODEX_HOME (else
+    // ~/.codex); it can't pin a session id at launch (the id is auto-minted, embedded in the
+    // date-sharded rollout filename `sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl`); and
+    // model/effort/sandbox/approval usually come from config.toml, so they're read from the rollout
+    // (turn_context), not the command line. All reads are out-of-band; Codex is never adopted/driven
+    // in C1.
+
+    // The Codex config home: CODEX_HOME (of our process) if set, else %USERPROFILE%\.codex. Trailing
+    // slashes trimmed. Empty only if USERPROFILE is unset. (A codex PROCESS may carry its OWN
+    // CODEX_HOME in its env — CodexProcessFacts.codexHome — which callers prefer when known.)
+    std::wstring CodexDefaultHome();
+
+    // Pure: fill the parsed fields of `facts` (model/sandbox/approvalMode/resumeTarget + wtSession/
+    // amSession/codexHome) from a command line + env map. Codex flags: model (--model/-m), sandbox
+    // (--sandbox/-s), approval (--ask-for-approval/-a); a `resume <guid>` token yields resumeTarget.
+    // Does NOT touch pid/start/cwd/commandline/runningApp (the OS layer + caller own those). Total.
+    void ParseCodexFacts(std::wstring_view commandline, const std::unordered_map<std::wstring, std::wstring>& env, CodexProcessFacts& facts);
+
+    // Read one codex.exe's facts out-of-band: cwd + command line + env (PEB) + start time, then
+    // ParseCodexFacts. `parentPid` left 0 (caller fills from the snapshot), `runningApp` Unknown
+    // (caller classifies with its own AM_SESSION). Empty PEB fields => observe-only. (Phase C1)
+    CodexProcessFacts ReadCodexFacts(uint32_t pid);
+
+    // Pure: extract the session uuid from a rollout stem ("rollout-<ISO-ts>-<uuid>"): the trailing
+    // 36 chars iff they form a hyphenated UUID (Codex uses time-ordered UUIDv7). Empty if not.
+    std::wstring CodexRolloutUuid(std::wstring_view rolloutStem);
+
+    // The resolved Codex rollout for a correlated codex: its conversation id (== the rollout uuid),
+    // the full .jsonl path (date-sharded — NOT derivable from cwd+id, so it is carried), and timing.
+    struct CodexSession
+    {
+        std::wstring sessionId; // the rollout uuid ("" if none found yet — a never-prompted codex)
+        std::wstring rolloutPath; // full path to the rollout .jsonl ("" if none)
+        int64_t createdUnixMs{}; // rollout ctime (≈ conversation start)
+        int64_t lastActivityUnixMs{}; // rollout mtime (≈ last activity)
+    };
+
+    // Resolve the active rollout for a codex at `cwd` started ~`startUnixMs`, searching under an
+    // EXPLICIT codex home (so the harness can point it at a temp dir). Scans the date-sharded
+    // sessions dir for the local day around the start (± 1 day for midnight/skew), confirms each
+    // candidate's cwd via a cheap head-scan of its session_meta line (`ExtractCwdFromTranscriptHead`
+    // — cwd precedes the bulky base_instructions, so a 4 KB head suffices), and picks by ctime ≈
+    // start IDENTITY (PickNewestTranscript), falling back to newest-mtime-in-cwd for a resumed
+    // session (whose rollout predates the process). Empty session when the cwd has no rollout yet.
+    CodexSession ResolveCodexSessionIn(std::wstring_view codexHome, std::wstring_view cwd, int64_t startUnixMs);
+    CodexSession ResolveCodexSession(std::wstring_view cwd, int64_t startUnixMs); // CodexDefaultHome()
+
+    // Resolve a rollout's full path by its known uuid (an explicit `codex resume <guid>`): globs
+    // <home>/sessions/ recursively for `rollout-*<uuid>.jsonl`. Empty if not found. (Phase C1)
+    std::wstring ResolveCodexRolloutPathIn(std::wstring_view codexHome, std::wstring_view sessionId);
+
+    // A Codex rollout's user-facing metadata, read out-of-band for the External row + read-only plan.
+    struct CodexRolloutInfo
+    {
+        bool found{};
+        int64_t createdUnixMs{}; // file ctime (≈ conversation start)
+        int64_t lastActivityUnixMs{}; // file mtime (≈ last activity)
+        std::wstring cwd; // session_meta.cwd
+        std::wstring title; // first REAL human prompt (a `user_message` event), one line — the display title
+        std::wstring model; // first turn_context.model (e.g. "gpt-5.5")
+        std::wstring effort; // first turn_context collaboration_mode.settings.reasoning_effort (else top-level)
+        std::wstring sandbox; // first turn_context.sandbox_policy.type (read-only / workspace-write / danger-full-access)
+        std::wstring approvalMode; // first turn_context.approval_policy (untrusted / on-request / never)
+        std::wstring gitBranch; // best-effort: session_meta.git.branch, if recorded
+        std::vector<std::wstring> userPrompts; // the human prompts in order (user_message events; noise-filtered; capped)
+    };
+
+    // PURE + total: parse Codex rollout JSONL text into a CodexRolloutInfo (sans timing). Each line is
+    // a RolloutLine {timestamp,type,payload}: `session_meta` carries cwd; the FIRST `turn_context`
+    // carries model/effort/sandbox/approval; `event_msg`/`user_message` payloads are the human prompts
+    // (the FIRST is the title — these events are the clean human input; the AGENTS.md / context blobs
+    // live in `response_item` user messages and are skipped). `truncated` (a head read may end
+    // mid-line) drops the trailing partial segment. (Phase C1; the testable core of ReadCodexRolloutInfo.)
+    void ParseCodexRolloutText(std::wstring_view text, bool truncated, size_t maxPrompts, CodexRolloutInfo& out);
+
+    // Read <rolloutPath> out-of-band: stat (created/last), then ReadFileHead(maxBytes; 0 == whole
+    // file) -> ParseCodexRolloutText. Filesystem only. (Phase C1)
+    CodexRolloutInfo ReadCodexRolloutInfo(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts);
+
     // ===== window activation: surface an external claude's hosting window (Manager UI) ======
 
     // The last path segment of a Windows/POSIX path ("K:\src\Agentmaster\" -> "Agentmaster";

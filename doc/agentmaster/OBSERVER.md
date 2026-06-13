@@ -60,7 +60,9 @@ by the push path. We then measured the out-of-band alternatives on the live mach
 
 **Non-goals**
 - No screen scraping (Rule #7). State comes from the transcript + process facts only.
-- No control of Codex (acknowledge image + pid only).
+- No *control* of Codex. As of **C1** (§11f / §19-Q3) a Codex session is **enriched observe-only** —
+  model · effort · sandbox · approval · title · timing, read out-of-band from its rollout — and surfaced
+  in the External group, but it is never adopted, bound, or driven (control is a later phase).
 - No new persisted state — the observer's tables are runtime-only.
 - No injection by the observer; binding stays on the UI lane (`_BindClaudeSessionToTab`).
 
@@ -113,7 +115,8 @@ namespace Agentmaster
 ```
 
 - **`TabActivity`** — what a tab is *doing right now*, derived from the deepest meaningful descendant
-  of the tab's shell: `claude.exe`→ClaudeCode, `codex.exe`→Codex (acknowledge only), else the shell
+  of the tab's shell: `claude.exe`→ClaudeCode, `codex.exe`→Codex (observe-only — enriched from its
+  rollout, never driven; §11f), else the shell
   image → Powershell / Cmd, else Other.
 - **`RunningApp`** — who *hosts* a claude: `Agentmaster` (our `AM_SESSION`), `WindowsTerminal`
   (`WT_SESSION` but not our `AM_SESSION`), `Other` (neither). External ones are acknowledged and shown
@@ -368,7 +371,9 @@ for tab in roster:
                                                    cpid, f.runningApp, f.background,
                                                    f.model, f.effort, f.permissionMode, f.sessionName })
     elif xpid = FindDescendantByImage(snap, tab.shellPid, "codex.exe"):
-        act[tab.wtSession] = TabActivityRow{ Codex, "codex.exe" }          # acknowledge only
+        # Codex (C1, observe-only): activity badge enriched with the model; the FULL External row is
+        # emitted by the codex census below (§11f). codexInfo(xpid) is resolved+cached per pid.
+        act[tab.wtSession] = TabActivityRow{ Codex, "codex.exe", model = codexInfo(xpid).model }
     else:
         shell = imageOf(snap, tab.shellPid)
         act[tab.wtSession] = TabActivityRow{ classifyShell(shell), shell,
@@ -377,6 +382,9 @@ for tab in roster:
 
 # external census: claudes whose wtSession is NOT in our roster but RunningApp==WindowsTerminal
 #   -> optionally surface as "external N" (no registry session, observe-only)
+# codex census (C1, §11f): EVERY codex.exe (rostered or not) -> an ExternalClaudeRow{kind=Codex},
+#   enriched from its rollout (codexInfo), same orphan-skip + host-label as claude. Observe-only:
+#   NOT fed to ObserveClaude; never bound/driven.
 
 publish(corr, act)                                          # under the table mutex
 _knownPids = { cpid for tabs that correlated }              # for the M-lane / liveness cross-check
@@ -539,6 +547,60 @@ A correlated claude with **no transcript yet** (never prompted) has `sessionId==
 Only the durable `SessionInfo` subset persists (`Persistence.cpp` ToJson/FromJson untouched for the
 new transient fields). On restart the observer re-derives everything.
 
+### 11f. Codex (observe-only enrichment — Phase C1; resolves §19-Q3)
+
+A second agent — the OpenAI **Codex CLI** (`codex.exe`) — is now a first-class OBSERVED entity, the
+Codex analog of the external census, read entirely out-of-band (**zero writes to `~/.codex`**). It is
+**observe-only**: never adopted, bound, or driven (control is a later phase). The three divergences
+from Claude that shape it: Codex's config home is **`CODEX_HOME`** (else `~/.codex`), not `~/.claude`;
+it **cannot pin a session id at launch** (the id is auto-minted, embedded in the rollout filename); and
+model/effort/sandbox/approval usually come from `config.toml`, so they are read from the **rollout**,
+not the command line.
+
+- **Primitives (`ProcessInspect`).** `ReadCodexFacts`/`ParseCodexFacts` (PEB cwd/cmdline/env → model
+  `--model`/`-m`, sandbox `--sandbox`/`-s`, approval `--ask-for-approval`/`-a`, `WT_SESSION` /
+  `AM_SESSION` / `CODEX_HOME`, and an explicit `codex resume <guid>` as the authoritative id);
+  `CodexRolloutUuid` (the trailing UUIDv7 of a `rollout-<ISO-ts>-<uuid>` stem); `ResolveCodexSessionIn`
+  — Codex shards rollouts by **LOCAL date** (`sessions/YYYY/MM/DD/rollout-*.jsonl`) and the cwd lives
+  *inside* the file, so the Claude cwd-encoded glob does NOT apply: scan the start's local day **± 1**,
+  confirm each candidate's cwd by a cheap head-scan of its `session_meta` line
+  (`ExtractCwdFromTranscriptHead` — cwd precedes the bulky `base_instructions`, so 4 KB suffices), then
+  pick by **ctime ≈ start IDENTITY** (`PickNewestTranscript`), falling back to **newest-mtime-in-cwd**
+  for a `resume`d session whose rollout predates the process; `ResolveCodexRolloutPathIn` (find a rollout
+  by a known uuid — the explicit-resume path); `ParseCodexRolloutText`/`ReadCodexRolloutInfo` (the
+  `RolloutLine`/`payload` JSONL: `session_meta`→cwd, the FIRST `turn_context`→model/effort/sandbox/
+  approval, `event_msg`/`user_message`→the human prompts + title — the AGENTS.md / context blobs are
+  `response_item` user messages and are skipped). All pure parts are unit-tested.
+- **S-lane (`ProcessObserver`).** A Codex census parallel to the claude one: EVERY `codex.exe` is
+  observe-only — **even one in OUR own tab** (Codex is never driven in C1) — enriched ONCE per pid
+  (`_codexInfoByPid`, mtime re-stat'd each survey), classified ours/external by `AM_SESSION`, with the
+  SAME orphan-skip + host-label (`ResolveExternalHostLabel`) as the claude census, and emitted as an
+  `ExternalClaudeRow{kind=Codex}`. Codex pids join the O7 liveness set (a codex birth/exit forces a full
+  survey); the census log carries `codex=N`. **Never** fed to `ObserveClaude` (no registry session —
+  Rule #13).
+- **UI (`AgentManagerContent`).** The External group (Triage Board + Explorer **EXTERNAL**) renders a
+  teal **`codex`** pill + `model · sandbox · approval` + timing; the right-click menu is **kind-aware** —
+  Codex omits **Adopt** / **Open New Session Here** (those resume/spawn a CLAUDE; a disabled note says
+  control is a later phase) and keeps the agent-agnostic **Bring Window To Front**; **left-click → a
+  read-only Flight Plan** sourced from the rollout. The per-tab observe badge reads `○ codex · <model> ·
+  unlinked`.
+- **Data model (`Activity.h`).** New `enum AgentKind { Claude, Codex }` + `CodexProcessFacts`;
+  `ExternalClaudeRow` gained `kind` (Claude default — every existing producer/consumer unchanged),
+  `sandbox`, `approvalMode`, and the Codex `rolloutPath` (the date-sharded path, carried so the
+  read-only plan + future actions need no re-resolve). The type name is kept for a minimal, rebase-cheap
+  diff; `kind` discriminates. This is the **light "external-row" path** — see §19-Q3 for the
+  external-row-vs-generalized-agent-abstraction choice the later control phases revisit.
+
+**Later phases (NOT C1):** **C2** — state via a Codex rollout-tail PULL reconciler (`event_msg/task_started`
+→ Running, `task_complete` → turn-complete, tool calls → Running) feeding the existing `ShouldSynthesize*`
+machine; still observe-only, zero `~/.codex` writes. **C3** — low-latency PUSH by wiring Codex `notify`
+(turn-complete only) or `~/.codex/hooks.json` (SessionStart/UserPromptSubmit/Stop/PreToolUse/
+PermissionRequest — payloads map ~1:1 to our wire line; the forwarder pattern is reusable) to the same
+bridge; **invasive** — it mutates the user's GLOBAL Codex config (no per-session `--settings` like
+Claude) + hook-trust friction, so it is a product decision. **C4** — bind a stdin injector + Autopilot;
+launch must be PULL-correlated (no `--session-id` to pin), resume=`codex resume <id>`, fork=`codex fork
+<id>`, model fixed on resume; typed-vs-flight echo accounting needs C3's `UserPromptSubmit`.
+
 ---
 
 ## 12. Threading & synchronization (contract)
@@ -577,7 +639,10 @@ new transient fields). On restart the observer re-derives everything.
   one (the close→cd→reopen case we proved).
 - **Foreign / nested terminals:** `AM_SESSION` present but `WT_SESSION` not in our roster ⇒
   observe-only. Real-WT claude (no `AM_SESSION`) ⇒ `WindowsTerminal`, never bound.
-- **Codex:** acknowledged (image + pid) only; no PEB env/cmdline probing, no registry session.
+- **Codex (C1, observe-only):** ENRICHED out-of-band from its date-sharded rollout
+  (`<CODEX_HOME|~/.codex>/sessions/YYYY/MM/DD/rollout-<ISO-ts>-<uuid>.jsonl`) — model/effort/sandbox/
+  approval/title/timing, classified ours/external by `AM_SESSION` like claude — and surfaced in the
+  External group; NO registry session, never bound or driven (control is a later phase). §11f / §19-Q3.
 - **Debounce / caps:** survey ≤ 1 Toolhelp/known-interval; hard cap; abortable on `Stop`; the
   observer **never** writes to any shell stdin (invisibility invariant).
 
@@ -670,6 +735,12 @@ helpers to `AgentMaster/tests/`.
 
 1. Window attribution in `AM_SESSION` (`:<windowId>`) now, or defer until multi-window observer needs it?
 2. Surface external (`WindowsTerminal`) claudes in the Manager at all, or only count them?
-3. Codex: keep as bare acknowledge, or reserve an enrichment slot for a future Codex integration?
+3. ~~Codex: keep as bare acknowledge, or reserve an enrichment slot for a future Codex integration?~~
+   **RESOLVED — Phase C1 (observe-only enrichment) shipped (§11f):** Codex sessions are detected,
+   rollout-resolved, and surfaced in the External group with model/effort/sandbox/approval/title/timing;
+   no registry session, never driven. Implemented as the **light external-row + `AgentKind` path**, NOT
+   a generalized agent abstraction — the open follow-on (revisit at C2) is whether driving Codex (C4)
+   warrants graduating `SessionInfo`/registry/scanner to a first-class `AgentKind` so a managed Codex
+   session is a citizen, or whether a parallel Codex-managed path stays cheaper.
 4. O7 debounce: gate on roster-equality + PID-liveness only, or add a `ReadDirectoryChangesW` watch on
    `projects/` to event-drive transcript-appear instead of the heartbeat?

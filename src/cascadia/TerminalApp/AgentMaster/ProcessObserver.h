@@ -121,6 +121,28 @@ namespace Agentmaster
         };
         std::unordered_map<std::wstring, ExtInfo> _extInfoCache;
 
+        // Worker-thread-only cache (no lock) of a Codex session's resolved id + rollout path + the
+        // rollout-derived facts (title / model / effort / sandbox / approval / git branch / timing),
+        // keyed by codex PID — so the date-sharded resolution + rollout head-read happen ONCE per
+        // codex process (only the mtime is re-stat'd each survey). Pruned to live codex pids.
+        // (Phase C1, OBSERVER.md §19-Q3.)
+        struct CodexInfo
+        {
+            std::wstring sessionId;
+            std::wstring rolloutPath;
+            std::wstring title;
+            std::wstring model;
+            std::wstring effort;
+            std::wstring sandbox;
+            std::wstring approvalMode;
+            std::wstring gitBranch;
+            int64_t createdUnixMs{};
+            int64_t lastActivityUnixMs{};
+            bool resolved{}; // the rollout was found + head-read once (don't re-resolve a known one)
+        };
+        std::unordered_map<uint32_t, CodexInfo> _codexInfoByPid;
+        std::vector<std::pair<uint32_t, int64_t>> _lastCodexAlive; // (pid,start) of codex seen last full survey — folded into the O7 liveness set so a codex birth/exit forces a full survey
+
         // Debounce (O7, worker-thread-only, no lock). The FULL Toolhelp survey runs at most every
         // kObserverHeartbeatMs; between full surveys the worker ticks at kObserverFastTickMs and, when
         // the roster is byte-identical AND every correlated (pid,start) pair is still alive, SKIPS the

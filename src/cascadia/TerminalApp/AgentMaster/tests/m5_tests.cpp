@@ -1953,6 +1953,155 @@ static void TestTranscriptResolve()
     }
 }
 
+// "YYYY\\MM\\DD" in LOCAL time for a unix-ms instant — mirrors ProcessInspect's CodexDayDirLocal
+// (same Win32 conversion, so the date dir the test CREATES matches the one the resolver GLOBS).
+static std::wstring TestCodexDayDir(int64_t unixMs)
+{
+    ULARGE_INTEGER u;
+    u.QuadPart = static_cast<uint64_t>(unixMs) * 10000ull + 116444736000000000ull;
+    FILETIME ut;
+    ut.dwLowDateTime = u.LowPart;
+    ut.dwHighDateTime = u.HighPart;
+    FILETIME lt{};
+    ::FileTimeToLocalFileTime(&ut, &lt);
+    SYSTEMTIME st{};
+    ::FileTimeToSystemTime(&lt, &st);
+    wchar_t buf[16]{};
+    ::swprintf(buf, 16, L"%04u\\%02u\\%02u", st.wYear, st.wMonth, st.wDay);
+    return buf;
+}
+
+// Agentmaster Phase C1: Codex (OpenAI Codex CLI) observe-only enrichment. Covers the PURE
+// primitives (ParseCodexFacts / CodexRolloutUuid / ParseCodexRolloutText) + the file-read
+// (ReadCodexRolloutInfo) + the date-sharded resolution (ResolveCodexSessionIn) over a temp home.
+static void TestCodexObserve()
+{
+    std::wprintf(L"Codex (Phase C1) facts/uuid/rollout parse + resolution:\n");
+    using Env = std::unordered_map<std::wstring, std::wstring>;
+
+    // --- ParseCodexFacts: flags (--model/-m, --sandbox/-s, --ask-for-approval/-a), env, resume ---
+    {
+        CodexProcessFacts f;
+        Env env{ { L"WT_SESSION", L"wt-9" }, { L"AM_SESSION", L"am-9" }, { L"CODEX_HOME", L"D:/cx" } };
+        ParseCodexFacts(L"codex --model gpt-5.5 --sandbox danger-full-access --ask-for-approval never", env, f);
+        CHECK(f.model == L"gpt-5.5", "codex facts model from --model");
+        CHECK(f.sandbox == L"danger-full-access", "codex facts sandbox from --sandbox");
+        CHECK(f.approvalMode == L"never", "codex facts approval from --ask-for-approval");
+        CHECK(f.wtSession == L"wt-9" && f.amSession == L"am-9", "codex facts WT_SESSION + AM_SESSION");
+        CHECK(f.codexHome == L"D:/cx", "codex facts CODEX_HOME from env");
+        CHECK(f.resumeTarget.empty(), "fresh codex launch has no resume target");
+    }
+    {
+        CodexProcessFacts f;
+        ParseCodexFacts(L"codex -m o3 -s read-only -a on-request", {}, f);
+        CHECK(f.model == L"o3", "codex facts model from -m");
+        CHECK(f.sandbox == L"read-only", "codex facts sandbox from -s");
+        CHECK(f.approvalMode == L"on-request", "codex facts approval from -a");
+    }
+    {
+        CodexProcessFacts f;
+        ParseCodexFacts(L"codex", {}, f); // bare: config.toml carries everything -> nothing on the cmdline
+        CHECK(f.model.empty() && f.sandbox.empty() && f.approvalMode.empty() && f.resumeTarget.empty(), "bare codex cmdline -> empty parsed facts");
+    }
+    {
+        CodexProcessFacts f;
+        ParseCodexFacts(L"codex resume 019d8aa3-10a5-7273-ae65-a62cba4b63de", {}, f);
+        CHECK(f.resumeTarget == L"019d8aa3-10a5-7273-ae65-a62cba4b63de", "codex `resume <guid>` -> authoritative resumeTarget");
+        CodexProcessFacts g;
+        ParseCodexFacts(L"codex resume --last", {}, g);
+        CHECK(g.resumeTarget.empty(), "codex `resume --last` -> no explicit id (cwd discovery)");
+    }
+
+    // --- CodexRolloutUuid: the trailing 36-char UUIDv7 of a rollout stem ---
+    CHECK(CodexRolloutUuid(L"rollout-2026-04-14T09-17-15-019d8aa3-10a5-7273-ae65-a62cba4b63de") == L"019d8aa3-10a5-7273-ae65-a62cba4b63de", "uuid from a real rollout stem");
+    CHECK(CodexRolloutUuid(L"rollout-2026-04-14T09-17-15-not-a-guid-here-xxxx-xxxxxxxxxxxx").empty(), "non-guid tail -> empty");
+    CHECK(CodexRolloutUuid(L"short").empty(), "too-short stem -> empty");
+
+    // --- ParseCodexRolloutText: model/effort/sandbox/approval (turn_context), title + prompts
+    //     (event_msg/user_message), and the AGENTS.md response_item user message is IGNORED ---
+    {
+        const std::string roll =
+            R"({"type":"session_meta","payload":{"id":"019d8aa3-10a5-7273-ae65-a62cba4b63de","cwd":"K:/AmCodexTest/proj"}})" "\n"
+            R"({"type":"turn_context","payload":{"model":"gpt-5.5","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"},"collaboration_mode":{"settings":{"reasoning_effort":"xhigh"}}}})" "\n"
+            R"({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for K:/AmCodexTest/proj"}]}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"user_message","message":"First real question\nsecond line"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"agent_message","message":"an answer"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"user_message","message":"Second question"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"task_complete","turn_id":"t","last_agent_message":"done"}})" "\n";
+        const std::wstring wide(roll.begin(), roll.end()); // ASCII content -> safe narrow->wide
+        CodexRolloutInfo info;
+        ParseCodexRolloutText(wide, false, 100, info);
+        CHECK(info.cwd == L"K:/AmCodexTest/proj", "rollout cwd from session_meta");
+        CHECK(info.model == L"gpt-5.5", "rollout model from turn_context");
+        CHECK(info.effort == L"xhigh", "rollout effort from collaboration_mode.settings.reasoning_effort");
+        CHECK(info.sandbox == L"danger-full-access", "rollout sandbox from sandbox_policy.type");
+        CHECK(info.approvalMode == L"never", "rollout approval from approval_policy");
+        CHECK(info.title == L"First real question", "title = first user_message, first line");
+        CHECK(info.userPrompts.size() == 2, "two human prompts (AGENTS.md response_item ignored)");
+        CHECK(info.userPrompts.size() == 2 && info.userPrompts[0] == L"First real question\nsecond line", "first prompt full text");
+        CHECK(info.userPrompts.size() == 2 && info.userPrompts[1] == L"Second question", "second prompt");
+    }
+
+    // --- ReadCodexRolloutInfo over a temp FILE (path-direct; validates read + timing wiring) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring root = std::wstring{ tmp } + L"am_codex_file_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ root }, ec);
+        const std::wstring path = root + L"\\rollout-2025-06-15T10-00-00-019d8aa3-10a5-7273-ae65-a62cba4b63de.jsonl";
+        const std::string roll =
+            R"({"type":"session_meta","payload":{"cwd":"K:/AmCodexTest/proj"}})" "\n"
+            R"({"type":"turn_context","payload":{"model":"gpt-5.5"}})" "\n"
+            R"({"type":"event_msg","payload":{"type":"user_message","message":"hello codex"}})" "\n";
+        MakeJsonl(path, roll, 7000, 3000);
+        const auto info = ReadCodexRolloutInfo(path, 0, 100);
+        CHECK(info.found, "ReadCodexRolloutInfo found the file");
+        CHECK(info.createdUnixMs == 3000 && info.lastActivityUnixMs == 7000, "rollout ctime/mtime");
+        CHECK(info.title == L"hello codex" && info.model == L"gpt-5.5", "rollout title + model from file");
+        CHECK(!ReadCodexRolloutInfo(root + L"\\nope.jsonl", 0, 100).found, "missing rollout -> not found");
+        std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
+
+    // --- ResolveCodexSessionIn over a temp CODEX_HOME (date-sharded glob + cwd-confirm + pick) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring home = std::wstring{ tmp } + L"am_codex_home_" + std::to_wstring(::GetCurrentProcessId());
+        const int64_t startMs = 1750000000000LL; // a fixed instant; the day dir is derived locally from it
+        const std::wstring sdir = home + L"\\sessions\\" + TestCodexDayDir(startMs);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ sdir }, ec);
+        const std::string metaMine = R"({"type":"session_meta","payload":{"cwd":"K:/AmCodexTest/proj"}})" "\n";
+        const std::string metaOther = R"({"type":"session_meta","payload":{"cwd":"K:/Other/dir"}})" "\n";
+        const std::wstring uuidMine = L"019d8aa3-10a5-7273-ae65-a62cba4b63de";
+        const std::wstring uuidOld = L"019d0000-0000-7000-8000-000000000000";
+        const std::wstring uuidOther = L"019dffff-ffff-7fff-bfff-ffffffffffff";
+        MakeJsonl(sdir + L"\\rollout-x-" + uuidMine + L".jsonl", metaMine, startMs, startMs); // ctime≈start, my cwd
+        MakeJsonl(sdir + L"\\rollout-x-" + uuidOld + L".jsonl", metaMine, startMs - 3600000, startMs - 3600000); // older, my cwd
+        MakeJsonl(sdir + L"\\rollout-x-" + uuidOther + L".jsonl", metaOther, startMs + 5000, startMs + 5000); // diff cwd
+
+        const auto sess = ResolveCodexSessionIn(home, L"K:/AmCodexTest/proj", startMs);
+        CHECK(sess.sessionId == uuidMine, "resolve: rollout created at my start, in my cwd (ctime≈start identity)");
+        CHECK(sess.rolloutPath.find(uuidMine) != std::wstring::npos, "resolve returns the rollout path");
+        CHECK(sess.createdUnixMs == startMs, "resolve carries the rollout ctime");
+
+        // resume fallback: start far past every rollout's ctime -> newest-mtime IN my cwd (mine).
+        const auto sessR = ResolveCodexSessionIn(home, L"K:/AmCodexTest/proj", startMs + 100000000LL);
+        CHECK(sessR.sessionId == uuidMine, "resume fallback: newest-mtime rollout in cwd when none matches start");
+
+        CHECK(ResolveCodexSessionIn(home, L"K:/Nope/x", startMs).sessionId.empty(), "no rollout in cwd -> empty session");
+        CHECK(ResolveCodexSessionIn(L"", L"K:/AmCodexTest/proj", startMs).sessionId.empty(), "empty home -> empty session");
+
+        // ResolveCodexRolloutPathIn: find a rollout by its known uuid (the explicit-resume path).
+        const auto byId = ResolveCodexRolloutPathIn(home, uuidOther);
+        CHECK(byId.find(uuidOther) != std::wstring::npos, "ResolveCodexRolloutPathIn finds a rollout by uuid");
+        CHECK(ResolveCodexRolloutPathIn(home, L"019dded0-0000-7000-8000-000000000000").empty(), "ResolveCodexRolloutPathIn: unknown uuid -> empty");
+
+        std::filesystem::remove_all(std::filesystem::path{ home }, ec);
+    }
+}
+
 static void TestProcessInspectLive()
 {
     std::wprintf(L"ProcessInspect live PEB self-read (our own process):\n");
@@ -2704,6 +2853,7 @@ int wmain()
     TestProcessInspectTree();
     TestProcessInspectParse();
     TestTranscriptResolve();
+    TestCodexObserve();
     TestTranscriptStore();
     TestSessionSearch();
     TestProcessInspectLive();

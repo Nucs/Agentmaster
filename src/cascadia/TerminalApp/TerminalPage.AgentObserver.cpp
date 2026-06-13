@@ -604,6 +604,68 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
+        // Storm guard (multi-window): the registry is a process-wide singleton (M9), so Snapshot()
+        // returns the ENTIRE fleet — sessions hosted in OTHER windows included. A session can only be
+        // bound where its ConPTY physically lives, so collect THIS window's live WT_SESSION tokens
+        // (== ITerminalConnection::SessionId(), the tabToken) up front and reconcile ONLY sessions whose
+        // tabToken is in that set. Without this, every window re-ran _AdoptExternalSession for every
+        // OTHER window's sessions on EVERY scanner tick, and each call queues a fire_and_forget UI-thread
+        // coroutine — so the dispatcher floods faster than the UI thread can drain it. Observed live: 2-3
+        // windows over a 44-session fleet drove a ~100 line/s [bind-try]/[adopt] storm, a 7.4 GB working
+        // set, and a Responding=False window that still processed input but NEVER rendered (transparent/
+        // black). Each window now reconciles only its own tabs (a Manager-only window does zero attempts).
+        const auto lower = [](std::wstring s) {
+            for (auto& c : s)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            return s;
+        };
+        std::unordered_set<std::wstring> windowTokens;
+        for (const auto& projectedTab : _tabs)
+        {
+            if (projectedTab == _managerTab)
+            {
+                continue; // the Manager tab hosts no ConPTY
+            }
+            const auto tabImpl = _GetTabImpl(projectedTab);
+            if (!tabImpl)
+            {
+                continue;
+            }
+            TerminalConnection::ITerminalConnection conn{ nullptr };
+            tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+                if (conn)
+                {
+                    return;
+                }
+                const auto content = pane->GetContent();
+                if (!content)
+                {
+                    return;
+                }
+                const auto term = content.try_as<TerminalApp::TerminalPaneContent>();
+                if (!term)
+                {
+                    return;
+                }
+                const auto ctrl = term.GetTermControl();
+                if (!ctrl)
+                {
+                    return;
+                }
+                conn = ctrl.Connection();
+            });
+            if (conn)
+            {
+                // The exact tab id: WT_SESSION == ITerminalConnection::SessionId() (the correlation key).
+                windowTokens.insert(lower(::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId())));
+            }
+        }
+
         const auto sessions = _sessionRegistry->Snapshot();
         size_t attempts = 0;
         for (const auto& s : sessions)
@@ -611,6 +673,13 @@ namespace winrt::TerminalApp::implementation
             if (!s.live || s.tabToken.empty())
             {
                 continue; // archived, or no hook has revealed a hosting ConPTY yet
+            }
+            // Only a session whose hosting ConPTY lives in THIS window is bindable here — skip the rest
+            // of the (process-wide) fleet so a window never re-attempts another window's sessions (the
+            // dispatcher-flood fix above). A window that doesn't host this tabToken isn't its reconciler.
+            if (windowTokens.find(lower(s.tabToken)) == windowTokens.end())
+            {
+                continue;
             }
             // Skip sessions already fully set up in THIS window (bound tab + overlay) — no work, no log.
             const auto it = _claudeTabs.find(s.id);
@@ -627,6 +696,7 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           L"[reconcile] sessions=" + std::to_wstring(sessions.size()) +
+                                              L" windowTabs=" + std::to_wstring(windowTokens.size()) +
                                               L" attempts=" + std::to_wstring(attempts) +
                                               L" boundTabs=" + std::to_wstring(_claudeTabs.size()) + L"\n");
         }
@@ -774,10 +844,10 @@ namespace winrt::TerminalApp::implementation
         {
             byWt[c.wtSession] = c;
         }
-        std::unordered_map<std::wstring, ::Agentmaster::TabActivity> actByWt;
+        std::unordered_map<std::wstring, ::Agentmaster::TabActivityRow> actByWt;
         for (const auto& a : act)
         {
-            actByWt[a.wtSession] = a.activity;
+            actByWt[a.wtSession] = a; // the whole row (Codex carries its model, to enrich the badge)
         }
         std::unordered_set<std::wstring> rosterWts; // this window's tabs this tick (for observe-badge pruning)
         for (const auto& pt : probeTabs)
@@ -845,7 +915,8 @@ namespace winrt::TerminalApp::implementation
             }
             else if (const auto ait = actByWt.find(pt.wt); ait != actByWt.end())
             {
-                switch (ait->second)
+                const auto& arow = ait->second;
+                switch (arow.activity)
                 {
                 case ::Agentmaster::TabActivity::Powershell:
                     kind = L"pwsh";
@@ -854,7 +925,10 @@ namespace winrt::TerminalApp::implementation
                     kind = L"cmd";
                     break;
                 case ::Agentmaster::TabActivity::Codex:
-                    kind = L"codex";
+                    // Codex is observe-only (Phase C1) — enrich the badge with the model when resolved:
+                    // "○ codex · gpt-5.5 · unlinked" (the kind string is the badge's idempotency key, so
+                    // it re-renders once the model lands).
+                    kind = arow.model.empty() ? std::wstring{ L"codex" } : (std::wstring{ L"codex  \x00B7  " } + arow.model);
                     break;
                 case ::Agentmaster::TabActivity::ClaudeCode:
                     kind = L"claude"; // activity caught the claude before correlation did
