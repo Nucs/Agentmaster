@@ -534,9 +534,20 @@ launch, gated by a decide-prompt, + a recover button** for history). Commits `bf
   Fleet Observer's reading — `cmd`'s own PEB cwd (it syncs on `cd`) or a pwsh's **newest native child**
   PEB cwd (children inherit the live `$PWD` at spawn), cached per tab across idle gaps
   (`ResolveShellCwd` / `ProcessObserver._shellCwdCache` → `TabActivityRow.cwd`; capture reads it via
-  `_ShellTabIdent` + `Activity()`). Read-only — never writes to a shell (Rule #13). *Caveat:* a pwsh
-  tab that only ran shell **builtins** + `cd` (no external command ever) leaves no observable child, so
-  it falls back to its launch dir; an OSC-9;9 prompt hook would close that gap if desired. The Archived overlay is **grouped by window** (`_RebuildArchiveList` over
+  `_ShellTabIdent` + `Activity()`). Read-only — never writes to a shell (Rule #13). *Caveat (structural,
+  investigated + deliberately deferred):* a pwsh tab that only ran shell **builtins** + `cd` (no external
+  command ever) leaves no observable child, so it falls back to its launch dir. This residue is
+  **unclosable by any out-of-band read** — pwsh freezes its process cwd, `[Environment]::CurrentDirectory`,
+  AND its open directory handle (all verified stale at launch dir), and **no file on the machine records
+  a plain shell's cwd** (the "read the file the agent writes" trick already covers every OTHER case — a
+  claude tab via its transcript, a codex tab via its rollout `session_meta.cwd`, cmd/bash via the PEB —
+  but a plain pwsh writes nothing; even Codex, open-source, only knows its OWN cwd via `current_dir()` and
+  has no foreign-cwd reader / introspection command). The ONLY lossless fix is **shell integration** — the
+  shell emitting its cwd from a prompt hook (`OSC 9;9` ConEmu / `OSC 7` file-uri / VS Code's
+  `OSC 633;P;Cwd`, all already parsed by our terminal into `WorkingDirectory()`), injectable VS-Code-style
+  (a prompt-WRAP that preserves oh-my-posh/starship) into our OWN pwsh profiles in `settings.json`. Deferred
+  by decision (2026-06): the gap is narrow — cmd & bash already sync their PEB cwd, so only a cd-only
+  *plain pwsh* tab is affected — and the fix requires a one-time prompt-hook injection nobody wanted yet. The Archived overlay is **grouped by window** (`_RebuildArchiveList` over
   `RecoverableWindows`): a per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1
   -s <idx>`) over its session rows (**Restore here** cherry-picks one into the current window). A clobber
   guard (`_FlushWindowRecord`: skip a no-tabs+no-geometry or pre-Initialized capture) + a close-flush
