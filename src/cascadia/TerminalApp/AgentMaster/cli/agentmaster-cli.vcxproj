@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Agentmaster — the commandline introspection tool (doc/agentmaster/CLI.md).
+     A console-subsystem exe that links ONLY the pure-C++ engine units (no WinRT, no
+     TerminalAppLib) + agentcli.cpp. Modeled on wt.vcxproj (the launcher shim), but Console
+     subsystem and with the full ole32/oleaut32/user32 link set the engine needs (CoCreateGuid /
+     UIA / CompareStringOrdinal), not onecore-only. Shipped beside WindowsTerminal.exe and invoked
+     by the alias shim's verb dispatch. -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7E5A9C12-3B4D-4E6F-8A1B-2C3D4E5F6A7B}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>agentmastercli</RootNamespace>
+    <ProjectName>agentmaster-cli</ProjectName>
+    <TargetName>agentmaster-cli</TargetName>
+    <ConfigurationType>Application</ConfigurationType>
+    <VersionInfoFileDescription>Agentmaster CLI</VersionInfoFileDescription>
+  </PropertyGroup>
+
+  <Import Project="..\..\..\..\..\common.openconsole.props" Condition="'$(OpenConsoleDir)'==''" />
+  <Import Project="$(OpenConsoleDir)src\common.build.pre.props" />
+  <Import Project="$(OpenConsoleDir)src\common.nugetversions.props" />
+
+  <!-- Source Files. agentcli.cpp is the CLI; the AgentMaster/*.cpp are the pure-C++ engine units
+       (the same set the standalone test harness compiles), each <PrecompiledHeader>NotUsing. -->
+  <ItemGroup>
+    <ClCompile Include="agentcli.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\SessionRegistry.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\HooksBridge.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ClaudeSpawn.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\Persistence.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\SessionScanner.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ProcessInspect.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\TranscriptStore.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\SessionSearch.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+
+  <Import Project="$(OpenConsoleDir)src\common.build.post.props" />
+  <Import Project="$(OpenConsoleDir)src\common.nugetversions.targets" />
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- This IS the dev CLI build; an unpackaged run (no inherited AGENTMASTER_PROFILE) then
+           defaults to ~/.agentmaster-dev. The release-identity package build overrides this off
+           via the wapproj. -->
+      <PreprocessorDefinitions>AGENTMASTER_DEV;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>ole32.lib;oleaut32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>
