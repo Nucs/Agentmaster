@@ -386,6 +386,21 @@ namespace winrt::TerminalApp::implementation
                 self->_RestoreArchivedSession(id);
             }
         });
+        // Agentmaster: the Launch box accepted a FOUND session id. The content already resolved its
+        // (dir, title), so reuse the same on-disk seams the Sessions page uses — resume (live -> Jump,
+        // archived/unknown -> minimal record + claude --resume) and fork (claude --resume --fork-session).
+        content->SetResumeSessionHandler([weakThis](winrt::hstring id, winrt::hstring dir, winrt::hstring title) {
+            if (auto self = weakThis.get())
+            {
+                self->_ResumeSessionFromDisk(std::wstring{ id }, std::wstring{ dir }, std::wstring{ title });
+            }
+        });
+        content->SetForkSessionHandler([weakThis](winrt::hstring id, winrt::hstring dir, winrt::hstring title) {
+            if (auto self = weakThis.get())
+            {
+                self->_ForkSessionFromDisk(std::wstring{ id }, std::wstring{ dir }, std::wstring{ title });
+            }
+        });
         content->SetRenameHandler([weakThis](winrt::hstring id, winrt::hstring title) {
             if (auto self = weakThis.get())
             {

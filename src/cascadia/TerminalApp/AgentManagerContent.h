@@ -45,6 +45,12 @@ namespace winrt::TerminalApp::implementation
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
+        // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
+        // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
+        // button (fork it into a new conversation). Both resolve (dir, title) in the content, so the
+        // page just forwards to _ResumeSessionFromDisk / _ForkSessionFromDisk.
+        void SetResumeSessionHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler); // (sessionId, dir, title)
+        void SetForkSessionHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler); // (sessionId, dir, title)
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL scope.
         // (pid, workingDir) -> the page resolves the conversation id from the transcript and resumes it
@@ -187,6 +193,12 @@ namespace winrt::TerminalApp::implementation
         void _RebuildPathPicker();
         void _PickPath(const std::wstring& dir);
         void _NormalizeCwdBox(); // platform-sensitive NormPath of the cwd box (on commit / blur / pick / launch)
+        // Agentmaster: validate the Launch box's content as a working dir OR a session id, painting the
+        // underline (green = a FOUND session id; red = an unknown id or a missing dir) and enabling the
+        // launch button (disabled on red) + the Fork button (shown only for a found session id).
+        void _ValidateLaunchBox();
+        void _OnForkFromBox(); // the Fork button (visible for a found session id) -> _forkSessionHandler
+        bool _ResolveSessionDirTitle(const std::wstring& id, std::wstring& dir, std::wstring& title); // registry first, transcript cwd fallback
         void _PushRecentDir(const std::wstring& dir);
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current) const;
         winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
@@ -282,6 +294,8 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _activateHandler;
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring)> _restoreHandler;
+        std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
+        std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(uint32_t, winrt::hstring)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt -> page resumes the external's conversation into a managed tab
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
@@ -349,6 +363,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch session" (dir) / "Resume session" (a found session id); disabled on a red box
+        winrt::Windows::UI::Xaml::Controls::Button _forkBtn{ nullptr }; // Agentmaster: "Fork" — visible only when the box holds a FOUND session id
+        winrt::Windows::UI::Xaml::Controls::Border _cwdUnderline{ nullptr }; // Agentmaster: validation underline (green=found session id, red=missing dir / unknown id, hidden=neutral)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _pathPanelBorder{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _pathListHost{ nullptr };

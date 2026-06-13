@@ -11,6 +11,7 @@
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 
 #include <algorithm>
 #include <chrono>
@@ -520,6 +521,53 @@ namespace
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
     }
 
+    // Agentmaster: the Launch box accepts EITHER a working directory OR a Claude session id. A
+    // UUID-shaped token (8-4-4-4-12 hex, with optional surrounding braces / whitespace) is treated
+    // as a session id (resume / fork); anything else is a path. A directory is never UUID-shaped and
+    // a session id is never a valid path, so the discrimination is unambiguous. Returns the bare id
+    // (braces + whitespace stripped) on a match, nullopt otherwise.
+    std::optional<std::wstring> LooksLikeSessionId(const std::wstring& raw)
+    {
+        std::wstring s = raw;
+        const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+        while (!s.empty() && isws(s.front()))
+        {
+            s.erase(s.begin());
+        }
+        while (!s.empty() && isws(s.back()))
+        {
+            s.pop_back();
+        }
+        if (s.size() >= 2 && s.front() == L'{' && s.back() == L'}')
+        {
+            s = s.substr(1, s.size() - 2);
+        }
+        if (s.size() != 36)
+        {
+            return std::nullopt;
+        }
+        for (size_t i = 0; i < s.size(); ++i)
+        {
+            const wchar_t c = s[i];
+            if (i == 8 || i == 13 || i == 18 || i == 23)
+            {
+                if (c != L'-')
+                {
+                    return std::nullopt;
+                }
+            }
+            else
+            {
+                const bool hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+                if (!hex)
+                {
+                    return std::nullopt;
+                }
+            }
+        }
+        return s;
+    }
+
     std::wstring JoinDir(const std::wstring& base, const std::wstring& leaf)
     {
         std::wstring b = base;
@@ -714,6 +762,14 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
     {
         _restoreHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetResumeSessionHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler)
+    {
+        _resumeSessionHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetForkSessionHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler)
+    {
+        _forkSessionHandler = std::move(handler);
     }
     void AgentManagerContent::SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler)
     {
@@ -1016,6 +1072,10 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
+                // Agentmaster: paint the validation underline + enable/disable launch on every edit
+                // (a working dir OR a session id). Runs before the picker logic's focus early-out so
+                // it always reflects the current text.
+                _ValidateLaunchBox();
                 // Typing should ALWAYS surface the list. The prior version only refreshed an
                 // already-open popup, so whenever the box held focus while the popup was closed
                 // (focus arrived programmatically, a stray LostFocus closed it, etc.) typing
@@ -1081,12 +1141,38 @@ namespace winrt::TerminalApp::implementation
                     _NormalizeCwdBox(); // commit: normalize what the user typed
                 }
             });
-            bar.Children().Append(_cwdBox);
+            // Agentmaster: the box + a validation underline beneath it, in a vertical column so the
+            // underline tracks the box width. The path-picker Popup anchors via _cwdBox.TransformToVisual
+            // (robust to this wrapping), so the dropdown placement is unaffected.
+            auto cwdCol = StackPanel{};
+            cwdCol.Orientation(Orientation::Vertical);
+            cwdCol.Spacing(2);
+            cwdCol.VerticalAlignment(VerticalAlignment::Center);
+            cwdCol.Children().Append(_cwdBox);
+            _cwdUnderline = Border{};
+            _cwdUnderline.Height(2);
+            _cwdUnderline.Width(360); // match _cwdBox.Width(360)
+            _cwdUnderline.HorizontalAlignment(HorizontalAlignment::Left);
+            _cwdUnderline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
+            _cwdUnderline.Background(Fill(0x00, 0x00, 0x00, 0x00)); // transparent = neutral; kept present so painting it never reflows the bar
+            cwdCol.Children().Append(_cwdUnderline);
+            bar.Children().Append(cwdCol);
 
-            auto launch = Button{};
-            launch.Content(winrt::box_value(L"Launch session"));
-            launch.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
-            bar.Children().Append(launch);
+            _launchBtn = Button{};
+            _launchBtn.Content(winrt::box_value(L"Launch session"));
+            _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
+            bar.Children().Append(_launchBtn);
+
+            // Fork — hidden unless the box holds a FOUND session id; forks that conversation into a
+            // NEW one (the original transcript is untouched), mirroring the Sessions page's "Fork here".
+            _forkBtn = Button{};
+            _forkBtn.Content(winrt::box_value(L"Fork"));
+            _forkBtn.Visibility(Visibility::Collapsed);
+            AgentSetTip(_forkBtn, L"Fork this conversation into a NEW session (claude --resume --fork-session) \x2014 the original is untouched");
+            _forkBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnForkFromBox(); });
+            bar.Children().Append(_forkBtn);
+
+            _ValidateLaunchBox(); // initial state for the seeded cwd (USERPROFILE -> neutral, enabled)
 
             // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the "Reopen Windows (N)" recover
             // button — the "if I answered No" path. It reopens saved windows that are NOT currently
@@ -4669,14 +4755,144 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_OnLaunch()
     {
+        if (!_cwdBox)
+        {
+            return;
+        }
+        _NormalizeCwdBox(); // launch with — and remember — a normalized path (a session id is unaffected)
+        const std::wstring text{ _cwdBox.Text() };
+        // A session id in the box = resume that conversation. The button reads "Resume session" and
+        // is only ENABLED when the id was FOUND (_ValidateLaunchBox), so this path is reachable only
+        // for a real on-disk transcript; resolve its dir/title and hand off to the page.
+        if (const auto sid = LooksLikeSessionId(text))
+        {
+            std::wstring dir, title;
+            if (_resumeSessionHandler && _ResolveSessionDirTitle(*sid, dir, title))
+            {
+                _ClosePathPicker();
+                _resumeSessionHandler(winrt::hstring{ *sid }, winrt::hstring{ dir }, winrt::hstring{ title });
+            }
+            return;
+        }
+        // A working directory = a new, independent session there.
         if (_spawnHandler)
         {
-            _NormalizeCwdBox(); // launch with — and remember — a normalized path
-            const auto dir = _cwdBox ? _cwdBox.Text() : winrt::hstring{};
-            _PushRecentDir(std::wstring{ dir }); // remember it as "recently selected"
+            _PushRecentDir(text); // remember it as "recently selected"
             _ClosePathPicker();
-            _spawnHandler(dir, winrt::hstring{});
+            _spawnHandler(winrt::hstring{ text }, winrt::hstring{});
         }
+    }
+
+    // Agentmaster: the Fork button (shown only for a FOUND session id) -> fork that conversation
+    // into a NEW one in the same dir (the page's _ForkSessionFromDisk: claude --resume --fork-session).
+    void AgentManagerContent::_OnForkFromBox()
+    {
+        if (!_cwdBox)
+        {
+            return;
+        }
+        const auto sid = LooksLikeSessionId(std::wstring{ _cwdBox.Text() });
+        if (!sid) // the button is hidden for non-session-id input, but guard anyway
+        {
+            return;
+        }
+        std::wstring dir, title;
+        if (_forkSessionHandler && _ResolveSessionDirTitle(*sid, dir, title))
+        {
+            _ClosePathPicker();
+            _forkSessionHandler(winrt::hstring{ *sid }, winrt::hstring{ dir }, winrt::hstring{ title });
+        }
+    }
+
+    // Agentmaster: paint the Launch box's validation underline + drive the launch/fork buttons.
+    // EMPTY -> neutral, "Launch session" enabled (defaults). A UUID -> session id: FOUND = green +
+    // "Resume session" enabled + Fork shown; NOT found = red + disabled. Otherwise a directory:
+    // EXISTS = neutral + "Launch session" enabled; MISSING = red + disabled. (Per the design: green
+    // is reserved for a found session id; a valid folder stays neutral.)
+    void AgentManagerContent::_ValidateLaunchBox()
+    {
+        if (!_cwdBox || !_launchBtn)
+        {
+            return;
+        }
+        std::wstring trimmed{ _cwdBox.Text() };
+        const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+        while (!trimmed.empty() && isws(trimmed.front()))
+        {
+            trimmed.erase(trimmed.begin());
+        }
+        while (!trimmed.empty() && isws(trimmed.back()))
+        {
+            trimmed.pop_back();
+        }
+
+        const auto paint = [this](int state) { // 0 neutral (hidden), 1 green, 2 red
+            if (!_cwdUnderline)
+            {
+                return;
+            }
+            // transparent (neutral) / green (found id) / red (missing dir or unknown id); kept always
+            // present (Height 2) so toggling color never reflows the toolbar.
+            _cwdUnderline.Background(state == 0 ? Fill(0x00, 0x00, 0x00, 0x00) : (state == 1 ? Fill(0xFF, 0x4C, 0xAF, 0x50) : Fill(0xFF, 0xE5, 0x39, 0x35)));
+        };
+        const auto showFork = [this](bool v) {
+            if (_forkBtn)
+            {
+                _forkBtn.Visibility(v ? Visibility::Visible : Visibility::Collapsed);
+            }
+        };
+
+        if (trimmed.empty())
+        {
+            paint(0);
+            _launchBtn.IsEnabled(true);
+            _launchBtn.Content(winrt::box_value(L"Launch session"));
+            showFork(false);
+            return;
+        }
+        if (const auto sid = LooksLikeSessionId(trimmed))
+        {
+            const bool found = ::Agentmaster::ClaudeConversationExists(*sid);
+            paint(found ? 1 : 2);
+            _launchBtn.IsEnabled(found);
+            _launchBtn.Content(winrt::box_value(L"Resume session"));
+            showFork(found);
+            return;
+        }
+        // a working directory: green is reserved for session ids, so a valid dir stays neutral.
+        const bool exists = IsDir(NormPath(trimmed));
+        paint(exists ? 0 : 2);
+        _launchBtn.IsEnabled(exists);
+        _launchBtn.Content(winrt::box_value(L"Launch session"));
+        showFork(false);
+    }
+
+    // Agentmaster: resolve a session id to its (working dir, title) for resume / fork. The registry
+    // knows a managed (live or archived) session directly; otherwise read the cwd straight off the
+    // on-disk transcript (the project FOLDER name is a lossy encoding, so read the line's real cwd).
+    // Title is left empty in the transcript case — the resume/fork seam derives a smart name from the
+    // dir. Returns false if no dir could be found (caller no-ops).
+    bool AgentManagerContent::_ResolveSessionDirTitle(const std::wstring& id, std::wstring& dir, std::wstring& title)
+    {
+        dir.clear();
+        title.clear();
+        if (_registry)
+        {
+            if (const auto info = _registry->Get(id); info && !info->workingDir.empty())
+            {
+                dir = info->workingDir;
+                title = info->title;
+                return true;
+            }
+        }
+        const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(id);
+        if (path.empty())
+        {
+            return false;
+        }
+        const auto facts = ::Agentmaster::ReadTranscriptQuickFacts(path, 0);
+        dir = facts.cwd;
+        return !dir.empty();
     }
 
     void AgentManagerContent::_OnAddPrompt()
