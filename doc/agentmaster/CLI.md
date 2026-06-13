@@ -221,7 +221,15 @@ automatic by inherited env. The flags exist only to *cross-target* another insta
 ## 9. Phasing & status
 
 - **P1 — read (hybrid, standalone reader):** `show` / `list` / `sessions` / `tabs` / `windows` /
-  `external` / `--self`. Zero engine edits. **← in progress.**
+  `external` / `--self`. Zero engine edits. **Code COMPLETE + QA'd** (presence-authoritative binding,
+  host classification, activity/files/last-prompt). **Packaging authored + PROVEN:**
+  `agentmaster-cli.vcxproj` (console; links the engine units) builds clean; the `wt`/`wtd` shim flips
+  to console-subsystem + verb-dispatch (`shim.cpp` + `wt.vcxproj` `SubSystem=Console`) — verified
+  end-to-end (`wt.exe show --self` dispatches to the CLI with full output; non-verbs forward to the
+  GUI byte-for-byte); wired into `OpenConsole.slnx` + `CascadiaPackage.wapproj` so a build ships
+  `agentmaster-cli.exe` beside `WindowsTerminal.exe`. **Remaining: the destructive package
+  build + deploy** (close → build → relaunch) to make the real `agentmaster show` alias live — which
+  must be run from OUTSIDE the dev instance being closed (self-kill hazard).
 - **P2 — control:** the `--am-restore` / `--am-archive` handoff intercept + disk-poll confirm →
   `restore` / `archive`.
 - **P3 — TODO:** a `watch` event stream, and **prompt control** (`enqueue` / `send-now` /

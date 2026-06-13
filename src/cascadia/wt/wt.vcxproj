@@ -30,6 +30,10 @@
 
   <ItemDefinitionGroup>
     <Link>
+      <!-- Agentmaster: Console subsystem so `agentmaster <verb>` attaches to the caller's console
+           and the shell waits for stdout (CLI.md §2). The forward-to-GUI path is unchanged; a
+           console we allocate for a no-console launch is freed before forwarding (shim.cpp). -->
+      <SubSystem>Console</SubSystem>
       <!-- Remove all non-onecore dependencies -->
       <AdditionalDependencies>onecore.lib</AdditionalDependencies>
     </Link>
