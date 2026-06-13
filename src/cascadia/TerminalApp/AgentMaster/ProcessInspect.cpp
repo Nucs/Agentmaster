@@ -725,6 +725,54 @@ namespace Agentmaster
         return false;
     }
 
+    std::vector<uint32_t> CommandChildrenOf(const std::vector<ProcEntry>& snap, uint32_t shellPid)
+    {
+        std::vector<uint32_t> out;
+        if (shellPid == 0)
+        {
+            return out;
+        }
+        for (const auto& e : snap)
+        {
+            if (e.ppid == shellPid && !IsConsoleInfra(e.image))
+            {
+                out.push_back(e.pid);
+            }
+        }
+        return out;
+    }
+
+    ShellCwd ResolveShellCwd(const std::vector<ProcEntry>& snap, uint32_t shellPid, std::wstring_view shellImage)
+    {
+        // Newest command child first: it was spawned at the shell's CURRENT $PWD, so its PEB cwd is
+        // the most recent live working dir (the older ones may predate a `cd`). Its cwd is the truth
+        // for ANY shell (cmd / pwsh / powershell) — children inherit the live cwd at spawn.
+        uint32_t newestChild = 0;
+        int64_t newestStart = -1;
+        for (const uint32_t childPid : CommandChildrenOf(snap, shellPid))
+        {
+            const int64_t st = ProcessStartUnixMs(childPid);
+            if (st >= newestStart)
+            {
+                newestStart = st;
+                newestChild = childPid;
+            }
+        }
+        if (newestChild != 0)
+        {
+            if (auto cwd = ReadProcessCwd(newestChild); !cwd.empty())
+            {
+                return { std::move(cwd), true };
+            }
+        }
+        // No usable child: the shell's OWN PEB cwd. Accurate for cmd.exe (it syncs on `cd`); for
+        // pwsh/powershell this is the frozen launch dir (Set-Location never touches the process cwd),
+        // so it's flagged unreliable and a caller should prefer an earlier child-derived reading.
+        auto own = ReadProcessCwd(shellPid);
+        const bool reliable = !own.empty() && ImageNameEq(shellImage, L"cmd.exe");
+        return { std::move(own), reliable };
+    }
+
     // ===== PURE: command-line + env parsing ================================================
 
     std::wstring EnvLookup(const std::unordered_map<std::wstring, std::wstring>& env, std::wstring_view name)

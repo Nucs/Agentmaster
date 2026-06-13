@@ -1709,6 +1709,20 @@ static void TestProcessInspectTree()
     };
     CHECK(HasActiveChild(infra2, 600), "HasActiveChild sees a real (rg) child past OpenConsole");
     CHECK(HasNonShellChild(infra2, 600), "HasNonShellChild sees rg (a non-shell command)");
+
+    // --- CommandChildrenOf: the shell's real command children (the out-of-band cwd source) ---
+    // A shell's NATIVE children inherit its live cwd at spawn, so they recover a pwsh tab's cwd
+    // (pwsh freezes its own process cwd). Console infra (conhost / OpenConsole) is excluded — it's
+    // OS plumbing, not a command, and runs in C:\WINDOWS, which would poison the reading.
+    CHECK(CommandChildrenOf(snap, 200).size() == 1 && CommandChildrenOf(snap, 200)[0] == 201, "CommandChildrenOf(pwsh A) == {claude} (a native child)");
+    CHECK(CommandChildrenOf(snap, 400).size() == 1 && CommandChildrenOf(snap, 400)[0] == 401, "CommandChildrenOf(pwsh C) == {git}");
+    CHECK(CommandChildrenOf(snap, 401).empty(), "CommandChildrenOf of a leaf is empty");
+    CHECK(CommandChildrenOf(snap, 999).empty(), "CommandChildrenOf of an unknown pid is empty");
+    CHECK(CommandChildrenOf(infra, 500).empty(), "CommandChildrenOf excludes a conhost-only child (would read C:\\WINDOWS)");
+    {
+        const auto cc = CommandChildrenOf(infra2, 600);
+        CHECK(cc.size() == 1 && cc[0] == 602, "CommandChildrenOf skips OpenConsole, keeps the rg command child");
+    }
 }
 
 static void TestProcessInspectParse()

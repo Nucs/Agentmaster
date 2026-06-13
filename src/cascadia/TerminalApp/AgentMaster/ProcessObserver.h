@@ -131,5 +131,6 @@ namespace Agentmaster
         std::vector<std::pair<uint32_t, int64_t>> _lastCorrelated; // (pid, startUnixMs) correlated last full survey
         std::unordered_set<uint32_t> _pebDeniedLogged; // pids whose PEB read was denied — logged once (O7)
         std::unordered_set<uint32_t> _guiExcludedLogged; // GUI claude pids (the desktop Electron app) skipped — logged once
+        std::unordered_map<std::wstring, std::wstring> _shellCwdCache; // wtSession -> last TRUSTWORTHY shell cwd (survives idle gaps when a pwsh has no child this tick)
     };
 }

@@ -485,6 +485,15 @@ namespace Agentmaster
             }
 
             // No claude under this tab: a Codex acknowledge, else classify the shell image.
+            std::wstring shellImage;
+            for (const auto& e : snap)
+            {
+                if (e.pid == tab.shellPid)
+                {
+                    shellImage = e.image;
+                    break;
+                }
+            }
             TabActivityRow ar;
             ar.wtSession = wtSession;
             ar.shellPid = tab.shellPid;
@@ -496,22 +505,39 @@ namespace Agentmaster
             }
             else
             {
-                std::wstring shellImage;
-                for (const auto& e : snap)
-                {
-                    if (e.pid == tab.shellPid)
-                    {
-                        shellImage = e.image;
-                        break;
-                    }
-                }
                 ar.activity = ClassifyShellActivity(shellImage);
                 ar.image = shellImage;
-                // O6: a shell running a non-shell foreground command is busy. (Its PEB cwd is left
-                // empty — pwsh never syncs its PROCESS cwd with Set-Location, so it would be stale.)
+                // O6: a shell running a non-shell foreground command is busy.
                 ar.busy = HasNonShellChild(snap, tab.shellPid);
             }
+            // Resolve this tab's working dir out-of-band so a reopened shell tab restores where it was
+            // (PERSISTENCE.md): cmd's own PEB tracks `cd`; pwsh/powershell freeze their process cwd but
+            // pass the live $PWD to native children, so ResolveShellCwd reads the newest child. Cache a
+            // TRUSTWORTHY reading per tab so an IDLE pwsh (no child this tick) keeps its last real cwd
+            // rather than regressing to the launch dir. Read-only — never writes to a shell (Rule #13).
+            {
+                const auto sc = ResolveShellCwd(snap, tab.shellPid, shellImage);
+                if (sc.reliable && !sc.cwd.empty())
+                {
+                    _shellCwdCache[wtSession] = sc.cwd;
+                    ar.cwd = sc.cwd;
+                }
+                else if (const auto it = _shellCwdCache.find(wtSession); it != _shellCwdCache.end())
+                {
+                    ar.cwd = it->second; // idle pwsh: reuse the last trustworthy cwd
+                }
+                else
+                {
+                    ar.cwd = sc.cwd; // best-effort (a launch dir) — still better than nothing
+                }
+            }
             act.push_back(std::move(ar));
+        }
+
+        // Drop cached shell cwds for tabs no longer in any window's roster (closed tabs).
+        for (auto it = _shellCwdCache.begin(); it != _shellCwdCache.end();)
+        {
+            it = (roster.find(it->first) == roster.end()) ? _shellCwdCache.erase(it) : std::next(it);
         }
 
         // 4) Census: classify each claude — rostered (in one of our tabs) -> OURS; else by AM_SESSION

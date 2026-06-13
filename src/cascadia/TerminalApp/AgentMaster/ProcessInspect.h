@@ -103,6 +103,28 @@ namespace Agentmaster
     // child counts as non-shell, but those tabs take the ClaudeCode/Codex branch, not the shell one.)
     bool HasNonShellChild(const std::vector<ProcEntry>& snap, uint32_t pid);
 
+    // The DIRECT children of `shellPid` that are real commands — i.e. NOT console infrastructure
+    // (conhost.exe / OpenConsole.exe). In snapshot order. Pure. These are the processes a shell
+    // launched to run a command (git / claude / a build / even a nested cmd); each inherits the
+    // shell's LIVE working dir at spawn time, which is how a pwsh tab's cwd is recovered out-of-band
+    // (pwsh freezes its OWN process cwd but passes $PWD to children — see ResolveShellCwd). (PERSISTENCE.md)
+    std::vector<uint32_t> CommandChildrenOf(const std::vector<ProcEntry>& snap, uint32_t shellPid);
+
+    // A shell tab's resolved working directory + whether the reading is trustworthy. (OBSERVER.md)
+    struct ShellCwd
+    {
+        std::wstring cwd;
+        bool reliable{}; // true when child-derived OR the shell is cmd.exe (its own PEB tracks `cd`)
+    };
+
+    // Resolve a shell's REAL cwd out-of-band (read-only; no shell cooperation). cmd.exe syncs its
+    // process cwd on `cd`, so its own PEB is accurate. pwsh/powershell keep their OWN process cwd
+    // frozen at the launch dir (Set-Location updates only $PWD) but pass the live $PWD as the cwd of
+    // any native child — so we read the NEWEST CommandChildrenOf child's PEB cwd, falling back to the
+    // shell's own PEB when there is no child (accurate for cmd; the stale launch dir for an idle pwsh,
+    // flagged reliable=false so callers can prefer a cached earlier reading). (OBSERVER.md / PERSISTENCE.md)
+    ShellCwd ResolveShellCwd(const std::vector<ProcEntry>& snap, uint32_t shellPid, std::wstring_view shellImage);
+
     // ===== PURE: command-line + env parsing (the testable core of ReadClaudeFacts) =========
 
     // Case-insensitive environment lookup over a ReadProcessEnv map (Windows env names ignore

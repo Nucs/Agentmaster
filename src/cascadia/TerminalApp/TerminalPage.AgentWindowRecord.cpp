@@ -15,9 +15,11 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include "../../types/inc/utils.hpp" // IsValidDirectory + GuidToPlainString (shell-tab cwd capture)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Engine.h" // RecoverableWindows (the reopen dispatch)
 #include "AgentMaster/Persistence.h" // SaveWindowRecord
+#include "AgentMaster/ProcessObserver.h" // Activity() table -> out-of-band shell-tab cwd for capture
 #include "AgentMaster/ProfileBootstrap.h" // PackageFamilyName/IsDevPackage (the per-identity reopen alias)
 #include "AgentMaster/SessionRegistry.h" // _RestoreWindowTabs reads the fleet
 
@@ -74,6 +76,68 @@ namespace winrt::TerminalApp::implementation
             return L"focus";
         }
         return L"default";
+    }
+
+    // Agentmaster: a shell (Other) tab's OSC-9;9 working dir (when shell integration reports one) +
+    // its WT_SESSION id, walked from the tab's active terminal control. WT's BuildStartupActions
+    // records WorkingDirectory() when present, else the profile's default StartingDirectory — so a tab
+    // the user `cd`'d in is otherwise lost on reopen. Capture prefers the exact OSC value; when absent
+    // it falls back to the Fleet Observer's Activity table, whose `cwd` carries the shell cwd read
+    // OUT-OF-BAND (cmd's own PEB / a pwsh's newest native child, cached across idle) and is keyed by
+    // this same WT_SESSION. The id is lowercased to match the observer's keys. (PERSISTENCE.md §13.5)
+    struct ShellTabIdent
+    {
+        std::wstring oscCwd; // WorkingDirectory() if a valid dir, else empty
+        std::wstring wtSession; // ITerminalConnection::SessionId(), lowercased
+    };
+    static ShellTabIdent _ShellTabIdent(const winrt::com_ptr<Tab>& tabImpl)
+    {
+        ShellTabIdent out;
+        if (!tabImpl)
+        {
+            return out;
+        }
+        Microsoft::Terminal::Control::TermControl ctrl{ nullptr };
+        tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
+            if (ctrl)
+            {
+                return;
+            }
+            const auto content = pane->GetContent();
+            if (!content)
+            {
+                return;
+            }
+            const auto term = content.try_as<TerminalApp::TerminalPaneContent>();
+            if (!term)
+            {
+                return;
+            }
+            if (const auto c = term.GetTermControl())
+            {
+                ctrl = c;
+            }
+        });
+        if (!ctrl)
+        {
+            return out;
+        }
+        if (const auto wd = ctrl.WorkingDirectory(); ::Microsoft::Console::Utils::IsValidDirectory(wd.c_str()))
+        {
+            out.oscCwd = std::wstring{ wd };
+        }
+        if (const auto conn = ctrl.Connection())
+        {
+            out.wtSession = ::Microsoft::Console::Utils::GuidToPlainString(conn.SessionId());
+            for (auto& c : out.wtSession)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c + 32);
+                }
+            }
+        }
+        return out;
     }
 
     // Agentmaster (M10; PERSISTENCE.md §13): build this window's record from LIVE state. Geometry
@@ -188,6 +252,35 @@ namespace winrt::TerminalApp::implementation
                         auto tabActions = t->BuildStartupActions(BuildStartupKind::Persist);
                         if (!tabActions.empty())
                         {
+                            // Agentmaster: BuildStartupActions stamps the cwd from WorkingDirectory()
+                            // (OSC 9;9) else the profile default — losing where the user `cd`'d. Recover
+                            // the tab's REAL cwd and overwrite the NewTab action's StartingDirectory so the
+                            // reopened tab lands there: prefer the exact OSC value, else the Fleet
+                            // Observer's out-of-band reading (cmd's own PEB / a pwsh's newest native child,
+                            // cached across idle gaps). Empty -> keep WT's value.
+                            const auto ident = _ShellTabIdent(t);
+                            std::wstring realCwd = ident.oscCwd;
+                            if (realCwd.empty() && _observer && !ident.wtSession.empty())
+                            {
+                                for (const auto& a : _observer->Activity())
+                                {
+                                    if (a.wtSession == ident.wtSession && !a.cwd.empty())
+                                    {
+                                        realCwd = a.cwd;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!realCwd.empty() && tabActions[0].Action() == ShortcutAction::NewTab)
+                            {
+                                if (const auto nta = tabActions[0].Args().try_as<NewTabArgs>())
+                                {
+                                    if (const auto term = nta.ContentArgs().try_as<NewTerminalArgs>())
+                                    {
+                                        term.StartingDirectory(winrt::hstring{ realCwd });
+                                    }
+                                }
+                            }
                             WindowLayout layout;
                             layout.TabLayout(winrt::single_threaded_vector<ActionAndArgs>(std::move(tabActions)));
                             entry.actionsJson = std::wstring{ WindowLayout::ToJson(layout) };

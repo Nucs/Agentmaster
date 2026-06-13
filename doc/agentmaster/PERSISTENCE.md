@@ -527,7 +527,16 @@ launch, gated by a decide-prompt, + a recover button** for history). Commits `bf
   (`_LaunchClaudeSession`, lazy-start safe), an **Other** ref replays its captured startup actions
   (`WindowLayout::FromJson` → one `ProcessStartupActions`) to recreate the shell tab with title + color
   + cwd. Capture fills `actionsJson` via `BuildStartupActions(Persist)` → `WindowLayout::ToJson`
-  (`_CaptureWindowRecord`). The Archived overlay is **grouped by window** (`_RebuildArchiveList` over
+  (`_CaptureWindowRecord`). **Shell-tab cwd is recovered out-of-band** so a reopened pwsh/cmd tab lands
+  where the user `cd`'d, not at the launch dir: `BuildStartupActions` only knows `WorkingDirectory()`
+  (OSC 9;9 shell integration) else the profile default, and PowerShell **freezes its own process cwd**
+  (`Set-Location` updates only `$PWD`), so capture overrides the `NewTab` `StartingDirectory` with the
+  Fleet Observer's reading — `cmd`'s own PEB cwd (it syncs on `cd`) or a pwsh's **newest native child**
+  PEB cwd (children inherit the live `$PWD` at spawn), cached per tab across idle gaps
+  (`ResolveShellCwd` / `ProcessObserver._shellCwdCache` → `TabActivityRow.cwd`; capture reads it via
+  `_ShellTabIdent` + `Activity()`). Read-only — never writes to a shell (Rule #13). *Caveat:* a pwsh
+  tab that only ran shell **builtins** + `cd` (no external command ever) leaves no observable child, so
+  it falls back to its launch dir; an OSC-9;9 prompt hook would close that gap if desired. The Archived overlay is **grouped by window** (`_RebuildArchiveList` over
   `RecoverableWindows`): a per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1
   -s <idx>`) over its session rows (**Restore here** cherry-picks one into the current window). A clobber
   guard (`_FlushWindowRecord`: skip a no-tabs+no-geometry or pre-Initialized capture) + a close-flush
