@@ -1573,11 +1573,21 @@ int wmain(int argc, wchar_t** argv)
             ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", dir.c_str());
         }
     }
-#ifdef AGENTMASTER_DEV
-    else if (EnvVar(L"AGENTMASTER_PROFILE").empty() && !IsPackaged())
+    else if (IsPackaged())
     {
-        // This binary was built as the DEV CLI and is running unpackaged with no inherited
-        // profile — default to the dev profile so "the binary targets its build type".
+        // Packaged: OUR package identity is the authoritative "which install am I" signal — the user
+        // chose it by typing `agentmasterdev` vs `agentmaster`. CLEAR any AGENTMASTER_PROFILE
+        // inherited from a shell hosted in the OTHER instance, so ResolveProfileDir resolves via
+        // GetCurrentPackageFamilyName + the saved choice (dev exe -> dev profile, release ->
+        // release), never the ambient env. The saved custom-folder choice (the picker) still wins —
+        // it lives in .agentmaster.profiles keyed by identity, which that resolution consults.
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", nullptr);
+    }
+#ifdef AGENTMASTER_DEV
+    else if (EnvVar(L"AGENTMASTER_PROFILE").empty())
+    {
+        // Unpackaged dev build with no inherited profile — default to the dev profile so "the binary
+        // targets its build type". (A packaged build never reaches here; identity handled it above.)
         const auto home = EnvVar(L"USERPROFILE");
         if (!home.empty())
         {

@@ -67,6 +67,31 @@ namespace
         const auto e = s.find_first_of(L" \t");
         return e == std::wstring_view::npos ? s : s.substr(0, e);
     }
+
+    // A CLI invocation == the first token is a verb (the standard verb-first form,
+    // `agentmaster show ...`) OR a CLI-ONLY global flag (so `agentmaster --instance dev show ...`
+    // also dispatches). The listed flags are unique to the CLI — none collide with a
+    // WindowsTerminal commandline token — so a GUI launch (`-w`, `-s`, `nt`, `-Embedding`, bare) is
+    // never misrouted to the CLI; it forwards to the GUI as before.
+    bool IsCliInvocation(std::wstring_view tail)
+    {
+        const auto tok = FirstToken(tail);
+        if (IsCliVerb(tok))
+        {
+            return true;
+        }
+        static constexpr std::wstring_view kCliFlags[] = {
+            L"--json", L"--self", L"--offline", L"--tail", L"--instance", L"--state", L"--dir"
+        };
+        for (const auto f : kCliFlags)
+        {
+            if (tok == f)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 }
 
 #pragma warning(suppress : 26461) // we can't change the signature of wmain
@@ -79,8 +104,8 @@ int __cdecl wmain(int /*argc*/, wchar_t** /*argv*/)
 
     const std::wstring_view tail = CommandlineTail();
 
-    // --- a CLI verb -> the console introspection tool, on this console ---
-    if (IsCliVerb(FirstToken(tail)))
+    // --- a CLI invocation -> the console introspection tool, on this console ---
+    if (IsCliInvocation(tail))
     {
         std::filesystem::path cli{ module };
         cli.replace_filename(L"agentmaster-cli.exe");

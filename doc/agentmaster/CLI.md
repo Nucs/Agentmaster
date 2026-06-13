@@ -185,26 +185,31 @@ The release and dev packages install side by side, each with its own profile (`~
 `~/.agentmaster-dev`). The CLI must target the *right* one without the user thinking about it. It does,
 by a precedence ladder (highest first) — **so in normal use you never pass a flag**:
 
-1. **`--profile <dir>` / `--instance dev|release`** — explicit override.
-2. **Inherited `AGENTMASTER_PROFILE` env** — an agent running *inside* an Agentmaster tab inherits the
-   app's exported profile, so `agentmaster show --self` auto-targets **the exact instance it runs in**.
-   (Verified: `--self` with no flag binds the calling tab's own session.)
-3. **MSIX package identity** — a *packaged* `agentmaster-cli.exe` resolves via
+1. **`--profile <dir>` / `--instance dev|release`** — explicit override (cross-target on purpose).
+2. **MSIX package identity (PACKAGED)** — a packaged `agentmaster-cli.exe` resolves via
    `GetCurrentPackageFamilyName()` → the dev exe lands on the dev profile, the release exe on the
-   release profile. **Automatic, no hardcode** — this is how the whole app already resolves state
-   (`Profiles::ResolveProfileDir()`).
-4. **Compile-time brand** — an *unpackaged* build carries a `-DAGENTMASTER_DEV` brand so the dev CLI
-   defaults to `~/.agentmaster-dev` when run outside any app (the release build omits it → the
-   `~/.agentmaster` default). This is the literal "the binary targets its build type" knob, mirroring
-   the app's `/p:AgentmasterPackageIdentity`. (Verified: `env -u AGENTMASTER_PROFILE` → dev.)
-5. **Per-identity default** (`Profiles::ResolveProfileDir` fallback — `~/.agentmaster`).
+   release profile. The alias you typed (`agentmasterdev` vs `agentmaster`) IS the explicit "which
+   install" choice, so it **wins over any inherited `AGENTMASTER_PROFILE`** — the CLI clears the
+   ambient env first, then lets `Profiles::ResolveProfileDir()` resolve by identity + the saved choice
+   (so a Browse…-picked custom folder still wins; it lives in `.agentmaster.profiles` by identity).
+   **Automatic, no flag, no hardcode.** (Verified live: `agentmasterdev list` → `~/.agentmaster-dev`
+   even from a release-hosted shell.)
+3. **Inherited `AGENTMASTER_PROFILE` env (UNPACKAGED)** — an unpackaged build run *inside* an
+   Agentmaster tab inherits the app's exported profile, so it auto-targets that instance.
+4. **Compile-time brand (UNPACKAGED)** — `-DAGENTMASTER_DEV` so the unpackaged dev CLI defaults to
+   `~/.agentmaster-dev` when run outside any app (release omits it → `~/.agentmaster`). The literal
+   "the binary targets its build type" knob. (Verified: `env -u AGENTMASTER_PROFILE` → dev.)
+5. **Per-identity default** (`ResolveProfileDir` fallback — `~/.agentmaster`).
 
-All resolution is **headless-safe** (never shows UI). Control's `WM_COPYDATA` targets the
-**per-package-family** window class, so a release CLI talks to the release Emperor and a dev CLI to the
-dev Emperor — naturally scoped, never crossed.
+All resolution is **headless-safe** (never shows UI). So: shipped → automatic by the **alias's
+identity**; unpackaged dev build → automatic by brand; an unpackaged run in a tab → by inherited env.
+The flags exist only to cross-target another install on purpose.
 
-So: shipped → automatic by identity; unpackaged dev build → automatic by brand; an agent in a tab →
-automatic by inherited env. The flags exist only to *cross-target* another install on purpose.
+**Dispatch** (`shim.cpp`): the launcher routes to the CLI when the first commandline token is a verb
+(the standard verb-first form, `agentmaster show …`) OR a CLI-only global flag (`--json` / `--self` /
+`--offline` / `--tail` / `--instance` / `--state` / `--dir` — none collide with a WindowsTerminal
+token), so `agentmaster --instance dev show …` dispatches too. Anything else (`-w`, `-s`, `nt`,
+`-Embedding`, bare) forwards to the GUI unchanged.
 
 ## 8. Build & packaging
 
