@@ -154,6 +154,30 @@ namespace Agentmaster
     // from the publishing roster). Pure. (§19-Q1)
     std::wstring WindowIdFromAmSession(std::wstring_view amSession);
 
+    // Read another process's MSIX package family name (e.g. "Agentmaster_56k4f06dsfp9r",
+    // "AgentmasterDev_56k4f06dsfp9r", "Microsoft.WindowsTerminal_8wekyb3d8bbwe"). Empty for an
+    // unpackaged process or on denial. The authoritative way to tell an external claude's host
+    // terminal apart: real Windows Terminal vs an Agentmaster (release) vs an Agentmaster Dev instance.
+    std::wstring ReadProcessPackageFamily(uint32_t pid);
+
+    // Read a process's full image path (QueryFullProcessImageNameW). Empty on denial/exit. The
+    // unpackaged fallback for host classification (a loose Release/Debug build path).
+    std::wstring ReadProcessImagePath(uint32_t pid);
+
+    // BFS UP the ancestor chain of `pid` (NOT self) for the nearest WindowsTerminal.exe / wt.exe — the
+    // hosting terminal of a claude (directly for a Manager-launched ConPTY-root claude, or past its
+    // shell for a hand-typed one). 0 if none (a bare cmd/console host, or the host already exited).
+    // Pure over the snapshot. (OBSERVER.md §11c)
+    uint32_t FindTerminalHostPid(const std::vector<ProcEntry>& snap, uint32_t pid);
+
+    // The display label for an EXTERNAL claude's HOST: walk to the hosting terminal
+    // (FindTerminalHostPid) and name it by package family / image path — "Windows Terminal" (real WT),
+    // "Agentmaster" / "Agentmaster Dev" (another of OUR instances). With no live terminal ancestor:
+    // "Agentmaster" when the claude still carries our AM_SESSION stamp (an orphan whose host exited),
+    // else the nearest shell leaf ("cmd" / "pwsh") for a console-hosted claude, else empty. This is
+    // what fixes "Agentmaster shows as WindowsTerminal" and tells release/dev apart. (OBSERVER.md §11c)
+    std::wstring ResolveExternalHostLabel(const std::vector<ProcEntry>& snap, uint32_t claudePid, bool amSessionPresent);
+
     // True iff this `claude.exe` is actually the Claude DESKTOP app — an Electron GUI binary that
     // shares the leaf name "Claude.exe" — or one of its renderer/gpu/utility/crashpad children, NOT a
     // Claude Code CLI session. The desktop app + its helpers all run with cwd C:\WINDOWS\system32, so

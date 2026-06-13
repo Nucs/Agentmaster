@@ -2032,23 +2032,26 @@ namespace winrt::TerminalApp::implementation
 
         // host (the foreign terminal) · git branch
         {
-            std::wstring hostLabel;
-            if (ex.host == RunningApp::WindowsTerminal)
+            // The Fleet Observer resolves a clear host label by the hosting terminal's identity
+            // (package family / image path): "Windows Terminal" (real WT) vs "Agentmaster" /
+            // "Agentmaster Dev" (another of our instances) vs a shell leaf — see ResolveExternalHostLabel.
+            std::wstring hostLabel = ex.hostLabel;
+            if (hostLabel.empty())
             {
-                hostLabel = L"Windows Terminal";
-            }
-            else if (!ex.hostImage.empty())
-            {
-                hostLabel = ex.hostImage;
-                const auto dot = hostLabel.rfind(L".exe");
-                if (dot != std::wstring::npos)
+                // Fallback for an older/missing reading: the parent shell leaf, else generic.
+                if (!ex.hostImage.empty())
                 {
-                    hostLabel = hostLabel.substr(0, dot);
+                    hostLabel = ex.hostImage;
+                    const auto dot = hostLabel.rfind(L".exe");
+                    if (dot != std::wstring::npos)
+                    {
+                        hostLabel = hostLabel.substr(0, dot);
+                    }
                 }
-            }
-            else
-            {
-                hostLabel = L"external";
+                else
+                {
+                    hostLabel = (ex.host == RunningApp::WindowsTerminal) ? L"Windows Terminal" : L"external";
+                }
             }
             std::wstring hb = L"via " + hostLabel;
             if (!ex.gitBranch.empty())
@@ -2130,7 +2133,7 @@ namespace winrt::TerminalApp::implementation
             // host a tick after first sight triggers one refresh. Timestamps are deliberately NOT
             // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
             if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
-                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid)
+                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid)
             {
                 same = false;
             }
@@ -2706,25 +2709,27 @@ namespace winrt::TerminalApp::implementation
                 row.Children().Append(g);
                 row.Children().Append(Text(winrt::hstring{ title }, 13, false, 1.0));
 
-                // host tag: wt / cmd / pwsh / ... (the foreign host this claude runs in).
+                // host tag: the foreign host this claude runs in — "Windows Terminal" (real WT) vs
+                // "Agentmaster" / "Agentmaster Dev" (another of our instances) vs cmd / pwsh. Resolved by
+                // the hosting terminal's package family / image path (ResolveExternalHostLabel), so our
+                // fork is never mislabeled "WindowsTerminal" (its exe leaf) and dev/release are distinct.
                 {
-                    std::wstring hostLabel;
-                    if (ex.host == RunningApp::WindowsTerminal)
+                    std::wstring hostLabel = ex.hostLabel;
+                    if (hostLabel.empty())
                     {
-                        hostLabel = L"wt";
-                    }
-                    else if (!ex.hostImage.empty())
-                    {
-                        hostLabel = ex.hostImage;
-                        const auto dot = hostLabel.rfind(L".exe");
-                        if (dot != std::wstring::npos)
+                        if (!ex.hostImage.empty())
                         {
-                            hostLabel = hostLabel.substr(0, dot);
+                            hostLabel = ex.hostImage;
+                            const auto dot = hostLabel.rfind(L".exe");
+                            if (dot != std::wstring::npos)
+                            {
+                                hostLabel = hostLabel.substr(0, dot);
+                            }
                         }
-                    }
-                    else
-                    {
-                        hostLabel = L"ext";
+                        else
+                        {
+                            hostLabel = (ex.host == RunningApp::WindowsTerminal) ? L"wt" : L"ext";
+                        }
                     }
                     auto hp = Pill(winrt::hstring{ hostLabel }, Color{ 0xFF, 0x6E, 0x7B, 0x8A });
                     hp.Opacity(0.85);

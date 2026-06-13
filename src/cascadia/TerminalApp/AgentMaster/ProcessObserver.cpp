@@ -606,6 +606,11 @@ namespace Agentmaster
             {
                 ex.hostImage = parentImageOf(pid); // cmd.exe / pwsh.exe / ... (WT rows leave this empty)
             }
+            // Resolve a CLEAR host display label by the hosting terminal's identity (package family /
+            // image path), so an external claude in another Agentmaster instance reads "Agentmaster" /
+            // "Agentmaster Dev" instead of "WindowsTerminal" (our fork's exe leaf), and the real
+            // Windows Terminal reads "Windows Terminal" — not lumped together. (OBSERVER.md §11c)
+            ex.hostLabel = ResolveExternalHostLabel(snap, pid, !f.amSession.empty());
             const std::wstring sid = ResolveObservedId(f);
             ex.sessionId = sid;
             if (!sid.empty())

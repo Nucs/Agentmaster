@@ -515,6 +515,18 @@ Already snapshot-driven from the registry. New fields become card/row adornments
 kind`); add an optional **"External (N)"** group for `runningApp==WindowsTerminal` claudes
 (observe-only, no Flight Plan). No structural change.
 
+**Host label (release/dev/real-WT distinction).** An external row's host must NOT be named by the
+parent process's image leaf — our fork's exe is literally `WindowsTerminal.exe`, so an external claude
+in another **Agentmaster** instance read "WindowsTerminal" (indistinguishable from real WT, and from a
+dead-host orphan that read "ext"). `ResolveExternalHostLabel(snap, claudePid, amSessionPresent)` instead
+walks UP to the hosting terminal (`FindTerminalHostPid` — nearest `WindowsTerminal.exe`/`wt.exe`
+ancestor) and names it by **package family** (`ReadProcessPackageFamily`, authoritative for loose-
+registered AND MSIX): `Agentmaster_*` → **Agentmaster**, `AgentmasterDev_*` → **Agentmaster Dev**,
+`Microsoft.WindowsTerminal*` → **Windows Terminal**; image path is the unpackaged fallback. No live
+terminal ancestor + our `AM_SESSION` stamp ⇒ **Agentmaster** (an orphan whose host exited); else the
+nearest shell leaf (`cmd`/`pwsh`). Published as `ExternalClaudeRow.hostLabel`; the board ("via …") and
+the EXTERNAL tree pill render it.
+
 ### 11d. The "session before transcript" case
 A correlated claude with **no transcript yet** (never prompted) has `sessionId==""`. Handle by:
 - `CorrelationRow.sessionId` empty ⇒ the UI shows the tab as **ClaudeCode (starting…)** via the

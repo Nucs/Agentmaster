@@ -1723,6 +1723,20 @@ static void TestProcessInspectTree()
         const auto cc = CommandChildrenOf(infra2, 600);
         CHECK(cc.size() == 1 && cc[0] == 602, "CommandChildrenOf skips OpenConsole, keeps the rg command child");
     }
+
+    // --- FindTerminalHostPid: walk a claude up to its hosting WindowsTerminal.exe (the host-label core) ---
+    // The label that follows (real WT vs Agentmaster vs Agentmaster Dev) keys on this host process's
+    // package family; here we just verify the ancestor walk finds the right terminal (or none).
+    CHECK(FindTerminalHostPid(snap, 201) == 100, "claude A -> its hosting WindowsTerminal (via pwsh)");
+    CHECK(FindTerminalHostPid(snap, 302) == 100, "claude B -> the hosting WindowsTerminal (past cmd + shim)");
+    CHECK(FindTerminalHostPid(snap, 100) == 0, "WindowsTerminal itself has no WT ancestor (skips self)");
+    CHECK(FindTerminalHostPid(snap, 999) == 0, "unknown pid -> no host");
+    {
+        // An orphan: a claude whose parent terminal already exited (not in the snapshot) -> 0, so the
+        // label falls back to the AM_SESSION stamp ("Agentmaster") rather than a live host.
+        const std::vector<ProcEntry> orphan = { { 700, 690 /*gone*/, L"claude.exe" } };
+        CHECK(FindTerminalHostPid(orphan, 700) == 0, "orphaned claude (dead host) -> no terminal host pid");
+    }
 }
 
 static void TestProcessInspectParse()

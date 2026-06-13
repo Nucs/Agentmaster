@@ -156,6 +156,7 @@ namespace Agentmaster
         std::wstring gitBranch; // gitBranch recorded in the transcript, if any
         RunningApp host{ RunningApp::WindowsTerminal }; // WindowsTerminal == WT-hosted; Other == cmd / bare console
         std::wstring hostImage; // the host shell leaf for an Other host ("cmd.exe", "pwsh.exe", ...); empty for WT
+        std::wstring hostLabel; // resolved host DISPLAY name: "Windows Terminal" / "Agentmaster" / "Agentmaster Dev" / a shell leaf — distinguishes real WT from OUR instances (ResolveExternalHostLabel)
         uint32_t hostPid{}; // the host shell pid (the claude's parent) — the "same window/tab" grouping key: claudes under one terminal window/tab share it. Drives the color-coded pid underline in the EXTERNAL tree.
         int64_t createdUnixMs{}; // transcript ctime (≈ conversation start)
         int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity)

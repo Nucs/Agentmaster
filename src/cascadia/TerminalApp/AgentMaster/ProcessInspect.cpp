@@ -6,6 +6,7 @@
 #include "ProcessInspect.h"
 
 #include <windows.h>
+#include <appmodel.h> // GetPackageFamilyName (host terminal: real WT vs Agentmaster vs Dev)
 #include <tlhelp32.h> // CreateToolhelp32Snapshot
 
 // Bring Window To Front (BringClaudeWindowToFront): COM + UI Automation client for the WT tab
@@ -481,6 +482,48 @@ namespace Agentmaster
         return subsystem;
     }
 
+    std::wstring ReadProcessPackageFamily(uint32_t pid)
+    {
+        const HANDLE h = OpenForQuery(pid); // PROCESS_QUERY_LIMITED_INFORMATION suffices
+        if (h == nullptr)
+        {
+            return {};
+        }
+        std::wstring out;
+        UINT32 len = 0;
+        // First call sizes the buffer (ERROR_INSUFFICIENT_BUFFER); APPMODEL_ERROR_NO_PACKAGE for an
+        // unpackaged process. `len` includes the NUL.
+        if (::GetPackageFamilyName(h, &len, nullptr) == ERROR_INSUFFICIENT_BUFFER && len > 1)
+        {
+            std::wstring buf(len, L'\0');
+            if (::GetPackageFamilyName(h, &len, buf.data()) == ERROR_SUCCESS && len > 0)
+            {
+                buf.resize(len - 1); // drop the trailing NUL
+                out = std::move(buf);
+            }
+        }
+        ::CloseHandle(h);
+        return out;
+    }
+
+    std::wstring ReadProcessImagePath(uint32_t pid)
+    {
+        const HANDLE h = OpenForQuery(pid);
+        if (h == nullptr)
+        {
+            return {};
+        }
+        std::wstring out;
+        wchar_t buf[MAX_PATH * 2];
+        DWORD sz = static_cast<DWORD>(std::size(buf));
+        if (::QueryFullProcessImageNameW(h, 0, buf, &sz) && sz > 0)
+        {
+            out.assign(buf, sz);
+        }
+        ::CloseHandle(h);
+        return out;
+    }
+
     std::unordered_map<std::wstring, std::wstring> ReadProcessEnv(uint32_t pid)
     {
         std::unordered_map<std::wstring, std::wstring> out;
@@ -771,6 +814,111 @@ namespace Agentmaster
         auto own = ReadProcessCwd(shellPid);
         const bool reliable = !own.empty() && ImageNameEq(shellImage, L"cmd.exe");
         return { std::move(own), reliable };
+    }
+
+    uint32_t FindTerminalHostPid(const std::vector<ProcEntry>& snap, uint32_t pid)
+    {
+        if (pid == 0)
+        {
+            return 0;
+        }
+        std::unordered_map<uint32_t, const ProcEntry*> byPid;
+        byPid.reserve(snap.size());
+        for (const auto& e : snap)
+        {
+            byPid.emplace(e.pid, &e);
+        }
+        uint32_t cur = pid;
+        std::unordered_set<uint32_t> seen;
+        for (int depth = 0; depth < 24 && cur != 0 && seen.insert(cur).second; ++depth)
+        {
+            const auto it = byPid.find(cur);
+            if (it == byPid.end())
+            {
+                break; // ancestor exited (an orphan)
+            }
+            const ProcEntry& e = *it->second;
+            if (depth > 0 && (ImageNameEq(e.image, L"WindowsTerminal.exe") || ImageNameEq(e.image, L"wt.exe")))
+            {
+                return e.pid; // the hosting terminal (skip self at depth 0)
+            }
+            cur = e.ppid;
+        }
+        return 0;
+    }
+
+    // Name a hosting terminal PROCESS by identity: package family first (authoritative, works for both
+    // loose-registered and MSIX installs), image path as the unpackaged fallback. (OBSERVER.md §11c)
+    static std::wstring TerminalHostLabel(uint32_t terminalPid)
+    {
+        const std::wstring fam = ReadProcessPackageFamily(terminalPid);
+        if (StartsWithCI(fam, L"AgentmasterDev")) // Dev FIRST — "Agentmaster" is a prefix of it
+        {
+            return L"Agentmaster Dev";
+        }
+        if (StartsWithCI(fam, L"Agentmaster"))
+        {
+            return L"Agentmaster";
+        }
+        if (StartsWithCI(fam, L"Microsoft.WindowsTerminal") || StartsWithCI(fam, L"WindowsTerminalDev"))
+        {
+            return L"Windows Terminal";
+        }
+        // No / foreign package identity: classify by the image path (a loose build).
+        const std::wstring path = ReadProcessImagePath(terminalPid);
+        if (ContainsCI(path, L"Agentmaster"))
+        {
+            if (ContainsCI(path, L"\\Debug\\"))
+            {
+                return L"Agentmaster Dev";
+            }
+            return L"Agentmaster"; // Release loose, or an MSIX path
+        }
+        return L"Windows Terminal"; // a WT-class host we can't pin further
+    }
+
+    std::wstring ResolveExternalHostLabel(const std::vector<ProcEntry>& snap, uint32_t claudePid, bool amSessionPresent)
+    {
+        if (const uint32_t hostPid = FindTerminalHostPid(snap, claudePid); hostPid != 0)
+        {
+            return TerminalHostLabel(hostPid); // a live terminal ancestor — authoritative
+        }
+        // No live WindowsTerminal ancestor. An AM_SESSION stamp means an Agentmaster instance launched
+        // it (its host terminal has since exited — an orphan); we can't tell release/dev from a dead
+        // host, so label it generically.
+        if (amSessionPresent)
+        {
+            return L"Agentmaster";
+        }
+        // Console-hosted (cmd / pwsh launched outside a terminal): name the nearest shell ancestor.
+        std::unordered_map<uint32_t, const ProcEntry*> byPid;
+        byPid.reserve(snap.size());
+        for (const auto& e : snap)
+        {
+            byPid.emplace(e.pid, &e);
+        }
+        uint32_t cur = claudePid;
+        std::unordered_set<uint32_t> seen;
+        for (int depth = 0; depth < 24 && cur != 0 && seen.insert(cur).second; ++depth)
+        {
+            const auto it = byPid.find(cur);
+            if (it == byPid.end())
+            {
+                break;
+            }
+            const ProcEntry& e = *it->second;
+            if (depth > 0 && IsShellImage(e.image))
+            {
+                std::wstring leaf{ e.image };
+                if (const auto dot = leaf.rfind(L".exe"); dot != std::wstring::npos)
+                {
+                    leaf.resize(dot);
+                }
+                return leaf;
+            }
+            cur = e.ppid;
+        }
+        return {};
     }
 
     // ===== PURE: command-line + env parsing ================================================
