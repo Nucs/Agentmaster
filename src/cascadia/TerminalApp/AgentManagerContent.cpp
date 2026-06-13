@@ -1091,6 +1091,7 @@ namespace winrt::TerminalApp::implementation
             _cwdBox = TextBox{};
             _cwdBox.Width(360);
             _cwdBox.PlaceholderText(L"working directory (the M axis)");
+            AgentSetTip(_cwdBox, L"path to workdir / session id"); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
             {
                 wchar_t up[MAX_PATH];
                 const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
@@ -5147,6 +5148,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _ClosePathPicker();
                 _resumeSessionHandler(winrt::hstring{ *sid }, winrt::hstring{ dir }, winrt::hstring{ title });
+                _cwdBox.Text(L""); // Agentmaster: consume the session id — clear the box after resume (TextChanged -> _ValidateLaunchBox resets the underline/buttons)
             }
             return;
         }
@@ -5183,6 +5185,7 @@ namespace winrt::TerminalApp::implementation
         {
             _ClosePathPicker();
             _forkSessionHandler(winrt::hstring{ *sid }, winrt::hstring{ dir }, winrt::hstring{ title });
+            _cwdBox.Text(L""); // Agentmaster: consume the session id — clear the box after fork (TextChanged -> _ValidateLaunchBox resets the underline/buttons)
         }
     }
 
