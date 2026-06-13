@@ -543,7 +543,181 @@ namespace winrt::TerminalApp::implementation
         {
             return; // unknown, or already Open
         }
-        _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+        // Kind-aware restore: a Codex record resumes via `codex resume <uuid>` (gated on its rollout),
+        // a Claude record via `claude --resume <id>`. Both fall back to fresh when the transcript is gone.
+        if (info->kind == ::Agentmaster::AgentKind::Codex)
+        {
+            _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+        }
+        else
+        {
+            _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+        }
+    }
+
+    // Agentmaster (Codex managed-session support): launch a codex.exe on a ConPTY as a MANAGED tab,
+    // on the SAME path as _LaunchClaudeSession. The divergences are all Codex-inherent:
+    //   * No --session-id: OUR minted `handleId` is the durable registry/persistence/tab-map key (id's
+    //     role for Claude); the REAL rollout uuid (the `codex resume` target) is carried on
+    //     SessionInfo.codexSessionId and FILLED by the Fleet Observer once the rollout resolves.
+    //   * No hooks / no --settings: bare `codex` (config.toml governs); state comes from the C2
+    //     rollout-tail (mapped onto SessionState by _ReconcileManagedCodex each probe).
+    //   * Lifecycle + state only — NO stdin injector / Autopilot (driving the Codex TUI is a later
+    //     phase). The user types directly into the tab's ConPTY; Autopilot is forced Off.
+    // `restored` set => RESUME that conversation (reusing its handle) with its rollout uuid, gated on
+    // the rollout still existing; else a fresh codex (a new rollout the observer will resolve).
+    void TerminalPage::_SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title)
+    {
+        _LaunchCodexSession(workingDir, title, std::nullopt);
+    }
+
+    TerminalApp::Tab TerminalPage::_LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored)
+    {
+        if (!_sessionRegistry)
+        {
+            return nullptr;
+        }
+
+        std::wstring dir{ workingDir };
+        if (dir.empty())
+        {
+            wchar_t up[MAX_PATH];
+            const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
+            dir = (n > 0 && n < MAX_PATH) ? std::wstring{ up, n } : std::wstring{ L"C:\\" };
+        }
+        std::wstring ttl{ title };
+        if (ttl.empty())
+        {
+            ttl = ::Agentmaster::DeriveSessionTitle(dir);
+        }
+
+        // OUR durable handle = the registry / persistence / tab-map key. On restore REUSE the archived
+        // handle (the same record flips back live); a fresh launch mints a new one.
+        const std::wstring handleId = (restored && !restored->id.empty()) ? restored->id : ::Agentmaster::NewSessionId();
+
+        // Resume ONLY if Codex still has a rollout for the persisted uuid (the resume target). No uuid
+        // (a never-prompted archived codex) or the rollout vanished -> launch fresh in the dir (Codex
+        // mints a new rollout; the observer re-resolves codexSessionId). Mirrors Claude's transcript-
+        // gated resume (Rule #6).
+        std::wstring resumeUuid;
+        if (restored && !restored->codexSessionId.empty())
+        {
+            if (!::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), restored->codexSessionId).empty())
+            {
+                resumeUuid = restored->codexSessionId;
+            }
+        }
+        const std::wstring commandline = ::Agentmaster::BuildCodexCommandline(resumeUuid);
+
+        // Child env: NO CCMGR_* (Codex has no hook bridge). Stamp AM_SESSION so the Fleet Observer
+        // attributes this codex to THIS window (ownership) — same as a launched claude.
+        auto envMap = winrt::single_threaded_map<winrt::hstring, winrt::hstring>();
+        if (const auto& eng = ::Agentmaster::SharedEngine(); !eng.amSession.empty() && !_windowId.empty())
+        {
+            envMap.Insert(winrt::hstring{ L"AM_SESSION" }, winrt::hstring{ eng.amSession + L":" + _windowId });
+        }
+        for (auto& kv : ::Agentmaster::ParseEnvAssignments(::Agentmaster::LoadAppSettings().env))
+        {
+            if (kv.first.rfind(L"CCMGR_", 0) == 0)
+            {
+                continue;
+            }
+            envMap.Insert(winrt::hstring{ kv.first }, winrt::hstring{ kv.second });
+        }
+
+        auto valueSet = TerminalConnection::ConptyConnection::CreateSettings(
+            winrt::hstring{ commandline }, winrt::hstring{ dir }, winrt::hstring{ ttl },
+            false, L"", envMap.GetView(), 30, 120, winrt::guid{}, winrt::guid{});
+        TerminalConnection::ConptyConnection connection{};
+        connection.Initialize(valueSet);
+
+        Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs{};
+        const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
+        if (!pane)
+        {
+            return nullptr;
+        }
+        // Suppress closeOnExit so a finished/crashed codex leaves its tab open to read (the liveness
+        // sweep archives it), exactly like a Claude pane.
+        pane->WalkTree([](auto&& p) {
+            if (const auto content = p->GetContent())
+            {
+                if (const auto term = content.try_as<winrt::TerminalApp::TerminalPaneContent>())
+                {
+                    if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(term))
+                    {
+                        impl->SuppressAutoClose();
+                    }
+                }
+            }
+        });
+
+        const auto tab = _CreateNewTabFromPane(pane);
+        if (tab)
+        {
+            _claudeTabs[handleId] = winrt::make_weak(tab); // the tab map is agent-agnostic (Activate / Archive / capture)
+        }
+
+        // Register the managed Codex record (kind=Codex) — a live card at t=0, like Claude. No injector
+        // (lifecycle + state only); Autopilot forced Off (nothing to drive). codexSessionId carries the
+        // resume target (kept across restore; filled later by the observer for a fresh launch).
+        ::Agentmaster::SessionInfo info = restored ? *restored : ::Agentmaster::SessionInfo{};
+        info.id = handleId;
+        info.kind = ::Agentmaster::AgentKind::Codex;
+        info.title = ttl;
+        info.workingDir = dir;
+        info.codexSessionId = resumeUuid.empty() ? (restored ? restored->codexSessionId : std::wstring{}) : resumeUuid;
+        info.state = ::Agentmaster::SessionState::Idle; // the C2 rollout-tail reconcile establishes the real state
+        info.external = false; // we own this tab's ConPTY
+        info.live = true;
+        info.autopilot.mode = ::Agentmaster::AutopilotMode::Off; // no driving in this phase
+        info.pendingConfirmPromptId.clear();
+        _sessionRegistry->Upsert(info);
+
+        if (tab)
+        {
+            if (const auto impl = _GetTabImpl(tab))
+            {
+                impl->SetTabText(winrt::hstring{ ttl });
+            }
+            _ApplyDirColorToTab(tab, dir);
+            _AttachClaudeOverlay(tab, handleId); // the per-tab badge (status color from the record's state)
+            if (const auto s = _sessionRegistry->Get(handleId))
+            {
+                _SetTabAgentDot(tab, AgentStatusColorFor(s->state));
+            }
+        }
+
+        const std::wstring tag = !resumeUuid.empty() ? L"[codex-resume] " : (restored ? L"[codex-restore-fresh] " : L"[codex-spawn] ");
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      tag + handleId + (resumeUuid.empty() ? L"" : (L" (rollout " + resumeUuid + L")")) + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+        return tab;
+    }
+
+    // Agentmaster (Codex): adopt an EXTERNAL (observe-only) codex from the Explorer Tree's EXTERNAL
+    // scope — the Codex analog of _AdoptExternalClaude. We host no ConPTY for the foreign codex, so we
+    // can't drive it (Rule #13); "adopt" resumes its CONVERSATION (its rollout) into a NEW managed tab:
+    // resolve the rollout uuid (cwd + process-start, Rule #14), then `codex resume <uuid>` — leaving the
+    // original codex running. No rollout yet (never prompted) -> a fresh managed codex in the same dir.
+    void TerminalPage::_AdoptExternalCodex(uint32_t pid, winrt::hstring cwd)
+    {
+        const std::wstring dir{ cwd };
+        const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
+        const std::wstring uuid = ::Agentmaster::ResolveCodexSession(dir, start).sessionId;
+
+        std::optional<::Agentmaster::SessionInfo> restored;
+        if (!uuid.empty())
+        {
+            ::Agentmaster::SessionInfo info{};
+            info.kind = ::Agentmaster::AgentKind::Codex;
+            info.workingDir = dir;
+            info.codexSessionId = uuid; // _LaunchCodexSession gates the resume on this rollout existing
+            restored = std::move(info);
+        }
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      std::wstring{ L"[adopt-codex] pid=" } + std::to_wstring(pid) + L" cwd=" + dir +
+                                          L" -> " + (uuid.empty() ? std::wstring{ L"(fresh \x2014 no rollout)" } : (L"resume " + uuid)) + L"\n");
+        _LaunchCodexSession(cwd, winrt::hstring{}, restored);
     }
 
     // Agentmaster (Fleet Observer): adopt an EXTERNAL (observe-only) claude from the Explorer Tree's

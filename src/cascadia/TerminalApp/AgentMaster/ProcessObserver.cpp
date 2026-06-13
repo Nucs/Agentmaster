@@ -658,6 +658,7 @@ namespace Agentmaster
                     const CodexInfo ci = getCodexInfo(cf->second); // resolved + state-advanced once per pid (cached)
                     ar.model = ci.model;
                     ar.codexState = ci.state; // Phase C2: enrich the badge with the turn state
+                    ar.sessionId = ci.sessionId; // the resolved rollout uuid -> the UI lane fills a MANAGED codex record's codexSessionId (Codex-launch)
                 }
             }
             else
@@ -823,9 +824,26 @@ namespace Agentmaster
         //     surfaced as an External row (kind=Codex) regardless of host — even one in OUR own tab
         //     (Codex is never adopted/driven in C1). Same orphan skip + host labeling as the claude
         //     census; enriched from its rollout via getCodexInfo. NOT fed to ObserveClaude.
+        // Managed Codex (launched / restored / adopted BY US) carry a registry record (kind=Codex,
+        // live) whose tabToken == their WT_SESSION; they surface as managed Triage-Board cards, so
+        // EXCLUDE them from the observe-only External census — else a launched codex DOUBLE-shows (a
+        // managed card AND an external row). A hand-typed codex in our tab has no such record and stays
+        // observe-only (External). (Codex-launch.)
+        std::unordered_set<std::wstring> managedCodexTokens;
+        for (const auto& s : _registry->Snapshot())
+        {
+            if (s.kind == AgentKind::Codex && s.live && !s.external && !s.tabToken.empty())
+            {
+                managedCodexTokens.insert(s.tabToken);
+            }
+        }
         int codexCount = 0;
         for (const auto& [pid, f] : codexByPid)
         {
+            if (!f.wtSession.empty() && managedCodexTokens.count(f.wtSession))
+            {
+                continue; // managed -> a Triage-Board card, not an observe-only External row
+            }
             // Orphan skip (mirror the claude census): a codex whose host shell/terminal has exited is
             // a dead session, not a live external. PID-reuse guard: a present parent started no later.
             bool parentLive = false;

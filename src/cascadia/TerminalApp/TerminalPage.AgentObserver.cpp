@@ -859,18 +859,26 @@ namespace winrt::TerminalApp::implementation
                 continue; // tab torn down during the settle
             }
             // One session per tab; is this tab already bound (has a real overlay)?
-            bool alreadyBound = false;
-            for (const auto& [boundId, weakBound] : _claudeTabs)
+            std::wstring boundId;
+            for (const auto& [bid, weakBound] : _claudeTabs)
             {
                 if (const auto t = weakBound.get(); t && t == hostTab)
                 {
-                    alreadyBound = true;
+                    boundId = bid;
                     break;
                 }
             }
-            if (alreadyBound)
+            if (!boundId.empty())
             {
                 _DropPendingOverlay(pt.wt); // bound -> the real overlay owns the slot now
+                // Managed Codex (Codex-launch, lifecycle + state): a Codex record has NO hook/scanner
+                // feed, so the C2 rollout-tail is its state authority. Pull the resolved rollout uuid +
+                // the turn-state from the observer's activity row onto the record (cheap no-op when
+                // unchanged); also stamps tabToken so the census dedups it out of the External group.
+                if (const auto ait = actByWt.find(pt.wt); ait != actByWt.end() && ait->second.activity == ::Agentmaster::TabActivity::Codex)
+                {
+                    _ReconcileManagedCodex(boundId, ait->second);
+                }
                 continue;
             }
 
@@ -975,6 +983,62 @@ namespace winrt::TerminalApp::implementation
             }
         }
         co_return;
+    }
+
+    // Agentmaster (Codex-launch): reconcile a MANAGED Codex record from the Fleet Observer's per-tab
+    // activity row — the Codex analog of the hook/scanner state feed (Codex has neither). Fills the
+    // resolved rollout uuid (the `codex resume` target, needed for archive/restore), stamps tabToken
+    // (the census-dedup key so a managed codex never ALSO shows as an External row), and maps the C2
+    // rollout-tail turn-state onto SessionState. A cheap no-op when nothing changed (no registry/UI
+    // churn each probe). Codex exposes no NeedsApproval/Error via PULL, so an Unknown turn-state leaves
+    // the current state untouched.
+    void TerminalPage::_ReconcileManagedCodex(const std::wstring& sessionId, const ::Agentmaster::TabActivityRow& act)
+    {
+        if (!_sessionRegistry)
+        {
+            return;
+        }
+        const auto s = _sessionRegistry->Get(sessionId);
+        if (!s || s->kind != ::Agentmaster::AgentKind::Codex)
+        {
+            return; // only managed Codex records
+        }
+        std::optional<::Agentmaster::SessionState> mapped;
+        switch (act.codexState)
+        {
+        case ::Agentmaster::CodexState::Running:
+            mapped = ::Agentmaster::SessionState::Running;
+            break;
+        case ::Agentmaster::CodexState::Waiting:
+            mapped = ::Agentmaster::SessionState::WaitingForInput;
+            break;
+        case ::Agentmaster::CodexState::Idle:
+            mapped = ::Agentmaster::SessionState::Idle;
+            break;
+        default:
+            break; // Unknown -> leave the current state
+        }
+        const bool uuidChanged = !act.sessionId.empty() && s->codexSessionId != act.sessionId;
+        const bool tokenChanged = !act.wtSession.empty() && s->tabToken != act.wtSession;
+        const bool stateChanged = mapped.has_value() && s->state != *mapped;
+        if (!uuidChanged && !tokenChanged && !stateChanged)
+        {
+            return; // steady state -> no churn
+        }
+        _sessionRegistry->Update(sessionId, [&](::Agentmaster::SessionInfo& si) {
+            if (uuidChanged)
+            {
+                si.codexSessionId = act.sessionId; // the `codex resume` target (persisted for archive/restore)
+            }
+            if (tokenChanged)
+            {
+                si.tabToken = act.wtSession; // census-dedup key (managed codex excluded from External)
+            }
+            if (stateChanged)
+            {
+                si.state = *mapped;
+            }
+        });
     }
 
     // Agentmaster: the Explorer Tree "refresh" button's action — force a fresh reload NOW instead of

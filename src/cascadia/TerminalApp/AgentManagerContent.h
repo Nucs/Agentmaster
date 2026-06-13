@@ -57,6 +57,10 @@ namespace winrt::TerminalApp::implementation
         // into a NEW managed, controllable tab (`claude --resume <id>`), or launches fresh if it has no
         // transcript. The original external process is left running (we never inject into / kill it).
         void SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring)> handler);
+        // Agentmaster (Codex-launch): the EXTERNAL-tree menu for a Codex row. (pid, cwd, adopt):
+        // adopt=true resumes that codex's rollout into a managed tab (`codex resume <uuid>`); adopt=false
+        // launches a fresh managed Codex in cwd. The page routes to _AdoptExternalCodex / _SpawnCodexSession.
+        void SetCodexLaunchHandler(std::function<void(uint32_t, winrt::hstring, bool)> handler);
         // Agentmaster: the set of session ids hosted in THIS window (the page's _claudeTabs).
         // Used by the Explorer Tree's LOCAL scope to show only this window's sessions; GLOBAL
         // ignores it and shows every window's sessions (the whole process-wide registry).
@@ -298,6 +302,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(uint32_t, winrt::hstring)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt -> page resumes the external's conversation into a managed tab
+        std::function<void(uint32_t, winrt::hstring, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex Adopt (true) / Open-New-Codex (false)
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;

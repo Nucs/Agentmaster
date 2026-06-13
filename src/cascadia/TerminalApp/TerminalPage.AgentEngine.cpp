@@ -415,6 +415,21 @@ namespace winrt::TerminalApp::implementation
                 self->_AdoptExternalClaude(pid, cwd);
             }
         });
+        // Agentmaster (Codex-launch): the EXTERNAL-codex menu — Adopt (resume its rollout into a managed
+        // tab) or Open New Codex Session Here (a fresh managed codex in the cwd). Lifecycle + state only.
+        content->SetCodexLaunchHandler([weakThis](uint32_t pid, winrt::hstring cwd, bool adopt) {
+            if (auto self = weakThis.get())
+            {
+                if (adopt)
+                {
+                    self->_AdoptExternalCodex(pid, cwd);
+                }
+                else
+                {
+                    self->_SpawnCodexSession(cwd, winrt::hstring{});
+                }
+            }
+        });
         // Agentmaster: the Explorer Tree's refresh button — force the Fleet Observer to re-survey NOW
         // (re-enrich the registry + recompute the External census) and redraw, instead of waiting for
         // the next observer/scanner tick. Covers every scope (LOCAL/GLOBAL re-pull + EXTERNAL census).

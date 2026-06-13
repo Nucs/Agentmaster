@@ -227,7 +227,17 @@ namespace winrt::TerminalApp::implementation
             const auto sessionId = _ClaudeSessionForTab(tab);
             if (!sessionId.empty())
             {
+                // A managed session tab — Claude OR Codex (Codex-launch). A REFERENCE: the record (incl.
+                // a Codex resume uuid on SessionInfo.codexSessionId) lives in sessions.json. Record the
+                // KIND so _RestoreWindowTabs replays the right CLI (`claude --resume` vs `codex resume`).
                 entry.kind = ::Agentmaster::TabKind::Claude;
+                if (_sessionRegistry)
+                {
+                    if (const auto s = _sessionRegistry->Get(sessionId); s && s->kind == ::Agentmaster::AgentKind::Codex)
+                    {
+                        entry.kind = ::Agentmaster::TabKind::Codex;
+                    }
+                }
                 entry.sessionId = sessionId;
                 // Agentmaster: do NOT capture a per-tab color here. A Claude tab's color is ONE value per
                 // working directory (Rule #12) — owned by dir-colors.json and re-applied on restore by
@@ -291,9 +301,10 @@ namespace winrt::TerminalApp::implementation
             }
             if (focusedTab && tab == focusedTab)
             {
-                // Prefer the stable Claude conversation id; a shell tab (no cross-restart id) falls back
-                // to its index in rec.tabs. Read entry BEFORE the move below.
-                if (entry.kind == ::Agentmaster::TabKind::Claude && !entry.sessionId.empty())
+                // Prefer the stable managed-session handle (Claude conversation id, or our durable Codex
+                // handle); a shell tab (no cross-restart id) falls back to its index in rec.tabs. Read
+                // entry BEFORE the move below.
+                if ((entry.kind == ::Agentmaster::TabKind::Claude || entry.kind == ::Agentmaster::TabKind::Codex) && !entry.sessionId.empty())
                 {
                     rec.selectedSessionId = entry.sessionId;
                 }
@@ -394,10 +405,11 @@ namespace winrt::TerminalApp::implementation
         // position. -1 => unresolved (the selected session couldn't be restored) => leave default focus.
         int targetAbs = wantManager ? 0 : -1;
 
-        // Pass 1 — Claude sessions, synchronously, in record order.
+        // Pass 1 — managed sessions (Claude + Codex), synchronously, in record order.
         for (const auto& entry : tabs)
         {
-            if (entry.kind != ::Agentmaster::TabKind::Claude || entry.sessionId.empty())
+            const bool isCodex = entry.kind == ::Agentmaster::TabKind::Codex;
+            if ((entry.kind != ::Agentmaster::TabKind::Claude && !isCodex) || entry.sessionId.empty())
             {
                 continue;
             }
@@ -411,10 +423,19 @@ namespace winrt::TerminalApp::implementation
                 ++skipped; // unknown (fleet not loaded yet / pruned) or already open elsewhere
                 continue;
             }
-            _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            // Kind-aware re-home: Codex resumes via `codex resume <uuid>` (rollout-gated on
+            // SessionInfo.codexSessionId), Claude via `claude --resume <id>`.
+            if (isCodex)
+            {
+                _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            }
+            else
+            {
+                _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            }
             if (!selSessionId.empty() && entry.sessionId == selSessionId)
             {
-                targetAbs = 1 + static_cast<int>(resumed); // this Claude tab's index (Manager occupies 0)
+                targetAbs = 1 + static_cast<int>(resumed); // this managed tab's index (Manager occupies 0)
             }
             ++resumed;
         }

@@ -602,8 +602,17 @@ namespace winrt::TerminalApp::implementation
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
-        void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume) an archived session + its Flight Plan
+        void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd); // Agentmaster (Fleet Observer): resume an EXTERNAL claude's conversation into a managed tab (resolve id -> claude --resume; fresh if none)
+        // Agentmaster (Codex managed-session support): launch / restore a codex.exe on a ConPTY as a
+        // MANAGED tab, on the same path as Claude. Codex can't pin a session id (no --session-id), so
+        // OUR minted id is the durable handle and the real rollout uuid (SessionInfo.codexSessionId,
+        // filled by the Fleet Observer) is the `codex resume` target. Lifecycle + state only — no
+        // injector / Autopilot (driving the Codex TUI is a later phase).
+        void _SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title); // fresh codex in a dir
+        TerminalApp::Tab _LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored); // fresh, or `codex resume <uuid>` (rollout-gated); returns the created tab
+        void _AdoptExternalCodex(uint32_t pid, winrt::hstring cwd); // resume an EXTERNAL codex's rollout into a managed tab (resolve uuid -> codex resume; fresh if none)
+        void _ReconcileManagedCodex(const std::wstring& sessionId, const ::Agentmaster::TabActivityRow& act); // fill codexSessionId + map the C2 turn-state onto a managed Codex record (UI-lane, per probe)
         std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
         std::wstring _ClaudeSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which managed session is BOUND to this connection (by tabToken == WT_SESSION) — archive on pane-close + re-point injector on restartConnection
         void _DetachClaudeTabForMove(const winrt::com_ptr<Tab>& tab); // Agentmaster (cross-window move): a Claude tab is moving to ANOTHER window (tear-out / moveTab) — evict this window's per-window binding (NOT the injector/live) so teardown can't archive a session now alive elsewhere; the destination re-homes it

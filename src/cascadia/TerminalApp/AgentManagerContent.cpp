@@ -779,6 +779,10 @@ namespace winrt::TerminalApp::implementation
     {
         _adoptExternalHandler = std::move(handler);
     }
+    void AgentManagerContent::SetCodexLaunchHandler(std::function<void(uint32_t, winrt::hstring, bool)> handler)
+    {
+        _codexLaunchHandler = std::move(handler);
+    }
     void AgentManagerContent::SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider)
     {
         _localScopeProvider = std::move(provider);
@@ -3028,12 +3032,56 @@ namespace winrt::TerminalApp::implementation
 
         if (ex.kind == AgentKind::Codex)
         {
-            // Observe-only: explain why Adopt/Open-New aren't here (they resume/spawn a CLAUDE session).
-            MenuFlyoutItem note;
-            note.Text(L"Adopt \x2014 Codex control is a later phase");
-            note.IsEnabled(false);
-            AgentSetTip(note, L"Phase C1 surfaces Codex sessions read-only (left-click for its conversation). Adopting / driving Codex is a later phase.");
-            menu.Items().Append(note);
+            // Codex-launch (lifecycle + state): Adopt resumes this codex's rollout into a MANAGED tab
+            // (`codex resume <uuid>`; the original keeps running), and Open New Codex Session Here
+            // launches a fresh managed codex in the cwd. Both route to _codexLaunchHandler (adopt flag).
+            // No injector/Autopilot yet — you type into the tab directly (driving Codex is a later phase).
+            const std::wstring sid = ex.sessionId;
+            MenuFlyoutItem adopt;
+            adopt.Text(L"Adopt");
+            AgentSetTip(adopt, sid.empty() ?
+                                   winrt::hstring{ L"This codex hasn't been prompted yet (no rollout) \x2014 Adopt launches a fresh managed codex here" } :
+                                   winrt::hstring{ L"Resume this codex's conversation into a managed tab (codex resume); the original keeps running \x2014 close it to avoid two writers" });
+            adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_codexLaunchHandler) { self->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true); } } });
+                }
+                else if (auto self = weak.get())
+                {
+                    if (self->_codexLaunchHandler) { self->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true); }
+                }
+            });
+            menu.Items().Append(adopt);
+
+            MenuFlyoutItem openHereCx;
+            openHereCx.Text(L"Open New Codex Session Here");
+            AgentSetTip(openHereCx, L"Launch a managed Codex session in this directory (a new, independent conversation)");
+            openHereCx.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
+                {
+                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_codexLaunchHandler) { self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false); } } });
+                }
+                else if (auto self = weak.get())
+                {
+                    if (self->_codexLaunchHandler) { self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false); }
+                }
+            });
+            menu.Items().Append(openHereCx);
+
+            MenuFlyoutItem copyIdCx;
+            copyIdCx.Text(L"Copy Session Id");
+            if (sid.empty())
+            {
+                copyIdCx.IsEnabled(false);
+                AgentSetTip(copyIdCx, L"No rollout id yet (this codex hasn't been prompted)");
+            }
+            else
+            {
+                AgentSetTip(copyIdCx, L"Copy this codex rollout's conversation id to the clipboard");
+                copyIdCx.Click([sid](const IInspectable&, const RoutedEventArgs&) { CopyTextToClipboard(sid); });
+            }
+            menu.Items().Append(copyIdCx);
         }
         else
         {
