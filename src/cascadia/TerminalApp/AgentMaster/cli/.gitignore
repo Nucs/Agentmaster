@@ -1,0 +1,5 @@
+# Agentmaster CLI standalone build artifacts (compiled on demand via _compile.bat)
+*.exe
+*.obj
+*.ilk
+*.pdb
