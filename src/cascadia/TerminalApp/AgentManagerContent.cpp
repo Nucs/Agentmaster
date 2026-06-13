@@ -1647,6 +1647,15 @@ namespace winrt::TerminalApp::implementation
         stack.Spacing(2);
 
         stack.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0));
+        // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
+        // from Claude (the implicit default — no pill, visuals unchanged).
+        if (s.kind == AgentKind::Codex)
+        {
+            auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+            cp.Opacity(0.9);
+            cp.HorizontalAlignment(HorizontalAlignment::Left);
+            stack.Children().Append(cp);
+        }
         stack.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
 
         // model · effort · kind adornment (O6, Fleet Observer enrichment): only the parts we know.
@@ -2620,6 +2629,14 @@ namespace winrt::TerminalApp::implementation
                 g.Foreground(SolidColorBrush{ StateColor(s.state) });
                 row.Children().Append(g);
                 row.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 13, false, 1.0));
+                // Agentmaster (Codex-launch): a teal "codex" agent pill on a MANAGED Codex row, mirroring
+                // the Board card — distinguishes it from a Claude row at a glance (Claude = no pill).
+                if (s.kind == AgentKind::Codex)
+                {
+                    auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+                    cp.Opacity(0.9);
+                    row.Children().Append(cp);
+                }
                 row.Children().Append(Text(StateLabel(s.state), 11, false, 0.5));
                 // Agentmaster: a gray "outside" tag marks a session hosted in another window (only
                 // possible in GLOBAL scope; in LOCAL every row is this window's). It sits at the end
