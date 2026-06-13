@@ -65,13 +65,13 @@
               (per-dir colored tabs, the selected-tab highlight, light themes), and centers
               deterministically — no font line-box / baseline concerns. The Fill binds the same
               AgentStatusBrush the code already writes, so this is presentation-only. The
-              asymmetric Margin (top +2 / bottom -2) dips the dot 2px below the slot's center —
+              asymmetric Margin (top +1 / bottom -1) dips the dot 1px below the slot's center —
               dead-center read optically HIGH against the title's visual midline — while the
               consumed height stays 10px (no header-row growth).  -->
         <Ellipse x:Name="HeaderAgentStatusDot"
                  Width="10"
                  Height="10"
-                 Margin="0,2,6,-2"
+                 Margin="0,1,6,-1"
                  VerticalAlignment="Center"
                  Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
                  Stroke="Black"

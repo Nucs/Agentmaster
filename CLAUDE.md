@@ -261,8 +261,8 @@ the concurrent UIA work; the tree as a whole builds green.
 
 **The tab strip itself now carries the state dot.** Every classified tab's header reads
 `[icon] ● <title>`: a state-colored **Ellipse** (thin black stroke for contrast on any tab
-chrome; dipped **2px below slot-center** via an asymmetric `0,2,6,-2` Margin — dead-center read
-optically high against the title, and the +2/−2 pair keeps the 10px slot so the header row
+chrome; dipped **1px below slot-center** via an asymmetric `0,1,6,-1` Margin — dead-center read
+optically high against the title, and the +1/−1 pair keeps the 10px slot so the header row
 doesn't grow) in `TabHeaderControl.xaml`'s indicator row right before the title — one more
 `x:Bind`'ed element over `TerminalTabStatus` (two new observable properties,
 `AgentStatusVisible`/`AgentStatusBrush`; `Tab.idl` already projects `TabStatus{get;}`, so no
