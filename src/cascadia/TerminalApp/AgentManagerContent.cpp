@@ -45,6 +45,22 @@ namespace
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
     }
 
+    // Agentmaster: put text on the system clipboard (the context menus' "Copy Session Id"). Mirrors
+    // the Archive page's ArchiveCopyToClipboard. Flush so the content survives the app losing focus
+    // (it can refuse — non-fatal). Best-effort.
+    void CopyTextToClipboard(const std::wstring& text)
+    {
+        try
+        {
+            winrt::Windows::ApplicationModel::DataTransfer::DataPackage pkg;
+            pkg.RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Copy);
+            pkg.SetText(winrt::hstring{ text });
+            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
+            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
+        }
+        CATCH_LOG();
+    }
+
     // Agentmaster: a small stable palette to color-code the EXTERNAL tree's pid underline by host
     // window/shell — claudes sharing a terminal window/tab carry the same host shell pid, so they get
     // the same color and are easy to spot at a glance (even across cwd groups). Vivid-on-dark, visually
@@ -2908,6 +2924,26 @@ namespace winrt::TerminalApp::implementation
                 }
             });
             menu.Items().Append(openHere);
+
+            // Copy Session Id — the resolved conversation id. Empty for a never-prompted external
+            // (no transcript id yet, Rule #14) -> the item is disabled. Synchronous clipboard write,
+            // no defer needed (matches the Archive page's "Copy id").
+            MenuFlyoutItem copyId;
+            copyId.Text(L"Copy Session Id");
+            const std::wstring sid = ex.sessionId;
+            if (sid.empty())
+            {
+                copyId.IsEnabled(false);
+                AgentSetTip(copyId, L"No conversation id yet (this claude hasn't been prompted)");
+            }
+            else
+            {
+                AgentSetTip(copyId, L"Copy this session's conversation id to the clipboard");
+                copyId.Click([sid](const IInspectable&, const RoutedEventArgs&) {
+                    CopyTextToClipboard(sid);
+                });
+            }
+            menu.Items().Append(copyId);
         }
 
         // Bring Window To Front — the LAST option, for BOTH agents: surface the window HOSTING this
@@ -3153,6 +3189,17 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(openHere);
+
+        // Copy Session Id — put this session's conversation id (UUID) on the clipboard. Synchronous:
+        // a pure clipboard write has no focus/tree-rebuild race, so it needs no defer like the items
+        // above (matches the Archive page's "Copy id").
+        MenuFlyoutItem copyId;
+        copyId.Text(L"Copy Session Id");
+        AgentSetTip(copyId, L"Copy this session's conversation id to the clipboard");
+        copyId.Click([id](const IInspectable&, const RoutedEventArgs&) {
+            CopyTextToClipboard(id);
+        });
+        menu.Items().Append(copyId);
 
         return menu;
     }
