@@ -65,17 +65,18 @@
               (per-dir colored tabs, the selected-tab highlight, light themes), and centers
               deterministically — no font line-box / baseline concerns. The Fill binds the same
               AgentStatusBrush the code already writes, so this is presentation-only. Margin
-              "-6,1,6,-1": the NEGATIVE left (-6) pulls the dot toward the profile icon to its
-              left — the MUX TabViewItem template seats our header after an icon column (16px) +
-              a 10px TabViewItemHeaderIconMargin, and -6 tightens that icon→dot gap to ~4px
-              WITHOUT touching the shared global margin every other tab uses; the title (the next
-              StackPanel element) left-shifts with it, so the +6 right keeps the dot→title gap.
-              Top +1 / bottom -1 dips the dot 1px below slot-center (dead-center reads optically
-              HIGH against the title) while the consumed height stays 10px (no header-row growth).  -->
+              "0,1,6,-1": left is 0 — NO negative overhang. A negative left margin (an earlier
+              attempt to tighten the icon→dot gap) made the dot hang past the header's left edge
+              and get CLIPPED by the tab border on tabs whose content starts near the left (e.g. a
+              no-icon shell tab). The icon→dot gap is now tightened the safe way — globally, via a
+              TabViewItemHeaderIconMargin override on the TabView (TabRowControl.xaml) — so the dot
+              sits close to the icon without any element hanging off the border. Top +1 / bottom -1
+              dips the dot 1px below slot-center (dead-center reads optically HIGH against the
+              title) while the consumed height stays 10px (no header-row growth).  -->
         <Ellipse x:Name="HeaderAgentStatusDot"
                  Width="10"
                  Height="10"
-                 Margin="-6,1,6,-1"
+                 Margin="0,1,6,-1"
                  VerticalAlignment="Center"
                  Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
                  Stroke="Black"

@@ -141,7 +141,10 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::FrameworkElement, Content, PropertyChanged.raise, nullptr);
 
     private:
-        static constexpr double HeaderRenameBoxWidthDefault{ 165 };
+        // Agentmaster: widened from upstream's 165 — the rename box (now multi-line) was capping
+        // at ~half a wide tab's width. This is a MaxWidth, so a narrow Equal-mode tab still clamps
+        // the box to the tab; it only lets the box use more room when the tab is wide.
+        static constexpr double HeaderRenameBoxWidthDefault{ 360 };
         static constexpr double HeaderRenameBoxWidthTitleLength{ std::numeric_limits<double>::infinity() };
 
         winrt::Windows::UI::Xaml::FocusState _focusState{ winrt::Windows::UI::Xaml::FocusState::Unfocused };

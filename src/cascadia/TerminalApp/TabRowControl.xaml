@@ -34,6 +34,15 @@
                  IsAddTabButtonVisible="false"
                  TabWidthMode="Equal">
 
+        <!--  Agentmaster: tighten the icon → header gap from the MUX default 10px to 4px, so the
+              tab-strip status dot / title sit closer to the profile icon. This is the SAFE way to
+              get "less space left of the dot" — it replaces a negative dot margin that overhung and
+              got clipped at the tab's left border (see TabHeaderControl.xaml). Scoped to the TabView
+              so every TabViewItem resolves it; applies uniformly to all tabs.  -->
+        <mux:TabView.Resources>
+            <Thickness x:Key="TabViewItemHeaderIconMargin">0,0,4,0</Thickness>
+        </mux:TabView.Resources>
+
         <mux:TabView.TabStripHeader>
             <!--  EA18 is the "Shield" glyph  -->
             <FontIcon x:Uid="ElevationShield"
