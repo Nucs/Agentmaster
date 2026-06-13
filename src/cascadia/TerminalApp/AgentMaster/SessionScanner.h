@@ -58,10 +58,15 @@ namespace Agentmaster
         {
             UserPrompt, // a human message (content is a plain string / pure-text block; NOT a tool_result)
             Assistant, // an assistant message (carries its concatenated text + message.stop_reason)
+            ToolResult, // a user message carrying a tool_result block — a tool completed (NOT a typed prompt)
         };
         Kind kind{ Kind::Assistant };
         std::wstring text; // UserPrompt: the prompt body. Assistant: concatenated text blocks (may be empty).
         std::wstring stopReason; // Assistant only: message.stop_reason ("end_turn" / "tool_use" / ...).
+        // Assistant only: the name of an INTERACTIVE tool_use block in this message (one that blocks
+        // on the user — AskUserQuestion), else "". Lets the scanner tell a session that is BLOCKED
+        // waiting for the user to answer (-> NeedsApproval) from one genuinely working (a long Bash).
+        std::wstring toolName;
     };
 
     struct TranscriptParse
@@ -114,6 +119,72 @@ namespace Agentmaster
     // WaitingForInput — Running needs no repair, and NeedsApproval / Error / Done are "needs you /
     // ended" states a mere transcript line must never clear).
     bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept;
+
+    // PURE: is this user-message text the Claude Code marker for a turn the user ABORTED (Esc)?
+    // An interrupt fires NO clean Stop hook, and the marker line clears the tracked stop_reason —
+    // so without recognizing it, a Running session whose turn the user killed stayed Running
+    // forever (the missed-Stop backstop, gated on a terminal stop_reason, could never fire). The
+    // marker is authoritative "the turn is over NOW" (no more assistant output is coming), so it
+    // is treated as a turn-ender. Matches both "[Request interrupted by user]" and the
+    // "…for tool use]" variant via the stable prefix.
+    inline bool IsUserInterruptMarker(std::wstring_view text) noexcept
+    {
+        constexpr std::wstring_view kPrefix = L"[Request interrupted by user";
+        return text.size() >= kPrefix.size() && text.substr(0, kPrefix.size()) == kPrefix;
+    }
+
+    // PURE: does this tool_use name BLOCK on the user (the agent cannot proceed until the user
+    // answers)? AskUserQuestion is the built-in interactive question tool. An unanswered one with a
+    // quiescent transcript means the session is "needs you", NOT working — distinct from a pending
+    // NON-interactive tool (a long Bash / web fetch) whose transcript is ALSO momentarily quiescent
+    // but is genuinely running. Conservative allowlist (evidence-based): only names we KNOW block.
+    inline bool IsInteractiveTool(std::wstring_view toolName) noexcept
+    {
+        return toolName == L"AskUserQuestion";
+    }
+
+    // PURE + total: should the reconciler synthesize a missed/forced Stop (-> WaitingForInput)? The
+    // missed-Stop backstop, generalized. Fires from Running OR NeedsApproval — a session blocked on
+    // the user (a real permission approval, OR a synthesized AskUserQuestion block below) whose turn
+    // then ENDED must also be released; recon-stop being Running-ONLY left an approved session stuck
+    // in NeedsApproval when its post-approval Stop hook was dropped. The turn is OVER when the tail
+    // is a TERMINAL stop_reason (end_turn / …) or the user INTERRUPTED it. Requires the transcript
+    // to have gone quiescent first (a mid-turn pause is not the end).
+    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs) noexcept
+    {
+        if (state != SessionState::Running && state != SessionState::NeedsApproval)
+        {
+            return false; // only a turn-in-progress / blocked-on-user state has a turn to end
+        }
+        if (quietForMs < kScanStopQuiescenceMs)
+        {
+            return false; // not quiet long enough — could be a mid-turn pause
+        }
+        return interrupted || IsTerminalStopReason(lastStopReason);
+    }
+
+    // PURE + total: should the reconciler synthesize a "needs you" state (-> NeedsApproval) because
+    // the latest assistant message is an UNANSWERED interactive tool_use (AskUserQuestion) and the
+    // transcript has gone quiescent? The session is blocked waiting for the user to answer — it must
+    // NOT show as Running (the Triage Board's whole job is to surface who needs you). Only from
+    // Running (idempotent — once NeedsApproval it stays until the answer + the turn's end release it
+    // via ShouldSynthesizeStop). An interrupt takes precedence (the question is gone -> a Stop).
+    inline bool ShouldSynthesizeBlockedOnUser(SessionState state, std::wstring_view pendingInteractiveTool, bool interrupted, int64_t quietForMs) noexcept
+    {
+        if (state != SessionState::Running)
+        {
+            return false; // entered once from Running; never re-fire while already NeedsApproval
+        }
+        if (interrupted)
+        {
+            return false; // an interrupt ends the turn (ShouldSynthesizeStop owns it), not a block
+        }
+        if (quietForMs < kScanStopQuiescenceMs)
+        {
+            return false; // the user may answer within the settle window — don't flicker
+        }
+        return IsInteractiveTool(pendingInteractiveTool);
+    }
 
     // Ticked on the scanner thread on the slow cadence; the probe marshals to ITS OWN UI thread
     // and archives any of its claude tabs whose ConPTY connection has Closed. One per window (M9).
@@ -176,6 +247,10 @@ namespace Agentmaster
             // (ShouldSynthesizeRunning) reads the value from BEFORE the pass, so the pass that
             // finishes the replay cannot itself synthesize. Reset with the truncation rewind.
             bool primed{ false };
+            // Tail facts that disambiguate "blocked on the user" / "interrupted" from "working" —
+            // the missed-Stop backstop can't read either from stop_reason alone (HookEvents.h notes).
+            std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion) is the latest assistant block; "" once answered / moved on
+            bool interrupted{ false }; // the latest user line is a turn-abort marker (Esc) — treat as a turn-ender
         };
 
         void _worker() noexcept;

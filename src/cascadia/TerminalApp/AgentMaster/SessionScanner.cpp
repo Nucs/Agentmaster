@@ -71,6 +71,27 @@ namespace
         return b > 0 && s[b - 1] == L'?';
     }
 
+    // The name of an INTERACTIVE (blocks-on-user) tool_use block in this message's content, else "".
+    // The scanner uses it to flag a session blocked waiting for the user to answer (AskUserQuestion)
+    // — non-interactive tool_use blocks (Bash, Read, …) are ignored: those are genuinely working.
+    std::wstring CollectInteractiveToolName(const Agentmaster::json::Value* content)
+    {
+        using Agentmaster::json::Value;
+        if (!content || content->type != Value::Type::Arr)
+        {
+            return {};
+        }
+        for (const auto& blk : content->arr)
+        {
+            if (blk.type == Value::Type::Obj && blk.StrAt(L"type") == L"tool_use" &&
+                Agentmaster::IsInteractiveTool(blk.StrAt(L"name")))
+            {
+                return blk.StrAt(L"name");
+            }
+        }
+        return {};
+    }
+
     // Concatenate the text blocks of a Claude message `content` (string, or array of blocks).
     std::wstring CollectText(const Agentmaster::json::Value* content)
     {
@@ -152,7 +173,9 @@ namespace Agentmaster
                 TranscriptEvent ev;
                 ev.kind = TranscriptEvent::Kind::Assistant;
                 ev.stopReason = msg->StrAt(L"stop_reason");
-                ev.text = CollectText(msg->Find(L"content"));
+                const auto* content = msg->Find(L"content");
+                ev.text = CollectText(content);
+                ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
                 out.events.push_back(std::move(ev));
             }
             else if (type == L"user")
@@ -180,7 +203,8 @@ namespace Agentmaster
                 else if (content->type == json::Value::Type::Arr)
                 {
                     // A pure-text user message is a human prompt; ANY tool_result block means this
-                    // is a tool turn, not something the human typed -> skip (zero false positives).
+                    // is a tool turn, not something the human typed -> emit a ToolResult marker
+                    // (a tool completed — it ANSWERS a pending interactive tool_use) instead.
                     bool hasToolResult = false;
                     std::wstring text;
                     for (const auto& blk : content->arr)
@@ -200,10 +224,14 @@ namespace Agentmaster
                             text += blk.StrAt(L"text");
                         }
                     }
-                    if (!hasToolResult)
+                    if (hasToolResult)
                     {
-                        prompt = text;
+                        TranscriptEvent ev;
+                        ev.kind = TranscriptEvent::Kind::ToolResult;
+                        out.events.push_back(std::move(ev));
+                        continue;
                     }
+                    prompt = text;
                 }
                 if (!prompt.empty())
                 {
@@ -477,36 +505,60 @@ namespace Agentmaster
             }
         }
 
-        // Missed-Stop reconciliation: the transcript's last assistant message ended the turn
-        // (a TERMINAL stop_reason — end_turn / stop_sequence / max_tokens / refusal; gated on
-        // end_turn alone, a turn that ended any other way stayed Running forever) and the file
-        // has gone quiescent, yet we are STILL Running — the Stop hook was dropped. Synthesize a
-        // Stop identical to the real one (-> WaitingForInput + the question-guard + the Autopilot
-        // advance). The Running gate (re-checked against the freshest state right before firing)
-        // makes a real Stop that already landed win, so this never double-fires.
-        if (s.state == SessionState::Running && IsTerminalStopReason(st.lastStopReason))
+        const int64_t quietForMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
+
+        // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last
+        // assistant message ended it (a TERMINAL stop_reason — end_turn / stop_sequence /
+        // max_tokens / refusal) or the user INTERRUPTED it (Esc -> no clean Stop hook) — the file
+        // has gone quiescent, yet we are STILL Running (or blocked in NeedsApproval whose
+        // post-approval / post-answer Stop was dropped). Synthesize a Stop identical to the real
+        // one (-> WaitingForInput + the question-guard + the Autopilot advance). The state gate
+        // (re-checked against the freshest state right before firing) makes a real Stop that
+        // already landed win, so this never double-fires.
+        if (ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs))
         {
-            const int64_t quietForMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
-            if (quietForMs >= kScanStopQuiescenceMs)
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && (fresh->state == SessionState::Running || fresh->state == SessionState::NeedsApproval))
             {
-                const auto fresh = _registry->Get(s.id);
-                if (fresh && fresh->state == SessionState::Running)
-                {
-                    HookMessage stop;
-                    stop.event = HookEvent::Stop;
-                    stop.sessionId = s.id;
-                    stop.cwd = s.workingDir;
-                    stop.ts = NowMs();
-                    // Synthesized from a >=2s-QUIESCENT transcript: turn identity is settled, so
-                    // the ordered machine (NextSessionStateOrdered) lands WaitingForInput
-                    // unconditionally — never held Running by a recorded type-ahead (already
-                    // consumed or canceled), never treated as stale.
-                    stop.quiescentStop = true;
-                    stop.lastMessageIsQuestion = EndsWithQuestion(st.lastAssistantText);
-                    _registry->OnHookEvent(stop);
-                    AppendStateLog(L"scanner.log",
-                                   L"[recon-stop] " + s.id + L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") + L"\n");
-                }
+                HookMessage stop;
+                stop.event = HookEvent::Stop;
+                stop.sessionId = s.id;
+                stop.cwd = s.workingDir;
+                stop.ts = NowMs();
+                // Synthesized from a >=2s-QUIESCENT transcript: turn identity is settled, so
+                // the ordered machine (NextSessionStateOrdered) lands WaitingForInput
+                // unconditionally — never held Running by a recorded type-ahead (already
+                // consumed or canceled), never treated as stale.
+                stop.quiescentStop = true;
+                stop.lastMessageIsQuestion = !st.interrupted && EndsWithQuestion(st.lastAssistantText);
+                _registry->OnHookEvent(stop);
+                AppendStateLog(L"scanner.log",
+                               L"[recon-stop] " + s.id + L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") +
+                                   (st.interrupted ? L" interrupted" : L"") + L"\n");
+            }
+        }
+
+        // Blocked-on-user reconciliation: the latest assistant message is an UNANSWERED interactive
+        // tool_use (AskUserQuestion) and the transcript has gone quiescent — the session is blocked
+        // waiting for the user to answer, NOT working, so it must not show Running. Synthesize a
+        // permission-style Notification (-> NeedsApproval, the "needs you" column). Idempotent: only
+        // from Running, so once it lands NeedsApproval it stays until the answer + the turn's end
+        // release it via the missed-Stop reconciliation above. (Autopilot treats NeedsApproval as
+        // NOT ready — Rule #1 — so it won't auto-answer the question with a queued prompt.)
+        if (ShouldSynthesizeBlockedOnUser(s.state, st.pendingInteractiveTool, st.interrupted, quietForMs))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && fresh->state == SessionState::Running)
+            {
+                HookMessage block;
+                block.event = HookEvent::Notification;
+                block.permissionRequest = true; // -> NeedsApproval via the one state machine
+                block.sessionId = s.id;
+                block.cwd = s.workingDir;
+                block.ts = NowMs();
+                _registry->OnHookEvent(block);
+                AppendStateLog(L"scanner.log",
+                               L"[recon-block] " + s.id + L" (unanswered " + st.pendingInteractiveTool + L" -> needs you)\n");
             }
         }
     }
@@ -584,11 +636,18 @@ namespace Agentmaster
         }
 
         const auto parsed = ParseTranscriptDelta(wide);
+        bool consumedTurnEvent = false; // a human prompt / assistant line (NOT a bare tool_result)
         for (const auto& ev : parsed.events)
         {
             if (ev.kind == TranscriptEvent::Kind::Assistant)
             {
+                consumedTurnEvent = true;
                 st.lastStopReason = ev.stopReason; // latest assistant line wins (tool_use -> not done)
+                st.interrupted = false; // fresh assistant output: the turn is progressing, not aborted
+                // The latest assistant block sets / clears the "blocked on the user" flag: an
+                // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
+                // a text / non-interactive-tool message means the agent moved on (clear it).
+                st.pendingInteractiveTool = ev.toolName; // "" unless this message is an interactive tool_use
                 if (!ev.text.empty())
                 {
                     st.lastAssistantText = ev.text;
@@ -598,28 +657,47 @@ namespace Agentmaster
                     _registry->UpdateQuiet(s.id, [&text](SessionInfo& ss) { ss.lastAssistantText = text; });
                 }
             }
-            else // UserPrompt: a new human turn began
+            else if (ev.kind == TranscriptEvent::Kind::ToolResult)
             {
+                // A tool produced a result -> a pending interactive tool_use (the question) was
+                // ANSWERED. (Deliberately NOT a turn event for the run-repair: a bare tool_result
+                // never synthesized Running before — preserve that.)
+                st.pendingInteractiveTool.clear();
+            }
+            else // UserPrompt: a new human turn began, OR a turn-abort interrupt marker
+            {
+                consumedTurnEvent = true;
                 // CRITICAL: a new user message starts a fresh turn, so the PRIOR assistant
                 // end_turn no longer marks the CURRENT turn complete. Clear the tracked
                 // stop_reason, else the missed-Stop backstop could fire on that stale end_turn
                 // while claude is mid-(new-)turn — declaring turn-complete and draining the plan
-                // into a running turn. (tool_result user lines don't reach here — they're filtered
-                // in ParseTranscriptDelta — so this only resets on a genuine human prompt.)
+                // into a running turn. (tool_result user lines don't reach here — they're a
+                // ToolResult event above — so this only resets on a genuine human line.)
                 st.lastStopReason.clear();
-                // Control markers that masquerade as user lines — interrupt markers, command
-                // echoes, task notifications (STATE.md §8 bug-2) — must not be back-filled into
-                // the Flight Plan as Typed prompts. They still clear the stop_reason above (the
-                // transcript moved past the prior end_turn either way).
-                if (!IsNoiseUserPrompt(ev.text))
+                st.pendingInteractiveTool.clear(); // a human line supersedes any pending question
+                if (IsUserInterruptMarker(ev.text))
                 {
-                    _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
+                    // The user hit Esc: NO clean Stop hook fires, and the marker clears the
+                    // stop_reason — so without this flag the turn's end goes unseen and the
+                    // session stays Running forever. Flag it; recon-stop releases it to Waiting.
+                    st.interrupted = true;
+                }
+                else
+                {
+                    st.interrupted = false;
+                    // Control markers that masquerade as user lines — command echoes, task
+                    // notifications (STATE.md §8 bug-2) — must not be back-filled into the Flight
+                    // Plan as Typed prompts. They still clear the stop_reason above.
+                    if (!IsNoiseUserPrompt(ev.text))
+                    {
+                        _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
+                    }
                 }
             }
         }
-        // ≥1 turn event consumed -> the caller may synthesize a missed UserPromptSubmit off it
-        // (meta / tool_result / garbage lines never reach `events`, so they can't trigger it).
-        return !parsed.events.empty();
+        // ≥1 human prompt / assistant line consumed -> the caller may synthesize a missed
+        // UserPromptSubmit off it (a bare tool_result / meta / garbage line never counts).
+        return consumedTurnEvent;
     }
 
     // Agentmaster (cache-aware Waiting decay): a session in WaitingForInput is the Triage Board's

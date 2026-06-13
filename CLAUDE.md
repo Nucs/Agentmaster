@@ -52,7 +52,7 @@ Observer-owned session state (the PULL state engine — design, pre-implementati
 **All milestones M0–M8 + session restore are complete, built, deployed (until the next deploy
 cycle, still under the pre-split `Agentmaster` loose registration — the dev identity is now
 `AgentmasterDev`, see *Deploy & run* migration), and verified running.** The engine passes
-**666/666** standalone
+**694/694** standalone
 checks (`AgentMaster/tests/`), and the full pipeline has been exercised end-to-end in the
 deployed package: Launch → real `claude.exe` on a ConPTY → `--settings` hooks → PowerShell
 forwarder → named pipe → registry → state machine → UI, plus `claude --resume` restore on
@@ -334,7 +334,21 @@ What works, by area:
   shows Running" bug. The scanner's synthesized missed-Stop is `quiescentStop` (≥2s-quiet
   transcript): always lands `WaitingForInput`, never stale, never held by the queue. Hook `ts`
   also refreshes `lastActivityUnixMs` monotonically (real hooks previously never updated the
-  Waiting→Idle decay anchor — it only moved on synthesized events).
+  Waiting→Idle decay anchor — it only moved on synthesized events). The scanner's missed-Stop
+  reconciliation is **generalized** past the bare end_turn/Running case (all three proved against
+  live sessions): (a) **interrupt** — a user-abort marker (`[Request interrupted by user…]`, Esc;
+  fires no clean `Stop`) is a turn-ender (`IsUserInterruptMarker` → `ScanState.interrupted`), so a
+  killed turn no longer shows Running forever; (b) **blocked-on-user** — an UNANSWERED interactive
+  tool_use (`AskUserQuestion`, surfaced by `ParseTranscriptDelta`'s new `toolName` +
+  `IsInteractiveTool`) on a quiescent transcript synthesizes a permission-style Notification →
+  **`NeedsApproval`** (`ShouldSynthesizeBlockedOnUser` → `[recon-block]`), so a session blocked
+  waiting for your answer reads "needs you", not Running (a pending NON-interactive tool — a long
+  Bash — still reads Running); (c) **needs-approval exit** — `ShouldSynthesizeStop` now fires from
+  **`NeedsApproval` as well as `Running`** on a terminal/interrupt tail, so an approved (or
+  answered) session whose post-turn `Stop` hook was dropped is released to `WaitingForInput`
+  instead of stranding in `NeedsApproval` (the original "answer the question, stay needs-approval"
+  report). `ParseTranscriptDelta` now also emits a `ToolResult` marker (a tool completed → it
+  answers the pending question) that does NOT count as a run-repair turn event.
 - **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
   type yourself into any tab (the WT `+` button → `cd` → `claude`) is managed too, not just
   Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env

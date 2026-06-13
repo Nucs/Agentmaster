@@ -1385,11 +1385,12 @@ static void TestTranscriptScan()
         CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::UserPrompt, "user string -> prompt");
         CHECK(r.events.size() == 1 && r.events[0].text == L"hello there", "user prompt text");
     }
-    // user line: tool_result array -> NOT a human prompt (no false positive)
+    // user line: tool_result array -> NOT a human prompt (no false positive); it is a ToolResult
+    // marker (a tool completed -> answers a pending interactive tool_use), never a UserPrompt.
     {
         const std::wstring line = LR"j({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]}})j" L"\n";
         const auto r = ParseTranscriptDelta(line);
-        CHECK(r.events.empty(), "tool_result user line -> no prompt");
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::ToolResult, "tool_result user line -> ToolResult marker, not a prompt");
     }
     // user line: isMeta -> skipped
     {
@@ -1518,6 +1519,120 @@ static void TestTranscriptScan()
         const auto s = reg.Get(L"s2");
         CHECK(s && s->lastAssistantText == L"peek", "UpdateQuiet mutates the record");
         CHECK(observed == afterUpsert, "UpdateQuiet fires NO observer (no persist/UI churn)");
+    }
+}
+
+// Agentmaster — the stuck-state reconcilers (proved against 4 live Desktop sessions):
+//   #1 an unanswered AskUserQuestion left the session BLOCKED on the user but showing Running
+//      forever (a "tool_use" tail is non-terminal, so the missed-Stop backstop never fired);
+//   #2 an INTERRUPTED turn (Esc) showed Running forever (no clean Stop hook, and the interrupt
+//      marker cleared the stop_reason, disarming the backstop);
+//   and the original report: a NeedsApproval whose post-approval Stop hook was DROPPED stayed
+//   NeedsApproval (the missed-Stop backstop was Running-ONLY). All three now reconcile.
+static void TestBlockedAndInterruptedStates()
+{
+    std::wprintf(L"Blocked-on-user / interrupted / needs-approval-exit reconcilers:\n");
+
+    // --- pure decision helpers ---
+    CHECK(IsUserInterruptMarker(L"[Request interrupted by user for tool use]"), "interrupt: tool-use variant recognized");
+    CHECK(IsUserInterruptMarker(L"[Request interrupted by user]"), "interrupt: bare variant recognized");
+    CHECK(!IsUserInterruptMarker(L"please don't interrupt me"), "interrupt: ordinary prompt is not a marker");
+    CHECK(IsInteractiveTool(L"AskUserQuestion"), "interactive: AskUserQuestion blocks on the user");
+    CHECK(!IsInteractiveTool(L"Bash") && !IsInteractiveTool(L""), "interactive: Bash / none do not block");
+
+    // recon-stop: fires from Running OR NeedsApproval, on a terminal stop_reason OR an interrupt,
+    // only once quiescent.
+    CHECK(ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, 5000), "stop: Running + terminal tail + quiet -> stop");
+    CHECK(ShouldSynthesizeStop(SessionState::Running, L"", true, 5000), "stop: Running + interrupt + quiet -> stop (#2 fix)");
+    CHECK(ShouldSynthesizeStop(SessionState::NeedsApproval, L"end_turn", false, 5000), "stop: NeedsApproval + terminal tail -> stop (original fix)");
+    CHECK(!ShouldSynthesizeStop(SessionState::Running, L"tool_use", false, 5000), "stop: a pending tool_use tail is NOT the turn's end");
+    CHECK(!ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, 1000), "stop: not quiescent yet -> hold");
+    CHECK(!ShouldSynthesizeStop(SessionState::Idle, L"end_turn", false, 5000), "stop: an Idle session has no turn to end");
+    CHECK(!ShouldSynthesizeStop(SessionState::WaitingForInput, L"end_turn", false, 5000), "stop: already settled -> no-op");
+
+    // recon-block: an unanswered interactive tool_use, only from Running, only once quiescent.
+    CHECK(ShouldSynthesizeBlockedOnUser(SessionState::Running, L"AskUserQuestion", false, 5000), "block: Running + unanswered question + quiet -> NeedsApproval (#1 fix)");
+    CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::Running, L"", false, 5000), "block: no pending interactive tool -> no-op");
+    CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::Running, L"Bash", false, 5000), "block: a pending Bash is WORKING, not blocked");
+    CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::Running, L"AskUserQuestion", true, 5000), "block: an interrupt takes precedence (-> stop)");
+    CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::NeedsApproval, L"AskUserQuestion", false, 5000), "block: idempotent — never re-fires while already NeedsApproval");
+    CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::Running, L"AskUserQuestion", false, 1000), "block: not quiescent yet -> hold");
+
+    // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
+    {
+        const auto p = ParseTranscriptDelta(
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"text\",\"text\":\"hold on\"},{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}\n");
+        CHECK(p.events.size() == 1 && p.events[0].kind == TranscriptEvent::Kind::Assistant, "parse: assistant tool_use line");
+        CHECK(p.events[0].toolName == L"AskUserQuestion", "parse: interactive tool name surfaced");
+        CHECK(p.events[0].text == L"hold on", "parse: text alongside the tool_use still collected");
+    }
+    {
+        const auto p = ParseTranscriptDelta(
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}]}}\n");
+        CHECK(p.events.size() == 1 && p.events[0].toolName.empty(), "parse: a NON-interactive tool_use sets no toolName");
+    }
+    {
+        const auto p = ParseTranscriptDelta(
+            L"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n");
+        CHECK(p.events.size() == 1 && p.events[0].kind == TranscriptEvent::Kind::ToolResult, "parse: tool_result -> ToolResult marker (not a typed prompt)");
+    }
+
+    // --- end-to-end: derive the tail (mirroring the scanner) from the REAL transcript tails and
+    //     drive the real SessionRegistry through one reconcile pass on a quiescent transcript. ---
+    auto deriveTail = [](std::wstring_view chunk) {
+        std::wstring lastStop, pendingTool;
+        bool interrupted = false;
+        for (const auto& ev : ParseTranscriptDelta(chunk).events)
+        {
+            if (ev.kind == TranscriptEvent::Kind::Assistant) { lastStop = ev.stopReason; interrupted = false; pendingTool = ev.toolName; }
+            else if (ev.kind == TranscriptEvent::Kind::ToolResult) { pendingTool.clear(); }
+            else { lastStop.clear(); pendingTool.clear(); interrupted = IsUserInterruptMarker(ev.text); }
+        }
+        return std::make_tuple(lastStop, pendingTool, interrupted);
+    };
+    auto reconcileQuiescent = [&](SessionRegistry& reg, const std::wstring& id, std::wstring_view chunk) {
+        const auto [lastStop, pendingTool, interrupted] = deriveTail(chunk);
+        const auto st = reg.Get(id)->state;
+        if (ShouldSynthesizeStop(st, lastStop, interrupted, 3000))
+        {
+            HookMessage stop = Msg(id, HookEvent::Stop); stop.ts = 9000; stop.quiescentStop = true;
+            reg.OnHookEvent(stop);
+        }
+        else if (ShouldSynthesizeBlockedOnUser(st, pendingTool, interrupted, 3000))
+        {
+            HookMessage n = Msg(id, HookEvent::Notification); n.permissionRequest = true; n.ts = 9000;
+            reg.OnHookEvent(n);
+        }
+    };
+
+    { // #1 oldest (4f2ea3bc): unanswered AskUserQuestion -> the "needs you" column, NOT Running
+        SessionRegistry reg; reg.Upsert(MakeSession(L"e1", SessionState::Running));
+        reconcileQuiescent(reg, L"e1",
+            L"{\"type\":\"user\",\"message\":{\"content\":\"q\"}}\n"
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}\n");
+        CHECK(reg.Get(L"e1")->state == SessionState::NeedsApproval, "e2e #1: unanswered AskUserQuestion -> NeedsApproval (was: stuck Running)");
+    }
+    { // #2 mid (3de852d6): question rejected then user interrupt -> turn over -> Waiting
+        SessionRegistry reg; reg.Upsert(MakeSession(L"e2", SessionState::Running));
+        reconcileQuiescent(reg, L"e2",
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}\n"
+            L"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"rejected\"}]}}\n"
+            L"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user for tool use]\"}]}}\n");
+        CHECK(reg.Get(L"e2")->state == SessionState::WaitingForInput, "e2e #2: interrupted turn -> WaitingForInput (was: stuck Running)");
+    }
+    { // original: NeedsApproval whose post-approval Stop was dropped -> a terminal tail releases it
+        SessionRegistry reg; reg.Upsert(MakeSession(L"e3", SessionState::Running));
+        reg.OnHookEvent([] { HookMessage m = Msg(L"e3", HookEvent::Notification); m.permissionRequest = true; return m; }());
+        CHECK(reg.Get(L"e3")->state == SessionState::NeedsApproval, "e2e orig: permission Notification -> NeedsApproval");
+        reconcileQuiescent(reg, L"e3",
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"All done.\"}]}}\n");
+        CHECK(reg.Get(L"e3")->state == SessionState::WaitingForInput, "e2e orig: dropped post-approval Stop -> terminal tail releases NeedsApproval -> Waiting");
+    }
+    { // CONTROL: a genuinely-working session (pending NON-interactive Bash) must STAY Running
+        SessionRegistry reg; reg.Upsert(MakeSession(L"e4", SessionState::Running));
+        reconcileQuiescent(reg, L"e4",
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}]}}\n");
+        CHECK(reg.Get(L"e4")->state == SessionState::Running, "e2e control: pending Bash (working) stays Running — no false positive");
     }
 }
 
@@ -2536,6 +2651,7 @@ int wmain()
     TestProfileBootstrap();
     TestScheduler();
     TestTranscriptScan();
+    TestBlockedAndInterruptedStates();
     TestPersistence();
     TestManagerLayout();
     TestWindowRecord();

@@ -161,7 +161,18 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   stop_reason (`IsTerminalStopReason`: `end_turn` / `stop_sequence` / `max_tokens` / `refusal`
   — gated on `end_turn` alone, a turn ended any other way stayed Running forever), so it is
   authoritative "idle NOW": it always lands `WaitingForInput` and zeroes the accounting,
-  regardless of `ts` or a recorded type-ahead (consumed or canceled by then).
+  regardless of `ts` or a recorded type-ahead (consumed or canceled by then). The synthesized
+  `Stop` now also fires on a **user-interrupt** tail (`IsUserInterruptMarker` — Esc kills a turn
+  with no clean `Stop`, and the marker clears the stop_reason) and from **`NeedsApproval` as well
+  as `Running`** (`ShouldSynthesizeStop`), so an approved/answered session whose post-turn `Stop`
+  was dropped is released to `WaitingForInput` instead of stranding in `NeedsApproval`.
+- **Blocked-on-user (synthesized `NeedsApproval`)** — an UNANSWERED **interactive** tool_use
+  (`AskUserQuestion`, surfaced by `ParseTranscriptDelta`'s `toolName` + `IsInteractiveTool`) on a
+  quiescent transcript is the agent waiting for *you*, not working — so `ShouldSynthesizeBlockedOnUser`
+  synthesizes a permission-style `Notification` → `NeedsApproval` (`[recon-block]`), from `Running`
+  only (idempotent). A pending **non-interactive** tool (a long `Bash`) stays `Running`. A
+  `ToolResult` marker (the question was answered) or a new prompt clears the block; the turn's
+  terminal/interrupt tail then exits it (above).
 
 Self-healing by construction: every applied `Stop` zeroes `queuedPrompts` (drift cannot
 accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never starts an API turn —
