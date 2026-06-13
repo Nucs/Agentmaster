@@ -63,6 +63,11 @@ namespace Agentmaster
         std::wstring sessionIdArg; // --session-id <id>  (when explicitly passed)
         bool background{}; // CLAUDE_CODE_SESSION_KIND=bg / CLAUDE_BG_* / "daemon run"
         std::wstring sessionName; // CLAUDE_CODE_SESSION_NAME (bg jobs)
+        // PE subsystem of the main image (IMAGE_SUBSYSTEM_*): 3 = console (the Claude Code CLI),
+        // 2 = GUI (the Claude DESKTOP Electron app — same "Claude.exe" leaf name, NOT a CLI session),
+        // 0 = undeterminable (denied / elevated / WOW64). Lets the census drop the desktop app + its
+        // renderer/gpu/utility children, which run with cwd C:\WINDOWS\system32 (OBSERVER.md §5a).
+        uint16_t subsystem{};
         bool alive{ true };
         RunningApp runningApp{ RunningApp::Unknown };
     };

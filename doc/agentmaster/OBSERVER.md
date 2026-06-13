@@ -144,6 +144,8 @@ struct ClaudeProcessFacts
     std::wstring sessionIdArg;        // --session-id <id>  (when explicitly passed)
     bool         background{};        // CLAUDE_CODE_SESSION_KIND=bg / CLAUDE_BG_* / "daemon run"
     std::wstring sessionName;         // CLAUDE_CODE_SESSION_NAME (bg jobs)
+    uint16_t     subsystem{};         // PE subsystem: 3 = console (the CLI), 2 = GUI (the desktop
+                                      //   Electron app, ALSO Claude.exe — excluded), 0 = unknown
     bool         alive{ true };
     RunningApp   runningApp{ RunningApp::Unknown };
 };
@@ -340,8 +342,14 @@ namespace Agentmaster
 
 ```
 snap = SnapshotProcesses()                                  // ~10 ms, ONE call
-claudes = snap.filter(image == "claude.exe")
+claudes = snap.filter(image == "claude.exe")                // case-insensitive -> ALSO the desktop app
 factsByPid = { pid: ReadClaudeFacts(pid) for pid in claudes }   // ~15 µs each
+# Drop the Claude DESKTOP app: an Electron GUI binary ALSO named Claude.exe, whose main + renderer/
+# gpu/utility/crashpad children all run with cwd C:\WINDOWS\system32 and would otherwise surface as
+# bogus "system32 sessions" in the External group. The CLI is a console app, the desktop app a GUI
+# app -> tell them apart by PE subsystem (IsClaudeDesktopGuiApp). 0 (denied/elevated/WOW64) stays a
+# candidate CLI so a real elevated session is never hidden.
+factsByPid = { pid: f for pid, f in factsByPid if not IsClaudeDesktopGuiApp(f) }
 for f in factsByPid: f.runningApp = classify(f.amSession, f.wtSession, amSession)
 
 roster = merge(_rosterByWindow)                             // all windows' tabs

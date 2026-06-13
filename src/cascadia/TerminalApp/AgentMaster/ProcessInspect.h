@@ -60,6 +60,12 @@ namespace Agentmaster
     // tie-break which transcript belongs to which claude when several share an encoded cwd dir.
     int64_t ProcessStartUnixMs(uint32_t pid);
 
+    // Read the PE "Subsystem" of a process's main image (IMAGE_SUBSYSTEM_*: 2 = GUI, 3 = console)
+    // from its loaded base (PEB.ImageBaseAddress). 0 if undeterminable (denied / WOW64 / exited).
+    // This is how the Claude Code CLI (a console app) is told apart from the Claude DESKTOP app (an
+    // Electron GUI binary ALSO named Claude.exe) — see IsClaudeDesktopGuiApp.
+    uint16_t ReadProcessImageSubsystem(uint32_t pid);
+
     // True iff the pid names a process that is still running (OpenProcess + GetExitCodeProcess !=
     // STILL_ACTIVE is false). A cheap liveness gate for the cached-PID fast path.
     bool ProcessAlive(uint32_t pid);
@@ -125,6 +131,16 @@ namespace Agentmaster
     // or empty for a bare "<processGuid>" (a hand-typed `+`-tab claude, whose window is instead known
     // from the publishing roster). Pure. (§19-Q1)
     std::wstring WindowIdFromAmSession(std::wstring_view amSession);
+
+    // True iff this `claude.exe` is actually the Claude DESKTOP app — an Electron GUI binary that
+    // shares the leaf name "Claude.exe" — or one of its renderer/gpu/utility/crashpad children, NOT a
+    // Claude Code CLI session. The desktop app + its helpers all run with cwd C:\WINDOWS\system32, so
+    // without this they pollute the External census as bogus "system32 sessions". Discriminated purely
+    // by PE subsystem (facts.subsystem, filled by ReadClaudeFacts): the CLI is a console app, the
+    // desktop app a GUI app. An UNDETERMINABLE subsystem (0 — denied/elevated/WOW64) is treated as NOT
+    // the desktop app, so a real elevated CLI session is never hidden (and a denied PEB can't read a
+    // system32 cwd anyway, so it never reintroduces the bug). Pure.
+    bool IsClaudeDesktopGuiApp(const ClaudeProcessFacts& facts);
 
     // ===== OS-touching: full facts read for one claude pid =================================
 

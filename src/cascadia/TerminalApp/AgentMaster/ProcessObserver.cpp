@@ -333,6 +333,19 @@ namespace Agentmaster
             }
             ClaudeProcessFacts f = ReadClaudeFacts(e.pid);
             f.parentPid = e.ppid;
+            // The Claude DESKTOP app (an Electron GUI binary ALSO named Claude.exe) and its
+            // renderer/gpu/utility/crashpad children are NOT Claude Code sessions — they run with cwd
+            // C:\WINDOWS\system32 and would otherwise surface in the External group as bogus "system32
+            // sessions". Tell them apart by PE subsystem (console CLI vs GUI app) and skip the GUI ones
+            // entirely (out of factsByPid -> no External row, no census, never correlated). (OBSERVER.md §5a)
+            if (IsClaudeDesktopGuiApp(f))
+            {
+                if (_guiExcludedLogged.insert(e.pid).second)
+                {
+                    AppendStateLog(L"hooks.log", L"[observer] skipping GUI claude (desktop app, not a CLI session) pid=" + std::to_wstring(e.pid) + L" cwd=" + f.cwd + L"\n");
+                }
+                continue;
+            }
             f.runningApp = ClassifyRunningApp(f.amSession, f.wtSession, _amSession);
             // O7: a fully-empty PEB read (cwd AND commandline) means a denied / elevated /
             // cross-integrity (or WOW64) target — it can't be correlated/bound, so it stays

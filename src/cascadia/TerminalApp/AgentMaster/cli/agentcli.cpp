@@ -371,6 +371,10 @@ namespace
             lc.facts = ReadClaudeFacts(e.pid);
             lc.facts.pid = e.pid;
             lc.facts.parentPid = e.ppid;
+            if (IsClaudeDesktopGuiApp(lc.facts))
+            {
+                continue; // the Claude DESKTOP app (Electron GUI, cwd C:\WINDOWS\system32), not a CLI session
+            }
             const SessionPresenceRow* pres = nullptr;
             if (const auto it = presByPid.find(e.pid); it != presByPid.end())
             {

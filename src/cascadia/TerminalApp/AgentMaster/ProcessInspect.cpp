@@ -438,6 +438,49 @@ namespace Agentmaster
         return result;
     }
 
+    uint16_t ReadProcessImageSubsystem(uint32_t pid)
+    {
+        const HANDLE h = OpenForRead(pid);
+        if (h == nullptr)
+        {
+            return 0;
+        }
+        uint16_t subsystem = 0;
+        if (!TargetIsWow64(h)) // x64 PEB / PE layout only (matches the other reads)
+        {
+            if (const auto ntqip = GetNtQip())
+            {
+                struct PBI
+                {
+                    LONG_PTR ExitStatus;
+                    PVOID PebBaseAddress;
+                    ULONG_PTR Reserved[4];
+                } pbi{};
+                SIZE_T got = 0;
+                BYTE* imageBase = nullptr;
+                // PEB.ImageBaseAddress @ +0x10 == the main module's load address.
+                if (ntqip(h, 0 /*ProcessBasicInformation*/, &pbi, sizeof(pbi), nullptr) == 0 && pbi.PebBaseAddress != nullptr &&
+                    ::ReadProcessMemory(h, static_cast<BYTE*>(pbi.PebBaseAddress) + 0x10, &imageBase, sizeof(imageBase), &got) && imageBase != nullptr)
+                {
+                    LONG ntOff = 0; // IMAGE_DOS_HEADER.e_lfanew @ +0x3C -> the PE header
+                    if (::ReadProcessMemory(h, imageBase + 0x3C, &ntOff, sizeof(ntOff), &got) && ntOff > 0 && ntOff < 0x1000000)
+                    {
+                        // IMAGE_NT_HEADERS = Signature(4) + IMAGE_FILE_HEADER(0x14) + IMAGE_OPTIONAL_HEADER.
+                        // OptionalHeader.Subsystem is at +0x44 for BOTH PE32 and PE32+ (in PE32+ the wider
+                        // 8-byte ImageBase exactly offsets the absent 4-byte BaseOfData), so no magic check.
+                        uint16_t sub = 0;
+                        if (::ReadProcessMemory(h, imageBase + ntOff + 0x18 + 0x44, &sub, sizeof(sub), &got))
+                        {
+                            subsystem = sub;
+                        }
+                    }
+                }
+            }
+        }
+        ::CloseHandle(h);
+        return subsystem;
+    }
+
     std::unordered_map<std::wstring, std::wstring> ReadProcessEnv(uint32_t pid)
     {
         std::unordered_map<std::wstring, std::wstring> out;
@@ -821,6 +864,15 @@ namespace Agentmaster
         return RunningApp::Other;
     }
 
+    bool IsClaudeDesktopGuiApp(const ClaudeProcessFacts& facts)
+    {
+        // IMAGE_SUBSYSTEM_WINDOWS_GUI == 2. The Claude Code CLI is a console app (CUI == 3); the
+        // Claude desktop app (Electron) + every renderer/gpu/utility/crashpad child share one GUI
+        // binary. Only a confirmed GUI subsystem is the desktop app — 0 (undeterminable) stays a
+        // candidate CLI so an elevated session is never hidden (see the header note).
+        return facts.subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI;
+    }
+
     // ===== OS-touching: full facts read ====================================================
 
     ClaudeProcessFacts ReadClaudeFacts(uint32_t pid)
@@ -830,6 +882,7 @@ namespace Agentmaster
         f.startUnixMs = ProcessStartUnixMs(pid);
         f.cwd = ReadProcessCwd(pid);
         f.commandline = ReadProcessCommandLine(pid);
+        f.subsystem = ReadProcessImageSubsystem(pid); // console (CLI) vs GUI (the desktop Electron app)
         const auto env = ReadProcessEnv(pid);
         ParseClaudeFacts(f.commandline, env, f);
         // parentPid + runningApp are left for the caller (it has the snapshot + its own AM_SESSION).

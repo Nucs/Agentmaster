@@ -1796,6 +1796,22 @@ static void TestProcessInspectParse()
     CHECK(WindowIdFromAmSession(L"am-1:win-9") == L"win-9", "extract windowId from <guid>:<windowId>");
     CHECK(WindowIdFromAmSession(L"am-1").empty(), "bare <guid> has no windowId");
     CHECK(WindowIdFromAmSession(L"").empty(), "empty AM_SESSION -> no windowId");
+
+    // --- IsClaudeDesktopGuiApp: tell the Claude Code CLI (console) from the Claude desktop app (GUI) ---
+    // The desktop Electron app (and its renderer/gpu/utility children) share the leaf name Claude.exe
+    // and run with cwd C:\WINDOWS\system32; only the PE subsystem separates them. Excluding them keeps
+    // the External census free of bogus "system32 sessions".
+    {
+        ClaudeProcessFacts cli;
+        cli.subsystem = 3; // IMAGE_SUBSYSTEM_WINDOWS_CUI
+        CHECK(!IsClaudeDesktopGuiApp(cli), "console-subsystem claude is the CLI -> not the desktop app");
+        ClaudeProcessFacts desktop;
+        desktop.subsystem = 2; // IMAGE_SUBSYSTEM_WINDOWS_GUI
+        desktop.cwd = L"C:\\WINDOWS\\system32";
+        CHECK(IsClaudeDesktopGuiApp(desktop), "GUI-subsystem Claude.exe is the desktop app -> excluded");
+        ClaudeProcessFacts unknown; // 0 == undeterminable (denied/elevated/WOW64): never hide a real session
+        CHECK(!IsClaudeDesktopGuiApp(unknown), "undeterminable subsystem -> treated as CLI (not hidden)");
+    }
 }
 
 static FILETIME UnixMsToFileTime(int64_t ms)

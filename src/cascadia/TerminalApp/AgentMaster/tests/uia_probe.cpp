@@ -97,8 +97,12 @@ int wmain(int argc, wchar_t** argv)
         }
         const auto f = ReadClaudeFacts(e.pid);
         const auto sid = ResolveSessionId(f.cwd, f.startUnixMs);
-        wprintf(L"claude pid=%u ppid=%u cwd=%ls wt=%.8ls am=%.8ls sid=%.8ls\n",
-                e.pid, e.ppid, f.cwd.c_str(), f.wtSession.c_str(), f.amSession.c_str(), sid.c_str());
+        // The Claude DESKTOP app (Electron GUI, also named Claude.exe) + its children are NOT CLI
+        // sessions — the census skips them (IsClaudeDesktopGuiApp). Label them here so the diagnostic
+        // shows the full picture instead of silently dropping them.
+        const wchar_t* tag = IsClaudeDesktopGuiApp(f) ? L" [desktop-gui SKIPPED]" : L"";
+        wprintf(L"claude pid=%u ppid=%u sub=%u cwd=%ls wt=%.8ls am=%.8ls sid=%.8ls%ls\n",
+                e.pid, e.ppid, f.subsystem, f.cwd.c_str(), f.wtSession.c_str(), f.amSession.c_str(), sid.c_str(), tag);
     }
 
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
