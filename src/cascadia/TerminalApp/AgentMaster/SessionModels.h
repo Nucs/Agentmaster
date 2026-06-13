@@ -137,6 +137,22 @@ namespace Agentmaster
         std::wstring title; // task / display name
         std::wstring workingDir; // the "M" axis: which working directory
         std::wstring branch; // git branch / worktree
+        // Agentmaster (Codex managed-session support): which coding agent this session is. Default
+        // Claude, so every existing record/path is byte-for-byte unchanged. A Codex session rides the
+        // SAME managed path as Claude (immediate card at launch, registry record, archive/restore,
+        // per-window persistence); the divergences are confined to `codexSessionId` + the resume
+        // commandline (Codex can't pin an id and has no hooks — its state comes from the C2 rollout
+        // tail). Persisted.
+        AgentKind kind{ AgentKind::Claude };
+        // Codex only: the REAL rollout conversation uuid — the `codex resume <uuid>` target and the
+        // "does a transcript exist" gate (the Codex analog of how Claude's `id` doubles as its resume
+        // id). OUR `id` above is a minted, durable handle (the registry / persistence / tab-map key,
+        // exactly Claude's id role); for Codex it is NOT the conversation id (Codex mints that itself,
+        // embedded in the date-sharded rollout filename — no --session-id), so the resume target is
+        // carried HERE, filled by the Fleet Observer once the rollout resolves. Empty until the first
+        // turn writes it (a never-prompted Codex restore-freshes, like Claude); always empty for Claude.
+        // Persisted.
+        std::wstring codexSessionId;
         SessionState state{ SessionState::Idle };
         int64_t lastActivityUnixMs{ 0 };
         // True for a session ADOPTED from a claude we did NOT launch (typed into a `+` tab,
@@ -315,6 +331,7 @@ namespace Agentmaster
     enum class TabKind
     {
         Claude, // a Manager-owned claude.exe session — restored via `claude --resume <convId>`
+        Codex, // a Manager-owned codex.exe session — restored via `codex resume <rolloutUuid>` (the uuid lives on the referenced SessionInfo.codexSessionId; sessionId here is our durable handle)
         Other, // any other WT tab — restored by replaying its stored ActionAndArgs JSON
     };
 

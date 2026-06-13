@@ -622,6 +622,9 @@ static void TestSpawnBuilders()
     CHECK(cmdNB == L"claude --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh, no bypass)");
     const auto rcmdNB = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, false);
     CHECK(rcmdNB == L"claude --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume, no bypass)");
+    // Codex (managed-session support): bare `codex` fresh; `codex resume <uuid>` to continue a rollout.
+    CHECK(BuildCodexCommandline(L"") == L"codex", "codex commandline (fresh)");
+    CHECK(BuildCodexCommandline(L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a") == L"codex resume 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (resume by rollout uuid)");
 
     const auto json = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1", L"", true, true);
     CHECK(json.find(L"\"hooks\"") != std::wstring::npos, "settings has hooks");
@@ -1055,6 +1058,27 @@ static void TestPersistence()
         }
     }
 
+    // Codex managed session: the agent kind + the rollout resume target (codexSessionId) round-trip,
+    // and a default (Claude) session carries NEITHER key, so an all-Claude sessions.json is unchanged.
+    {
+        SessionInfo cx;
+        cx.id = L"codex-handle-1"; // OUR durable handle (the registry / persistence / tab-map key)
+        cx.title = L"proxmox homelab";
+        cx.workingDir = L"K:/source/proxmox";
+        cx.kind = AgentKind::Codex;
+        cx.codexSessionId = L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a"; // the codex resume uuid
+        SessionInfo claudeDefault;
+        claudeDefault.id = L"claude-1";
+        const auto back = DeserializeSessions(SerializeSessions({ cx, claudeDefault }));
+        CHECK(back.size() == 2, "codex+claude sessions round-trip count");
+        if (back.size() == 2)
+        {
+            CHECK(back[0].kind == AgentKind::Codex, "codex session kind preserved");
+            CHECK(back[0].codexSessionId == L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex resume uuid (codexSessionId) preserved");
+            CHECK(back[1].kind == AgentKind::Claude && back[1].codexSessionId.empty(), "default session is Claude with no codex uuid");
+        }
+    }
+
     // Templates: capture-from-queue resets ids/status; apply assigns fresh ids + Pending.
     {
         std::vector<QueuedPrompt> queue;
@@ -1158,6 +1182,12 @@ static void TestWindowRecord()
     other.actionsJson = L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]";
     in.tabs.push_back(other);
 
+    // A Codex tab is a REFERENCE like Claude (the resume uuid lives on the referenced SessionInfo).
+    TabEntry codex;
+    codex.kind = TabKind::Codex;
+    codex.sessionId = L"codex-handle-1";
+    in.tabs.push_back(codex);
+
     // Selected tab persisted by stable identity (Claude conversation id preferred; index is the shell
     // fallback). Both set to non-default values so a dropped field FAILS the round-trip (a -1 default
     // would otherwise mask a missing index).
@@ -1179,14 +1209,16 @@ static void TestWindowRecord()
     CHECK(out.geometry.hasSize && approx(out.geometry.width, 1280) && approx(out.geometry.height, 800), "geometry size round-trip");
     CHECK(out.geometry.launchMode == L"maximized", "geometry launchMode round-trip");
 
-    CHECK(out.tabs.size() == 2, "tab count + order preserved");
-    if (out.tabs.size() == 2)
+    CHECK(out.tabs.size() == 3, "tab count + order preserved");
+    if (out.tabs.size() == 3)
     {
         CHECK(out.tabs[0].kind == TabKind::Claude, "tab[0] is Claude");
         CHECK(out.tabs[0].tabColor == L"#FFD700", "Claude tab color round-trip");
         CHECK(out.tabs[0].sessionId == L"conv-abc", "Claude tab sessionId reference round-trip");
         CHECK(out.tabs[1].kind == TabKind::Other, "tab[1] is Other");
         CHECK(out.tabs[1].actionsJson == L"[{\"action\":\"newTab\",\"profile\":\"pwsh\"}]", "Other tab actionsJson (nested JSON) round-trip");
+        CHECK(out.tabs[2].kind == TabKind::Codex, "tab[2] is Codex");
+        CHECK(out.tabs[2].sessionId == L"codex-handle-1", "Codex tab sessionId reference round-trip");
     }
 
     CHECK(out.selectedSessionId == L"conv-abc", "selected tab persisted by stable Claude id (round-trip)");

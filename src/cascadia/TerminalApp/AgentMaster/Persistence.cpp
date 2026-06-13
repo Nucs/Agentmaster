@@ -338,6 +338,16 @@ namespace Agentmaster
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
         o.Set(L"external", json::Value::MkBool(s.external));
+        // Codex managed-session support: persist the agent kind + the rollout resume target. Both
+        // are omitted when default (Claude / empty), so an all-Claude sessions.json is byte-unchanged.
+        if (s.kind == AgentKind::Codex)
+        {
+            o.Set(L"kind", json::Value::MkStr(L"Codex"));
+        }
+        if (!s.codexSessionId.empty())
+        {
+            o.Set(L"codexSessionId", json::Value::MkStr(s.codexSessionId));
+        }
         auto q = json::Value::MkArr();
         for (const auto& p : s.queue)
         {
@@ -358,6 +368,8 @@ namespace Agentmaster
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
         s.external = v.BoolAt(L"external", false);
+        s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
+        s.codexSessionId = v.StrAt(L"codexSessionId");
         if (const auto* q = v.Find(L"queue"); q && q->type == json::Value::Type::Arr)
         {
             for (const auto& pv : q->arr)
@@ -496,10 +508,10 @@ namespace Agentmaster
     json::Value ToJson(const TabEntry& t)
     {
         auto o = json::Value::MkObj();
-        o.Set(L"kind", json::Value::MkStr(t.kind == TabKind::Other ? L"Other" : L"Claude"));
-        if (t.kind == TabKind::Claude)
+        o.Set(L"kind", json::Value::MkStr(t.kind == TabKind::Other ? L"Other" : (t.kind == TabKind::Codex ? L"Codex" : L"Claude")));
+        if (t.kind == TabKind::Claude || t.kind == TabKind::Codex)
         {
-            o.Set(L"sessionId", json::Value::MkStr(t.sessionId)); // a reference; the record lives in sessions.json
+            o.Set(L"sessionId", json::Value::MkStr(t.sessionId)); // a reference; the record (incl. the Codex resume uuid) lives in sessions.json
         }
         else
         {
@@ -515,8 +527,9 @@ namespace Agentmaster
     TabEntry TabEntryFromJson(const json::Value& v)
     {
         TabEntry t;
-        t.kind = (v.StrAt(L"kind", L"Claude") == L"Other") ? TabKind::Other : TabKind::Claude;
-        if (t.kind == TabKind::Claude)
+        const auto tk = v.StrAt(L"kind", L"Claude");
+        t.kind = (tk == L"Other") ? TabKind::Other : (tk == L"Codex" ? TabKind::Codex : TabKind::Claude);
+        if (t.kind == TabKind::Claude || t.kind == TabKind::Codex)
         {
             t.sessionId = v.StrAt(L"sessionId");
         }

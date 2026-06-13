@@ -386,6 +386,17 @@ try {
         return cmd;
     }
 
+    std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid)
+    {
+        // Resume continues the existing rollout by its uuid (model/sandbox/approval inherited); a fresh
+        // launch is bare codex (config.toml governs, cwd via the ConPTY, AM_SESSION via the child env).
+        if (!resumeCodexUuid.empty())
+        {
+            return L"codex resume " + std::wstring{ resumeCodexUuid };
+        }
+        return L"codex";
+    }
+
     std::wstring NewSessionId()
     {
         GUID g{};

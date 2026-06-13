@@ -74,6 +74,14 @@ namespace Agentmaster
     //   SOURCE transcript untouched (no two-writers-on-one-.jsonl). Overrides the resume/fresh forms.
     std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {});
 
+    // Assemble the codex (OpenAI Codex CLI) command line (Agentmaster — Codex managed-session
+    // support). Codex CANNOT pin a session id and takes NO --settings (unlike claude), so a FRESH
+    // launch is the bare `codex` — model / sandbox / approval come from ~/.codex/config.toml, the cwd
+    // is set by the ConPTY, and ownership is stamped via AM_SESSION in the child env by the caller. A
+    // RESUME continues an existing rollout by its uuid: `codex resume <uuid>` (model / sandbox /
+    // approval are INHERITED from the original run — not overridable on resume). Pure + unit-tested.
+    std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid);
+
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
 
