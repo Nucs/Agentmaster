@@ -445,7 +445,7 @@ namespace Agentmaster
         }
         if (begin > 0)
         {
-            snip.insert(snip.begin(), L'…');
+            snip.insert(0, L"…");
         }
         return snip;
     }
