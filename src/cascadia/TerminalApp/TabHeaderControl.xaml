@@ -85,19 +85,28 @@
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />
-        <!--  Agentmaster: AcceptsReturn + Wrap make this a MULTI-LINE rename box — Return inserts a
-              newline (titles can hold line breaks; see TabHeaderControl.cpp's KeyUp, where Return no
-              longer commits) instead of saving. Commit by clicking away (LostFocus); Escape cancels.
-              MinHeight keeps the one-line look; MaxHeight caps the growth for a tall title.  -->
+        <!--  Agentmaster: AcceptsReturn makes this a MULTI-LINE rename box — Return inserts a newline
+              (titles can hold line breaks; see TabHeaderControl.cpp's KeyUp, where Return no longer
+              commits) instead of saving. Commit by clicking away (LostFocus); Escape cancels.
+              TextWrapping is NoWrap (NOT Wrap): this box lives in the tab header's HORIZONTAL
+              StackPanel, which measures children with INFINITE width. A Wrap TextBox has no finite
+              width to wrap against there, so it degenerates to its MinWidth and never grows with the
+              text — in SizeToContent tab mode (RenamerMaxWidth = infinity) it collapsed to ~0px and
+              whatever you typed scrolled invisibly inside it (the title still committed on focus-loss,
+              you just couldn't see it while typing). NoWrap makes the box auto-size its WIDTH to the
+              content in BOTH tab-width modes, so it stays visible and grows as you type; explicit
+              Return newlines still grow it vertically up to MaxHeight. MinWidth is a usable floor so
+              an emptied box (Ctrl+A, Delete) stays visible instead of vanishing; MinHeight keeps the
+              one-line look; MaxHeight caps the growth for a tall title.  -->
         <TextBox x:Name="HeaderRenamerTextBox"
                  MinHeight="24"
                  MaxHeight="96"
-                 MinWidth="0"
+                 MinWidth="120"
                  MaxWidth="{x:Bind RenamerMaxWidth, Mode=OneWay}"
                  Padding="4,4,4,3"
                  FontSize="12"
                  AcceptsReturn="True"
-                 TextWrapping="Wrap"
+                 TextWrapping="NoWrap"
                  IsSpellCheckEnabled="False"
                  LostFocus="RenameBoxLostFocusHandler"
                  MaxLength="1024"
