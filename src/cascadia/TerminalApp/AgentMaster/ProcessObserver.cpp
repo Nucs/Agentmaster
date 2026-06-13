@@ -543,7 +543,7 @@ namespace Agentmaster
         // 4) Census: classify each claude — rostered (in one of our tabs) -> OURS; else by AM_SESSION
         //    (external Windows Terminal / bare Other). Logged on signature change (a Launch/close is
         //    visible immediately) or a slow keepalive (a soak shows the survey is alive).
-        int ours = 0, external = 0, other = 0;
+        int ours = 0, external = 0, other = 0, orphan = 0;
         std::vector<uint32_t> oursPids;
         std::vector<ExternalClaudeRow> externalRows; // published for the Manager's "External" group (O6)
         // Resolve a claude's host shell leaf from the snapshot (its parent's image) — labels a
@@ -578,6 +578,29 @@ namespace Agentmaster
             {
                 ++ours;
                 oursPids.push_back(pid);
+                continue;
+            }
+            // Skip ORPHANED claudes: their hosting terminal/ConPTY has EXITED (the parent process is
+            // gone), so they are dead, non-interactable sessions — not live externals. Without this
+            // they pile up as phantom External rows after dev close→relaunch cycles (a claude can
+            // outlive its window — "3 pids for 1 tab"). PID-reuse guard: a still-present parent must
+            // have started no later than the claude. (OBSERVER.md §11c)
+            bool parentLive = false;
+            for (const auto& e : snap)
+            {
+                if (e.pid == f.parentPid)
+                {
+                    parentLive = (f.startUnixMs == 0) || (ProcessStartUnixMs(f.parentPid) <= f.startUnixMs + 2000);
+                    break;
+                }
+            }
+            if (!parentLive)
+            {
+                ++orphan;
+                if (_orphanLogged.insert(pid).second)
+                {
+                    AppendStateLog(L"hooks.log", L"[observer] skipping orphaned claude (host terminal exited) pid=" + std::to_wstring(pid) + L" cwd=" + f.cwd + L"\n");
+                }
                 continue;
             }
             // External (observe-only): a WT-hosted claude (WindowsTerminal) OR a bare-console /
