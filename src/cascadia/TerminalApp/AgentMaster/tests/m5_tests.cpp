@@ -666,9 +666,19 @@ static void TestSpawnBuilders()
 
     const auto fwd = BuildForwarderScript(L"C:\\Users\\x\\.agentmaster-dev");
     CHECK(fwd.find(L"NamedPipeClientStream") != std::wstring::npos, "forwarder uses NamedPipeClientStream");
-    CHECK(fwd.find(L"CCMGR_SESSION_ID") != std::wstring::npos, "forwarder reads CCMGR_SESSION_ID");
+    CHECK(fwd.find(L"CCMGR_SESSION_ID") != std::wstring::npos, "forwarder reads CCMGR_SESSION_ID (launch-id fallback)");
     CHECK(fwd.find(L"CCMGR_HOOK_PIPE") != std::wstring::npos, "forwarder reads CCMGR_HOOK_PIPE");
-    CHECK(fwd.find(L"session_id") != std::wstring::npos, "forwarder falls back to payload session_id");
+    CHECK(fwd.find(L"session_id") != std::wstring::npos, "forwarder uses payload session_id");
+    // Payload-FIRST precedence: the hook's session_id (Claude's CURRENT conversation, which follows
+    // /resume,/clear,/compact) must be chosen BEFORE the launch-time env fallback. Env-first
+    // stranded a diverged managed session as a phantom record stuck in the last mis-attributed
+    // state (no transcript under the dead launch id => the scanner could never reconcile it).
+    {
+        const auto payloadAt = fwd.find(L"$sid = [string]$j.session_id");
+        const auto envAt = fwd.find(L"$sid = $env:CCMGR_SESSION_ID");
+        CHECK(payloadAt != std::wstring::npos && envAt != std::wstring::npos && payloadAt < envAt,
+              "forwarder prefers payload session_id over the launch env (id follows /resume,/clear,/compact)");
+    }
     CHECK(fwd.find(L"WT_SESSION") != std::wstring::npos, "forwarder emits WT_SESSION tabToken");
     // The bridge-discovery fallback is PER-PROFILE: the stateDir is baked in (PS-single-quoted);
     // no profile-blind $env:USERPROFILE\.agentmaster path and no unexpanded placeholder remain.

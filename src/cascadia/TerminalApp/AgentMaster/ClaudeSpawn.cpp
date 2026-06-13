@@ -194,11 +194,19 @@ try {
     try { $j = $raw | ConvertFrom-Json } catch { $j = $null }
   }
 
-  # Session id: prefer the env we inject at Launch; otherwise take it from the hook payload
-  # so a session we did NOT launch (a hand-typed `claude` in a `+` tab) still correlates.
-  $sid = $env:CCMGR_SESSION_ID
-  if ([string]::IsNullOrEmpty($sid) -and $j -ne $null -and $j.session_id) { $sid = [string]$j.session_id }
-  if ([string]::IsNullOrEmpty($sid)) { NoteFwdDrop "drop: no session id (env CCMGR_SESSION_ID unset and payload had no session_id)"; return }
+  # Session id: prefer Claude's OWN current conversation id from the hook PAYLOAD. It is
+  # authoritative and FOLLOWS /resume, /clear and /compact; the launch-time env does NOT (it is
+  # pinned at spawn). The env (set only for sessions WE launched) is the FALLBACK for the rare
+  # payload that lacks a session_id. Env-FIRST stranded a managed session whose conversation
+  # diverged from its launch id: every post-divergence hook fed the dead launch-id record (which
+  # has no transcript of its own, so the scanner could never reconcile it), leaving a phantom
+  # stuck in the last mis-attributed state (e.g. a Notification -> NeedsApproval that never cleared,
+  # or Idle while the real conversation runs). For a normal spawn the FIRST conversation's payload
+  # id == our --session-id == the env, so this is a no-op until a divergence actually happens.
+  $sid = ""
+  if ($j -ne $null -and $j.session_id) { $sid = [string]$j.session_id }
+  if ([string]::IsNullOrEmpty($sid)) { $sid = $env:CCMGR_SESSION_ID }
+  if ([string]::IsNullOrEmpty($sid)) { NoteFwdDrop "drop: no session id (payload had no session_id and env CCMGR_SESSION_ID unset)"; return }
 
   # Pipe: prefer the inherited env; otherwise the bridge discovery file (covers a shell that
   # did not inherit CCMGR_HOOK_PIPE).

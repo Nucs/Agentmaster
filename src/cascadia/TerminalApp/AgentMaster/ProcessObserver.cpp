@@ -514,9 +514,34 @@ namespace Agentmaster
         presence.erase(std::remove_if(presence.begin(), presence.end(), [&factsByPid](const SessionPresenceRow& r) { return factsByPid.find(r.pid) == factsByPid.end(); }),
                        presence.end());
         std::unordered_map<std::wstring, std::wstring> presenceBySid;
+        // pid -> the conversation id Claude is CURRENTLY on (its own heartbeat). Used to BIND a
+        // correlated tab to the live conversation rather than the launch-time --session-id on the
+        // cmdline, which goes stale when the user /resume / /clear / /compact-s a managed session
+        // into a different conversation (the cmdline still shows the spawn id; presence does not).
+        // Bind-grade trust is STRICTER than the status enrichment above: the row must belong to the
+        // SAME live process — pid alive (already filtered) AND its recorded startedAt within an init
+        // window of the OS process-create time — so a stale presence file left by a REUSED pid can
+        // never mis-bind. Presence is pid-keyed, so it is immune to the cwd-density mis-bind Rule #14
+        // warns of. (See ResolveObservedId + the rostered bind below.)
+        std::unordered_map<uint32_t, std::wstring> presenceByPid;
         for (const auto& r : presence)
         {
             presenceBySid[r.sessionId] = r.status;
+            if (r.sessionId.empty())
+            {
+                continue;
+            }
+            const auto fit = factsByPid.find(r.pid);
+            if (fit == factsByPid.end())
+            {
+                continue; // pid not a live claude this snapshot (already filtered, belt+suspenders)
+            }
+            const int64_t procStart = fit->second.startUnixMs;
+            if (procStart > 0 && (r.startedAtMs < procStart - 5000 || r.startedAtMs > procStart + 60000))
+            {
+                continue; // presence predates / long-postdates this process -> not its file (PID reuse)
+            }
+            presenceByPid[r.pid] = r.sessionId;
         }
 
         // 2) Merge every window's roster (one entry per tab; a wtSession lives in exactly one
@@ -565,7 +590,20 @@ namespace Agentmaster
             {
                 const auto fit = factsByPid.find(cpid);
                 const ClaudeProcessFacts f = (fit != factsByPid.end()) ? fit->second : ReadClaudeFacts(cpid);
-                const std::wstring sid = ResolveObservedId(f);
+                std::wstring sid = ResolveObservedId(f);
+                // Claude's OWN presence heartbeat is the authoritative record of the conversation
+                // this pid is CURRENTLY on — it follows /resume, /clear and /compact, which the
+                // launch-time --session-id on the cmdline does NOT. When they disagree (a managed
+                // session the user resumed/cleared/compacted into a different conversation), the
+                // presence id wins, so the tab binds to — and displays the state of — the
+                // conversation actually running, not the stale launch id stuck as a phantom record.
+                // A brand-new spawn that hasn't written presence yet (or a denied PEB start time)
+                // is absent from presenceByPid and falls back to ResolveObservedId (== our launch
+                // id, which is correct until a divergence). Matches the CLI's bind precedence.
+                if (const auto pit = presenceByPid.find(cpid); pit != presenceByPid.end() && LooksLikeGuid(pit->second))
+                {
+                    sid = pit->second;
+                }
                 const std::wstring ownerWin = ownerByWt.count(wtSession) ? ownerByWt[wtSession] : std::wstring{};
                 correlatedPids.push_back(cpid);
                 rosteredOwner[cpid] = ownerWin; // mark this pid OURS for the census below
