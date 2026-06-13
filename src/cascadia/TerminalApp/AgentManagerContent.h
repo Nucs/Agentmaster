@@ -201,6 +201,10 @@ namespace winrt::TerminalApp::implementation
         // underline (green = a FOUND session id; red = an unknown id or a missing dir) and enabling the
         // launch button (disabled on red) + the Fork button (shown only for a found session id).
         void _ValidateLaunchBox();
+        // Agentmaster (Codex-launch): the launch bar's Claude<->Codex agent toggle. _UpdateLaunchAgentButton
+        // repaints it from _launchCodex; clicking flips _launchCodex and re-validates (the Launch button text
+        // + the session-id resume/fork affordances are Claude-only — Codex launches a directory only).
+        void _UpdateLaunchAgentButton();
         void _OnForkFromBox(); // the Fork button (visible for a found session id) -> _forkSessionHandler
         bool _ResolveSessionDirTitle(const std::wstring& id, std::wstring& dir, std::wstring& title); // registry first, transcript cwd fallback
         void _PushRecentDir(const std::wstring& dir);
@@ -369,6 +373,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch session" (dir) / "Resume session" (a found session id); disabled on a red box
+        winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr }; // Agentmaster (Codex-launch): the Claude<->Codex agent toggle before the box
+        bool _launchCodex{ false }; // Agentmaster (Codex-launch): false = launch a Claude (default, unchanged); true = launch a managed Codex in the typed dir
         winrt::Windows::UI::Xaml::Controls::Button _forkBtn{ nullptr }; // Agentmaster: "Fork" — visible only when the box holds a FOUND session id
         winrt::Windows::UI::Xaml::Controls::Border _cwdUnderline{ nullptr }; // Agentmaster: validation underline (green=found session id, red=missing dir / unknown id, hidden=neutral)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _pathPopup{ nullptr };

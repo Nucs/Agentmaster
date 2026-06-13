@@ -1027,7 +1027,26 @@ namespace winrt::TerminalApp::implementation
             bar.VerticalAlignment(VerticalAlignment::Center);
 
             bar.Children().Append(Text(L"Agentmaster", 18, true, 1.0));
-            bar.Children().Append(Text(L"\x2014  launch a Claude session in", 13, false, 0.6));
+            bar.Children().Append(Text(L"\x2014  launch a", 13, false, 0.6));
+
+            // Agentmaster (Codex-launch): the agent toggle — Claude (default) <-> Codex. Click cycles it
+            // (the scope/sort/autopilot toggle idiom). It retargets the SAME cwd box + Launch button, so a
+            // managed Codex launches exactly the way a Claude does ("do what we do for Claude"). A Codex
+            // launch is directory-only — Codex has no typed-id resume/fork here (Codex resume is reached via
+            // the Archive page / window-restore / EXTERNAL Adopt), so _ValidateLaunchBox suppresses those.
+            _launchAgentBtn = Button{};
+            _launchAgentBtn.FontSize(11);
+            _launchAgentBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            AgentSetTip(_launchAgentBtn, L"Agent to launch \x2014 click to switch between Claude and Codex");
+            _launchAgentBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _launchCodex = !_launchCodex;
+                _UpdateLaunchAgentButton();
+                _ValidateLaunchBox(); // repaint the Launch button text + resume/fork affordances for the new agent
+            });
+            bar.Children().Append(_launchAgentBtn);
+            _UpdateLaunchAgentButton();
+
+            bar.Children().Append(Text(L"session in", 13, false, 0.6));
 
             _cwdBox = TextBox{};
             _cwdBox.Width(360);
@@ -4818,6 +4837,26 @@ namespace winrt::TerminalApp::implementation
 
     // ---- action handlers ----------------------------------------------------
 
+    // Agentmaster (Codex-launch): repaint the launch-bar agent toggle from _launchCodex. Codex wears the
+    // SAME teal (0xFF4EC9B0) as every other codex surface (the EXTERNAL pill, the managed Board/tree pill),
+    // so the agent reads one color everywhere; Claude is a neutral blue accent (the default, unchanged).
+    void AgentManagerContent::_UpdateLaunchAgentButton()
+    {
+        if (!_launchAgentBtn)
+        {
+            return;
+        }
+        const bool codex = _launchCodex;
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(6);
+        auto g = Text(L"\x25CF", 11, true, 1.0); // ●
+        g.Foreground(SolidColorBrush{ codex ? Color{ 0xFF, 0x4E, 0xC9, 0xB0 } : Color{ 0xFF, 0x4F, 0x9C, 0xFF } });
+        row.Children().Append(g);
+        row.Children().Append(Text(codex ? L"Codex" : L"Claude", 11, false, 0.95));
+        _launchAgentBtn.Content(row);
+    }
+
     void AgentManagerContent::_OnLaunch()
     {
         if (!_cwdBox)
@@ -4826,6 +4865,21 @@ namespace winrt::TerminalApp::implementation
         }
         _NormalizeCwdBox(); // launch with — and remember — a normalized path (a session id is unaffected)
         const std::wstring text{ _cwdBox.Text() };
+        // Agentmaster (Codex-launch): a Codex launch is DIRECTORY-ONLY — codex has no typed-id resume/fork
+        // here (Codex resume is reached via the Archive page / window-restore / EXTERNAL Adopt), and while
+        // Codex is selected _ValidateLaunchBox keeps the box in directory semantics. Spawn a managed codex in
+        // that dir, mirroring the EXTERNAL menu's "Open New Codex Session Here" (pid 0 = no source external,
+        // adopt=false = a fresh independent session). _LaunchCodexSession registers the card immediately.
+        if (_launchCodex)
+        {
+            if (_codexLaunchHandler)
+            {
+                _PushRecentDir(text); // remember it as "recently selected" (shared MRU with Claude launches)
+                _ClosePathPicker();
+                _codexLaunchHandler(0, winrt::hstring{ text }, false);
+            }
+            return;
+        }
         // A session id in the box = resume that conversation. The button reads "Resume session" and
         // is only ENABLED when the id was FOUND (_ValidateLaunchBox), so this path is reachable only
         // for a real on-disk transcript; resolve its dir/title and hand off to the page.
@@ -4906,6 +4960,27 @@ namespace winrt::TerminalApp::implementation
                 _forkBtn.Visibility(v ? Visibility::Visible : Visibility::Collapsed);
             }
         };
+
+        // Agentmaster (Codex-launch): while Codex is the selected agent the box is DIRECTORY-ONLY — codex
+        // has no --session-id, so there is no typed-id resume (the green found-id state) and no Fork. Empty
+        // or an existing dir => enabled "Launch Codex" (neutral underline); a missing dir => red + disabled.
+        if (_launchCodex)
+        {
+            showFork(false);
+            if (trimmed.empty())
+            {
+                paint(0);
+                _launchBtn.IsEnabled(true);
+            }
+            else
+            {
+                const bool exists = IsDir(NormPath(trimmed));
+                paint(exists ? 0 : 2);
+                _launchBtn.IsEnabled(exists);
+            }
+            _launchBtn.Content(winrt::box_value(L"Launch Codex"));
+            return;
+        }
 
         if (trimmed.empty())
         {
