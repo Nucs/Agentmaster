@@ -46,6 +46,7 @@ Per-tab link badge (overlay): [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster
 Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md).
 Sessions browser + the `~/.claude` storage map: [`doc/agentmaster/SESSIONS.md`](doc/agentmaster/SESSIONS.md).
 Observer-owned session state (the PULL state engine — design, pre-implementation): [`doc/agentmaster/STATE.md`](doc/agentmaster/STATE.md).
+Commandline introspection (the `agentmaster <verb>` CLI): [`doc/agentmaster/CLI.md`](doc/agentmaster/CLI.md).
 
 ## Status
 
@@ -301,6 +302,50 @@ forwarder's bridge discovery is now per-profile too (`BuildForwarderScript(state
 hardcoded `~/.agentmaster/bridge.json`, a cross-instance hook-routing bug). Engine code is
 otherwise untouched: `AgentmasterStateDir()` simply resolves through `ProfileBootstrap.h`, so
 unpackaged/test runs keep the historical `~/.agentmaster`.
+
+**Commandline introspection — the `agentmaster <verb>` CLI ([`CLI.md`](doc/agentmaster/CLI.md)) is
+implemented (P1, read-only), deployed to the DEV alias by an in-place binary swap (no instance closed),
+and live-verified; the ONE unexercised step is a full package build of the committed wiring.** The
+fleet is queryable from a shell so an AI agent can understand *what is going on inside any tab/session*
+WITHOUT the UI: **`show <ref>`** (full introspection — identity/placement, derived state + presence,
+the conversation tail + last assistant reply, activity [msgs/tools/**files touched**], the last user
+prompt, the Flight-Plan queue + autopilot), **`list` / `sessions` / `tabs` / `windows` / `external`**,
+plus **`--self`** (introspect the calling agent's OWN tab via `WT_SESSION`) and **`--json`**
+(`schemaVersion`-stamped). It **always works — app up OR down** — by reading only persisted +
+OS-observable state (the Fleet Observer's PULL model run one-shot from a separate process):
+`sessions.json` + `windows/<id>.json` + PEB process facts + transcripts + claude's presence heartbeat;
+no live responder, no new IPC, **no engine edits for the reads** (`AgentMaster/cli/agentcli.cpp` links
+the existing pure-C++ engine units, like the test harness). A live claude is bound to its conversation
+by claude's OWN presence self-report (`sessions/<pid>.json`, **pid-keyed** — immune to the cwd-density
+mis-bind Rule #14 warns of), then explicit `--session-id` / `--resume`, then the cwd→transcript
+fallback; `external` rows are **host-classified** (`windows-terminal` / `agentmaster-other` [a sibling
+install's session] / `console`). State is **derived** offline from the presence heartbeat +
+transcript-tail via the same `SessionScanner` predicates (`ParseTranscriptDelta` /
+`IsTerminalStopReason` / `IsInteractiveTool`). **Transport — the overload:** the execution alias
+already targets the tiny `wt`/`wtd` launcher shim (`src/cascadia/wt/shim.cpp`, NOT the GUI), now
+**console-subsystem + DUAL-MODE** — a CLI verb (or a CLI-only LEADING flag: `--json`/`--self`/
+`--offline`/`--tail`/`--instance`/`--state`/`--dir`, none of which collide with a WT commandline)
+execs **`agentmaster-cli.exe`** on the caller's console; **any other commandline forwards to
+`WindowsTerminal.exe` byte-for-byte** (bare launch / `-w` / `-s` reopen / `-Embedding` defterm
+unaffected — defterm + Start-menu activate the GUI directly, never the alias). A GUI-subsystem exe
+can't own stdout (the reason `wt.exe` never returned output), so the launcher MUST be console; a
+console allocated for a no-parent-console launch (our reopen `ShellExecute`) is `FreeConsole`d before
+forwarding so a GUI launch never flashes one. **Targeting needs no flag:** a packaged
+`agentmaster-cli.exe` resolves its profile by **package identity** (`GetCurrentPackageFamilyName` —
+`agentmasterdev` → `~/.agentmaster-dev`, `agentmaster` → `~/.agentmaster`), and the alias you TYPE wins
+over any inherited `AGENTMASTER_PROFILE` (the CLI clears the ambient env when packaged, so a
+release-hosted shell still gets dev from `agentmasterdev`); `--profile`/`--instance` cross-target; an
+unpackaged build falls back to inherited env > the `-DAGENTMASTER_DEV` compile brand > default. Wired
+into `OpenConsole.slnx` + `CascadiaPackage.wapproj` (mirrors the `wt` references; the flatten step
+vends `agentmaster-cli.exe` into the package beside `WindowsTerminal.exe`) + `wt.vcxproj`
+`SubSystem=Console`. Live-verified end-to-end via the real `agentmasterdev` alias (every verb returns
+valid JSON, auto-targeting dev). **Still to finish (NOT P2/P3):** the committed build wiring has only
+been **isolation-built + XML-validated — a real full `Build-Agentmaster.ps1` / CI Release build has NOT
+run**, so the wapproj integration + a properly-branded `wtd.exe` are unconfirmed and the live dev alias
+runs on **hand-copied binaries** until then (needs the dev instance closed); and the **release** alias
+`agentmaster show` is **not deployed** (only `agentmasterdev`). **P2 (control — `restore`/`archive` via
+the existing `WM_COPYDATA` handoff + a disk-poll confirm) and P3 (`watch` event stream + prompt-driving
+`enqueue`/`send-now`/`set-autopilot`) are designed + deferred** (CLI.md §4/§9).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -827,8 +872,12 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     [env > portable marker > saved choice > per-identity default], the `.agentmaster.profiles`
     choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,
     Terminal-settings seeding, and the one-instance-per-profile kernel mutex; included by the
-    engine, AgentManagerContent, TerminalPage AND the WindowsTerminal EXE — PROFILES.md), and
-    `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`).
+    engine, AgentManagerContent, TerminalPage AND the WindowsTerminal EXE — PROFILES.md),
+    `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`), and
+    `cli/` — the **commandline introspection tool** (CLI.md): `agentcli.cpp` (the read-only P1
+    reader — `show`/`list`/`sessions`/`tabs`/`windows`/`external`/`--self`/`--json`, linking these
+    engine units like the test harness) + `agentmaster-cli.vcxproj` (a CONSOLE exe shipped beside
+    `WindowsTerminal.exe`) + `_compile.bat` / `_build-proj.bat` (standalone + isolation builds).
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
@@ -854,6 +903,11 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
     `TerminalTabStatus.{h,idl}` (the tab-strip status dot: an `AgentStatusVisible`/
     `AgentStatusBrush`-bound Ellipse in the indicator row); registrations in
     `TerminalAppLib.vcxproj`.
+  - `src/cascadia/wt/shim.cpp` + `wt.vcxproj` (the `agentmaster <verb>` overload, CLI.md §2): the
+    alias-target launcher shim is now **console-subsystem + dual-mode** (`SubSystem=Console`) — it
+    execs `agentmaster-cli.exe` for a CLI verb / leading CLI-flag and forwards everything else to
+    `WindowsTerminal.exe` byte-for-byte; the `agentmaster-cli.vcxproj` reference + the `wt`-mirrored
+    entry in `OpenConsole.slnx` + `CascadiaPackage.wapproj` ship the CLI in the package.
   - `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in
     `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`), a comctl32-v6 dependency in
     `WindowsTerminal.manifest` (the profile picker's TaskDialog), the `AGENTMASTER_PROFILE`
