@@ -20,6 +20,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <appmodel.h>
 #include <fcntl.h>
 #include <io.h>
 
@@ -207,6 +208,22 @@ namespace
         return v;
     }
 
+    // Is this process running with MSIX package identity? When packaged, the profile resolves
+    // automatically from GetCurrentPackageFamilyName (the dev exe -> dev profile, release ->
+    // release), so the build-time brand default must NOT override it.
+    bool IsPackaged()
+    {
+        UINT32 len = 0;
+        return ::GetCurrentPackageFamilyName(&len, nullptr) != APPMODEL_ERROR_NO_PACKAGE;
+    }
+
+    // The owning-instance GUID prefix of an AM_SESSION stamp ("<guid>" or "<guid>:<windowId>").
+    std::wstring AmGuidPrefix(std::wstring_view am)
+    {
+        const auto colon = am.find(L':');
+        return std::wstring{ colon == std::wstring_view::npos ? am : am.substr(0, colon) };
+    }
+
     // Read up to maxBytes from the END of a file, decode UTF-8, and (if we started mid-file)
     // drop the partial leading line so ParseTranscriptDelta sees whole JSONL lines. Shares
     // read/write/delete so a live claude is never blocked.
@@ -282,11 +299,19 @@ namespace
         std::unordered_map<std::wstring, TabPlacement> placeById; // id -> window/tab placement
     };
 
-    // Bind a live claude to its CURRENT conversation id: an explicit --session-id wins (authoritative,
-    // known before the transcript exists — Rule #14), then --resume <guid>, then the cwd→transcript
-    // resolution by creation-time identity. Empty => never-prompted.
-    std::wstring ResolveLiveId(const ClaudeProcessFacts& fx)
+    // Bind a live claude to its CURRENT conversation id, MOST authoritative first:
+    //   1. claude's OWN presence self-report (sessions/<pid>.json), matched by PID — immune to the
+    //      cwd-density ambiguity that mis-binds when several claudes share one working dir (Rule #14);
+    //   2. an explicit --session-id on the command line (known before the transcript exists);
+    //   3. --resume <guid>;
+    //   4. the cwd→transcript resolution by creation-time identity (the fragile fallback).
+    // Empty => never-prompted / not yet resolvable.
+    std::wstring ResolveLiveId(const ClaudeProcessFacts& fx, std::wstring_view presenceId)
     {
+        if (!presenceId.empty() && IsSessionIdStem(presenceId))
+        {
+            return std::wstring{ presenceId };
+        }
         if (!fx.sessionIdArg.empty() && IsSessionIdStem(fx.sessionIdArg))
         {
             return fx.sessionIdArg;
@@ -311,10 +336,10 @@ namespace
             f.sessionById[f.sessions[i].id] = i;
         }
 
-        std::unordered_map<uint32_t, std::wstring> presByPid;
+        std::unordered_map<uint32_t, const SessionPresenceRow*> presByPid;
         for (const auto& p : f.presence)
         {
-            presByPid[p.pid] = p.status;
+            presByPid[p.pid] = &p; // f.presence is stable after load (not reallocated below)
         }
 
         const auto snap = SnapshotProcesses();
@@ -346,14 +371,16 @@ namespace
             lc.facts = ReadClaudeFacts(e.pid);
             lc.facts.pid = e.pid;
             lc.facts.parentPid = e.ppid;
-            lc.sessionId = ResolveLiveId(lc.facts);
+            const SessionPresenceRow* pres = nullptr;
+            if (const auto it = presByPid.find(e.pid); it != presByPid.end())
+            {
+                pres = it->second;
+                lc.presence = pres->status;
+            }
+            lc.sessionId = ResolveLiveId(lc.facts, pres ? pres->sessionId : std::wstring_view{});
             if (!lc.sessionId.empty())
             {
                 TranscriptTimes(lc.facts.cwd, lc.sessionId, lc.createdMs, lc.lastActivityMs);
-            }
-            if (const auto it = presByPid.find(e.pid); it != presByPid.end())
-            {
-                lc.presence = it->second;
             }
             f.live.push_back(std::move(lc));
         }
@@ -743,6 +770,41 @@ namespace
             }
             o.Set(L"conversation", std::move(conv));
             o.Set(L"transcriptPath", json::Value::MkStr(tpath));
+
+            // The human's last real ask (what the session is working on / waiting to act on).
+            for (auto it = turns.rbegin(); it != turns.rend(); ++it)
+            {
+                if (it->role == L"user" && !it->text.empty())
+                {
+                    o.Set(L"lastUserPrompt", json::Value::MkStr(it->text));
+                    break;
+                }
+            }
+
+            // Activity + what files it's touching — a full transcript fold (one session, so the
+            // whole-file scan is fine). This is the "what is it actually doing" signal.
+            if (!tpath.empty())
+            {
+                TranscriptStats st;
+                if (AccumulateTranscriptStats(tpath, st))
+                {
+                    auto act = json::Value::MkObj();
+                    act.Set(L"messages", json::Value::MkNum(st.userPrompts + st.assistantLines));
+                    act.Set(L"userPrompts", json::Value::MkNum(st.userPrompts));
+                    act.Set(L"assistantLines", json::Value::MkNum(st.assistantLines));
+                    act.Set(L"toolUses", json::Value::MkNum(st.toolUses));
+                    o.Set(L"activity", std::move(act));
+                    if (!st.pathsAccessed.empty())
+                    {
+                        auto files = json::Value::MkArr();
+                        for (size_t i = 0; i < st.pathsAccessed.size() && i < 40; ++i)
+                        {
+                            files.Push(json::Value::MkStr(st.pathsAccessed[i]));
+                        }
+                        o.Set(L"filesTouched", std::move(files));
+                    }
+                }
+            }
         }
         return o;
     }
@@ -767,6 +829,29 @@ namespace
             o.Set(L"wtSession", json::Value::MkStr(lc.facts.wtSession));
         }
         o.Set(L"managed", json::Value::MkBool(false));
+        // Classify the host so a consumer can tell a TRULY-external claude (real Windows Terminal
+        // / bare console) from one managed by the OTHER Agentmaster instance (release vs dev — both
+        // install side by side). AM_SESSION is stamped by whichever Agentmaster launched it; its
+        // GUID prefix identifies the instance.
+        {
+            const std::wstring ourAm = EnvVar(L"AM_SESSION");
+            std::wstring host;
+            if (!lc.facts.amSession.empty())
+            {
+                const bool self = !ourAm.empty() && IEquals(AmGuidPrefix(lc.facts.amSession), AmGuidPrefix(ourAm));
+                host = self ? L"agentmaster-self" : L"agentmaster-other";
+                o.Set(L"amSession", json::Value::MkStr(lc.facts.amSession));
+            }
+            else if (!lc.facts.wtSession.empty())
+            {
+                host = L"windows-terminal";
+            }
+            else
+            {
+                host = L"console";
+            }
+            o.Set(L"host", json::Value::MkStr(host));
+        }
         // enrich from transcript (title/branch/prompts)
         std::wstring title;
         if (!lc.sessionId.empty() && !lc.facts.cwd.empty())
@@ -928,6 +1013,20 @@ namespace
 
     // ===== reference resolution (for show / future control) =================================
 
+    // A LIVE claude matching a ref by exact id or id-prefix (for sessions not in THIS profile's
+    // sessions.json — managed by the other instance, or not yet persisted).
+    const LiveClaude* FindLiveByRef(const Fleet& f, std::wstring_view ref)
+    {
+        for (const auto& lc : f.live)
+        {
+            if (!lc.sessionId.empty() && (IEquals(lc.sessionId, ref) || lc.sessionId.rfind(ref, 0) == 0))
+            {
+                return &lc;
+            }
+        }
+        return nullptr;
+    }
+
     // Resolve a user-supplied ref to a managed session index, or -1 with candidates printed.
     int ResolveSessionRef(const Fleet& f, std::wstring_view ref, std::vector<std::wstring>& candidates)
     {
@@ -1069,17 +1168,19 @@ namespace
             root.Set(L"external", std::move(arr));
             return EmitJson(root);
         }
-        OutLn(L"PID     STATE            CWD                                        MODEL");
+        OutLn(L"PID     HOST              STATE            CWD                                  TITLE");
         for (const auto* lc : ext)
         {
             const auto j = JExternal(f, *lc);
             std::wstring line = std::to_wstring(lc->pid);
             line.resize(std::max<size_t>(line.size(), 8), L' ');
+            line += j.StrAt(L"host");
+            line.resize(std::max<size_t>(line.size(), 8 + 18), L' ');
             line += j.StrAt(L"derivedState");
-            line.resize(std::max<size_t>(line.size(), 8 + 17), L' ');
-            line += Trunc(lc->facts.cwd, 42);
-            line.resize(std::max<size_t>(line.size(), 8 + 17 + 43), L' ');
-            line += lc->facts.model;
+            line.resize(std::max<size_t>(line.size(), 8 + 18 + 17), L' ');
+            line += Trunc(lc->facts.cwd, 36);
+            line.resize(std::max<size_t>(line.size(), 8 + 18 + 17 + 37), L' ');
+            line += Trunc(j.StrAt(L"title"), 40);
             OutLn(line);
         }
         if (ext.empty())
@@ -1231,40 +1332,49 @@ namespace
 
         std::vector<std::wstring> candidates;
         const int idx = ResolveSessionRef(f, ref, candidates);
-        if (idx < 0)
+
+        json::Value js;
+        bool have = false;
+        if (idx >= 0)
+        {
+            js = JSession(f, f.sessions[idx], true, a.tail);
+            have = true;
+        }
+        else if (candidates.empty())
+        {
+            // Not managed in THIS profile — but it may be a LIVE claude (managed by the other
+            // instance, or not yet persisted). A live claude always has a transcript, so synthesize
+            // a record and reuse the rich JSession (the queue is simply empty).
+            if (const LiveClaude* lc = FindLiveByRef(f, ref))
+            {
+                SessionInfo synth;
+                synth.id = lc->sessionId;
+                synth.workingDir = lc->facts.cwd;
+                synth.external = true;
+                const auto info = ReadTranscriptInfo(lc->facts.cwd, lc->sessionId, 65536, 1);
+                synth.title = TranscriptDisplayTitle(info);
+                synth.branch = info.gitBranch;
+                js = JSession(f, synth, true, a.tail);
+                have = true;
+            }
+        }
+        if (!have)
         {
             if (candidates.empty())
             {
-                // maybe an external/live id not in sessions.json
-                for (const auto& lc : f.live)
-                {
-                    if (!lc.sessionId.empty() && (IEquals(lc.sessionId, ref) || lc.sessionId.rfind(ref, 0) == 0))
-                    {
-                        auto root = EnvelopeBase();
-                        root.Set(L"session", JExternal(f, lc));
-                        if (a.json)
-                        {
-                            return EmitJson(root);
-                        }
-                        OutLn(L"EXTERNAL claude (unmanaged) pid=" + std::to_wstring(lc.pid));
-                        OutLn(L"  id:    " + lc.sessionId);
-                        OutLn(L"  cwd:   " + lc.facts.cwd);
-                        OutLn(L"  model: " + lc.facts.model);
-                        return 0;
-                    }
-                }
                 Err(L"show: no session matches '" + ref + L"'");
-                return 1;
             }
-            Err(L"show: '" + ref + L"' is ambiguous — candidates:");
-            for (const auto& c : candidates)
+            else
             {
-                Err(L"  " + c);
+                Err(L"show: '" + ref + L"' is ambiguous — candidates:");
+                for (const auto& c : candidates)
+                {
+                    Err(L"  " + c);
+                }
             }
             return 1;
         }
 
-        const auto js = JSession(f, f.sessions[idx], true, a.tail);
         if (a.json)
         {
             auto root = EnvelopeBase();
@@ -1272,14 +1382,13 @@ namespace
             return EmitJson(root);
         }
 
-        // human detail
-        const auto& s = f.sessions[idx];
-        OutLn(L"╾─ " + s.title + L" ──");
-        OutLn(L"  id:        " + s.id);
-        OutLn(L"  dir:       " + s.workingDir + (js.Find(L"liveCwd") ? L"   (live: " + js.StrAt(L"liveCwd") + L")" : L""));
-        if (!s.branch.empty())
+        // human detail (rendered from `js`, so it works for managed AND live-synthesized sessions)
+        OutLn(L"╾─ " + Trunc(js.StrAt(L"title"), 80) + L" ──");
+        OutLn(L"  id:        " + js.StrAt(L"id"));
+        OutLn(L"  dir:       " + js.StrAt(L"workingDir") + (js.Find(L"liveCwd") ? L"   (live: " + js.StrAt(L"liveCwd") + L")" : L""));
+        if (!js.StrAt(L"branch").empty())
         {
-            OutLn(L"  branch:    " + s.branch);
+            OutLn(L"  branch:    " + js.StrAt(L"branch"));
         }
         OutLn(L"  state:     " + js.StrAt(L"derivedState") +
               (js.Find(L"presence") ? L"   presence=" + js.StrAt(L"presence") : L"") +
@@ -1297,9 +1406,26 @@ namespace
         {
             OutLn(L"  placement: window " + pl->StrAt(L"windowId") + L" · tab " + std::to_wstring(pl->U32At(L"tabIndex")) + (pl->BoolAt(L"selected") ? L" (focused)" : L""));
         }
+        if (const auto* act = js.Find(L"activity"))
+        {
+            OutLn(L"  activity:  " + std::to_wstring(act->U32At(L"messages")) + L" msgs · " + std::to_wstring(act->U32At(L"toolUses")) + L" tool calls");
+        }
         if (js.Find(L"pendingInteractiveTool"))
         {
             OutLn(L"  ⚠ blocked on user — pending tool: " + js.StrAt(L"pendingInteractiveTool"));
+        }
+        if (js.Find(L"lastUserPrompt"))
+        {
+            OutLn(L"  you asked:  " + Trunc(js.StrAt(L"lastUserPrompt"), 120));
+        }
+        if (const auto* files = js.Find(L"filesTouched"); files && !files->arr.empty())
+        {
+            std::wstring fl;
+            for (size_t i = 0; i < files->arr.size() && i < 6; ++i)
+            {
+                fl += (i ? L", " : L"") + Trunc(files->arr[i].AsStr(), 40);
+            }
+            OutLn(L"  files:     " + fl + (files->arr.size() > 6 ? L" (+" + std::to_wstring(files->arr.size() - 6) + L" more)" : L""));
         }
 
         // flight plan
@@ -1424,6 +1550,16 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // Profile targeting MUST happen before any state read (ResolveProfileDir caches once).
+    // Precedence (highest first):
+    //   1. --profile <dir> / --instance dev|release        (explicit override)
+    //   2. inherited AGENTMASTER_PROFILE env                (an agent INSIDE an app tab targets
+    //                                                        its own instance automatically)
+    //   3. MSIX package identity                            (a packaged dev exe -> dev profile,
+    //                                                        release -> release; handled by
+    //                                                        ResolveProfileDir, so do nothing)
+    //   4. compile-time brand (AGENTMASTER_DEV)             (an UNPACKAGED dev build run OUTSIDE
+    //                                                        any app defaults to ~/.agentmaster-dev)
+    //   5. the per-identity default (~/.agentmaster)        (ResolveProfileDir fallback)
     if (!profileOverride.empty())
     {
         ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", profileOverride.c_str());
@@ -1437,6 +1573,18 @@ int wmain(int argc, wchar_t** argv)
             ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", dir.c_str());
         }
     }
+#ifdef AGENTMASTER_DEV
+    else if (EnvVar(L"AGENTMASTER_PROFILE").empty() && !IsPackaged())
+    {
+        // This binary was built as the DEV CLI and is running unpackaged with no inherited
+        // profile — default to the dev profile so "the binary targets its build type".
+        const auto home = EnvVar(L"USERPROFILE");
+        if (!home.empty())
+        {
+            ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", (home + L"\\.agentmaster-dev").c_str());
+        }
+    }
+#endif
 
     if (positionals.empty())
     {

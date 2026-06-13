@@ -7,7 +7,9 @@ if errorlevel 1 (
   exit /b 2
 )
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\cli"
-cl /std:c++20 /EHsc /nologo /W3 /Fe:agentcli.exe agentcli.cpp ^
+REM /D AGENTMASTER_DEV: this standalone build represents the DEV CLI — when run UNPACKAGED and
+REM outside any app (no inherited AGENTMASTER_PROFILE), it defaults to ~/.agentmaster-dev.
+cl /std:c++20 /EHsc /nologo /W3 /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
    ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ^
    ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ^
    ole32.lib user32.lib oleaut32.lib

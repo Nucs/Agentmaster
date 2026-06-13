@@ -134,20 +134,40 @@ A faithful render of the per-tab overlay + Flight Plan + Triage card combined:
 - **State** — `derivedState` (Running / WaitingForInput / NeedsApproval / Error / Idle / Done) +
   raw `presence` (busy/idle/waiting), turn-in-flight?, created-ago / active-for / last-activity-ago,
   pid + alive, hook provenance (`hookWired`, last hook/observed).
+- **Activity (what it's actually doing)** — message count, tool-call count, and **`filesTouched`**
+  (the dirs/files the session's tool calls have hit — `TranscriptStats::pathsAccessed`), so a consumer
+  sees *what the session is working on* at a glance.
 - **Conversation (the substance)** — the last *N* turn pairs, the **last assistant reply verbatim**
-  (where it left off), last-turn tool calls (what it is doing); if NeedsApproval → the pending
-  tool / permission; if waiting on a question → the question text.
+  (where it left off), **`lastUserPrompt`** (the human's last real ask), last-turn tool calls; if
+  NeedsApproval → the pending interactive tool; if waiting on a question → the question text.
 - **Flight Plan** — the full queue, each prompt `{label, text, status, origin (flight/typed), gate,
   sentAt}`, plus the sent history and the autopilot backstops
   (maxAutoSends / autoSendsThisRun / stopOnError / pauseOnHumanInput).
 
+A live claude that is *not* in the queried profile's `sessions.json` (managed by the other instance,
+or not yet persisted) still gets the **full transcript-derived view** — `show` synthesizes a record
+from the live process + transcript, so identity / state / activity / conversation are always present;
+only the queue/autopilot are blank. The `external` census additionally classifies each unmanaged
+claude's **`host`** — `windows-terminal` / `agentmaster-other` / `console` — so a sibling instance's
+session is never mistaken for a truly-foreign one.
+
 Default output is a compact human summary; `--json` (stable, `schemaVersion`-stamped) is the agent
 mode.
 
-## 6. Offline state derivation
+## 6. Conversation binding + offline state derivation
 
-In-memory hook `SessionState` is in-process only. Offline, the CLI derives an equivalent the way the
-Observer/Scanner already do, from two live, file-backed signals:
+**Binding a live claude to its conversation id** (most authoritative first), so a claude in a working
+dir shared by *several* concurrent claudes is never mis-bound (Rule #14's hard case, which a one-shot
+cwd→transcript guess gets wrong):
+
+1. claude's **own presence self-report** (`sessions/<pid>.json`), matched by **PID** — pid-keyed, so
+   it is immune to cwd density (the decisive signal; verified to fix `--self` in a 5-claude cwd);
+2. an explicit `--session-id` on the command line;
+3. `--resume <guid>`;
+4. the cwd→transcript creation-time resolution (`ResolveSessionId`, the fragile fallback).
+
+**State.** In-memory hook `SessionState` is in-process only. Offline, the CLI derives an equivalent the
+way the Observer/Scanner already do, from two live, file-backed signals:
 
 - **presence** (`~/.claude/sessions/<pid>.json`, claude's own heartbeat): `busy → Running`,
   `waiting → WaitingForInput` (or `NeedsApproval`), `idle/shell → Idle`, none → `archived`/unknown.
@@ -159,15 +179,32 @@ Observer/Scanner already do, from two live, file-backed signals:
 The `presence` value and the transcript-derived signal are both emitted, so a consumer never has to
 trust a single heuristic.
 
-## 7. Profiles & multi-instance
+## 7. Profiles & multi-instance — **the binary targets its build type**
 
-The CLI resolves the active profile through the engine's own resolver
-(`AgentmasterStateDir()` → `Profiles::ResolveProfileDir()` — env `AGENTMASTER_PROFILE` > portable
-marker > the per-install `.agentmaster.profiles` choice > the per-identity default; **headless-safe,
-never shows UI**). Run with package identity (the alias→shim→cli chain keeps identity), it lands on
-the *same* profile the running app uses. `--profile <dir>` / `--instance dev|release` retarget.
-Control's `WM_COPYDATA` targets the **per-package-family** window class, so a release CLI talks to the
-release Emperor and a dev CLI to the dev Emperor — naturally scoped, never crossed.
+The release and dev packages install side by side, each with its own profile (`~/.agentmaster` vs
+`~/.agentmaster-dev`). The CLI must target the *right* one without the user thinking about it. It does,
+by a precedence ladder (highest first) — **so in normal use you never pass a flag**:
+
+1. **`--profile <dir>` / `--instance dev|release`** — explicit override.
+2. **Inherited `AGENTMASTER_PROFILE` env** — an agent running *inside* an Agentmaster tab inherits the
+   app's exported profile, so `agentmaster show --self` auto-targets **the exact instance it runs in**.
+   (Verified: `--self` with no flag binds the calling tab's own session.)
+3. **MSIX package identity** — a *packaged* `agentmaster-cli.exe` resolves via
+   `GetCurrentPackageFamilyName()` → the dev exe lands on the dev profile, the release exe on the
+   release profile. **Automatic, no hardcode** — this is how the whole app already resolves state
+   (`Profiles::ResolveProfileDir()`).
+4. **Compile-time brand** — an *unpackaged* build carries a `-DAGENTMASTER_DEV` brand so the dev CLI
+   defaults to `~/.agentmaster-dev` when run outside any app (the release build omits it → the
+   `~/.agentmaster` default). This is the literal "the binary targets its build type" knob, mirroring
+   the app's `/p:AgentmasterPackageIdentity`. (Verified: `env -u AGENTMASTER_PROFILE` → dev.)
+5. **Per-identity default** (`Profiles::ResolveProfileDir` fallback — `~/.agentmaster`).
+
+All resolution is **headless-safe** (never shows UI). Control's `WM_COPYDATA` targets the
+**per-package-family** window class, so a release CLI talks to the release Emperor and a dev CLI to the
+dev Emperor — naturally scoped, never crossed.
+
+So: shipped → automatic by identity; unpackaged dev build → automatic by brand; an agent in a tab →
+automatic by inherited env. The flags exist only to *cross-target* another install on purpose.
 
 ## 8. Build & packaging
 
