@@ -251,7 +251,9 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
-        if (_profile)
+        // Agentmaster: Claude session panes call SuppressAutoClose() so the dead tab stays open
+        // for the user to read (_SweepClaudeLiveness archives and leaves it; see TerminalPaneContent.h).
+        if (_profile && !_suppressAutoClose)
         {
             const auto mode = _profile.CloseOnExit();
 

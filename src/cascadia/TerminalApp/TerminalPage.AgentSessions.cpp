@@ -174,6 +174,25 @@ namespace winrt::TerminalApp::implementation
         {
             return nullptr;
         }
+
+        // Agentmaster: suppress the profile's closeOnExit auto-close for this Claude pane.
+        // When claude.exe exits (Ctrl+C, natural completion, crash), the pane must NOT
+        // auto-close: _SweepClaudeLiveness intentionally leaves dead tabs open for the user
+        // to read while archiving the session. Without this, a graceful exit fires
+        // CloseRequested → Pane::Close() → Tab::Closed → _RemoveTab, bypassing the design.
+        pane->WalkTree([](auto&& p) {
+            if (const auto content = p->GetContent())
+            {
+                if (const auto term = content.try_as<winrt::TerminalApp::TerminalPaneContent>())
+                {
+                    if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(term))
+                    {
+                        impl->SuppressAutoClose();
+                    }
+                }
+            }
+        });
+
         const auto tab = _CreateNewTabFromPane(pane);
         if (tab)
         {

@@ -50,6 +50,12 @@ namespace winrt::TerminalApp::implementation
         // constantly-repainting Claude TUI is not a meaningful broadcast target. Non-projected (get_self).
         void SetAgentManaged(bool value) noexcept { _agentManaged = value; }
         bool AgentManaged() const noexcept { return _agentManaged; }
+        // Agentmaster: suppress the profile's closeOnExit auto-close for this pane. Claude sessions must
+        // NOT auto-close when claude.exe exits: the liveness sweep (_SweepClaudeLiveness) archives the
+        // session and intentionally leaves the dead tab open for the user to read. Without this, a
+        // graceful claude exit (Ctrl+C, natural completion) triggers CloseRequested → Pane::Close() →
+        // Tab::Closed → _RemoveTab, bypassing the "leave dead tab open" design. Non-projected (get_self).
+        void SuppressAutoClose() noexcept { _suppressAutoClose = true; }
         winrt::Windows::Foundation::Size MinimumSize();
         void Focus(winrt::Windows::UI::Xaml::FocusState reason = winrt::Windows::UI::Xaml::FocusState::Programmatic);
         void Close();
@@ -87,6 +93,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _rootWrapper{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _agentOverlaySlot{ nullptr };
         bool _agentManaged{ false }; // Agentmaster: hosts a managed Claude session -> excluded from broadcast input
+        bool _suppressAutoClose{ false }; // Agentmaster: block closeOnExit auto-close (Claude sessions leave dead tab open)
         winrt::Microsoft::Terminal::TerminalConnection::ConnectionState _connectionState{ winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected };
         winrt::Microsoft::Terminal::Settings::Model::Profile _profile{ nullptr };
         std::shared_ptr<TerminalSettingsCache> _cache{};
