@@ -481,22 +481,43 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Skip the per-tab confirmOnClose check when the caller has already
-        // shown an aggregate confirmation dialog (e.g. _RemoveTabs).
+        // Agentmaster: a deliberate single-tab close (the tab's X, middle-click, the context-menu
+        // "Close", or the closeTab action) MUST get the user's explicit agreement first — even for a
+        // plain shell tab with NO managed session (a Claude/Codex session tab already took the
+        // archive-confirm branch above). Upstream only prompts per the ConfirmOnClose setting, whose
+        // default (Automatic) closes a single-pane tab SILENTLY (_ShouldWarnOnCloseTab => false), so a
+        // stray click discards a tab with no prompt. We therefore ALWAYS confirm here, with a
+        // buttons-only ContentDialog — and deliberately NOT the shared _ShowConfirmCloseDialog: that
+        // one carries a "don't ask again" checkbox that flips ConfirmOnClose to Never, which would
+        // silently defeat this guarantee. Buttons-only also keeps it XAML-Islands-safe (a text/input
+        // child in a ContentDialog gets no keypresses on an island). skipConfirmClose is still honored
+        // so an aggregate close (_RemoveTabs) that already showed its own confirmation isn't
+        // double-prompted; window-close / quit tear down without routing through here.
         if (!skipConfirmClose)
         {
-            const auto tabImpl = _GetTabImpl(tab);
-            if (tabImpl && _ShouldWarnOnCloseTab(tabImpl))
+            if (const auto presenter{ _dialogPresenter.get() })
             {
-                const auto weak = get_weak();
+                const std::wstring tabTitle{ tab.Title() };
 
-                auto warningResult = co_await _ShowConfirmCloseDialog(ConfirmCloseDialogKind::Tab);
-                strong = weak.get();
-                if (!strong || warningResult != ContentDialogResult::Primary)
+                ContentDialog dialog;
+                dialog.Title(winrt::box_value(L"Close tab?"));
+                dialog.Content(winrt::box_value(tabTitle.empty() ?
+                                                    winrt::hstring{ L"This tab will be closed." } :
+                                                    winrt::hstring{ L"“" + tabTitle + L"” will be closed." }));
+                dialog.PrimaryButtonText(L"Close");
+                dialog.CloseButtonText(L"Cancel");
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+
+                const auto weak = get_weak();
+                const auto result = co_await presenter.ShowDialog(dialog);
+                strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+                if (!strong || result != ContentDialogResult::Primary)
                 {
-                    co_return;
+                    co_return; // cancelled / torn down -> leave the tab open
                 }
             }
+            // No presenter to confirm with -> fall through and close (we can't prompt; the tab is
+            // recoverable via "reopen closed tab" — _AddPreviouslyClosedPaneOrTab below).
         }
 
         auto t = winrt::get_self<implementation::Tab>(tab);
