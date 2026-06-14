@@ -1471,7 +1471,8 @@ namespace winrt::TerminalApp::implementation
                         }
                         else
                         {
-                            self->_RestoreArchivedSession(winrt::hstring{ rid });
+                            // Follow a /clear+plan-restart chain to its tail so we restore where the conversation left off.
+                            self->_RestoreArchivedSession(winrt::hstring{ self->_ResolveRestoreChainTail(std::wstring{ rid }, L"", L"") });
                         }
                         self->_HideArchivePage();
                     });
@@ -1935,7 +1936,8 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                self->_RestoreArchivedSession(hid);
+                // Follow a /clear+plan-restart chain to its tail so we restore where the conversation left off.
+                self->_RestoreArchivedSession(winrt::hstring{ self->_ResolveRestoreChainTail(std::wstring{ hid }, L"", L"") });
                 self->_HideArchivePage();
             });
         });
@@ -2009,7 +2011,9 @@ namespace winrt::TerminalApp::implementation
         }
         for (const auto& id : ids)
         {
-            _RestoreArchivedSession(winrt::hstring{ id });
+            // Follow each checked session's /clear+plan-restart chain to its tail before restoring (two
+            // checked links of one chain collapse to the tail; _RestoreArchivedSession's !live guard dedupes).
+            _RestoreArchivedSession(winrt::hstring{ _ResolveRestoreChainTail(id, L"", L"") });
             _archiveChecked.erase(id);
         }
         _HideArchivePage();

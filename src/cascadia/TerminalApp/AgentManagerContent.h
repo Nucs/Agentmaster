@@ -272,6 +272,20 @@ namespace winrt::TerminalApp::implementation
         void _HideSettings();
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
 
+        // Agentmaster (native-exe-only policy): the "Claude not detected" modal — shown when a
+        // launch/fork is attempted with no native claude.exe (::Agentmaster::ClaudeAvailable() false).
+        // Carries why (native required, the Node CLI is unsupported), the install path (`claude install`
+        // + a docs link), a Browse… (locate claude.exe), and Re-check. Built into the tree like the
+        // settings overlay (toggled by Visibility), so its content behaves in XAML Islands.
+        void _BuildClaudeMissingOverlay();
+        void _ShowClaudeMissing();
+        void _HideClaudeMissing();
+        // Browse for claude.exe (IFileOpenDialog, .exe filter) -> persist it as the claudeExePath
+        // override (through _settingsSink) + ::Agentmaster::RefreshClaudeExe; hides the missing-overlay
+        // and re-validates the launch box if claude is now available. Runs the Win32 modal OFF the click
+        // tick (the XAML-Islands deferral rule). `fromSettings` true => also refresh the Settings fields.
+        void _BrowseForClaudeExe(bool fromSettings);
+
         // Archived-sessions overlay (mirrors the settings overlay): a modal list of sessions that
         // were closed/archived (live==false). Each row Restores (re-launch + resume); the header
         // states the consequence. Opened from the "Archived" toolbar button next to the cog.
@@ -393,6 +407,9 @@ namespace winrt::TerminalApp::implementation
         // ---- Archived-sessions overlay (the "Archived" button) ----
         winrt::Windows::UI::Xaml::Controls::Grid _archiveOverlay{ nullptr }; // dimmed modal layer listing archived sessions
         winrt::Windows::UI::Xaml::Controls::StackPanel _archiveListHost{ nullptr }; // rows of archived sessions (Restore each)
+        // ---- "Claude not detected" overlay (native-exe-only policy gate) ----
+        winrt::Windows::UI::Xaml::Controls::Grid _claudeMissingOverlay{ nullptr }; // dimmed modal layer; shown when launch/fork is blocked by no native claude.exe
+        winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
         // ---- Settings overlay (the cog dialog) ----
         winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };
@@ -408,6 +425,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;

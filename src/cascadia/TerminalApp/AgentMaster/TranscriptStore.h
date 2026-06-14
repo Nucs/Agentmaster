@@ -241,4 +241,69 @@ namespace Agentmaster
     SessionIndexEntry LoadOrRefreshSessionIndexIn(const std::wstring& indexDir, const TranscriptRef& ref);
     // Against the live index dir (<AgentmasterStateDir>\sessions-index, created on demand).
     SessionIndexEntry LoadOrRefreshSessionIndex(const TranscriptRef& ref);
+
+    // ===== continuation-chain lineage (/clear + plan-restart "where did this go?") ===========
+    // A logical Claude conversation that gets `/clear`ed — or plan-restarted via a slash command,
+    // or continued by pasting a handover into a fresh session — mints a NEW session id each time,
+    // and the resulting files are UNLINKED on disk. Verified across this corpus: NO parentUuid
+    // chain across files, NO forkedFrom (that stamps a `/branch` FORK, a divergent branch — not a
+    // continuation), NO isCompactSummary (a true `/compact` stays in ONE file via a
+    // `system/compact_boundary`), and NO `SessionEnd`/next-id pointer. So the only evidence that B
+    // continues A is STRUCTURAL: same cwd + B created shortly AFTER A's last activity + B is not a
+    // fork. resume / restore / fork follow this chain to its TAIL so the user lands where they LEFT
+    // OFF — not on the earliest link they happen to recognize by its original first-prompt title.
+    // (SESSIONS.md §4 / §324.2's "plan-mode parent->child chains".)
+
+    // Max gap from one session's last activity to the next session's creation for them to count as
+    // the SAME continued conversation. Deliberately conservative: an automatic redirect must never
+    // merge two genuinely-separate same-dir conversations (a return hours later is a NEW one), but
+    // it must span a /clear-rephrase-and-paste pause (observed up to ~11 min on a real chain).
+    inline constexpr int64_t kContinuationGapMaxMs = 15 * 60 * 1000; // 15 minutes
+    // Small negative tolerance: B may be timestamped a hair before A's last main-chain line (clock
+    // skew / a trailing untimestamped write); within this, "B starts after A ends" still holds.
+    inline constexpr int64_t kContinuationSkewMs = 5 * 1000; // 5 seconds
+
+    // One on-disk session reduced to what chain-linking needs. created/lastActivity come from the
+    // transcript LINES (ReadTranscriptQuickFacts), never file mtime (which lies — §5).
+    struct SessionChainNode
+    {
+        std::wstring sessionId;
+        std::wstring cwd; // the REAL cwd (compare with NormDirKey — Rule #8)
+        int64_t createdMs{}; // first activity (a fork's is the file birth)
+        int64_t lastActivityMs{}; // last user/assistant timestamp (== createdMs when never-prompted)
+        bool fork{}; // a `/branch` fork is a BRANCH, never a continuation link
+    };
+
+    struct SessionChainResult
+    {
+        std::wstring tailId; // the chain tail (== startId when there is no newer continuation)
+        int hops{}; // continuation links followed (0 == no redirect)
+    };
+
+    // Pure: from `startId`, follow continuation edges to the chain TAIL. An edge A->B holds iff
+    // NormDirKey(A.cwd)==NormDirKey(B.cwd) && !B.fork && B is the EARLIEST same-cwd non-fork session
+    // created in [A.lastActivity - skewMs, A.lastActivity + gapMaxMs]. Bails (no further edge) on
+    // AMBIGUITY — a second candidate whose lifetime OVERLAPS B's (started at/before B's last
+    // activity), i.e. parallel same-cwd sessions — so two claudes in one dir are never silently
+    // merged (Rule #14 spirit). Returns {startId, 0} when startId isn't in `nodes` or has no
+    // continuation. Cycle-safe (a visited set + a hop cap). Deterministic.
+    SessionChainResult ResolveContinuationChainTail(const std::vector<SessionChainNode>& nodes,
+                                                    const std::wstring& startId,
+                                                    int64_t gapMaxMs = kContinuationGapMaxMs,
+                                                    int64_t skewMs = kContinuationSkewMs);
+
+    struct ContinuationTail
+    {
+        std::wstring tailId; // resolved tail (== input sessionId when no newer continuation)
+        std::wstring tailCwd; // the tail's own cwd (falls back to the input cwd)
+        std::wstring tailTitle; // the tail's display title (PickDisplayTitle); empty when only a redirect needs it
+        int hops{};
+    };
+
+    // Filesystem: enumerate the on-disk sessions in `sessionId`'s project dir (the encoding of
+    // `cwd`), build the chain nodes (ReadTranscriptQuickFacts for timing/fork/cwd), resolve the
+    // tail, and — only when it differs — read the tail's title from its sidecar index. Returns
+    // {sessionId, cwd, "", 0} when there's no newer continuation, the dir is unreadable, or the
+    // session isn't present. Read-only.
+    ContinuationTail ResolveContinuationTailOnDisk(const std::wstring& sessionId, const std::wstring& cwd);
 }

@@ -1319,34 +1319,92 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // A logical Claude conversation that was `/clear`ed (or plan-restarted, or continued by pasting a
+    // handover) lives across several UNLINKED on-disk session files (see TranscriptStore's continuation
+    // notes). The user recognizes the conversation by its ORIGINAL first-prompt title — which is the
+    // chain HEAD — but "restore my conversation" means "where I LEFT OFF" = the TAIL. Resolve the tail
+    // (same cwd + time-adjacency, read-only) and, when it differs, make sure a restorable registry
+    // record exists for it (upsert a minimal archived-shaped one for a never-managed on-disk tail,
+    // inheriting the source dir). Returns `clickedId` unchanged when there is no newer continuation, the
+    // dir is unreadable, or the record is a Codex one (Codex doesn't /clear into new files). Idempotent.
+    std::wstring TerminalPage::_ResolveRestoreChainTail(const std::wstring& clickedId, const std::wstring& dirHint, const std::wstring& titleHint)
+    {
+        if (!_sessionRegistry || clickedId.empty())
+        {
+            return clickedId;
+        }
+        std::wstring cwd = dirHint;
+        std::wstring titleFallback = titleHint;
+        if (const auto rec = _sessionRegistry->Get(clickedId))
+        {
+            if (rec->kind == ::Agentmaster::AgentKind::Codex)
+            {
+                return clickedId; // the continuation chain is a Claude /clear concept
+            }
+            if (!rec->workingDir.empty())
+            {
+                cwd = rec->workingDir;
+            }
+            if (titleFallback.empty())
+            {
+                titleFallback = rec->title;
+            }
+        }
+        if (cwd.empty())
+        {
+            return clickedId;
+        }
+        const auto tail = ::Agentmaster::ResolveContinuationTailOnDisk(clickedId, cwd);
+        if (tail.tailId.empty() || tail.tailId == clickedId)
+        {
+            return clickedId;
+        }
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[resume->continuation] " + clickedId + L" -> " + tail.tailId + L" (" + std::to_wstring(tail.hops) + L" /clear hops, same dir)\n");
+        if (!_sessionRegistry->Get(tail.tailId))
+        {
+            ::Agentmaster::SessionInfo s;
+            s.id = tail.tailId;
+            s.workingDir = !tail.tailCwd.empty() ? tail.tailCwd : cwd;
+            s.title = !tail.tailTitle.empty() ? tail.tailTitle : titleFallback;
+            s.kind = ::Agentmaster::AgentKind::Claude;
+            s.state = ::Agentmaster::SessionState::Idle;
+            s.live = false; // archived-shaped: exactly what _RestoreArchivedSession expects
+            _sessionRegistry->Upsert(std::move(s));
+        }
+        return tail.tailId;
+    }
+
     // Resume ANY on-disk session into a managed tab: live here -> Jump; known-archived -> the
     // normal Restore seam; unknown to the registry -> upsert a minimal ARCHIVED record first,
     // then the SAME transcript-gated resume seam (claude --resume; fresh if the transcript
     // vanished). This reuses every existing guarantee: title pinning, per-dir tab color, hooks
-    // correlation by the same id, Rule #6's gating.
+    // correlation by the same id, Rule #6's gating. The clicked id is first resolved to its
+    // continuation-chain TAIL (a /clear'd conversation), so resuming lands where the user left off.
     void TerminalPage::_ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title)
     {
         if (!_sessionRegistry || sessionId.empty() || dir.empty())
         {
             return;
         }
-        const auto existing = _sessionRegistry->Get(sessionId);
+        const std::wstring target = _ResolveRestoreChainTail(sessionId, dir, title); // follow /clear chain to the tail
+        const auto existing = _sessionRegistry->Get(target);
         if (existing && existing->live)
         {
-            _ActivateClaudeSession(winrt::hstring{ sessionId }); // already OPEN somewhere in this app
+            _ActivateClaudeSession(winrt::hstring{ target }); // already OPEN somewhere in this app
             return;
         }
         if (!existing)
         {
             ::Agentmaster::SessionInfo s;
-            s.id = sessionId;
+            s.id = target;
             s.workingDir = dir;
             s.title = title;
             s.state = ::Agentmaster::SessionState::Idle;
             s.live = false; // archived-shaped: exactly what _RestoreArchivedSession expects
             _sessionRegistry->Upsert(std::move(s));
         }
-        _RestoreArchivedSession(winrt::hstring{ sessionId });
+        _RestoreArchivedSession(winrt::hstring{ target });
         _HideSessionsPage(); // land on the freshly opened tab
     }
 
@@ -1362,12 +1420,35 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        std::wstring ttl = !title.empty() ? title : ::Agentmaster::DeriveSessionTitle(dir);
+        // Fork the LATEST link of the conversation (the /clear chain tail), not an earlier checkpoint
+        // the user happens to recognize by its original title — so the fork branches from where they
+        // left off. The tail's own title seeds the "(fork)" name; its cwd is identical (same-dir chain).
+        std::wstring forkParentId = parentId;
+        std::wstring forkDir = dir;
+        std::wstring forkBaseTitle = title;
+        {
+            const auto tail = ::Agentmaster::ResolveContinuationTailOnDisk(parentId, dir);
+            if (!tail.tailId.empty() && tail.tailId != parentId)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[sessions-page->fork] continuation " + parentId + L" -> " + tail.tailId + L" (" + std::to_wstring(tail.hops) + L" /clear hops)\n");
+                forkParentId = tail.tailId;
+                if (!tail.tailCwd.empty())
+                {
+                    forkDir = tail.tailCwd;
+                }
+                if (!tail.tailTitle.empty())
+                {
+                    forkBaseTitle = tail.tailTitle;
+                }
+            }
+        }
+        std::wstring ttl = !forkBaseTitle.empty() ? forkBaseTitle : ::Agentmaster::DeriveSessionTitle(forkDir);
         ttl += L" (fork)";
-        const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(parentId) ? parentId : std::wstring{};
+        const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(forkParentId) ? forkParentId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      L"[sessions-page->fork] source=" + parentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-        _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+                                      L"[sessions-page->fork] source=" + forkParentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
+        _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
         _HideSessionsPage(); // land on the freshly forked tab
     }
 

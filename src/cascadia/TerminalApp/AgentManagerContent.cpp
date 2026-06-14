@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <thread> // background transcript read for an external's read-only plan
+#include <shobjidl.h> // IFileOpenDialog — Browse for claude.exe (native-exe-only policy)
 
 using namespace winrt::Windows::Foundation;
 // Using-DECLARATIONS (not a directive) for the color helpers: a `using namespace
@@ -60,6 +61,45 @@ namespace
             winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
         }
         CATCH_LOG();
+    }
+
+    // Agentmaster (native-exe-only policy): a modal file picker for locating claude.exe. COM is already
+    // initialized STA on the XAML-Islands UI thread; CALL THIS OFF THE CLICK TICK (a COM modal needs the
+    // message pump — the same rule the profile picker follows). Empty optional on cancel/failure.
+    std::optional<std::wstring> PickClaudeExe(HWND owner)
+    {
+        winrt::com_ptr<IFileOpenDialog> dlg;
+        if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.put()))))
+        {
+            return std::nullopt;
+        }
+        const COMDLG_FILTERSPEC filters[] = {
+            { L"claude.exe", L"claude.exe" },
+            { L"Executables (*.exe)", L"*.exe" },
+            { L"All files (*.*)", L"*.*" },
+        };
+        dlg->SetFileTypes(static_cast<UINT>(sizeof(filters) / sizeof(filters[0])), filters);
+        dlg->SetTitle(L"Locate claude.exe (the native build)");
+        FILEOPENDIALOGOPTIONS opts{};
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+        if (FAILED(dlg->Show(owner)))
+        {
+            return std::nullopt; // user canceled
+        }
+        winrt::com_ptr<IShellItem> item;
+        if (FAILED(dlg->GetResult(item.put())))
+        {
+            return std::nullopt;
+        }
+        PWSTR path = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+        {
+            return std::nullopt;
+        }
+        std::wstring out{ path };
+        ::CoTaskMemFree(path);
+        return out;
     }
 
     // Agentmaster: a small stable palette to color-code the EXTERNAL tree's pid underline by host
@@ -1631,6 +1671,7 @@ namespace winrt::TerminalApp::implementation
         // SetOpenArchiveHandler). _BuildArchiveOverlay() is intentionally NOT called; its methods stay
         // dormant (every call site is null-guarded on _archiveOverlay / _archiveListHost).
         _BuildSettingsOverlay(); // modal settings layer, appended last so it renders on top
+        _BuildClaudeMissingOverlay(); // native-exe-only gate modal (shown when no claude.exe is detected)
     }
 
     // ---- Refresh / rebuild --------------------------------------------------
@@ -4143,6 +4184,26 @@ namespace winrt::TerminalApp::implementation
         _setEnv.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setEnv);
 
+        // CLAUDE BINARY (native-exe-only policy): the auto-detected native claude.exe + an optional
+        // explicit override. The whole app gates launch/fork/resume on resolving one (ResolveClaudeExe);
+        // the override must be a real *.exe (a .cmd/.bat or the Node CLI is rejected).
+        panel.Children().Append(Text(L"CLAUDE BINARY (native build required)", 11, true, 0.6));
+        _setClaudeDetected = TextBlock{};
+        _setClaudeDetected.TextWrapping(TextWrapping::Wrap);
+        _setClaudeDetected.Opacity(0.85);
+        _setClaudeDetected.FontSize(12);
+        panel.Children().Append(_setClaudeDetected);
+        _setClaudeExePath = TextBox{};
+        _setClaudeExePath.Header(winrt::box_value(L"Override claude.exe path"));
+        _setClaudeExePath.PlaceholderText(L"blank \x2014 auto-detect; or a full path to claude.exe");
+        panel.Children().Append(_setClaudeExePath);
+        {
+            auto browse = Button{};
+            browse.Content(winrt::box_value(L"Browse for claude.exe\x2026"));
+            browse.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForClaudeExe(true); });
+            panel.Children().Append(browse);
+        }
+
         // AUTOPILOT
         panel.Children().Append(Text(L"AUTOPILOT (defaults for new sessions)", 11, true, 0.6));
         _setDefaultMode = ComboBox{};
@@ -4276,6 +4337,15 @@ namespace winrt::TerminalApp::implementation
         {
             _setEnv.Text(winrt::hstring{ _appSettings.env });
         }
+        if (_setClaudeExePath)
+        {
+            _setClaudeExePath.Text(winrt::hstring{ _appSettings.claudeExePath });
+        }
+        if (_setClaudeDetected)
+        {
+            const auto& exe = ::Agentmaster::SharedEngine().claudeExePath;
+            _setClaudeDetected.Text(winrt::hstring{ exe.empty() ? std::wstring{ L"Detected: none \x2014 Claude launch/fork/resume is disabled until a native claude.exe is found" } : (L"Detected: " + exe) });
+        }
         if (_setDefaultMode)
         {
             _setDefaultMode.SelectedIndex(_appSettings.defaultAutopilotMode == AutopilotMode::Full ? 2 :
@@ -4356,6 +4426,13 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.env = std::wstring{ _setEnv.Text() };
         }
+        if (_setClaudeExePath)
+        {
+            std::wstring p{ _setClaudeExePath.Text() };
+            const auto a = p.find_first_not_of(L" \t");
+            const auto b = p.find_last_not_of(L" \t");
+            _appSettings.claudeExePath = (a == std::wstring::npos) ? std::wstring{} : p.substr(a, b - a + 1);
+        }
         if (_setDefaultMode)
         {
             const int idx = _setDefaultMode.SelectedIndex();
@@ -4429,7 +4506,179 @@ namespace winrt::TerminalApp::implementation
         {
             _settingsSink(_appSettings); // page persists + applies to future spawns
         }
+        // Native-exe-only policy: re-resolve the claude.exe now, so a changed/cleared override (or a
+        // freshly-installed binary) takes effect this run — no restart needed (RefreshClaudeExe updates
+        // the shared engine's cached path; ClaudeAvailable() flips accordingly).
+        ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
         _HideSettings();
+    }
+
+    // ---- "Claude not detected" overlay (native-exe-only policy gate) --------
+
+    void AgentManagerContent::_BuildClaudeMissingOverlay()
+    {
+        // Mirrors the settings overlay: a dimmed modal in the main tree (NOT a ContentDialog, so its
+        // buttons + text behave in XAML Islands). Shown when a launch/fork is attempted with no native
+        // claude.exe resolved (ClaudeAvailable() false).
+        _claudeMissingOverlay = Grid{};
+        _claudeMissingOverlay.Visibility(Visibility::Collapsed);
+        _claudeMissingOverlay.Background(SolidColorBrush{ ColorHelper::FromArgb(0xA0, 0x00, 0x00, 0x00) });
+        Grid::SetRow(_claudeMissingOverlay, 0);
+        Grid::SetRowSpan(_claudeMissingOverlay, 99);
+        Grid::SetColumnSpan(_claudeMissingOverlay, 99);
+        _claudeMissingOverlay.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
+            _HideClaudeMissing();
+        });
+
+        auto card = Border{};
+        card.Background(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x25, 0x25, 0x25) });
+        card.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x90, 0x80, 0x80, 0x80) });
+        card.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
+        card.Padding(Thickness{ 20, 16, 20, 16 });
+        card.Width(500);
+        card.HorizontalAlignment(HorizontalAlignment::Center);
+        card.VerticalAlignment(VerticalAlignment::Center);
+        card.RequestedTheme(ElementTheme::Dark);
+        card.Tapped([](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& e) {
+            e.Handled(true);
+        });
+
+        auto panel = StackPanel{};
+        panel.Spacing(10);
+        panel.Children().Append(Text(L"\x26A0 Claude Code (native) not found", 18, true, 1.0));
+        {
+            auto body = TextBlock{};
+            body.TextWrapping(TextWrapping::Wrap);
+            body.Opacity(0.9);
+            body.FontSize(13);
+            body.Text(L"Agentmaster drives the native claude.exe. None was found on PATH, in "
+                      L"%USERPROFILE%\\.local\\bin, or behind an npm claude.cmd. Launching, resuming, and "
+                      L"forking are disabled until one is available \x2014 a pure-Node `claude` is not "
+                      L"supported (the fleet view, adoption, and process insight all need the native binary).");
+            panel.Children().Append(body);
+        }
+        {
+            auto how = TextBlock{};
+            how.TextWrapping(TextWrapping::Wrap);
+            how.Opacity(0.9);
+            how.FontSize(13);
+            how.Text(L"Install it: open a terminal and run   claude install   (migrates an existing "
+                     L"Claude Code to the native build), then click Re-check. Or get Claude Code below, "
+                     L"or Browse\x2026 to a claude.exe you already have.");
+            panel.Children().Append(how);
+        }
+        _claudeMissingStatus = TextBlock{};
+        _claudeMissingStatus.TextWrapping(TextWrapping::Wrap);
+        _claudeMissingStatus.Opacity(0.7);
+        _claudeMissingStatus.FontSize(12);
+        panel.Children().Append(_claudeMissingStatus);
+
+        auto buttons = StackPanel{};
+        buttons.Orientation(Orientation::Horizontal);
+        buttons.HorizontalAlignment(HorizontalAlignment::Right);
+        buttons.Spacing(8);
+        buttons.Margin(Thickness{ 0, 8, 0, 0 });
+        auto getClaude = Button{};
+        getClaude.Content(winrt::box_value(L"Get Claude Code"));
+        getClaude.Click([](const IInspectable&, const RoutedEventArgs&) {
+            try
+            {
+                winrt::Windows::System::Launcher::LaunchUriAsync(Uri{ L"https://code.claude.com/docs/en/setup" });
+            }
+            CATCH_LOG();
+        });
+        auto browse = Button{};
+        browse.Content(winrt::box_value(L"Browse for claude.exe\x2026"));
+        browse.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForClaudeExe(false); });
+        auto recheck = Button{};
+        recheck.Content(winrt::box_value(L"Re-check"));
+        recheck.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            const auto exe = ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
+            if (!exe.empty())
+            {
+                _HideClaudeMissing();
+                _ValidateLaunchBox();
+            }
+            else if (_claudeMissingStatus)
+            {
+                _claudeMissingStatus.Text(L"Still not found. Run `claude install`, or Browse to a claude.exe.");
+            }
+        });
+        auto close = Button{};
+        close.Content(winrt::box_value(L"Close"));
+        close.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideClaudeMissing(); });
+        buttons.Children().Append(getClaude);
+        buttons.Children().Append(browse);
+        buttons.Children().Append(recheck);
+        buttons.Children().Append(close);
+        panel.Children().Append(buttons);
+
+        card.Child(panel);
+        _claudeMissingOverlay.Children().Append(card);
+        _root.Children().Append(_claudeMissingOverlay);
+    }
+
+    void AgentManagerContent::_ShowClaudeMissing()
+    {
+        if (!_claudeMissingOverlay)
+        {
+            return;
+        }
+        if (_claudeMissingStatus)
+        {
+            const auto& exe = ::Agentmaster::SharedEngine().claudeExePath;
+            _claudeMissingStatus.Text(winrt::hstring{ exe.empty() ? std::wstring{ L"Status: no native claude.exe detected." } : (L"Status: using " + exe) });
+        }
+        _claudeMissingOverlay.Visibility(Visibility::Visible);
+    }
+
+    void AgentManagerContent::_HideClaudeMissing()
+    {
+        if (_claudeMissingOverlay)
+        {
+            _claudeMissingOverlay.Visibility(Visibility::Collapsed);
+        }
+    }
+
+    void AgentManagerContent::_BrowseForClaudeExe(bool fromSettings)
+    {
+        if (!_dispatcher)
+        {
+            return;
+        }
+        // Defer off the click tick, then run the COM modal (it needs the message pump — the XAML-Islands
+        // rule the profile picker follows). A picked .exe becomes the persisted override + re-resolves.
+        _dispatcher.TryEnqueue([this, fromSettings]() {
+            const auto picked = PickClaudeExe(::GetActiveWindow());
+            if (!picked || picked->empty())
+            {
+                return;
+            }
+            _appSettings.claudeExePath = *picked;
+            if (_settingsSink)
+            {
+                _settingsSink(_appSettings); // persist the override
+            }
+            const auto exe = ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
+            if (fromSettings && _setClaudeExePath)
+            {
+                _setClaudeExePath.Text(winrt::hstring{ _appSettings.claudeExePath });
+            }
+            if (fromSettings && _setClaudeDetected)
+            {
+                _setClaudeDetected.Text(winrt::hstring{ exe.empty() ? std::wstring{ L"Detected: none" } : (L"Detected: " + exe) });
+            }
+            if (!exe.empty())
+            {
+                _HideClaudeMissing();
+                _ValidateLaunchBox();
+            }
+            else if (_claudeMissingStatus)
+            {
+                _claudeMissingStatus.Text(L"That file isn't a usable claude.exe \x2014 pick the native claude.exe.");
+            }
+        });
     }
 
     void AgentManagerContent::_RebuildPlan(const std::vector<SessionInfo>& sessions)
@@ -4880,6 +5129,14 @@ namespace winrt::TerminalApp::implementation
             }
             return;
         }
+        // Native-exe-only policy: every CLAUDE interaction (new session or resume) needs a native
+        // claude.exe. With none detected, show the install/Browse modal instead of launching. (Codex
+        // launches above are a separate runtime and are not gated on claude.exe.)
+        if (!::Agentmaster::ClaudeAvailable())
+        {
+            _ShowClaudeMissing();
+            return;
+        }
         // A session id in the box = resume that conversation. The button reads "Resume session" and
         // is only ENABLED when the id was FOUND (_ValidateLaunchBox), so this path is reachable only
         // for a real on-disk transcript; resolve its dir/title and hand off to the page.
@@ -4908,6 +5165,12 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_cwdBox)
         {
+            return;
+        }
+        // Native-exe-only policy: a fork is a claude launch -> requires a native claude.exe.
+        if (!::Agentmaster::ClaudeAvailable())
+        {
+            _ShowClaudeMissing();
             return;
         }
         const auto sid = LooksLikeSessionId(std::wstring{ _cwdBox.Text() });

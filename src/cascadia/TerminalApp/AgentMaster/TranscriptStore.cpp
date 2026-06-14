@@ -11,9 +11,12 @@
 #include <time.h> // _mkgmtime64 (ISO timestamp -> Unix epoch)
 
 #include <algorithm>
+#include <unordered_set>
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
 #include "Json.h" // transcript line parsing
+#include "Persistence.h" // NormDirKey — filesystem-aware cwd comparison (Rule #8)
+#include "ProcessInspect.h" // EncodeCwdToProjectDir — cwd -> project-dir leaf
 
 namespace
 {
@@ -1124,5 +1127,201 @@ namespace Agentmaster
         const std::wstring dir = AgentmasterStateDir() + L"\\sessions-index";
         ::CreateDirectoryW(dir.c_str(), nullptr); // idempotent; parent exists (the state dir)
         return LoadOrRefreshSessionIndexIn(dir, ref);
+    }
+
+    // ===== continuation-chain lineage ========================================================
+
+    SessionChainResult ResolveContinuationChainTail(const std::vector<SessionChainNode>& nodes,
+                                                    const std::wstring& startId,
+                                                    int64_t gapMaxMs,
+                                                    int64_t skewMs)
+    {
+        SessionChainResult res{ startId, 0 };
+        if (startId.empty() || nodes.empty())
+        {
+            return res;
+        }
+        const auto findNode = [&nodes](const std::wstring& id) -> const SessionChainNode* {
+            for (const auto& n : nodes)
+            {
+                if (n.sessionId == id)
+                {
+                    return &n;
+                }
+            }
+            return nullptr;
+        };
+        const SessionChainNode* cur = findNode(startId);
+        if (!cur)
+        {
+            return res; // the clicked id isn't in this dir — don't redirect
+        }
+
+        std::unordered_set<std::wstring> visited;
+        visited.insert(cur->sessionId);
+        constexpr int kMaxHops = 64; // a chain this long never happens; a hard backstop vs. a pathological loop
+        while (res.hops < kMaxHops)
+        {
+            const std::wstring curKey = NormDirKey(cur->cwd);
+            // Candidates that could continue `cur`: same cwd, not a fork, unvisited, and created
+            // at/after cur ended (within skew). The chain successor is the EARLIEST of these.
+            std::vector<const SessionChainNode*> cands;
+            for (const auto& n : nodes)
+            {
+                if (n.sessionId == cur->sessionId || n.fork || visited.count(n.sessionId))
+                {
+                    continue;
+                }
+                if (n.createdMs < cur->lastActivityMs - skewMs)
+                {
+                    continue; // started before cur finished — a parallel/earlier session, not a continuation
+                }
+                if (NormDirKey(n.cwd) != curKey)
+                {
+                    continue;
+                }
+                cands.push_back(&n);
+            }
+            if (cands.empty())
+            {
+                break;
+            }
+            std::sort(cands.begin(), cands.end(), [](const SessionChainNode* a, const SessionChainNode* b) {
+                if (a->createdMs != b->createdMs)
+                {
+                    return a->createdMs < b->createdMs;
+                }
+                return a->sessionId < b->sessionId; // deterministic tiebreak
+            });
+            const SessionChainNode* next = cands.front();
+            if (next->createdMs - cur->lastActivityMs > gapMaxMs)
+            {
+                break; // the next session starts too long after — a NEW conversation, not a continuation
+            }
+            // Ambiguity guard: if a SECOND candidate's lifetime overlaps `next` (it started at/before
+            // `next`'s last activity), two same-dir sessions ran in parallel — we can't say which one
+            // continues `cur`, so stop here rather than silently pick one (Rule #14 spirit).
+            if (cands.size() >= 2 && cands[1]->createdMs <= next->lastActivityMs)
+            {
+                break;
+            }
+            cur = next;
+            visited.insert(cur->sessionId);
+            res.tailId = cur->sessionId;
+            ++res.hops;
+        }
+        return res;
+    }
+
+    ContinuationTail ResolveContinuationTailOnDisk(const std::wstring& sessionId, const std::wstring& cwd)
+    {
+        ContinuationTail out{ sessionId, cwd, L"", 0 };
+        if (sessionId.empty() || cwd.empty())
+        {
+            return out;
+        }
+        std::wstring projRoot = ClaudeProjectsDir();
+        while (!projRoot.empty() && (projRoot.back() == L'\\' || projRoot.back() == L'/'))
+        {
+            projRoot.pop_back();
+        }
+        if (projRoot.empty())
+        {
+            return out;
+        }
+        const std::wstring leaf = EncodeCwdToProjectDir(cwd);
+        const std::wstring projDir = projRoot + L"\\" + leaf;
+
+        // Scan the <uuid>.jsonl files DIRECTLY in this one project dir (EnumerateTranscriptsIn walks
+        // the SUBDIRS of a root — wrong level here; these files sit at projDir's top).
+        std::vector<TranscriptRef> refs;
+        {
+            static const std::wstring ext = L".jsonl";
+            WIN32_FIND_DATAW ff{};
+            const HANDLE hf = ::FindFirstFileW((projDir + L"\\*.jsonl").c_str(), &ff);
+            if (hf == INVALID_HANDLE_VALUE)
+            {
+                return out; // unknown dir / no transcripts — no redirect
+            }
+            do
+            {
+                if (ff.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    continue;
+                }
+                const std::wstring name = ff.cFileName;
+                if (name.size() <= ext.size())
+                {
+                    continue;
+                }
+                const std::wstring stem = name.substr(0, name.size() - ext.size());
+                if (!IsSessionIdStem(stem))
+                {
+                    continue;
+                }
+                TranscriptRef r;
+                r.sessionId = stem;
+                r.path = projDir + L"\\" + name;
+                r.projectDirLeaf = leaf;
+                r.sizeBytes = (static_cast<int64_t>(ff.nFileSizeHigh) << 32) | static_cast<int64_t>(ff.nFileSizeLow);
+                r.mtimeMs = FileTimeToUnixMs(ff.ftLastWriteTime);
+                r.birthMs = FileTimeToUnixMs(ff.ftCreationTime);
+                refs.push_back(std::move(r));
+            } while (::FindNextFileW(hf, &ff));
+            ::FindClose(hf);
+        }
+        if (refs.size() < 2)
+        {
+            return out; // a lone session can't have a continuation
+        }
+
+        std::vector<SessionChainNode> nodes;
+        nodes.reserve(refs.size());
+        for (const auto& r : refs)
+        {
+            const auto qf = ReadTranscriptQuickFacts(r.path, r.birthMs);
+            if (!qf.found)
+            {
+                continue;
+            }
+            SessionChainNode n;
+            n.sessionId = r.sessionId;
+            n.cwd = !qf.cwd.empty() ? qf.cwd : cwd;
+            n.createdMs = qf.createdMs;
+            n.lastActivityMs = qf.lastActivityMs > 0 ? qf.lastActivityMs : qf.createdMs;
+            n.fork = qf.fork;
+            nodes.push_back(std::move(n));
+        }
+
+        const auto chain = ResolveContinuationChainTail(nodes, sessionId);
+        out.tailId = chain.tailId;
+        out.hops = chain.hops;
+        for (const auto& n : nodes)
+        {
+            if (n.sessionId == chain.tailId)
+            {
+                if (!n.cwd.empty())
+                {
+                    out.tailCwd = n.cwd;
+                }
+                break;
+            }
+        }
+        if (chain.tailId != sessionId)
+        {
+            for (const auto& r : refs)
+            {
+                if (r.sessionId == chain.tailId)
+                {
+                    const auto idx = LoadOrRefreshSessionIndex(r);
+                    if (idx.valid)
+                    {
+                        out.tailTitle = PickDisplayTitle(idx.stats.customTitle, idx.stats.aiTitle, idx.stats.summary, idx.stats.firstUserPrompt);
+                    }
+                    break;
+                }
+            }
+        }
+        return out;
     }
 }

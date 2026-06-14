@@ -348,7 +348,7 @@ try {
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autopilot + injected prompts) and gates risky
@@ -361,6 +361,37 @@ try {
         // When OFF, the flag is omitted and BuildHooksSettingsJson pins permissions.defaultMode
         // instead (normal prompts + trust apply).
         const std::wstring flag = skipPermissions ? L"--dangerously-skip-permissions " : L"";
+
+        // How to invoke claude. The programmatic spawn runs through ConPTY's CreateProcessW, which —
+        // unlike a shell — appends only ".exe" and NEVER consults PATHEXT. So a bare `claude` token
+        // resolves ONLY a native claude.exe and silently misses the npm `claude.cmd` (the common
+        // install), dying with ERROR_FILE_NOT_FOUND (0x80070002). We therefore launch the REAL
+        // resolved launcher BY FULL PATH: a .exe runs directly (quoted, so spaces in the path are
+        // safe); a .cmd/.bat is a batch script CreateProcessW cannot execute directly, so it is run
+        // via `cmd /c`. `claudeLauncher` is resolved in Engine init BEFORE our shim dir is prepended
+        // to PATH, so it is always the real claude, never our own shim. Empty (claude not found on
+        // PATH at init) falls back to the bare token — the spawn then surfaces the not-found error,
+        // and a genuinely PATH-resolvable claude.exe still works.
+        bool batch = false;
+        if (!claudeLauncher.empty())
+        {
+            const auto dot = claudeLauncher.find_last_of(L'.');
+            if (dot != std::wstring_view::npos)
+            {
+                std::wstring ext{ claudeLauncher.substr(dot) };
+                for (auto& c : ext)
+                {
+                    if (c >= L'A' && c <= L'Z')
+                    {
+                        c = static_cast<wchar_t>(c - L'A' + L'a');
+                    }
+                }
+                batch = (ext == L".cmd" || ext == L".bat");
+            }
+        }
+        const std::wstring exe = claudeLauncher.empty() ? std::wstring{ L"claude" } : (L"\"" + std::wstring{ claudeLauncher } + L"\"");
+
+        std::wstring cmd;
         if (!forkFromSessionId.empty())
         {
             // Fork (Agentmaster): resume the SOURCE conversation's history, but --fork-session writes to
@@ -368,29 +399,26 @@ try {
             // caller). The source <forkFrom>.jsonl is never written to -> no two-writers corruption from
             // duplicating a tab; and because the new id is known up front, the forked session registers
             // and binds exactly like a fresh launch.
-            std::wstring cmd = L"claude " + flag + L"--resume ";
-            cmd += forkFromSessionId;
-            cmd += L" --fork-session --session-id ";
-            cmd += sessionId;
-            cmd += L" --settings \"";
-            cmd += settingsPath;
-            cmd += L"\"";
-            return cmd;
+            cmd = exe + L" " + flag + L"--resume " + std::wstring{ forkFromSessionId } + L" --fork-session --session-id " + std::wstring{ sessionId } + L" --settings \"" + std::wstring{ settingsPath } + L"\"";
         }
-        if (resume)
+        else if (resume)
         {
             // Resume the existing conversation by id; --resume implies the session id.
-            std::wstring cmd = L"claude " + flag + L"--resume ";
-            cmd += sessionId;
-            cmd += L" --settings \"";
-            cmd += settingsPath;
-            cmd += L"\"";
-            return cmd;
+            cmd = exe + L" " + flag + L"--resume " + std::wstring{ sessionId } + L" --settings \"" + std::wstring{ settingsPath } + L"\"";
         }
-        std::wstring cmd = L"claude " + flag + L"--settings \"";
-        cmd += settingsPath;
-        cmd += L"\" --session-id ";
-        cmd += sessionId;
+        else
+        {
+            cmd = exe + L" " + flag + L"--settings \"" + std::wstring{ settingsPath } + L"\" --session-id " + std::wstring{ sessionId };
+        }
+
+        if (batch)
+        {
+            // cmd /c with MORE than two quote chars (we quote both the launcher AND the --settings
+            // path): cmd strips the FIRST and LAST quote of the remainder, then runs what's between.
+            // So wrap the whole command in ONE outer pair — the inner quotes (launcher + settings)
+            // survive intact. (See `cmd /?`: the >2-quotes case falls to "strip leading+trailing quote".)
+            return L"cmd /c \"" + cmd + L"\"";
+        }
         return cmd;
     }
 
@@ -629,6 +657,181 @@ try {
         return {};
     }
 
+    namespace
+    {
+        // True iff `path` exists and is a regular file (not a directory).
+        bool FileExistsNotDir(const std::wstring& path)
+        {
+            const DWORD attr = ::GetFileAttributesW(path.c_str());
+            return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+        }
+
+        // Case-insensitive ".exe" suffix test (ASCII fold). Pure.
+        bool EndsWithExeCI(std::wstring_view s)
+        {
+            if (s.size() < 4)
+            {
+                return false;
+            }
+            std::wstring tail{ s.substr(s.size() - 4) };
+            for (auto& c : tail)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            return tail == L".exe";
+        }
+
+        // Normalize a PATH dir entry: strip surrounding quotes/spaces, ensure a trailing backslash.
+        // Returns "" for an empty/blank entry.
+        std::wstring NormalizeDir(std::wstring dir)
+        {
+            while (!dir.empty() && (dir.front() == L'"' || dir.front() == L' '))
+            {
+                dir.erase(dir.begin());
+            }
+            while (!dir.empty() && (dir.back() == L'"' || dir.back() == L' '))
+            {
+                dir.pop_back();
+            }
+            if (dir.empty())
+            {
+                return {};
+            }
+            if (dir.back() != L'\\' && dir.back() != L'/')
+            {
+                dir.push_back(L'\\');
+            }
+            return dir;
+        }
+
+        // Follow a npm `claude.cmd`/`.bat` in `launcherDir` (already trailing-slash normalized) to the
+        // NATIVE binary it ultimately runs: the per-platform optional dependency (or a vendored copy)
+        // under <launcherDir>\node_modules\@anthropic-ai\. Bounded + deterministic (known subpaths, then
+        // one glob level under @anthropic-ai) — NOT a deep tree walk. Empty if no claude.exe is there
+        // (a pure-Node install). [Agentmaster — "a .cmd is OK iff it points to the exe"]
+        std::wstring FollowNpmCmdToExe(const std::wstring& launcherDir)
+        {
+            const std::wstring base = launcherDir + L"node_modules\\@anthropic-ai\\";
+            static const wchar_t* const candidates[] = {
+                L"claude-code-win32-x64\\claude.exe",
+                L"claude-code-win32-arm64\\claude.exe",
+                L"claude-code\\vendor\\claude.exe",
+                L"claude-code\\claude.exe",
+            };
+            for (const auto* c : candidates)
+            {
+                const std::wstring p = base + c;
+                if (FileExistsNotDir(p))
+                {
+                    return p;
+                }
+            }
+            // One glob level: node_modules\@anthropic-ai\*\claude.exe (covers a renamed platform pkg).
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = ::FindFirstFileW((base + L"*").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                    {
+                        continue;
+                    }
+                    const std::wstring name = fd.cFileName;
+                    if (name == L"." || name == L"..")
+                    {
+                        continue;
+                    }
+                    const std::wstring p = base + name + L"\\claude.exe";
+                    if (FileExistsNotDir(p))
+                    {
+                        ::FindClose(h);
+                        return p;
+                    }
+                } while (::FindNextFileW(h, &fd));
+                ::FindClose(h);
+            }
+            return {};
+        }
+    }
+
+    std::wstring ResolveClaudeExeIn(std::wstring_view overridePath, const std::vector<std::wstring>& pathDirs, std::wstring_view homeDir)
+    {
+        // 1. Explicit override — must be an existing .exe (an invalid override is "not detected",
+        //    so the Settings UI flags it rather than silently auto-detecting around it).
+        if (!overridePath.empty())
+        {
+            std::wstring p{ overridePath };
+            return (EndsWithExeCI(p) && FileExistsNotDir(p)) ? p : std::wstring{};
+        }
+
+        // 2. claude.exe directly on PATH (EXACT leaf — never a .cmd/.bat).
+        for (const auto& raw : pathDirs)
+        {
+            const std::wstring dir = NormalizeDir(raw);
+            if (!dir.empty() && FileExistsNotDir(dir + L"claude.exe"))
+            {
+                return dir + L"claude.exe";
+            }
+        }
+
+        // 3. The native installer's default location (~/.local/bin\claude.exe).
+        if (!homeDir.empty())
+        {
+            std::wstring home{ homeDir };
+            if (home.back() != L'\\' && home.back() != L'/')
+            {
+                home.push_back(L'\\');
+            }
+            const std::wstring cand = home + L".local\\bin\\claude.exe";
+            if (FileExistsNotDir(cand))
+            {
+                return cand;
+            }
+        }
+
+        // 4. Follow a claude.cmd / claude.bat on PATH to its npm native binary.
+        for (const auto& raw : pathDirs)
+        {
+            const std::wstring dir = NormalizeDir(raw);
+            if (dir.empty())
+            {
+                continue;
+            }
+            if (FileExistsNotDir(dir + L"claude.cmd") || FileExistsNotDir(dir + L"claude.bat"))
+            {
+                if (auto p = FollowNpmCmdToExe(dir); !p.empty())
+                {
+                    return p;
+                }
+            }
+        }
+
+        return {};
+    }
+
+    std::wstring ResolveClaudeExe(std::wstring_view overridePath)
+    {
+        // Gather PATH dirs + USERPROFILE from the environment, then delegate to the testable core.
+        std::vector<std::wstring> dirs;
+        const std::wstring path = GetEnvW(L"PATH");
+        size_t start = 0;
+        while (start <= path.size())
+        {
+            size_t sc = path.find(L';', start);
+            if (sc == std::wstring::npos)
+            {
+                sc = path.size();
+            }
+            dirs.push_back(path.substr(start, sc - start));
+            start = sc + 1;
+        }
+        return ResolveClaudeExeIn(overridePath, dirs, GetEnvW(L"USERPROFILE"));
+    }
+
     std::wstring MaterializeClaudeShim(const std::wstring& stateDir, const std::wstring& settingsPath)
     {
         // Resolve the real claude FIRST (PATH is still un-mutated here, so this never finds
@@ -753,7 +956,7 @@ try {
         return out;
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
@@ -773,7 +976,7 @@ try {
         spec.forwarderPath = forwarderPath;
 
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher);
 
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
         spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);

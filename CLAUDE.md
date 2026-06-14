@@ -460,9 +460,13 @@ What works, by area:
   cmd/PowerShell + a POSIX `claude`) that injects `--settings <ours>` then execs the real claude
   (`ResolveRealClaude`, resolved BEFORE the PATH prepend so it never finds the shim); every new
   tab is *meant* to inherit this env so a bare `claude` self-wires for hooks (but WT's env
-  regeneration breaks that for `+` tabs — see the caveat below). (Launch's direct
-  `CreateProcessW("claude …")` resolves `claude.exe` with no PATHEXT, bypassing the `.cmd` shim
-  — no double-wiring.) The forwarder takes the session id from the hook **payload** and emits
+  regeneration breaks that for `+` tabs — see the caveat below). (Launch/Restore does **not** go
+  through the shim: it spawns the **native `claude.exe` by full path** — `Engine::claudeExePath`,
+  resolved once at engine init by `ResolveClaudeExe` (Settings override → PATH `claude.exe` →
+  `~/.local/bin` → a `claude.cmd`'s npm binary), BEFORE the PATH prepend so it's the real claude not
+  the shim. **Native-exe-only policy** (see Gotchas): if no `claude.exe` resolves, `ClaudeAvailable()`
+  is false and the Manager **gates** every claude interaction (launch / new / fork / resume) behind a
+  "Claude not detected" modal — Browse… + `claude install`; a pure-Node `claude` is unsupported.) The forwarder takes the session id from the hook **payload** and emits
   the hosting **`WT_SESSION`** as the `tabToken` wire field, falling back to a **`bridge.json`**
   discovery file when it didn't inherit the pipe env. The registry **adopts** an unknown session
   on `SessionStart` (flagged `SessionInfo::external`) and fires every window's adoption handler (`AddAdoptionHandler`, fanned out — whichever window hosts the `+` tab binds it);
@@ -848,7 +852,9 @@ What works, by area:
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
   `--dangerously-skip-permissions`), `model` (== `/model <v>`), `includeCoAuthoredBy`, and a
   global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via
-  `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus **Autopilot defaults** stamped
+  `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus a **CLAUDE BINARY** row (the
+  native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**
+  (`claudeExePath`) with **Browse…**, re-resolved live on Save via `RefreshClaudeExe` — plus **Autopilot defaults** stamped
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
@@ -1382,6 +1388,28 @@ build **binlog uploads as an artifact** to diagnose the first run.
   `ClaudeConversationExists(id)` globs `<CLAUDE_CONFIG_DIR | ~/.claude>/projects/*/<id>.jsonl`
   (ids are unique UUIDs, so no need to reproduce Claude's cwd→dir encoding). No transcript ⇒
   launch fresh (`[restore-fresh]` in `hooks.log`) instead of `--resume` (`[resume]`).
+- **Native-exe-only policy: launch the native `claude.exe` by FULL PATH, gate everything else.**
+  Launch/Restore hands a command line to ConPTY, which launches it via `CreateProcessW` — and
+  `CreateProcessW` appends only `.exe` and **never consults `PATHEXT`**. So a bare `claude` token
+  finds a native `claude.exe` (the `~/.local/bin` installer) but **silently misses the npm
+  `claude.cmd`**, failing with `0x80070002` / `ERROR_FILE_NOT_FOUND` — *even though a hand-typed
+  `claude` works* (a shell honors `PATHEXT` + the shim). It cost a friend's whole release ("my friend
+  couldn't run it"): the dev had `claude.exe`, the friend had `claude.cmd`. **The fix is a deliberate
+  policy, not a `.cmd` workaround:** Agentmaster is so `claude.exe`-coupled (the entire Fleet Observer
+  + PEB enrichment key on the `claude.exe` image) that a pure-Node `claude` (`node.exe`, no native
+  binary) is **unsupported**. `ResolveClaudeExe` resolves a *real `claude.exe`* — Settings override
+  (must be `.exe`) → PATH `claude.exe` (exact leaf, never a `.cmd`) → `~/.local/bin\claude.exe` →
+  **follow a `claude.cmd`/`.bat` to its npm native binary** (`<dir>\node_modules\@anthropic-ai\…\claude.exe`;
+  the `.cmd` is a breadcrumb, never launched). Run once at engine init **before the PATH shim is
+  prepended** (so a PATH `claude.cmd` resolves to the real binary, not our shim) → cached in
+  `Engine::claudeExePath`; `hooks.log` prints `[engine] claude.exe: …`. Empty ⇒ `ClaudeAvailable()`
+  false ⇒ the Manager gates launch/new/fork/resume behind the "Claude not detected" modal (Browse…
+  via `IFileOpenDialog` + `claude install`), `TerminalPage::_LaunchClaudeSession` hard-refuses
+  (`[launch-blocked]`) as the backstop for non-UI restore paths, and the Settings cog shows the
+  detected path + an `.exe`-only override (`AppSettings::claudeExePath`, re-resolved live via
+  `RefreshClaudeExe`). Because both npm and the native installer ship the SAME native `claude.exe`
+  today (npm just delivers it via a per-platform optional dep), this gates only the legacy Node CLI.
+  (Codex's `BuildCodexCommandline` still emits a bare `codex` — same latent bug, not yet fixed.)
 - **A ConPTY connection's process spawns on the control's first non-zero layout — never
   eager-`Start()` it before the control initializes.** `TermControl::_InitializeTerminal`
   (gated on `SwapChainPanel().LayoutUpdated`) is what calls `_core.Connection().Start()`, so a

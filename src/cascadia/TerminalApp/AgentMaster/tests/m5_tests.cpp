@@ -622,6 +622,68 @@ static void TestSpawnBuilders()
     CHECK(cmdNB == L"claude --settings \"C:/x/s.json\" --session-id abc-123", "claude commandline (fresh, no bypass)");
     const auto rcmdNB = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, false);
     CHECK(rcmdNB == L"claude --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume, no bypass)");
+
+    // Launcher resolution (Agentmaster — the "my friend couldn't run it" 0x80070002 fix). ConPTY's
+    // CreateProcessW appends only ".exe" and ignores PATHEXT, so a bare `claude` token misses the npm
+    // `claude.cmd`. Given the REAL launcher full path we emit it directly: a .exe as the quoted leading
+    // token; a .cmd/.bat wrapped in `cmd /c` (CreateProcessW cannot exec a batch file directly).
+    const auto exeCmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, true, L"", L"C:\\Users\\me\\.local\\bin\\claude.exe");
+    CHECK(exeCmd == L"\"C:\\Users\\me\\.local\\bin\\claude.exe\" --dangerously-skip-permissions --resume abc-123 --settings \"C:/x/s.json\"", "claude commandline (resume, resolved .exe by full path)");
+    const auto cmdResume = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, true, L"", L"C:\\npm\\claude.cmd");
+    CHECK(cmdResume == L"cmd /c \"\"C:\\npm\\claude.cmd\" --dangerously-skip-permissions --resume abc-123 --settings \"C:/x/s.json\"\"", "claude commandline (resume, npm .cmd via cmd /c)");
+    const auto cmdFresh = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, true, L"", L"C:\\npm\\claude.cmd");
+    CHECK(cmdFresh == L"cmd /c \"\"C:\\npm\\claude.cmd\" --dangerously-skip-permissions --settings \"C:/x/s.json\" --session-id abc-123\"", "claude commandline (fresh, npm .cmd via cmd /c, keeps --session-id)");
+    // .bat resolves like .cmd, extension match is case-insensitive; no-bypass omits the flag.
+    const auto batCmd = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, false, L"", L"C:\\tools\\Claude.BAT");
+    CHECK(batCmd == L"cmd /c \"\"C:\\tools\\Claude.BAT\" --resume abc-123 --settings \"C:/x/s.json\"\"", "claude commandline (resume, .BAT case-insensitive, no bypass)");
+    // Fork via a resolved .exe: full path leads, source conversation forked into the new id.
+    const auto forkExe = BuildClaudeCommandline(L"C:/x/s.json", L"new-id", false, true, L"src-id", L"C:\\bin\\claude.exe");
+    CHECK(forkExe == L"\"C:\\bin\\claude.exe\" --dangerously-skip-permissions --resume src-id --fork-session --session-id new-id --settings \"C:/x/s.json\"", "claude commandline (fork, resolved .exe)");
+    // Empty launcher => the bare-token fallback (unchanged from the original behavior).
+    CHECK(BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, true, L"", L"") == rcmd, "empty launcher falls back to the bare `claude` token");
+
+    // ResolveClaudeExeIn (native-exe-only policy): resolve a real claude.exe; a .cmd is only a
+    // breadcrumb to its npm binary; a pure-Node .cmd (no binary) resolves to empty (gated). Temp fixture.
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const std::wstring root = (fs::temp_directory_path(ec) / (L"am-claude-exe-" + NewSessionId())).wstring();
+        const std::wstring binExe = root + L"\\binexe";
+        const std::wstring binCmd = root + L"\\bincmd";
+        const std::wstring binNode = root + L"\\binnode";
+        const std::wstring home = root + L"\\home";
+        const std::wstring exeDirect = binExe + L"\\claude.exe";
+        const std::wstring npmExe = binCmd + L"\\node_modules\\@anthropic-ai\\claude-code-win32-x64\\claude.exe";
+        const std::wstring homeExe = home + L"\\.local\\bin\\claude.exe";
+        auto touch = [](const std::wstring& p) {
+            std::error_code e2;
+            fs::create_directories(fs::path{ p }.parent_path(), e2);
+            std::ofstream f{ fs::path{ p }, std::ios::binary };
+            f << "x";
+        };
+        touch(exeDirect);
+        touch(binCmd + L"\\claude.cmd");
+        touch(npmExe);
+        touch(binNode + L"\\claude.cmd"); // a pure-Node install: a .cmd but NO native binary anywhere
+        touch(homeExe);
+
+        // 1. A valid override (an existing .exe) wins outright.
+        CHECK(ResolveClaudeExeIn(exeDirect, {}, L"") == exeDirect, "ResolveClaudeExe: valid .exe override");
+        // 2. A .cmd override is rejected (exe-only) -> empty.
+        CHECK(ResolveClaudeExeIn(binCmd + L"\\claude.cmd", {}, L"").empty(), "ResolveClaudeExe: .cmd override rejected");
+        // 3. A nonexistent .exe override -> empty.
+        CHECK(ResolveClaudeExeIn(root + L"\\nope.exe", {}, L"").empty(), "ResolveClaudeExe: missing .exe override -> empty");
+        // 4. A direct claude.exe on PATH beats an earlier dir's .cmd (step 2 runs before the .cmd follow).
+        CHECK(ResolveClaudeExeIn(L"", { binCmd, binExe }, L"") == exeDirect, "ResolveClaudeExe: PATH claude.exe preferred over a .cmd");
+        // 5. Follow a claude.cmd to its npm native binary (home empty so the ~/.local/bin step is skipped).
+        CHECK(ResolveClaudeExeIn(L"", { binCmd }, L"") == npmExe, "ResolveClaudeExe: follow .cmd -> npm node_modules claude.exe");
+        // 6. A pure-Node .cmd (no native binary anywhere) -> empty (gated, by design).
+        CHECK(ResolveClaudeExeIn(L"", { binNode }, L"").empty(), "ResolveClaudeExe: pure-node .cmd -> not detected");
+        // 7. The ~/.local/bin native install (step 3) beats chasing a .cmd's node_modules (step 4).
+        CHECK(ResolveClaudeExeIn(L"", { binNode }, home) == homeExe, "ResolveClaudeExe: ~/.local/bin claude.exe fallback");
+
+        fs::remove_all(fs::path{ root }, ec);
+    }
     // Codex (managed-session support): bare `codex` fresh; `codex resume <uuid>` to continue a rollout.
     CHECK(BuildCodexCommandline(L"") == L"codex", "codex commandline (fresh)");
     CHECK(BuildCodexCommandline(L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a") == L"codex resume 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (resume by rollout uuid)");
@@ -2615,6 +2677,96 @@ static void TestTranscriptStore()
     }
 }
 
+static void TestContinuationChain()
+{
+    std::wprintf(L"ContinuationChain (/clear + plan-restart tail resolution — pure resolver):\n");
+    // A node builder: (id, cwd, created, lastActivity, [fork]). Times in ms.
+    const auto N = [](const wchar_t* id, const wchar_t* cwd, int64_t created, int64_t last, bool fork = false) {
+        SessionChainNode n;
+        n.sessionId = id;
+        n.cwd = cwd;
+        n.createdMs = created;
+        n.lastActivityMs = last;
+        n.fork = fork;
+        return n;
+    };
+
+    // The real DwhGateway scenario: head (7b2eab70) -> mid (28b301d9, +24s) -> tail (aee7610f, +11min).
+    {
+        std::vector<SessionChainNode> v{
+            N(L"head", L"K:\\proj\\a", 0, 1000000),
+            N(L"mid", L"K:\\proj\\a", 1024000, 2000000), // +24s after head ended
+            N(L"tail", L"K:\\proj\\a", 2660000, 3000000), // +11min after mid ended
+        };
+        auto r = ResolveContinuationChainTail(v, L"head");
+        CHECK(r.tailId == L"tail" && r.hops == 2, "chain: head follows two /clear links to the tail");
+        CHECK(ResolveContinuationChainTail(v, L"mid").tailId == L"tail", "chain: from the MIDDLE link, still reach the tail");
+        CHECK(ResolveContinuationChainTail(v, L"mid").hops == 1, "chain: middle->tail is one hop");
+        auto t = ResolveContinuationChainTail(v, L"tail");
+        CHECK(t.tailId == L"tail" && t.hops == 0, "chain: the tail resolves to itself (no redirect)");
+    }
+
+    // Gap too large => a NEW conversation, not a continuation: tail link starts >15min after mid.
+    {
+        std::vector<SessionChainNode> v{
+            N(L"head", L"K:\\proj\\a", 0, 1000000),
+            N(L"mid", L"K:\\proj\\a", 1024000, 2000000),
+            N(L"far", L"K:\\proj\\a", 2000000 + 16 * 60 * 1000, 4000000), // 16min after mid ended
+        };
+        auto r = ResolveContinuationChainTail(v, L"head");
+        CHECK(r.tailId == L"mid" && r.hops == 1, "chain: a >15min gap stops the chain (mid is the tail)");
+    }
+
+    // Parallel/overlap => ambiguous => bail (never silently merge two same-dir claudes).
+    {
+        std::vector<SessionChainNode> v{
+            N(L"a", L"K:\\proj\\a", 0, 1000000),
+            N(L"b", L"K:\\proj\\a", 1024000, 2000000),
+            N(L"par", L"K:\\proj\\a", 1100000, 2200000), // started while 'b' was still active
+        };
+        auto r = ResolveContinuationChainTail(v, L"a");
+        CHECK(r.tailId == L"a" && r.hops == 0, "chain: overlapping parallel successors => no redirect");
+    }
+
+    // A fork is a BRANCH, never a continuation target.
+    {
+        std::vector<SessionChainNode> v{
+            N(L"a", L"K:\\proj\\a", 0, 1000000),
+            N(L"forked", L"K:\\proj\\a", 1024000, 2000000, /*fork*/ true),
+        };
+        CHECK(ResolveContinuationChainTail(v, L"a").tailId == L"a", "chain: a fork successor is skipped (branch, not continuation)");
+    }
+
+    // Different cwd is a different conversation; a case/slash-variant of the SAME dir still chains (Rule #8).
+    {
+        std::vector<SessionChainNode> v{
+            N(L"a", L"K:\\Proj\\A", 0, 1000000),
+            N(L"other", L"K:\\proj\\b", 1024000, 2000000), // different dir — must NOT chain
+            N(L"cont", L"k:/proj/a", 1100000, 2000000), // same dir, case+slash variant — MUST chain
+        };
+        auto r = ResolveContinuationChainTail(v, L"a");
+        CHECK(r.tailId == L"cont" && r.hops == 1, "chain: case/slash-variant same dir chains; a different dir does not");
+    }
+
+    // A custom (tighter) gapMax is honored.
+    {
+        std::vector<SessionChainNode> v{
+            N(L"head", L"K:\\proj\\a", 0, 1000000),
+            N(L"mid", L"K:\\proj\\a", 1024000, 2000000), // +24s (within 30s)
+            N(L"tail", L"K:\\proj\\a", 2660000, 3000000), // +11min (beyond 30s)
+        };
+        auto r = ResolveContinuationChainTail(v, L"head", /*gapMaxMs*/ 30000);
+        CHECK(r.tailId == L"mid" && r.hops == 1, "chain: a tight gapMax stops after the 24s link");
+    }
+
+    // Robustness: an unknown start id returns itself; an empty node set is safe.
+    {
+        std::vector<SessionChainNode> v{ N(L"a", L"K:\\proj\\a", 0, 1000000) };
+        CHECK(ResolveContinuationChainTail(v, L"ghost").tailId == L"ghost", "chain: unknown start id => returns itself");
+        CHECK(ResolveContinuationChainTail({}, L"a").tailId == L"a", "chain: empty nodes => returns the start id");
+    }
+}
+
 static void TestSessionSearch()
 {
     std::wprintf(L"SessionSearch (regex/match/snippet + fast phase + history + presence + index):\n");
@@ -2983,6 +3135,7 @@ int wmain()
     TestTranscriptResolve();
     TestCodexObserve();
     TestTranscriptStore();
+    TestContinuationChain();
     TestSessionSearch();
     TestProcessInspectLive();
     TestBringToFrontHeuristics();

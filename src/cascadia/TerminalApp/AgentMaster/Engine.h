@@ -63,6 +63,18 @@ namespace Agentmaster
         // instances stay cleanly separable (each binds only its own).
         std::wstring amSession;
 
+        // Agentmaster (native-exe-only policy). The NATIVE claude.exe to launch, resolved at engine
+        // init via ResolveClaudeExe(settings.claudeExePath) and re-resolved by RefreshClaudeExe when
+        // the Settings override changes. ALWAYS a real claude.exe full path, or EMPTY when none is
+        // found anywhere (PATH claude.exe / ~/.local/bin / a claude.cmd's npm binary / the override).
+        // Empty == "Claude not detected": the app GATES every claude interaction (launch / new / fork
+        // / resume / adopt) behind the install prompt. Threaded into the Launch/Restore command line
+        // by full path (BuildClaudeSpawn -> BuildClaudeCommandline). ConPTY's CreateProcessW appends
+        // only ".exe" and ignores PATHEXT, so launching by full path is mandatory (a bare `claude`
+        // would miss the npm install and die 0x80070002). UI-thread-owned (set at init + on Settings
+        // save); gating reads it through ClaudeAvailable().
+        std::wstring claudeExePath;
+
         // Restore (loading sessions.json + re-launching the saved fleet) is a PROCESS-once
         // action — the registry is now shared, so if every window's _OnFirstLayout restored,
         // a second window would re-launch the same conversations into the one registry (dup
@@ -138,6 +150,16 @@ namespace Agentmaster
     // lifetime: the bridge/scheduler threads stop when the process exits), which also sidesteps
     // static-destruction-order hazards with the WinRT shutdown of the windows that observe it.
     Engine& SharedEngine();
+
+    // Agentmaster (native-exe-only policy). True iff a native claude.exe was resolved (== the engine
+    // may launch/fork/resume) — i.e. SharedEngine().claudeExePath is non-empty. False => "Claude not
+    // detected", and the Manager gates every claude interaction behind the install prompt.
+    bool ClaudeAvailable();
+
+    // Re-resolve the native claude.exe with a (possibly new) explicit override — called when the
+    // Settings cog's claude-path override is saved, so a Browse/override takes effect WITHOUT a
+    // restart. Updates SharedEngine().claudeExePath and returns it ("" => still not detected).
+    std::wstring RefreshClaudeExe(std::wstring_view overridePath);
 
     // M10: claim this window's persisted record (geometry + Manager lens + ordered tab refs), or
     // nullopt if none remains — in which case the window mints a fresh id. Pops from the shared

@@ -118,8 +118,11 @@ namespace Agentmaster
             //    CascadiaSettingsSerialization FixupUserSettings — [Agentmaster]): with WT's default
             //    env-reload ON, ConptyConnection rebuilds a child's env from the REGISTRY
             //    (til::env::regenerate), which DROPS these runtime-only vars and the shim is never
-            //    hit. Launch's direct CreateProcessW("claude ...") resolves claude.exe (no PATHEXT)
-            //    and bypasses the .cmd shim — so no double-wiring.
+            //    hit. Launch/Restore does NOT go through the shim: it spawns the NATIVE claude.exe BY
+            //    FULL PATH (resolved into e->claudeExePath below, before this PATH prepend, so a
+            //    claude.cmd on PATH is followed to its real binary, not our shim). exe-only policy: a
+            //    pure-Node `claude` resolves to empty and GATES the Manager. (CreateProcessW needs the
+            //    full path — it appends only ".exe" and ignores PATHEXT, the 0x80070002 bug.)
             try
             {
                 // Fleet Observer (OBSERVER.md §7): mint the per-process ownership stamp and export
@@ -137,8 +140,16 @@ namespace Agentmaster
                 WriteBridgeDiscovery(pipeName);
                 const auto stateDir = AgentmasterStateDir();
                 const auto hookFiles = MaterializeSharedHookFiles(stateDir, LoadAppSettings());
-                // Resolve real claude + author the shim BEFORE touching PATH (so it never finds
-                // our own shim), then prepend the shim dir.
+                // Resolve the NATIVE claude.exe NOW (native-exe-only policy), while PATH is still
+                // un-mutated so a claude.cmd on PATH is followed to its REAL binary, not the adoption
+                // shim we author next. Honors the Settings override; ALWAYS a real claude.exe (or
+                // empty). Empty => "Claude not detected" and the Manager gates every claude
+                // interaction. Launched by full path (CreateProcessW appends only ".exe", ignores
+                // PATHEXT — a bare `claude` would miss the npm install, the 0x80070002 bug).
+                e->claudeExePath = ResolveClaudeExe(LoadAppSettings().claudeExePath);
+                AppendStateLog(L"hooks.log", L"[engine] claude.exe: " + (e->claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e->claudeExePath) + L"\n");
+                // Author the adoption shim BEFORE touching PATH (so ResolveRealClaude inside it never
+                // finds our own shim), then prepend the shim dir for hand-typed `+`-tab self-wiring.
                 const auto shimDir = MaterializeClaudeShim(stateDir, hookFiles.first);
                 ::SetEnvironmentVariableW(L"CCMGR_HOOK_PIPE", pipeName.c_str());
                 if (!shimDir.empty())
@@ -174,6 +185,21 @@ namespace Agentmaster
         }();
 
         return *g;
+    }
+
+    bool ClaudeAvailable()
+    {
+        return !SharedEngine().claudeExePath.empty();
+    }
+
+    std::wstring RefreshClaudeExe(std::wstring_view overridePath)
+    {
+        // Re-resolve when the Settings override changes, so a Browse/override takes effect without a
+        // restart. UI-thread-called (settings save); claudeExePath has no other writer after init.
+        auto& e = SharedEngine();
+        e.claudeExePath = ResolveClaudeExe(overridePath);
+        AppendStateLog(L"hooks.log", L"[engine] claude.exe refreshed: " + (e.claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e.claudeExePath) + L"\n");
+        return e.claudeExePath;
     }
 
     std::optional<WindowRecord> ClaimWindowRecord()

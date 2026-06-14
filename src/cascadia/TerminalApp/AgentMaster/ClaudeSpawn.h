@@ -72,7 +72,14 @@ namespace Agentmaster
     // forkFromSessionId set (Agentmaster): claude [..] --resume <forkFrom> --fork-session --session-id
     //   <id> --settings "<f>" — branch an existing conversation into a NEW id (`id`), leaving the
     //   SOURCE transcript untouched (no two-writers-on-one-.jsonl). Overrides the resume/fresh forms.
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {});
+    // claudeLauncher (Agentmaster): the REAL claude launcher as a FULL PATH (from ResolveRealClaude at
+    //   engine init, BEFORE the shim dir is on PATH so it is never our shim). The programmatic spawn
+    //   runs through ConPTY's CreateProcessW, which appends only ".exe" and IGNORES PATHEXT — so a bare
+    //   `claude` token misses the npm `claude.cmd` and fails with 0x80070002 (ERROR_FILE_NOT_FOUND).
+    //   Given a launcher we emit its full path: a .exe as the (quoted) leading token; a .cmd/.bat
+    //   wrapped in `cmd /c` (CreateProcessW cannot execute a batch file directly). Empty => the bare
+    //   `claude` token (back-compat, and the not-found path that surfaces the error to the user).
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {});
 
     // Assemble the codex (OpenAI Codex CLI) command line (Agentmaster — Codex managed-session
     // support). Codex CANNOT pin a session id and takes NO --settings (unlike claude), so a FRESH
@@ -153,8 +160,26 @@ namespace Agentmaster
 
     // Resolve the real `claude` launcher on PATH (searched as claude.exe/.cmd/.bat, in that
     // order). MUST be called BEFORE the shim dir is prepended to PATH so it never resolves to
-    // our own shim. Returns the full path, or empty if claude is not found on PATH.
+    // our own shim. Returns the full path, or empty if claude is not found on PATH. Used to author
+    // the hand-typed-adoption shim (where a .cmd launcher is fine — the shim re-invokes it).
     std::wstring ResolveRealClaude();
+
+    // Agentmaster (native-exe-only policy). Resolve the NATIVE claude.exe to LAUNCH — the only
+    // supported runtime (the whole Fleet Observer + PEB enrichment are claude.exe-keyed; a pure-Node
+    // `claude` is unsupported). Resolution order:
+    //   1. `overridePath` — if non-empty it MUST exist AND end ".exe" (else => empty: an invalid
+    //      override is "not detected", and the Settings UI flags it).
+    //   2. `claude.exe` on PATH (EXACT leaf — never a .cmd/.bat).
+    //   3. `<home>\.local\bin\claude.exe` (the native installer's default location).
+    //   4. FOLLOW a `claude.cmd`/`.bat` on PATH to its npm native binary — `<launcherDir>\node_modules\
+    //      @anthropic-ai\...\claude.exe` (this is "a .cmd is OK *iff* it points to the exe"; the .cmd is
+    //      never launched, only used as a breadcrumb to the real exe).
+    // Empty => no native claude.exe anywhere ⇒ the app GATES all claude interactions. NEVER returns a
+    // .cmd/.bat. `ResolveClaudeExeIn` is the OS-light, unit-testable core: it takes the PATH dirs +
+    // home explicitly (so the harness points it at temp dirs) and only does file-existence checks;
+    // `ResolveClaudeExe` gathers PATH + USERPROFILE from the environment and delegates to it.
+    std::wstring ResolveClaudeExeIn(std::wstring_view overridePath, const std::vector<std::wstring>& pathDirs, std::wstring_view homeDir);
+    std::wstring ResolveClaudeExe(std::wstring_view overridePath = {});
 
     // Write a transparent `claude` PATH shim (claude.cmd for cmd/PowerShell + an
     // extensionless POSIX `claude` for git-bash) into <stateDir>\shim. Each forwards all args
@@ -177,5 +202,9 @@ namespace Agentmaster
     // id is minted as the spec id (the fork TARGET) and the commandline resumes <forkFromSessionId>
     // with --fork-session, so the source transcript is never written to. Mutually exclusive with
     // resumeSessionId; if both are set, fork wins.
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {});
+    // `claudeLauncher` (the real claude full path, resolved by the engine before the shim is on PATH)
+    // is threaded to BuildClaudeCommandline so the spawn launches claude BY FULL PATH — the npm
+    // `claude.cmd` via `cmd /c`, a native claude.exe directly — instead of a bare `claude` token that
+    // ConPTY's CreateProcessW can only resolve as claude.exe (no PATHEXT). Empty => bare-token fallback.
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {});
 }

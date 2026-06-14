@@ -102,8 +102,13 @@ settings — including Terminal's own settings under `<profile>\terminal\`); eac
 its own choice (change it later: Manager tab → ⚙ → Profile). See
 [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md).
 
-Requires Windows 10 2004 (19041) or later, on x64 or arm64, with
-[Claude Code](https://www.anthropic.com/claude-code) (`claude`) installed and on `PATH`. Agentmaster
+Requires Windows 10 2004 (19041) or later, on x64 or arm64, with the **native**
+[Claude Code](https://www.anthropic.com/claude-code) build (a real `claude.exe`) installed — via the
+native installer or `npm i -g @anthropic-ai/claude-code` (npm ships the same native binary) or
+`claude install`. Agentmaster auto-detects it on `PATH`, in `%USERPROFILE%\.local\bin`, or behind an
+npm `claude.cmd`; if none is found it gates Claude actions and points you to install or Browse to it
+(the Settings cog also takes an explicit `claude.exe` override). A pure-Node `claude` CLI is **not**
+supported. Agentmaster
 installs side-by-side under its own package identity, so any existing Windows Terminal install is
 left untouched — and the release identity (`Agentmaster`, alias `agentmaster`) is likewise distinct
 from a from-source dev build (`AgentmasterDev`, alias `agentmasterdev`), so the two coexist without

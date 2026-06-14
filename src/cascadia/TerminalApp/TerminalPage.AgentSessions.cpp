@@ -107,6 +107,16 @@ namespace winrt::TerminalApp::implementation
             return nullptr;
         }
 
+        // Native-exe-only policy: never spawn without a resolved native claude.exe. The Manager's
+        // Launch/Fork buttons already gate with the install prompt; this is the backstop for the
+        // non-UI entry points (Restore all, window/workspace restore) — they no-op cleanly instead of
+        // spawning a doomed ConPTY (a fork/resume is just a launch variant — all funnel through here).
+        if (!::Agentmaster::ClaudeAvailable())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-blocked] no native claude.exe; refusing to spawn \"" + std::wstring{ title } + L"\"\n");
+            return nullptr;
+        }
+
         std::wstring dir{ workingDir };
         if (dir.empty())
         {
@@ -132,7 +142,11 @@ namespace winrt::TerminalApp::implementation
         const std::wstring resumeId = wantResume ? restored->id : std::wstring{};
         // forkFromId set (duplicate-tab -> fork) overrides resume/fresh: BuildClaudeSpawn mints a NEW id
         // and the commandline forks the source conversation into it (the source transcript is untouched).
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), forkFromId);
+        // Launch the NATIVE claude.exe by full path (resolved once at engine init; exe-only policy).
+        // CreateProcessW appends only ".exe" and ignores PATHEXT, so the full path is mandatory. This
+        // is reached ONLY when ClaudeAvailable() (the Manager gates launch/new/fork/resume otherwise),
+        // so claudeExePath is non-empty here; the empty bare-token fallback never executes.
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), forkFromId, ::Agentmaster::SharedEngine().claudeExePath);
 
         // Child environment: CCMGR_SESSION_ID + CCMGR_HOOK_PIPE so hook events correlate
         // back to this session's registry record (HOOKS.md).

@@ -268,6 +268,14 @@ namespace Agentmaster
         // ';'-delimited list of NAME=VALUE pairs (e.g. "FOO=bar;HTTPS_PROXY=http://h:8080").
         // Parsed by ParseEnvAssignments at spawn; CCMGR_* names are ignored (reserved).
         std::wstring env{};
+        // Agentmaster (native-exe-only policy): an explicit override path to the native claude.exe.
+        // "" => auto-detect (PATH claude.exe, ~/.local/bin\claude.exe, or a claude.cmd's npm binary —
+        // see ResolveClaudeExe). When set it MUST be an existing *.exe (the Settings UI validates +
+        // browses for it). The whole app launches/forks/resumes ONLY when a native claude.exe resolves;
+        // otherwise every claude interaction is gated behind an "install the native build" prompt. A
+        // pure-Node `claude` (no native binary) is deliberately unsupported (the Fleet Observer + PEB
+        // enrichment are all claude.exe-keyed).
+        std::wstring claudeExePath{};
 
         // --- Autopilot defaults stamped onto NEW sessions (not restored ones) ---
         AutopilotMode defaultAutopilotMode{ AutopilotMode::Off };
