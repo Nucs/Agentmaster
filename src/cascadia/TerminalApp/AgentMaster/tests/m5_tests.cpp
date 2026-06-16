@@ -609,6 +609,101 @@ static void TestObserveClaude()
     CHECK(reg.Count() == countBefore, "ObserveClaude no-ops for an empty sessionId");
 }
 
+// Agentmaster (one ConPTY = one live conversation; Rule #14 / session-id divergence): a single
+// claude.exe — one pid on one ConPTY (tabToken) — hosts exactly ONE conversation at a time. When it
+// switches conversation id in-session (/clear, /compact, /resume), the OLD id lingered `live`, so two
+// live records claimed one tab and the reconciler churned re-homing between them — flickering the tab
+// header between the managed name and claude's live OSC title. ObserveClaude (which resolves the
+// CURRENT conversation from claude's pid-keyed presence heartbeat) must archive the stale same-process
+// sibling so the tab binds exactly one session: the newest.
+static void TestSupersedeStaleTabSiblings()
+{
+    std::wprintf(L"SessionRegistry: one ConPTY = one live conversation (session-id divergence):\n");
+    const std::wstring token = L"WT-5cea3919";
+    const uint32_t pid = 21680;
+
+    // (1) Divergence: the SAME claude (pid 21680 on one ConPTY) switched conversation id. Observing the
+    //     new (fresher) conversation archives the stale prior one that shared its ConPTY + process.
+    {
+        SessionRegistry reg;
+        SessionInfo oldC;
+        oldC.id = L"old-conv";
+        oldC.live = true;
+        oldC.pid = pid;
+        oldC.tabToken = token;
+        oldC.lastActivityUnixMs = 1000; // freshness 1000
+        reg.Upsert(oldC);
+
+        ObservedClaude o; // the new conversation, observed as current (newer transcript activity)
+        o.sessionId = L"new-conv";
+        o.tabToken = token;
+        o.pid = pid;
+        o.cwd = L"K:/dwh";
+        o.lastActivityUnixMs = 2000; // freshness 2000 > 1000
+        o.observedUnixMs = 5000;
+        reg.ObserveClaude(o);
+
+        CHECK(reg.Get(L"new-conv") && reg.Get(L"new-conv")->live, "divergence: the newest conversation stays live");
+        CHECK(reg.Get(L"old-conv") && !reg.Get(L"old-conv")->live, "divergence: the stale same-pid conversation on the same ConPTY is archived");
+    }
+
+    // (2) A child sub-claude (a DIFFERENT pid that inherited the parent's WT_SESSION via env) is NEVER
+    //     superseded — it is a real, concurrent process, not a stale conversation of the tab's claude.
+    {
+        SessionRegistry reg;
+        SessionInfo child;
+        child.id = L"sub-claude";
+        child.live = true;
+        child.pid = 99999; // a different process
+        child.tabToken = token; // inherited the parent's WT_SESSION
+        child.lastActivityUnixMs = 500;
+        reg.Upsert(child);
+
+        ObservedClaude o;
+        o.sessionId = L"parent-conv";
+        o.tabToken = token;
+        o.pid = pid; // the tab's real claude
+        o.lastActivityUnixMs = 2000;
+        reg.ObserveClaude(o);
+
+        CHECK(reg.Get(L"sub-claude") && reg.Get(L"sub-claude")->live, "a different-pid sub-claude sharing the WT_SESSION is NOT archived");
+    }
+
+    // (3) Newest wins: a mis-resolved / stale observation can NEVER archive a genuinely-FRESHER sibling.
+    {
+        SessionRegistry reg;
+        SessionInfo current;
+        current.id = L"actually-current";
+        current.live = true;
+        current.pid = pid;
+        current.tabToken = token;
+        current.lastActivityUnixMs = 9000; // genuinely fresher (its transcript is the one being written)
+        reg.Upsert(current);
+
+        ObservedClaude o; // the observer happened to resolve a STALE id this tick
+        o.sessionId = L"stale-resolved";
+        o.tabToken = token;
+        o.pid = pid;
+        o.lastActivityUnixMs = 2000; // older than the current
+        reg.ObserveClaude(o);
+
+        CHECK(reg.Get(L"actually-current") && reg.Get(L"actually-current")->live, "freshness guard: a stale observation does NOT archive the fresher current conversation");
+    }
+
+    // (4) The common case is untouched: observing the sole conversation of a tab archives nothing.
+    {
+        SessionRegistry reg;
+        ObservedClaude o;
+        o.sessionId = L"solo";
+        o.tabToken = token;
+        o.pid = pid;
+        o.lastActivityUnixMs = 1000;
+        reg.ObserveClaude(o);
+        CHECK(reg.Get(L"solo") && reg.Get(L"solo")->live, "the sole conversation on a ConPTY stays live (no false supersede)");
+        CHECK(reg.Count() == 1, "no spurious records created by a single observe");
+    }
+}
+
 static void TestSpawnBuilders()
 {
     std::wprintf(L"ClaudeSpawn builders:\n");
@@ -4371,6 +4466,7 @@ int wmain()
     TestRegistryFanout();
     TestTypedCapture();
     TestObserveClaude();
+    TestSupersedeStaleTabSiblings();
     TestSpawnBuilders();
     TestProfileBootstrap();
     TestScheduler();

@@ -131,6 +131,22 @@ namespace Agentmaster
         // Snapshot the observer list under the lock, then invoke each outside it.
         void _notify(const SessionInfo& snapshot, HookEvent cause);
 
+        // Agentmaster (one ConPTY = one live conversation; Rule #14 / session-id divergence): a single
+        // claude.exe — one pid on one ConPTY (tabToken) — can be in exactly ONE conversation at a time.
+        // An in-session /clear, /compact, or /resume switches its conversation id, so the OLD id is no
+        // longer live on that tab; but its record lingered `live`, leaving TWO live records claiming one
+        // ConPTY. The tab reconciler matches purely by tabToken, so it churned re-homing the tab between
+        // the two ids — flickering the tab header between the managed name and claude's live OSC title.
+        // When `winnerId` (pid `pid`, tabToken `tabToken`) is confirmed as the CURRENT conversation,
+        // archive (live=false) every OTHER live record that shares that ConPTY and process. Discriminated:
+        //  - by `pid`, so a child sub-claude that inherited the parent's WT_SESSION (a DIFFERENT pid on
+        //    the same tabToken) is NEVER superseded — it is a real, concurrent process (an unknown-pid
+        //    sibling is also archivable: it is a not-yet-observed stale record, not a live sub-claude);
+        //  - by freshness (hook/transcript activity, NOT observation time), so a stale or mis-resolved
+        //    observation can never archive the genuinely-current conversation (the newest always wins).
+        // Caller holds _mtx; returns the archived snapshots so the caller can _notify them outside it.
+        std::vector<SessionInfo> _SupersedeStaleTabSiblings(const std::wstring& winnerId, const std::wstring& tabToken, uint32_t pid, int64_t winnerFreshness);
+
         mutable std::mutex _mtx;
         // insertion-ordered storage so the UI shows a stable order
         std::vector<std::wstring> _order;

@@ -31,6 +31,55 @@ namespace
     // recently (so a stale never-echoed prompt, or a reloaded old one, can't swallow a fresh
     // human message that happens to repeat the text).
     constexpr int64_t kEchoWindowMs = 15000;
+
+    // Agentmaster: case-insensitive equality for a WT_SESSION / tabToken GUID string. The hook wire
+    // carries the token as-is from the WT_SESSION env, while the Fleet Observer reads the same value
+    // out of the PEB — the two can differ in case, so a tab can't be matched by ordinal compare.
+    bool TabTokenEq(const std::wstring& a, const std::wstring& b) noexcept
+    {
+        if (a.size() != b.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            wchar_t ca = a[i];
+            wchar_t cb = b[i];
+            if (ca >= L'A' && ca <= L'Z')
+            {
+                ca = static_cast<wchar_t>(ca - L'A' + L'a');
+            }
+            if (cb >= L'A' && cb <= L'Z')
+            {
+                cb = static_cast<wchar_t>(cb - L'A' + L'a');
+            }
+            if (ca != cb)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Agentmaster: a session's CONVERSATION-activity freshness — the newest of its real activity
+    // signals (an authoritative hook, the transcript mtime, the hook-driven activity anchor).
+    // Deliberately EXCLUDES lastObservedUnixMs (which only means "the survey looked at it just now",
+    // and would otherwise make whichever id the observer resolved this tick always 'win'). The
+    // genuinely-current conversation on a ConPTY always has the freshest such activity, so this is
+    // the "newest wins" tiebreaker when two records claim one (tabToken, pid).
+    int64_t TabSessionFreshness(const Agentmaster::SessionInfo& s) noexcept
+    {
+        int64_t f = s.lastHookUnixMs;
+        if (s.convLastActivityUnixMs > f)
+        {
+            f = s.convLastActivityUnixMs;
+        }
+        if (s.lastActivityUnixMs > f)
+        {
+            f = s.lastActivityUnixMs;
+        }
+        return f;
+    }
 }
 
 namespace Agentmaster
@@ -146,6 +195,44 @@ namespace Agentmaster
     {
         std::lock_guard guard{ _mtx };
         return _sessions.size();
+    }
+
+    std::vector<SessionInfo> SessionRegistry::_SupersedeStaleTabSiblings(const std::wstring& winnerId, const std::wstring& tabToken, uint32_t pid, int64_t winnerFreshness)
+    {
+        std::vector<SessionInfo> archived;
+        if (tabToken.empty() || pid == 0)
+        {
+            return archived; // need a ConPTY id AND a known process to assert "same claude, stale conversation"
+        }
+        for (auto& [id, s] : _sessions)
+        {
+            if (id == winnerId || !s.live)
+            {
+                continue;
+            }
+            // A DIFFERENT live process on the same WT_SESSION is a child sub-claude that inherited the
+            // parent's env (Bash-tool `claude`, `claude -p`, a hook) — a real, concurrent process; never
+            // archive it. An unknown-pid (never-observed) sibling IS archivable: it is a stale leftover
+            // record of this same conversation lineage, not a live tab.
+            if (s.pid != 0 && s.pid != pid)
+            {
+                continue;
+            }
+            if (!TabTokenEq(s.tabToken, tabToken))
+            {
+                continue;
+            }
+            // Newest wins: a sibling that is genuinely fresher than the confirmed-current conversation
+            // is NOT stale — never let a mis-resolved/late observation archive the live conversation.
+            if (TabSessionFreshness(s) > winnerFreshness)
+            {
+                continue;
+            }
+            s.live = false;
+            s.pendingConfirmPromptId.clear();
+            archived.push_back(s);
+        }
+        return archived;
     }
 
     void SessionRegistry::OnHookEvent(const HookMessage& msg)
@@ -318,6 +405,7 @@ namespace Agentmaster
         SessionInfo snapshot;
         bool created = false;
         bool changed = false;
+        std::vector<SessionInfo> superseded; // stale prior conversations of the same claude on this ConPTY (notified outside the lock)
         {
             std::lock_guard guard{ _mtx };
             auto it = _sessions.find(o.sessionId);
@@ -414,6 +502,17 @@ namespace Agentmaster
                 s.convLastActivityUnixMs = o.lastActivityUnixMs;
             }
 
+            // One ConPTY = one live conversation (Rule #14 / session-id divergence): this observed claude
+            // (pid o.pid) is the CURRENT conversation on its tabToken, resolved from claude's own pid-keyed
+            // presence heartbeat. Archive any STALE prior conversation of the SAME process still flagged
+            // live on that ConPTY, so the tab reconciler binds exactly one session (the newest) instead of
+            // churning between divergent ids and flickering the tab title. Only a live winner supersedes;
+            // pid + freshness guards protect a sibling sub-claude / the genuinely-current conversation.
+            if (s.live && !s.tabToken.empty())
+            {
+                superseded = _SupersedeStaleTabSiblings(o.sessionId, s.tabToken, s.pid, TabSessionFreshness(s));
+            }
+
             changed = changed || created;
             snapshot = s;
         }
@@ -450,6 +549,13 @@ namespace Agentmaster
         if (changed)
         {
             _notify(snapshot, HookEvent::Unknown);
+        }
+        // Each stale sibling archived above (live=false): notify so its hosting window drops the live
+        // card / hides the tab-strip dot and persistence saves it as Archived (restorable). Outside the
+        // lock, like every other _notify.
+        for (const auto& gone : superseded)
+        {
+            _notify(gone, HookEvent::Unknown);
         }
     }
 
