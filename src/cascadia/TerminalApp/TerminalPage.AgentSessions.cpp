@@ -20,6 +20,7 @@
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
+#include "AgentMaster/TranscriptStore.h" // ResolveContinuationTailOnDisk (restore -> newest correlated session)
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
 #include "AgentMaster/HooksBridge.h" // PipeName for the spawn spec
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
@@ -201,13 +202,44 @@ namespace winrt::TerminalApp::implementation
             ttl = ::Agentmaster::DeriveSessionTitle(dir);
         }
 
-        // Resume ONLY if Claude actually has a saved conversation for this id. A session that
-        // was opened but never received a prompt has no transcript, so `claude --resume <id>`
-        // would fail with "No conversation found" and the tab would die (exit code 1). Such a
-        // session is re-launched fresh instead — keeping its working dir + Flight Plan, with a
-        // new conversation id. (Correctness Rule #6: restore == resume, never replay.)
-        const bool wantResume = restored && !restored->id.empty() && ::Agentmaster::ClaudeConversationExists(restored->id);
-        const std::wstring resumeId = wantResume ? restored->id : std::wstring{};
+        // Restore must resume the NEWEST conversation in this tab's continuation chain — never a stale
+        // persisted id. Claude mints a NEW session id on /clear, /compact, and the plan-mode->implement
+        // transition (a silent split — the new transcript carries no link back to its parent), so an
+        // archived record's id is frequently an ANCESTOR of the conversation actually on disk. Restoring
+        // the ancestor would resume an old, truncated transcript (or, post-/clear, an empty one) instead
+        // of where the work actually is. ResolveContinuationTailOnDisk correlates the chain by cwd +
+        // temporal adjacency (same dir, each link started right after the prior turn ended, not a fork, no
+        // parallel-session ambiguity) and walks to its tail. A tab hosts exactly ONE session — the tail.
+        std::wstring resumeTargetId = (restored && !restored->id.empty()) ? restored->id : std::wstring{};
+        if (!resumeTargetId.empty())
+        {
+            const std::wstring chainCwd = (restored && !restored->workingDir.empty()) ? restored->workingDir : dir;
+            const auto tail = ::Agentmaster::ResolveContinuationTailOnDisk(resumeTargetId, chainCwd);
+            if (!tail.tailId.empty() && tail.tailId != resumeTargetId)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[restore->continuation] " + resumeTargetId + L" -> " + tail.tailId + L" (" + std::to_wstring(tail.hops) + L" hop(s) of /clear,/compact,/plan; resume the newest correlated session)\n");
+                resumeTargetId = tail.tailId;
+            }
+        }
+        // One tab = one session (the conflict the chain creates): if this window already hosts a tab bound
+        // to the conversation we'd resume, another archived ref chained to the SAME live conversation.
+        // Don't spawn a second claude on it — two claude.exe appending one transcript corrupt each other —
+        // the existing tab IS this session. (Reached on the multi-tab window-restore path; a lone
+        // Archive-restore of an already-open session likewise no-ops. The null return tells callers to
+        // count it skipped, not as a freshly homed tab.)
+        if (!resumeTargetId.empty() && _claudeTabs.find(resumeTargetId) != _claudeTabs.end())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restore-dedup] " + resumeTargetId + L" already hosted in this window — skipping duplicate resume (a tab can't be two sessions)\n");
+            return nullptr;
+        }
+        // Resume ONLY if Claude actually has a saved conversation for the (tail) id. A session that was
+        // opened but never received a prompt — or whose transcript vanished — has none, so `claude
+        // --resume <id>` would fail with "No conversation found" and the tab would die (exit code 1); it
+        // is re-launched FRESH instead (a new id, keeping the working dir + Flight Plan). (Correctness
+        // Rule #6: restore == resume, never replay.)
+        const bool wantResume = !resumeTargetId.empty() && ::Agentmaster::ClaudeConversationExists(resumeTargetId);
+        const std::wstring resumeId = wantResume ? resumeTargetId : std::wstring{};
         // forkFromId set (duplicate-tab -> fork) overrides resume/fresh: BuildClaudeSpawn mints a NEW id
         // and the commandline forks the source conversation into it (the source transcript is untouched).
         // Launch the NATIVE claude.exe by full path (resolved once at engine init; exe-only policy).
@@ -289,9 +321,11 @@ namespace winrt::TerminalApp::implementation
         }
         _sessionRegistry->Upsert(info);
 
-        // Restoring an archived session whose transcript no longer exists yields a FRESH id
-        // (restore-fresh). The new (live) record above replaces nothing, so drop the stale
-        // archived record under the old id — otherwise it would linger in the Archived list.
+        // The spawned id differs from the restored record's id in two cases: restore-FRESH (the
+        // transcript was gone, so a new conversation id was minted) and the continuation REDIRECT above
+        // (we resumed the chain tail, an id distinct from the persisted ancestor). Either way the new
+        // (live) record is keyed by the spawned id and the old archived record under restored->id is now
+        // stale — drop it so it doesn't linger in the Archived list as a duplicate/ancestor.
         if (restored && !restored->id.empty() && restored->id != spec.sessionId)
         {
             _sessionRegistry->Remove(restored->id);

@@ -523,14 +523,19 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
             // Kind-aware re-home: Codex resumes via `codex resume <uuid>` (rollout-gated on
-            // SessionInfo.codexSessionId), Claude via `claude --resume <id>`.
-            if (isCodex)
+            // SessionInfo.codexSessionId), Claude via `claude --resume <id>`. _LaunchClaudeSession resumes
+            // the NEWEST conversation in this ref's continuation chain (Claude splits ids on /clear,
+            // /compact, the plan->implement transition) and returns null when that conversation is ALREADY
+            // hosted by an earlier ref this restore — two archived refs that chained to one live
+            // conversation (a tab can't be two sessions). A null is NOT a new tab, so it must not advance
+            // the resumed/focus accounting — count it skipped.
+            const auto homed = isCodex
+                ? _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info)
+                : _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            if (!homed)
             {
-                _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
-            }
-            else
-            {
-                _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+                ++skipped;
+                continue;
             }
             if (!selSessionId.empty() && entry.sessionId == selSessionId)
             {
