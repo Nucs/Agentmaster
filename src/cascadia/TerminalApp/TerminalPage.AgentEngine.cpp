@@ -288,20 +288,22 @@ namespace winrt::TerminalApp::implementation
             // _SetTabAgentDot is idempotent on an unchanged color. The SAME hop also re-pins the
             // hosting tab's TITLE when the registry title changed (cross-window rename, Rule #11:
             // an Explorer-tree/board rename in ANOTHER window writes the shared registry; only the
-            // window holding the tab can retitle it — the equality guards on both sync directions
-            // make the settled case a no-op, so this never loops). Token detached in ~TerminalPage
-            // (Rule #10 — a closed window's observer must not linger on the shared registry).
+            // window holding the tab can retitle it — _SyncClaudeTabTitleFromRegistry reads the
+            // title FRESH and pins it through the latch, so the two sync directions converge and
+            // never ping-pong). The RunAsync coalesces bursts; the title MUST be re-read on the UI
+            // thread, NOT captured here, or a stale snapshot races a concurrent rename and the
+            // directions oscillate (the /clear re-home title-swap + [Unknown] flood). Token detached
+            // in ~TerminalPage (Rule #10 — a closed window's observer must not linger on the registry).
             const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
             _agentDotObserverToken = _sessionRegistry->AddObserver([weakThis, dispatcher](const ::Agentmaster::SessionInfo& s, ::Agentmaster::HookEvent) {
                 const std::wstring id = s.id;
                 const auto state = s.state;
                 const bool live = s.live;
-                const std::wstring title = s.title;
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live, title]() {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live]() {
                     if (auto self = weakThis.get())
                     {
                         self->_UpdateTabAgentDot(id, state, live);
-                        self->_SyncClaudeTabTitleFromRegistry(id, title);
+                        self->_SyncClaudeTabTitleFromRegistry(id); // reads the CURRENT registry title (no stale capture)
                     }
                 });
             });

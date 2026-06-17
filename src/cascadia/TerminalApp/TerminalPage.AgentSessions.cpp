@@ -257,7 +257,7 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto impl = _GetTabImpl(tab))
             {
-                impl->SetTabText(winrt::hstring{ ttl });
+                _SetClaudeTabTextPinned(impl, winrt::hstring{ ttl }); // pinned: registry->tab, no write-back
             }
             // Per-directory tab color: the dir's persisted color, or a stable auto-assigned one.
             _ApplyDirColorToTab(tab, dir);
@@ -692,7 +692,7 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto impl = _GetTabImpl(tab))
             {
-                impl->SetTabText(winrt::hstring{ ttl });
+                _SetClaudeTabTextPinned(impl, winrt::hstring{ ttl }); // pinned: registry->tab, no write-back
             }
             _ApplyDirColorToTab(tab, dir);
             _AttachClaudeOverlay(tab, handleId); // the per-tab badge (status color from the record's state)
@@ -957,6 +957,29 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out-pane] " + id + L" (Claude pane leaving this window; binding kept alive for the destination)\n");
     }
 
+    // Agentmaster (Rule #11): pin a Claude tab's title from a registry-driven source — rename,
+    // restore, smart-naming, bind, or the cross-window registry-observer push. Tab::SetTabText
+    // synchronously raises PropertyChanged("Title") -> TerminalPage::_UpdateTitle ->
+    // _SyncClaudeTitleFromTab on the SAME call stack, which would normally mirror the tab text
+    // back into the registry. That reverse mirror must fire ONLY for a genuine USER tab rename,
+    // never for our own programmatic pin: the _pinningClaudeTabTitle latch makes the re-entrant
+    // _SyncClaudeTitleFromTab a no-op for the duration of this SetTabText. Without it, a title the
+    // async registry observer captured at notify-time can go stale (the registry advanced), the
+    // pin writes that stale value back, and the registry<->tab directions ping-pong forever —
+    // the observed /clear symptom: the tab title swapping between the new "Agentmaster" and the
+    // old conversation's "am master" while [Unknown] notify lines flooded hooks.log (a re-home
+    // writes the title twice in quick succession, seeding two distinct in-flight values).
+    void TerminalPage::_SetClaudeTabTextPinned(const winrt::com_ptr<Tab>& tabImpl, const winrt::hstring& title)
+    {
+        if (!tabImpl)
+        {
+            return;
+        }
+        _pinningClaudeTabTitle = true;
+        const auto resetPin = wil::scope_exit([this]() noexcept { _pinningClaudeTabTitle = false; });
+        tabImpl->SetTabText(title);
+    }
+
     // Agentmaster: rename a Claude session from the Manager's Explorer Tree (or a Triage-Board
     // card's menu — same editor). A session's title is ONE value — the Explorer-tree name, the
     // persisted SessionInfo.title, and the WT tab title.
@@ -983,7 +1006,7 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto impl = _GetTabImpl(tab))
             {
-                impl->SetTabText(title);
+                _SetClaudeTabTextPinned(impl, title); // pinned: don't bounce back into the tab->registry mirror
             }
         }
     }
@@ -997,8 +1020,13 @@ namespace winrt::TerminalApp::implementation
     // is re-pinned so the tab never falls back to claude's volatile OSC title and diverges.
     void TerminalPage::_SyncClaudeTitleFromTab(const TerminalApp::Tab& tab)
     {
-        if (!_sessionRegistry)
+        if (!_sessionRegistry || _pinningClaudeTabTitle)
         {
+            // _pinningClaudeTabTitle: WE are pinning this tab's title from the registry side
+            // (rename / restore / bind / cross-window push). Tab::SetTabText re-enters us
+            // synchronously; suppressing the write-back here is what stops the registry<->tab
+            // ping-pong (the /clear title-swap + [Unknown] flood). A genuine USER tab rename
+            // arrives with the latch CLEAR and still mirrors into the registry below.
             return;
         }
         const auto id = _ClaudeSessionForTab(tab);
@@ -1015,11 +1043,11 @@ namespace winrt::TerminalApp::implementation
         const auto info = _sessionRegistry->Get(id);
         if (text.empty())
         {
-            // Override cleared (ResetTabText) -> re-pin to the managed name. Re-enters once, then
-            // settles (GetTabText() == title -> the equality guard below returns without writing).
+            // Override cleared (ResetTabText) -> re-pin to the managed name. Pinned, so the
+            // re-entrant _SyncClaudeTitleFromTab is a no-op (the latch), never a write-back.
             if (info && !info->title.empty())
             {
-                impl->SetTabText(winrt::hstring{ info->title });
+                _SetClaudeTabTextPinned(impl, winrt::hstring{ info->title });
             }
             return;
         }
@@ -1033,28 +1061,39 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (cross-window rename; Rule #11): the registry-observer reaction (bounced to this
     // window's UI thread by the engine-init observer, riding the same hop as the tab dot). When the
     // session's ONE title changes anywhere — an Explorer-tree/board-card rename in ANOTHER window,
-    // a restore, the smart-naming — the window actually HOSTING the tab re-pins it here. A session
-    // this window doesn't host is a cheap map-miss no-op (every window's observer sees every fleet
-    // event). Equality-guarded: re-pinning an already-matching tab writes nothing, and the
-    // SetTabText below re-enters _SyncClaudeTitleFromTab once, which sees registry == tab and also
-    // writes nothing — so the two sync directions settle instead of looping.
-    void TerminalPage::_SyncClaudeTabTitleFromRegistry(const std::wstring& sessionId, const std::wstring& title)
+    // a restore, the smart-naming, a bind/re-home — the window actually HOSTING the tab re-pins it
+    // here. A session this window doesn't host is a cheap map-miss no-op (every window's observer
+    // sees every fleet event).
+    //
+    // The title is read FRESH from the registry, never taken from the observer callback (which
+    // captured it at notify-time and may be stale by the time this coalesced UI-thread hop runs).
+    // Applying a stale value is what seeded the registry<->tab ping-pong on /clear: the re-home
+    // wrote the title twice in quick succession, so two callbacks each carried a different captured
+    // title and kept reverting one another. Reading fresh + pinning through _SetClaudeTabTextPinned
+    // (the latch, so the synchronous _SyncClaudeTitleFromTab re-entry never writes back) makes every
+    // queued push converge on the same latest value and stop.
+    void TerminalPage::_SyncClaudeTabTitleFromRegistry(const std::wstring& sessionId)
     {
-        if (title.empty())
+        if (!_sessionRegistry)
         {
-            return; // never clear a pinned tab title from the registry side (the pin re-asserts on empty)
+            return;
         }
         const auto it = _claudeTabs.find(sessionId);
         const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
         if (!tab)
         {
-            return;
+            return; // not hosted here — every window's observer fires for every fleet event
+        }
+        const auto info = _sessionRegistry->Get(sessionId);
+        if (!info || info->title.empty())
+        {
+            return; // never clear a pinned tab title from the registry side (the pin re-asserts on empty)
         }
         if (const auto impl = _GetTabImpl(tab))
         {
-            if (std::wstring{ impl->GetTabText() } != title)
+            if (std::wstring{ impl->GetTabText() } != info->title)
             {
-                impl->SetTabText(winrt::hstring{ title });
+                _SetClaudeTabTextPinned(impl, winrt::hstring{ info->title });
             }
         }
     }

@@ -429,7 +429,7 @@ namespace winrt::TerminalApp::implementation
             }
             else if (const auto s = _sessionRegistry->Get(id); s && !s->title.empty())
             {
-                impl->SetTabText(winrt::hstring{ s->title });
+                _SetClaudeTabTextPinned(impl, winrt::hstring{ s->title }); // pinned: registry->tab, no write-back
             }
         }
         _ApplyDirColorToTab(hostTab, cwd); // per-directory tab color
