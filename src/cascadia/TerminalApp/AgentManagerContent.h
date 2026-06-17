@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -388,6 +389,14 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
         winrt::Windows::UI::Xaml::Controls::Button _treeRefreshBtn{ nullptr }; // Agentmaster: the ↻ refresh button after the sort toggle (reload the current scope's data)
         winrt::Windows::UI::Xaml::Controls::StackPanel _treeHost{ nullptr };
+        // Agentmaster: id -> the live board card / tree row Button, repopulated on every _Refresh
+        // (cleared + refilled by _RebuildBoard / _RebuildTree). Used ONLY to RESTORE keyboard focus
+        // onto the same card/row after a rebuild: _Refresh recreates every element on any registry
+        // notification — including a title-only change — which would otherwise drop focus off the
+        // clicked card (the selection highlight survives via _selectedId, the focused element does
+        // not). The focused element is identified by its "b:<id>" / "t:<id>" Tag.
+        std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _boardCardsById;
+        std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _treeRowsById;
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };

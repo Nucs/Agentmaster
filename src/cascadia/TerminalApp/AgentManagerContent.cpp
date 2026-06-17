@@ -1687,6 +1687,31 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+
+        // Agentmaster: preserve keyboard focus across the rebuild below. _Refresh fires on ANY
+        // registry notification — including a mere title change (a rename, or claude floating its
+        // OSC title) — and _RebuildBoard/_RebuildTree CLEAR + recreate every card/row Button, which
+        // would otherwise drop keyboard focus off the card the user just clicked (the selection
+        // highlight survives via _selectedId; the focused ELEMENT does not). Capture the focused
+        // card/row's lens+id from its "b:<id>"/"t:<id>" Tag, then re-focus the rebuilt element after.
+        std::wstring refocusTag;
+        auto refocusState = FocusState::Unfocused;
+        if (const auto xr = _root.XamlRoot())
+        {
+            if (const auto fe = winrt::Windows::UI::Xaml::Input::FocusManager::GetFocusedElement(xr).try_as<FrameworkElement>())
+            {
+                const std::wstring tag{ winrt::unbox_value_or<winrt::hstring>(fe.Tag(), winrt::hstring{}) };
+                if (tag.rfind(L"b:", 0) == 0 || tag.rfind(L"t:", 0) == 0)
+                {
+                    refocusTag = tag;
+                    if (const auto ctrl = fe.try_as<Control>())
+                    {
+                        refocusState = ctrl.FocusState();
+                    }
+                }
+            }
+        }
+
         std::vector<SessionInfo> sessions;
         if (_registry)
         {
@@ -1700,6 +1725,31 @@ namespace winrt::TerminalApp::implementation
         if (_archiveOverlay && _archiveOverlay.Visibility() == Visibility::Visible)
         {
             _RebuildArchiveList(); // keep the open archive list current as sessions archive/restore
+        }
+
+        // Re-focus the same card/row if a tagged one held focus and still exists post-rebuild (it may
+        // have moved columns on a state change, or be gone if archived — then we leave focus be). The
+        // maps are layout-independent (filled during the rebuild), so this is reliable pre-layout.
+        if (!refocusTag.empty() && refocusState != FocusState::Unfocused)
+        {
+            const auto& map = (refocusTag.front() == L'b') ? _boardCardsById : _treeRowsById;
+            const auto it = map.find(refocusTag.substr(2));
+            if (it != map.end() && it->second)
+            {
+                // A freshly-rebuilt card/row isn't focusable until it Loads (the same reason the
+                // in-place rename box focuses in its Loaded). Try now; if it isn't ready yet, re-try
+                // on Loaded. The handler captures only the state (the sender IS the element), so there
+                // is no element<->handler cycle to leak the card.
+                if (!it->second.Focus(refocusState))
+                {
+                    it->second.Loaded([refocusState](const IInspectable& s, const RoutedEventArgs&) {
+                        if (const auto c = s.try_as<Control>())
+                        {
+                            c.Focus(refocusState);
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -1848,6 +1898,11 @@ namespace winrt::TerminalApp::implementation
         // row — Rename… / Archive… / Open New Session Here — one card/row, one action set
         // (Linked Lenses). The menu acts on the captured id/cwd, never "the selected session".
         card.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
+        // Agentmaster: tag + register the card so _Refresh can RESTORE keyboard focus onto it after
+        // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
+        // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
+        card.Tag(winrt::box_value(winrt::hstring{ L"b:" + s.id }));
+        _boardCardsById[s.id] = card;
         return card;
     }
 
@@ -2043,6 +2098,7 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::_RebuildBoard(const std::vector<SessionInfo>& sessions)
     {
         _boardHost.Children().Clear();
+        _boardCardsById.clear(); // refilled by _MakeCard below (focus-restore map; see _Refresh)
         if (_boardScope)
         {
             // The label exists only WHILE a directory is scoped (paired with "Show all"); unscoped
@@ -2429,6 +2485,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _treeHost.Children().Clear();
+        _treeRowsById.clear(); // refilled below (focus-restore map; see _Refresh). Cleared ONLY on
+                               // the full-rebuild path — the rename early-return above keeps the tree
+                               // (and so its existing map) intact.
 
         // Agentmaster: EXTERNAL scope renders the Fleet Observer's observe-only external claudes
         // (the _externalClaudes table, a different source than the registry snapshot) grouped by cwd,
@@ -2796,6 +2855,10 @@ namespace winrt::TerminalApp::implementation
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
                 rowBtn.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
+                // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
+                // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
+                rowBtn.Tag(winrt::box_value(winrt::hstring{ L"t:" + id }));
+                _treeRowsById[id] = rowBtn;
                 _treeHost.Children().Append(rowBtn);
             }
         }
