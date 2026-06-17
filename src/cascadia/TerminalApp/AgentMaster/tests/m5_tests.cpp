@@ -1365,6 +1365,7 @@ static void TestAppSettings()
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
         in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to 5
+        in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
         CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
@@ -1378,6 +1379,10 @@ static void TestAppSettings()
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
         CHECK(out.waitingDecayMinutes == 0u, "settings waitingDecayMinutes stored 0 (= never) round-trips as 0");
+        CHECK(out.hiddenSessionIds.size() == 2 &&
+                  out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
+                  out.hiddenSessionIds[1] == L"22222222-2222-2222-2222-222222222222",
+              "settings hiddenSessionIds round-trip (order preserved)");
     }
 
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
@@ -1387,6 +1392,7 @@ static void TestAppSettings()
         CHECK(out.defaultAutopilotMode == AutopilotMode::Off && out.maxAutoSends == 100u, "settings autopilot defaults on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
+        CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
     }

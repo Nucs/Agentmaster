@@ -479,6 +479,11 @@ namespace winrt::TerminalApp::implementation
         content->SetSettingsHandler([weakThis](::Agentmaster::AppSettings s) {
             if (auto self = weakThis.get())
             {
+                // hiddenSessionIds (the Sessions browser's "Hide from list" set) is owned by the
+                // page's hide action + the cog's "Reset hidden sessions", each a freshest-disk RMW.
+                // The cog FORM never edits it, so preserve the on-disk value here so a form Save
+                // can't regress a hide/reset done since the modal was seeded (incl. by another window).
+                s.hiddenSessionIds = ::Agentmaster::LoadAppSettings().hiddenSessionIds;
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
                 // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle
@@ -527,6 +532,15 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ShowSessionsPage();
+            }
+        });
+        // Agentmaster (Sessions page; SESSIONS.md): the Settings cog's "Reset hidden sessions"
+        // clears the user's "Hide from list" set (owned by the page, not the cog form) and re-shows
+        // every hidden session in the Sessions browser.
+        content->SetResetHiddenSessionsHandler([weakThis]() {
+            if (auto self = weakThis.get())
+            {
+                self->_ResetHiddenSessions();
             }
         });
 

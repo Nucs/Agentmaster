@@ -310,6 +310,13 @@ namespace Agentmaster
         // the splitter itself on drag release (read-modify-write of settings.json, not the cog),
         // seeded into every window's Archive shell. Default 0.5 == the original 50/50 split.
         double archiveSplitFraction{ 0.5 };
+        // Agentmaster (Sessions page; SESSIONS.md): the session ids the user chose to HIDE from the
+        // global Sessions browser ("Hide from list" on a row's right-click menu). Persisted here so
+        // a hide sticks across restarts; cleared from the Settings cog's "Reset hidden sessions"
+        // (both paths a freshest-disk read-modify-write of settings.json). The Sessions page filters
+        // these out of its table; nothing else reads the list — it is purely a browse-list
+        // preference, never a lifecycle action (a hidden session is untouched on disk).
+        std::vector<std::wstring> hiddenSessionIds{};
     };
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====

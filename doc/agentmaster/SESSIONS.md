@@ -29,8 +29,13 @@
 - **Content:** all Claude Code sessions on this machine whose **last activity** falls inside the
   selected window (default **1 month**) — not just Agentmaster-managed ones: everything under
   `~/.claude/projects/`.
-- **Search bar:** `[ search for sessions ] (👤) (🤖) (📁) (📄) (F) [1 month]`
-  - All five are **toggle buttons** (click = select/deselect, visible selected state):
+- **Search bar:** `[ search for sessions ] (👤) (🤖) (📁) (📄) (F) [1 month] (↻)`
+  - **`↻` Refresh** (`_sessRefreshBtn`, rightmost) re-runs the gather pass — re-enumerate the
+    window's transcripts + load-or-refresh every sidecar index — so a session created (or grown)
+    since the page opened shows up and its new content folds into the search index. Same pass as
+    opening the page; the `_sessionsIndexing` flag dedupes an in-flight gather, so a double-click
+    is safe.
+  - All five toggles are **toggle buttons** (click = select/deselect, visible selected state):
     - `👤` selected ⇒ the search also scans **user messages** (typed prompts).
     - `🤖` selected ⇒ the search also scans **agent + tools** (everything *but* user messages:
       assistant text/thinking, tool inputs/results, system content).
@@ -64,6 +69,15 @@
 - **Opened sessions get more:** a session that is currently OPEN in this app (live in the
   registry) renders enriched — its **per-working-dir tab color** chip, the live **state glyph**,
   and Jump-to-tab; see §6.6 for the full row-affordance matrix.
+- **Hide from list:** a row's **right-click → "Hide from list"** drops that session from the
+  browser (`_HideSessionFromList`), persisted in `AppSettings.hiddenSessionIds` via a freshest-disk
+  read-modify-write (the splitter/`treeSort` pattern), so it survives restarts. The render filters
+  the set out at its single chokepoint (`_RenderSessionsTable` — covers both the empty-query and
+  search paths) and the count shows `· N hidden`. It is a pure **browse-list preference** — the
+  transcript on disk is never touched and nothing else (registry / Triage Board / Archive) reads the
+  list. **Resettable** from the Settings cog's **"Reset hidden sessions"** button (`_ResetHiddenSessions`
+  via `SetResetHiddenSessionsHandler`), which clears the set and re-shows every hidden session. The
+  cog FORM never edits the list, so the cog's Save preserves it from freshest disk (no regression).
 
 ### 1a. Resolved behaviors (proposals — confirm before build)
 

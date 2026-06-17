@@ -467,6 +467,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeFilesBtn{ nullptr }; // 📄 files accessed
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessFuzzyBtn{ nullptr }; // (F) fuzzy
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
+        winrt::Windows::UI::Xaml::Controls::Button _sessRefreshBtn{ nullptr }; // ↻ — re-enumerate the window + load-or-refresh each sidecar index (pick up new/updated sessions)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sessRangePopup{ nullptr }; // hover: From/To range picker (answer Q4 — text boxes)
         winrt::Windows::UI::Xaml::Controls::TextBox _sessFromBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _sessToBox{ nullptr };
@@ -683,6 +684,8 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ResolveRestoreChainTail(const std::wstring& clickedId, const std::wstring& dirHint, const std::wstring& titleHint); // Agentmaster: follow a /clear+plan-restart continuation chain to its TAIL (TranscriptStore) so resume/restore land where the user LEFT OFF, not the earliest link they recognize by title; upserts a minimal archived-shaped record for an unmanaged tail. Returns clickedId when there is no newer continuation (or for a Codex record).
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends
+        void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": append to AppSettings.hiddenSessionIds (freshest-disk RMW) + drop it from the table (the transcript on disk is untouched)
+        void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
         // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
         // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.
         void _RegisterAgentPageOverlay(const winrt::Windows::UI::Xaml::Controls::Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss);

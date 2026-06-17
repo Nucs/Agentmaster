@@ -430,6 +430,12 @@ namespace Agentmaster
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
+        auto hidden = json::Value::MkArr();
+        for (const auto& id : s.hiddenSessionIds)
+        {
+            hidden.Push(json::Value::MkStr(id));
+        }
+        o.Set(L"hiddenSessionIds", std::move(hidden));
         return o;
     }
 
@@ -457,6 +463,16 @@ namespace Agentmaster
             // must not collapse a pane (fall back to the 50/50 default instead).
             const double f = v.NumAt(L"archiveSplitFraction", 0.5);
             s.archiveSplitFraction = (f > 0.05 && f < 0.95) ? f : 0.5;
+        }
+        if (const auto* h = v.Find(L"hiddenSessionIds"); h && h->type == json::Value::Type::Arr)
+        {
+            for (const auto& e : h->arr)
+            {
+                if (e.type == json::Value::Type::Str && !e.str.empty())
+                {
+                    s.hiddenSessionIds.push_back(e.str);
+                }
+            }
         }
         return s;
     }

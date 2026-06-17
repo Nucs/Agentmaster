@@ -5853,6 +5853,19 @@ namespace winrt::TerminalApp::implementation
         tabImpl.copy_from(winrt::get_self<Tab>(tabBase));
         if (tabImpl)
         {
+            // Agentmaster: the pinned Manager tab (index 0) is non-movable — it must never be torn
+            // out into a new window nor handed to another window by drag. Refuse to begin its drag:
+            // NOT stashing it neutralizes both tear-out seams (_onTabDroppedOutside and
+            // SendContentToOther bail on a null _stashed.draggedTab), and leaving the DataPackage
+            // without our windowId/pid means no other window's TabStripDragOver will accept it.
+            // CanDrag(false) on its TabViewItem should already stop the drag from starting; this is
+            // the belt-and-suspenders, and a same-window reorder that still slips through is snapped
+            // back by _PinManagerTabFirst() in _TabDragCompleted.
+            if (_managerTab && tabBase == _managerTab)
+            {
+                return;
+            }
+
             // First: stash the tab we started dragging.
             // We're going to be asked for this.
             _stashed.draggedTab = tabImpl;

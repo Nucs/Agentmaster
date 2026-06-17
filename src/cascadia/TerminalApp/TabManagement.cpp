@@ -123,6 +123,18 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster: index 0 is permanently reserved for the pinned, non-closable Manager tab —
+        // NOTHING may insert ahead of it. This is the single hard chokepoint for every tab insertion
+        // (both _tabs and the TabView item list go through here), so it backs the NewTabPosition math
+        // above regardless of caller or setting. _managerTab is still null while the Manager tab
+        // itself is being created (it is assigned from the return of _CreateNewTabFromPane, AFTER this
+        // method runs), so this guard never displaces that one intentional insert at 0 — it only
+        // clamps every later tab.
+        if (_managerTab && insertPosition == 0)
+        {
+            insertPosition = 1;
+        }
+
         // Add the new tab to the list of our tabs.
         _tabs.InsertAt(insertPosition, *newTabImpl);
         _mruTabs.Append(*newTabImpl);

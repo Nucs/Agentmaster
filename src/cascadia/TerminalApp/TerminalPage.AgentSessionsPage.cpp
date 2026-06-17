@@ -372,6 +372,25 @@ namespace winrt::TerminalApp::implementation
         });
         bar.Children().Append(_sessWindowBtn);
 
+        // ↻ Refresh — re-run the same gather pass that opening the page does: re-enumerate the
+        // window's transcripts and load-or-refresh every sidecar index, so a session created (or
+        // grown) since the page opened shows up and its new content folds into the search index.
+        // The _sessionsIndexing flag dedupes against an in-flight pass, so a double-click is safe.
+        _sessRefreshBtn = Button{};
+        _sessRefreshBtn.Content(winrt::box_value(winrt::hstring{ L"\x21BB" }));
+        SessSetTip(_sessRefreshBtn, L"Refresh \x2014 rescan for new sessions and re-index changed ones");
+        _sessRefreshBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            // Defer off the click tick (the page's pointer-handler discipline); the gather itself
+            // runs on a background pass and re-renders when it lands.
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (auto self = weak.get())
+                {
+                    self->_RefreshSessionsRows();
+                }
+            });
+        });
+        bar.Children().Append(_sessRefreshBtn);
+
         Grid::SetColumn(bar, 2);
         header.Children().Append(bar);
         Grid::SetRow(header, 0);
@@ -915,10 +934,21 @@ namespace winrt::TerminalApp::implementation
         addHeader(6, L"Msgs\x00B7Tools", true);
         addHeader(7, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false);
 
-        // --- the visible set: window rows ∩ the current search result (fast ∪ content hits) ---
+        // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
+        // minus the user's "Hide from list" set. This render is the single chokepoint both the
+        // empty-query and search paths flow through, so filtering hidden ids here covers both;
+        // resetting from the Settings cog just re-renders (the rows stay in _sessionsRows). A
+        // hidden session is untouched on disk — purely a browse-list preference. ---
+        const std::unordered_set<std::wstring> hidden(_appSettings.hiddenSessionIds.begin(), _appSettings.hiddenSessionIds.end());
+        int hiddenInWindow = 0;
         std::vector<const _SessionsRow*> view;
         for (const auto& r : _sessionsRows)
         {
+            if (!hidden.empty() && hidden.count(r.id))
+            {
+                ++hiddenInWindow;
+                continue;
+            }
             if (!searching || _sessionsFastIds.count(r.id) || _sessionsHitCounts.count(r.id))
             {
                 view.push_back(&r);
@@ -1111,6 +1141,27 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
             });
+            // Right-click: "Hide from list" — drop this session from the browser (persisted in
+            // AppSettings.hiddenSessionIds; resettable from the Settings cog). Deferred one tick (the
+            // MenuFlyout restores focus to its target as it closes, and the action mutates the tree —
+            // the page's pointer-handler discipline). The transcript on disk is never touched.
+            {
+                MenuFlyout rowMenu;
+                MenuFlyoutItem hideItem;
+                hideItem.Text(L"Hide from list");
+                SessSetTip(hideItem, L"Hide this session from the browser (resettable in Settings) \x2014 the transcript on disk is untouched");
+                const std::wstring rid = r.id;
+                hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_HideSessionFromList(rid);
+                        }
+                    });
+                });
+                rowMenu.Items().Append(hideItem);
+                rowB.ContextFlyout(rowMenu);
+            }
             _sessionsRowsHost.Children().Append(rowB);
         }
 
@@ -1123,6 +1174,10 @@ namespace winrt::TerminalApp::implementation
             }
             counts += L" sessions \x00B7 ";
             counts += (_sessionsFromMs > 0) ? L"custom range" : kSessPresets[std::clamp(_sessionsWindowPreset, 0, kSessPresetCount - 1)].label;
+            if (hiddenInWindow > 0)
+            {
+                counts += L" \x00B7 " + std::to_wstring(hiddenInWindow) + L" hidden"; // resettable in Settings
+            }
             if (_sessionsIndexing.load())
             {
                 counts += L" \x00B7 indexing\x2026";
@@ -1510,6 +1565,53 @@ namespace winrt::TerminalApp::implementation
                 break;
             }
         }
+    }
+
+    // Row right-click "Hide from list": append this id to AppSettings.hiddenSessionIds via a
+    // freshest-disk read-modify-write (so it sticks across restarts AND doesn't clobber another
+    // field / another window's concurrent write — the splitter/treeSort pattern), refresh THIS
+    // window's in-memory copy, and re-render the table (the render chokepoint filters it out).
+    // Resettable from the Settings cog. The transcript on disk is NEVER touched — a browse-list
+    // preference only. Already-hidden ids are a no-op (no duplicate write).
+    void TerminalPage::_HideSessionFromList(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto s = ::Agentmaster::LoadAppSettings();
+        if (std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId) == s.hiddenSessionIds.end())
+        {
+            s.hiddenSessionIds.push_back(sessionId);
+            ::Agentmaster::SaveAppSettings(s);
+        }
+        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
+        // If the hidden row was selected, drop the selection so the detail pane doesn't keep
+        // showing a session that's no longer in the list.
+        if (_sessionsSelectedId == sessionId)
+        {
+            _sessionsSelectedId.clear();
+            _ShowSessionsDetail(_sessionsSelectedId); // -> "Select a session"
+        }
+        _RenderSessionsTable();
+    }
+
+    // Settings cog "Reset hidden sessions" (wired via SetResetHiddenSessionsHandler): clear the
+    // whole hidden set (freshest-disk RMW) and re-render the Sessions page if it is built, so every
+    // hidden session reappears. No re-gather needed — the rows are still in _sessionsRows; only the
+    // render-time filter changes. A no-op when nothing is hidden.
+    void TerminalPage::_ResetHiddenSessions()
+    {
+        auto s = ::Agentmaster::LoadAppSettings();
+        if (s.hiddenSessionIds.empty())
+        {
+            _appSettings.hiddenSessionIds.clear();
+            return;
+        }
+        s.hiddenSessionIds.clear();
+        ::Agentmaster::SaveAppSettings(s);
+        _appSettings.hiddenSessionIds.clear();
+        _RenderSessionsTable(); // no-op if the page was never built (host null)
     }
 
     // ===== the generic window-level page-overlay seam (_agentPageOverlays) ===================

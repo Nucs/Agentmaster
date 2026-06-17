@@ -84,6 +84,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button (right after
         // Archived) opens the full-window browser over EVERY on-disk Claude Code session.
         void SetOpenSessionsHandler(std::function<void()> handler);
+        // Agentmaster (Sessions page; SESSIONS.md): the Settings cog's "Reset hidden sessions"
+        // button — clear the user's "Hide from list" set (AppSettings.hiddenSessionIds). The page
+        // (TerminalPage) owns the list + the Sessions browser, so the cog just fires the action there.
+        void SetResetHiddenSessionsHandler(std::function<void()> handler);
         // Agentmaster: the Explorer Tree's "refresh" button (after the sort toggle) — reload the data
         // for the CURRENT scope. The content redraws immediately; this fires so the page can force the
         // Fleet Observer to re-survey now (re-enrich the registry + recompute the External census)
@@ -329,6 +333,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(int)> _reopenWindowHandler; // Agentmaster (M10): reopen ONE saved window by record index (per-window "Reopen window")
         std::function<void()> _openArchiveHandler; // Agentmaster (Archive page): open the full-window Archive page (TerminalPage-hosted)
         std::function<void()> _openSessionsHandler; // Agentmaster (Sessions page): open the full-window global Sessions browser (TerminalPage-hosted)
+        std::function<void()> _resetHiddenSessionsHandler; // Agentmaster (Sessions page): the Settings cog's "Reset hidden sessions" action — clear AppSettings.hiddenSessionIds (TerminalPage-side)
         std::function<void()> _refreshHandler; // Agentmaster: Explorer Tree refresh -> page re-surveys the Fleet Observer (reload the current scope's data)
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
@@ -424,6 +429,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
+        winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
         winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)

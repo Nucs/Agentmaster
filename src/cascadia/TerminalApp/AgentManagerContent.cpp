@@ -857,6 +857,10 @@ namespace winrt::TerminalApp::implementation
     {
         _openSessionsHandler = std::move(handler);
     }
+    void AgentManagerContent::SetResetHiddenSessionsHandler(std::function<void()> handler)
+    {
+        _resetHiddenSessionsHandler = std::move(handler);
+    }
     void AgentManagerContent::SetRefreshHandler(std::function<void()> handler)
     {
         _refreshHandler = std::move(handler);
@@ -4244,6 +4248,27 @@ namespace winrt::TerminalApp::implementation
         _setRecentDirsLimit.PlaceholderText(L"10");
         panel.Children().Append(_setRecentDirsLimit);
 
+        // Sessions browser: un-hide every session removed via the Sessions page's right-click
+        // "Hide from list". The list lives in AppSettings.hiddenSessionIds, owned by the page
+        // (TerminalPage), so this fires the handler there rather than reading a count the cog
+        // doesn't track; the button gives inline confirmation. Re-enabled/relabeled per _ShowSettings.
+        _setResetHidden = Button{};
+        _setResetHidden.Content(winrt::box_value(L"Reset hidden sessions"));
+        AgentSetTip(_setResetHidden, L"Un-hide every session you removed from the Sessions browser with \x201CHide from list\x201D");
+        _setResetHidden.Click([this](const IInspectable& sender, const RoutedEventArgs&) {
+            if (_resetHiddenSessionsHandler)
+            {
+                _resetHiddenSessionsHandler();
+            }
+            // The list lives in TerminalPage; confirm locally (the cog doesn't track the count).
+            if (const auto b = sender.try_as<Button>())
+            {
+                b.Content(winrt::box_value(L"Hidden sessions cleared"));
+                b.IsEnabled(false);
+            }
+        });
+        panel.Children().Append(_setResetHidden);
+
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
         // the choice file / env, never inside the profile it selects). Read-only display +
@@ -4380,6 +4405,12 @@ namespace winrt::TerminalApp::implementation
         if (_setRecentDirsLimit)
         {
             _setRecentDirsLimit.Text(winrt::hstring{ std::to_wstring(_appSettings.recentDirsLimit) });
+        }
+        if (_setResetHidden)
+        {
+            // The "cleared" state is per-click feedback; restore the actionable label each open.
+            _setResetHidden.Content(winrt::box_value(L"Reset hidden sessions"));
+            _setResetHidden.IsEnabled(true);
         }
         if (_setProfileDir)
         {
