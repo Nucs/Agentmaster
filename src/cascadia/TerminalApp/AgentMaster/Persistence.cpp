@@ -940,6 +940,11 @@ namespace Agentmaster
         uint64_t g_colorSeed{ 0 }; // per-startup randomization (SeedDirColors); arbitrary until set
         bool g_colorSeedSet{ false };
         std::unordered_map<std::wstring, std::wstring> g_autoAssigned; // NormDirKey -> assigned hex (this run)
+        // The "color collection": palette colors already handed out in the CURRENT cycle. A new dir
+        // prefers a color not yet in here (spreads variety, avoids early repeats); when it fills the
+        // whole palette ("the color list is over"), AssignDirAutoColor resets it so the palette can be
+        // dealt again — while still avoiding any color a tab is actively showing.
+        std::unordered_set<std::wstring> g_dealtColors;
 
         // Install a fresh random seed if one was never set. The Engine seeds at init; this is the
         // fallback for headless/test callers that touch a color before the engine runs. Caller holds
@@ -1164,6 +1169,7 @@ namespace Agentmaster
         std::lock_guard guard{ g_dirColorMtx };
         g_colorSeed = seed;
         g_colorSeedSet = true;
+        g_dealtColors.clear(); // a fresh run / re-seed starts a fresh color collection
     }
 
     std::wstring AutoDirColorHex(const std::wstring& dir)
@@ -1184,19 +1190,24 @@ namespace Agentmaster
 
     std::wstring AssignDirAutoColor(const std::wstring& dir, const std::vector<std::wstring>& openDirKeys)
     {
-        // ALLOCATING: hand a directory an auto color that no OTHER currently-open directory holds,
-        // walking its seeded probe order until a free color is found (the "if taken, take the next
-        // one" rule — the fix for two folders sharing a color). The choice is remembered for the run
-        // so the dir's color is stable and shared by every tab in it (Rule #12); a dir keeps its color
-        // across reassignments while it stays free, and a color freed by a closed dir is reused. When
-        // every palette color is taken (more open dirs than colors) it falls back to the preferred
-        // one. NOT persisted (only explicit user picks persist — Rule #12); re-derived each run from
-        // the random per-startup seed. `openDirKeys` are the NormDirKeys of the currently-open dirs.
+        // ALLOCATING: deal a directory an auto color from the seeded probe order. Priority: a color
+        // that is BOTH not yet picked this cycle (the g_dealtColors "collection") AND not actively
+        // shown by any open tab — so colors spread across the palette and two open dirs never share
+        // one (the fix for two folders sharing a color). When the whole palette has been picked ("the
+        // color list is over"), the collection is RESET so colors can be dealt again — but the pick
+        // still tries to avoid a color a tab in any window is actively using. Only when there is no
+        // un-active color at all (more open dirs than palette colors) is a reuse unavoidable. The
+        // choice is remembered for the run so the dir's color is stable and shared by every tab in it
+        // (Rule #12); a dir keeps its color while it stays free; a color freed by a closed dir is
+        // reusable. NOT persisted (only explicit user picks persist — Rule #12); re-derived each run
+        // from the random per-startup seed. `openDirKeys` are the NormDirKeys of the currently-open dirs.
         const std::wstring key = NormDirKey(dir);
         std::lock_guard guard{ g_dirColorMtx };
         EnsureColorSeedLocked();
 
-        std::unordered_set<std::wstring> taken; // colors held by OTHER open dirs (their auto assignments)
+        // active = colors currently shown by OTHER open dirs' tabs (across ALL windows — openDirKeys
+        // is the process-wide registry's live set). These are the colors we must try not to reuse.
+        std::unordered_set<std::wstring> active;
         for (const auto& k : openDirKeys)
         {
             if (k == key)
@@ -1205,29 +1216,46 @@ namespace Agentmaster
             }
             if (const auto it = g_autoAssigned.find(k); it != g_autoAssigned.end())
             {
-                taken.insert(it->second);
+                active.insert(it->second);
             }
         }
 
-        // Keep the dir's existing color if it is still free (stable within a run).
-        if (const auto cur = g_autoAssigned.find(key); cur != g_autoAssigned.end() && taken.find(cur->second) == taken.end())
+        // Keep the dir's existing color if no open tab is actively using it (stable within a run).
+        if (const auto cur = g_autoAssigned.find(key); cur != g_autoAssigned.end() && active.find(cur->second) == active.end())
         {
             return cur->second;
         }
 
         const auto order = ColorProbeOrderLocked(key);
-        for (const size_t idx : order)
-        {
-            std::wstring cand = kAutoPalette[idx];
-            if (taken.find(cand) == taken.end())
+        const auto firstProbe = [&](auto&& usable) -> const wchar_t* {
+            for (const size_t idx : order)
             {
-                g_autoAssigned[key] = cand;
-                return cand;
+                if (usable(std::wstring{ kAutoPalette[idx] }))
+                {
+                    return kAutoPalette[idx];
+                }
             }
+            return nullptr;
+        };
+
+        // 1) Prefer a not-yet-picked color that no open tab is using.
+        const wchar_t* chosen = firstProbe([&](const std::wstring& c) {
+            return g_dealtColors.find(c) == g_dealtColors.end() && active.find(c) == active.end();
+        });
+        // 2) None left: if the whole palette has been picked, reset the collection and deal again —
+        //    still avoiding colors actively used by a tab in any window.
+        if (!chosen)
+        {
+            if (g_dealtColors.size() >= kAutoPaletteCount)
+            {
+                g_dealtColors.clear();
+            }
+            chosen = firstProbe([&](const std::wstring& c) { return active.find(c) == active.end(); });
         }
-        // Palette exhausted (more open dirs than colors) — reuse the preferred color.
-        std::wstring cand = kAutoPalette[order.front()];
+        // 3) Every palette color is actively in use (more open dirs than colors) — reuse is unavoidable.
+        std::wstring cand = chosen ? std::wstring{ chosen } : std::wstring{ kAutoPalette[order.front()] };
         g_autoAssigned[key] = cand;
+        g_dealtColors.insert(cand);
         return cand;
     }
 

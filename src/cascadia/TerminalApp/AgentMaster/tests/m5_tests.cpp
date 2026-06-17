@@ -1656,6 +1656,39 @@ static void TestTabNamingAndColor()
         const auto z = AssignDirAutoColor(L"K:\\reuse\\z", { NormDirKey(L"K:\\reuse\\y") }); // x closed
         CHECK(z != y, "a new dir avoids the still-open dir's color");
     }
+    {
+        // Exhaustion: deal all 14 colors to dirs that immediately close (empty open set) so the
+        // collection fills, then verify the next deals RESET it and still avoid actively-used colors.
+        SeedDirColors(0xC0FFEEull); // fresh collection
+        const size_t n = 14; // palette size
+        std::vector<std::wstring> dealt;
+        for (size_t i = 0; i < n; ++i)
+        {
+            dealt.push_back(AssignDirAutoColor(L"K:\\cycle\\d" + std::to_wstring(i), {}));
+        }
+        bool distinct = true;
+        for (size_t i = 0; i < dealt.size() && distinct; ++i)
+        {
+            for (size_t j = i + 1; j < dealt.size(); ++j)
+            {
+                if (dealt[i] == dealt[j])
+                {
+                    distinct = false;
+                    break;
+                }
+            }
+        }
+        CHECK(distinct, "cycle: 14 sequential deals use all 14 palette colors once (collection fills)");
+
+        // The collection is now full; the next deals must reset it and avoid the actively-open colors.
+        const auto aKey = NormDirKey(L"K:\\cycle\\openA");
+        const auto bKey = NormDirKey(L"K:\\cycle\\openB");
+        const auto ca = AssignDirAutoColor(L"K:\\cycle\\openA", {}); // collection over -> reset here
+        const auto cb = AssignDirAutoColor(L"K:\\cycle\\openB", { aKey }); // avoid A
+        const auto cc = AssignDirAutoColor(L"K:\\cycle\\openC", { aKey, bKey }); // avoid A + B
+        CHECK(ca.size() == 7 && ca[0] == L'#', "post-reset deal is a palette color");
+        CHECK(cc != ca && cc != cb, "after a collection reset, a new dir still avoids actively-used colors");
+    }
     CHECK(SerializeDirColors({}).find(L"\"version\":2") != std::wstring::npos, "dir-colors serializes at version 2");
 
     // --- DirColors serialize round-trip (pure; no disk) ---
