@@ -35,7 +35,12 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   badge on its first prompt; cleared when claude exits or the tab closes — so a started-but-unprompted
   claude (no transcript id yet) is never invisible. Dim until hover; hover/click **expands** controls
   (Autopilot cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm.
-  Off-switchable (`AppSettings.showTabOverlay`).
+  Off-switchable (`AppSettings.showTabOverlay`). Hover also reveals a **row of actions** — a folder
+  button (Open Path) + a copy menu (Session Id · working dir · branch · the REAL Claude/Codex launch
+  CLI · the full session **Summary** · the **Transcript**) + a **pencil** that toggles a **SUMMARY
+  PANEL**: a second overlay below the badge (≤20% pane width) rendering the `session-end.js` box
+  (messages/files/tasks/plan) analyzed from the transcript, its show/hide a GLOBAL setting
+  (`AppSettings.showSummaryPanel`).
   The per-tab *here-and-now* lens, complementing the Manager's *fleet* view.
 
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
@@ -932,7 +937,9 @@ What works, by area:
   in the `.agentmaster.profiles` choice file / env, never inside the profile it selects); a change
   applies on the NEXT start and is shown staged as `current → new (after restart)` until then
   (PROFILES.md). It also carries non-cog global state set elsewhere in the
-  UI but persisted through the same file: `showTabOverlay`, **`treeSort`** (the Explorer Tree's
+  UI but persisted through the same file: `showTabOverlay`, **`showSummaryPanel`** (the per-tab summary
+  panel's pencil toggle — GLOBAL across windows, written by `_ToggleSummaryPanel` via a settings.json
+  read-modify-write, NOT the cog; preserved from disk on a cog Save), **`treeSort`** (the Explorer Tree's
   NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
   the cog), and **`archiveSplitFraction`** (the Archive page's table|detail split as the table's
   fraction — written by the splitter's drag release via a read-modify-write of settings.json; star
@@ -969,6 +976,45 @@ branch is the **live** current branch (`ReadGitBranchForDir` — read from `.git
 worktree/submodule `.git` FILE + a detached HEAD → short SHA), distinct from a transcript's historical
 first-seen snapshot; and the observer's `TabActivityRow.gitBranch` is now also the **live writer** for
 `SessionInfo.branch` (the round-3 audit's "no live writer" gap), beside the off-thread transcript backfill.
+The badge also carries a **hover-only action row (row 3)** — a **folder** button (Open Path: the
+session's working dir via `explorer.exe`, off-thread) + a **copy** menu + a **pencil**. The copy menu
+yields `Session Id` · `Copy Path` (working dir) · `Copy Branch Name` · `Claude Launch CLI` · `Codex
+Launch CLI` (each the **REAL** full command — the live process commandline read from the PEB
+`ReadProcessCommandLine`, or the builder Launch/Restore would use, NOT a toy `--resume <id>`) ·
+`Summary` (the full textual session box) · `Transcript` (the whole conversation, user + assistant TEXT
+only via `ReadConversationText` — no tools/results/thinking). Every copy / Open Path plays a short
+confirmation chime (`PlaySoundW`). Built only for a LINKED session; collapsed at rest, revealed while
+the pointer is over the badge OR the copy menu is open.
+The pencil toggles a **SUMMARY PANEL** — a **second overlay** in its own slot stacked **below the
+badge** (`TerminalPaneContent::SetAgentSummaryOverlay`, capped to **20% of the pane width**, re-capped
+on the wrapper's `SizeChanged`), shown while the **GLOBAL** `AppSettings.showSummaryPanel` is ON. The
+toggle is **global, not per-session** (mirrors `showTabOverlay`/`treeSort`): the pencil hands off to
+`TerminalPage::_ToggleSummaryPanel` — a freshest-disk read-modify-write of just that field + a **live
+broadcast** to every linked overlay in the window (`AgentTabOverlay::SetSummaryEnabled`); other windows
+adopt on next launch, and the cog Save preserves it from disk (like `hiddenSessionIds`). The panel
+renders the **`~/.claude/hooks/session-end.js` box**, a faithful C++ port of that analyzer in
+`ProcessInspect`: `AnalyzeSessionTranscript` (one forward pass → user messages [deduped, noise-
+filtered], files read [`Read`] / edited [`Edit`/`Write`], branch, first/last timestamps, tasks [last
+`TodoWrite`], plan-start/plan-end signals, parent session id, plan file) + `FormatSessionDuration` +
+`FindPlanFileInTranscript` (a plan lives in the PARENT transcript). It is analyzed **off-thread**
+(`_LoadSummaryAsync`), reloaded only when the transcript **mtime grows** (a quiet tab costs one
+`GetFileAttributesEx`) and is mtime/loading-guarded. The **displayed** panel is a **TRIMMED** view
+(`full=false`) — it omits everything panel 1 (the badge) already shows (the live-state header [kept only
+for the plan-start/plan-end signal], session id, Dir, Folder, the resume CLI, Branch, Codex
+`model·effort`), leaving the value-add: Parent/Plan, Tasks, Messages, Files Read/Edited; the copy menu's
+**`Summary`** (`CopySummaryAsync`) yields the **COMPLETE** box. Section separators fill the panel
+**border-to-border** — the body is a `StackPanel` of monospace `TextBlock`s interleaved with full-width
+`Border` rules (`HorizontalAlignment::Stretch`, re-fills on resize; a fixed run of `─` can't in a
+wrapping block), driven by a sentinel line (`\x1F`) the display turns into a `Border` and the plain-text
+copy turns into a `─` rule. **System-injected "user" messages are filtered** out of the Messages list
+(`ProcessInspect::SeIsCommandNoise` — the summary-only filter, distinct from titles/Flight-Plan's
+`IsNoiseUserPrompt`): `<command-*>` / `<bash-*>` echoes, `<task-notification>` /
+`<output-file>` / `<status>`+`<summary>`, subagent telemetry `<usage>` / `<subagent_tokens>`, background
+bash `<bash-notification>` / `<shell-id>` / `<persisted-output>`, `<background-task-input>`, and
+`<system-reminder>` — the set chosen after a **full-corpus `jq` scan of all ~4900 on-disk sessions**;
+real content (C# generics `<int>` / `<T>`, exceptions, XML-doc `<summary>` / `<remarks>`, C++
+`#include`s, MSBuild/HTML, the user's review/diff templates, own type names, doc placeholders) is
+deliberately **kept** (the `<status>`&&`<summary>` combo guards against filtering C# XML-doc).
 Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
@@ -1012,7 +1058,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     Observer** — `Activity.h` (data models — incl. `AgentKind` / `CodexProcessFacts` / `CodexState`),
     `ProcessInspect.{h,cpp}` (PEB / Toolhelp / transcript primitives — id resolution + content: title /
     prompts / ctime·mtime timing; the Codex date-sharded rollout resolver + `ReadCodexFacts` + the C2
-    rollout-tail state deriver `ClassifyCodexLine`/`ReadCodexStateDelta`),
+    rollout-tail state deriver `ClassifyCodexLine`/`ReadCodexStateDelta`; the summary-panel
+    `session-end.js` port `AnalyzeSessionTranscript` / `FormatSessionDuration` / `FindPlanFileInTranscript`
+    + `ReadConversationText` + the summary-only noise filter `SeIsCommandNoise`),
     `ProcessObserver.{h,cpp}` (the S-lane; also validates + publishes the `sessions/<pid>.json`
     presence heartbeat) — `TranscriptStore.{h,cpp}` (the on-disk Claude-session
     store API for the Sessions browser, SESSIONS.md §6: global transcript enumeration, the
@@ -1034,6 +1082,11 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   - `src/cascadia/TerminalApp/AgentTabOverlay.{h,cpp}` — the per-tab link badge (TAB_OVERLAY.md),
     enriched by the observer with `model · effort · kind`; also the registry-less `ShowActivity`
     **observe badge** (`○ <kind> · unlinked`: pwsh / cmd / unprompted-claude / codex) for every non-bound tab.
+    Carries the **hover action row** (folder Open Path + a copy menu — Session Id / Copy Path / Copy
+    Branch / Claude·Codex Launch CLI / Summary / Transcript, with a chime — `BuildLaunchCli` /
+    `CopyConversationAsync`) and the **pencil-toggled SUMMARY PANEL** (`SetAgentSummaryOverlay` 2nd slot;
+    `RenderSummaryBox`/`RenderCodexSummary` with a `full` trim flag, `_SetSummaryContent`'s `StackPanel`
+    + full-width `Border` rules, `_LoadSummaryAsync` off-thread, `CopySummaryAsync` for the full box).
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
     overlay's hand-synced palette copy).
