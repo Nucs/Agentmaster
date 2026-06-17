@@ -8,6 +8,7 @@
 
 #include "ClaudeSpawn.h" // ResolveClaudeTranscriptPath, AppendStateLog
 #include "Json.h"
+#include "ProcessInspect.h" // SubagentActivityUnixMs — subagent/Task side-file activity (the parent transcript stays quiescent while a subagent runs)
 #include "SessionRegistry.h"
 #include "TranscriptStore.h" // IsNoiseUserPrompt — keep control markers out of the Flight-Plan back-fill
 
@@ -533,7 +534,64 @@ namespace Agentmaster
             }
         }
 
-        const int64_t quietForMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
+        // Agentmaster (subagent/fork activity): the parent <id>.jsonl can sit QUIESCENT while the
+        // turn's real work happens elsewhere — a Task/Agent SUBAGENT writing <id>/subagents/*.jsonl
+        // (the parent does not grow until the subagent returns), or, after a live /fork|/clear|
+        // /compact|/resume, a NEW conversation id the tab has not yet re-bound to. Two out-of-band
+        // signals recover "still working" without screen-scraping: the newest subagent/tool-result
+        // side-file write (SubagentActivityUnixMs), and claude's OWN presence heartbeat ("busy",
+        // pid-validated by the S-lane — Rule #13: a FACT the scanner may consume as a state input).
+        // Fold both into the quiescence clock so the missed-Stop / blocked-on-user synths below do
+        // NOT demote a working session: a fresh subagent write counts as a recent transcript write,
+        // and a "busy" heartbeat forces quietForMs to 0 (claude says it is working — never synthesize
+        // a turn-end). With neither signal present this is exactly the prior parent-only value, so a
+        // genuinely idle session reconciles unchanged.
+        const int64_t parentQuietMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
+        const int64_t subagentActivityMs = SubagentActivityUnixMs(st.path);
+        const bool presenceBusy = PresenceIsBusy(s.presenceStatus);
+        const bool subagentActive = subagentActivityMs > 0 && (NowMs() - subagentActivityMs) <= kScanSubagentFreshMs;
+        int64_t quietForMs = parentQuietMs;
+        if (subagentActivityMs > 0)
+        {
+            const int64_t subQuietMs = NowMs() - subagentActivityMs;
+            if (subQuietMs < quietForMs)
+            {
+                quietForMs = subQuietMs; // the conversation IS being written (just not the main file)
+            }
+        }
+        if (presenceBusy)
+        {
+            quietForMs = 0; // claude self-reports working — the transcript may be momentarily quiet, the turn is not over
+        }
+
+        // Subagent/fork activity reconciliation — the EXTERNAL-WORK mirror of recon-run above.
+        // recon-run keys on a PARENT-transcript append; this fires when the work is OUTSIDE the
+        // parent transcript: a subagent is writing <id>/subagents/*.jsonl, or presence says "busy"
+        // (which also follows a live /fork to a new id before the observer re-binds the tab). A
+        // session sitting Idle / WaitingForInput while demonstrably WORKING must read Running.
+        // Synthesized as tool ACTIVITY (PostToolUse -> Running through the ONE state machine), NOT a
+        // UserPromptSubmit (which from these states would inflate the type-ahead queue accounting).
+        // The pure gate guards BOTH arms on a NON-terminal tail, so neither a stale "busy" lingering
+        // right after a real Stop NOR a subagent's final write (which lands µs before the parent's
+        // end_turn) can bounce a just-Waiting session back to Running. The re-Get mirrors the other
+        // synths' freshest-state re-check (a real hook landing mid-pass wins), and — gated to
+        // Idle/Waiting — it self-limits: once it lands Running it stops re-firing.
+        if (ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceBusy, st.lastStopReason))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))
+            {
+                HookMessage act;
+                act.event = HookEvent::PostToolUse;
+                act.sessionId = s.id;
+                act.cwd = s.workingDir;
+                act.ts = NowMs();
+                _registry->OnHookEvent(act);
+                AppendStateLog(L"scanner.log",
+                               L"[recon-subagent] " + s.id + L" (" + (presenceBusy ? L"presence=busy" : L"subagent active") +
+                                   L", " + (fresh->state == SessionState::Idle ? L"Idle" : L"Waiting") + L" -> Running)\n");
+            }
+        }
 
         // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last
         // assistant message ended it (a TERMINAL stop_reason — end_turn / stop_sequence /
@@ -745,6 +803,15 @@ namespace Agentmaster
         if (minutes == 0 || s.state != SessionState::WaitingForInput || s.lastActivityUnixMs <= 0)
         {
             return; // disabled / not waiting / no timestamp to age against (never decay on 0)
+        }
+        // Agentmaster: never decay a session claude itself reports BUSY — a long Task/Agent subagent
+        // run keeps the heartbeat "busy" while the main transcript is quiescent, and a WaitingForInput
+        // card with a live "busy" heartbeat is the recon-subagent promotion's target (don't race it to
+        // Idle first). Rule #13 fact, consumed here as a decay input. (Subagent side-file activity is
+        // already handled upstream by the recon-subagent promotion / the quiescence fold.)
+        if (PresenceIsBusy(s.presenceStatus))
+        {
+            return;
         }
         const int64_t decayMs = static_cast<int64_t>(minutes) * 60000;
         if (nowMs - s.lastActivityUnixMs < decayMs)

@@ -1209,6 +1209,63 @@ namespace Agentmaster
 
     // ===== transcript content: timing + title + human prompts ================================
 
+    int64_t SubagentActivityUnixMs(std::wstring_view transcriptPath)
+    {
+        // The side files live in a sibling directory named after the session id: strip the
+        // ".jsonl" off "<...>/<id>.jsonl" to get "<...>/<id>", then scan its "subagents" and
+        // "tool-results" children for the newest FILE write time. (We enumerate files, not the
+        // dir, because Windows does NOT bump a directory's mtime when a file inside it is appended
+        // to — only on add/remove — and Claude APPENDS to agent-<id>.jsonl as a subagent works.)
+        if (transcriptPath.size() < 7) // shorter than "x.jsonl"
+        {
+            return 0;
+        }
+        std::wstring base{ transcriptPath };
+        constexpr std::wstring_view kExt = L".jsonl";
+        if (base.size() >= kExt.size())
+        {
+            const size_t off = base.size() - kExt.size();
+            bool isJsonl = true;
+            for (size_t i = 0; i < kExt.size(); ++i)
+            {
+                if (towlower(base[off + i]) != kExt[i]) // kExt is lowercase; the path's ext is too, but fold to be safe
+                {
+                    isJsonl = false;
+                    break;
+                }
+            }
+            if (isJsonl)
+            {
+                base.resize(off);
+            }
+        }
+        int64_t newest = 0;
+        for (const wchar_t* sub : { L"\\subagents\\*", L"\\tool-results\\*" })
+        {
+            const std::wstring pattern = base + sub;
+            WIN32_FIND_DATAW fd{};
+            const HANDLE h = ::FindFirstFileW(pattern.c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                continue; // no such side dir (the common case) — instant miss
+            }
+            do
+            {
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                {
+                    continue; // ".", "..", or a nested-subagent dir (presence-"busy" covers those)
+                }
+                const int64_t m = FileTimeToUnixMs(fd.ftLastWriteTime);
+                if (m > newest)
+                {
+                    newest = m;
+                }
+            } while (::FindNextFileW(h, &fd));
+            ::FindClose(h);
+        }
+        return newest;
+    }
+
     bool TranscriptTimesIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs)
     {
         createdUnixMs = 0;
@@ -1225,6 +1282,17 @@ namespace Agentmaster
         }
         createdUnixMs = FileTimeToUnixMs(fad.ftCreationTime);
         lastActivityUnixMs = FileTimeToUnixMs(fad.ftLastWriteTime);
+        // Agentmaster (subagent activity): while a Task/Agent subagent runs, the side files
+        // (<id>/subagents/*.jsonl, <id>/tool-results/*) grow but THIS transcript stays quiescent —
+        // so its mtime alone reads "stale". Fold the newest side-file write into "last activity" so
+        // the per-session timing adornment (and the scanner's "transcript advanced" Enter-retry
+        // check) reflect work happening inside a subagent. createdUnixMs (the conversation start) is
+        // left as the parent's — a subagent never predates its parent.
+        const int64_t subMs = SubagentActivityUnixMs(path);
+        if (subMs > lastActivityUnixMs)
+        {
+            lastActivityUnixMs = subMs;
+        }
         return true;
     }
 
@@ -2292,6 +2360,11 @@ namespace Agentmaster
         // resolve it when the matching tool_result is seen, and fall back to "edited" for any with no
         // result by end-of-transcript (a truncated tail).
         std::unordered_map<std::wstring, std::wstring> pendingWrites;
+        // Agentmaster: tool_use ids of interactive (AskUserQuestion) blocks seen so far — a later user
+        // tool_result answering one is a REAL user interaction (the user chose an answer), so it must
+        // advance "last user msg" (out.lastUserTs) like a typed prompt. The interactive-tool set mirrors
+        // SessionScanner.h's IsInteractiveTool (today: AskUserQuestion).
+        std::unordered_set<std::wstring> interactiveAskIds;
         json::Value lastTodos;
         bool haveTodos = false;
         bool isFirstUser = true;
@@ -2445,6 +2518,25 @@ namespace Agentmaster
                             out.userMsgs.push_back(content);
                         }
                     }
+                    // Agentmaster: answering an AskUserQuestion is a real user interaction, so it advances
+                    // "last user msg" too — but the answer's content is a tool_result block (not a typed
+                    // text prompt), so the text path above skips it. Detect the answer by correlating the
+                    // tool_result's tool_use_id back to a prior interactive (AskUserQuestion) tool_use
+                    // (interactiveAskIds, populated in the assistant branch below). Advance the TIMESTAMP
+                    // only — the synthetic "User has answered your questions…" text stays OUT of the
+                    // Messages list (userMsgs is real typed prompts).
+                    else if (c && c->type == json::Value::Type::Arr && !interactiveAskIds.empty())
+                    {
+                        for (const auto& blk : c->arr)
+                        {
+                            if (blk.type == json::Value::Type::Obj && blk.StrAt(L"type") == L"tool_result" &&
+                                interactiveAskIds.count(blk.StrAt(L"tool_use_id")) != 0)
+                            {
+                                out.lastUserTs = ts;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2515,6 +2607,16 @@ namespace Agentmaster
                             if (name == L"ExitPlanMode")
                             {
                                 out.hasExitPlanMode = true;
+                            }
+                            // Agentmaster: remember each interactive (AskUserQuestion) tool_use id so the
+                            // user's later tool_result answering it advances "last user msg" (see the
+                            // externalUser branch above). Mirrors SessionScanner.h's IsInteractiveTool.
+                            if (name == L"AskUserQuestion")
+                            {
+                                if (const std::wstring askId = blk.StrAt(L"id"); !askId.empty())
+                                {
+                                    interactiveAskIds.insert(askId);
+                                }
                             }
                         }
                     }
@@ -3538,5 +3640,198 @@ namespace Agentmaster
             ::CoUninitialize();
         }
         return ok;
+    }
+
+    // ===== Agentmaster: shared summary-box renderers (TAB_OVERLAY.md summary panel + the Sessions
+    // page detail). Moved here from AgentTabOverlay.cpp so the overlay and the Sessions page share
+    // ONE renderer (single source of truth — they can never drift). Pure string work; the only OS
+    // dependency lives in the callers (AnalyzeSessionTranscript / path resolution), so these are
+    // safe to invoke off the UI thread.
+    namespace
+    {
+        // The project-folder name = basename(dirname(transcriptPath)) — session-end.js getFolderName.
+        std::wstring SummaryFolderFromPath(const std::wstring& p)
+        {
+            const auto s1 = p.find_last_of(L"/\\");
+            if (s1 == std::wstring::npos)
+            {
+                return {};
+            }
+            const std::wstring dir = p.substr(0, s1);
+            const auto s2 = dir.find_last_of(L"/\\");
+            return s2 == std::wstring::npos ? dir : dir.substr(s2 + 1);
+        }
+
+        // Escape a message to ONE line (newlines/tabs -> \n / \t, like session-end.js) + truncate.
+        std::wstring SummaryEscapeMsg(const std::wstring& m)
+        {
+            std::wstring esc;
+            for (const wchar_t ch : m)
+            {
+                if (ch == L'\n')
+                    esc += L"\\n";
+                else if (ch == L'\r')
+                    ; // dropped
+                else if (ch == L'\t')
+                    esc += L"\\t";
+                else
+                    esc += ch;
+            }
+            if (esc.size() > 240)
+            {
+                esc = esc.substr(0, 237) + L"...";
+            }
+            return esc;
+        }
+    }
+
+    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full)
+    {
+        std::wstring glyph = liveGlyph, label = liveLabel;
+        const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
+        if (a.hasPlanContent)
+        {
+            glyph = L"\U0001F680"; // 🚀
+            label = L"plan-start";
+        }
+        else if (a.hasExitPlanMode)
+        {
+            glyph = L"\U0001F4CB"; // 📋
+            label = L"plan-end";
+        }
+
+        std::wstring o;
+        const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
+        // A section divider: a lone sentinel line, suppressed at the very top (a leading rule with
+        // nothing above it reads as a stray bar). The display turns it into a full-width Border rule.
+        const auto sep = [&o]() { if (!o.empty()) { o += kSummarySepMark; o += L"\n"; } };
+
+        // Header: a live-state line when full AND a live state was passed, OR a plan signal. A caller
+        // with no live state (the Sessions page passes an empty label) suppresses the otherwise-
+        // redundant header while still surfacing plan-start/plan-end (isPlan overrides glyph+label).
+        if ((full && !label.empty()) || isPlan)
+        {
+            line(glyph + L"  " + label);
+        }
+        if (full)
+        {
+            line(id);
+        }
+        if (a.hasPlanContent && !a.parentSessionId.empty())
+        {
+            line(L"Parent: " + a.parentSessionId);
+            if (!planFile.empty())
+            {
+                line(L"Plan:   " + planFile);
+            }
+        }
+        else if (!planFile.empty())
+        {
+            line(L"Plan:   " + planFile);
+        }
+        if (full)
+        {
+            line(L"Dir:    " + cwd);
+            if (const std::wstring folder = SummaryFolderFromPath(transcriptPath); !folder.empty())
+            {
+                line(L"Folder: " + folder);
+            }
+            line(L"Resume: " + resumeCmd);
+        }
+        if (full && !a.branch.empty())
+        {
+            line(L"Branch: " + a.branch);
+        }
+        if (a.tasksCompleted > 0 || a.tasksPending > 0)
+        {
+            line(L"Tasks:  " + std::to_wstring(a.tasksCompleted) + L" done / " + std::to_wstring(a.tasksPending) + L" pending");
+        }
+        if (!a.userMsgs.empty())
+        {
+            sep();
+            int i = 1;
+            for (const auto& m : a.userMsgs)
+            {
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m));
+            }
+        }
+        if (!a.filesRead.empty())
+        {
+            sep();
+            line(L"Files Read:");
+            for (const auto& f : a.filesRead)
+            {
+                line(L"   * " + f);
+            }
+        }
+        if (!a.filesCreated.empty())
+        {
+            sep();
+            line(L"Files Created:");
+            for (const auto& f : a.filesCreated)
+            {
+                line(L"   * " + f);
+            }
+        }
+        if (!a.filesEdited.empty())
+        {
+            sep();
+            line(L"Files Edited:");
+            for (const auto& f : a.filesEdited)
+            {
+                line(L"   * " + f);
+            }
+        }
+        while (!o.empty() && o.back() == L'\n')
+        {
+            o.pop_back();
+        }
+        return o;
+    }
+
+    std::wstring RenderCodexSummaryBox(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full)
+    {
+        std::wstring o;
+        const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
+        const auto sep = [&o]() { if (!o.empty()) { o += kSummarySepMark; o += L"\n"; } };
+
+        if (full)
+        {
+            line(liveGlyph + L"  " + liveLabel + L"  \x00B7 codex");
+            line(id);
+            line(L"Dir:    " + cwd);
+            if (const std::wstring folder = SummaryFolderFromPath(transcriptPath); !folder.empty())
+            {
+                line(L"Folder: " + folder);
+            }
+            line(L"Resume: " + resumeCmd);
+            std::wstring me;
+            const auto add = [&me](const std::wstring& p) { if (!p.empty()) { if (!me.empty()) me += L" \x00B7 "; me += p; } };
+            add(info.model);
+            add(info.effort);
+            add(info.sandbox);
+            if (!me.empty())
+            {
+                line(L"Model:  " + me);
+            }
+            if (!info.gitBranch.empty())
+            {
+                line(L"Branch: " + info.gitBranch);
+            }
+        }
+        if (!info.userPrompts.empty())
+        {
+            sep();
+            int i = 1;
+            for (const auto& m : info.userPrompts)
+            {
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m));
+            }
+        }
+        while (!o.empty() && o.back() == L'\n')
+        {
+            o.pop_back();
+        }
+        return o;
     }
 }

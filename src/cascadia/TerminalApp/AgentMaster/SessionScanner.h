@@ -50,6 +50,7 @@ namespace Agentmaster
     inline constexpr int64_t kScanForceConsumeBytes = 4 << 20; // a 4 MiB run with no newline -> skip it (corrupt/binary guard)
     inline constexpr int64_t kScanDiscoverMs = 1500; // idle keep-ticking cadence (drives each window's observer probe + liveness sweep when nothing is live)
     inline constexpr int64_t kScanRunRepairFreshMs = 15000; // a consumed turn event must be this FRESH (file mtime) to synthesize a missed UserPromptSubmit — a stalled/late scan must not revive an old write (belt+suspenders BEHIND the primed-cursor gate below, which is what actually blocks the history replay: mtime alone cannot — a window closed mid-turn and reopened within the window replays a FRESH file)
+    inline constexpr int64_t kScanSubagentFreshMs = 15000; // a SUBAGENT/tool-result side file written within this window == the turn is actively working inside a Task/Agent subagent (the parent <id>.jsonl is quiescent) -> hold/synthesize Running (SubagentActivityUnixMs, ProcessInspect)
 
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
     struct TranscriptEvent
@@ -221,6 +222,54 @@ namespace Agentmaster
             return false; // the turn ENDED -> ShouldSynthesizeStop's job (-> Waiting), not a resume
         }
         return sinceWriteMs <= kScanRunRepairFreshMs; // a live, fresh turn (not an old write surfacing late)
+    }
+
+    // PURE: is Claude's presence heartbeat reporting this session as actively WORKING? The presence
+    // file (~/.claude/sessions/<pid>.json "status") is claude's OWN self-report, and it (a) FOLLOWS
+    // the live conversation across /fork, /clear, /compact, /resume — it is pid-keyed, so it names
+    // the id the process is ACTUALLY in, not the stale launch id — and (b) stays "busy" for the WHOLE
+    // turn, including while a Task/Agent subagent runs and the main transcript is quiescent. So it is
+    // the one signal that covers BOTH spawn cases. The S-lane validates it against pid liveness before
+    // publishing it onto SessionInfo.presenceStatus (Rule #13: a display FACT — the OBSERVER never
+    // sets state), which is exactly why the SCANNER — the engine's state authority — may read it as a
+    // state INPUT here without violating that rule. "idle"/"waiting"/"shell"/"" are NOT "working".
+    inline bool PresenceIsBusy(std::wstring_view presenceStatus) noexcept
+    {
+        return presenceStatus == L"busy";
+    }
+
+    // PURE + total: should the reconciler synthesize Running because EXTERNAL work is active while the
+    // session sits Idle / WaitingForInput? The SUBAGENT/FORK mirror of ShouldSynthesizeRunning (which
+    // keys on a PARENT-transcript append): a tab whose turn delegated to a subagent — so the parent
+    // <id>.jsonl is quiescent while <id>/subagents/*.jsonl grows — or whose live conversation forked to
+    // a new id we have not yet re-bound, must read Running, not idle. Two signals of "still working":
+    //   * subagentActive — a subagent/tool-result side file was written within kScanSubagentFreshMs
+    //     (SubagentActivityUnixMs). Fires regardless of cursor priming — it is a CURRENT filesystem
+    //     fact, not a transcript-replay artifact, so the primed-cursor gate the parent-append repairs
+    //     need does not apply.
+    //   * presenceBusy — claude's heartbeat self-reports "busy" (it follows a live /fork to a new id).
+    // BOTH arms are gated on a NON-TERMINAL tail: a TERMINAL stop_reason (end_turn / stop_sequence /
+    // max_tokens / refusal) means the turn is OVER, and recent side-file activity / a lingering "busy"
+    // is then the TAIL END of the turn that just finished — the subagent's last write lands µs BEFORE
+    // the parent's end_turn (so it is always "fresh" at turn-end), and "busy" lingers a tick after a
+    // real Stop — NOT new work, so it must never bounce a settled (WaitingForInput) session back to
+    // Running. During a LIVE subagent the parent tail is the pending Task/Agent tool_use (non-terminal),
+    // so genuine in-flight work is unaffected. Only from the two states a missed turn-start strands a
+    // session in (Idle / WaitingForInput); Running needs no repair, and NeedsApproval / Error / Done are
+    // "needs you / ended" a mere activity signal must not clear. The caller synthesizes it as tool
+    // ACTIVITY (PostToolUse -> Running), NOT a UserPromptSubmit (which would inflate the type-ahead
+    // queue accounting, ++queuedPrompts).
+    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceBusy, std::wstring_view lastStopReason) noexcept
+    {
+        if (state != SessionState::Idle && state != SessionState::WaitingForInput)
+        {
+            return false;
+        }
+        if (IsTerminalStopReason(lastStopReason))
+        {
+            return false; // a COMPLETED turn — recent subagent activity / lingering "busy" is its tail end, not new work
+        }
+        return subagentActive || presenceBusy;
     }
 
     // Ticked on the scanner thread on the slow cadence; the probe marshals to ITS OWN UI thread

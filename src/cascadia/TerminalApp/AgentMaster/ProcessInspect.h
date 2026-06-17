@@ -249,6 +249,19 @@ namespace Agentmaster
     bool TranscriptTimesIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs);
     bool TranscriptTimes(std::wstring_view cwd, std::wstring_view sessionId, int64_t& createdUnixMs, int64_t& lastActivityUnixMs);
 
+    // Agentmaster (subagent/Task activity): the newest last-write time (Unix ms) among a session's
+    // SUBAGENT + tool-result SIDE files — Claude Code's layout writes a Task/Agent subagent's own
+    // conversation to projects/<proj>/<id>/subagents/agent-<agentId>.jsonl (sharing the parent's
+    // sessionId, isSidechain:true) and externalizes big tool outputs to .../tool-results/*, BOTH
+    // while the MAIN transcript (<id>.jsonl) stays QUIESCENT. The state engine + the timing adornment
+    // fold this in so a tab whose turn delegated to a subagent reads ACTIVE, not stale/idle.
+    // `transcriptPath` is the resolved <...>/<id>.jsonl (the side dirs are its sibling <id>/ folder;
+    // the ".jsonl" is stripped to find them). 0 when there is no such activity / no side dirs.
+    // Filesystem only — one shallow FindFirstFile per side dir, an instant miss when absent (the
+    // common case), so it is cheap enough to call each scan tick / survey. (Direct children only —
+    // a rare nested subagent is covered by the presence-"busy" floor instead.)
+    int64_t SubagentActivityUnixMs(std::wstring_view transcriptPath);
+
     // A transcript's user-facing metadata, read out-of-band for the Manager's external rows (a real
     // title instead of a bare "claude") and the read-only Flight Plan of a selected external session.
     struct TranscriptInfo
@@ -299,7 +312,7 @@ namespace Agentmaster
         std::wstring branch; // first gitBranch seen
         std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age)
         std::wstring lastTs; // last entry.timestamp (ISO) — last activity
-        std::wstring lastUserTs; // last REAL external-user message's entry.timestamp (ISO) — "last user msg" ago
+        std::wstring lastUserTs; // last real user INTERACTION's entry.timestamp (ISO) — "last user msg" ago: a typed external-user prompt OR the user's answer to an AskUserQuestion (a tool_result on an interactive tool_use), so answering a question advances the clock too
         int tasksCompleted{ 0 };
         int tasksPending{ 0 }; // pending + in_progress, from the LAST TodoWrite
         bool hasExitPlanMode{ false }; // an ExitPlanMode tool_use (plan-end signal)
@@ -312,6 +325,20 @@ namespace Agentmaster
     // Port of session-end.js parseTranscript: one forward pass over a Claude transcript .jsonl.
     // `maxBytes` 0 == the whole file. Filesystem only; `found` is false if the file can't be read.
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes);
+
+    // Agentmaster: the session-end.js summary BOX rendered to PLAIN TEXT — the SINGLE source of
+    // truth shared by the per-tab overlay's summary panel (AgentTabOverlay) AND the Sessions page's
+    // detail pane (TerminalPage.AgentSessionsPage), so the two renderings can never drift. Section
+    // dividers are emitted as a lone `kSummarySepMark` line: a display turns each into a full-width
+    // rule, the clipboard/plain path into a `─` run. `full` picks the audience:
+    //  - full=false: the value-add only (Parent/Plan, Tasks, Messages, Files) — for the overlay,
+    //    whose badge already shows the header / id / Dir / Folder / Resume / Branch.
+    //  - full=true: the COMPLETE box (also id, Dir, Folder, Resume, Branch). The header line is
+    //    emitted when `full && !liveLabel.empty()` OR the transcript is plan-start/plan-end — so a
+    //    caller with no live state (the Sessions page) can pass an empty label to suppress the
+    //    otherwise-redundant header while STILL surfacing the plan signal.
+    constexpr wchar_t kSummarySepMark = L'\x1F'; // ASCII Unit Separator — never occurs in transcript content
+    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full);
 
     // Port of session-end.js formatDuration: "2h 12m (20:21 -> 22:33)" from two ISO timestamps, the
     // HH:MM shown in LOCAL time (like the hook). Empty if either timestamp is missing/unparseable.
@@ -412,6 +439,11 @@ namespace Agentmaster
     // Read <rolloutPath> out-of-band: stat (created/last), then ReadFileHead(maxBytes; 0 == whole
     // file) -> ParseCodexRolloutText. Filesystem only. (Phase C1)
     CodexRolloutInfo ReadCodexRolloutInfo(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts);
+
+    // Agentmaster: the Codex analog of RenderSessionSummaryBox (shared by the overlay's summary
+    // panel; the Sessions page is Claude-only so it never calls this). full=false = prompts only;
+    // full=true = the complete box (header + id + Dir + Folder + Resume + Model + Branch + prompts).
+    std::wstring RenderCodexSummaryBox(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full);
 
     // ===== Codex turn-state (Phase C2): rollout-tail -> Running / Waiting / Idle ===============
     // Codex's turn lifecycle is EXPLICIT in the rollout (no stop_reason guessing): the event_msg

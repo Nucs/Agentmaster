@@ -1963,6 +1963,28 @@ static void TestBlockedAndInterruptedStates()
     CHECK(!ShouldSynthesizeResumed(SessionState::Idle, true, true, L"", L"tool_use", false, 500), "resume: Idle is recon-run's domain, not resume");
     CHECK(!ShouldSynthesizeResumed(SessionState::WaitingForInput, true, true, L"", L"tool_use", false, 500), "resume: Waiting is recon-run's domain, not resume");
 
+    // --- Subagent/fork activity: presence "busy" + external-work Running promotion (the recon-subagent gate) ---
+    CHECK(PresenceIsBusy(L"busy"), "presence: 'busy' == working");
+    CHECK(!PresenceIsBusy(L"idle"), "presence: 'idle' is not working");
+    CHECK(!PresenceIsBusy(L"waiting"), "presence: 'waiting' (for the user) is not working");
+    CHECK(!PresenceIsBusy(L"shell"), "presence: 'shell' is not working");
+    CHECK(!PresenceIsBusy(L""), "presence: no heartbeat is not working");
+    // subagentActive arm — a subagent transcript is actively growing (the parent's tail is the pending Task tool_use, non-terminal):
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, true, false, L""), "ext-work: Idle + subagent writing (no parent stop_reason) -> Running");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"tool_use"), "ext-work: subagent writing + in-flight (tool_use) tail -> Running");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"end_turn"), "ext-work: turn ENDED (terminal tail) — a subagent's final write lands us before end_turn, so 'fresh subagent' here is the just-finished turn, NOT new work: do NOT bounce Waiting->Running");
+    // presenceBusy arm — gated on a NON-terminal tail (no post-Stop flicker):
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L""), "ext-work: Idle + presence busy + in-flight tail -> Running (e.g. a freshly /fork'd conversation)");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"tool_use"), "ext-work: presence busy + mid-turn tail -> Running");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, false, true, L"end_turn"), "ext-work: stale 'busy' right after a real Stop (terminal tail) does NOT bounce Waiting back to Running");
+    // state gate — only Idle/Waiting are repairable:
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Running, true, true, L"tool_use"), "ext-work: already Running -> no-op");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::NeedsApproval, true, true, L""), "ext-work: NeedsApproval ('needs you') never cleared by activity");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Error, true, true, L""), "ext-work: Error never cleared by inference");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Done, true, true, L""), "ext-work: Done never revived");
+    // neither signal -> unchanged (a genuinely idle session):
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, false, L"tool_use"), "ext-work: no subagent + not busy -> no synthesis (parent-only path owns it)");
+
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {
         const auto p = ParseTranscriptDelta(
@@ -2410,6 +2432,44 @@ static void TestTranscriptResolve()
         CHECK(ResolveSessionIdIn(projRoot, cwd, 50000).empty(), "start after all transcripts -> empty (never-prompted)");
 
         std::filesystem::remove_all(std::filesystem::path{ root }, ec);
+    }
+
+    // --- AnalyzeSessionTranscript: answering an AskUserQuestion advances "last user msg" ----------
+    // Regression: the user's answer to AskUserQuestion is a tool_result block (not a typed text
+    // prompt), so it once never moved lastUserTs and "last user msg" stayed pinned to the older typed
+    // prompt. The answer is now correlated back to the interactive tool_use id and DOES advance the
+    // timestamp, while its synthetic "User has answered…" text stays OUT of the Messages list. A
+    // NON-interactive tool_result (a Bash result) must NOT advance it.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_lastuser_" + std::to_wstring(::GetCurrentProcessId());
+
+        // Case A: typed prompt (18:00) -> AskUserQuestion (18:06) -> the user's answer (18:10).
+        const std::wstring pAsk = base + L"_ask.jsonl";
+        MakeJsonl(pAsk,
+                  R"j({"type":"user","userType":"external","message":{"content":"do the thing"},"timestamp":"2026-01-24T18:00:00.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_ASK1","name":"AskUserQuestion","input":{"questions":[]}}]},"timestamp":"2026-01-24T18:06:41.211Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":[{"type":"tool_result","content":"User has answered your questions.","tool_use_id":"toolu_ASK1"}]},"timestamp":"2026-01-24T18:10:27.815Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pAsk, 0);
+        CHECK(a.lastUserTs == L"2026-01-24T18:10:27.815Z", "AnalyzeSessionTranscript: answering AskUserQuestion advances last-user time to the ANSWER (not the older typed prompt)");
+        CHECK(a.userMsgs.size() == 1 && a.userMsgs[0] == L"do the thing", "AnalyzeSessionTranscript: the synthetic answer text stays OUT of the Messages list (only the typed prompt)");
+
+        // Case B (control): typed prompt (19:00) -> Bash tool_use -> a Bash tool_result (19:05). A
+        // non-interactive tool result must NOT advance last-user time — it stays at the typed prompt.
+        const std::wstring pBash = base + L"_bash.jsonl";
+        MakeJsonl(pBash,
+                  R"j({"type":"user","userType":"external","message":{"content":"run a build"},"timestamp":"2026-01-24T19:00:00.000Z"})j" "\n"
+                  R"j({"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_BASH1","name":"Bash","input":{"command":"echo hi"}}]},"timestamp":"2026-01-24T19:01:00.000Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":[{"type":"tool_result","content":"hi","tool_use_id":"toolu_BASH1"}]},"timestamp":"2026-01-24T19:05:00.000Z"})j" "\n",
+                  1000, 1000);
+        const auto b = AnalyzeSessionTranscript(pBash, 0);
+        CHECK(b.lastUserTs == L"2026-01-24T19:00:00.000Z", "AnalyzeSessionTranscript: a non-interactive (Bash) tool_result does NOT advance last-user time");
+
+        std::error_code ec2;
+        std::filesystem::remove(std::filesystem::path{ pAsk }, ec2);
+        std::filesystem::remove(std::filesystem::path{ pBash }, ec2);
     }
 }
 
