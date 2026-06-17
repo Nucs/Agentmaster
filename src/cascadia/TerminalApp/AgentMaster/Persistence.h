@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -140,25 +141,35 @@ namespace Agentmaster
     // stripped, and (on Windows) lowercased — so case/slash variants of one dir collapse to one
     // key. Keys the per-directory color map and matches sibling tabs in the same directory.
     std::wstring NormDirKey(const std::wstring& dir);
-    // Install the per-startup color seed (the Engine calls this once at init with a random value, so
-    // the auto palette assignment is re-rolled every launch). A test/headless caller may pass a fixed
-    // seed for determinism; a caller that touches a color before any seed is set gets a lazy random one.
+    // Install the color seed (the Engine calls this once at init with a random value). The seed only
+    // randomizes the probe ORDER for a dir's FIRST-ever assignment (which then persists permanently);
+    // it never moves an already-assigned color. A test/headless caller may pass a fixed seed for
+    // determinism; a caller that touches a color before any seed is set gets a lazy random one.
     void SeedDirColors(uint64_t seed);
-    // A directory's auto tab color "#RRGGBB" — PURE PREVIEW, no allocation/mutation. Returns the dir's
-    // live auto assignment if it has one (so an off-tab chip matches the real tab), else the first
-    // color of its seeded probe order. Use AssignDirAutoColor to actually claim a collision-free color.
+    // A directory's auto tab color "#RRGGBB" — PURE PREVIEW, no disk/mutation: the first color of the
+    // dir's seeded probe order. Only a representative for a dir with NO persisted color; callers wanting
+    // the dir's real (permanent) color check GetDirColor first. The real pick is AssignDirAutoColor.
     std::wstring AutoDirColorHex(const std::wstring& dir);
-    // Claim a collision-free auto color for a directory: walk the dir's seeded probe sequence and take
-    // the first color no OTHER currently-open dir holds (the "if taken, take the next one" rule — the
-    // fix for two folders sharing a color). `openDirKeys` = the NormDirKeys of the currently-open dirs.
-    // Stable + shared within a run (Rule #12); freed colors are reused; NOT persisted (re-derived each
-    // run). Falls back to the preferred color when every palette slot is taken.
+    // Deal a directory a PERMANENT, collision-free auto color and persist it to dir-colors.json (so the
+    // folder keeps that color across tabs/windows/restarts — Rule #12). Prefers a color no other folder
+    // already holds; when the palette is exhausted it resets and reuses, still avoiding colors actively
+    // shown by an open tab. `openDirKeys` = the NormDirKeys of the currently-open dirs (all windows).
     std::wstring AssignDirAutoColor(const std::wstring& dir, const std::vector<std::wstring>& openDirKeys);
-    // The dir's live auto assignment this run (set by AssignDirAutoColor), or nullopt. Lets the color-
-    // change handler recognize our own auto application and skip persisting it.
-    std::optional<std::wstring> CurrentDirAutoColor(const std::wstring& dir);
-    // One-time dir-colors.json upgrade (v1 -> v2): drop the old per-dir AUTO colors (palette members,
-    // now ephemeral + collision-avoided) while keeping explicit user picks. Idempotent (version stamp).
+    // PURE core of AssignDirAutoColor (no disk; unit-testable): given the existing folder->color map
+    // and the colors currently shown by open tabs, choose dirKey's color (already-assigned wins; else
+    // first palette color no folder holds; else — palette exhausted — first not actively shown; else
+    // the dir's preferred color). Returns "#RRGGBB".
+    std::wstring ChooseDirColor(const std::wstring& dirKey,
+                                const std::vector<std::pair<std::wstring, std::wstring>>& existing,
+                                const std::unordered_set<std::wstring>& activeColors,
+                                uint64_t seed);
+    // PURE: de-collide a folder->color map so every palette color is unique across folders, keeping
+    // each folder's color where possible (first occurrence wins; duplicates get a free palette color;
+    // off-palette user picks are kept verbatim). Used by the v1->v2 migration.
+    std::vector<std::pair<std::wstring, std::wstring>>
+    DeCollideDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& entries, uint64_t seed);
+    // One-time dir-colors.json upgrade (v1 -> v2): de-collide the persisted map (every folder keeps its
+    // color where possible; duplicate palette colors are reassigned to free ones). Idempotent (version).
     void MigrateDirColorsToV2IfNeeded();
 
     // ---- templates: build + apply ----

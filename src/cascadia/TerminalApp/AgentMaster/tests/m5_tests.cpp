@@ -1605,89 +1605,92 @@ static void TestTabNamingAndColor()
     CHECK(c1 == AutoDirColorHex(L"K:\\source\\NumSharp"), "auto color deterministic");
     CHECK(c1 == AutoDirColorHex(L"k:/source/numsharp"), "auto color stable across spelling");
 
-    // --- AssignDirAutoColor: stable per dir, collision-free across concurrently-open dirs ---
+    // --- ChooseDirColor (PURE permanent allocator; no disk): permanence, uniqueness, exhaustion reset ---
     {
-        // Same dir => same color regardless of the open set; stable across spelling; CurrentDirAutoColor
-        // mirrors it; an unassigned dir reports none.
-        const auto a = AssignDirAutoColor(L"K:\\proj\\alpha", {});
-        CHECK(a.size() == 7 && a[0] == L'#', "assigned color is #RRGGBB");
-        CHECK(a == AssignDirAutoColor(L"K:\\proj\\alpha", {}), "assigned color stable for a dir");
-        CHECK(a == AssignDirAutoColor(L"k:/proj/alpha/", {}), "assigned color stable across spelling");
-        CHECK(CurrentDirAutoColor(L"K:\\proj\\alpha").has_value() && *CurrentDirAutoColor(L"K:\\proj\\alpha") == a,
-              "CurrentDirAutoColor returns the assignment");
-        CHECK(!CurrentDirAutoColor(L"K:\\proj\\never-assigned").has_value(), "unassigned dir has no current color");
-    }
-    {
-        // Collision avoidance: 14 dirs (the palette size), each seeing the prior ones as open, get 14
-        // DISTINCT colors — this is the "two folders, same color" fix.
+        const uint64_t seed = 0xA11CE5EEull;
+        using Map = std::vector<std::pair<std::wstring, std::wstring>>;
+
+        // (0) An already-assigned folder keeps its color — permanence (independent of seed/open set).
+        const Map one = { { L"k:\\a", L"#123456" } };
+        CHECK(ChooseDirColor(L"k:\\a", one, {}, seed) == L"#123456", "assigned folder keeps its color (permanent)");
+        CHECK(ChooseDirColor(L"k:\\a", one, {}, 999ull) == L"#123456", "permanence is seed-independent");
+
+        // (1) Assigning palette-many folders in turn (each appended to the map) yields all-DISTINCT
+        // colors — the "two folders, same color" fix: a new folder avoids every color already assigned.
         const size_t n = 14; // == kAutoPalette size in Persistence.cpp
-        std::vector<std::wstring> openKeys;
-        std::vector<std::wstring> assigned;
-        for (size_t i = 0; i < n; ++i)
-        {
-            const std::wstring dir = L"K:\\fleet\\dir" + std::to_wstring(i);
-            assigned.push_back(AssignDirAutoColor(dir, openKeys));
-            openKeys.push_back(NormDirKey(dir));
-        }
-        bool allDistinct = true;
-        for (size_t i = 0; i < assigned.size() && allDistinct; ++i)
-        {
-            for (size_t j = i + 1; j < assigned.size(); ++j)
-            {
-                if (assigned[i] == assigned[j])
-                {
-                    allDistinct = false;
-                    break;
-                }
-            }
-        }
-        CHECK(allDistinct, "N<=palette concurrently-open dirs get N distinct colors (no collision)");
-
-        // Palette exhausted: the (n+1)-th open dir reuses a slot but still yields a valid palette color.
-        const auto overflow = AssignDirAutoColor(L"K:\\fleet\\overflow", openKeys);
-        CHECK(overflow.size() == 7 && overflow[0] == L'#', "overflow dir still gets a palette color");
-    }
-    {
-        // A color freed by a closed dir is reusable; a new dir still avoids a STILL-open dir's color.
-        SeedDirColors(0xBEEFCAFEull);
-        const auto x = AssignDirAutoColor(L"K:\\reuse\\x", {});
-        const auto y = AssignDirAutoColor(L"K:\\reuse\\y", { NormDirKey(L"K:\\reuse\\x") });
-        CHECK(x != y, "two concurrently-open dirs differ");
-        const auto z = AssignDirAutoColor(L"K:\\reuse\\z", { NormDirKey(L"K:\\reuse\\y") }); // x closed
-        CHECK(z != y, "a new dir avoids the still-open dir's color");
-    }
-    {
-        // Exhaustion: deal all 14 colors to dirs that immediately close (empty open set) so the
-        // collection fills, then verify the next deals RESET it and still avoid actively-used colors.
-        SeedDirColors(0xC0FFEEull); // fresh collection
-        const size_t n = 14; // palette size
-        std::vector<std::wstring> dealt;
-        for (size_t i = 0; i < n; ++i)
-        {
-            dealt.push_back(AssignDirAutoColor(L"K:\\cycle\\d" + std::to_wstring(i), {}));
-        }
+        Map existing;
+        std::unordered_set<std::wstring> seen;
         bool distinct = true;
-        for (size_t i = 0; i < dealt.size() && distinct; ++i)
+        for (size_t i = 0; i < n; ++i)
         {
-            for (size_t j = i + 1; j < dealt.size(); ++j)
+            const std::wstring key = NormDirKey(L"k:\\fleet\\dir" + std::to_wstring(i));
+            const auto c = ChooseDirColor(key, existing, {}, seed);
+            existing.emplace_back(key, c);
+            if (!seen.insert(c).second)
             {
-                if (dealt[i] == dealt[j])
-                {
-                    distinct = false;
-                    break;
-                }
+                distinct = false;
             }
         }
-        CHECK(distinct, "cycle: 14 sequential deals use all 14 palette colors once (collection fills)");
+        CHECK(distinct && seen.size() == n, "palette-many folders get distinct colors (collision-free)");
 
-        // The collection is now full; the next deals must reset it and avoid the actively-open colors.
-        const auto aKey = NormDirKey(L"K:\\cycle\\openA");
-        const auto bKey = NormDirKey(L"K:\\cycle\\openB");
-        const auto ca = AssignDirAutoColor(L"K:\\cycle\\openA", {}); // collection over -> reset here
-        const auto cb = AssignDirAutoColor(L"K:\\cycle\\openB", { aKey }); // avoid A
-        const auto cc = AssignDirAutoColor(L"K:\\cycle\\openC", { aKey, bKey }); // avoid A + B
-        CHECK(ca.size() == 7 && ca[0] == L'#', "post-reset deal is a palette color");
-        CHECK(cc != ca && cc != cb, "after a collection reset, a new dir still avoids actively-used colors");
+        // (2) Palette exhausted (all 14 assigned): a new folder RESETS the collection and reuses, but
+        // avoids the colors open tabs are actively showing.
+        const std::wstring activeHex = existing.front().second;
+        const auto reused = ChooseDirColor(L"k:\\fleet\\extra", existing, { activeHex }, seed);
+        CHECK(reused.size() == 7 && reused[0] == L'#', "exhausted -> still a palette color");
+        CHECK(reused != activeHex, "exhausted reuse avoids an actively-shown color");
+
+        // (3) Every palette color is active (more open dirs than colors): reuse is unavoidable, but the
+        // result is still a valid palette color.
+        std::unordered_set<std::wstring> allActive;
+        for (const auto& [k, h] : existing)
+        {
+            allActive.insert(h);
+        }
+        const auto forced = ChooseDirColor(L"k:\\fleet\\extra2", existing, allActive, seed);
+        CHECK(forced.size() == 7 && forced[0] == L'#', "all-active -> fallback is still a palette color");
+    }
+
+    // --- DeCollideDirColors (v1->v2 migration core): fix duplicate palette colors, keep user picks ---
+    {
+        const std::vector<std::pair<std::wstring, std::wstring>> in = {
+            { L"k:\\desktop", L"#E06C75" }, // palette
+            { L"k:\\eli", L"#E06C75" }, // dup of desktop -> reassign
+            { L"k:\\numsharp", L"#2BBAC5" }, // palette
+            { L"k:\\grimes", L"#2BBAC5" }, // dup of numsharp -> reassign
+            { L"k:\\agentmaster", L"#9E696A" }, // off-palette user pick -> keep verbatim
+        };
+        const auto out = DeCollideDirColors(in, 0xD3C0DEull);
+        CHECK(out.size() == in.size(), "de-collide keeps every folder");
+        const auto colorOf = [&](const std::wstring& key) -> std::wstring {
+            for (const auto& [k, h] : out)
+            {
+                if (k == key)
+                {
+                    return h;
+                }
+            }
+            return L"";
+        };
+        CHECK(colorOf(L"k:\\desktop") == L"#E06C75", "first occurrence keeps its palette color");
+        CHECK(colorOf(L"k:\\numsharp") == L"#2BBAC5", "first occurrence keeps its palette color (2)");
+        CHECK(colorOf(L"k:\\agentmaster") == L"#9E696A", "off-palette user pick preserved verbatim");
+        CHECK(colorOf(L"k:\\eli") != L"#E06C75", "duplicate reassigned away from desktop");
+        CHECK(colorOf(L"k:\\grimes") != L"#2BBAC5", "duplicate reassigned away from numsharp");
+        std::unordered_set<std::wstring> palSeen;
+        bool allUnique = true;
+        for (const auto& [k, h] : out)
+        {
+            if (h == L"#9E696A")
+            {
+                continue; // off-palette user pick — not a palette slot
+            }
+            if (!palSeen.insert(h).second)
+            {
+                allUnique = false;
+            }
+        }
+        CHECK(allUnique, "de-collide leaves no two folders sharing a palette color");
     }
     CHECK(SerializeDirColors({}).find(L"\"version\":2") != std::wstring::npos, "dir-colors serializes at version 2");
 
