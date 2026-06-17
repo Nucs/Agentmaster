@@ -763,10 +763,12 @@ What works, by area:
   Rule #11). A launched session's default name is **smart-derived from its cwd**
   (`DeriveSessionTitle`: walk up past generic `bin/obj/Debug/...` segments to the first meaningful
   folder, then **≤16 chars** as-is / **>16 mixed-case** → its capitals only / **>16 all-lower** →
-  as-is truncated past 30 with `...`), and each tab is **colored per working directory** (the dir's
-  persisted user color, or a **collision-free auto color** — a per-startup-seeded palette permutation
-  that takes the first color no other open dir holds, re-rolled each launch and NOT persisted;
-  recoloring one tab persists that pick + recolors every tab in the dir — Rule #12). Flight Plan: a **compose row** — three top-left icon buttons
+  as-is truncated past 30 with `...`), and each tab is **colored per working directory** — a
+  **permanent** color a dir keeps across tabs/windows/restarts (persisted to `dir-colors.json`): the
+  dir's persisted color, or a fresh **collision-free auto color** (first in the dir's seeded probe
+  order that no other folder holds; on a full palette it resets + reuses, avoiding colors open tabs
+  show) that is then persisted. Recoloring one tab persists that pick + recolors every tab in the
+  dir — Rule #12). Flight Plan: a **compose row** — three top-left icon buttons
   (**eye** = Focus / jump to the live tab · **!** = Send now, *which now confirms first* ·
   **envelope** = Add to the queue) beside a **multiline textarea** that grows as you type;
   per-message actions moved off a button strip onto a **right-click menu over the messages**
@@ -1139,8 +1141,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   local silent-drop trace — a delivery that never reached the bridge: no sid / no pipe / a dead
   pipe's connect timeout; the bridge-side hooks.log only sees lines that ARRIVED), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
-  (per-working-directory tab colors — **user picks only, schema v2**; auto colors are ephemeral,
-  re-rolled each run from a random seed), `sessions-index/<sid>.json` (the Sessions browser's
+  (the **permanent** per-working-directory tab color map, schema **v2** — both user picks and
+  auto-assigned colors, so a folder keeps its color across restarts), `sessions-index/<sid>.json` (the Sessions browser's
   per-session search/stats sidecar cache — `(size,mtime)`-keyed, incrementally re-accumulated
   from the stored byte offset), `settings.json`
   (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
@@ -1213,8 +1215,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   flows back through `_UpdateTitle` → `_SyncClaudeTitleFromTab`, which writes the registry (Rule #11).
   `_LaunchClaudeSession`/`_AdoptExternalSession` also **smart-name** an untitled session
   (`DeriveSessionTitle`) and **color the tab per working dir** (`_ApplyDirColorToTab` — the dir's
-  persisted user color, else `AssignDirAutoColor`'s collision-free, per-startup-seeded auto color,
-  which is ephemeral / not persisted); a user color change flows `Tab::SetRuntimeTabColor` → the
+  persisted color, else `AssignDirAutoColor`'s collision-free auto color, which is then **persisted**
+  so the folder→color mapping is permanent); a user color change flows `Tab::SetRuntimeTabColor` → the
   new `Tab::TabColorChanged` event → `_OnClaudeTabColorChanged`, which persists it to
   `dir-colors.json` and recolors every live tab in that dir (Rule #12).
 - **Shared stdin:** the registry holds a per-session injector bound to that session's
@@ -1734,31 +1736,33 @@ build **binlog uploads as an artifact** to diagnose the first run.
     **increments** (` (fork 2)`, ` (fork 3)`, … — multi-digit, nested/earlier parens preserved) instead
     of stacking ` (fork) (fork)`. Don't reintroduce a separate tab title or scrape claude's OSC title
     for the name.
-12. **A tab's color is ONE value per working directory.** Every Claude tab in a dir shares one
-    color (filesystem-aware key `NormDirKey` — slash/case/trailing-normalized), from one of two
-    sources: an **explicit user pick** (persisted to `dir-colors.json`, schema **v2**) or a
-    **collision-free AUTO color** (ephemeral — re-derived every run, **NOT** persisted). On
-    launch/restore/adopt `_ApplyDirColorToTab` paints the dir's persisted user color if one exists,
-    else `AssignDirAutoColor` claims an auto one: a **per-startup random seed** (Engine init →
-    `SeedDirColors`) drives a deterministic Fisher-Yates **permutation** of the palette per dir (the
-    "fixed but randomized sequence"; splitmix64 over `(seed, key)`), and assignment **walks it,
-    taking the first color no OTHER currently-open dir holds** — the open set being the process-wide
-    registry's live sessions, passed in by `_ApplyDirColorToTab`. So two open dirs never share a
-    color (the fix for the "two folders, same color" bug — a hash collision into one `% 14` slot in
-    the old scheme); a color freed by a closed dir is reused; more open dirs than palette colors
-    falls back to the preferred slot. The color is **stable + shared within a run** (a dir keeps it
-    while free) and **re-rolled across runs** (the seed). A user color change
+12. **A tab's color is ONE value per working directory — PERMANENT.** Every Claude tab in a dir
+    shares one color (filesystem-aware key `NormDirKey` — slash/case/trailing-normalized), and a dir
+    **keeps the same color across tabs, windows, and restarts** (the user gets used to a folder's
+    color). `dir-colors.json` (schema **v2**) is the single source of truth — the PERMANENT
+    folder→color map, holding BOTH user picks and auto-assigned colors (no in-memory cycle state).
+    On launch/restore/adopt `_ApplyDirColorToTab` paints the dir's persisted color if it has one,
+    else `AssignDirAutoColor` deals a fresh one and **persists it**. The deal (pure core
+    `ChooseDirColor`): (0) an already-assigned dir keeps its color; (1) else the first color in the
+    dir's seeded probe order (Fisher-Yates / splitmix64 over `(seed, key)`) that **no other folder
+    already holds** — the "color collection" is just the palette colors present in the map, so two
+    dirs never share a color while colors remain (the fix for the "two folders, same color" bug — a
+    hash collision into one `% 14` slot in the old scheme); (2) when **every palette color is already
+    assigned** ("the color list is over") the collection **resets** — reuse is allowed, but the deal
+    still **avoids any color an OPEN tab is actively showing** (across all windows, via `openDirKeys`
+    = the process-wide registry's live set); (3) only when every palette color is active (more open
+    dirs than colors) is reuse unavoidable → the dir's preferred slot. The **seed** (Engine init →
+    `SeedDirColors`, random) only randomizes a dir's **first-ever** assignment, which then persists —
+    it never moves an assigned color. A user color change
     (`Tab::SetRuntimeTabColor`/`Reset` → `TabColorChanged` → `_OnClaudeTabColorChanged`) **persists
-    it for the dir AND recolors every live tab in that dir** (Rule #8); a reset drops the entry.
-    `_OnClaudeTabColorChanged` carries **two de-dupes** that make our OWN writes no-ops: vs the
-    persisted user color (our user-pick fan-out + a reset) AND vs the live auto color
-    (`CurrentDirAutoColor` — our launch-time auto paint, applied but **never persisted**); only a
-    genuine user pick differs from both and is written. Don't regress either — together they keep
-    propagation from looping AND keep the ephemeral auto colors out of `dir-colors.json`. A one-time
-    `MigrateDirColorsToV2IfNeeded` (Engine init) upgrades a v1 file by **dropping the old per-dir
-    auto colors** (palette members — provably auto, and the source of the stale collisions) while
-    **keeping user picks** (off-palette hexes). (The default *name*, `DeriveSessionTitle`, only
-    seeds an *untitled* session — a real/renamed title wins, Rule #11.)
+    it for the dir AND recolors every live tab in that dir** (Rule #8); a reset drops the entry. A
+    single de-dupe (`GetDirColor(dir) == newHex`) makes our OWN writes no-ops — our launch-time auto
+    paint AND a user-pick fan-out already match the persisted color, so only a genuine NEW user pick
+    re-persists + re-fans (no loop). A one-time `MigrateDirColorsToV2IfNeeded` (Engine init)
+    **de-collides** a v1 file (`DeCollideDirColors`): every folder keeps its color where possible,
+    duplicate palette colors are reassigned to free ones, and off-palette user picks are kept
+    verbatim — fixing the existing collisions without discarding the mapping. (The default *name*,
+    `DeriveSessionTitle`, only seeds an *untitled* session — a real/renamed title wins, Rule #11.)
 13. **Fleet Observer: rostered == ours; correlate by `WT_SESSION`, never guess; provenance: push
     wins for state.** A claude correlated to a tab in OUR published roster (its shell == the ConPTY
     root of one of our tabs) is running in one of our windows, so it is **OURS** (`RunningApp::
