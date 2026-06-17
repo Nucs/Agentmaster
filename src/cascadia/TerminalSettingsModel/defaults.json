@@ -564,6 +564,11 @@
         { "command": "duplicateTab", "id": "Terminal.DuplicateTab" },
         { "command": "nextTab", "id": "Terminal.NextTab" },
         { "command": "prevTab", "id": "Terminal.PrevTab" },
+        // Agentmaster: next tab with the visual tab-switcher FORCED OFF ("disabled") so it jumps
+        // immediately (the global tabSwitcherMode default is "inOrder", which would pop the palette).
+        // _SelectNextTab's wraparound math lands index 0 — the pinned Agent Manager tab — when moving
+        // right off the last tab. Bound to alt+right (see the keybindings section).
+        { "command": { "action": "nextTab", "tabSwitcherMode": "disabled" }, "id": "Agentmaster.NextTabImmediate" },
         { "command": { "action": "switchToTab", "index": 0 }, "id": "Terminal.SwitchToTab0" },
         { "command": { "action": "switchToTab", "index": 1 }, "id": "Terminal.SwitchToTab1" },
         { "command": { "action": "switchToTab", "index": 2 }, "id": "Terminal.SwitchToTab2" },
@@ -771,8 +776,12 @@
         { "keys": "alt+shift+right", "id": "Terminal.ResizePaneRight" },
         { "keys": "alt+shift+up", "id": "Terminal.ResizePaneUp" },
         { "keys": "alt+down", "id": "Terminal.MoveFocusDown" },
-        { "keys": "alt+left", "id": "Terminal.MoveFocusLeft" },
-        { "keys": "alt+right", "id": "Terminal.MoveFocusRight" },
+        // Agentmaster: alt+left jumps straight to the pinned Agent Manager tab (tab 0); alt+right
+        // cycles forward through the tabs in this window and wraps back to the Manager off the last
+        // one. These REPLACE the upstream MoveFocusLeft/Right pane-focus bindings (alt+up/down keep
+        // pane-focus navigation). See Agentmaster.NextTabImmediate in the actions section above.
+        { "keys": "alt+left", "id": "Terminal.SwitchToTab0" },
+        { "keys": "alt+right", "id": "Agentmaster.NextTabImmediate" },
         { "keys": "alt+up", "id": "Terminal.MoveFocusUp" },
         { "keys": "ctrl+alt+left", "id": "Terminal.MoveFocusPrevious" },
 

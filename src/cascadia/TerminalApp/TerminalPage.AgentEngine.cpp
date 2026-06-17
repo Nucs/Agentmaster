@@ -469,11 +469,6 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_scheduler->SetGlobalPause(paused);
                 }
-                // Agentmaster: pressing the Pause/Resume Autopilot button jumps to the Manager tab,
-                // so hitting pause always lands the user on the Triage Board to assess + take control
-                // of the fleet (and resume takes them back). Runs on the UI thread (the Click handler),
-                // so touching the TabView here is safe.
-                self->_FocusManagerTab();
             }
         });
         content->SetConfirmHandler([weakThis](winrt::hstring id, bool confirm) {
@@ -648,25 +643,6 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
             _UpdateTabIndices();
-        }
-    }
-
-    // Agentmaster: jump to (select) the pinned Manager tab. Wired into the Pause-Autopilot action
-    // so pressing Pause/Resume lands the user on the Triage Board to assess + take control of the
-    // fleet. Routes through _SelectTab (the canonical tab-switch path: sets the TabView selection
-    // and updates focus, startup-state aware) rather than poking _tabView directly. Resolving the
-    // index from _managerTab keeps it correct even if the tab briefly drifted before _PinManagerTabFirst
-    // snapped it back to 0. No-op when the Manager tab is absent.
-    void TerminalPage::_FocusManagerTab()
-    {
-        if (!_managerTab)
-        {
-            return;
-        }
-        uint32_t idx{};
-        if (_tabs.IndexOf(_managerTab, idx))
-        {
-            _SelectTab(idx);
         }
     }
 
