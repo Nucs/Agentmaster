@@ -2285,6 +2285,54 @@ namespace Agentmaster
         }
         return n.find(L"/plans/") != std::wstring::npos;
     }
+    // Agentmaster (summary): the inner text of the FIRST <tag>...</tag> in c, trimmed of surrounding
+    // whitespace. Empty if the tag (or its closer) is absent. Used to rebuild a slash-command prompt
+    // from its wrapper tags.
+    static std::wstring SeExtractTagText(const std::wstring& c, const wchar_t* tag)
+    {
+        const std::wstring open = std::wstring(L"<") + tag + L">";
+        const std::wstring close = std::wstring(L"</") + tag + L">";
+        const auto a = c.find(open);
+        if (a == std::wstring::npos)
+        {
+            return {};
+        }
+        const auto s = a + open.size();
+        const auto e = c.find(close, s);
+        if (e == std::wstring::npos)
+        {
+            return {};
+        }
+        std::wstring inner = c.substr(s, e - s);
+        size_t b = 0, en = inner.size();
+        while (b < en && (inner[b] == L' ' || inner[b] == L'\t' || inner[b] == L'\r' || inner[b] == L'\n'))
+        {
+            ++b;
+        }
+        while (en > b && (inner[en - 1] == L' ' || inner[en - 1] == L'\t' || inner[en - 1] == L'\r' || inner[en - 1] == L'\n'))
+        {
+            --en;
+        }
+        return inner.substr(b, en - b);
+    }
+
+    // Agentmaster (summary): reconstruct the prompt the user actually typed for a slash command —
+    // "/name args" from <command-name>/name</command-name> + <command-args>args</command-args>, with
+    // the wrapper tags stripped. Empty when there's no <command-name> (the caller then leaves the
+    // content for the noise filter). The bare word in <command-message> is redundant with /name, so
+    // it's unused. Args may legitimately contain '<'/'>' (real prompt text) — only the WRAPPER tags
+    // are removed, never angle brackets inside the user's own args.
+    static std::wstring SeReconstructCommandPrompt(const std::wstring& c)
+    {
+        std::wstring name = SeExtractTagText(c, L"command-name");
+        if (name.empty())
+        {
+            return {};
+        }
+        const std::wstring args = SeExtractTagText(c, L"command-args");
+        return args.empty() ? name : (name + L" " + args);
+    }
+
     static bool SeIsCommandNoise(const std::wstring& c)
     {
         const auto has = [&](const wchar_t* s) { return c.find(s) != std::wstring::npos; };
@@ -2506,6 +2554,19 @@ namespace Agentmaster
                                     break;
                                 }
                             }
+                        }
+                    }
+                    // Agentmaster: a slash command (/clear, /compact, /<custom>, ...) arrives as a user
+                    // message wrapped in <command-name>/x</command-name> + <command-args>...</command-args>.
+                    // Reconstruct the prompt the user actually typed — "/x args", wrapper tags stripped —
+                    // so it reads as a real numbered Message instead of being dropped as noise below. The
+                    // reconstructed text has no <command-*> wrappers, so it sails through SeIsCommandNoise;
+                    // a malformed wrapper (no reconstruction) keeps the original and is filtered as before.
+                    if (!content.empty() && content.find(L"<command-name>") != std::wstring::npos)
+                    {
+                        if (std::wstring cmd = SeReconstructCommandPrompt(content); !cmd.empty())
+                        {
+                            content = std::move(cmd);
                         }
                     }
                     if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content))
