@@ -1340,6 +1340,17 @@ namespace winrt::TerminalApp::implementation
             });
             header.Children().Append(_boardScopeBtn);
             _UpdateBoardScopeButton();
+            // Agentmaster: a "Clear" button right next to LOCAL/GLOBAL — deselect the current card/row
+            // (the Flight Plan then shows nothing-selected). Hidden while nothing is selected (kept in
+            // sync by _RebuildBoard, like "Show all"); shown once a session/external is selected.
+            _clearSelBtn = Button{};
+            _clearSelBtn.Content(winrt::box_value(L"Clear"));
+            _clearSelBtn.FontSize(11);
+            _clearSelBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            _clearSelBtn.Visibility(Visibility::Collapsed); // nothing selected at build; _RebuildBoard syncs
+            AgentSetTip(_clearSelBtn, L"Clear the current selection \x2014 deselect the card / row (the Flight Plan shows nothing selected)");
+            _clearSelBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ClearSelection(); });
+            header.Children().Append(_clearSelBtn);
             // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
             // next to the "Show all" clear button). The old unscoped "[all directories]"
             // placeholder is gone — it was display-only, restating the default.
@@ -2123,6 +2134,12 @@ namespace winrt::TerminalApp::implementation
         {
             // "Show all" disappears when we ARE showing all (no scope) and reappears once a dir is scoped.
             _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
+        }
+        if (_clearSelBtn)
+        {
+            // "Clear" is shown only while something is selected (managed OR external), like "Show all".
+            const bool hasSel = !_selectedId.empty() || !_selectedExternalSessionId.empty();
+            _clearSelBtn.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
         }
 
         // Agentmaster: the board's LOCAL/GLOBAL scope (the toggle next to the title — ONE state
@@ -5212,6 +5229,20 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_SelectSession(const std::wstring& id)
     {
+        // Agentmaster: selecting a managed session — by a card/row click OR a tab switch (the page's
+        // SelectSession() routes here) — drops that session's working directory into the Launch box, so
+        // "Launch Claude" / Open-New-Session is pre-aimed where you're working. Done BEFORE the
+        // already-selected early-out so a re-select re-aims it. The box is not focused during a card
+        // click / tab switch, so its TextChanged early-outs (it never pops the path-picker) — it just
+        // repaints the launch button via _ValidateLaunchBox.
+        if (_cwdBox && _registry && !id.empty())
+        {
+            if (const auto s = _registry->Get(id); s && !s->workingDir.empty())
+            {
+                _cwdBox.Text(winrt::hstring{ s->workingDir });
+            }
+        }
+
         // Selecting a managed session clears any external (read-only) selection — the Flight Plan is
         // one surface; a managed selection wins (it is drivable).
         const bool hadExternal = !_selectedExternalSessionId.empty();
@@ -5228,6 +5259,24 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
+    // Agentmaster: the board header's "Clear" button — deselect whatever managed session OR external is
+    // selected (the Flight Plan then shows nothing-selected). A no-op when nothing is selected. Clears
+    // BOTH selection kinds at once (the Launch box is left as-is — it is an independent launch target).
+    void AgentManagerContent::_ClearSelection()
+    {
+        if (_selectedId.empty() && _selectedExternalSessionId.empty())
+        {
+            return; // nothing selected
+        }
+        _selectedId.clear();
+        _selectedPromptId.clear();
+        _selectedExternalSessionId.clear();
+        _selectedExternalCwd.clear();
+        _selectedExternalTitle.clear();
+        _NotifyLensChanged(); // selection is part of the per-window lens
+        _Refresh();
+    }
+
     // Agentmaster: select an EXTERNAL (observe-only) row -> the Flight Plan shows its conversation
     // READ-ONLY. We host no ConPTY for it (Rule #9/#13), so this never binds an injector; it only
     // surfaces what was prompted. Clears the managed selection (one Flight-Plan surface).
@@ -5238,6 +5287,12 @@ namespace winrt::TerminalApp::implementation
         _selectedExternalSessionId = sessionId;
         _selectedExternalCwd = cwd;
         _selectedExternalTitle = title;
+        // Agentmaster: like a managed select, aim the Launch box at this external's cwd (so Launch /
+        // Open-New-Session here is one keystroke). Unfocused box => no path-picker pop (see _SelectSession).
+        if (_cwdBox && !cwd.empty())
+        {
+            _cwdBox.Text(winrt::hstring{ cwd });
+        }
         _selectedExternalKind = kind; // Phase C1: the read-only plan reader (Claude transcript vs Codex rollout)
         _selectedExternalRolloutPath = rolloutPath;
         // Linked Lenses: selecting an external — from the Explorer Tree OR a Triage-Board External

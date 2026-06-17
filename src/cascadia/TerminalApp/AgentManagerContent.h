@@ -178,6 +178,7 @@ namespace winrt::TerminalApp::implementation
         void _UpdateTreeSortButton();
 
         void _SelectSession(const std::wstring& id);
+        void _ClearSelection(); // Agentmaster: the board header's "Clear" button — deselect the managed OR external selection
         void _SetScope(const std::wstring& dir);
         std::optional<::Agentmaster::SessionInfo> _Selected(const std::vector<::Agentmaster::SessionInfo>& sessions) const;
 
@@ -399,6 +400,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr }; // Agentmaster: "[scope: <dir>]" — shown ONLY while a directory is scoped (the old "[all directories]" placeholder is gone; it was display-only)
         winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped
         winrt::Windows::UI::Xaml::Controls::Button _boardScopeBtn{ nullptr }; // Agentmaster: the board's LOCAL/GLOBAL toggle after the "TRIAGE BOARD" title — same state as _treeScopeBtn (External reads GLOBAL)
+        winrt::Windows::UI::Xaml::Controls::Button _clearSelBtn{ nullptr }; // Agentmaster: the board's "Clear" button next to LOCAL/GLOBAL — deselect the current card/row; hidden while nothing is selected (synced by _RebuildBoard, like _showAllBtn)
         winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL/EXTERNAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
         winrt::Windows::UI::Xaml::Controls::Button _treeRefreshBtn{ nullptr }; // Agentmaster: the ↻ refresh button after the sort toggle (reload the current scope's data)
