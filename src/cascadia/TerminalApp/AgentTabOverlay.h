@@ -91,6 +91,7 @@ namespace winrt::TerminalApp::implementation
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
+        void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules
         void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
         winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime); // analyze + render off-thread, set text on the UI thread
@@ -111,9 +112,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2: "<root workdir folder>/<branch>"
         winrt::Windows::UI::Xaml::Controls::StackPanel _row3{ nullptr }; // row 3: folder + copy buttons (hover-only)
 
-        // Summary panel (the 2nd slot): a scrollable monospace box, shown while the global showSummaryPanel is ON.
+        // Summary panel (the 2nd slot): a scrollable box, shown while the global showSummaryPanel is ON.
+        // The body is a StackPanel (not one TextBlock) so separators can be full-width Border rules.
         winrt::Windows::UI::Xaml::Controls::Border _summaryRoot{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBlock _summaryText{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
         int64_t _summaryMtime{ 0 }; // last-loaded transcript mtime — reload only when it grows
         bool _summaryLoading{ false }; // one analyze+render in flight at a time

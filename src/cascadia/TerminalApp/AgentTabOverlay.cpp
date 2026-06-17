@@ -46,6 +46,11 @@ namespace
     constexpr const wchar_t* kDot = L"\x00B7"; // ·
     constexpr const wchar_t* kHourglass = L"\x23F3"; // ⏳
     constexpr const wchar_t* kLink = L"\x26D3"; // ⛓
+    // Summary-box section separator SENTINEL: the renderers emit this as a lone line; the DISPLAYED
+    // panel turns each into a full-width Border rule (border to border, re-fills on resize), and the
+    // COPYABLE summary turns each into a plain-text ─ rule. \x1F (ASCII Unit Separator) never occurs
+    // in transcript content, so it's an unambiguous marker.
+    constexpr wchar_t kSepMark = L'\x1F';
 
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
@@ -281,7 +286,9 @@ namespace
 
         std::wstring o;
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
-        const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; }; // ──────────── (12)
+        // A section divider: a lone sentinel line, suppressed at the very top (a leading rule with
+        // nothing above it reads as a stray bar). The display turns it into a full-width Border rule.
+        const auto sep = [&o]() { if (!o.empty()) { o += kSepMark; o += L"\n"; } };
 
         // Header: full => always (live state / plan). UI => only the plan-start/plan-end signal (the
         // badge already shows the live state, so a non-plan header would just duplicate it).
@@ -314,10 +321,6 @@ namespace
             }
             line(L"Resume: " + resumeCmd);
         }
-        if (const std::wstring dur = FormatSessionDuration(a.firstTs, a.lastTs); !dur.empty())
-        {
-            line(L"Dur:    " + dur);
-        }
         if (full && !a.branch.empty())
         {
             line(L"Branch: " + a.branch);
@@ -329,7 +332,6 @@ namespace
         if (!a.userMsgs.empty())
         {
             sep();
-            line(L"Messages:");
             int i = 1;
             for (const auto& m : a.userMsgs)
             {
@@ -370,7 +372,7 @@ namespace
     {
         std::wstring o;
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
-        const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; };
+        const auto sep = [&o]() { if (!o.empty()) { o += kSepMark; o += L"\n"; } };
 
         if (full)
         {
@@ -399,7 +401,6 @@ namespace
         if (!info.userPrompts.empty())
         {
             sep();
-            line(L"Messages:");
             int i = 1;
             for (const auto& m : info.userPrompts)
             {
@@ -460,6 +461,12 @@ namespace
         if (text.empty() || !disp)
         {
             co_return;
+        }
+        // The clipboard gets PLAIN text, so turn each separator sentinel into a visible ─ rule (the
+        // display path turns the same sentinel into a Border instead).
+        for (size_t p = text.find(kSepMark); p != std::wstring::npos; p = text.find(kSepMark, p))
+        {
+            text.replace(p, 1, std::wstring(48, L'\x2500')); // ──────────────────────────────────────────────── (48)
         }
         disp.TryEnqueue([text]() { CopyTextToClipboard(text); });
     }
@@ -972,21 +979,18 @@ namespace winrt::TerminalApp::implementation
         {
             return; // built once (Initialize), and only for a LINKED session (never an observe badge)
         }
-        // Monospace so the session-end.js-style label columns (Session/Parent/Plan/Dir/...) line up;
-        // wrapped (no fixed-width rules) since the panel is capped to 20% of the pane. Text-selectable
-        // so the box can be copied out; never a tab stop (don't pull keyboard focus off the ConPTY).
-        _summaryText = TextBlock{};
-        _summaryText.FontFamily(FontFamily{ L"Cascadia Mono" });
-        _summaryText.FontSize(11);
-        _summaryText.TextWrapping(TextWrapping::Wrap);
-        _summaryText.IsTextSelectionEnabled(true);
-        _summaryText.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
+        // The body is a vertical StackPanel (not one TextBlock) so a section separator can be a
+        // full-width Border rule that fills the panel border-to-border + re-fills on resize — a fixed
+        // run of ─ chars can't do that in a wrapping block. _SetSummaryContent fills it: monospace,
+        // wrapped, selectable TextBlocks for text runs, interleaved with the Border rules.
+        _summaryStack = StackPanel{};
+        _summaryStack.Orientation(Orientation::Vertical);
 
         ScrollViewer sv{};
         sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
         sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
         sv.MaxHeight(480); // a long session can't run off the bottom of the pane
-        sv.Content(_summaryText);
+        sv.Content(_summaryStack);
 
         _summaryRoot = Border{};
         _summaryRoot.Background(Fill(0xE6, 0x20, 0x20, 0x20)); // near-opaque dark, matching the badge
@@ -996,6 +1000,65 @@ namespace winrt::TerminalApp::implementation
         _summaryRoot.Padding(ThicknessHelper::FromLengths(8, 6, 8, 6));
         _summaryRoot.Child(sv);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
+    }
+
+    // Render the rendered-text box into the StackPanel: contiguous text lines become one monospace,
+    // wrapped, selectable TextBlock; each separator sentinel line (kSepMark) becomes a full-width
+    // Border rule (HorizontalAlignment::Stretch => border-to-border, re-fills as the pane resizes).
+    void AgentTabOverlay::_SetSummaryContent(const std::wstring& text)
+    {
+        if (!_summaryStack)
+        {
+            return;
+        }
+        _summaryStack.Children().Clear();
+        std::wstring seg; // accumulated contiguous text lines
+        const auto flushSeg = [&]() {
+            if (seg.empty())
+            {
+                return;
+            }
+            TextBlock tb{};
+            tb.FontFamily(FontFamily{ L"Cascadia Mono" });
+            tb.FontSize(11);
+            tb.TextWrapping(TextWrapping::Wrap);
+            tb.IsTextSelectionEnabled(true);
+            tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
+            tb.Text(winrt::hstring{ seg });
+            _summaryStack.Children().Append(tb);
+            seg.clear();
+        };
+        size_t i = 0;
+        while (i <= text.size())
+        {
+            const size_t nl = text.find(L'\n', i);
+            const size_t end = (nl == std::wstring::npos) ? text.size() : nl;
+            const std::wstring lineStr = text.substr(i, end - i);
+            if (lineStr.size() == 1 && lineStr[0] == kSepMark)
+            {
+                flushSeg(); // close the run above the rule
+                Border rule{};
+                rule.Height(1);
+                rule.HorizontalAlignment(HorizontalAlignment::Stretch); // border to border
+                rule.Background(Fill(0x40, 0xFF, 0xFF, 0xFF));
+                rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
+                _summaryStack.Children().Append(rule);
+            }
+            else
+            {
+                if (!seg.empty())
+                {
+                    seg += L"\n";
+                }
+                seg += lineStr;
+            }
+            if (nl == std::wstring::npos)
+            {
+                break;
+            }
+            i = nl + 1;
+        }
+        flushSeg();
     }
 
     void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
@@ -1073,7 +1136,7 @@ namespace winrt::TerminalApp::implementation
 
     winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime)
     {
-        auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryText)
+        auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
         co_await winrt::resume_background();
 
         // Resolve the transcript path once (cached in _summaryPath across reloads). Claude: a shallow
@@ -1128,7 +1191,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Hop back to the UI thread to publish (TextBlock + member writes are UI-thread only).
+        // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
             disp.TryEnqueue([weak = get_weak(), text, path, mtime]() {
@@ -1136,7 +1199,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (!text.empty())
                     {
-                        self->_summaryText.Text(winrt::hstring{ text });
+                        self->_SetSummaryContent(text); // text runs -> TextBlocks, sentinels -> full-width rules
                     }
                     self->_summaryPath = path; // cache the resolved path for the next reload
                     self->_summaryMtime = mtime;
