@@ -302,7 +302,8 @@ unknown sid gets a minimal archived-shaped record, then the SAME transcript-gate
 the duplicate-tab fork's recipe: `claude --resume <parent> --fork-session --session-id <new>`, the
 new id minted by us so hooks/registry correlate from the first event; offered on EVERY row
 **including a LIVE one** — a fork writes its OWN transcript, so the adopt path's two-writers
-hazard doesn't apply; transcript-gated → fresh; titled `"<title> (fork)"`, logged
+hazard doesn't apply; transcript-gated → fresh; titled via `DeriveForkTitle` (`"<title> (fork)"`,
+then `(fork 2)`/`(fork 3)`/… on a fork-of-a-fork, never stacked `(fork) (fork)`), logged
 `[sessions-page->fork]`), **Open New Session Here**; double-click = resume. **Presence
 integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
 owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
@@ -1627,6 +1628,37 @@ build **binlog uploads as an artifact** to diagnose the first run.
   a tail — a `live + active-state + zero-transcript + quiescent → release` safety net would
   self-heal one); and `/resume`-ing an already-open conversation into a managed tab is **two writers**
   on one transcript (the adopt-external hazard, now reachable manually).
+- **Tab title — the mechanism + its traps (the MECHANISM behind Rule #11).** A tab carries TWO title
+  channels: the user-rename **override** `Tab::_runtimeTabText`, and the active control's
+  OSC/profile/`StartingTitle` title. `Tab::Title()`/`_GetActiveTitle()` returns the override when set,
+  else the control title — but **`Tab::GetTabText()` returns ONLY the override** (the one fact the two
+  title sync directions hinge on; missing it is easy — even a careful audit mis-read it as "the OSC
+  title leaks"). A managed Claude/Codex tab **pins** the override (`SetTabText`), so claude's volatile
+  OSC title is hidden AND can never reach the registry: the reverse mirror `_SyncClaudeTitleFromTab`
+  reads `GetTabText()` (the override), while the OSC `TitleChanged` handler only calls `UpdateTitle()`
+  (sets `Title()`, never the override). An UNBOUND `+`-tab claude has an EMPTY override, so it floats
+  with the OSC title until the observer binds it (`_BindClaudeSessionToTab` then pins the
+  managed/derived name; a name the user already gave the `+` tab wins). **Every registry→tab pin MUST
+  go through `_SetClaudeTabTextPinned`** (the `_pinningClaudeTabTitle` latch): `SetTabText`
+  synchronously raises `PropertyChanged("Title")` → `_UpdateTitle` → `_SyncClaudeTitleFromTab`, so a raw
+  pin would mirror our OWN write back into the registry — and an async observer that captured a
+  now-stale title would write it back and the tab⇄registry directions **ping-pong forever** (the
+  observed `/clear` title-swap + `[Unknown]` flood). The latch is a plain bool, UI-thread-only and
+  synchronous-safe (set → `SetTabText` → re-entry no-ops → cleared, one stack frame, `wil::scope_exit`);
+  the cross-window re-pin (`_SyncClaudeTabTitleFromRegistry`) reads the title **FRESH** on the UI thread,
+  never the captured snapshot. **Persistence is split by tab kind:** a managed tab persists as a
+  sessionId **ref** in the `WindowRecord` (the title rides `sessions.json` — Option 1, `SessionInfo.title`);
+  a shell tab persists its `_runtimeTabText` as a `RenameTab` action inside `actionsJson`
+  (`BuildStartupActions`). The two are mutually exclusive (`_ClaudeSessionForTab` non-empty → ref, empty →
+  Other), so a managed tab is never ALSO replayed as a RenameTab-bearing shell; on restore a managed tab
+  re-pins from `SessionInfo.title`, a shell tab replays its `RenameTab`. **On-disk DISPLAY titles are a
+  SEPARATE concept** — the Sessions browser / Archive page / CLI / external-row enrichment derive one
+  from the transcript via `PickDisplayTitle` (precedence `customTitle > aiTitle > summary > firstPrompt`);
+  it is **display-only** and never written over a managed `SessionInfo.title` (resume/fork-from-disk seed
+  a record's title only when the session is UNKNOWN to the registry — `_ResumeSessionFromDisk` /
+  `_ForkSessionFromDisk` gate on `!existing`). `DeriveSessionTitle` (the cwd-derived default) is never
+  empty, so a managed title can't go blank; renames are trimmed/rejected on BOTH entry points
+  (`_CommitRename` and `_SyncClaudeTitleFromTab`).
 
 ## Correctness rules (do not regress)
 
@@ -1686,9 +1718,22 @@ build **binlog uploads as an artifact** to diagnose the first run.
     host the tab (the board/tree show the whole fleet) writes the registry, and the hosting
     window's registry observer re-pins its tab (`_SyncClaudeTabTitleFromRegistry`, riding the
     tab-dot push). Equality guards make an already-in-step sync a no-op (no loops); an
-    emptied override (`ResetTabText`) re-pins. On **adopt**, a name the user already gave the `+` tab
-    wins (mirrored into the registry); else the tab is pinned to the managed name. Don't reintroduce
-    a separate tab title or scrape claude's OSC title for the name.
+    emptied override (`ResetTabText`) re-pins. A WT-tab rename is **normalized like the Explorer
+    editor** (`_CommitRename`): `_SyncClaudeTitleFromTab` trims surrounding whitespace/newlines and
+    **rejects** a blank/whitespace-only rename (re-pins the managed name — a title never goes empty),
+    and when the user typed surrounding whitespace it re-pins the tab to the trimmed value so the strip
+    matches the stored name. It reads the `_runtimeTabText` override (`Tab::GetTabText()`), **never**
+    the volatile active/OSC title (`_GetActiveTitle()`), so claude's OSC title can't leak into the
+    registry. On **adopt**, a name the user already gave the `+` tab wins (mirrored into the registry);
+    else the tab is pinned to the managed name. On an in-session **`/resume`** re-home (the tab's claude
+    switches conversation id on a stable ConPTY — `_BindClaudeSessionToTab`'s `reHomedFromOtherId`
+    latch), the new conversation keeps **ITS own** title (its registry title if any, else
+    `DeriveSessionTitle`) and the tab is re-pinned to it — it **never** inherits the superseded
+    (now-archived) conversation's still-pinned tab text, which would mask the new id under the old one's
+    name. A **fork's** name comes from `DeriveForkTitle`: a first fork appends ` (fork)`, forking a fork
+    **increments** (` (fork 2)`, ` (fork 3)`, … — multi-digit, nested/earlier parens preserved) instead
+    of stacking ` (fork) (fork)`. Don't reintroduce a separate tab title or scrape claude's OSC title
+    for the name.
 12. **A tab's color is ONE value per working directory.** Every Claude tab in a dir shares one
     color (filesystem-aware key `NormDirKey` — slash/case/trailing-normalized), from one of two
     sources: an **explicit user pick** (persisted to `dir-colors.json`, schema **v2**) or a

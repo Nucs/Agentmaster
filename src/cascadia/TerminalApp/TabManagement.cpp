@@ -335,8 +335,8 @@ namespace winrt::TerminalApp::implementation
             {
                 const auto src = _sessionRegistry->Get(sourceId);
                 const std::wstring dir = src ? src->workingDir : std::wstring{};
-                std::wstring ttl = (src && !src->title.empty()) ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
-                ttl += L" (fork)";
+                const std::wstring forkBase = (src && !src->title.empty()) ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
+                const std::wstring ttl = ::Agentmaster::DeriveForkTitle(forkBase); // bump " (fork N)" instead of stacking
                 // Codex (kind-aware): sourceId is the Codex's durable HANDLE id, which has NO Claude
                 // transcript, so the Claude branch below would silently spawn a fresh claude.exe in the
                 // codex's dir (wrong agent). Route to the Codex launcher instead — it forks via

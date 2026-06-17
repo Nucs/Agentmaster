@@ -590,6 +590,7 @@ namespace winrt::TerminalApp::implementation
         HRESULT _OpenNewTab(const Microsoft::Terminal::Settings::Model::INewContentArgs& newContentArgs);
         TerminalApp::Tab _CreateNewTabFromPane(std::shared_ptr<Pane> pane, uint32_t insertPosition = -1);
         void _OpenAgentManagerTab(); // Agentmaster
+        void _FocusManagerTab(); // Agentmaster: jump to (select) the pinned Manager tab — used by the Pause-Autopilot action so a pause/resume lands the user on the Triage Board. No-op if the Manager tab is absent.
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
         void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
         TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id)
@@ -755,6 +756,7 @@ namespace winrt::TerminalApp::implementation
         bool _SwapPane(const Microsoft::Terminal::Settings::Model::FocusDirection& direction);
         bool _MovePane(const Microsoft::Terminal::Settings::Model::MovePaneArgs args);
         bool _MoveTab(winrt::com_ptr<Tab> tab, const Microsoft::Terminal::Settings::Model::MoveTabArgs args);
+        void _MoveTabToEdge(winrt::com_ptr<Tab> tab, bool toEnd); // Agentmaster: context-menu "Move to start/end"
 
         std::shared_ptr<ThrottledFunc<>> _adjustProcessPriorityThrottled;
         void _adjustProcessPriority() const;

@@ -125,6 +125,8 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<TerminalApp::Tab, IInspectable> ActivePaneChanged;
         til::event<winrt::delegate<>> TabRaiseVisualBell;
         til::event<winrt::delegate<>> TabColorChanged; // Agentmaster: runtime tab color set/reset -> page syncs the per-directory color
+        til::event<winrt::delegate<>> MoveTabToStartRequested; // Agentmaster: context-menu "Move to start" -> page relocates this tab to the first movable slot
+        til::event<winrt::delegate<>> MoveTabToEndRequested; // Agentmaster: context-menu "Move to end" -> page relocates this tab to the last slot
         til::event<winrt::delegate<winrt::hstring /*title*/, winrt::hstring /*body*/, winrt::TerminalApp::IPaneContent /*content*/>> TabToastNotificationRequested;
         til::typed_event<IInspectable, IInspectable> TaskbarProgressChanged;
 
@@ -153,6 +155,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _moveToNewWindowMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _moveRightMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _moveLeftMenuItem{};
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _moveToStartMenuItem{}; // Agentmaster
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _moveToEndMenuItem{}; // Agentmaster
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _exportTabMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _findMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _restartConnectionMenuItem{};

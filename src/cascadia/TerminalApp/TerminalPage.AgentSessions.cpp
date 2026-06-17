@@ -1082,23 +1082,39 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const std::wstring text{ impl->GetTabText() };
+        // Trim surrounding whitespace/newlines, MATCHING the Manager's _CommitRename so both rename
+        // entry points (the WT tab header / renameTab action here; the Explorer-tree editor there)
+        // store the same normalized title. (Internal newlines — paste only — are left as-is, exactly
+        // like _CommitRename; the Manager collapses them for display via OneLine.)
+        const std::wstring raw{ impl->GetTabText() };
+        const auto firstNonWs = raw.find_first_not_of(L" \t\r\n");
+        const std::wstring text = (firstNonWs == std::wstring::npos) ?
+                                      std::wstring{} :
+                                      raw.substr(firstNonWs, raw.find_last_not_of(L" \t\r\n") - firstNonWs + 1);
         const auto info = _sessionRegistry->Get(id);
         if (text.empty())
         {
-            // Override cleared (ResetTabText) -> re-pin to the managed name. Pinned, so the
-            // re-entrant _SyncClaudeTitleFromTab is a no-op (the latch), never a write-back.
+            // Override cleared (ResetTabText) OR a blank / whitespace-only rename -> re-pin the managed
+            // name; never let a session's title go empty (Rule #11). Pinned, so the re-entrant
+            // _SyncClaudeTitleFromTab is a no-op (the latch), never a write-back.
             if (info && !info->title.empty())
             {
                 _SetClaudeTabTextPinned(impl, winrt::hstring{ info->title });
             }
             return;
         }
-        if (info && info->title == text)
+        // Persist the trimmed title only when it actually changed (a no-op Update would still churn the
+        // observer / persist / UI). A null info (no record yet) makes the Update a no-op anyway.
+        if (!info || info->title != text)
         {
-            return; // already in sync (our own pin / an Explorer-driven rename) -> no write, no loop
+            _sessionRegistry->Update(id, [&text](::Agentmaster::SessionInfo& s) { s.title = text; });
         }
-        _sessionRegistry->Update(id, [&text](::Agentmaster::SessionInfo& s) { s.title = text; });
+        // If the user typed surrounding whitespace, normalize the tab strip to the trimmed value we
+        // stored, so the tab and the Explorer/board name agree (one-title rule). Pinned -> no loop.
+        if (raw != text)
+        {
+            _SetClaudeTabTextPinned(impl, winrt::hstring{ text });
+        }
     }
 
     // Agentmaster (cross-window rename; Rule #11): the registry-observer reaction (bounced to this

@@ -1579,6 +1579,18 @@ static void TestTabNamingAndColor()
         CHECK(DeriveSessionTitle(L"C:\\x\\" + leaf) == std::wstring(30, L'a') + L"...", ">30 all-lower truncated with ...");
     }
 
+    // --- DeriveForkTitle: first fork appends " (fork)", forking a fork BUMPS the counter ---
+    CHECK(DeriveForkTitle(L"NumSharp") == L"NumSharp (fork)", "first fork appends (fork)");
+    CHECK(DeriveForkTitle(L"NumSharp (fork)") == L"NumSharp (fork 2)", "fork of a fork -> (fork 2), not (fork) (fork)");
+    CHECK(DeriveForkTitle(L"NumSharp (fork 2)") == L"NumSharp (fork 3)", "(fork 2) -> (fork 3)");
+    CHECK(DeriveForkTitle(L"NumSharp (fork 9)") == L"NumSharp (fork 10)", "multi-digit counter increments");
+    CHECK(DeriveForkTitle(L"Foo (bar)") == L"Foo (bar) (fork)", "non-fork trailing paren is preserved, gets (fork)");
+    CHECK(DeriveForkTitle(L"Foo (1.0)") == L"Foo (1.0) (fork)", "non-numeric-after-fork trailer untouched");
+    CHECK(DeriveForkTitle(L"My App (beta) (fork)") == L"My App (beta) (fork 2)", "only the trailing fork group is bumped (nested paren safe)");
+    CHECK(DeriveForkTitle(L"") == L" (fork)", "empty source -> ' (fork)' (degenerate; caller derives a base first)");
+    CHECK(DeriveForkTitle(L"(fork)") == L"(fork) (fork)", "no prefix before (fork) -> append (not bump; degenerate)");
+    CHECK(DeriveForkTitle(L"x (fork )") == L"x (fork ) (fork)", "trailing space inside the group is not a counter -> append");
+
     // --- IsGenericDirName (case-folded) ---
     CHECK(IsGenericDirName(L"bin") && IsGenericDirName(L"BIN") && IsGenericDirName(L"Obj"), "generic names case-insensitive");
     CHECK(!IsGenericDirName(L"NumSharp"), "project name not generic");

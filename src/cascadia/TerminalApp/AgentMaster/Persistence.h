@@ -128,6 +128,11 @@ namespace Agentmaster
     // then apply the length rules — <=16 chars used as-is; >16 mixed-case -> its capital letters
     // only; >16 all-lowercase -> as-is, truncated past 30 chars with "...". Never empty ("claude").
     std::wstring DeriveSessionTitle(const std::wstring& workingDir);
+    // Derive a fork's title from its source's: a first fork appends " (fork)"; forking a fork BUMPS a
+    // counter (" (fork 2)", " (fork 3)", ...) instead of stacking suffixes ("X (fork) (fork)"). Only a
+    // trailing " (fork)" / " (fork N)" group is recognized (nested/earlier parens are left intact).
+    // Pure + testable; shared by both fork entry points (duplicate-tab fork, fork-from-disk).
+    std::wstring DeriveForkTitle(const std::wstring& sourceTitle);
     // Whether a single path segment (any case) is a generic build/output/structural folder name
     // we skip when naming (bin, obj, debug, release, build, ... — the top 20).
     bool IsGenericDirName(const std::wstring& segment);

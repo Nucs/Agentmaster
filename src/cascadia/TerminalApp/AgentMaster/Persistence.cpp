@@ -1091,6 +1091,49 @@ namespace Agentmaster
         return base;
     }
 
+    std::wstring DeriveForkTitle(const std::wstring& sourceTitle)
+    {
+        // Only a trailing " (fork)" or " (fork N)" group counts — recognize it and BUMP the counter
+        // rather than appending another suffix (the "X (fork) (fork)" growth). A nested/earlier paren
+        // group ("Foo (bar)") or a non-fork trailer ("Foo (1.0)") is left intact and just gets " (fork)".
+        if (!sourceTitle.empty() && sourceTitle.back() == L')')
+        {
+            const auto open = sourceTitle.rfind(L'('); // the LAST '(' -> the trailing group, nested-paren safe
+            if (open != std::wstring::npos && open > 0 && sourceTitle[open - 1] == L' ')
+            {
+                const std::wstring prefix = sourceTitle.substr(0, open - 1); // text before the " (" separator
+                const std::wstring inner = sourceTitle.substr(open + 1, sourceTitle.size() - open - 2); // between ( and )
+                if (inner == L"fork")
+                {
+                    return prefix + L" (fork 2)"; // the unnumbered first fork -> the second
+                }
+                if (inner.rfind(L"fork ", 0) == 0)
+                {
+                    const std::wstring numStr = inner.substr(5);
+                    bool allDigits = !numStr.empty();
+                    for (const wchar_t c : numStr)
+                    {
+                        if (c < L'0' || c > L'9')
+                        {
+                            allDigits = false;
+                            break;
+                        }
+                    }
+                    if (allDigits)
+                    {
+                        unsigned long long n = 0;
+                        for (const wchar_t c : numStr)
+                        {
+                            n = n * 10ull + static_cast<unsigned long long>(c - L'0');
+                        }
+                        return prefix + L" (fork " + std::to_wstring(n + 1) + L")";
+                    }
+                }
+            }
+        }
+        return sourceTitle + L" (fork)";
+    }
+
     std::wstring NormDirKey(const std::wstring& dir)
     {
         std::wstring s = dir;

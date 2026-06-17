@@ -412,6 +412,10 @@ namespace winrt::TerminalApp::implementation
         // RE-HOME (in-session `/resume`): if this SAME tab is currently bound to a DIFFERENT session
         // id, the conversation switched ids on a stable ConPTY. Supersede the old id — archive it
         // (its Flight Plan stays restorable) and drop its tab/overlay binding — then re-point below.
+        // reHomedFromOtherId records that we did so, so the title block below does NOT let the old
+        // (now-archived) conversation's still-pinned tab title bleed onto the new conversation
+        // (Rule #11: each session owns its title; the new id must show ITS name, not the archived one's).
+        bool reHomedFromOtherId = false;
         for (const auto& [oldId, weakOld] : _claudeTabs)
         {
             if (const auto t = weakOld.get(); t && t == hostTab && oldId != id)
@@ -429,6 +433,7 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
                 _claudeTabs.erase(superseded);
                 _claudeOverlays.erase(superseded);
+                reHomedFromOtherId = true; // the tab's pinned text is `superseded`'s title — don't bleed it onto `id`
                 break; // one tab hosts one session
             }
         }
@@ -453,13 +458,20 @@ namespace winrt::TerminalApp::implementation
             s.live = true; // running in a tab we control now (covers /resume to a previously-archived id)
         });
 
-        // One-title rule: a name the user already gave the tab wins (mirror it into the registry);
-        // otherwise pin the tab to the managed name. Either way it is now in _claudeTabs, so later
-        // renames sync via _SyncClaudeTitleFromTab.
+        // One-title rule (Rule #11) — give the tab THIS session's own title:
+        //   * Normal adopt/move bind: a name the user already gave the tab wins — mirror the tab's
+        //     runtime text into the registry; otherwise pin the tab to the managed/derived name.
+        //   * In-session `/resume` re-home (reHomedFromOtherId): the tab's runtime text is still the
+        //     SUPERSEDED (now-archived) conversation's pinned title. It must NOT bleed onto the new
+        //     conversation — that one owns its identity: its prior managed title if it had one, else
+        //     the cwd-derived ttl set above (DeriveSessionTitle is never empty, so the else-branch pin
+        //     always fires). Skip the tab-text-wins mirror and pin the tab to the new id's title,
+        //     flipping the strip from the archived name to the new one.
+        // Either way `id` is now in _claudeTabs, so later renames sync via _SyncClaudeTitleFromTab.
         if (const auto impl = _GetTabImpl(hostTab))
         {
             const std::wstring tabText{ impl->GetTabText() };
-            if (!tabText.empty())
+            if (!tabText.empty() && !reHomedFromOtherId)
             {
                 _sessionRegistry->Update(id, [&tabText](::Agentmaster::SessionInfo& s) { s.title = tabText; });
             }

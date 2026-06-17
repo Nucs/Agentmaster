@@ -1554,6 +1554,29 @@ namespace winrt::TerminalApp::implementation
             _moveRightMenuItem.Text(RS_(L"TabMoveRight"));
         }
 
+        // Move to start (Agentmaster). The page computes the target slot (it reserves index 0 for
+        // the pinned Manager tab), so this only raises the request.
+        {
+            _moveToStartMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->MoveTabToStartRequested.raise();
+                }
+            });
+            _moveToStartMenuItem.Text(RS_(L"TabMoveToStart"));
+        }
+
+        // Move to end (Agentmaster).
+        {
+            _moveToEndMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->MoveTabToEndRequested.raise();
+                }
+            });
+            _moveToEndMenuItem.Text(RS_(L"TabMoveToEnd"));
+        }
+
         // Create a sub-menu for our extended move tab items.
         // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
         // out the whole "Move tab" sub-menu. See DisableCloseAndMoveMenuItems().
@@ -1561,6 +1584,8 @@ namespace winrt::TerminalApp::implementation
         _moveSubMenu.Items().Append(_moveToNewWindowMenuItem);
         _moveSubMenu.Items().Append(_moveRightMenuItem);
         _moveSubMenu.Items().Append(_moveLeftMenuItem);
+        _moveSubMenu.Items().Append(_moveToStartMenuItem); // Agentmaster
+        _moveSubMenu.Items().Append(_moveToEndMenuItem); // Agentmaster
         flyout.Items().Append(_moveSubMenu);
     }
 
@@ -1841,6 +1866,10 @@ namespace winrt::TerminalApp::implementation
 
         // enabled if not last tab
         _moveRightMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
+
+        // Agentmaster: "Move to start" enabled unless already left-most; "Move to end" unless last.
+        _moveToStartMenuItem.IsEnabled(tabIndex > 0);
+        _moveToEndMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
     }
 
     // Agentmaster: permanently gray out the context-menu entries that would move or

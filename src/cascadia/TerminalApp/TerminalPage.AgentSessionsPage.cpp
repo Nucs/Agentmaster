@@ -1498,8 +1498,8 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
-        std::wstring ttl = !forkBaseTitle.empty() ? forkBaseTitle : ::Agentmaster::DeriveSessionTitle(forkDir);
-        ttl += L" (fork)";
+        const std::wstring forkBase = !forkBaseTitle.empty() ? forkBaseTitle : ::Agentmaster::DeriveSessionTitle(forkDir);
+        const std::wstring ttl = ::Agentmaster::DeriveForkTitle(forkBase); // bump " (fork N)" instead of stacking
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(forkParentId) ? forkParentId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[sessions-page->fork] source=" + forkParentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");

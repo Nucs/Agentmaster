@@ -2173,6 +2173,25 @@ namespace winrt::TerminalApp::implementation
                 page->_OnClaudeTabColorChanged(*tab);
             }
         });
+
+        // Agentmaster: context-menu "Move to start" / "Move to end" -> relocate the tab to the
+        // first movable slot / the last slot (the pinned Manager tab keeps index 0).
+        hostingTab.MoveTabToStartRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (page && tab)
+            {
+                page->_MoveTabToEdge(tab, false);
+            }
+        });
+        hostingTab.MoveTabToEndRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (page && tab)
+            {
+                page->_MoveTabToEdge(tab, true);
+            }
+        });
     }
 
     // Method Description:
@@ -2791,6 +2810,25 @@ namespace winrt::TerminalApp::implementation
         }
 
         return true;
+    }
+
+    // Agentmaster: relocate a tab to the very start or end of the tab row, from the context-menu
+    // "Move to start" / "Move to end" entries. _TryMoveTab clamps the target into the movable range
+    // and reserves index 0 for the pinned Manager tab, so the "start" lands right after it; a
+    // sentinel target of Size()-1 lands at the end.
+    void TerminalPage::_MoveTabToEdge(winrt::com_ptr<Tab> tab, bool toEnd)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        const auto tabIndex = _GetTabIndex(*tab);
+        if (!tabIndex)
+        {
+            return;
+        }
+        const auto target = toEnd ? gsl::narrow_cast<int32_t>(_tabs.Size()) - 1 : 0;
+        _TryMoveTab(tabIndex.value(), target);
     }
 
     // When the tab's active pane changes, we'll want to lookup a new icon
