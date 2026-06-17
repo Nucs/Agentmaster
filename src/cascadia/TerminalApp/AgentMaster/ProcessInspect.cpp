@@ -2285,7 +2285,13 @@ namespace Agentmaster
         const bool truncated = (maxBytes != 0);
         const std::wstring wide = Utf8ToWide(bytes);
 
-        std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit;
+        std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit, seenCreated;
+        // A Write's created-vs-overwrote verdict is in its tool_result ("File created successfully at:"
+        // for a NEW file, "...has been updated successfully" otherwise), which arrives in a later user
+        // message — so defer Write classification: map the Write's tool_use id -> its file_path here,
+        // resolve it when the matching tool_result is seen, and fall back to "edited" for any with no
+        // result by end-of-transcript (a truncated tail).
+        std::unordered_map<std::wstring, std::wstring> pendingWrites;
         json::Value lastTodos;
         bool haveTodos = false;
         bool isFirstUser = true;
@@ -2476,13 +2482,23 @@ namespace Agentmaster
                                         out.planFilesRead.push_back(fp);
                                     }
                                 }
-                                else if (name == L"Edit" || name == L"Write")
+                                else if (name == L"Edit")
                                 {
-                                    if (seenEdit.insert(base).second)
+                                    // Edit always targets an EXISTING file (Claude requires a prior Read).
+                                    if (seenCreated.find(base) == seenCreated.end() && seenEdit.insert(base).second)
                                     {
                                         out.filesEdited.push_back(base);
                                     }
-                                    if (name == L"Write" && SeIsPlansPath(fp))
+                                }
+                                else if (name == L"Write")
+                                {
+                                    // Defer: created (new file) vs edited (overwrite) is decided by the
+                                    // tool_result text, resolved below. Keep the plan-file capture here.
+                                    if (const std::wstring id = blk.StrAt(L"id"); !id.empty())
+                                    {
+                                        pendingWrites[id] = fp;
+                                    }
+                                    if (SeIsPlansPath(fp))
                                     {
                                         out.planFilePath = fp;
                                     }
@@ -2504,9 +2520,77 @@ namespace Agentmaster
                     }
                 }
             }
+
+            // tool_result blocks (carried in user messages) resolve a deferred Write: "File created
+            // successfully at:" => a NEW file (Files Created), anything else (an overwrite) => Files
+            // Edited. Created wins over Edited for the same basename.
+            if (type == L"user" && !pendingWrites.empty())
+            {
+                const auto* msg = obj.Find(L"message");
+                if (msg && msg->type == json::Value::Type::Obj)
+                {
+                    if (const auto* c = msg->Find(L"content"); c && c->type == json::Value::Type::Arr)
+                    {
+                        for (const auto& blk : c->arr)
+                        {
+                            if (blk.type != json::Value::Type::Obj || blk.StrAt(L"type") != L"tool_result")
+                            {
+                                continue;
+                            }
+                            const auto pw = pendingWrites.find(blk.StrAt(L"tool_use_id"));
+                            if (pw == pendingWrites.end())
+                            {
+                                continue;
+                            }
+                            const std::wstring base = SeBasename(pw->second);
+                            pendingWrites.erase(pw);
+                            std::wstring res; // the tool_result text (a string, or {type:text} blocks)
+                            if (const auto* rc = blk.Find(L"content"))
+                            {
+                                if (rc->type == json::Value::Type::Str)
+                                {
+                                    res = rc->str;
+                                }
+                                else if (rc->type == json::Value::Type::Arr)
+                                {
+                                    for (const auto& rb : rc->arr)
+                                    {
+                                        if (rb.type == json::Value::Type::Obj && rb.StrAt(L"type") == L"text")
+                                        {
+                                            res += rb.StrAt(L"text");
+                                        }
+                                    }
+                                }
+                            }
+                            if (res.find(L"File created successfully at:") != std::wstring::npos)
+                            {
+                                if (seenCreated.insert(base).second)
+                                {
+                                    out.filesCreated.push_back(base);
+                                }
+                            }
+                            else if (seenCreated.find(base) == seenCreated.end() && seenEdit.insert(base).second)
+                            {
+                                out.filesEdited.push_back(base);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Any Write whose tool_result never arrived (a truncated tail) falls back to "edited".
+        for (const auto& [id, fp] : pendingWrites)
+        {
+            const std::wstring base = SeBasename(fp);
+            if (seenCreated.find(base) == seenCreated.end() && seenEdit.insert(base).second)
+            {
+                out.filesEdited.push_back(base);
+            }
         }
 
         std::sort(out.filesRead.begin(), out.filesRead.end());
+        std::sort(out.filesCreated.begin(), out.filesCreated.end());
         std::sort(out.filesEdited.begin(), out.filesEdited.end());
         if (haveTodos)
         {

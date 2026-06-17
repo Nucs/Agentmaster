@@ -294,7 +294,8 @@ namespace Agentmaster
         bool found{ false };
         std::vector<std::wstring> userMsgs; // type=user, userType=external, text content; deduped; command/bash/Caveat/Overview/interrupt-skipped
         std::vector<std::wstring> filesRead; // Read tool file_path basenames, sorted + unique
-        std::vector<std::wstring> filesEdited; // Edit/Write tool file_path basenames, sorted + unique
+        std::vector<std::wstring> filesCreated; // Write tool file_path basenames whose result was "File created successfully at:" (NEW files), sorted + unique
+        std::vector<std::wstring> filesEdited; // Edit / overwriting-Write tool file_path basenames (existing files), sorted + unique
         std::wstring branch; // first gitBranch seen
         std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age)
         std::wstring lastTs; // last entry.timestamp (ISO) — last activity
