@@ -244,7 +244,7 @@
     <value>Reset</value>
   </data>
   <data name="RenameTabText" xml:space="preserve">
-    <value>Rename tab</value>
+    <value>Rename tab (F2)</value>
   </data>
   <data name="DuplicateTabText" xml:space="preserve">
     <value>Duplicate tab</value>

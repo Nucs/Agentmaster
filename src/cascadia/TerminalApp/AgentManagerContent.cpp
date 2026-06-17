@@ -3558,7 +3558,7 @@ namespace winrt::TerminalApp::implementation
         // which would otherwise yank focus out of the freshly-shown rename editor / dialog (and the
         // spawn / tree rebuild for Open New Session Here).
         MenuFlyoutItem rename;
-        rename.Text(L"Rename\x2026");
+        rename.Text(L"Rename (F2)");
         rename.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
