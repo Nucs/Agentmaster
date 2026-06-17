@@ -82,6 +82,20 @@ namespace
         }
     }
 
+    // Is SHIFT held right now? A summary-panel resize started with SHIFT down is LOCAL-only (this tab,
+    // ephemeral — not persisted, not cross-tab-shared). CoreWindow is available in this app's XAML
+    // islands (the splitter cursors above rely on it); if it's somehow absent, treat SHIFT as up so the
+    // resize falls back to the shared/persisted default.
+    bool IsShiftDown()
+    {
+        if (const auto w = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread())
+        {
+            const auto st = w.GetKeyState(winrt::Windows::System::VirtualKey::Shift);
+            return (st & winrt::Windows::UI::Core::CoreVirtualKeyStates::Down) == winrt::Windows::UI::Core::CoreVirtualKeyStates::Down;
+        }
+        return false;
+    }
+
     // Color-matched to the Triage Board — now via the ONE shared palette (AgentStatusColors.h, the
     // factoring the old hand-synced copy's comment promised), so the overlay badge and the
     // tab-strip status dot can never drift apart.
@@ -1203,6 +1217,7 @@ namespace winrt::TerminalApp::implementation
                 self->_summaryDragging = true;
                 self->_summaryDragLeft = left;
                 self->_summaryDragBottom = bottom;
+                self->_summaryDragShift = IsShiftDown(); // SHIFT at gesture start => local-only resize (decided at release)
                 const auto p = e.GetCurrentPoint(nullptr).Position(); // island-relative; only the delta matters
                 self->_summaryDragStartX = p.X;
                 self->_summaryDragStartY = p.Y;
@@ -1340,6 +1355,12 @@ namespace winrt::TerminalApp::implementation
     {
         // Page-driven mirror of the GLOBAL AppSettings size fractions — on attach (seed) and on a resize
         // anywhere (broadcast). Pure apply; never calls the resize handler (so a broadcast can't loop).
+        // A SHIFT-resize detached THIS tab from the shared size (_summarySizeLocalOverride): keep its
+        // own size and IGNORE the broadcast until the user's next no-Shift drag re-attaches it.
+        if (_summarySizeLocalOverride)
+        {
+            return;
+        }
         _summaryWidthFraction = widthFraction;
         _summaryHeightFraction = heightFraction;
         _ApplySummarySize();
@@ -1372,9 +1393,15 @@ namespace winrt::TerminalApp::implementation
         _ApplySummarySize();
     }
 
-    // Grip release: drop pointer capture, restore the cursor, and persist the new size GLOBALLY (the
-    // page does the freshest-disk RMW + the live broadcast to every linked overlay in the window). The
-    // fractions are already band-clamped by _OnSummaryDragMove.
+    // Grip release: drop pointer capture, restore the cursor, then commit the new size. The fractions are
+    // already band-clamped by _OnSummaryDragMove and applied to THIS panel. How it commits depends on
+    // whether SHIFT was held at the gesture's start:
+    //  - SHIFT held  => LOCAL-only: mark this tab detached (_summarySizeLocalOverride) and do NOT persist
+    //                   or broadcast — the size stays on this tab and survives tab switches (in-memory),
+    //                   but is NOT saved to settings.json nor pushed to sibling tabs.
+    //  - no SHIFT    => SHARED: re-attach this tab and call the resize handler, which does the freshest-
+    //                   disk RMW + the live broadcast to every linked overlay in the window (so switching
+    //                   tabs shows the same size, and it persists across restart / seeds new windows).
     void AgentTabOverlay::_OnSummaryDragEnd(const IInspectable& sender)
     {
         if (!_summaryDragging)
@@ -1387,6 +1414,12 @@ namespace winrt::TerminalApp::implementation
             el.ReleasePointerCaptures();
         }
         ApplyCursor(CoreCursorType::Arrow);
+        if (_summaryDragShift)
+        {
+            _summarySizeLocalOverride = true; // this tab now keeps its own size + ignores shared broadcasts
+            return; // ephemeral: no persist, no cross-tab share
+        }
+        _summarySizeLocalOverride = false; // a no-Shift drag re-attaches this tab to the shared size
         if (_onResizeSummary)
         {
             _onResizeSummary(_summaryWidthFraction, _summaryHeightFraction);

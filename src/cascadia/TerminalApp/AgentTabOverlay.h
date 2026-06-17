@@ -155,11 +155,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _summaryScroll{ nullptr }; // the body scroller — its MaxHeight is the panel's height control
         double _summaryWidthFraction{ 0.0 }; // 0 == auto (20% cap); else explicit width fraction of the pane (0.08..0.5)
         double _summaryHeightFraction{ 0.0 }; // 0 == auto (content up to min(480,0.75*pane)); else explicit height fraction (0.06..0.75)
+        bool _summarySizeLocalOverride{ false }; // a SHIFT-resize detached THIS tab from the shared/global size: it keeps its own size + ignores broadcasts until the next no-Shift drag re-attaches it
         double _summaryPaneW{ 0.0 }; // last pane width pushed by the host (px)
         double _summaryPaneH{ 0.0 }; // last pane height pushed by the host (px)
         bool _summaryDragging{ false }; // a grip drag is in flight
         bool _summaryDragLeft{ false }; // the in-flight drag adjusts width (left edge / corner)
         bool _summaryDragBottom{ false }; // the in-flight drag adjusts height (bottom edge / corner)
+        bool _summaryDragShift{ false }; // SHIFT held at this drag's START => a LOCAL-only resize (ephemeral; not persisted, not broadcast)
         double _summaryDragStartX{ 0.0 }; // pointer X at press (island-relative)
         double _summaryDragStartY{ 0.0 }; // pointer Y at press
         double _summaryDragStartW{ 0.0 }; // panel width px at press
