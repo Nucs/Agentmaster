@@ -460,7 +460,7 @@ namespace Agentmaster
         s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
-        s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", false); // TAB_OVERLAY.md summary panel toggle (absent => OFF)
+        s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value

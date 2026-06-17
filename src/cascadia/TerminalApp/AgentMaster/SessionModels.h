@@ -313,8 +313,8 @@ namespace Agentmaster
         // overlay, toggled by the badge's pencil button) is shown. GLOBAL across windows — like
         // showTabOverlay/treeSort it lives here in settings.json, NOT per-session: the pencil on any
         // tab flips this one value (a freshest-disk read-modify-write), every linked overlay in the
-        // window applies it live, and it seeds every window on launch. Default OFF (panel hidden).
-        bool showSummaryPanel{ false };
+        // window applies it live, and it seeds every window on launch. Default ON (panel shown).
+        bool showSummaryPanel{ true };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };
