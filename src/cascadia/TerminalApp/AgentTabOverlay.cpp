@@ -20,6 +20,8 @@
 #include <winrt/Windows.ApplicationModel.DataTransfer.h> // Clipboard / DataPackage (row 3 copy)
 
 #include <shellapi.h> // ShellExecuteExW (row 3 folder button)
+#include <mmsystem.h> // PlaySoundW (row 3 copy/open confirmation chime)
+#pragma comment(lib, "winmm.lib")
 
 #include <string>
 
@@ -112,9 +114,18 @@ namespace
         }
     }
 
+    // A short confirmation chime for a completed row-3 action (copy / open). Async so it never blocks
+    // the UI thread; SystemAsterisk is the soft Windows notification sound. Best-effort (silent if the
+    // user has system sounds off). winmm is already in the link (TerminalPaneContent's WarningBell).
+    void PlayActionSound()
+    {
+        ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
+    }
+
     // Put text on the system clipboard (row 3's copy menu). Mirrors AgentManagerContent's
     // CopyTextToClipboard. Flush so the content survives the app losing focus (it can refuse —
-    // non-fatal). WinRT Clipboard is STA, so call this on the UI thread. Best-effort.
+    // non-fatal). WinRT Clipboard is STA, so call this on the UI thread. Plays the confirmation
+    // chime once the copy actually lands. Best-effort.
     void CopyTextToClipboard(const std::wstring& text)
     {
         try
@@ -124,6 +135,7 @@ namespace
             pkg.SetText(winrt::hstring{ text });
             winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
             winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
+            PlayActionSound(); // "copy is done" feedback (every row-3 copy routes through here)
         }
         CATCH_LOG();
     }
@@ -553,9 +565,10 @@ namespace winrt::TerminalApp::implementation
         };
         addItem(L"Session Id", 0);
         addItem(L"Copy Path", 1);
-        addItem(L"Claude Launch CLI", 2);
-        addItem(L"Codex Launch CLI", 3);
-        addItem(L"Transcript", 4);
+        addItem(L"Copy Branch Name", 2);
+        addItem(L"Claude Launch CLI", 3);
+        addItem(L"Codex Launch CLI", 4);
+        addItem(L"Transcript", 5);
         // The pointer must LEAVE the badge to reach the menu, so pin the expanded state while it's open.
         flyout.Opened([weak](const IInspectable&, const IInspectable&) {
             if (auto self = weak.get())
@@ -600,6 +613,7 @@ namespace winrt::TerminalApp::implementation
         if (!dir.empty())
         {
             OpenPathInExplorerAsync(dir);
+            PlayActionSound(); // same click feedback as the copy menu (Open Path)
         }
     }
 
@@ -636,13 +650,19 @@ namespace winrt::TerminalApp::implementation
             }
             break;
         }
-        case 2: // Claude Launch CLI — the REAL full command (live commandline / would-use builder)
+        case 2: // Copy Branch Name — the session's git branch (live-observed; empty => no-op)
+            if (!s.branch.empty())
+            {
+                CopyTextToClipboard(s.branch);
+            }
+            break;
+        case 3: // Claude Launch CLI — the REAL full command (live commandline / would-use builder)
             CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ false));
             break;
-        case 3: // Codex Launch CLI — the REAL full command
+        case 4: // Codex Launch CLI — the REAL full command
             CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ true));
             break;
-        case 4: // Transcript — the whole conversation (user + assistant text only), off-thread
+        case 5: // Transcript — the whole conversation (user + assistant text only), off-thread
             CopyConversationAsync(_dispatcher, codex, s.id, s.codexSessionId);
             break;
         default:

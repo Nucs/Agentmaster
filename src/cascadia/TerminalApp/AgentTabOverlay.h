@@ -8,11 +8,12 @@
 // Row 2 (dim/secondary): "<root workdir folder>/<branch>" (e.g. myworkdir/feature/issue123) so the
 // session's place + branch read at a glance; hidden when there's no dir/branch (and on observe badges).
 // Row 3 (hover-only actions): a folder button (Open Path — the working dir via explorer.exe) + a copy
-// button whose menu copies the Session Id / Copy Path (working dir) / Claude Launch CLI / Codex Launch
-// CLI (each the REAL full command — the live process commandline with hooks, or the builder Agentmaster
-// would use) / Transcript (the whole conversation, user + assistant TEXT only). Collapsed at rest;
-// revealed while the pointer is over the badge OR the copy menu is open (so the menu doesn't vanish
-// under the pointer). Built only for a LINKED session (Initialize), never an observe badge.
+// button whose menu copies the Session Id / Copy Path (working dir) / Copy Branch Name / Claude Launch
+// CLI / Codex Launch CLI (each the REAL full command — the live process commandline with hooks, or the
+// builder Agentmaster would use) / Transcript (the whole conversation, user + assistant TEXT only).
+// A completed copy (and Open Path) plays a short confirmation chime. Collapsed at rest; revealed while
+// the pointer is over the badge OR the copy menu is open (so the menu doesn't vanish under the
+// pointer). Built only for a LINKED session (Initialize), never an observe badge.
 //
 // Built imperatively (no IDL/XAML markup), like AgentManagerContent. It is NOT an IPaneContent —
 // it just produces a FrameworkElement the app installs into the pane's overlay slot
