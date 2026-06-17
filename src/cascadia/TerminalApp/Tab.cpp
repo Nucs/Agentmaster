@@ -1810,12 +1810,13 @@ namespace winrt::TerminalApp::implementation
         Controls::MenuFlyoutSeparator menuSeparator;
         contextMenuFlyout.Items().Append(chooseColorMenuItem);
         contextMenuFlyout.Items().Append(renameTabMenuItem);
-        contextMenuFlyout.Items().Append(_duplicateTabMenuItem);
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
         contextMenuFlyout.Items().Append(_findMenuItem);
         contextMenuFlyout.Items().Append(_restartConnectionMenuItem);
+        // Agentmaster: place "Duplicate tab" directly below "Restart session"
+        contextMenuFlyout.Items().Append(_duplicateTabMenuItem);
         contextMenuFlyout.Items().Append(menuSeparator);
 
         auto closeSubMenu = _AppendCloseMenuItems(contextMenuFlyout);
