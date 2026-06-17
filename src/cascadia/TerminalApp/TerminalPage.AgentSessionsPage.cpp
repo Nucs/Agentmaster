@@ -32,7 +32,7 @@
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
 #include "AgentMaster/Persistence.h" // GetDirColor / AutoDirColorHex (the per-dir color chip)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (detail prompts)
+#include "AgentMaster/ProcessInspect.h" // AnalyzeSessionTranscript / RenderSessionSummaryBox / FindPlanFileInTranscript / kSummarySepMark (detail summary box)
 #include "AgentMaster/ProcessObserver.h" // Presence()
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionSearch.h" // the two-phase search
@@ -78,6 +78,61 @@ namespace winrt::TerminalApp::implementation
             t.TextTrimming(TextTrimming::CharacterEllipsis);
             t.VerticalAlignment(VerticalAlignment::Center);
             return t;
+        }
+
+        // Render a session-summary box (RenderSessionSummaryBox output, full=true) into `host`: split
+        // on '\n'; a lone kSummarySepMark sentinel line becomes a full-width rule (border to border),
+        // every other run becomes a monospace, wrapped, selectable TextBlock — mirroring the overlay
+        // panel's _SetSummaryContent so the Sessions detail and the per-tab summary panel look the same.
+        void SessAppendSummaryBox(StackPanel host, const std::wstring& text)
+        {
+            std::wstring seg;
+            const auto flush = [&]() {
+                if (seg.empty())
+                {
+                    return;
+                }
+                TextBlock tb{};
+                tb.FontFamily(FontFamily{ L"Cascadia Mono" });
+                tb.FontSize(11);
+                tb.TextWrapping(TextWrapping::Wrap);
+                tb.IsTextSelectionEnabled(true);
+                tb.Opacity(0.85);
+                tb.Text(winrt::hstring{ seg });
+                host.Children().Append(tb);
+                seg.clear();
+            };
+            size_t i = 0;
+            while (i <= text.size())
+            {
+                const size_t nl = text.find(L'\n', i);
+                const size_t end = (nl == std::wstring::npos) ? text.size() : nl;
+                const std::wstring lineStr = text.substr(i, end - i);
+                if (lineStr.size() == 1 && lineStr[0] == ::Agentmaster::kSummarySepMark)
+                {
+                    flush(); // close the run above the rule
+                    Border rule{};
+                    rule.Height(1);
+                    rule.HorizontalAlignment(HorizontalAlignment::Stretch); // border to border
+                    rule.Background(SessBrush(0x40, 0xFF, 0xFF, 0xFF));
+                    rule.Margin(Thickness{ 0, 4, 0, 4 });
+                    host.Children().Append(rule);
+                }
+                else
+                {
+                    if (!seg.empty())
+                    {
+                        seg += L"\n";
+                    }
+                    seg += lineStr;
+                }
+                if (nl == std::wstring::npos)
+                {
+                    break;
+                }
+                i = nl + 1;
+            }
+            flush();
         }
 
         // "now" / "5m" / "3h" / "2d" / "3mo" / "1y" (the Archive page's compact-ago shape).
@@ -1220,11 +1275,18 @@ namespace winrt::TerminalApp::implementation
             t.TextWrapping(TextWrapping::Wrap);
             _sessionsDetailHost.Children().Append(t);
         };
-        meta(L"id", row->id + (row->fork ? (L"  (fork of " + row->forkedFromId.substr(0, 8) + L"\x2026)") : L""));
-        meta(L"dir", row->dir);
-        meta(L"branch", row->branch);
+        // id / dir / branch are shown by the full summary box below (full=true), so don't repeat
+        // them here — keep only what the box LACKS: the timing, the weight (msgs · tools · KB), the
+        // fork lineage, and (below) the live presence line.
         meta(L"created", SessAgo(row->createdMs, now) + L" ago \x00B7 active " + SessAgo(row->lastActivityMs, now) + L" ago");
-        meta(L"weight", std::to_wstring(row->msgs) + L" messages \x00B7 " + std::to_wstring(row->tools) + L" tool calls \x00B7 " + std::to_wstring(row->sizeBytes / 1024) + L" KB");
+        {
+            std::wstring weight = std::to_wstring(row->msgs) + L" messages \x00B7 " + std::to_wstring(row->tools) + L" tool calls \x00B7 " + std::to_wstring(row->sizeBytes / 1024) + L" KB";
+            if (row->fork)
+            {
+                weight += L" \x00B7 fork of " + row->forkedFromId.substr(0, 8) + L"\x2026";
+            }
+            meta(L"weight", weight);
+        }
         const auto reg = _sessionRegistry ? _sessionRegistry->Get(row->id) : std::nullopt;
         if (reg && reg->live)
         {
@@ -1310,52 +1372,53 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // The conversation's prompt list (his most-displayed artifact, §6a) — off-thread head
-        // read, cached by (id, transcript mtime).
+        // The full session-summary box — the SAME session-end.js analyzer the per-tab overlay's
+        // summary panel renders (RenderSessionSummaryBox), here full=true so it carries id / Dir /
+        // Folder / Resume / Branch / Tasks + the numbered Messages (deduped, whole-file, noise-
+        // filtered) + Files Read/Created/Edited + any plan-start/plan-end lineage. Off-thread whole-
+        // file analyze, cached by (id, transcript mtime). It SUPERSEDES the old flat PROMPTS list —
+        // the box's Messages section is the same prompts, deduped over the WHOLE transcript.
         if (_sessionsDetailTiId == row->id && _sessionsDetailTiMtime == row->lastActivityMs)
         {
-            if (!_sessionsDetailPrompts.empty())
+            if (!_sessionsDetailSummary.empty())
             {
-                _sessionsDetailHost.Children().Append(SessText(L"PROMPTS", 11, true, 0.5));
-                int i = 1;
-                for (const auto& p : _sessionsDetailPrompts)
-                {
-                    auto t = SessText(winrt::hstring{ std::to_wstring(i++) + L". " + p }, 11, false, 0.75);
-                    t.TextWrapping(TextWrapping::Wrap);
-                    _sessionsDetailHost.Children().Append(t);
-                }
+                SessAppendSummaryBox(_sessionsDetailHost, _sessionsDetailSummary);
             }
         }
         else if (!_sessionsDetailPending)
         {
-            _LoadSessionsPrompts(row->id, row->dir, row->lastActivityMs);
+            _LoadSessionsSummary(row->id, row->dir, row->lastActivityMs);
         }
     }
 
-    winrt::fire_and_forget TerminalPage::_LoadSessionsPrompts(std::wstring sessionId, std::wstring dir, int64_t mtime)
+    // Off-thread: resolve the transcript, run the WHOLE-FILE session-end.js analyzer, and render the
+    // FULL summary box (full=true) — the SAME RenderSessionSummaryBox the per-tab overlay's summary
+    // panel uses, so the two renderings can never drift. An EMPTY live glyph/label means the box's
+    // header line appears ONLY for a plan-start/plan-end session (auto-detected) — the live state is
+    // shown by the detail's own rows, not duplicated. resumeCmd is the descriptive `claude --resume
+    // <id>` (the page's Resume/Fork buttons do the real, hook-wired launch). Cached by (id, mtime).
+    winrt::fire_and_forget TerminalPage::_LoadSessionsSummary(std::wstring sessionId, std::wstring dir, int64_t mtime)
     {
         _sessionsDetailPending = true;
         auto weakThis{ get_weak() };
         co_await winrt::resume_background();
 
-        const auto ti = ::Agentmaster::ReadTranscriptInfo(dir, sessionId, 2 * 1024 * 1024, 50);
-        std::vector<std::wstring> prompts;
-        prompts.reserve(ti.userPrompts.size());
-        for (const auto& p : ti.userPrompts)
+        std::wstring text;
+        const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+        if (!path.empty())
         {
-            // Single-line, capped — the numbered list shape.
-            std::wstring one;
-            one.reserve(std::min<size_t>(p.size(), 200));
-            for (const wchar_t c : p)
+            const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+            std::wstring planFile = a.planFilePath;
+            if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
             {
-                one.push_back(c == L'\n' || c == L'\r' || c == L'\t' ? L' ' : c);
-                if (one.size() >= 200)
+                // A plan-start session's plan file lives in its PARENT transcript (session-end.js).
+                const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
+                if (!parentPath.empty())
                 {
-                    one += L"\x2026";
-                    break;
+                    planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                 }
             }
-            prompts.push_back(std::move(one));
+            text = ::Agentmaster::RenderSessionSummaryBox(a, sessionId, dir, path, L"claude --resume " + sessionId, L"" /* no live glyph */, L"" /* empty label => header only for plan */, planFile, /*full*/ true);
         }
 
         co_await winrt::resume_foreground(Dispatcher());
@@ -1367,7 +1430,7 @@ namespace winrt::TerminalApp::implementation
         self->_sessionsDetailPending = false;
         self->_sessionsDetailTiId = sessionId;
         self->_sessionsDetailTiMtime = mtime;
-        self->_sessionsDetailPrompts = std::move(prompts);
+        self->_sessionsDetailSummary = std::move(text);
         if (self->_sessionsSelectedId == sessionId && self->_sessionsPageVisible.load(std::memory_order_relaxed))
         {
             self->_ShowSessionsDetail(sessionId);

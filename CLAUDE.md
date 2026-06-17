@@ -40,7 +40,9 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   CLI · the full session **Summary** · the **Transcript**) + a **pencil** that toggles a **SUMMARY
   PANEL**: a second overlay below the badge (≤20% pane width) rendering the `session-end.js` box
   (messages/files/tasks/plan) analyzed from the transcript, its show/hide a GLOBAL setting
-  (`AppSettings.showSummaryPanel`).
+  (`AppSettings.showSummaryPanel`); a **wrap-line toggle** (↵) at the right of its times bar flips a
+  message's newlines between a literal `\n` and real multi-line (`AppSettings.summaryPanelWrapNewlines`,
+  also GLOBAL).
   The per-tab *here-and-now* lens, complementing the Manager's *fleet* view.
 
 Full design: [`doc/agentmaster/DESIGN.md`](doc/agentmaster/DESIGN.md).
@@ -453,7 +455,7 @@ What works, by area:
   transcript): always lands `WaitingForInput`, never stale, never held by the queue. Hook `ts`
   also refreshes `lastActivityUnixMs` monotonically (real hooks previously never updated the
   Waiting→Idle decay anchor — it only moved on synthesized events). The scanner's missed-Stop
-  reconciliation is **generalized** past the bare end_turn/Running case (all three proved against
+  reconciliation is **generalized** past the bare end_turn/Running case (each proved against
   live sessions): (a) **interrupt** — a user-abort marker (`[Request interrupted by user…]`, Esc;
   fires no clean `Stop`) is a turn-ender (`IsUserInterruptMarker` → `ScanState.interrupted`), so a
   killed turn no longer shows Running forever; (b) **blocked-on-user** — an UNANSWERED interactive
@@ -465,13 +467,24 @@ What works, by area:
   **`NeedsApproval` as well as `Running`** on a terminal/interrupt tail, so an approved (or
   answered) session whose post-turn `Stop` hook was dropped is released to `WaitingForInput`
   instead of stranding in `NeedsApproval` (the original "answer the question, stay needs-approval"
-  report); and (d) **needs-approval RESUME** — `ShouldSynthesizeResumed` releases a `NeedsApproval`
+  report); (d) **needs-approval RESUME** — `ShouldSynthesizeResumed` releases a `NeedsApproval`
   session BACK to **`Running`** when the user answered/approved and the agent kept working (a fresh live
   append this pass on a primed cursor, no pending interactive tool, no interrupt, non-terminal tail) —
   previously its only pull-side exit was → `WaitingForInput` at end-of-turn, so an answered-but-still-
   working session showed orange "needs you" for the rest of the turn; mutually exclusive with
   `ShouldSynthesizeStop` (the interrupt + terminal guards), synthesized as tool ACTIVITY (PostToolUse),
-  NOT a `UserPromptSubmit` (which would wrongly `++queuedPrompts`). `ParseTranscriptDelta` now also emits
+  NOT a `UserPromptSubmit` (which would wrongly `++queuedPrompts`); and (e) **presence-idle release** —
+  a turn can end with NEITHER a `Stop` hook NOR a terminal/interrupt tail (its last transcript line is a
+  bare prompt that produced no assistant output **and** cleared the tracked `stop_reason`, `_readDelta`),
+  so (a)–(c) can't fire and a done session strands **`Running`/`NeedsApproval`** forever though claude is
+  idle. `ShouldSynthesizeStopFromPresenceIdle` releases it (→ `WaitingForInput` as a `quiescentStop`,
+  logged `[recon-stop-idle]`) when claude's OWN pid-validated presence heartbeat reads **`idle`**
+  (`PresenceIsAtRest` — `idle`-only; `waiting`/`shell`/empty excluded) on a non-terminal, non-interrupted
+  tail quiet ≥ `kScanPresenceIdleQuiescenceMs` (5s, > the 2s stop-quiescence so it outlasts the ~2s
+  S-lane presence-refresh lag — a just-STARTED turn's heartbeat already reads `busy`) with NO pending
+  interactive tool (so it never pre-empts (b)). Claude's heartbeat is consumed as a state INPUT here
+  (Rule #13: a pid-validated FACT) — the IDLE counterpart to the same `busy` reading that elsewhere only
+  ever HELD Running; proved live (session `d271a31f`). `ParseTranscriptDelta` now also emits
   a `ToolResult` marker (a tool completed → it answers the pending question) that does NOT count as a
   run-repair turn event.
 - **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
@@ -942,7 +955,9 @@ What works, by area:
   (PROFILES.md). It also carries non-cog global state set elsewhere in the
   UI but persisted through the same file: `showTabOverlay`, **`showSummaryPanel`** (the per-tab summary
   panel's pencil toggle — GLOBAL across windows, written by `_ToggleSummaryPanel` via a settings.json
-  read-modify-write, NOT the cog; preserved from disk on a cog Save), **`treeSort`** (the Explorer Tree's
+  read-modify-write, NOT the cog; preserved from disk on a cog Save), **`summaryPanelWrapNewlines`** (the
+  summary panel's wrap-line toggle — same GLOBAL + freshest-disk-RMW idiom via `_ToggleSummaryWrap`,
+  preserved on a cog Save in both save paths; default off), **`treeSort`** (the Explorer Tree's
   NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
   the cog), and **`archiveSplitFraction`** (the Archive page's table|detail split as the table's
   fraction — written by the splitter's drag release via a read-modify-write of settings.json; star
@@ -1005,7 +1020,17 @@ filtered], files read [`Read`] / edited [`Edit`/`Write`], branch, first/last tim
 (`full=false`) — it omits everything panel 1 (the badge) already shows (the live-state header [kept only
 for the plan-start/plan-end signal], session id, Dir, Folder, the resume CLI, Branch, Codex
 `model·effort`), leaving the value-add: Parent/Plan, Tasks, Messages, Files Read/Edited; the copy menu's
-**`Summary`** (`CopySummaryAsync`) yields the **COMPLETE** box. Section separators fill the panel
+**`Summary`** (`CopySummaryAsync`) yields the **COMPLETE** box. A **wrap-line toggle** (↵, font-sized;
+dim when off / a lighter shade when on) at the RIGHT of the panel's **times bar** (the live
+age/last-user-msg/last-activity line stays left — a 2-column `Grid`) flips how a message renders its
+newlines: OFF (default, the session-end.js look) collapses each message to ONE line with newlines
+escaped to a literal `\n` (240-char cap), ON **preserves** the real newlines (multi-line, 2000-char cap;
+the panel scrolls). GLOBAL + persisted exactly like `showSummaryPanel` (`AppSettings.summaryPanelWrapNewlines`,
+default off): `TerminalPage::_ToggleSummaryWrap` does the freshest-disk RMW + **live broadcast**
+(`AgentTabOverlay::SetSummaryWrapNewlines`, which invalidates the mtime gate so the panel re-renders —
+a `_summaryWrapDirty` flag covers a toggle that lands while an analyze+render is mid-flight), and the flag
+threads through to BOTH the displayed panel and the copy-menu `Summary`, for Claude (`RenderSummaryBox`)
+and Codex (`RenderCodexSummary` — via `SummaryEscapeMsg`'s `wrapNewlines` mode). Section separators fill the panel
 **border-to-border** — the body is a `StackPanel` of monospace `TextBlock`s interleaved with full-width
 `Border` rules (`HorizontalAlignment::Stretch`, re-fills on resize; a fixed run of `─` can't in a
 wrapping block), driven by a sentinel line (`\x1F`) the display turns into a `Border` and the plain-text
@@ -1089,7 +1114,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     Branch / Claude·Codex Launch CLI / Summary / Transcript, with a chime — `BuildLaunchCli` /
     `CopyConversationAsync`) and the **pencil-toggled SUMMARY PANEL** (`SetAgentSummaryOverlay` 2nd slot;
     `RenderSummaryBox`/`RenderCodexSummary` with a `full` trim flag, `_SetSummaryContent`'s `StackPanel`
-    + full-width `Border` rules, `_LoadSummaryAsync` off-thread, `CopySummaryAsync` for the full box).
+    + full-width `Border` rules, `_LoadSummaryAsync` off-thread, `CopySummaryAsync` for the full box) —
+    whose times bar carries a **wrap-line toggle** (`_ToggleSummaryWrap`/`SetSummaryWrapNewlines`, the
+    GLOBAL `AppSettings.summaryPanelWrapNewlines`: preserve message newlines vs literal `\n`).
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
     overlay's hand-synced palette copy).
