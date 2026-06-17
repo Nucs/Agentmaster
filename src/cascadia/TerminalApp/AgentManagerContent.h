@@ -462,6 +462,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setStopOnError{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecay{ nullptr }; // Waiting-for-you -> Idle after N minutes (0 = never; default 5 = Claude's server cache lifetime)
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
@@ -508,5 +509,10 @@ namespace winrt::TerminalApp::implementation
         // the tab renamer; while the editor is live the tree skips rebuilds to keep focus+text.
         std::wstring _renamingId;
         winrt::Windows::UI::Xaml::Controls::TextBox _renameBox{ nullptr };
+        // Agentmaster: like TabHeaderControl, the inline rename box is multi-line; a commit combo
+        // (Enter / Shift+Enter per AppSettings::tabRenameCommitMode) is flagged in PreviewKeyDown
+        // (which suppresses the newline) and committed on the matching KeyUp — Rule #11 keeps this
+        // tree-rename path behaving like the WT tab-rename box.
+        bool _renameCommitOnKeyUp{ false };
     };
 }

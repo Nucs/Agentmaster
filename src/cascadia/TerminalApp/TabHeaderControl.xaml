@@ -85,9 +85,11 @@
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />
-        <!--  Agentmaster: AcceptsReturn makes this a MULTI-LINE rename box — Return inserts a newline
-              (titles can hold line breaks; see TabHeaderControl.cpp's KeyUp, where Return no longer
-              commits) instead of saving. Commit by clicking away (LostFocus); Escape cancels.
+        <!--  Agentmaster: AcceptsReturn makes this a MULTI-LINE rename box — a non-commit Return inserts
+              a newline (titles can hold line breaks). Commit (accept + save, identical to clicking away)
+              is by clicking away (LostFocus) ALWAYS, plus optionally Shift+Enter (default) or Enter, per
+              the GLOBAL TabRenameCommitMode app-setting — see TabHeaderControl.cpp's PreviewKeyDown/KeyUp,
+              which suppress the newline for whichever key is the commit key. Escape cancels.
               TextWrapping is NoWrap (NOT Wrap): this box lives in the tab header's HORIZONTAL
               StackPanel, which measures children with INFINITE width. A Wrap TextBox has no finite
               width to wrap against there, so it degenerates to its MinWidth and never grows with the

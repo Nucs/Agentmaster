@@ -6,11 +6,37 @@
 
 #include "TabHeaderControl.g.cpp"
 
+#include <atomic>
+
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
 
+namespace
+{
+    // Agentmaster: the process-global tab-rename commit mode. Raw ints mirror
+    // Agentmaster::TabRenameCommitMode (SessionModels.h) so this leaf control needn't pull in the
+    // engine model; TerminalPage casts the enum to int via SetTabRenameCommitMode (a static_assert
+    // there locks the values). atomic == read on the UI thread per keypress, written from any
+    // window's settings-apply.
+    constexpr int32_t kRenameCommitClickAwayOnly = 0; // only focus-loss commits (both keys insert a newline)
+    constexpr int32_t kRenameCommitShiftEnter = 1; // default: Shift+Enter commits; plain Enter inserts a newline
+    constexpr int32_t kRenameCommitEnter = 2; // Enter commits; Shift+Enter inserts a newline
+    std::atomic<int32_t> g_renameCommitMode{ kRenameCommitShiftEnter };
+}
+
 namespace winrt::TerminalApp::implementation
 {
+    void SetTabRenameCommitMode(int32_t mode) noexcept
+    {
+        // Clamp an unknown value to the default (keyboard commit on Shift+Enter) rather than
+        // silently disabling the keyboard commit altogether.
+        if (mode != kRenameCommitClickAwayOnly && mode != kRenameCommitEnter)
+        {
+            mode = kRenameCommitShiftEnter;
+        }
+        g_renameCommitMode.store(mode, std::memory_order_relaxed);
+    }
+
     TabHeaderControl::TabHeaderControl()
     {
         InitializeComponent();
@@ -32,24 +58,67 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster: the rename box is AcceptsReturn (multi-line), so a plain Return normally
+        // inserts a newline into the title rather than committing. The global TabRenameCommitMode
+        // (a GLOBAL cross-window AppSetting) optionally promotes Enter or Shift+Enter to a COMMIT
+        // that behaves EXACTLY like clicking away. PreviewKeyDown (tunneling) runs BEFORE the
+        // TextBox's own key handling, which makes it the one place that can (a) see Enter reliably
+        // regardless of how the box marks it and (b) PREVENT the AcceptsReturn newline for the commit
+        // combo by marking the event handled. We deliberately DON'T close the box here: the original
+        // note below warns that removing the box on a *down* event lets the following key-up bubble
+        // to the NewTabButton — so we only flag the commit and perform it on the matching key-up.
+        HeaderRenamerTextBox().PreviewKeyDown([this](auto&&, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            if (e.OriginalKey() != Windows::System::VirtualKey::Enter)
+            {
+                return;
+            }
+            const auto mode = g_renameCommitMode.load(std::memory_order_relaxed);
+            if (mode == kRenameCommitClickAwayOnly)
+            {
+                return; // "None" — Enter and Shift+Enter both just insert a newline (commit by clicking away)
+            }
+            // Shift+Enter and a plain Enter both arrive as VirtualKey::Enter, so the Shift modifier is
+            // what distinguishes the commit key from the newline key. Read it islands-safe — guard the
+            // CoreWindow like the rest of Agentmaster's UI; if absent, treat Shift as not-pressed.
+            auto shiftDown = false;
+            if (const auto w = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread())
+            {
+                shiftDown = WI_IsFlagSet(w.GetKeyState(winrt::Windows::System::VirtualKey::Shift), winrt::Windows::UI::Core::CoreVirtualKeyStates::Down);
+            }
+            const bool commit = (mode == kRenameCommitShiftEnter) ? shiftDown : !shiftDown;
+            if (commit)
+            {
+                _commitOnKeyUp = true;
+                e.Handled(true); // suppress the AcceptsReturn newline + stop the down from bubbling; KeyUp commits
+            }
+        });
+
         // NOTE: (Preview)KeyDown does not work here. If you use that, we'll
         // remove the TextBox from the UI tree, then the following KeyUp
         // will bubble to the NewTabButton, which we don't want to have
-        // happen.
-        HeaderRenamerTextBox().KeyUp([&](auto&&, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
-            if (_receivedKeyDown)
+        // happen. (Agentmaster: this is exactly why the Enter/Shift+Enter commit, flagged in
+        // PreviewKeyDown above, is *performed* here on key-up rather than on key-down.)
+        HeaderRenamerTextBox().KeyUp([this](auto&&, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+            // Agentmaster: a commit combo (Enter / Shift+Enter per the global mode) was pressed; its
+            // newline was already suppressed in PreviewKeyDown. Commit == "click away": collapsing the
+            // box drives RenameBoxLostFocusHandler, which trims + raises TitleChangeRequested. Gated on
+            // _commitOnKeyUp (set only while the box was focused), NOT _receivedKeyDown, so a commit on
+            // the very first keystroke still works AND the command-palette open-Enter (whose down never
+            // reached this box) is still ignored. Set Handled before closing — the close may synchronously
+            // raise RenameEnded and tear this control down.
+            if (_commitOnKeyUp)
             {
-                // Agentmaster: Return is NO LONGER a commit — the box is AcceptsReturn (multi-line),
-                // so Return inserts a newline into the title (the TextBox handles + marks it). The
-                // user commits by clicking away (RenameBoxLostFocusHandler) or focusing elsewhere.
-                // Escape still discards the in-progress edit.
-                if (e.OriginalKey() == Windows::System::VirtualKey::Escape)
-                {
-                    // User wants to discard the changes they made,
-                    // set _renameCancelled to true and close the rename box
-                    _renameCancelled = true;
-                    _CloseRenameBox();
-                }
+                _commitOnKeyUp = false;
+                e.Handled(true);
+                _CloseRenameBox();
+                return;
+            }
+            if (_receivedKeyDown && e.OriginalKey() == Windows::System::VirtualKey::Escape)
+            {
+                // User wants to discard the changes they made,
+                // set _renameCancelled to true and close the rename box
+                _renameCancelled = true;
+                _CloseRenameBox();
             }
         });
     }
@@ -73,6 +142,7 @@ namespace winrt::TerminalApp::implementation
     {
         _receivedKeyDown = false;
         _renameCancelled = false;
+        _commitOnKeyUp = false;
 
         HeaderTextBlock().Visibility(Windows::UI::Xaml::Visibility::Collapsed);
         HeaderRenamerTextBox().Visibility(Windows::UI::Xaml::Visibility::Visible);

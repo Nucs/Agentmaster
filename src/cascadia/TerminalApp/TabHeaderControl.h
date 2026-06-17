@@ -9,6 +9,15 @@
 
 namespace winrt::TerminalApp::implementation
 {
+    // Agentmaster: the process-global tab-rename commit mode (mirrors AppSettings::tabRenameCommitMode;
+    // see SessionModels.h). It is GLOBAL across windows, so rather than plumb the value into every
+    // Tab's header on each settings change, TerminalPage writes this one process-wide value (on
+    // AppSettings load + cog Save) and every header's rename box reads it live on a keypress. The raw
+    // int avoids coupling this leaf control to the engine model; values match TabRenameCommitMode
+    // (0 = click-away only, 1 = +Shift+Enter, 2 = +Enter), locked by a static_assert in
+    // TerminalPage.AgentEngine.cpp.
+    void SetTabRenameCommitMode(int32_t mode) noexcept;
+
     struct TabHeaderControl : TabHeaderControlT<TabHeaderControl>
     {
         TabHeaderControl();
@@ -30,6 +39,11 @@ namespace winrt::TerminalApp::implementation
     private:
         bool _receivedKeyDown{ false };
         bool _renameCancelled{ false };
+        // Agentmaster: set in PreviewKeyDown when the commit combo (Enter / Shift+Enter, per the
+        // global mode) is pressed — where we also suppress the AcceptsReturn newline — and consumed
+        // on the matching KeyUp to commit (the original upstream note warns that closing the box on a
+        // *down* event lets the up bubble to the NewTabButton, so we defer the close to key-up).
+        bool _commitOnKeyUp{ false };
 
         void _CloseRenameBox();
     };

@@ -1500,6 +1500,7 @@ static void TestAppSettings()
         in.stopOnError = false;
         in.pauseOnHumanInput = false;
         in.confirmBeforeKill = false;
+        in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
@@ -1517,6 +1518,7 @@ static void TestAppSettings()
         CHECK(out.stopOnError == false, "settings stopOnError round-trip");
         CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
+        CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
         CHECK(out.summaryPanelWidthFraction > 0.399 && out.summaryPanelWidthFraction < 0.401, "settings summaryPanelWidthFraction round-trip");
@@ -1536,9 +1538,22 @@ static void TestAppSettings()
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");
         CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
+        CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
+    }
+
+    // tabRenameCommitMode: each token parses to its mode; an unknown token falls back to the default.
+    {
+        const auto none = DeserializeAppSettings(L"{\"settings\":{\"tabRenameCommitMode\":\"clickAway\"}}");
+        CHECK(none.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOnly, "settings tabRenameCommitMode 'clickAway' honored");
+        const auto ent = DeserializeAppSettings(L"{\"settings\":{\"tabRenameCommitMode\":\"enter\"}}");
+        CHECK(ent.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode 'enter' honored");
+        const auto se = DeserializeAppSettings(L"{\"settings\":{\"tabRenameCommitMode\":\"shiftEnter\"}}");
+        CHECK(se.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode 'shiftEnter' honored");
+        const auto bad = DeserializeAppSettings(L"{\"settings\":{\"tabRenameCommitMode\":\"bogus\"}}");
+        CHECK(bad.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode unknown -> default (Shift+Enter)");
     }
 
     // A present subset is honored; the rest keep defaults.

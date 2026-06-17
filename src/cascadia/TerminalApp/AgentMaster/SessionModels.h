@@ -48,6 +48,20 @@ namespace Agentmaster
         ByPid // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
     };
 
+    // Agentmaster: how the tab/session RENAME box treats Enter / Shift+Enter as a COMMIT (accept +
+    // save, exactly like clicking away). The rename box is multi-line (AcceptsReturn), so the key
+    // that ISN'T the commit key inserts a newline into the title instead. Clicking away (focus loss)
+    // ALWAYS commits in every mode — this only governs the keyboard shortcut. GLOBAL app setting
+    // (AppSettings::tabRenameCommitMode), persisted to settings.json so the choice is shared by every
+    // window and survives restart. The integer order is wire-stable AND mirrored by the raw-int
+    // constants in TabHeaderControl.cpp (a static_assert in TerminalPage.AgentEngine.cpp locks it).
+    enum class TabRenameCommitMode
+    {
+        ClickAwayOnly = 0, // None: only focus-loss commits; both Enter and Shift+Enter insert a newline
+        ClickAwayOrShiftEnter = 1, // default: Shift+Enter commits; a plain Enter inserts a newline
+        ClickAwayOrEnter = 2 // Enter commits; Shift+Enter inserts a newline
+    };
+
     // When a queued prompt is allowed to fire.
     enum class PromptGate
     {
@@ -293,6 +307,10 @@ namespace Agentmaster
 
         // --- Behavior sugar ---
         bool confirmBeforeKill{ true }; // confirm before killing a session from the Manager
+        // How the tab/session rename box commits via the keyboard (focus-loss always commits). GLOBAL
+        // across windows. Default = Shift+Enter commits while a plain Enter still inserts a newline
+        // (titles are multi-line). See TabRenameCommitMode.
+        TabRenameCommitMode tabRenameCommitMode{ TabRenameCommitMode::ClickAwayOrShiftEnter };
         std::wstring defaultLaunchDir{}; // "" => the Launch cwd box defaults to %USERPROFILE%
         // Agentmaster: demote a session sitting in WaitingForInput (the Triage Board's
         // "Waiting-for-you" column) to Idle after this many minutes with no activity. Rationale:

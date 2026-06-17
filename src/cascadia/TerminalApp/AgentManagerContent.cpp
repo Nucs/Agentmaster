@@ -2774,17 +2774,55 @@ namespace winrt::TerminalApp::implementation
                     auto box = TextBox{};
                     box.Text(s.title);
                     box.Margin(Thickness{ 16, 0, 0, 4 });
-                    // Multi-line titles: Return INSERTS a newline (AcceptsReturn) rather than
-                    // committing — matching the WT tab-rename box (TabHeaderControl). The commit
-                    // is focus-loss (click away / select another row); Escape still cancels. The
-                    // TextBox marks Return handled, so it won't bubble to the row's Enter=Activate.
+                    // Multi-line titles: a NON-commit Return INSERTS a newline (AcceptsReturn) rather
+                    // than committing — matching the WT tab-rename box (TabHeaderControl). Focus-loss
+                    // (click away / select another row) ALWAYS commits; Enter / Shift+Enter optionally
+                    // commit per the GLOBAL TabRenameCommitMode (Rule #11 keeps this path == the tab
+                    // renamer). In every case the TextBox or our PreviewKeyDown marks Return handled, so
+                    // it won't bubble to the row's Enter=Activate. Escape still cancels.
                     box.AcceptsReturn(true);
                     box.TextWrapping(TextWrapping::Wrap);
+                    _renameCommitOnKeyUp = false;
+                    // PreviewKeyDown (tunneling) runs before the box's own key handling — the one place
+                    // we can both see Enter reliably and SUPPRESS the AcceptsReturn newline for the commit
+                    // combo. We don't commit on the down event (it rebuilds the tree and tears out this
+                    // box mid-keystroke); the matching KeyUp commits, exactly like TabHeaderControl.
+                    box.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+                        if (e.Key() != VirtualKey::Enter)
+                        {
+                            return;
+                        }
+                        const auto mode = _appSettings.tabRenameCommitMode;
+                        if (mode == TabRenameCommitMode::ClickAwayOnly)
+                        {
+                            return; // both keys just insert a newline; commit by clicking away
+                        }
+                        // Shift distinguishes the commit key from the newline key (both arrive as Enter).
+                        auto shiftDown = false;
+                        if (const auto w = CoreWindow::GetForCurrentThread())
+                        {
+                            shiftDown = WI_IsFlagSet(w.GetKeyState(VirtualKey::Shift), winrt::Windows::UI::Core::CoreVirtualKeyStates::Down);
+                        }
+                        const bool commit = (mode == TabRenameCommitMode::ClickAwayOrShiftEnter) ? shiftDown : !shiftDown;
+                        if (commit)
+                        {
+                            _renameCommitOnKeyUp = true;
+                            e.Handled(true); // suppress the newline + stop the down bubbling; KeyUp commits
+                        }
+                    });
                     box.KeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
                         if (e.Key() == VirtualKey::Escape)
                         {
                             _CancelRename();
                             e.Handled(true);
+                        }
+                    });
+                    box.KeyUp([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+                        if (_renameCommitOnKeyUp)
+                        {
+                            _renameCommitOnKeyUp = false;
+                            e.Handled(true);
+                            _CommitRename(); // == clicking away (idempotent; the LostFocus that follows no-ops)
                         }
                     });
                     box.LostFocus([this](const IInspectable&, const RoutedEventArgs&) { _CommitRename(); });
@@ -4443,6 +4481,16 @@ namespace winrt::TerminalApp::implementation
         _setConfirmKill = ToggleSwitch{};
         _setConfirmKill.Header(winrt::box_value(L"Confirm before archiving a session"));
         panel.Children().Append(_setConfirmKill);
+        // How the tab/session rename box commits via the keyboard. Clicking away (focus loss) ALWAYS
+        // commits; this only governs the Enter / Shift+Enter shortcut. The box is multi-line, so the
+        // key that ISN'T the commit key inserts a newline. GLOBAL across windows (TabRenameCommitMode).
+        _setRenameCommit = ComboBox{};
+        _setRenameCommit.Header(winrt::box_value(L"Tab rename: commit with"));
+        _setRenameCommit.Items().Append(winrt::box_value(L"Click away only"));
+        _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Shift+Enter"));
+        _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Enter"));
+        AgentSetTip(_setRenameCommit, L"How renaming a tab is accepted & saved. Clicking away always commits; this picks the keyboard shortcut. The other key inserts a newline (titles can be multi-line).");
+        panel.Children().Append(_setRenameCommit);
         _setWaitingDecay = TextBox{};
         _setWaitingDecay.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after (minutes)"));
         // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn — past that the
@@ -4604,6 +4652,13 @@ namespace winrt::TerminalApp::implementation
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
         }
+        if (_setRenameCommit)
+        {
+            // Items are ordered to match TabRenameCommitMode (0 click-away / 1 +Shift+Enter / 2 +Enter).
+            _setRenameCommit.SelectedIndex(_appSettings.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter      ? 2 :
+                                           _appSettings.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter ? 1 :
+                                                                                                                            0);
+        }
         if (_setWaitingDecay)
         {
             _setWaitingDecay.Text(winrt::hstring{ std::to_wstring(_appSettings.waitingDecayMinutes) });
@@ -4707,6 +4762,13 @@ namespace winrt::TerminalApp::implementation
         if (_setConfirmKill)
         {
             _appSettings.confirmBeforeKill = _setConfirmKill.IsOn();
+        }
+        if (_setRenameCommit)
+        {
+            const int idx = _setRenameCommit.SelectedIndex();
+            _appSettings.tabRenameCommitMode = idx == 2 ? TabRenameCommitMode::ClickAwayOrEnter :
+                                               idx == 0 ? TabRenameCommitMode::ClickAwayOnly :
+                                                          TabRenameCommitMode::ClickAwayOrShiftEnter;
         }
         if (_setWaitingDecay)
         {

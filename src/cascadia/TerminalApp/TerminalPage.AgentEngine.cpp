@@ -18,6 +18,7 @@
 
 #include "AgentManagerContent.h" // the Manager tab's content (C1 UI) — created + wired here
 #include "AgentTabOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTabOverlay> maps — needs the complete type
+#include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
 #include "AgentMaster/Persistence.h" // Load/SaveAppSettings
@@ -45,6 +46,14 @@ using namespace ::TerminalApp;
 using namespace ::Microsoft::Console;
 using namespace ::Microsoft::Terminal::Core;
 using namespace std::chrono_literals;
+
+// Agentmaster: TabHeaderControl mirrors the rename-commit mode as raw ints (it doesn't include the
+// engine model). SetTabRenameCommitMode below casts the enum straight to int, so the enum's
+// underlying values MUST be these — lock it here, where both the enum and that contract are visible.
+static_assert(static_cast<int32_t>(::Agentmaster::TabRenameCommitMode::ClickAwayOnly) == 0 &&
+                  static_cast<int32_t>(::Agentmaster::TabRenameCommitMode::ClickAwayOrShiftEnter) == 1 &&
+                  static_cast<int32_t>(::Agentmaster::TabRenameCommitMode::ClickAwayOrEnter) == 2,
+              "TabRenameCommitMode values must match the raw-int constants in TabHeaderControl.cpp");
 
 namespace winrt
 {
@@ -185,6 +194,9 @@ namespace winrt::TerminalApp::implementation
         }
 
         _appSettings = ::Agentmaster::LoadAppSettings(); // the Settings cog (per-field defaults if absent)
+        // Agentmaster: publish the GLOBAL tab-rename commit mode to the (process-wide) tab headers.
+        // Cross-window, so it lives in one process-static the headers read live, not per-tab state.
+        SetTabRenameCommitMode(static_cast<int32_t>(_appSettings.tabRenameCommitMode));
 
         // M9: consume the ONE process-wide engine. v1.24 WT is a WindowEmperor — every window
         // lives in a single process — so the SessionRegistry (single source of truth), the
@@ -497,6 +509,9 @@ namespace winrt::TerminalApp::implementation
                 }
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
+                // Apply the (possibly changed) GLOBAL rename-commit mode to every window's tab
+                // headers immediately (process-wide static), not just next launch.
+                SetTabRenameCommitMode(static_cast<int32_t>(s.tabRenameCommitMode));
                 // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle
                 // window to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
