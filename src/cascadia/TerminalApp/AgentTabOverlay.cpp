@@ -255,8 +255,10 @@ namespace
 
     // Render the session-end.js box, adapted to the narrow (20%) summary panel: the same labels +
     // section dividers + mapping, but wrapped (no fixed-width rules). plan-start/plan-end override the
-    // header glyph+label; otherwise the live state glyph+label (passed in) is used.
-    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile)
+    // header glyph+label; otherwise the live state glyph+label (passed in) is used. The session id +
+    // the launch/resume CLI are deliberately NOT shown here (they're long and dominate the narrow
+    // panel) — both remain one click away on the badge's hover copy menu.
+    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         if (a.hasPlanContent)
@@ -275,7 +277,6 @@ namespace
         const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; }; // ──────────── (12)
 
         line(glyph + L"  " + label);
-        line(id);
         if (a.hasPlanContent && !a.parentSessionId.empty())
         {
             line(L"Parent: " + a.parentSessionId);
@@ -293,7 +294,6 @@ namespace
         {
             line(L"Folder: " + folder);
         }
-        line(L"Resume: " + resumeCmd);
         if (const std::wstring dur = FormatSessionDuration(a.firstTs, a.lastTs); !dur.empty())
         {
             line(L"Dur:    " + dur);
@@ -342,24 +342,20 @@ namespace
     }
 
     // Codex: a reduced box from the rollout (the rollout exposes no tool files / tasks) — model /
-    // effort / sandbox, branch, and the human prompts.
-    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel)
+    // effort / sandbox, branch, and the human prompts. Like the Claude box, the rollout id + the
+    // resume CLI are omitted here (available on the hover copy menu).
+    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& liveGlyph, const std::wstring& liveLabel)
     {
         std::wstring o;
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
         const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; };
 
         line(liveGlyph + L"  " + liveLabel + L"  \x00B7 codex");
-        if (!id.empty())
-        {
-            line(id);
-        }
         line(L"Dir:    " + cwd);
         if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
         {
             line(L"Folder: " + folder);
         }
-        line(L"Resume: " + resumeCmd);
         std::wstring me;
         const auto add = [&me](const std::wstring& p) { if (!p.empty()) { if (!me.empty()) me += L" \x00B7 "; me += p; } };
         add(info.model);
@@ -762,9 +758,10 @@ namespace winrt::TerminalApp::implementation
         });
         copyBtn.Flyout(flyout);
 
-        // Pencil: toggle the SUMMARY PANEL (the 2nd overlay slot, below this badge). Persisted via
-        // SessionInfo.summaryShown, so a tab reopens with the panel in the same state.
-        Button pencilBtn = mkIconBtn(L"\xE70F", L"Show/hide the session summary panel"); // Edit (pencil)
+        // Pencil: toggle the SUMMARY PANEL (the 2nd overlay slot, below this badge). The visibility is
+        // a GLOBAL setting (AppSettings::showSummaryPanel) — shared across windows + persisted — so the
+        // pencil hands off to the page (_ToggleSummary -> _onToggleSummary), which flips it everywhere.
+        Button pencilBtn = mkIconBtn(L"\xE70F", L"Show/hide the session summary panel (all tabs)"); // Edit (pencil)
         pencilBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {
@@ -886,29 +883,50 @@ namespace winrt::TerminalApp::implementation
         _summaryRoot.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         _summaryRoot.Padding(ThicknessHelper::FromLengths(8, 6, 8, 6));
         _summaryRoot.Child(sv);
-        _summaryRoot.Visibility(Visibility::Collapsed); // shown only while summaryShown is ON
+        _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
+    }
+
+    void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
+    {
+        _onToggleSummary = std::move(handler);
+    }
+
+    void AgentTabOverlay::SetSummaryEnabled(bool on)
+    {
+        // The summary panel's visibility is a GLOBAL setting (AppSettings::showSummaryPanel), mirrored
+        // into the overlay here by the page — on attach (seed) and on every pencil toggle (broadcast to
+        // every linked overlay in the window). _Refresh reads _summaryEnabled too, so the panel stays in
+        // step on subsequent registry events.
+        _summaryEnabled = on;
+        if (!_summaryRoot)
+        {
+            return; // no panel on the observe badge
+        }
+        if (!on)
+        {
+            _summaryRoot.Visibility(Visibility::Collapsed);
+            return;
+        }
+        // Enabled: show + (re)load from the freshest session snapshot.
+        if (_registry && !_sessionId.empty())
+        {
+            if (const auto info = _registry->Get(_sessionId))
+            {
+                _UpdateSummary(*info);
+                return;
+            }
+        }
+        _summaryRoot.Visibility(Visibility::Visible); // enabled but no session yet — _Refresh will fill it
     }
 
     void AgentTabOverlay::_ToggleSummary()
     {
-        if (!_registry || _sessionId.empty())
+        // The pencil flips the GLOBAL setting, not per-session state: hand off to the page, which does
+        // the freshest-disk read-modify-write of settings.json AND applies it live to every linked
+        // overlay in the window (SetSummaryEnabled). No-op if no handler is wired (defensive).
+        if (_onToggleSummary)
         {
-            return;
-        }
-        const auto info = _registry->Get(_sessionId);
-        if (!info)
-        {
-            return;
-        }
-        const bool next = !info->summaryShown;
-        // Persist through the registry's Update seam: it fires the autosave + the lens/overlay
-        // observers (our id-filtered observer re-enters _Refresh -> _UpdateSummary on the UI thread).
-        _registry->Update(_sessionId, [next](SessionInfo& s) { s.summaryShown = next; });
-        // ...and apply immediately too (the observer hop adds a tick of latency; _UpdateSummary is
-        // idempotent + guarded, so the later observer-driven call is a no-op).
-        if (const auto fresh = _registry->Get(_sessionId))
-        {
-            _UpdateSummary(*fresh);
+            _onToggleSummary();
         }
     }
 
@@ -918,7 +936,7 @@ namespace winrt::TerminalApp::implementation
         {
             return; // no panel on the observe badge (built only by Initialize, for a linked session)
         }
-        if (!s.summaryShown)
+        if (!_summaryEnabled)
         {
             _summaryRoot.Visibility(Visibility::Collapsed);
             return;
@@ -935,14 +953,13 @@ namespace winrt::TerminalApp::implementation
             return; // a codex not yet reconciled (no rollout uuid) — nothing to analyze
         }
         std::wstring cwd = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
-        std::wstring resume = BuildLaunchCli(s, codex); // the REAL resume command (same as the copy menu)
         std::wstring liveGlyph{ StateGlyph(s.state) };
         std::wstring liveLabel{ StateLabel(s.state) };
         _summaryLoading = true;
-        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(resume), std::move(liveGlyph), std::move(liveLabel), _summaryMtime);
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime);
     }
 
-    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring resumeCmd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime)
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryText)
         co_await winrt::resume_background();
@@ -975,7 +992,7 @@ namespace winrt::TerminalApp::implementation
                 if (codex)
                 {
                     const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
-                    text = RenderCodexSummary(info, sessionId, cwd, path, resumeCmd, liveGlyph, liveLabel);
+                    text = RenderCodexSummary(info, cwd, path, liveGlyph, liveLabel);
                 }
                 else
                 {
@@ -991,7 +1008,7 @@ namespace winrt::TerminalApp::implementation
                             planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                         }
                     }
-                    text = RenderSummaryBox(a, sessionId, cwd, path, resumeCmd, liveGlyph, liveLabel, planFile);
+                    text = RenderSummaryBox(a, cwd, path, liveGlyph, liveLabel, planFile);
                 }
             }
         }

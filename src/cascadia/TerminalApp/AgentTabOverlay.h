@@ -17,7 +17,8 @@
 // PENCIL button that toggles the SUMMARY PANEL — a SECOND overlay (its own slot, below the badge, max
 // 20% of the pane) that renders a session-end.js-style box (Session/Parent/Plan/Dir/Folder/Resume/
 // Duration/Branch/Tasks/Messages/Files Read/Files Edited), analyzed off-thread from the transcript via
-// ProcessInspect::AnalyzeSessionTranscript. The toggle state persists (SessionInfo.summaryShown).
+// ProcessInspect::AnalyzeSessionTranscript. The toggle is a GLOBAL setting (AppSettings::showSummaryPanel) —
+// shared across windows + persisted; the pencil on any tab flips every tab's panel.
 //
 // Built imperatively (no IDL/XAML markup), like AgentManagerContent. It is NOT an IPaneContent —
 // it just produces a FrameworkElement the app installs into the pane's overlay slot
@@ -30,6 +31,7 @@
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.System.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -64,8 +66,18 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (TAB_OVERLAY.md summary panel): the FrameworkElement for the SECOND slot (below
         // the badge), installed via TerminalPaneContent::SetAgentSummaryOverlay. Built by Initialize;
-        // shown only while the pencil toggle (SessionInfo.summaryShown) is ON.
+        // shown only while the GLOBAL toggle (AppSettings::showSummaryPanel) is ON.
         winrt::Windows::UI::Xaml::FrameworkElement SummaryRoot() const { return _summaryRoot; }
+
+        // Agentmaster (TAB_OVERLAY.md summary panel): the summary panel's visibility is a GLOBAL setting
+        // (AppSettings::showSummaryPanel), not per-session. The page mirrors it in here — on attach (seed)
+        // and on every pencil toggle (broadcast to every linked overlay in the window). Shows/hides +
+        // (re)loads the panel. Call on the UI thread.
+        void SetSummaryEnabled(bool on);
+        // The pencil button flips the GLOBAL setting; the overlay can't reach AppSettings, so it calls
+        // this handler (wired by the page) to do the freshest-disk read-modify-write + the live
+        // broadcast. Set by _AttachClaudeOverlay.
+        void SetSummaryToggleHandler(std::function<void()> handler);
 
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
@@ -76,9 +88,9 @@ namespace winrt::TerminalApp::implementation
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
-        void _ToggleSummary(); // pencil button: flip SessionInfo.summaryShown (persists; fires the observer)
-        void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide + (re)load when grown
-        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring resumeCmd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime); // analyze + render off-thread, set text on the UI thread
+        void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
+        void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
+        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime); // analyze + render off-thread, set text on the UI thread
 
         std::wstring _sessionId;
         bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
@@ -96,11 +108,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2: "<root workdir folder>/<branch>"
         winrt::Windows::UI::Xaml::Controls::StackPanel _row3{ nullptr }; // row 3: folder + copy buttons (hover-only)
 
-        // Summary panel (the 2nd slot): a scrollable monospace box, shown while summaryShown is ON.
+        // Summary panel (the 2nd slot): a scrollable monospace box, shown while the global showSummaryPanel is ON.
         winrt::Windows::UI::Xaml::Controls::Border _summaryRoot{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _summaryText{ nullptr };
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
         int64_t _summaryMtime{ 0 }; // last-loaded transcript mtime — reload only when it grows
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
+        bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
+        std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
     };
 }

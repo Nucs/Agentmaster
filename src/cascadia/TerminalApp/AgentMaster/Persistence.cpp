@@ -340,10 +340,6 @@ namespace Agentmaster
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
         o.Set(L"external", json::Value::MkBool(s.external));
-        if (s.summaryShown)
-        {
-            o.Set(L"summaryShown", json::Value::MkBool(true)); // TAB_OVERLAY.md summary panel toggle (default OFF => omitted)
-        }
         // Codex managed-session support: persist the agent kind + the rollout resume target. Both
         // are omitted when default (Claude / empty), so an all-Claude sessions.json is byte-unchanged.
         if (s.kind == AgentKind::Codex)
@@ -374,7 +370,6 @@ namespace Agentmaster
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
         s.external = v.BoolAt(L"external", false);
-        s.summaryShown = v.BoolAt(L"summaryShown", false); // TAB_OVERLAY.md summary panel toggle (absent => OFF)
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
         if (const auto* q = v.Find(L"queue"); q && q->type == json::Value::Type::Arr)
@@ -435,6 +430,7 @@ namespace Agentmaster
         o.Set(L"waitingDecayMinutes", json::Value::MkNum(s.waitingDecayMinutes));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
+        o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         auto hidden = json::Value::MkArr();
@@ -464,6 +460,7 @@ namespace Agentmaster
         s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
+        s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", false); // TAB_OVERLAY.md summary panel toggle (absent => OFF)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value

@@ -485,11 +485,16 @@ namespace winrt::TerminalApp::implementation
         content->SetSettingsHandler([weakThis](::Agentmaster::AppSettings s) {
             if (auto self = weakThis.get())
             {
-                // hiddenSessionIds (the Sessions browser's "Hide from list" set) is owned by the
-                // page's hide action + the cog's "Reset hidden sessions", each a freshest-disk RMW.
-                // The cog FORM never edits it, so preserve the on-disk value here so a form Save
-                // can't regress a hide/reset done since the modal was seeded (incl. by another window).
-                s.hiddenSessionIds = ::Agentmaster::LoadAppSettings().hiddenSessionIds;
+                // hiddenSessionIds (the Sessions browser's "Hide from list" set) AND showSummaryPanel
+                // (the per-tab summary-panel pencil) are owned by UI actions OUTSIDE the cog form, each a
+                // freshest-disk RMW. The cog FORM never edits them, so preserve the on-disk values here so
+                // a form Save can't regress a hide/reset/pencil-toggle done since the modal was seeded
+                // (incl. by another window).
+                {
+                    const auto disk = ::Agentmaster::LoadAppSettings();
+                    s.hiddenSessionIds = disk.hiddenSessionIds;
+                    s.showSummaryPanel = disk.showSummaryPanel;
+                }
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
                 // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle

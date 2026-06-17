@@ -2221,8 +2221,17 @@ namespace Agentmaster
     {
         const auto has = [&](const wchar_t* s) { return c.find(s) != std::wstring::npos; };
         const auto starts = [&](const wchar_t* p) { return c.rfind(p, 0) == 0; };
-        return has(L"<command-message>") || has(L"<command-name>") || has(L"<local-command-") ||
+        return has(L"<command-message>") || has(L"<command-name>") || has(L"<command-args>") || has(L"<local-command-") ||
                has(L"<bash-input>") || has(L"<bash-stdout>") || has(L"<bash-stderr>") ||
+               // Agentmaster (summary refinement): system-injected execution noise that arrives as a
+               // "user" message but is NOT a human prompt. (a) background task-finished notices
+               // <task-notification> (carry <task-id>/<tool-use-id>/<output-file>); (b) finished
+               // background-command results (<output-file>, or a <status>...</status> + <summary>...
+               // block); (c) subagent token/timing telemetry footers (<usage>/<subagent_tokens>).
+               // Teammate messages (<teammate-message>) are intentionally NOT filtered.
+               has(L"<task-notification>") ||
+               has(L"<output-file>") || (has(L"<status>") && has(L"<summary>")) ||
+               has(L"<usage>") || has(L"<subagent_tokens>") ||
                starts(L"Caveat:") || starts(L"Overview:") || starts(L"\n") || starts(L"[Request interrupted");
     }
     static bool SeAllWhitespace(const std::wstring& s)

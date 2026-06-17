@@ -153,6 +153,19 @@ namespace winrt::TerminalApp::implementation
         }
         auto overlay = winrt::make_self<implementation::AgentTabOverlay>();
         overlay->Initialize(sessionId, _sessionRegistry);
+        // Summary panel (TAB_OVERLAY.md): its show/hide is the GLOBAL AppSettings::showSummaryPanel, not
+        // per-session — seed this overlay with the current value, and wire the pencil to flip the global
+        // setting (freshest-disk RMW) + broadcast live to every linked overlay in this window.
+        overlay->SetSummaryEnabled(_appSettings.showSummaryPanel);
+        {
+            auto weakThis = get_weak();
+            overlay->SetSummaryToggleHandler([weakThis]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_ToggleSummaryPanel();
+                }
+            });
+        }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
             impl->SetAgentOverlay(overlay->Root());
@@ -160,6 +173,28 @@ namespace winrt::TerminalApp::implementation
             impl->SetAgentManaged(true); // exclude this managed-session pane from broadcast input (item 2)
             _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");
+        }
+    }
+
+    // Agentmaster (TAB_OVERLAY.md summary panel): the per-tab pencil button toggles the summary panel's
+    // visibility, which is a GLOBAL setting (AppSettings::showSummaryPanel) so the choice is shared across
+    // windows and survives restart. Mirror the treeSort / archiveSplitFraction pattern: a freshest-disk
+    // read-modify-write of just this field (so a concurrent cog Save / another window can't be clobbered),
+    // keep this window's in-memory copy in step, then apply it LIVE to every linked overlay in this window
+    // (other already-open windows adopt it on their next launch, like treeSort).
+    void TerminalPage::_ToggleSummaryPanel()
+    {
+        auto s = ::Agentmaster::LoadAppSettings();
+        const bool next = !s.showSummaryPanel;
+        s.showSummaryPanel = next;
+        ::Agentmaster::SaveAppSettings(s);
+        _appSettings.showSummaryPanel = next;
+        for (const auto& [id, ov] : _claudeOverlays)
+        {
+            if (ov)
+            {
+                ov->SetSummaryEnabled(next);
+            }
         }
     }
 
