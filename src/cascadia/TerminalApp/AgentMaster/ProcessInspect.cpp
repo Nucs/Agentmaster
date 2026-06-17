@@ -2199,6 +2199,424 @@ namespace Agentmaster
         return out;
     }
 
+    // --- session-end.js port helpers (TAB_OVERLAY.md summary panel) ---
+    static std::wstring SeBasename(const std::wstring& fp)
+    {
+        const auto pos = fp.find_last_of(L"/\\");
+        return pos == std::wstring::npos ? fp : fp.substr(pos + 1);
+    }
+    static bool SeIsPlansPath(const std::wstring& fp)
+    {
+        std::wstring n = fp; // normalize separators + case, then look for a /plans/ segment (JS: /[/\\]plans[/\\]/i)
+        for (auto& c : n)
+        {
+            if (c == L'\\')
+                c = L'/';
+            else if (c >= L'A' && c <= L'Z')
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+        }
+        return n.find(L"/plans/") != std::wstring::npos;
+    }
+    static bool SeIsCommandNoise(const std::wstring& c)
+    {
+        const auto has = [&](const wchar_t* s) { return c.find(s) != std::wstring::npos; };
+        const auto starts = [&](const wchar_t* p) { return c.rfind(p, 0) == 0; };
+        return has(L"<command-message>") || has(L"<command-name>") || has(L"<local-command-") ||
+               has(L"<bash-input>") || has(L"<bash-stdout>") || has(L"<bash-stderr>") ||
+               starts(L"Caveat:") || starts(L"Overview:") || starts(L"\n") || starts(L"[Request interrupted");
+    }
+    static bool SeAllWhitespace(const std::wstring& s)
+    {
+        for (const wchar_t c : s)
+        {
+            if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    static bool SeParseIso(std::wstring_view iso, FILETIME& outUtc)
+    {
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+        if (::swscanf_s(std::wstring{ iso }.c_str(), L"%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6)
+        {
+            return false;
+        }
+        SYSTEMTIME st{};
+        st.wYear = static_cast<WORD>(y);
+        st.wMonth = static_cast<WORD>(mo);
+        st.wDay = static_cast<WORD>(d);
+        st.wHour = static_cast<WORD>(h);
+        st.wMinute = static_cast<WORD>(mi);
+        st.wSecond = static_cast<WORD>(s);
+        return ::SystemTimeToFileTime(&st, &outUtc) != FALSE;
+    }
+
+    SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes)
+    {
+        SessionSummary out;
+        if (transcriptPath.empty())
+        {
+            return out;
+        }
+        const std::string bytes = ReadFileHead(std::wstring{ transcriptPath }, maxBytes);
+        if (bytes.empty())
+        {
+            return out;
+        }
+        out.found = true;
+        const bool truncated = (maxBytes != 0);
+        const std::wstring wide = Utf8ToWide(bytes);
+
+        std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit;
+        json::Value lastTodos;
+        bool haveTodos = false;
+        bool isFirstUser = true;
+
+        size_t start = 0;
+        for (size_t i = 0; i <= wide.size(); ++i)
+        {
+            if (i < wide.size() && wide[i] != L'\n')
+            {
+                continue;
+            }
+            if (i == wide.size() && truncated)
+            {
+                break;
+            }
+            std::wstring_view line(wide.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+
+            const std::wstring ts = obj.StrAt(L"timestamp");
+            if (!ts.empty())
+            {
+                if (out.firstTs.empty())
+                {
+                    out.firstTs = ts;
+                }
+                out.lastTs = ts;
+            }
+            if (out.branch.empty())
+            {
+                const std::wstring gb = obj.StrAt(L"gitBranch");
+                if (!gb.empty())
+                {
+                    out.branch = gb;
+                }
+            }
+
+            const std::wstring type = obj.StrAt(L"type");
+            const bool externalUser = (type == L"user" && obj.StrAt(L"userType") == L"external");
+
+            if (externalUser && isFirstUser)
+            {
+                isFirstUser = false;
+                if (const auto* pc = obj.Find(L"planContent");
+                    pc && pc->type != json::Value::Type::Null &&
+                    !(pc->type == json::Value::Type::Bool && !pc->boolean) &&
+                    !(pc->type == json::Value::Type::Str && pc->str.empty()))
+                {
+                    out.hasPlanContent = true;
+                }
+                // Parent: "read the full transcript at: <...>.jsonl" in the (string) content.
+                const auto* msg = obj.Find(L"message");
+                std::wstring contentStr;
+                if (msg && msg->type == json::Value::Type::Obj)
+                {
+                    if (const auto* c = msg->Find(L"content"); c && c->type == json::Value::Type::Str)
+                    {
+                        contentStr = c->str;
+                    }
+                }
+                if (!contentStr.empty())
+                {
+                    std::wstring lc = contentStr;
+                    for (auto& ch : lc)
+                    {
+                        if (ch >= L'A' && ch <= L'Z')
+                        {
+                            ch = static_cast<wchar_t>(ch - L'A' + L'a');
+                        }
+                    }
+                    const auto mk = lc.find(L"read the full transcript at:");
+                    if (mk != std::wstring::npos)
+                    {
+                        size_t p = mk + 28; // == len("read the full transcript at:")
+                        while (p < contentStr.size() && (contentStr[p] == L' ' || contentStr[p] == L'\t'))
+                        {
+                            ++p;
+                        }
+                        size_t e = p;
+                        while (e < contentStr.size() && contentStr[e] != L' ' && contentStr[e] != L'\t' && contentStr[e] != L'\r' && contentStr[e] != L'\n')
+                        {
+                            ++e;
+                        }
+                        const std::wstring tok = contentStr.substr(p, e - p);
+                        if (tok.size() >= 6)
+                        {
+                            std::wstring tl = tok;
+                            for (auto& ch : tl)
+                            {
+                                if (ch >= L'A' && ch <= L'Z')
+                                {
+                                    ch = static_cast<wchar_t>(ch - L'A' + L'a');
+                                }
+                            }
+                            if (tl.rfind(L".jsonl") == tl.size() - 6)
+                            {
+                                std::wstring stem = SeBasename(tok);
+                                stem.resize(stem.size() - 6); // drop ".jsonl"
+                                out.parentSessionId = stem;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (externalUser)
+            {
+                const auto* msg = obj.Find(L"message");
+                if (msg && msg->type == json::Value::Type::Obj)
+                {
+                    const auto* c = msg->Find(L"content");
+                    std::wstring content;
+                    if (c)
+                    {
+                        if (c->type == json::Value::Type::Str)
+                        {
+                            content = c->str;
+                        }
+                        else if (c->type == json::Value::Type::Arr)
+                        {
+                            for (const auto& blk : c->arr)
+                            {
+                                if (blk.type == json::Value::Type::Obj && blk.StrAt(L"type") == L"text")
+                                {
+                                    content = blk.StrAt(L"text");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content) && seenMsgs.insert(content).second)
+                    {
+                        out.userMsgs.push_back(content);
+                    }
+                }
+            }
+
+            if (type == L"assistant")
+            {
+                const auto* msg = obj.Find(L"message");
+                if (msg && msg->type == json::Value::Type::Obj)
+                {
+                    if (const auto* c = msg->Find(L"content"); c && c->type == json::Value::Type::Arr)
+                    {
+                        for (const auto& blk : c->arr)
+                        {
+                            if (blk.type != json::Value::Type::Obj || blk.StrAt(L"type") != L"tool_use")
+                            {
+                                continue;
+                            }
+                            const std::wstring name = blk.StrAt(L"name");
+                            const auto* input = blk.Find(L"input");
+                            std::wstring fp;
+                            if (input && input->type == json::Value::Type::Obj)
+                            {
+                                fp = input->StrAt(L"file_path");
+                            }
+                            if (!fp.empty())
+                            {
+                                const std::wstring base = SeBasename(fp);
+                                if (name == L"Read")
+                                {
+                                    if (seenRead.insert(base).second)
+                                    {
+                                        out.filesRead.push_back(base);
+                                    }
+                                    if (SeIsPlansPath(fp))
+                                    {
+                                        out.planFilesRead.push_back(fp);
+                                    }
+                                }
+                                else if (name == L"Edit" || name == L"Write")
+                                {
+                                    if (seenEdit.insert(base).second)
+                                    {
+                                        out.filesEdited.push_back(base);
+                                    }
+                                    if (name == L"Write" && SeIsPlansPath(fp))
+                                    {
+                                        out.planFilePath = fp;
+                                    }
+                                }
+                            }
+                            if (name == L"TodoWrite" && input && input->type == json::Value::Type::Obj)
+                            {
+                                if (const auto* todos = input->Find(L"todos"); todos && todos->type == json::Value::Type::Arr)
+                                {
+                                    lastTodos = *todos;
+                                    haveTodos = true;
+                                }
+                            }
+                            if (name == L"ExitPlanMode")
+                            {
+                                out.hasExitPlanMode = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::sort(out.filesRead.begin(), out.filesRead.end());
+        std::sort(out.filesEdited.begin(), out.filesEdited.end());
+        if (haveTodos)
+        {
+            for (const auto& t : lastTodos.arr)
+            {
+                if (t.type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                const std::wstring st = t.StrAt(L"status");
+                if (st == L"completed")
+                {
+                    ++out.tasksCompleted;
+                }
+                else if (st == L"pending" || st == L"in_progress")
+                {
+                    ++out.tasksPending;
+                }
+            }
+        }
+        return out;
+    }
+
+    std::wstring FormatSessionDuration(std::wstring_view startIso, std::wstring_view endIso)
+    {
+        if (startIso.empty() || endIso.empty())
+        {
+            return {};
+        }
+        FILETIME a{}, b{};
+        if (!SeParseIso(startIso, a) || !SeParseIso(endIso, b))
+        {
+            return {};
+        }
+        ULARGE_INTEGER ua{}, ub{};
+        ua.LowPart = a.dwLowDateTime;
+        ua.HighPart = a.dwHighDateTime;
+        ub.LowPart = b.dwLowDateTime;
+        ub.HighPart = b.dwHighDateTime;
+        const long long diffSec = ub.QuadPart >= ua.QuadPart ? static_cast<long long>((ub.QuadPart - ua.QuadPart) / 10000000ULL) : 0;
+        const long long h = diffSec / 3600, m = (diffSec % 3600) / 60, s = diffSec % 60;
+        wchar_t dur[48];
+        if (h > 0)
+        {
+            ::swprintf(dur, 48, L"%lldh %lldm", h, m);
+        }
+        else if (m > 0)
+        {
+            ::swprintf(dur, 48, L"%lldm %llds", m, s);
+        }
+        else
+        {
+            ::swprintf(dur, 48, L"%llds", s);
+        }
+        const auto hhmm = [](const FILETIME& utc) -> std::wstring {
+            FILETIME lf{};
+            SYSTEMTIME st{};
+            if (::FileTimeToLocalFileTime(&utc, &lf) && ::FileTimeToSystemTime(&lf, &st))
+            {
+                wchar_t t[8];
+                ::swprintf(t, 8, L"%02d:%02d", st.wHour, st.wMinute);
+                return t;
+            }
+            return L"--:--";
+        };
+        return std::wstring{ dur } + L" (" + hhmm(a) + L" -> " + hhmm(b) + L")";
+    }
+
+    std::wstring FindPlanFileInTranscript(std::wstring_view transcriptPath)
+    {
+        if (transcriptPath.empty())
+        {
+            return {};
+        }
+        const std::string bytes = ReadFileHead(std::wstring{ transcriptPath }, 0);
+        if (bytes.empty())
+        {
+            return {};
+        }
+        const std::wstring wide = Utf8ToWide(bytes);
+        std::wstring planFile;
+        size_t start = 0;
+        for (size_t i = 0; i <= wide.size(); ++i)
+        {
+            if (i < wide.size() && wide[i] != L'\n')
+            {
+                continue;
+            }
+            std::wstring_view line(wide.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj || parsed->StrAt(L"type") != L"assistant")
+            {
+                continue;
+            }
+            const auto* msg = parsed->Find(L"message");
+            if (!msg || msg->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto* c = msg->Find(L"content");
+            if (!c || c->type != json::Value::Type::Arr)
+            {
+                continue;
+            }
+            for (const auto& blk : c->arr)
+            {
+                if (blk.type != json::Value::Type::Obj || blk.StrAt(L"type") != L"tool_use" || blk.StrAt(L"name") != L"Write")
+                {
+                    continue;
+                }
+                if (const auto* input = blk.Find(L"input"); input && input->type == json::Value::Type::Obj)
+                {
+                    const std::wstring fp = input->StrAt(L"file_path");
+                    if (!fp.empty() && SeIsPlansPath(fp))
+                    {
+                        planFile = fp; // keep the LAST
+                    }
+                }
+            }
+        }
+        return planFile;
+    }
+
     // ===== Codex turn-state (Phase C2): rollout-tail -> Running / Waiting / Idle ===============
 
     CodexBoundary ClassifyCodexLine(std::wstring_view jsonLine)

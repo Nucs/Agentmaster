@@ -283,6 +283,42 @@ namespace Agentmaster
     // IsNoiseUserPrompt). `maxBytes` 0 == the whole file. Filesystem only; empty on any read failure.
     std::wstring ReadConversationText(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
 
+    // ===== Session summary (TAB_OVERLAY.md summary panel) — the session-end.js analyzer, ported =====
+    // A faithful C++ port of ~/.claude/hooks/session-end.js parseTranscript + its field mapping, so the
+    // per-tab summary panel renders the same box (Session / Parent / Plan / Dir / Folder / Resume /
+    // Duration / Branch / Tasks / Messages / Files Read / Files Edited). One forward pass over the
+    // Claude transcript .jsonl collects every field; the overlay composes the box + decides the live
+    // type label.
+    struct SessionSummary
+    {
+        bool found{ false };
+        std::vector<std::wstring> userMsgs; // type=user, userType=external, text content; deduped; command/bash/Caveat/Overview/interrupt-skipped
+        std::vector<std::wstring> filesRead; // Read tool file_path basenames, sorted + unique
+        std::vector<std::wstring> filesEdited; // Edit/Write tool file_path basenames, sorted + unique
+        std::wstring branch; // first gitBranch seen
+        std::wstring firstTs; // first entry.timestamp (ISO) — duration start
+        std::wstring lastTs; // last entry.timestamp (ISO) — duration end
+        int tasksCompleted{ 0 };
+        int tasksPending{ 0 }; // pending + in_progress, from the LAST TodoWrite
+        bool hasExitPlanMode{ false }; // an ExitPlanMode tool_use (plan-end signal)
+        bool hasPlanContent{ false }; // planContent on the first external-user msg (plan-start signal)
+        std::wstring parentSessionId; // from "read the full transcript at: <...>.jsonl" in the first msg
+        std::wstring planFilePath; // a Write into a /plans/ dir (plan-end's plan file)
+        std::vector<std::wstring> planFilesRead; // Reads from a /plans/ dir (full paths)
+    };
+
+    // Port of session-end.js parseTranscript: one forward pass over a Claude transcript .jsonl.
+    // `maxBytes` 0 == the whole file. Filesystem only; `found` is false if the file can't be read.
+    SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes);
+
+    // Port of session-end.js formatDuration: "2h 12m (20:21 -> 22:33)" from two ISO timestamps, the
+    // HH:MM shown in LOCAL time (like the hook). Empty if either timestamp is missing/unparseable.
+    std::wstring FormatSessionDuration(std::wstring_view startIso, std::wstring_view endIso);
+
+    // session-end.js getPlanFileFromParent: the LAST `Write` into a /plans/ dir in a transcript
+    // (a plan-start session's plan lives in its PARENT). Empty if none. Filesystem only.
+    std::wstring FindPlanFileInTranscript(std::wstring_view transcriptPath);
+
     // The ONE display-title precedence over a TranscriptInfo (SESSIONS.md §6.3): customTitle >
     // aiTitle > legacy summary > title (the first REAL prompt). Pure.
     std::wstring TranscriptDisplayTitle(const TranscriptInfo& info);

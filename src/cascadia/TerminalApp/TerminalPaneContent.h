@@ -44,6 +44,10 @@ namespace winrt::TerminalApp::implementation
         // top-right slot floated over the TermControl. Non-projected (call via get_self); a null
         // element collapses the slot, so a non-Claude pane is visually unchanged.
         void SetAgentOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay);
+        // Agentmaster (TAB_OVERLAY.md summary panel): install/clear a SECOND overlay — the summary
+        // panel — into a slot stacked BELOW the link badge (top-right). Its width is capped to 20% of
+        // the pane (re-sized on the wrapper's SizeChanged). Non-projected (call via get_self).
+        void SetAgentSummaryOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay);
         // Agentmaster: mark this pane's content as hosting a MANAGED Claude session (set on bind via
         // _AttachClaudeOverlay). toggleBroadcastInput EXCLUDES such panes — a Claude session's stdin is
         // driven by the orchestrator's injector / Flight Plan, never raw broadcast keystrokes, and a
@@ -92,6 +96,7 @@ namespace winrt::TerminalApp::implementation
         // top-right; _agentOverlaySlot hosts it (collapsed until SetAgentOverlay fills it).
         winrt::Windows::UI::Xaml::Controls::Grid _rootWrapper{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _agentOverlaySlot{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _agentSummarySlot{ nullptr }; // Agentmaster: summary panel slot (below the badge, max 20% pane width)
         bool _agentManaged{ false }; // Agentmaster: hosts a managed Claude session -> excluded from broadcast input
         bool _suppressAutoClose{ false }; // Agentmaster: block closeOnExit auto-close (Claude sessions leave dead tab open)
         winrt::Microsoft::Terminal::TerminalConnection::ConnectionState _connectionState{ winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected };

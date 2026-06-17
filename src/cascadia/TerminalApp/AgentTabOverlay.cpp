@@ -217,6 +217,178 @@ namespace
         }
         disp.TryEnqueue([convo]() { CopyTextToClipboard(convo); });
     }
+
+    // The project-folder name = basename(dirname(transcriptPath)) — session-end.js getFolderName.
+    std::wstring FolderFromTranscriptPath(const std::wstring& p)
+    {
+        const auto s1 = p.find_last_of(L"/\\");
+        if (s1 == std::wstring::npos)
+        {
+            return {};
+        }
+        const std::wstring dir = p.substr(0, s1);
+        const auto s2 = dir.find_last_of(L"/\\");
+        return s2 == std::wstring::npos ? dir : dir.substr(s2 + 1);
+    }
+
+    // Escape a message to ONE line (newlines/tabs -> \n / \t, like session-end.js) + truncate.
+    std::wstring SummaryEscapeMsg(const std::wstring& m)
+    {
+        std::wstring esc;
+        for (const wchar_t ch : m)
+        {
+            if (ch == L'\n')
+                esc += L"\\n";
+            else if (ch == L'\r')
+                ; // dropped
+            else if (ch == L'\t')
+                esc += L"\\t";
+            else
+                esc += ch;
+        }
+        if (esc.size() > 240)
+        {
+            esc = esc.substr(0, 237) + L"...";
+        }
+        return esc;
+    }
+
+    // Render the session-end.js box, adapted to the narrow (20%) summary panel: the same labels +
+    // section dividers + mapping, but wrapped (no fixed-width rules). plan-start/plan-end override the
+    // header glyph+label; otherwise the live state glyph+label (passed in) is used.
+    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile)
+    {
+        std::wstring glyph = liveGlyph, label = liveLabel;
+        if (a.hasPlanContent)
+        {
+            glyph = L"\U0001F680"; // 🚀
+            label = L"plan-start";
+        }
+        else if (a.hasExitPlanMode)
+        {
+            glyph = L"\U0001F4CB"; // 📋
+            label = L"plan-end";
+        }
+
+        std::wstring o;
+        const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
+        const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; }; // ──────────── (12)
+
+        line(glyph + L"  " + label);
+        line(id);
+        if (a.hasPlanContent && !a.parentSessionId.empty())
+        {
+            line(L"Parent: " + a.parentSessionId);
+            if (!planFile.empty())
+            {
+                line(L"Plan:   " + planFile);
+            }
+        }
+        else if (!planFile.empty())
+        {
+            line(L"Plan:   " + planFile);
+        }
+        line(L"Dir:    " + cwd);
+        if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
+        {
+            line(L"Folder: " + folder);
+        }
+        line(L"Resume: " + resumeCmd);
+        if (const std::wstring dur = FormatSessionDuration(a.firstTs, a.lastTs); !dur.empty())
+        {
+            line(L"Dur:    " + dur);
+        }
+        if (!a.branch.empty())
+        {
+            line(L"Branch: " + a.branch);
+        }
+        if (a.tasksCompleted > 0 || a.tasksPending > 0)
+        {
+            line(L"Tasks:  " + std::to_wstring(a.tasksCompleted) + L" done / " + std::to_wstring(a.tasksPending) + L" pending");
+        }
+        if (!a.userMsgs.empty())
+        {
+            sep();
+            line(L"Messages:");
+            int i = 1;
+            for (const auto& m : a.userMsgs)
+            {
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m));
+            }
+        }
+        if (!a.filesRead.empty())
+        {
+            sep();
+            line(L"Files Read:");
+            for (const auto& f : a.filesRead)
+            {
+                line(L"   * " + f);
+            }
+        }
+        if (!a.filesEdited.empty())
+        {
+            sep();
+            line(L"Files Edited:");
+            for (const auto& f : a.filesEdited)
+            {
+                line(L"   * " + f);
+            }
+        }
+        while (!o.empty() && o.back() == L'\n')
+        {
+            o.pop_back();
+        }
+        return o;
+    }
+
+    // Codex: a reduced box from the rollout (the rollout exposes no tool files / tasks) — model /
+    // effort / sandbox, branch, and the human prompts.
+    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel)
+    {
+        std::wstring o;
+        const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
+        const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; };
+
+        line(liveGlyph + L"  " + liveLabel + L"  \x00B7 codex");
+        if (!id.empty())
+        {
+            line(id);
+        }
+        line(L"Dir:    " + cwd);
+        if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
+        {
+            line(L"Folder: " + folder);
+        }
+        line(L"Resume: " + resumeCmd);
+        std::wstring me;
+        const auto add = [&me](const std::wstring& p) { if (!p.empty()) { if (!me.empty()) me += L" \x00B7 "; me += p; } };
+        add(info.model);
+        add(info.effort);
+        add(info.sandbox);
+        if (!me.empty())
+        {
+            line(L"Model:  " + me);
+        }
+        if (!info.gitBranch.empty())
+        {
+            line(L"Branch: " + info.gitBranch);
+        }
+        if (!info.userPrompts.empty())
+        {
+            sep();
+            line(L"Messages:");
+            int i = 1;
+            for (const auto& m : info.userPrompts)
+            {
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m));
+            }
+        }
+        while (!o.empty() && o.back() == L'\n')
+        {
+            o.pop_back();
+        }
+        return o;
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -310,7 +482,8 @@ namespace winrt::TerminalApp::implementation
             });
         }
         _WireHover(); // pointer-over expand (opacity + row 3)
-        _BuildActionsRow(); // row 3: folder + copy menu (linked sessions only)
+        _BuildActionsRow(); // row 3: folder + copy menu + pencil (linked sessions only)
+        _BuildSummaryPanel(); // the 2nd slot (summary panel), collapsed until the pencil toggles it on
         _Refresh();
     }
 
@@ -476,6 +649,9 @@ namespace winrt::TerminalApp::implementation
                 _subline.Visibility(Visibility::Visible);
             }
         }
+
+        // Summary panel (2nd slot): show/hide per the persisted toggle + (re)load when the transcript grew.
+        _UpdateSummary(s);
     }
 
     void AgentTabOverlay::_WireHover()
@@ -586,6 +762,16 @@ namespace winrt::TerminalApp::implementation
         });
         copyBtn.Flyout(flyout);
 
+        // Pencil: toggle the SUMMARY PANEL (the 2nd overlay slot, below this badge). Persisted via
+        // SessionInfo.summaryShown, so a tab reopens with the panel in the same state.
+        Button pencilBtn = mkIconBtn(L"\xE70F", L"Show/hide the session summary panel"); // Edit (pencil)
+        pencilBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_ToggleSummary();
+            }
+        });
+
         _row3 = StackPanel{};
         _row3.Orientation(Orientation::Horizontal);
         _row3.HorizontalAlignment(HorizontalAlignment::Right);
@@ -594,6 +780,7 @@ namespace winrt::TerminalApp::implementation
         _row3.Visibility(Visibility::Collapsed); // hover-only
         _row3.Children().Append(folderBtn);
         _row3.Children().Append(copyBtn);
+        _row3.Children().Append(pencilBtn);
         _stack.Children().Append(_row3);
     }
 
@@ -667,6 +854,163 @@ namespace winrt::TerminalApp::implementation
             break;
         default:
             break;
+        }
+    }
+
+    void AgentTabOverlay::_BuildSummaryPanel()
+    {
+        if (_summaryRoot)
+        {
+            return; // built once (Initialize), and only for a LINKED session (never an observe badge)
+        }
+        // Monospace so the session-end.js-style label columns (Session/Parent/Plan/Dir/...) line up;
+        // wrapped (no fixed-width rules) since the panel is capped to 20% of the pane. Text-selectable
+        // so the box can be copied out; never a tab stop (don't pull keyboard focus off the ConPTY).
+        _summaryText = TextBlock{};
+        _summaryText.FontFamily(FontFamily{ L"Cascadia Mono" });
+        _summaryText.FontSize(11);
+        _summaryText.TextWrapping(TextWrapping::Wrap);
+        _summaryText.IsTextSelectionEnabled(true);
+        _summaryText.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
+
+        ScrollViewer sv{};
+        sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        sv.MaxHeight(480); // a long session can't run off the bottom of the pane
+        sv.Content(_summaryText);
+
+        _summaryRoot = Border{};
+        _summaryRoot.Background(Fill(0xE6, 0x20, 0x20, 0x20)); // near-opaque dark, matching the badge
+        _summaryRoot.BorderBrush(Fill(0x40, 0xFF, 0xFF, 0xFF));
+        _summaryRoot.BorderThickness(ThicknessHelper::FromUniformLength(1));
+        _summaryRoot.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+        _summaryRoot.Padding(ThicknessHelper::FromLengths(8, 6, 8, 6));
+        _summaryRoot.Child(sv);
+        _summaryRoot.Visibility(Visibility::Collapsed); // shown only while summaryShown is ON
+    }
+
+    void AgentTabOverlay::_ToggleSummary()
+    {
+        if (!_registry || _sessionId.empty())
+        {
+            return;
+        }
+        const auto info = _registry->Get(_sessionId);
+        if (!info)
+        {
+            return;
+        }
+        const bool next = !info->summaryShown;
+        // Persist through the registry's Update seam: it fires the autosave + the lens/overlay
+        // observers (our id-filtered observer re-enters _Refresh -> _UpdateSummary on the UI thread).
+        _registry->Update(_sessionId, [next](SessionInfo& s) { s.summaryShown = next; });
+        // ...and apply immediately too (the observer hop adds a tick of latency; _UpdateSummary is
+        // idempotent + guarded, so the later observer-driven call is a no-op).
+        if (const auto fresh = _registry->Get(_sessionId))
+        {
+            _UpdateSummary(*fresh);
+        }
+    }
+
+    void AgentTabOverlay::_UpdateSummary(const SessionInfo& s)
+    {
+        if (!_summaryRoot)
+        {
+            return; // no panel on the observe badge (built only by Initialize, for a linked session)
+        }
+        if (!s.summaryShown)
+        {
+            _summaryRoot.Visibility(Visibility::Collapsed);
+            return;
+        }
+        _summaryRoot.Visibility(Visibility::Visible);
+        if (_summaryLoading)
+        {
+            return; // one analyze+render in flight; the next _Refresh picks up any growth
+        }
+        const bool codex = (s.kind == AgentKind::Codex);
+        const std::wstring convId = codex ? (s.codexSessionId.empty() ? s.id : s.codexSessionId) : s.id;
+        if (convId.empty())
+        {
+            return; // a codex not yet reconciled (no rollout uuid) — nothing to analyze
+        }
+        std::wstring cwd = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+        std::wstring resume = BuildLaunchCli(s, codex); // the REAL resume command (same as the copy menu)
+        std::wstring liveGlyph{ StateGlyph(s.state) };
+        std::wstring liveLabel{ StateLabel(s.state) };
+        _summaryLoading = true;
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(resume), std::move(liveGlyph), std::move(liveLabel), _summaryMtime);
+    }
+
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring resumeCmd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime)
+    {
+        auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryText)
+        co_await winrt::resume_background();
+
+        // Resolve the transcript path once (cached in _summaryPath across reloads). Claude: a shallow
+        // glob by conversation id; Codex: a recursive date-sharded glob by rollout uuid (worth caching).
+        std::wstring path = transcriptPath;
+        if (path.empty())
+        {
+            path = codex ? ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), sessionId)
+                         : ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+        }
+
+        std::wstring text;
+        int64_t mtime = prevMtime;
+        if (!path.empty())
+        {
+            // Cheap stat: only do the heavy read+analyze when the transcript grew (mtime advanced) or
+            // we've never loaded it (prevMtime == 0). A quiet tab thus costs one GetFileAttributesEx.
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                ULARGE_INTEGER li{};
+                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                mtime = static_cast<int64_t>(li.QuadPart);
+            }
+            if (mtime != prevMtime || prevMtime == 0)
+            {
+                if (codex)
+                {
+                    const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
+                    text = RenderCodexSummary(info, sessionId, cwd, path, resumeCmd, liveGlyph, liveLabel);
+                }
+                else
+                {
+                    const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                    // plan-start: the plan file lives in the PARENT transcript (session-end.js
+                    // getPlanFileFromParent) — resolve + scan it when this session points at one.
+                    std::wstring planFile = a.planFilePath;
+                    if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
+                    {
+                        const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
+                        if (!parentPath.empty())
+                        {
+                            planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                        }
+                    }
+                    text = RenderSummaryBox(a, sessionId, cwd, path, resumeCmd, liveGlyph, liveLabel, planFile);
+                }
+            }
+        }
+
+        // Hop back to the UI thread to publish (TextBlock + member writes are UI-thread only).
+        if (auto disp = _dispatcher)
+        {
+            disp.TryEnqueue([weak = get_weak(), text, path, mtime]() {
+                if (auto self = weak.get())
+                {
+                    if (!text.empty())
+                    {
+                        self->_summaryText.Text(winrt::hstring{ text });
+                    }
+                    self->_summaryPath = path; // cache the resolved path for the next reload
+                    self->_summaryMtime = mtime;
+                    self->_summaryLoading = false;
+                }
+            });
         }
     }
 }

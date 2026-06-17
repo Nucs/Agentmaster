@@ -168,6 +168,10 @@ namespace Agentmaster
         // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is
         // (re)launched as a managed session on restore. Persisted so the card survives reopen.
         bool external{ false };
+        // Agentmaster (TAB_OVERLAY.md summary panel): whether the per-tab summary panel is toggled ON
+        // for this session (the pencil button). Persisted so the show/hide choice survives restart —
+        // the overlay re-applies it when it re-attaches on restore. Default OFF.
+        bool summaryShown{ false };
         // Transient (NOT persisted): the latest hosting WT_SESSION (the ConPTY's stable id) that
         // hooks reported for this session (the wire `tabToken`). The app correlates a tab to its
         // session by this. It is STABLE across an in-session `/resume` — which mints a NEW Claude

@@ -60,16 +60,42 @@ namespace winrt::TerminalApp::implementation
             winrt::Windows::UI::Xaml::Controls::Grid grid{};
             grid.Children().Append(_control);
 
-            winrt::Windows::UI::Xaml::Controls::Border slot{};
-            slot.HorizontalAlignment(HorizontalAlignment::Right);
-            slot.VerticalAlignment(VerticalAlignment::Top);
-            // Clear the terminal's ~16px right-edge scrollbar + a small top gap.
-            slot.Margin(ThicknessHelper::FromLengths(0, 4, 20, 0));
-            slot.Visibility(Visibility::Collapsed);
-            grid.Children().Append(slot);
+            // Two stacked slots, top-right: the link badge (row 1) and the summary panel (row 2,
+            // capped to 20% of the pane). Both empty + Collapsed by default, so a non-Claude pane is
+            // visually identical to the bare control. The wrapper is cached and travels with the
+            // content across split/zoom/re-parent (Pane re-reads GetRoot()), so neither is orphaned.
+            winrt::Windows::UI::Xaml::Controls::Border badge{};
+            badge.HorizontalAlignment(HorizontalAlignment::Right);
+            badge.Visibility(Visibility::Collapsed);
+
+            winrt::Windows::UI::Xaml::Controls::Border summary{};
+            summary.HorizontalAlignment(HorizontalAlignment::Right);
+            summary.Margin(ThicknessHelper::FromLengths(0, 4, 0, 0)); // a small gap below the badge
+            summary.Visibility(Visibility::Collapsed);
+
+            winrt::Windows::UI::Xaml::Controls::StackPanel stack{};
+            stack.Orientation(winrt::Windows::UI::Xaml::Controls::Orientation::Vertical);
+            stack.HorizontalAlignment(HorizontalAlignment::Right);
+            stack.VerticalAlignment(VerticalAlignment::Top);
+            // Clear the terminal's ~16px right-edge scrollbar + a small top gap (was on the lone slot).
+            stack.Margin(ThicknessHelper::FromLengths(0, 4, 20, 0));
+            stack.Children().Append(badge);
+            stack.Children().Append(summary);
+            grid.Children().Append(stack);
+
+            // Cap the summary panel to 20% of the pane width, re-evaluated as the pane resizes (weak
+            // capture: the handler lives on the grid, so it must not keep its own descendant alive).
+            auto weakSummary = winrt::make_weak(summary);
+            grid.SizeChanged([weakSummary](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::SizeChangedEventArgs& e) {
+                if (const auto s = weakSummary.get())
+                {
+                    s.MaxWidth(e.NewSize().Width * 0.2);
+                }
+            });
 
             _rootWrapper = grid;
-            _agentOverlaySlot = slot;
+            _agentOverlaySlot = badge;
+            _agentSummarySlot = summary;
         }
         return _rootWrapper;
     }
@@ -79,11 +105,20 @@ namespace winrt::TerminalApp::implementation
     }
     void TerminalPaneContent::SetAgentOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay)
     {
-        GetRoot(); // ensure the wrapper + slot exist
+        GetRoot(); // ensure the wrapper + slots exist
         if (_agentOverlaySlot)
         {
             _agentOverlaySlot.Child(overlay);
             _agentOverlaySlot.Visibility(overlay ? Visibility::Visible : Visibility::Collapsed);
+        }
+    }
+    void TerminalPaneContent::SetAgentSummaryOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay)
+    {
+        GetRoot(); // ensure the wrapper + slots exist
+        if (_agentSummarySlot)
+        {
+            _agentSummarySlot.Child(overlay);
+            _agentSummarySlot.Visibility(overlay ? Visibility::Visible : Visibility::Collapsed);
         }
     }
     winrt::Windows::Foundation::Size TerminalPaneContent::MinimumSize()

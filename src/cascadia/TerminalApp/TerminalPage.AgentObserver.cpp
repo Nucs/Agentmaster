@@ -156,6 +156,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
             impl->SetAgentOverlay(overlay->Root());
+            impl->SetAgentSummaryOverlay(overlay->SummaryRoot()); // 2nd slot: the pencil-toggled summary panel (TAB_OVERLAY.md)
             impl->SetAgentManaged(true); // exclude this managed-session pane from broadcast input (item 2)
             _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");
