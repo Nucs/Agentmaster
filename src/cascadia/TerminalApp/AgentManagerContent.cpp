@@ -873,6 +873,19 @@ namespace winrt::TerminalApp::implementation
     {
         _Refresh();
     }
+    // Agentmaster (Linked Lenses — per-tab -> Manager sync): drive the lens selection from the page when
+    // the user switches to a managed session's terminal tab. Routes through _SelectSession (the same path
+    // a board-card single-click takes), so the board card + tree row highlight and the Flight Plan show
+    // that session. _SelectSession early-outs when the id is already selected, so a re-select is cheap.
+    void AgentManagerContent::SelectSession(winrt::hstring id)
+    {
+        const std::wstring sid{ id };
+        if (sid.empty())
+        {
+            return; // not a managed session (e.g. a pwsh/cmd/external tab) -> leave the current selection
+        }
+        _SelectSession(sid);
+    }
     void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
     {
         _confirmHandler = std::move(handler);

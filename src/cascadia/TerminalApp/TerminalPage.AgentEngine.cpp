@@ -576,6 +576,41 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
+    // Agentmaster (Linked Lenses — the per-tab -> Manager half of the selection sync): when the user
+    // switches to a managed session's terminal tab, drive the Manager lens to select that session, so
+    // moving to the Manager tab shows the session you were just in highlighted (board card + tree row +
+    // its Flight Plan). Equivalent to a single-click on the session's board card. Called from the one
+    // post-startup tab-switch funnel (_OnTabSelectionChanged), so a user click, Ctrl+Tab, or a
+    // switchToTab action all follow through here.
+    void TerminalPage::_SyncManagerSelectionToTab(const TerminalApp::Tab& tab)
+    {
+        // Only once startup/restore is done: during _RestoreWindowTabs the focused tab is re-selected,
+        // and we must NOT clobber the per-window lens selection that SetManagerState restored from the
+        // record (the same gate _ScheduleWindowRecordSave uses).
+        if (_startupState != StartupState::Initialized)
+        {
+            return;
+        }
+        // The Manager tab itself (return to it = SEE the last selection) and non-session tabs
+        // (pwsh / cmd / external) leave the current Manager selection untouched.
+        if (!tab || tab == _managerTab)
+        {
+            return;
+        }
+        const auto id = _ClaudeSessionForTab(tab);
+        if (id.empty())
+        {
+            return; // not a managed Claude/Codex session tab -> nothing to select
+        }
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->SelectSession(winrt::hstring{ id });
+            }
+        }
+    }
+
     // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
     // creation appends (the Manager is created first), so the only ways it can drift are a tab
     // drag-drop or a move-tab action; this snaps it back. No-op when it is already first.

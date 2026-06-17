@@ -101,6 +101,12 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: force a UI redraw (board/tree/plan) from the current data — the page calls this
         // after an out-of-band reload (the observer survey lands asynchronously) so fresh data shows.
         void RefreshNow();
+        // Agentmaster (Linked Lenses — the per-tab -> Manager sync): select a managed session in the
+        // lens from OUTSIDE. The page calls this when the user switches to that session's terminal tab,
+        // so returning to the Manager tab shows the session you were just in selected (board card + tree
+        // row highlighted + its Flight Plan). Equivalent to a single-click on the session's board card;
+        // a no-op when the id is empty or already selected. Marshal to the UI thread is the caller's job.
+        void SelectSession(winrt::hstring id);
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
