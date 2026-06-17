@@ -255,12 +255,19 @@ namespace
 
     // Render the session-end.js box, adapted to the narrow (20%) summary panel: the same labels +
     // section dividers + mapping, but wrapped (no fixed-width rules). plan-start/plan-end override the
-    // header glyph+label; otherwise the live state glyph+label (passed in) is used. The session id +
-    // the launch/resume CLI are deliberately NOT shown here (they're long and dominate the narrow
-    // panel) — both remain one click away on the badge's hover copy menu.
-    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile)
+    // header glyph+label; otherwise the live state glyph+label (passed in) is used.
+    //
+    // `full` picks the audience:
+    //  - full=false (the DISPLAYED panel): omit everything the link badge (overlay panel 1) ALREADY
+    //    shows — the live-state header (kept only for the plan-start/plan-end signal, which the badge
+    //    does NOT show), the session id, Dir, Folder, the launch/resume CLI, and Branch. What's left is
+    //    the value-add: Parent/Plan, Duration, Tasks, Messages, Files Read/Edited.
+    //  - full=true (the COPYABLE "Summary" — copy menu): the COMPLETE box, including everything trimmed
+    //    above (id + resume CLI + Dir + Folder + Branch + the state header), so a copy loses nothing.
+    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
+        const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
         if (a.hasPlanContent)
         {
             glyph = L"\U0001F680"; // 🚀
@@ -276,7 +283,16 @@ namespace
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
         const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; }; // ──────────── (12)
 
-        line(glyph + L"  " + label);
+        // Header: full => always (live state / plan). UI => only the plan-start/plan-end signal (the
+        // badge already shows the live state, so a non-plan header would just duplicate it).
+        if (full || isPlan)
+        {
+            line(glyph + L"  " + label);
+        }
+        if (full)
+        {
+            line(id);
+        }
         if (a.hasPlanContent && !a.parentSessionId.empty())
         {
             line(L"Parent: " + a.parentSessionId);
@@ -289,16 +305,20 @@ namespace
         {
             line(L"Plan:   " + planFile);
         }
-        line(L"Dir:    " + cwd);
-        if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
+        if (full)
         {
-            line(L"Folder: " + folder);
+            line(L"Dir:    " + cwd);
+            if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
+            {
+                line(L"Folder: " + folder);
+            }
+            line(L"Resume: " + resumeCmd);
         }
         if (const std::wstring dur = FormatSessionDuration(a.firstTs, a.lastTs); !dur.empty())
         {
             line(L"Dur:    " + dur);
         }
-        if (!a.branch.empty())
+        if (full && !a.branch.empty())
         {
             line(L"Branch: " + a.branch);
         }
@@ -342,32 +362,39 @@ namespace
     }
 
     // Codex: a reduced box from the rollout (the rollout exposes no tool files / tasks) — model /
-    // effort / sandbox, branch, and the human prompts. Like the Claude box, the rollout id + the
-    // resume CLI are omitted here (available on the hover copy menu).
-    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& liveGlyph, const std::wstring& liveLabel)
+    // effort / sandbox, branch, and the human prompts. Same `full` split as RenderSummaryBox: the UI
+    // panel (full=false) shows ONLY the value-add the badge doesn't (the prompts), since the badge
+    // already carries state / model·effort / branch; the copyable Summary (full=true) is the complete
+    // box (header + id + Dir + Folder + Resume + Model + Branch + prompts).
+    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full)
     {
         std::wstring o;
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
         const auto sep = [&o]() { o += L"\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\x2500\n"; };
 
-        line(liveGlyph + L"  " + liveLabel + L"  \x00B7 codex");
-        line(L"Dir:    " + cwd);
-        if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
+        if (full)
         {
-            line(L"Folder: " + folder);
-        }
-        std::wstring me;
-        const auto add = [&me](const std::wstring& p) { if (!p.empty()) { if (!me.empty()) me += L" \x00B7 "; me += p; } };
-        add(info.model);
-        add(info.effort);
-        add(info.sandbox);
-        if (!me.empty())
-        {
-            line(L"Model:  " + me);
-        }
-        if (!info.gitBranch.empty())
-        {
-            line(L"Branch: " + info.gitBranch);
+            line(liveGlyph + L"  " + liveLabel + L"  \x00B7 codex");
+            line(id);
+            line(L"Dir:    " + cwd);
+            if (const std::wstring folder = FolderFromTranscriptPath(transcriptPath); !folder.empty())
+            {
+                line(L"Folder: " + folder);
+            }
+            line(L"Resume: " + resumeCmd);
+            std::wstring me;
+            const auto add = [&me](const std::wstring& p) { if (!p.empty()) { if (!me.empty()) me += L" \x00B7 "; me += p; } };
+            add(info.model);
+            add(info.effort);
+            add(info.sandbox);
+            if (!me.empty())
+            {
+                line(L"Model:  " + me);
+            }
+            if (!info.gitBranch.empty())
+            {
+                line(L"Branch: " + info.gitBranch);
+            }
         }
         if (!info.userPrompts.empty())
         {
@@ -384,6 +411,57 @@ namespace
             o.pop_back();
         }
         return o;
+    }
+
+    // Copy the FULL textual session summary (the complete session-end.js box — id + resume CLI + Dir +
+    // Folder + Branch + Model + Duration + Tasks + Messages + Files, i.e. everything the DISPLAYED panel
+    // trims because the badge already shows it). Mirrors CopyConversationAsync: resolve + analyze OFF the
+    // UI thread, render full=true, then hop back to copy. No-op if there's no transcript / nothing to copy.
+    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label)
+    {
+        co_await winrt::resume_background();
+        const std::wstring id = codex ? codexId : claudeId;
+        std::wstring path;
+        if (codex)
+        {
+            if (!codexId.empty())
+            {
+                path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexId);
+            }
+        }
+        else
+        {
+            path = ::Agentmaster::ResolveClaudeTranscriptPath(claudeId);
+        }
+        if (path.empty())
+        {
+            co_return; // no transcript yet (never prompted)
+        }
+        std::wstring text;
+        if (codex)
+        {
+            const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
+            text = RenderCodexSummary(info, id, cwd, path, resumeCmd, glyph, label, /*full*/ true);
+        }
+        else
+        {
+            const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+            std::wstring planFile = a.planFilePath;
+            if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
+            {
+                const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
+                if (!parentPath.empty())
+                {
+                    planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                }
+            }
+            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true);
+        }
+        if (text.empty() || !disp)
+        {
+            co_return;
+        }
+        disp.TryEnqueue([text]() { CopyTextToClipboard(text); });
     }
 }
 
@@ -480,6 +558,15 @@ namespace winrt::TerminalApp::implementation
         _WireHover(); // pointer-over expand (opacity + row 3)
         _BuildActionsRow(); // row 3: folder + copy menu + pencil (linked sessions only)
         _BuildSummaryPanel(); // the 2nd slot (summary panel), collapsed until the pencil toggles it on
+        // Explain the dense row-1 label (glyph + abbreviations): the live values are in the text, the
+        // tooltip says what each part MEANS. Linked-session wording; ShowActivity overrides it for an
+        // observe badge (defensive — the two are normally separate elements).
+        if (_line)
+        {
+            ToolTipService::SetToolTip(_line, winrt::box_value(winrt::hstring{
+                L"Status \x00B7 model \x00B7 effort \x00B7 Autopilot mode \x00B7 \x23F3 queued \x00B7 link\n"
+                L"\x26D3 linked = Agentmaster can drive it; observe = read-only; unlinked = not bound" }));
+        }
         _Refresh();
     }
 
@@ -505,6 +592,11 @@ namespace winrt::TerminalApp::implementation
             return; // unchanged -> no XAML churn (this runs every probe tick)
         }
         _lastActivitySig = kind;
+        // This is an observe badge, not a linked session — explain that (overrides the linked-session
+        // row-1 tooltip in case the same element was ever used both ways).
+        ToolTipService::SetToolTip(_line, winrt::box_value(winrt::hstring{
+            L"Observed by Agentmaster, not a linked session. A claude links on its first prompt;\n"
+            L"shells (pwsh/cmd) and external codex stay observe-only here." }));
         _root.Visibility(Visibility::Visible);
         _line.Inlines().Clear();
         Run glyph{};
@@ -642,6 +734,14 @@ namespace winrt::TerminalApp::implementation
             else
             {
                 _subline.Text(winrt::hstring{ sub });
+                // Row 2 is width-capped + ellipsized and shows only the leaf folder; the tooltip reveals
+                // the FULL working path (+ branch) behind it (the Archive-page reveal-behind-truncation pattern).
+                std::wstring tip = dir;
+                if (!s.branch.empty())
+                {
+                    tip = tip.empty() ? s.branch : (tip + L"  " + kDot + L"  " + s.branch);
+                }
+                ToolTipService::SetToolTip(_subline, winrt::box_value(winrt::hstring{ tip }));
                 _subline.Visibility(Visibility::Visible);
             }
         }
@@ -724,9 +824,12 @@ namespace winrt::TerminalApp::implementation
 
         Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy\x2026"); // Copy
         MenuFlyout flyout{};
-        const auto addItem = [&flyout, weak](const wchar_t* text, int which) {
+        // Each menu item carries a tooltip that says exactly WHAT gets copied (the labels are terse;
+        // the tip spells out the value), mirroring _CopyField's per-case behavior.
+        const auto addItem = [&flyout, weak](const wchar_t* text, const wchar_t* tip, int which) {
             MenuFlyoutItem item{};
             item.Text(text);
+            ToolTipService::SetToolTip(item, winrt::box_value(winrt::hstring{ tip }));
             item.Click([weak, which](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
                 {
@@ -735,12 +838,13 @@ namespace winrt::TerminalApp::implementation
             });
             flyout.Items().Append(item);
         };
-        addItem(L"Session Id", 0);
-        addItem(L"Copy Path", 1);
-        addItem(L"Copy Branch Name", 2);
-        addItem(L"Claude Launch CLI", 3);
-        addItem(L"Codex Launch CLI", 4);
-        addItem(L"Transcript", 5);
+        addItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
+        addItem(L"Copy Path", L"Copy the session's working-directory path", 1);
+        addItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+        addItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+        addItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        addItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims", 6);
+        addItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
         // The pointer must LEAVE the badge to reach the menu, so pin the expanded state while it's open.
         flyout.Opened([weak](const IInspectable&, const IInspectable&) {
             if (auto self = weak.get())
@@ -849,6 +953,14 @@ namespace winrt::TerminalApp::implementation
         case 5: // Transcript — the whole conversation (user + assistant text only), off-thread
             CopyConversationAsync(_dispatcher, codex, s.id, s.codexSessionId);
             break;
+        case 6: // Summary — the FULL textual session-end.js box (everything; the panel shows a trimmed view)
+        {
+            const std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+            const std::wstring resume = BuildLaunchCli(s, codex); // the same REAL launch CLI as cases 3/4
+            CopySummaryAsync(_dispatcher, codex, s.id, s.codexSessionId, dir, resume,
+                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) });
+            break;
+        }
         default:
             break;
         }
@@ -989,10 +1101,13 @@ namespace winrt::TerminalApp::implementation
             }
             if (mtime != prevMtime || prevMtime == 0)
             {
+                // The DISPLAYED panel is the TRIMMED view (full=false): it omits everything the link
+                // badge already shows. id + resumeCmd are passed empty here — full=false never renders
+                // them (the full box, with both, is the copy-menu "Summary" via CopySummaryAsync).
                 if (codex)
                 {
                     const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
-                    text = RenderCodexSummary(info, cwd, path, liveGlyph, liveLabel);
+                    text = RenderCodexSummary(info, sessionId, cwd, path, L"", liveGlyph, liveLabel, /*full*/ false);
                 }
                 else
                 {
@@ -1008,7 +1123,7 @@ namespace winrt::TerminalApp::implementation
                             planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                         }
                     }
-                    text = RenderSummaryBox(a, cwd, path, liveGlyph, liveLabel, planFile);
+                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false);
                 }
             }
         }

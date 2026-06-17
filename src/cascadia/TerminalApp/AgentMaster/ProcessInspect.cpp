@@ -2232,6 +2232,13 @@ namespace Agentmaster
                has(L"<task-notification>") ||
                has(L"<output-file>") || (has(L"<status>") && has(L"<summary>")) ||
                has(L"<usage>") || has(L"<subagent_tokens>") ||
+               // Agentmaster (summary refinement 2 — chosen from a full-corpus jq scan): the bash
+               // analog of task-notification (a finished BACKGROUND bash command + its shell id /
+               // persisted output — mostly already inside a <bash-stdout> block, but explicit here
+               // closes the gap for an output-less command), the system echo of input forwarded to a
+               // background task, and injected system reminders.
+               has(L"<bash-notification>") || has(L"<shell-id>") || has(L"<persisted-output>") ||
+               has(L"<background-task-input>") || has(L"<system-reminder>") ||
                starts(L"Caveat:") || starts(L"Overview:") || starts(L"\n") || starts(L"[Request interrupted");
     }
     static bool SeAllWhitespace(const std::wstring& s)

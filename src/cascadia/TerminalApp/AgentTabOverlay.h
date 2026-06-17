@@ -10,15 +10,18 @@
 // Row 3 (hover-only actions): a folder button (Open Path — the working dir via explorer.exe) + a copy
 // button whose menu copies the Session Id / Copy Path (working dir) / Copy Branch Name / Claude Launch
 // CLI / Codex Launch CLI (each the REAL full command — the live process commandline with hooks, or the
-// builder Agentmaster would use) / Transcript (the whole conversation, user + assistant TEXT only).
+// builder Agentmaster would use) / Summary (the FULL textual session box — everything, even what the
+// displayed panel trims) / Transcript (the whole conversation, user + assistant TEXT only).
 // A completed copy (and Open Path) plays a short confirmation chime. Collapsed at rest; revealed while
 // the pointer is over the badge OR the copy menu is open (so the menu doesn't vanish under the
 // pointer). Built only for a LINKED session (Initialize), never an observe badge. Row 3 also carries a
 // PENCIL button that toggles the SUMMARY PANEL — a SECOND overlay (its own slot, below the badge, max
-// 20% of the pane) that renders a session-end.js-style box (Session/Parent/Plan/Dir/Folder/Resume/
-// Duration/Branch/Tasks/Messages/Files Read/Files Edited), analyzed off-thread from the transcript via
-// ProcessInspect::AnalyzeSessionTranscript. The toggle is a GLOBAL setting (AppSettings::showSummaryPanel) —
-// shared across windows + persisted; the pencil on any tab flips every tab's panel.
+// 20% of the pane) that renders a session-end.js-style box analyzed off-thread from the transcript via
+// ProcessInspect::AnalyzeSessionTranscript. The DISPLAYED panel is a TRIMMED view (Parent/Plan/Duration/
+// Tasks/Messages/Files Read/Files Edited) — it omits everything panel 1 (the badge) already shows
+// (state, model·effort, branch, dir/folder); the copy menu's "Summary" yields the COMPLETE box (id +
+// resume CLI + dir + folder + branch + state header included). The toggle is a GLOBAL setting
+// (AppSettings::showSummaryPanel) — shared across windows + persisted; the pencil on any tab flips every tab's panel.
 //
 // Built imperatively (no IDL/XAML markup), like AgentManagerContent. It is NOT an IPaneContent —
 // it just produces a FrameworkElement the app installs into the pane's overlay slot
@@ -86,7 +89,7 @@ namespace winrt::TerminalApp::implementation
         void _BuildActionsRow(); // lazily build row 3 (folder + copy menu) for a LINKED session
         void _SetExpanded(bool on); // dim<->bright + show/hide row 3 (driven by hover OR pinned)
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
-        void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript
+        void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
         void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
