@@ -316,7 +316,9 @@ namespace winrt::TerminalApp::implementation
         // FORK the conversation: `claude --resume <id> --fork-session` branches its history into a new,
         // independent session id with its own transcript (the source's is untouched), registered as a
         // normal managed session ("<title> (fork)", fresh Flight Plan). A source that was never prompted
-        // has no transcript to fork -> fall back to a fresh session in the same dir.
+        // has no transcript to fork -> fall back to a fresh session in the same dir. A managed Codex tab
+        // forks the SAME way but via `codex fork <rolloutUuid>` (kind-aware, below) — the tab map is
+        // agent-agnostic, so Codex tabs reach this seam too and must NOT take the Claude path.
         if (_sessionRegistry)
         {
             std::wstring sourceId;
@@ -335,6 +337,18 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring dir = src ? src->workingDir : std::wstring{};
                 std::wstring ttl = (src && !src->title.empty()) ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
                 ttl += L" (fork)";
+                // Codex (kind-aware): sourceId is the Codex's durable HANDLE id, which has NO Claude
+                // transcript, so the Claude branch below would silently spawn a fresh claude.exe in the
+                // codex's dir (wrong agent). Route to the Codex launcher instead — it forks via
+                // `codex fork <rolloutUuid>` and rollout-gates it internally (a vanished/never-prompted
+                // rollout -> a fresh codex in the same dir), so we just hand it the real rollout uuid.
+                if (src && src->kind == ::Agentmaster::AgentKind::Codex)
+                {
+                    const std::wstring forkFrom = src->codexSessionId; // the REAL rollout uuid (the fork source)
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->codex-fork] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
+                    _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+                    return;
+                }
                 const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
                 _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
