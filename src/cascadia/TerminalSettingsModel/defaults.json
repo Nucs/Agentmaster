@@ -759,6 +759,8 @@
         { "keys": "ctrl+alt+7", "id": "Terminal.SwitchToTab6" },
         { "keys": "ctrl+alt+8", "id": "Terminal.SwitchToTab7" },
         { "keys": "ctrl+alt+9", "id": "Terminal.SwitchToLastTab" },
+        // Agentmaster: F2 starts an inline rename on the focused tab.
+        { "keys": "f2", "id": "Terminal.OpenTabRenamer" },
 
         // Pane Management
         { "keys": "ctrl+shift+w", "id": "Terminal.ClosePane" },
