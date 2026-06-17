@@ -580,7 +580,20 @@ What works, by area:
   (`_FocusClaudeSessionTab`: restore-if-minimized + `SetForegroundWindow` + the
   `SwitchToThisWindow` fallback — same-process, so the hand-off is permitted). Board/tree
   double-click, tree `Enter`, the Flight-Plan eye, and the Sessions page's Jump all ride this one
-  seam. **Rename is cross-window too**: the rename writes the shared registry; the window hosting
+  seam. **The reverse holds too — switching to a session's tab selects it in the Manager**: the one
+  post-startup tab-switch funnel (`_OnTabSelectionChanged`) calls `_SyncManagerSelectionToTab`, which
+  resolves the newly-focused tab's managed session (`_ClaudeSessionForTab` — Claude OR Codex, both live
+  in `_claudeTabs`) and drives the content's public **`SelectSession`** (the SAME `_SelectSession` path a
+  board-card single-click takes), so moving to the Manager tab shows the session you were just in
+  highlighted (board card + tree row + its Flight Plan) — the per-tab → Manager half of the
+  Linked-Lenses selection sync (the board/tree → tab half being Activate, above). User click, `Ctrl+Tab`,
+  and a `switchToTab` action all route through the funnel. Gated on `_startupState == Initialized` (so a
+  reopen's focused-tab restore can't clobber the lens selection seeded from the `WindowRecord` — the same
+  gate `_ScheduleWindowRecordSave` uses) and a no-op for the Manager tab itself (returning to it must
+  SHOW the last selection, not change it) and for a non-session tab (pwsh / cmd / external — those leave
+  the current Manager selection untouched). The selection is part of the per-window lens
+  (`ManagerState`), so it also persists across restart via the WindowRecord autosave. **Rename is
+  cross-window too**: the rename writes the shared registry; the window hosting
   the tab re-pins its title via the registry observer (`_SyncClaudeTabTitleFromRegistry`, riding
   the tab-dot push — equality-guarded both directions, so the settled case is a no-op; Rule #11).
   The Board/Tree show only
