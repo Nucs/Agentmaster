@@ -601,7 +601,20 @@ namespace Agentmaster
         // one (-> WaitingForInput + the question-guard + the Autopilot advance). The state gate
         // (re-checked against the freshest state right before firing) makes a real Stop that
         // already landed win, so this never double-fires.
-        if (ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs))
+        const bool stopFromTail = ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs);
+        // Agentmaster (presence-idle release): the missing IDLE half of the presence signal. The
+        // tail-based backstop above needs a TERMINAL stop_reason or an interrupt — but a turn can end
+        // with NEITHER: its last transcript line is a bare user prompt that cleared the tracked
+        // stop_reason (_readDelta) and then produced NO assistant output / fired NO Stop hook (a
+        // dropped Stop, or a no-op turn), stranding the session Running forever while claude is
+        // demonstrably at rest. claude's OWN pid-validated heartbeat saying "idle" is the authority
+        // that the turn is OVER (PresenceIsBusy's release mirror). Gated on no pending interactive tool
+        // so it never pre-empts recon-block (the blocked-on-question -> NeedsApproval path below), and
+        // on the (subagent/busy-folded) quietForMs, so a live subagent / "busy" heartbeat — which
+        // already forces that clock small — can never trip it mid-work.
+        const bool stopFromPresenceIdle = !stopFromTail && st.pendingInteractiveTool.empty() &&
+                                          ShouldSynthesizeStopFromPresenceIdle(s.state, s.presenceStatus, st.lastStopReason, st.interrupted, quietForMs);
+        if (stopFromTail || stopFromPresenceIdle)
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && (fresh->state == SessionState::Running || fresh->state == SessionState::NeedsApproval))
@@ -616,11 +629,15 @@ namespace Agentmaster
                 // unconditionally — never held Running by a recorded type-ahead (already
                 // consumed or canceled), never treated as stale.
                 stop.quiescentStop = true;
-                stop.lastMessageIsQuestion = !st.interrupted && EndsWithQuestion(st.lastAssistantText);
+                // Only a TAIL-derived stop reflects a real last assistant message; a presence-idle
+                // release ends a turn that produced no assistant output, so it carries no question.
+                stop.lastMessageIsQuestion = stopFromTail && !st.interrupted && EndsWithQuestion(st.lastAssistantText);
                 _registry->OnHookEvent(stop);
                 AppendStateLog(L"scanner.log",
-                               L"[recon-stop] " + s.id + L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") +
-                                   (st.interrupted ? L" interrupted" : L"") + L"\n");
+                               (stopFromPresenceIdle ? L"[recon-stop-idle] " : L"[recon-stop] ") + s.id +
+                                   L" q=" + (stop.lastMessageIsQuestion ? L"1" : L"0") +
+                                   (st.interrupted ? L" interrupted" : L"") +
+                                   (stopFromPresenceIdle ? (L" presence=" + s.presenceStatus) : std::wstring{}) + L"\n");
             }
         }
 

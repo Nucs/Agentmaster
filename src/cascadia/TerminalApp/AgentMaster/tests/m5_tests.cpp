@@ -1988,6 +1988,29 @@ static void TestBlockedAndInterruptedStates()
     // neither signal -> unchanged (a genuinely idle session):
     CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, false, L"tool_use"), "ext-work: no subagent + not busy -> no synthesis (parent-only path owns it)");
 
+    // --- presence-IDLE release: claude's OWN heartbeat says "idle" while we are stuck Running on a
+    //     NON-terminal tail (a trailing user prompt that produced no assistant output + a dropped/absent
+    //     Stop). The IDLE mirror of PresenceIsBusy; it covers the exact gap ShouldSynthesizeStop cannot
+    //     (no terminal stop_reason, no interrupt). PresenceIsAtRest is deliberately "idle"-only.
+    CHECK(PresenceIsAtRest(L"idle"), "presence-rest: 'idle' == at rest");
+    CHECK(!PresenceIsAtRest(L"busy"), "presence-rest: 'busy' is working, not at rest");
+    CHECK(!PresenceIsAtRest(L"waiting"), "presence-rest: 'waiting' (needs-you) left to recon-block, not released here");
+    CHECK(!PresenceIsAtRest(L"shell"), "presence-rest: 'shell' is not a claude turn-rest signal");
+    CHECK(!PresenceIsAtRest(L""), "presence-rest: no heartbeat is not 'at rest'");
+    // the bug repro: Running + 'idle' heartbeat + non-terminal tail (stop_reason cleared by the trailing
+    // prompt) + quiescent -> release to WaitingForInput. Signature: (state, presence, lastStop, interrupted, quietForMs).
+    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Running + idle + cleared (non-terminal) tail + quiet -> stop (the stuck-Running bug)");
+    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::NeedsApproval, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs), "presence-idle: a NeedsApproval stranded by a dropped post-answer Stop is released too");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleQuiescenceMs - 1), "presence-idle: not quiet long enough (S-lane refresh-lag window) -> hold");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"busy", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: heartbeat 'busy' -> never release");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: no heartbeat -> no signal, no release");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"waiting", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: 'waiting' is not released here (recon-block owns needs-you)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"end_turn", false, kScanPresenceIdleQuiescenceMs), "presence-idle: a TERMINAL tail is plain recon-stop's job (mutually exclusive)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", true, kScanPresenceIdleQuiescenceMs), "presence-idle: an interrupt is plain recon-stop's job (mutually exclusive)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Idle, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: an Idle session has no turn to end");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::WaitingForInput, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: already settled -> no-op");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Done, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Done is never re-ended/revived");
+
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {
         const auto p = ParseTranscriptDelta(

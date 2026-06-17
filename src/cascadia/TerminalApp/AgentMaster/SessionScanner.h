@@ -46,6 +46,7 @@ namespace Agentmaster
     inline constexpr int64_t kScanLiveIdleMs = 2500; // live but Idle/Waiting: poll lazily
     inline constexpr int64_t kScanSweepMs = 2500; // min interval between liveness-probe ticks
     inline constexpr int64_t kScanStopQuiescenceMs = 2000; // transcript must be this quiet before a synthesized Stop
+    inline constexpr int64_t kScanPresenceIdleQuiescenceMs = 5000; // presence-idle release (ShouldSynthesizeStopFromPresenceIdle): the parent transcript must be quiet THIS long — longer than kScanStopQuiescenceMs, to outlast the ~2s S-lane presence-refresh lag — before claude's at-rest ("idle") heartbeat releases a stuck Running on a NON-terminal tail
     inline constexpr int64_t kScanMaxDeltaBytes = 1 << 20; // read at most 1 MiB of new transcript per tick
     inline constexpr int64_t kScanForceConsumeBytes = 4 << 20; // a 4 MiB run with no newline -> skip it (corrupt/binary guard)
     inline constexpr int64_t kScanDiscoverMs = 1500; // idle keep-ticking cadence (drives each window's observer probe + liveness sweep when nothing is live)
@@ -236,6 +237,56 @@ namespace Agentmaster
     inline bool PresenceIsBusy(std::wstring_view presenceStatus) noexcept
     {
         return presenceStatus == L"busy";
+    }
+
+    // PURE: is Claude's presence heartbeat reporting this session AT REST — "idle" (no turn in
+    // progress, nothing pending)? The RELEASE mirror of PresenceIsBusy. claude's pid-keyed self-report
+    // flips to "busy" the instant a turn starts and back to "idle" when it fully ends, so an explicit
+    // "idle" is authoritative "no turn is running". Deliberately NARROW — only "idle": "waiting" (the
+    // user is being asked to answer/approve) overlaps the NeedsApproval / recon-block "needs you"
+    // semantics and is left to those paths; "shell" / "" are not at-rest claude-turn signals (a shell
+    // job, or no live presence file at all). The S-lane validates the backing pid is a live claude.exe
+    // before publishing this onto SessionInfo.presenceStatus (Rule #13: a FACT the scanner may consume).
+    inline bool PresenceIsAtRest(std::wstring_view presenceStatus) noexcept
+    {
+        return presenceStatus == L"idle";
+    }
+
+    // PURE + total: should the reconciler synthesize a missed Stop because Claude's OWN presence
+    // heartbeat says the session is at rest ("idle") while we are STILL Running / NeedsApproval, even
+    // though the transcript tail is NON-terminal? The missing IDLE half of the presence signal
+    // (PresenceIsBusy is the BUSY-hold half — it only ever KEPT a session Running; nothing released one
+    // on the strength of claude's own "I'm idle"). The plain missed-Stop backstop (ShouldSynthesizeStop)
+    // needs a TERMINAL stop_reason or an interrupt in the tail — but a turn can end with NEITHER: the
+    // last transcript line is a bare user prompt whose UserPromptSubmit cleared the tracked stop_reason
+    // (_readDelta) and which then produced NO assistant output and fired NO Stop hook (dropped, or a
+    // no-op turn), stranding the session Running forever while claude is demonstrably idle. claude's
+    // pid-validated heartbeat is the authority here: "idle" => the turn is OVER. Fires only in exactly
+    // that GAP — a NON-terminal, NON-interrupted tail (a terminal/interrupted tail is
+    // ShouldSynthesizeStop's territory, so the two are mutually exclusive and never double-fire) — from
+    // Running / NeedsApproval, and only after the transcript has been quiet LONGER than the normal stop
+    // quiescence (kScanPresenceIdleQuiescenceMs). The longer window closes the only race: right after a
+    // turn STARTS claude's file is already "busy" but the ~2s S-lane survey may not have refreshed
+    // SessionInfo.presenceStatus off the prior "idle" yet — by the time the parent transcript has been
+    // quiet kScanPresenceIdleQuiescenceMs with presence STILL "idle", the survey has re-read it, and a
+    // genuine in-flight turn (incl. an extended-thinking pause, which keeps the heartbeat "busy") reads
+    // "busy". The caller additionally gates this on no pending interactive tool so it never pre-empts
+    // recon-block's blocked-on-question -> NeedsApproval path.
+    inline bool ShouldSynthesizeStopFromPresenceIdle(SessionState state, std::wstring_view presenceStatus, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs) noexcept
+    {
+        if (state != SessionState::Running && state != SessionState::NeedsApproval)
+        {
+            return false; // only a turn-in-progress / blocked-on-user state has a turn to end
+        }
+        if (interrupted || IsTerminalStopReason(lastStopReason))
+        {
+            return false; // a terminal / interrupted tail is the plain missed-Stop's job (no double-fire)
+        }
+        if (quietForMs < kScanPresenceIdleQuiescenceMs)
+        {
+            return false; // not quiet long enough to outlast the S-lane's presence-refresh lag
+        }
+        return PresenceIsAtRest(presenceStatus);
     }
 
     // PURE + total: should the reconciler synthesize Running because EXTERNAL work is active while the
