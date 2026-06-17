@@ -67,10 +67,10 @@ namespace
     constexpr double kSummaryMaxHFrac = 0.75; // never taller than THREE-QUARTERS of the pane
     constexpr double kSummaryDefMaxH = 480.0; // the original auto-height cap (px), still capped at 0.75*pane
 
-    // Summary-panel opacity: matches the badge above it (_root.Opacity) at rest, and fades FURTHER on
-    // hover so you can peek at the terminal content behind the panel.
-    constexpr double kSummaryRestOpacity = 0.55; // == the badge's rest opacity (the overlay panel above)
-    constexpr double kSummaryHoverOpacity = 0.30; // less opaque while the pointer is over the panel
+    // Summary-panel opacity: EXACTLY the badge's values + mechanism (the overlay panel above —
+    // _root.Opacity / _SetExpanded): dim at rest, full (bright) on hover.
+    constexpr double kSummaryRestOpacity = 0.55; // == the badge's rest opacity (_root.Opacity dim)
+    constexpr double kSummaryHoverOpacity = 1.0; // == the badge's hovered opacity (_SetExpanded bright)
 
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
@@ -1289,10 +1289,11 @@ namespace winrt::TerminalApp::implementation
         // Padding now lives on contentBorder (so the grips reach the panel edges).
         _summaryRoot.Child(layout);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
-        _summaryRoot.Opacity(kSummaryRestOpacity); // match the badge (the overlay panel above)
-        // Hover fades the panel further (peek at the terminal behind it). PointerExited fires only when
-        // the pointer truly leaves the panel — moving onto a child grip keeps the parent "entered" — so
-        // the faded state holds steadily while hovering anywhere on the panel (incl. resizing).
+        _summaryRoot.Opacity(kSummaryRestOpacity); // dim at rest — same value as the badge (_root.Opacity)
+        // Same hover MECHANISM as the badge (_WireHover/_SetExpanded): brighten to full on pointer-over,
+        // back to dim on exit. PointerExited fires only when the pointer truly leaves the panel — moving
+        // onto a child grip keeps the parent "entered" — so it stays bright while hovering anywhere on
+        // the panel (incl. while resizing).
         _summaryRoot.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs&) {
             if (const auto self = weak.get())
             {
