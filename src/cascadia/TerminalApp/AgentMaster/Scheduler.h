@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 
 #include "SessionModels.h"
 
@@ -36,6 +37,22 @@ namespace Agentmaster
     // change-driven advance (the observer trigger that lets idle plans START) can't drain the
     // whole queue at once. Bounded in time so a lost echo can't permanently stall the plan.
     inline constexpr int64_t kPickupGuardMs = 4000;
+
+    // Enter-retry (the "the TUI ate my Enter" backstop). The ConPTY can deliver an injected
+    // `prompt + CR` faster than Claude's Ink UI initializes its input handler, so the submit Enter
+    // is absorbed as a NEWLINE instead of sending — the prompt sits typed-but-not-submitted and the
+    // turn never starts (no UserPromptSubmit, no transcript write, state stuck Idle/WaitingForInput).
+    // The scheduler watches every just-sent Flight prompt; if the turn has not started within
+    // kEnterRetryIntervalMs it re-presses a LONE Enter (never the text again — that would duplicate
+    // it), up to kEnterRetryMax extra presses, then gives up (the prompt stays Sent; the user can
+    // Send-now). kEnterRetryPollMs is how often the worker re-checks while a send awaits pickup.
+    // kEnterRetryActivityMarginMs guards the transcript-advanced "it started" signal against a send
+    // fired sub-second after the prior turn ended (so a real conversation write — not the prior
+    // turn's tail — is what clears the watch).
+    inline constexpr int64_t kEnterRetryIntervalMs = 10000; // wait this long for the turn to start before re-pressing Enter
+    inline constexpr uint32_t kEnterRetryMax = 3; // never re-press Enter more than this many times
+    inline constexpr int64_t kEnterRetryPollMs = 1000; // worker re-check cadence while a send awaits pickup
+    inline constexpr int64_t kEnterRetryActivityMarginMs = 1000; // transcript must advance at least this far past the send to count as "started"
 
     enum class AdvanceAction
     {
@@ -167,6 +184,81 @@ namespace Agentmaster
         return plan;
     }
 
+    enum class EnterRetryAction
+    {
+        None, // nothing to watch — the turn started, or no Flight prompt awaits pickup (stop watching)
+        Waiting, // a send awaits pickup but the retry interval hasn't elapsed yet (keep watching)
+        Retry, // re-press Enter now (the turn still hasn't started after kEnterRetryIntervalMs)
+        GiveUp, // exhausted kEnterRetryMax presses — stop watching (and log)
+    };
+
+    struct EnterRetryPlan
+    {
+        EnterRetryAction action{ EnterRetryAction::None };
+        std::wstring promptId; // the watched prompt (valid for Waiting / Retry / GiveUp)
+        uint32_t attempt{ 0 }; // how many Enter re-presses have already been made for it
+    };
+
+    // PURE decision (the DecideAdvance pattern): given a session snapshot + now, should the scheduler
+    // re-press Enter for a Flight prompt whose submit Enter the TUI may have eaten? See the
+    // kEnterRetry* constants above. The turn is considered STARTED — so no retry, stop watching — when
+    // ANY of: the prompt's UserPromptSubmit echo arrived (`echoed`, the hook path); the session left
+    // the ready set (state advanced past Idle/WaitingForInput, e.g. Running — covers a hook-less
+    // adopted session driven by the transcript tail); or the conversation transcript advanced past the
+    // send (`convLastActivityUnixMs`, the no-hook fast-turn fallback). Otherwise the most-recently-sent
+    // un-acknowledged Flight prompt is watched: Waiting until kEnterRetryIntervalMs elapses, then Retry
+    // (until kEnterRetryMax presses), then GiveUp. Only LIVE, non-external (injector-bound) sessions are
+    // driven — an observe-only / archived session has no stdin to write to.
+    inline EnterRetryPlan DecideEnterRetry(const SessionInfo& s, int64_t nowUnixMs)
+    {
+        EnterRetryPlan plan;
+        if (!s.live || s.external)
+        {
+            return plan; // observe-only / archived — no bound injector to re-press Enter on
+        }
+        if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
+        {
+            return plan; // the turn started (Running / NeedsApproval / Error / Done) — nothing to retry
+        }
+        // The most-recently-sent Flight prompt still awaiting its pickup (Sent, not echoed, and the
+        // transcript hasn't advanced past it). A later send supersedes an earlier one.
+        const QueuedPrompt* best = nullptr;
+        for (const auto& p : s.queue)
+        {
+            if (p.origin != PromptOrigin::Flight || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
+            {
+                continue;
+            }
+            // Transcript advanced meaningfully past this send => Claude picked it up (started a turn).
+            if (s.convLastActivityUnixMs != 0 && s.convLastActivityUnixMs > p.sentAtUnixMs + kEnterRetryActivityMarginMs)
+            {
+                continue;
+            }
+            if (!best || p.sentAtUnixMs > best->sentAtUnixMs)
+            {
+                best = &p;
+            }
+        }
+        if (!best)
+        {
+            return plan; // no un-acknowledged Flight send — stop watching
+        }
+        plan.promptId = best->id;
+        plan.attempt = best->enterRetries;
+        if (best->enterRetries >= kEnterRetryMax)
+        {
+            plan.action = EnterRetryAction::GiveUp;
+            return plan;
+        }
+        if ((nowUnixMs - best->sentAtUnixMs) >= kEnterRetryIntervalMs)
+        {
+            plan.action = EnterRetryAction::Retry;
+            return plan;
+        }
+        plan.action = EnterRetryAction::Waiting;
+        return plan;
+    }
+
     class Scheduler
     {
     public:
@@ -197,12 +289,20 @@ namespace Agentmaster
     private:
         void _worker() noexcept;
         void _process(const std::wstring& id);
+        // Re-press Enter for any watched session whose just-sent prompt the TUI never submitted
+        // (DecideEnterRetry). Runs on the worker thread each poll tick; drains _pending as sessions
+        // start their turn / give up. Does its registry I/O OUTSIDE _mtx.
+        void _sweepPendingPickups();
 
         std::shared_ptr<SessionRegistry> _registry;
         std::thread _thread;
         std::mutex _mtx;
         std::condition_variable _cv;
         std::deque<std::wstring> _queue;
+        // Session ids whose latest Flight send is awaiting pickup — the Enter-retry watch list.
+        // Armed in OnObserved (every send path marks the prompt Sent via the registry, which
+        // notifies this observer), drained in _sweepPendingPickups. Guarded by _mtx.
+        std::unordered_set<std::wstring> _pending;
         std::atomic<bool> _running{ false };
         std::atomic<bool> _globalPause{ false };
     };

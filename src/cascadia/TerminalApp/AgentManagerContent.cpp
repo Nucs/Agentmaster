@@ -5682,6 +5682,7 @@ namespace winrt::TerminalApp::implementation
                     target->attempts += 1;
                     target->sentAtUnixMs = NowMs();
                     target->echoed = false; // await this injection's UserPromptSubmit echo
+                    target->enterRetries = 0; // fresh send -> reset the scheduler's Enter-retry watch
                 }
             });
         }

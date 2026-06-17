@@ -95,6 +95,14 @@ namespace Agentmaster
         // UserPromptSubmit echo back; `echoed` marks that echo consumed so the registry does
         // not re-record our own injection as a `Typed` message. Reset to false at each send.
         bool echoed{ false };
+        // Transient (NOT persisted): how many EXTRA Enter keystrokes the scheduler has re-pressed
+        // for this Sent-but-unacknowledged Flight prompt. The Claude TUI can absorb the original
+        // submit Enter as a NEWLINE when the keystroke lands before its input box is ready (the
+        // ConPTY delivers text+CR faster than the Ink UI initializes), leaving the prompt typed but
+        // never submitted and the turn never starting. The scheduler watches such a prompt and, if
+        // the turn has not started within kEnterRetryIntervalMs, re-sends a lone Enter — capped at
+        // kEnterRetryMax (Scheduler.h). Reset to 0 at each fresh send.
+        uint32_t enterRetries{ 0 };
     };
 
     struct ApprovalPolicy

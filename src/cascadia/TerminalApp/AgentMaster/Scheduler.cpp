@@ -77,22 +77,130 @@ namespace Agentmaster
         for (;;)
         {
             std::wstring id;
+            bool haveAdvance = false;
             {
                 std::unique_lock lk{ _mtx };
-                _cv.wait(lk, [this] { return !_running.load() || !_queue.empty(); });
+                const auto ready = [this] { return !_running.load() || !_queue.empty(); };
+                if (_pending.empty())
+                {
+                    _cv.wait(lk, ready);
+                }
+                else
+                {
+                    // A Flight send is awaiting pickup — wake on a poll cadence to re-check it (and
+                    // re-press Enter when due) even if no advance is queued. (Spurious early wakes
+                    // just run an extra cheap sweep; the predicate still gates real work.)
+                    _cv.wait_for(lk, std::chrono::milliseconds(kEnterRetryPollMs), ready);
+                }
                 if (!_running.load() && _queue.empty())
                 {
                     return;
                 }
-                id = std::move(_queue.front());
-                _queue.pop_front();
+                if (!_queue.empty())
+                {
+                    id = std::move(_queue.front());
+                    _queue.pop_front();
+                    haveAdvance = true;
+                }
             }
+            if (haveAdvance)
+            {
+                try
+                {
+                    _process(id);
+                }
+                catch (...)
+                {
+                }
+            }
+            // Always sweep the Enter-retry watch list (cheap no-op when empty); a _process above may
+            // have just armed a fresh send, and a timed wake lands here with no advance to process.
             try
             {
-                _process(id);
+                _sweepPendingPickups();
             }
             catch (...)
             {
+            }
+        }
+    }
+
+    void Scheduler::_sweepPendingPickups()
+    {
+        // Snapshot the watch list (cheap id copy), then do all registry I/O OUTSIDE _mtx — Inject /
+        // Update reach the ConPTY + fire observers (re-entering OnObserved on this very thread), which
+        // must not happen under our lock.
+        std::vector<std::wstring> ids;
+        {
+            std::lock_guard lk{ _mtx };
+            ids.assign(_pending.begin(), _pending.end());
+        }
+        if (ids.empty())
+        {
+            return;
+        }
+        const int64_t now = NowMs();
+        std::vector<std::wstring> done; // ids to drop from the watch (turn started / gave up / gone)
+        for (const auto& id : ids)
+        {
+            const auto s = _registry->Get(id);
+            if (!s)
+            {
+                done.push_back(id);
+                continue;
+            }
+            const auto plan = DecideEnterRetry(*s, now);
+            if (plan.action == EnterRetryAction::None)
+            {
+                done.push_back(id); // the turn started (or nothing awaits pickup) — stop watching
+            }
+            else if (plan.action == EnterRetryAction::GiveUp)
+            {
+                done.push_back(id);
+                AppendStateLog(L"autopilot.log",
+                               L"[enter-retry-giveup] " + id + L" (turn never started after " +
+                                   std::to_wstring(kEnterRetryMax) + L" Enter retries)\n");
+            }
+            else if (plan.action == EnterRetryAction::Retry)
+            {
+                // Re-press a LONE Enter — never the prompt text (it is already typed in Claude's box;
+                // resending it would duplicate the message).
+                const bool delivered = _registry->Inject(id, L"\r");
+                if (!delivered)
+                {
+                    done.push_back(id); // injector vanished (tab closing) — stop watching
+                    continue;
+                }
+                // Bump the counter + RESTART the echo/pickup window from this Enter: when a late press
+                // finally submits, its UserPromptSubmit echo must land within kEchoWindowMs of the
+                // (refreshed) sentAt or the registry would mis-record it as a fresh Typed prompt. The
+                // still-Sent-and-unechoed guard avoids clobbering a prompt that got picked up between
+                // the DecideEnterRetry read above and this Update.
+                uint32_t attempt = 0;
+                _registry->Update(id, [&](SessionInfo& ss) {
+                    for (auto& p : ss.queue)
+                    {
+                        if (p.id == plan.promptId && p.status == PromptStatus::Sent && !p.echoed)
+                        {
+                            p.enterRetries += 1;
+                            p.sentAtUnixMs = now;
+                            attempt = p.enterRetries;
+                            break;
+                        }
+                    }
+                });
+                AppendStateLog(L"autopilot.log",
+                               L"[enter-retry] " + id + L" press " + std::to_wstring(attempt) + L"/" +
+                                   std::to_wstring(kEnterRetryMax) + L"\n");
+            }
+            // EnterRetryAction::Waiting -> keep watching (not yet due)
+        }
+        if (!done.empty())
+        {
+            std::lock_guard lk{ _mtx };
+            for (const auto& id : done)
+            {
+                _pending.erase(id);
             }
         }
     }
@@ -159,6 +267,7 @@ namespace Agentmaster
                         p.sentAtUnixMs = NowMs();
                         p.attempts += 1;
                         p.echoed = false; // await this injection's UserPromptSubmit echo
+                        p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
                         ss.autopilot.autoSendsThisRun += 1;
                         ss.pendingConfirmPromptId.clear();
                     }
@@ -235,6 +344,28 @@ namespace Agentmaster
 
     void Scheduler::OnObserved(const SessionInfo& s)
     {
+        // Enter-retry watch (DecideEnterRetry): arm the watch whenever a session has a Flight send
+        // awaiting pickup. EVERY send path — the auto-send + SemiAuto confirm below AND the Manager's
+        // manual Send-now — marks the prompt Sent through the registry, which notifies this observer,
+        // so no send path needs to know about the retry mechanism. Independent of autopilot mode (a
+        // manual Send-now with autopilot Off must still submit reliably) and of the early returns
+        // below, so it sits first. The worker sweep drains the watch as turns start / give up.
+        {
+            const auto rp = DecideEnterRetry(s, NowMs());
+            if (rp.action == EnterRetryAction::Waiting || rp.action == EnterRetryAction::Retry)
+            {
+                bool added = false;
+                {
+                    std::lock_guard lk{ _mtx };
+                    added = _pending.insert(s.id).second;
+                }
+                if (added)
+                {
+                    _cv.notify_one(); // wake the worker to begin polling this send for pickup
+                }
+            }
+        }
+
         // stopOnError backstop: a turn that ended in Error pauses the plan.
         if (s.state == SessionState::Error && s.autopilot.stopOnError && s.autopilot.mode != AutopilotMode::Off)
         {
@@ -293,6 +424,7 @@ namespace Agentmaster
                         p.sentAtUnixMs = NowMs();
                         p.attempts += 1;
                         p.echoed = false; // await this injection's UserPromptSubmit echo
+                        p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
                         ss.autopilot.autoSendsThisRun += 1;
                     }
                     else if (!confirm)

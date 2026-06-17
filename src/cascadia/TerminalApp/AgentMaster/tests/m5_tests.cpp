@@ -1071,6 +1071,127 @@ static void TestScheduler()
     }
 }
 
+// Agentmaster — the Enter-retry decision (DecideEnterRetry): re-press Enter when the TUI ate the
+// submit Enter of a just-injected Flight prompt (the prompt is typed but never sent, so the turn
+// never starts). Pure + deterministic, like DecideAdvance.
+static void TestEnterRetry()
+{
+    std::wprintf(L"Autopilot DecideEnterRetry (the TUI-ate-my-Enter backstop):\n");
+    const int64_t T = 1000000;
+    // A live, managed session with one Sent (Flight, not echoed) prompt at sentAt.
+    auto mk = [](SessionState st, int64_t sentAt, bool echoed, uint32_t retries) {
+        SessionInfo s;
+        s.id = L"r";
+        s.live = true;
+        s.external = false;
+        s.state = st;
+        QueuedPrompt p;
+        p.id = L"rp";
+        p.text = L"go";
+        p.status = PromptStatus::Sent;
+        p.origin = PromptOrigin::Flight;
+        p.sentAtUnixMs = sentAt;
+        p.echoed = echoed;
+        p.enterRetries = retries;
+        s.queue.push_back(p);
+        return s;
+    };
+
+    {
+        // Just sent -> watching, not yet due.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        const auto r = DecideEnterRetry(s, T);
+        CHECK(r.action == EnterRetryAction::Waiting && r.promptId == L"rp", "fresh send -> waiting");
+    }
+    {
+        // One ms before the interval -> still waiting.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs - 1).action == EnterRetryAction::Waiting, "just under interval -> waiting");
+    }
+    {
+        // Interval elapsed, turn never started -> re-press Enter.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        const auto r = DecideEnterRetry(s, T + kEnterRetryIntervalMs);
+        CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp" && r.attempt == 0, "interval elapsed -> retry");
+    }
+    {
+        // Same, from a freshly-resumed Idle session (it never emits a Stop).
+        auto s = mk(SessionState::Idle, T, false, 0);
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry, "idle + due -> retry");
+    }
+    {
+        // The UserPromptSubmit echo arrived (managed/hook path) -> the turn started, stop watching.
+        auto s = mk(SessionState::WaitingForInput, T, true, 0);
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "echoed -> none");
+    }
+    {
+        // State left the ready set (Running) -> the turn started (covers a hook-less adopted session
+        // whose state is driven by the transcript tail), stop watching.
+        auto s = mk(SessionState::Running, T, false, 0);
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "running -> none");
+        s.state = SessionState::NeedsApproval;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "needs-approval -> none");
+    }
+    {
+        // No-hook fast-turn fallback: echo never set + state back to Waiting, but the transcript
+        // advanced past the send -> it was picked up, stop watching.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs + 1;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "transcript advanced -> none");
+    }
+    {
+        // Transcript moved only WITHIN the margin (a send fired right after the prior turn's tail) ->
+        // NOT counted as started; still retry.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.convLastActivityUnixMs = T + kEnterRetryActivityMarginMs - 1;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::Retry, "transcript within margin -> retry");
+    }
+    {
+        // Exhausted the retry budget -> give up (and the caller stops watching + logs).
+        auto s = mk(SessionState::WaitingForInput, T, false, kEnterRetryMax);
+        const auto r = DecideEnterRetry(s, T + kEnterRetryIntervalMs);
+        CHECK(r.action == EnterRetryAction::GiveUp && r.attempt == kEnterRetryMax, "max retries -> give up");
+    }
+    {
+        // Observe-only external session -> no injector to drive, never retry.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.external = true;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "external -> none");
+    }
+    {
+        // Archived (!live) session -> no live claude, never retry.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.live = false;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "archived -> none");
+    }
+    {
+        // A Typed prompt (the human's own keystroke, captured) is never our send to re-press.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.queue[0].origin = PromptOrigin::Typed;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "typed origin -> none");
+    }
+    {
+        // A Pending (not-yet-sent) prompt isn't awaiting pickup.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.queue[0].status = PromptStatus::Pending;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "pending -> none");
+    }
+    {
+        // The LATEST un-acknowledged send is the one watched (a later send supersedes an earlier).
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        QueuedPrompt p2;
+        p2.id = L"rp2";
+        p2.text = L"go2";
+        p2.status = PromptStatus::Sent;
+        p2.origin = PromptOrigin::Flight;
+        p2.sentAtUnixMs = T + 2000; // sent later
+        p2.echoed = false;
+        s.queue.push_back(p2);
+        const auto r = DecideEnterRetry(s, T + 2000 + kEnterRetryIntervalMs);
+        CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp2", "latest send is the watched one");
+    }
+}
+
 static void TestPersistence()
 {
     std::wprintf(L"Persistence (JSON + sessions + templates):\n");
@@ -3219,6 +3340,7 @@ int wmain()
     TestSpawnBuilders();
     TestProfileBootstrap();
     TestScheduler();
+    TestEnterRetry();
     TestTranscriptScan();
     TestBlockedAndInterruptedStates();
     TestPersistence();
