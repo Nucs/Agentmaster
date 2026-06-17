@@ -18,6 +18,9 @@
 
 #pragma once
 
+#include <chrono> // the fast-open timer interval
+#include <memory> // shared_ptr holder for the lazily-created per-hover timer
+
 namespace winrt::TerminalApp::implementation
 {
     // Force-close el's tooltip if it is an explicit ToolTip (a boxed-string tip is
@@ -33,15 +36,24 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Attach a hover tooltip wrapped in an explicit ToolTip object (Content = the text; same
-    // rendering + auto-open as a boxed string) and force-close it from
-    //  - the element's own PointerExited (routes reliably through the island input HWND —
-    //    the half of the service's bookkeeping that works), and
-    //  - the element's Unloaded: an element REMOVED from the tree while hovered (a board /
-    //    table rebuild under a parked pointer) never gets the exit, and its open tip is a
-    //    popup in the popup ROOT — nothing else would ever close it.
-    // Popup open/close is NOT a tree mutation — safe synchronously in a pointer handler
-    // (the XAML-Islands defer rule is about visual-tree changes). No-op on an empty tip.
+    // Attach a hover tooltip wrapped in an explicit ToolTip object (Content = the text) and:
+    //  - OPEN it FAST. The framework's built-in hover delay is sluggish, and this SDK exposes no
+    //    ToolTipService.InitialShowDelay to shorten it, so we drive the open OURSELVES on a short
+    //    one-shot DispatcherTimer — ~1/3 of the system tooltip hover time (SPI_GETMOUSEHOVERTIME,
+    //    default 400ms => ~133ms) — exactly how WT's MinMaxCloseControl opens its caption-button
+    //    tips: a manual ToolTip.IsOpen(true) with NO PlacementTarget (the target SetToolTip stored
+    //    on the element handles placement — verified by that shipping control, whose XAML sets no
+    //    PlacementTarget — so the tip holds no reference back to `el` and there is no leak-prone
+    //    element<->tip cycle). The framework's own auto-open at the full delay then no-ops (already
+    //    open). A boxed-string tip can't be opened programmatically — the OTHER reason this helper
+    //    always wraps the text in an explicit ToolTip object.
+    //  - force-close it from the element's own PointerExited (routes reliably through the island
+    //    input HWND — the half of the service's bookkeeping that works) and its Unloaded (an
+    //    element REMOVED from the tree while hovered — a board / table rebuild under a parked
+    //    pointer — never gets the exit, and its open tip is a popup in the popup ROOT that nothing
+    //    else would close); both also STOP the open timer.
+    // Popup open/close is NOT a tree mutation — safe synchronously in a pointer handler (the
+    // XAML-Islands defer rule is about visual-tree changes). No-op on an empty tip.
     inline void AgentSetTip(const winrt::Windows::UI::Xaml::UIElement& el, const winrt::hstring& tip)
     {
         if (tip.empty())
@@ -51,7 +63,44 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToolTip t;
         t.Content(winrt::box_value(tip));
         winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, t);
-        el.PointerExited([](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+
+        // The open delay = 1/3 of the system tooltip hover time (process-global; read once).
+        static const auto openDelay = []() {
+            unsigned int hoverMs{ 400 };
+            if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
+            {
+                hoverMs = 400;
+            }
+            return std::chrono::milliseconds{ hoverMs / 3 };
+        }();
+
+        // Lazily-created per-hover one-shot timer, kept in a shared_ptr holder so un-hovered
+        // elements (e.g. every cell of a large table) never allocate one. The handlers capture the
+        // holder + the tip by value but NOT `el`, and the tip carries no PlacementTarget back to
+        // `el`, so there is no element<->handler reference cycle (which would otherwise leak the
+        // element across a board / table rebuild).
+        auto timer = std::make_shared<winrt::Windows::UI::Xaml::DispatcherTimer>(nullptr);
+        el.PointerEntered([timer, t](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+            if (!*timer)
+            {
+                winrt::Windows::UI::Xaml::DispatcherTimer dt;
+                dt.Interval(openDelay);
+                dt.Tick([t](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::Foundation::IInspectable&) {
+                    if (const auto self = s.try_as<winrt::Windows::UI::Xaml::DispatcherTimer>())
+                    {
+                        self.Stop(); // one-shot: open once, then idle until the next hover
+                    }
+                    t.IsOpen(true);
+                });
+                *timer = dt;
+            }
+            (*timer).Start();
+        });
+        el.PointerExited([timer](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+            if (*timer)
+            {
+                (*timer).Stop();
+            }
             if (const auto owner = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
             {
                 AgentCloseTipOn(owner);
@@ -59,7 +108,11 @@ namespace winrt::TerminalApp::implementation
         });
         if (const auto fe = el.try_as<winrt::Windows::UI::Xaml::FrameworkElement>())
         {
-            fe.Unloaded([](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
+            fe.Unloaded([timer](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
+                if (*timer)
+                {
+                    (*timer).Stop();
+                }
                 if (const auto owner = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
                 {
                     AgentCloseTipOn(owner);

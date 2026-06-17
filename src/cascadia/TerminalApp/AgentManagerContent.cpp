@@ -1799,8 +1799,32 @@ namespace winrt::TerminalApp::implementation
         card.Padding(Thickness{ 8, 6, 8, 6 });
         card.Margin(Thickness{ 0, 0, 0, 6 });
         card.Background(Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
+        // Agentmaster: the state-colored border is visual noise at rest on a busy board — show it
+        // only when the card is SELECTED or HOVERED. The brush stays the state accent (also pushed
+        // onto the Button's PointerOver/Pressed states so a hover shows the accent, not the theme's
+        // gray hover border); only the THICKNESS toggles: 0 at rest, 1 on hover, 2 when selected.
         card.BorderBrush(SolidColorBrush{ accent });
-        card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
+        card.Resources().Insert(winrt::box_value(L"ButtonBorderBrushPointerOver"), SolidColorBrush{ accent });
+        card.Resources().Insert(winrt::box_value(L"ButtonBorderBrushPressed"), SolidColorBrush{ accent });
+        card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 0, 0, 0, 0 });
+        if (!selected)
+        {
+            // sender == the card; toggle border thickness on hover. Use the sender (never capture
+            // the Button into its OWN handler — a strong self-capture leaks the element via the
+            // delegate). The brush is owned by the template's PointerOver state (accent, above).
+            card.PointerEntered([](const IInspectable& s, const PointerRoutedEventArgs&) {
+                if (const auto c = s.try_as<Control>())
+                {
+                    c.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                }
+            });
+            card.PointerExited([](const IInspectable& s, const PointerRoutedEventArgs&) {
+                if (const auto c = s.try_as<Control>())
+                {
+                    c.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                }
+            });
+        }
         const auto id = s.id;
         // Single click = select; double click (within the OS threshold) = Activate (jump to
         // the session's live terminal tab — the page fans out to the hosting WINDOW when the
