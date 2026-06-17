@@ -93,6 +93,7 @@ namespace winrt::TerminalApp::implementation
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules
         void _UpdateTimesLine(); // re-render the live "age / last user msg / last activity" ago line (DispatcherTimer-driven)
+        void _ApplySummaryVisibility(); // show the 2nd pane only when enabled AND non-empty (content rows or a times line); else collapse it
         void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
         winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime); // analyze + render off-thread, set text on the UI thread

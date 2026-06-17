@@ -463,6 +463,15 @@ namespace
                 line(L"   * " + f);
             }
         }
+        if (!a.filesCreated.empty())
+        {
+            sep();
+            line(L"Files Created:");
+            for (const auto& f : a.filesCreated)
+            {
+                line(L"   * " + f);
+            }
+        }
         if (!a.filesEdited.empty())
         {
             sep();
@@ -1188,6 +1197,21 @@ namespace winrt::TerminalApp::implementation
         const std::wstring line = FormatTimesLine(_summaryCreatedMs, _summaryLastUserMs, lastAct);
         _summaryTimesText.Text(winrt::hstring{ line });
         _summaryTimesText.Visibility(line.empty() ? Visibility::Collapsed : Visibility::Visible);
+        _ApplySummaryVisibility(); // the times line may have just appeared/cleared — re-evaluate the pane
+    }
+
+    // Show the summary pane ONLY when it's enabled AND has something to render — content rows OR a
+    // non-empty times line. Otherwise it's just an empty box (a never-prompted / no-transcript session,
+    // or a not-yet-loaded one), so collapse it. All show/hide of _summaryRoot funnels through here.
+    void AgentTabOverlay::_ApplySummaryVisibility()
+    {
+        if (!_summaryRoot)
+        {
+            return;
+        }
+        const bool hasContent = _summaryStack && _summaryStack.Children().Size() > 0;
+        const bool hasTimes = _summaryTimesText && !_summaryTimesText.Text().empty();
+        _summaryRoot.Visibility((_summaryEnabled && (hasContent || hasTimes)) ? Visibility::Visible : Visibility::Collapsed);
     }
 
     // Render the rendered-text box into the StackPanel: contiguous text lines become one monospace,
@@ -1288,7 +1312,7 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
         }
-        _summaryRoot.Visibility(Visibility::Visible); // enabled but no session yet — _Refresh will fill it
+        _ApplySummaryVisibility(); // enabled but no session yet — stay hidden until there's something to show
     }
 
     void AgentTabOverlay::_ToggleSummary()
@@ -1313,7 +1337,7 @@ namespace winrt::TerminalApp::implementation
             _summaryRoot.Visibility(Visibility::Collapsed);
             return;
         }
-        _summaryRoot.Visibility(Visibility::Visible);
+        _ApplySummaryVisibility(); // show only if there's already something to render (else stay hidden until the load lands)
         if (_summaryLoading)
         {
             return; // one analyze+render in flight; the next _Refresh picks up any growth
