@@ -27,6 +27,8 @@
 #include <algorithm> // std::clamp / std::min (summary-panel size fractions)
 #include <chrono> // DispatcherTimer interval (summary times-line ticker)
 #include <string>
+#include <unordered_set> // summary file-list de-dup (Edited/Created take over Read)
+#include <vector>
 
 using namespace winrt::Windows::Foundation;
 // Narrow using-DECLARATIONS for the color helpers: a `using namespace winrt::Windows::UI;` would
@@ -497,11 +499,68 @@ namespace
                 line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m));
             }
         }
-        if (!a.filesRead.empty())
+        // De-duplicate the file lists so each path appears in exactly ONE section. Precedence is
+        // Created > Edited > Read: a file that was read AND edited shows ONLY under Edited (the
+        // "edited takes over read" rule — keep the edit, drop the read), and a created file never
+        // also shows as edited or read. Files compare on a normalized key (ASCII case-folded +
+        // forward-slashed) so the same path collapses across sections even if its casing/separators
+        // differ; the ORIGINAL string is displayed. Within-list repeats are dropped too.
+        const auto fileKey = [](const std::wstring& p) {
+            std::wstring k;
+            k.reserve(p.size());
+            for (wchar_t c : p)
+            {
+                if (c == L'\\')
+                {
+                    c = L'/';
+                }
+                else if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+                k.push_back(c);
+            }
+            return k;
+        };
+        std::unordered_set<std::wstring> createdKeys, editedKeys;
+        for (const auto& f : a.filesCreated)
+        {
+            createdKeys.insert(fileKey(f));
+        }
+        for (const auto& f : a.filesEdited)
+        {
+            editedKeys.insert(fileKey(f));
+        }
+        std::vector<std::wstring> readShown, editedShown;
+        {
+            std::unordered_set<std::wstring> seen;
+            for (const auto& f : a.filesRead)
+            {
+                const auto k = fileKey(f);
+                if (createdKeys.count(k) || editedKeys.count(k) || !seen.insert(k).second)
+                {
+                    continue; // Edited/Created take over Read; drop within-list repeats
+                }
+                readShown.push_back(f);
+            }
+        }
+        {
+            std::unordered_set<std::wstring> seen;
+            for (const auto& f : a.filesEdited)
+            {
+                const auto k = fileKey(f);
+                if (createdKeys.count(k) || !seen.insert(k).second)
+                {
+                    continue; // Created takes over Edited; drop within-list repeats
+                }
+                editedShown.push_back(f);
+            }
+        }
+        if (!readShown.empty())
         {
             sep();
             line(L"Files Read:");
-            for (const auto& f : a.filesRead)
+            for (const auto& f : readShown)
             {
                 line(L"   * " + f);
             }
@@ -515,11 +574,11 @@ namespace
                 line(L"   * " + f);
             }
         }
-        if (!a.filesEdited.empty())
+        if (!editedShown.empty())
         {
             sep();
             line(L"Files Edited:");
-            for (const auto& f : a.filesEdited)
+            for (const auto& f : editedShown)
             {
                 line(L"   * " + f);
             }
