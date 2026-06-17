@@ -363,6 +363,12 @@ namespace Agentmaster
             assign(s.liveCwd, o.cwd);
             assign(s.model, o.model);
             assign(s.effort, o.effort);
+            if (!o.gitBranch.empty())
+            {
+                assign(s.branch, o.gitBranch); // Agentmaster: live writer for the git branch (the
+                // per-tab overlay's "<workdir folder>/<branch>" row); never clobber a known branch
+                // with empty (transcript momentarily unresolved / no branch recorded yet).
+            }
             assign(s.permissionMode, o.permissionMode);
             assign(s.background, o.background);
             assign(s.sessionName, o.sessionName);

@@ -418,7 +418,13 @@ namespace Agentmaster
         }
         const auto getCodexInfo = [this](const CodexProcessFacts& f) -> CodexInfo {
             auto it = _codexInfoByPid.find(f.pid);
-            if (it != _codexInfoByPid.end() && it->second.resolved)
+            // PID-reuse guard: only reuse a RESOLVED entry when it was resolved for THIS exact process
+            // (same start time). The map is pruned only to live codex pids, so a recycled pid can carry a
+            // dead codex's resolved entry here; trusting it would serve the wrong rollout uuid/state.
+            // start==0 (a failed read) leaves the entry's start at 0 and matches the same failed read, so
+            // it degrades to the prior pid-only behavior rather than thrashing. (An UNRESOLVED entry is
+            // not taken by this branch — it re-resolves every survey and overwrites below, self-healing.)
+            if (it != _codexInfoByPid.end() && it->second.resolved && it->second.startUnixMs == f.startUnixMs)
             {
                 // Known rollout: refresh the mtime (codex appends as it works); no re-resolve. When the
                 // file GREW since last survey, advance the turn-state cursor over the new delta (Phase
@@ -449,6 +455,7 @@ namespace Agentmaster
             // discovery over the date-sharded rollouts. A codex with no rollout yet (never prompted,
             // §11d) stays unresolved and is retried next survey until its first turn writes the file.
             CodexInfo ci;
+            ci.startUnixMs = f.startUnixMs; // stamp the process identity so a future PID reuse invalidates this entry (resolved or not)
             const std::wstring home = !f.codexHome.empty() ? f.codexHome : CodexDefaultHome();
             CodexSession sess;
             if (!f.resumeTarget.empty())
@@ -657,6 +664,12 @@ namespace Agentmaster
                     o.effort = f.effort;
                     o.permissionMode = f.permissionMode;
                     o.sessionName = f.sessionName;
+                    // Git branch — the live writer for SessionInfo::branch (the per-tab overlay's
+                    // row-2 "<workdir folder>/<branch>"). Read LIVE from the working dir's .git/HEAD,
+                    // i.e. the CURRENT branch — NOT the transcript's recorded gitBranch, which is a
+                    // per-line historical snapshot (first-seen) that reads stale, or "HEAD", when the
+                    // repo was momentarily detached as that line was written. A tiny filesystem read.
+                    o.gitBranch = ReadGitBranchForDir(f.cwd);
                     if (const auto pit = presenceBySid.find(sid); pit != presenceBySid.end())
                     {
                         o.presenceStatus = pit->second; // claude's own heartbeat (busy/idle/waiting/shell)

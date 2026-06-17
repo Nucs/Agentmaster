@@ -277,6 +277,14 @@ namespace Agentmaster
     // aiTitle > legacy summary > title (the first REAL prompt). Pure.
     std::wstring TranscriptDisplayTitle(const TranscriptInfo& info);
 
+    // Agentmaster: the CURRENT git branch of `dir`, read LIVE from .git/HEAD (handles a worktree/
+    // submodule .git FILE + a detached HEAD -> short SHA). Empty when `dir` is not under a git repo.
+    // The authoritative current branch for the per-tab overlay's "<folder>/<branch>" row: unlike a
+    // transcript's recorded gitBranch (a per-line historical SNAPSHOT, first-seen — it reads stale,
+    // or "HEAD", when the repo was momentarily detached as the line was written), this is what the
+    // working dir is on RIGHT NOW. Filesystem only (a tiny read) — safe off the UI thread.
+    std::wstring ReadGitBranchForDir(const std::wstring& dir);
+
     // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
     // Codex is the Claude analog with three divergences: its config home is CODEX_HOME (else
     // ~/.codex); it can't pin a session id at launch (the id is auto-minted, embedded in the

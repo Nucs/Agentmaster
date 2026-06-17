@@ -505,6 +505,34 @@ namespace Agentmaster
             }
         }
 
+        // Resumed-from-NeedsApproval reconciliation — the NeedsApproval MIRROR of recon-run above.
+        // The user ANSWERED the blocking question / permission and the agent is WORKING AGAIN (fresh
+        // assistant output, the pending interactive tool cleared, the turn not yet over). NeedsApproval's
+        // only OTHER pull-side exit is -> WaitingForInput at the turn's END (recon-stop), so without this
+        // a session answered MID-turn kept showing "needs you" (orange) for the rest of the turn even
+        // with new lines streaming in. The PURE gate (ShouldSynthesizeResumed) keys on a freshly-appended
+        // turn event consumed by an already-PRIMED cursor whose tail is in-progress, and its interrupt +
+        // terminal-stop guards make it mutually exclusive with recon-stop below (a finished/aborted turn
+        // is recon-stop's -> Waiting). Synthesized as tool ACTIVITY (PostToolUse -> Running through the
+        // ONE state machine), NOT a UserPromptSubmit, which from NeedsApproval would wrongly inflate the
+        // type-ahead queue accounting (++queuedPrompts) and could strand the next real Stop as Running.
+        // The re-Get mirrors the other synths' freshest-state re-check, so a real hook that landed
+        // mid-pass wins.
+        if (ShouldSynthesizeResumed(s.state, consumedTurnEvent, wasPrimed, st.pendingInteractiveTool, st.lastStopReason, st.interrupted, NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime)))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && fresh->state == SessionState::NeedsApproval)
+            {
+                HookMessage resume;
+                resume.event = HookEvent::PostToolUse;
+                resume.sessionId = s.id;
+                resume.cwd = s.workingDir;
+                resume.ts = NowMs();
+                _registry->OnHookEvent(resume);
+                AppendStateLog(L"scanner.log", L"[recon-resume] " + s.id + L" (answered -> working again, NeedsApproval -> Running)\n");
+            }
+        }
+
         const int64_t quietForMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
 
         // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last

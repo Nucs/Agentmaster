@@ -815,11 +815,11 @@ namespace winrt::TerminalApp::implementation
     {
         _renameHandler = std::move(handler);
     }
-    void AgentManagerContent::SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring)> handler)
+    void AgentManagerContent::SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring, bool)> handler)
     {
         _adoptExternalHandler = std::move(handler);
     }
-    void AgentManagerContent::SetCodexLaunchHandler(std::function<void(uint32_t, winrt::hstring, bool)> handler)
+    void AgentManagerContent::SetCodexLaunchHandler(std::function<void(uint32_t, winrt::hstring, bool, bool)> handler)
     {
         _codexLaunchHandler = std::move(handler);
     }
@@ -3206,20 +3206,38 @@ namespace winrt::TerminalApp::implementation
             // launches a fresh managed codex in the cwd. Both route to _codexLaunchHandler (adopt flag).
             // No injector/Autopilot yet — you type into the tab directly (driving Codex is a later phase).
             const std::wstring sid = ex.sessionId;
+            const std::wstring adoptTitle = ex.title;
             MenuFlyoutItem adopt;
             adopt.Text(L"Adopt");
             AgentSetTip(adopt, sid.empty() ?
                                    winrt::hstring{ L"This codex hasn't been prompted yet (no rollout) \x2014 Adopt launches a fresh managed codex here" } :
-                                   winrt::hstring{ L"Resume this codex's conversation into a managed tab (codex resume); the original keeps running \x2014 close it to avoid two writers" });
-            adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_codexLaunchHandler) { self->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true); } } });
-                }
-                else if (auto self = weak.get())
-                {
-                    if (self->_codexLaunchHandler) { self->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true); }
-                }
+                                   winrt::hstring{ L"Bring this codex's conversation under management \x2014 Fork a safe copy (codex fork) or Resume the same rollout" });
+            // Two processes can't safely share one rollout, and the external is still running, so OFFER
+            // the choice (the chosen "warn and let me choose"): Fork a copy (codex fork -> a NEW rollout,
+            // the source untouched -> safe) vs. Resume anyway (codex resume -> the same rollout; stop the
+            // original first). A never-prompted codex (no rollout) just launches fresh, no dialog.
+            adopt.Click([weak, disp, pid, cwd, sid, adoptTitle](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, pid, cwd, sid, adoptTitle]() {
+                    auto self = weak.get();
+                    if (!self || !self->_codexLaunchHandler)
+                    {
+                        return;
+                    }
+                    if (sid.empty())
+                    {
+                        self->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true, false); // no rollout -> launch fresh
+                        return;
+                    }
+                    const winrt::hstring label = adoptTitle.empty() ? winrt::hstring{ L"This Codex session" } : winrt::hstring{ L"\x201C" + adoptTitle + L"\x201D" };
+                    self->_ConfirmChoice(
+                        L"Adopt Codex session",
+                        label + winrt::hstring{ L" is still running outside Agentmaster. Two processes can't safely share one rollout.\n\nFork a copy: branch its current state into a controllable session (codex fork) \x2014 safe, the original is untouched.\nResume anyway: take over the same rollout \x2014 stop the original first to avoid two writers." },
+                        L"Fork a copy",
+                        L"Resume anyway",
+                        [weak, pid, cwd]() { if (auto s = weak.get()) { if (s->_codexLaunchHandler) { s->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true, true); } } },
+                        [weak, pid, cwd]() { if (auto s = weak.get()) { if (s->_codexLaunchHandler) { s->_codexLaunchHandler(pid, winrt::hstring{ cwd }, true, false); } } });
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
             });
             menu.Items().Append(adopt);
 
@@ -3229,11 +3247,11 @@ namespace winrt::TerminalApp::implementation
             openHereCx.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
                 if (disp)
                 {
-                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_codexLaunchHandler) { self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false); } } });
+                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_codexLaunchHandler) { self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false, false); } } });
                 }
                 else if (auto self = weak.get())
                 {
-                    if (self->_codexLaunchHandler) { self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false); }
+                    if (self->_codexLaunchHandler) { self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false, false); }
                 }
             });
             menu.Items().Append(openHereCx);
@@ -3254,21 +3272,39 @@ namespace winrt::TerminalApp::implementation
         }
         else
         {
+            const std::wstring sid = ex.sessionId;
+            const std::wstring adoptTitle = ex.title;
             MenuFlyoutItem adopt;
             adopt.Text(L"Adopt");
-            AgentSetTip(adopt, L"Resume this external claude's conversation into a managed, controllable tab (the original keeps running \x2014 close it to avoid two writers)");
-            adopt.Click([weak, disp, pid, cwd](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, pid, cwd]() { if (auto self = weak.get()) { if (self->_adoptExternalHandler) { self->_adoptExternalHandler(pid, winrt::hstring{ cwd }); } } });
-                }
-                else if (auto self = weak.get())
-                {
-                    if (self->_adoptExternalHandler)
+            AgentSetTip(adopt, sid.empty() ?
+                                   winrt::hstring{ L"This claude hasn't been prompted yet (no transcript) \x2014 Adopt launches a fresh managed session here" } :
+                                   winrt::hstring{ L"Bring this external claude's conversation under management \x2014 Fork a safe copy (--fork-session) or Resume the same conversation" });
+            // Two processes can't safely share one transcript, and the external is still running, so OFFER
+            // the choice (the chosen "warn and let me choose"): Fork a copy (claude --fork-session -> a NEW
+            // transcript, the source untouched -> safe) vs. Resume anyway (claude --resume -> the same
+            // conversation; stop the original first). A never-prompted claude (no transcript) launches fresh.
+            adopt.Click([weak, disp, pid, cwd, sid, adoptTitle](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, pid, cwd, sid, adoptTitle]() {
+                    auto self = weak.get();
+                    if (!self || !self->_adoptExternalHandler)
                     {
-                        self->_adoptExternalHandler(pid, winrt::hstring{ cwd });
+                        return;
                     }
-                }
+                    if (sid.empty())
+                    {
+                        self->_adoptExternalHandler(pid, winrt::hstring{ cwd }, false); // no transcript -> launch fresh
+                        return;
+                    }
+                    const winrt::hstring label = adoptTitle.empty() ? winrt::hstring{ L"This Claude session" } : winrt::hstring{ L"\x201C" + adoptTitle + L"\x201D" };
+                    self->_ConfirmChoice(
+                        L"Adopt Claude session",
+                        label + winrt::hstring{ L" is still running outside Agentmaster. Two processes can't safely share one transcript.\n\nFork a copy: branch its current state into a controllable session (claude --fork-session) \x2014 safe, the original is untouched.\nResume anyway: take over the same conversation \x2014 stop the original first to avoid two writers." },
+                        L"Fork a copy",
+                        L"Resume anyway",
+                        [weak, pid, cwd]() { if (auto s = weak.get()) { if (s->_adoptExternalHandler) { s->_adoptExternalHandler(pid, winrt::hstring{ cwd }, true); } } },
+                        [weak, pid, cwd]() { if (auto s = weak.get()) { if (s->_adoptExternalHandler) { s->_adoptExternalHandler(pid, winrt::hstring{ cwd }, false); } } });
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
             });
             menu.Items().Append(adopt);
 
@@ -3298,7 +3334,7 @@ namespace winrt::TerminalApp::implementation
             // no defer needed (matches the Archive page's "Copy id").
             MenuFlyoutItem copyId;
             copyId.Text(L"Copy Session Id");
-            const std::wstring sid = ex.sessionId;
+            // `sid` is already declared at the top of this branch (the Adopt dialog gate reuses it).
             if (sid.empty())
             {
                 copyId.IsEnabled(false);
@@ -3800,6 +3836,62 @@ namespace winrt::TerminalApp::implementation
                 if (cb)
                 {
                     cb();
+                }
+            }
+            CATCH_LOG();
+        });
+        try
+        {
+            dialog.ShowAsync();
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // Agentmaster: a THREE-way buttons-only choice (Primary / Secondary / Cancel) — the XAML-Islands-safe
+    // dialog with both an extra button and a second callback. Used by Adopt to offer "Fork a copy" (safe:
+    // a new transcript/rollout) vs. "Resume anyway" (take over the same conversation). Primary is the
+    // DEFAULT (the safe Fork choice); Close (Cancel) does nothing. Both callbacks are exception-guarded
+    // like _Confirm so nothing escapes into the XAML handler.
+    void AgentManagerContent::_ConfirmChoice(const winrt::hstring& title, const winrt::hstring& body, const winrt::hstring& primary, const winrt::hstring& secondary, std::function<void()> onPrimary, std::function<void()> onSecondary)
+    {
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(title));
+        dialog.Content(winrt::box_value(body));
+        dialog.PrimaryButtonText(primary);
+        dialog.SecondaryButtonText(secondary);
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Primary); // safe default = the primary (Fork) choice
+        if (_root)
+        {
+            try
+            {
+                dialog.XamlRoot(_root.XamlRoot());
+                dialog.RequestedTheme(_root.ActualTheme());
+            }
+            catch (...)
+            {
+            }
+        }
+        auto p = std::move(onPrimary);
+        auto s = std::move(onSecondary);
+        dialog.PrimaryButtonClick([p](const ContentDialog&, const ContentDialogButtonClickEventArgs&) {
+            try
+            {
+                if (p)
+                {
+                    p();
+                }
+            }
+            CATCH_LOG();
+        });
+        dialog.SecondaryButtonClick([s](const ContentDialog&, const ContentDialogButtonClickEventArgs&) {
+            try
+            {
+                if (s)
+                {
+                    s();
                 }
             }
             CATCH_LOG();
@@ -5026,8 +5118,9 @@ namespace winrt::TerminalApp::implementation
         {
             _planHeaderHost.Children().Append(Text(winrt::hstring{ _selectedExternalCwd }, 12, false, 0.6));
         }
-        // Codex is observe-only in Phase C1 (no Adopt yet); Claude can be adopted from the tree.
-        _planHeaderHost.Children().Append(Text(isCodex ? winrt::hstring{ L"Read-only \x2014 an OpenAI Codex session. Driving/adopting Codex is a later phase." } : winrt::hstring{ L"Read-only \x2014 runs outside Agentmaster. Right-click it in the tree and “Adopt” to resume the conversation into a managed tab." }, 11, false, 0.5));
+        // Observe-only here (we host no ConPTY). Both agents can be adopted from the tree's right-click
+        // menu — Adopt offers Fork a copy (safe while the original runs) or Resume the same conversation.
+        _planHeaderHost.Children().Append(Text(isCodex ? winrt::hstring{ L"Read-only \x2014 an OpenAI Codex session running outside Agentmaster. Right-click it in the tree and \x201C" L"Adopt\x201D to bring its conversation under management (Fork a copy, or Resume)." } : winrt::hstring{ L"Read-only \x2014 runs outside Agentmaster. Right-click it in the tree and \x201C" L"Adopt\x201D to bring its conversation under management (Fork a copy, or Resume)." }, 11, false, 0.5));
 
         if (_selectedExternalSessionId.empty())
         {
@@ -5244,7 +5337,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _PushRecentDir(text); // remember it as "recently selected" (shared MRU with Claude launches)
                 _ClosePathPicker();
-                _codexLaunchHandler(0, winrt::hstring{ text }, false);
+                _codexLaunchHandler(0, winrt::hstring{ text }, false, false); // fresh launch: adopt=false, fork=false
             }
             return;
         }

@@ -684,9 +684,27 @@ static void TestSpawnBuilders()
 
         fs::remove_all(fs::path{ root }, ec);
     }
-    // Codex (managed-session support): bare `codex` fresh; `codex resume <uuid>` to continue a rollout.
-    CHECK(BuildCodexCommandline(L"") == L"codex", "codex commandline (fresh)");
-    CHECK(BuildCodexCommandline(L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a") == L"codex resume 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (resume by rollout uuid)");
+    // Codex (managed-session support): with no resolved launcher, the bare token (back-compat +
+    // the not-found path): bare `codex` fresh; `codex resume <uuid>` to continue a rollout; and
+    // `codex fork <uuid>` to branch one (the adopt-a-live-external two-writers fix). Signature is
+    // (resumeUuid, forkUuid, launcher) — fork WINS over resume when both are set.
+    CHECK(BuildCodexCommandline(L"") == L"codex", "codex commandline (fresh, no launcher)");
+    CHECK(BuildCodexCommandline(L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a") == L"codex resume 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (resume by rollout uuid, no launcher)");
+    CHECK(BuildCodexCommandline(L"", L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a") == L"codex fork 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (fork by rollout uuid, no launcher)");
+    CHECK(BuildCodexCommandline(L"aaaa", L"bbbb") == L"codex fork bbbb", "codex commandline (fork wins over resume)");
+    // With a resolved launcher, codex is invoked BY FULL PATH — ConPTY's CreateProcessW ignores
+    // PATHEXT, so a bare `codex` misses an npm codex.cmd and dies 0x80070002 (ERROR_FILE_NOT_FOUND).
+    // A .exe runs directly (quoted, so a space in the path is safe).
+    CHECK(BuildCodexCommandline(L"", L"", L"C:\\bin\\codex.exe") == L"\"C:\\bin\\codex.exe\"", "codex commandline (fresh, .exe full path)");
+    CHECK(BuildCodexCommandline(L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", L"", L"C:\\bin\\codex.exe") == L"\"C:\\bin\\codex.exe\" resume 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (resume, .exe full path)");
+    CHECK(BuildCodexCommandline(L"", L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", L"C:\\bin\\codex.exe") == L"\"C:\\bin\\codex.exe\" fork 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex commandline (fork, .exe full path)");
+    // A .cmd/.bat is a batch script CreateProcessW cannot execute directly, so it goes via `cmd /c`,
+    // wrapped in ONE outer quote pair so the inner launcher quote survives (cmd strips only the
+    // first+last quote of the remainder — the >2-quotes case; mirrors BuildClaudeCommandline).
+    CHECK(BuildCodexCommandline(L"", L"", L"C:\\npm\\codex.cmd") == L"cmd /c \"\"C:\\npm\\codex.cmd\"\"", "codex commandline (fresh, .cmd via cmd /c)");
+    CHECK(BuildCodexCommandline(L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", L"", L"C:\\npm\\codex.cmd") == L"cmd /c \"\"C:\\npm\\codex.cmd\" resume 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a\"", "codex commandline (resume, .cmd via cmd /c)");
+    CHECK(BuildCodexCommandline(L"", L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", L"C:\\npm\\codex.cmd") == L"cmd /c \"\"C:\\npm\\codex.cmd\" fork 019ec0c7-a4e3-7c73-8c57-9f83ecb1903a\"", "codex commandline (fork, .cmd via cmd /c)");
+    CHECK(BuildCodexCommandline(L"", L"", L"C:\\path with space\\codex.bat") == L"cmd /c \"\"C:\\path with space\\codex.bat\"\"", "codex commandline (.bat with spaces via cmd /c)");
 
     const auto json = BuildHooksSettingsJson(L"C:/x/agentmaster-hook.ps1", L"", true, true);
     CHECK(json.find(L"\"hooks\"") != std::wstring::npos, "settings has hooks");
@@ -1668,6 +1686,23 @@ static void TestBlockedAndInterruptedStates()
     CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::NeedsApproval, L"AskUserQuestion", false, 5000), "block: idempotent — never re-fires while already NeedsApproval");
     CHECK(!ShouldSynthesizeBlockedOnUser(SessionState::Running, L"AskUserQuestion", false, 1000), "block: not quiescent yet -> hold");
 
+    // recon-resume: the NeedsApproval -> Running edge that was MISSING — a session answered MID-turn
+    // (the question/approval resolved + the agent working again) used to show "needs you" (orange)
+    // until end-of-turn. Fires only from NeedsApproval, off a fresh primed turn event, with the
+    // pending interactive tool cleared and a non-terminal/non-interrupted tail (mutually exclusive
+    // with recon-stop). Signature: (state, consumedTurnEvent, primedBeforePass, pendingTool, lastStop, interrupted, sinceWriteMs).
+    CHECK(ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"", L"tool_use", false, 500), "resume: answered + working again (pending tool) -> Running");
+    CHECK(ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"", L"", false, 500), "resume: answered + plain assistant text (no stop_reason) -> Running");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"AskUserQuestion", L"tool_use", false, 500), "resume: a NEW unanswered question still pending -> stay NeedsApproval");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, false, true, L"", L"tool_use", false, 500), "resume: no new turn event this pass -> no synthesis");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, true, false, L"", L"tool_use", false, 500), "resume: unprimed cursor (history replay) -> no synthesis");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"", L"end_turn", false, 500), "resume: terminal tail = turn ended -> recon-stop's job (Waiting), not Running");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"", L"", true, 500), "resume: an interrupt ended the turn -> recon-stop (Waiting), not a resume");
+    CHECK(!ShouldSynthesizeResumed(SessionState::NeedsApproval, true, true, L"", L"tool_use", false, kScanRunRepairFreshMs + 1), "resume: stale write (late scan) -> no synthesis");
+    CHECK(!ShouldSynthesizeResumed(SessionState::Running, true, true, L"", L"tool_use", false, 500), "resume: already Running -> no-op");
+    CHECK(!ShouldSynthesizeResumed(SessionState::Idle, true, true, L"", L"tool_use", false, 500), "resume: Idle is recon-run's domain, not resume");
+    CHECK(!ShouldSynthesizeResumed(SessionState::WaitingForInput, true, true, L"", L"tool_use", false, 500), "resume: Waiting is recon-run's domain, not resume");
+
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {
         const auto p = ParseTranscriptDelta(
@@ -1743,6 +1778,61 @@ static void TestBlockedAndInterruptedStates()
         reconcileQuiescent(reg, L"e4",
             L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}]}}\n");
         CHECK(reg.Get(L"e4")->state == SessionState::Running, "e2e control: pending Bash (working) stays Running — no false positive");
+    }
+
+    // --- recon-resume e2e: NeedsApproval -> Running when the user answers + the agent works again
+    //     (a FRESH live append, the recon-run-family path — mirrors _reconcileSession). ---
+    auto reconcileResume = [&](SessionRegistry& reg, const std::wstring& id, std::wstring_view chunk) {
+        const auto [lastStop, pendingTool, interrupted] = deriveTail(chunk);
+        bool consumedTurnEvent = false; // an assistant / human line (a bare tool_result never counts — mirrors _readDelta)
+        for (const auto& ev : ParseTranscriptDelta(chunk).events)
+        {
+            if (ev.kind != TranscriptEvent::Kind::ToolResult) { consumedTurnEvent = true; }
+        }
+        if (ShouldSynthesizeResumed(reg.Get(id)->state, consumedTurnEvent, /*primed*/ true, pendingTool, lastStop, interrupted, /*fresh*/ 500))
+        {
+            HookMessage r = Msg(id, HookEvent::PostToolUse); r.ts = 9000;
+            reg.OnHookEvent(r);
+        }
+    };
+
+    { // THE bug: AskUserQuestion answered, agent KEEPS WORKING -> Running (was: stuck NeedsApproval/orange until end-of-turn)
+        SessionRegistry reg; reg.Upsert(MakeSession(L"r1", SessionState::Running));
+        reconcileQuiescent(reg, L"r1", // unanswered question goes quiescent -> NeedsApproval
+            L"{\"type\":\"user\",\"message\":{\"content\":\"q\"}}\n"
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}\n");
+        CHECK(reg.Get(L"r1")->state == SessionState::NeedsApproval, "e2e resume #1a: unanswered AskUserQuestion -> NeedsApproval");
+        reconcileResume(reg, L"r1", // the answer (tool_result) + the agent resumes working (fresh assistant line, turn not over)
+            L"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"Option A\"}]}}\n"
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"text\",\"text\":\"Great, doing it.\"}]}}\n");
+        CHECK(reg.Get(L"r1")->state == SessionState::Running, "e2e resume #1b: answered + working again -> Running (THE FIX: was stuck NeedsApproval)");
+    }
+    { // "not limited to AskUserQuestion": a real permission approval, then the agent works again -> Running
+        SessionRegistry reg; reg.Upsert(MakeSession(L"r2", SessionState::Running));
+        reg.OnHookEvent([] { HookMessage m = Msg(L"r2", HookEvent::Notification); m.permissionRequest = true; return m; }());
+        CHECK(reg.Get(L"r2")->state == SessionState::NeedsApproval, "e2e resume #2a: permission Notification -> NeedsApproval");
+        reconcileResume(reg, L"r2", // approved: the tool ran (a fresh assistant line, mid-turn)
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}]}}\n");
+        CHECK(reg.Get(L"r2")->state == SessionState::Running, "e2e resume #2b: approved + working again -> Running (NOT limited to AskUserQuestion)");
+    }
+    { // CONTROL: a NEW question in the resume window keeps it blocked (must NOT flip to Running)
+        SessionRegistry reg; reg.Upsert(MakeSession(L"r3", SessionState::Running));
+        reconcileQuiescent(reg, L"r3",
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}\n");
+        reconcileResume(reg, L"r3", // answered the first, but the agent immediately asks ANOTHER
+            L"{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"A\"}]}}\n"
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"input\":{}}]}}\n");
+        CHECK(reg.Get(L"r3")->state == SessionState::NeedsApproval, "e2e resume control: a NEW pending question stays NeedsApproval");
+    }
+    { // CONTROL: an answer that ENDS the turn is recon-stop's job (-> Waiting), never a Running blip
+        SessionRegistry reg; reg.Upsert(MakeSession(L"r4", SessionState::Running));
+        reg.OnHookEvent([] { HookMessage m = Msg(L"r4", HookEvent::Notification); m.permissionRequest = true; return m; }());
+        reconcileResume(reg, L"r4", // a terminal tail: resume declines (mutually exclusive with recon-stop)
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"All done.\"}]}}\n");
+        CHECK(reg.Get(L"r4")->state == SessionState::NeedsApproval, "e2e resume control: terminal tail does NOT resume (recon-stop territory)");
+        reconcileQuiescent(reg, L"r4", // and the quiescent recon-stop then releases it the right way
+            L"{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"All done.\"}]}}\n");
+        CHECK(reg.Get(L"r4")->state == SessionState::WaitingForInput, "e2e resume control: end-of-turn -> recon-stop -> WaitingForInput");
     }
 }
 

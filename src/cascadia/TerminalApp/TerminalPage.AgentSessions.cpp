@@ -585,7 +585,7 @@ namespace winrt::TerminalApp::implementation
         _LaunchCodexSession(workingDir, title, std::nullopt);
     }
 
-    TerminalApp::Tab TerminalPage::_LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored)
+    TerminalApp::Tab TerminalPage::_LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid)
     {
         if (!_sessionRegistry)
         {
@@ -609,19 +609,33 @@ namespace winrt::TerminalApp::implementation
         // handle (the same record flips back live); a fresh launch mints a new one.
         const std::wstring handleId = (restored && !restored->id.empty()) ? restored->id : ::Agentmaster::NewSessionId();
 
+        // FORK (adopt a LIVE external safely) WINS over resume: `codex fork <uuid>` branches the
+        // source rollout into a NEW rollout, so the source is never written to (no two-writers on one
+        // rollout). Like resume, it is rollout-gated — a uuid whose rollout vanished drops to fresh.
+        // The fork mints its OWN rollout; the observer resolves that NEW uuid onto codexSessionId, so a
+        // forked session NEVER inherits the source's resume target.
+        std::wstring forkUuid;
+        if (!forkFromCodexUuid.empty() &&
+            !::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), forkFromCodexUuid).empty())
+        {
+            forkUuid = forkFromCodexUuid;
+        }
         // Resume ONLY if Codex still has a rollout for the persisted uuid (the resume target). No uuid
         // (a never-prompted archived codex) or the rollout vanished -> launch fresh in the dir (Codex
         // mints a new rollout; the observer re-resolves codexSessionId). Mirrors Claude's transcript-
-        // gated resume (Rule #6).
+        // gated resume (Rule #6). Skipped entirely when forking (fork wins).
         std::wstring resumeUuid;
-        if (restored && !restored->codexSessionId.empty())
+        if (forkUuid.empty() && restored && !restored->codexSessionId.empty())
         {
             if (!::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), restored->codexSessionId).empty())
             {
                 resumeUuid = restored->codexSessionId;
             }
         }
-        const std::wstring commandline = ::Agentmaster::BuildCodexCommandline(resumeUuid);
+        // Launch codex BY FULL PATH (resolved once at engine init). ConPTY's CreateProcessW appends
+        // only ".exe" and ignores PATHEXT, so a bare `codex` token would miss an npm codex.cmd and die
+        // 0x80070002 (ERROR_FILE_NOT_FOUND). Empty launcher falls back to the bare token (surfaces the error).
+        const std::wstring commandline = ::Agentmaster::BuildCodexCommandline(resumeUuid, forkUuid, ::Agentmaster::SharedEngine().codexExePath);
 
         // Child env: NO CCMGR_* (Codex has no hook bridge). Stamp AM_SESSION so the Fleet Observer
         // attributes this codex to THIS window (ownership) — same as a launched claude.
@@ -702,22 +716,37 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        const std::wstring tag = !resumeUuid.empty() ? L"[codex-resume] " : (restored ? L"[codex-restore-fresh] " : L"[codex-spawn] ");
+        const std::wstring tag = !forkUuid.empty() ? L"[codex-fork] " : (!resumeUuid.empty() ? L"[codex-resume] " : (restored ? L"[codex-restore-fresh] " : L"[codex-spawn] "));
+        const std::wstring rolloutNote = !forkUuid.empty() ? (L" (forked from " + forkUuid + L")") : (resumeUuid.empty() ? L"" : (L" (rollout " + resumeUuid + L")"));
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      tag + handleId + (resumeUuid.empty() ? L"" : (L" (rollout " + resumeUuid + L")")) + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+                                      tag + handleId + rolloutNote + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
         return tab;
     }
 
     // Agentmaster (Codex): adopt an EXTERNAL (observe-only) codex from the Explorer Tree's EXTERNAL
     // scope — the Codex analog of _AdoptExternalClaude. We host no ConPTY for the foreign codex, so we
-    // can't drive it (Rule #13); "adopt" resumes its CONVERSATION (its rollout) into a NEW managed tab:
-    // resolve the rollout uuid (cwd + process-start, Rule #14), then `codex resume <uuid>` — leaving the
-    // original codex running. No rollout yet (never prompted) -> a fresh managed codex in the same dir.
-    void TerminalPage::_AdoptExternalCodex(uint32_t pid, winrt::hstring cwd)
+    // can't drive it (Rule #13); "adopt" brings its CONVERSATION (its rollout) under management in a
+    // NEW managed tab. `fork` picks the two-writers-safe path (the user chose in the Adopt dialog):
+    //   * fork == true  -> `codex fork <uuid>` branches the rollout into a NEW one; the source rollout
+    //                      is untouched, so it is SAFE even though the original codex keeps running.
+    //   * fork == false -> `codex resume <uuid>` continues the SAME rollout (true take-over) — the
+    //                      user chose "Resume anyway" and is expected to stop the original first.
+    // Resolve the rollout uuid (cwd + process-start, Rule #14). No rollout yet (never prompted) -> a
+    // fresh managed codex in the same dir (both branches degrade to fresh). _LaunchCodexSession gates
+    // both the resume AND the fork on the rollout still existing.
+    void TerminalPage::_AdoptExternalCodex(uint32_t pid, winrt::hstring cwd, bool fork)
     {
         const std::wstring dir{ cwd };
         const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
         const std::wstring uuid = ::Agentmaster::ResolveCodexSession(dir, start).sessionId;
+
+        if (fork && !uuid.empty())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          std::wstring{ L"[adopt-codex] pid=" } + std::to_wstring(pid) + L" cwd=" + dir + L" -> fork " + uuid + L"\n");
+            _LaunchCodexSession(cwd, winrt::hstring{}, std::nullopt, uuid); // fork: new rollout, source untouched
+            return;
+        }
 
         std::optional<::Agentmaster::SessionInfo> restored;
         if (!uuid.empty())
@@ -736,20 +765,34 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (Fleet Observer): adopt an EXTERNAL (observe-only) claude from the Explorer Tree's
     // EXTERNAL scope. We host no ConPTY for the foreign process, so we can NEVER inject into the live
-    // external (Rule #9/#13) — "adopt" instead brings its CONVERSATION under management: resolve the
-    // conversation id from the transcript (cwd + process-start -> ResolveSessionId, Rule #14) and
-    // resume it into a NEW managed, controllable tab (claude --resume <id>, with a Flight Plan +
-    // Autopilot), reusing the proven _LaunchClaudeSession resume path. When the external has no
-    // transcript yet (never prompted -> id ""), fall back to a fresh managed session in the same dir
-    // (== "Open New Session Here"). The original external process is left running and untouched — we never inject
-    // into or kill it; the user closes it to avoid two writers on one transcript. _LaunchClaudeSession
-    // re-checks ClaudeConversationExists, so a transcript that vanished between resolve and launch also
-    // degrades to fresh rather than dying on "No conversation found".
-    void TerminalPage::_AdoptExternalClaude(uint32_t pid, winrt::hstring cwd)
+    // external (Rule #9/#13) — "adopt" instead brings its CONVERSATION under management in a NEW
+    // managed, controllable tab. `fork` picks the two-writers-safe path (the user chose in the Adopt
+    // dialog):
+    //   * fork == true  -> claude --resume <id> --fork-session --session-id <new> branches the
+    //                      conversation into a NEW transcript; the source <id>.jsonl is untouched, so
+    //                      it is SAFE even though the original external keeps running (the proven
+    //                      _ForkSessionFromDisk path — safe on a LIVE parent).
+    //   * fork == false -> claude --resume <id> continues the SAME conversation (true take-over) — the
+    //                      user chose "Resume anyway" and is expected to stop the original first to
+    //                      avoid two writers on one transcript.
+    // Resolve the conversation id (cwd + process-start -> ResolveSessionId, Rule #14). No transcript
+    // yet (never prompted -> id "") -> a fresh managed session in the same dir (both branches degrade
+    // to fresh). _LaunchClaudeSession transcript-gates both --resume and the fork, so a transcript that
+    // vanished between resolve and launch also degrades to fresh rather than dying on "No conversation
+    // found".
+    void TerminalPage::_AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork)
     {
         const std::wstring dir{ cwd };
         const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
         const std::wstring id = ::Agentmaster::ResolveSessionId(dir, start);
+
+        if (fork && !id.empty())
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          std::wstring{ L"[adopt-external] pid=" } + std::to_wstring(pid) + L" cwd=" + dir + L" -> fork " + id + L"\n");
+            _LaunchClaudeSession(cwd, winrt::hstring{}, std::nullopt, id); // fork: new transcript, source untouched (safe on a live external)
+            return;
+        }
 
         std::optional<::Agentmaster::SessionInfo> restored;
         if (!id.empty())

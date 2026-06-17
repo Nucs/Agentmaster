@@ -422,15 +422,60 @@ try {
         return cmd;
     }
 
-    std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid)
+    std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid, std::wstring_view forkCodexUuid, std::wstring_view codexLauncher)
     {
-        // Resume continues the existing rollout by its uuid (model/sandbox/approval inherited); a fresh
-        // launch is bare codex (config.toml governs, cwd via the ConPTY, AM_SESSION via the child env).
-        if (!resumeCodexUuid.empty())
+        // How to invoke codex. Like claude, the programmatic spawn runs through ConPTY's CreateProcessW,
+        // which — unlike a shell — appends only ".exe" and NEVER consults PATHEXT. So a bare `codex`
+        // token resolves ONLY a native codex.exe and silently misses the npm `codex.cmd` (a common
+        // install), dying with ERROR_FILE_NOT_FOUND (0x80070002). We therefore launch the resolved
+        // launcher BY FULL PATH: a .exe runs directly (quoted, so spaces in the path are safe); a
+        // .cmd/.bat is a batch script CreateProcessW cannot execute directly, so it is run via `cmd /c`.
+        // `codexLauncher` is resolved at engine init (ResolveCodexLauncher). Empty (codex not found)
+        // falls back to the bare token — the spawn then surfaces the not-found error, and a genuinely
+        // PATH-resolvable codex.exe still works.
+        bool batch = false;
+        if (!codexLauncher.empty())
         {
-            return L"codex resume " + std::wstring{ resumeCodexUuid };
+            const auto dot = codexLauncher.find_last_of(L'.');
+            if (dot != std::wstring_view::npos)
+            {
+                std::wstring ext{ codexLauncher.substr(dot) };
+                for (auto& c : ext)
+                {
+                    if (c >= L'A' && c <= L'Z')
+                    {
+                        c = static_cast<wchar_t>(c - L'A' + L'a');
+                    }
+                }
+                batch = (ext == L".cmd" || ext == L".bat");
+            }
         }
-        return L"codex";
+        const std::wstring exe = codexLauncher.empty() ? std::wstring{ L"codex" } : (L"\"" + std::wstring{ codexLauncher } + L"\"");
+
+        // Fork WINS over resume (mutually exclusive). `codex fork <uuid>` branches the source rollout
+        // into a NEW session/rollout (the source is untouched — safe even while it is live: the
+        // two-writers fix for adopting a LIVE external). Resume continues the existing rollout by its
+        // uuid (model/sandbox/approval inherited). Neither => a fresh launch (just the launcher;
+        // config.toml governs, cwd via the ConPTY, AM_SESSION via the child env).
+        std::wstring cmd = exe;
+        if (!forkCodexUuid.empty())
+        {
+            cmd += L" fork " + std::wstring{ forkCodexUuid };
+        }
+        else if (!resumeCodexUuid.empty())
+        {
+            cmd += L" resume " + std::wstring{ resumeCodexUuid };
+        }
+
+        if (batch)
+        {
+            // cmd /c with MORE than two quote chars (the quoted launcher, plus our outer pair): cmd
+            // strips the FIRST and LAST quote of the remainder, then runs what's between. So wrap the
+            // whole command in ONE outer pair — the inner launcher quote survives intact. (Mirrors
+            // BuildClaudeCommandline; see `cmd /?`: the >2-quotes case falls to "strip leading+trailing quote".)
+            return L"cmd /c \"" + cmd + L"\"";
+        }
+        return cmd;
     }
 
     std::wstring NewSessionId()
@@ -652,6 +697,71 @@ try {
                 {
                     return cand;
                 }
+            }
+        }
+        return {};
+    }
+
+    std::wstring ResolveCodexLauncher()
+    {
+        // Codex analog of ResolveRealClaude — but NOT native-exe-only: the Fleet Observer finds
+        // codex.exe as a DESCENDANT of the tab shell (FindDescendantByImage), so a .cmd/.bat that
+        // re-execs the native binary is fine. Walk PATH for codex.exe / codex.cmd / codex.bat
+        // (per-dir, .exe preferred), then fall back to the native installer's ~/.local/bin\codex.exe.
+        // Full path so BuildCodexCommandline can launch it by path (ConPTY's CreateProcessW appends
+        // only ".exe" and ignores PATHEXT, so a bare `codex` would miss an npm codex.cmd -> 0x80070002).
+        const std::wstring path = GetEnvW(L"PATH");
+        static const wchar_t* const exts[] = { L".exe", L".cmd", L".bat" };
+        size_t start = 0;
+        while (start <= path.size())
+        {
+            size_t sc = path.find(L';', start);
+            if (sc == std::wstring::npos)
+            {
+                sc = path.size();
+            }
+            std::wstring dir = path.substr(start, sc - start);
+            start = sc + 1;
+            // Trim surrounding quotes / whitespace, skip empties.
+            while (!dir.empty() && (dir.front() == L'"' || dir.front() == L' '))
+            {
+                dir.erase(dir.begin());
+            }
+            while (!dir.empty() && (dir.back() == L'"' || dir.back() == L' '))
+            {
+                dir.pop_back();
+            }
+            if (dir.empty())
+            {
+                continue;
+            }
+            if (dir.back() != L'\\' && dir.back() != L'/')
+            {
+                dir.push_back(L'\\');
+            }
+            for (const auto* e : exts)
+            {
+                const std::wstring cand = dir + L"codex" + e;
+                const DWORD attr = ::GetFileAttributesW(cand.c_str());
+                if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+                {
+                    return cand;
+                }
+            }
+        }
+        // The native installer's default location (~/.local/bin\codex.exe).
+        std::wstring home = GetEnvW(L"USERPROFILE");
+        if (!home.empty())
+        {
+            if (home.back() != L'\\' && home.back() != L'/')
+            {
+                home.push_back(L'\\');
+            }
+            const std::wstring cand = home + L".local\\bin\\codex.exe";
+            const DWORD attr = ::GetFileAttributesW(cand.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                return cand;
             }
         }
         return {};

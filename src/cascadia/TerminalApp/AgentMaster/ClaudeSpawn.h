@@ -83,11 +83,24 @@ namespace Agentmaster
 
     // Assemble the codex (OpenAI Codex CLI) command line (Agentmaster — Codex managed-session
     // support). Codex CANNOT pin a session id and takes NO --settings (unlike claude), so a FRESH
-    // launch is the bare `codex` — model / sandbox / approval come from ~/.codex/config.toml, the cwd
-    // is set by the ConPTY, and ownership is stamped via AM_SESSION in the child env by the caller. A
-    // RESUME continues an existing rollout by its uuid: `codex resume <uuid>` (model / sandbox /
-    // approval are INHERITED from the original run — not overridable on resume). Pure + unit-tested.
-    std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid);
+    // launch is just the launcher — model / sandbox / approval come from ~/.codex/config.toml, the
+    // cwd is set by the ConPTY, and ownership is stamped via AM_SESSION in the child env by the
+    // caller. A RESUME continues an existing rollout by its uuid: `<codex> resume <uuid>` (model /
+    // sandbox / approval are INHERITED from the original run — not overridable on resume).
+    // codexLauncher (Agentmaster): the resolved codex launcher as a FULL PATH (from
+    // ResolveCodexLauncher at engine init). The programmatic spawn runs through ConPTY's
+    // CreateProcessW, which appends only ".exe" and IGNORES PATHEXT — so a bare `codex` token misses
+    // the npm `codex.cmd` and fails with 0x80070002 (ERROR_FILE_NOT_FOUND). Given a launcher we emit
+    // its full path: a .exe as the (quoted) leading token; a .cmd/.bat wrapped in `cmd /c`
+    // (CreateProcessW cannot execute a batch file directly). Empty => the bare `codex` token
+    // (back-compat, and the not-found path that surfaces the error to the user). Pure + unit-tested.
+    // forkCodexUuid (Agentmaster): FORK an existing rollout into a NEW, independent session/rollout —
+    // `<codex> fork <uuid>` (Codex's first-class `fork` subcommand, the analog of claude's
+    // --fork-session). The source rollout is NOT written to, so a fork is safe even while the source
+    // codex is still running (the two-writers hazard of adopting a LIVE external). Fork WINS over
+    // resume (mutually exclusive); codex mints the new rollout's uuid and the Fleet Observer resolves
+    // it onto SessionInfo.codexSessionId (the two-id model). Neither set => a fresh launch.
+    std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid, std::wstring_view forkCodexUuid = {}, std::wstring_view codexLauncher = {});
 
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
@@ -180,6 +193,17 @@ namespace Agentmaster
     // `ResolveClaudeExe` gathers PATH + USERPROFILE from the environment and delegates to it.
     std::wstring ResolveClaudeExeIn(std::wstring_view overridePath, const std::vector<std::wstring>& pathDirs, std::wstring_view homeDir);
     std::wstring ResolveClaudeExe(std::wstring_view overridePath = {});
+
+    // Agentmaster (Codex managed-session support). Resolve the `codex` launcher to spawn a managed
+    // Codex session, as a FULL PATH. Same ConPTY/CreateProcessW hazard as claude — a bare `codex`
+    // token appends only ".exe", ignores PATHEXT, and so misses an npm `codex.cmd`, dying with
+    // 0x80070002 (ERROR_FILE_NOT_FOUND) — so we resolve the full path and BuildCodexCommandline runs
+    // it by path (a .exe directly; a .cmd/.bat via `cmd /c`). Unlike ResolveClaudeExe this is NOT
+    // native-exe-only: the Fleet Observer finds codex.exe as a DESCENDANT of the tab shell, so a
+    // .cmd/.bat that re-execs the native binary is fine. Resolution: codex.exe / codex.cmd /
+    // codex.bat on PATH (per-dir, .exe preferred), then <home>\.local\bin\codex.exe. Empty if codex
+    // is not found anywhere (the spawn then falls back to the bare `codex` token + the error).
+    std::wstring ResolveCodexLauncher();
 
     // Write a transparent `claude` PATH shim (claude.cmd for cmd/PowerShell + an
     // extensionless POSIX `claude` for git-bash) into <stateDir>\shim. Each forwards all args

@@ -1404,6 +1404,88 @@ namespace Agentmaster
         return PickDisplayTitle(info.customTitle, info.aiTitle, info.summary, info.title);
     }
 
+    // Agentmaster: the CURRENT git branch of a working dir (see ProcessInspect.h). Out-of-band,
+    // filesystem only — reuses the anon-namespace ReadFileHead / Utf8ToWide primitives above.
+    std::wstring ReadGitBranchForDir(const std::wstring& dir)
+    {
+        if (dir.empty())
+        {
+            return {};
+        }
+        std::wstring cur = dir;
+        while (cur.size() > 1 && (cur.back() == L'\\' || cur.back() == L'/'))
+        {
+            cur.pop_back(); // strip trailing separators
+        }
+
+        // Walk UP to the nearest .git: a directory is a normal repo root; a FILE is a worktree/
+        // submodule whose contents are "gitdir: <path>" (the real git dir), which we resolve.
+        std::wstring gitDir;
+        for (;;)
+        {
+            const std::wstring dot = cur + L"\\.git";
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (::GetFileAttributesExW(dot.c_str(), GetFileExInfoStandard, &fad))
+            {
+                if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    gitDir = dot; // normal repo root
+                    break;
+                }
+                std::wstring text = Utf8ToWide(ReadFileHead(dot, 4096)); // ".git" FILE: "gitdir: <path>"
+                const std::wstring key = L"gitdir:";
+                if (const auto k = text.find(key); k != std::wstring::npos)
+                {
+                    std::wstring g = text.substr(k + key.size());
+                    const auto b = g.find_first_not_of(L" \t\r\n");
+                    const auto e = g.find_last_not_of(L" \t\r\n");
+                    if (b != std::wstring::npos)
+                    {
+                        g = g.substr(b, e - b + 1);
+                        for (auto& ch : g)
+                        {
+                            if (ch == L'/')
+                            {
+                                ch = L'\\';
+                            }
+                        }
+                        const bool absolute = (g.size() >= 2 && g[1] == L':') || (g.size() >= 2 && g[0] == L'\\' && g[1] == L'\\');
+                        gitDir = absolute ? g : (cur + L"\\" + g); // relative gitdir is relative to .git's dir
+                    }
+                }
+                break;
+            }
+            const auto slash = cur.find_last_of(L"\\/");
+            if (slash == std::wstring::npos || slash < 2)
+            {
+                break; // reached the drive root (e.g. "C:") -> not under a repo
+            }
+            cur = cur.substr(0, slash);
+        }
+        if (gitDir.empty())
+        {
+            return {};
+        }
+
+        std::wstring head = Utf8ToWide(ReadFileHead(gitDir + L"\\HEAD", 4096));
+        while (!head.empty() && (head.back() == L'\n' || head.back() == L'\r' || head.back() == L' ' || head.back() == L'\t'))
+        {
+            head.pop_back();
+        }
+        const std::wstring branchPrefix = L"ref: refs/heads/";
+        if (head.rfind(branchPrefix, 0) == 0)
+        {
+            return head.substr(branchPrefix.size()); // keep slashes: e.g. feature/issue123
+        }
+        if (head.rfind(L"ref: ", 0) == 0)
+        {
+            const auto s = head.find_last_of(L'/'); // a non-branch ref (tag / note) -> its leaf
+            return (s != std::wstring::npos) ? head.substr(s + 1) : head.substr(5);
+        }
+        // Detached HEAD: a raw commit SHA. Show a short SHA, not the bare word "HEAD".
+        return head.size() >= 7 ? head.substr(0, 7) : head;
+    }
+
     // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
     // File-local helpers (internal linkage). They reuse the anon-namespace primitives above
     // (GlobTranscripts / ReadFileHead / Utf8ToWide / FileTimeToUnixMs / FirstLineTrim) and the

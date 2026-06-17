@@ -116,6 +116,26 @@ namespace winrt::TerminalApp::implementation
         _line.Foreground(Fill(0xFF, 0xEC, 0xEC, 0xEC));
         _line.IsTextSelectionEnabled(false);
         _line.TextWrapping(TextWrapping::NoWrap);
+        _line.HorizontalAlignment(HorizontalAlignment::Right); // keep the right edge aligned when row 2 is wider
+
+        // Row 2: "<root workdir folder>/<branch>" — secondary (smaller + dimmer), right-aligned to the
+        // badge edge, width-capped + ellipsized so a long branch path can't balloon the HUD. Collapsed
+        // until _Refresh() fills it; stays collapsed on the registry-less observe badge (no session).
+        _subline = TextBlock{};
+        _subline.FontSize(11);
+        _subline.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0));
+        _subline.IsTextSelectionEnabled(false);
+        _subline.TextWrapping(TextWrapping::NoWrap);
+        _subline.TextTrimming(TextTrimming::CharacterEllipsis);
+        _subline.HorizontalAlignment(HorizontalAlignment::Right);
+        _subline.MaxWidth(380);
+        _subline.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0));
+        _subline.Visibility(Visibility::Collapsed);
+
+        StackPanel stack{};
+        stack.Orientation(Orientation::Vertical);
+        stack.Children().Append(_line);
+        stack.Children().Append(_subline);
 
         _root = Border{};
         _root.Background(Fill(0xCC, 0x20, 0x20, 0x20)); // dark translucent so it reads on any terminal
@@ -124,7 +144,7 @@ namespace winrt::TerminalApp::implementation
         _root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         _root.Padding(ThicknessHelper::FromLengths(7, 2, 7, 2));
         _root.Opacity(0.55); // dim at rest; full on hover (the chosen interaction)
-        _root.Child(_line);
+        _root.Child(stack);
 
         _root.PointerEntered([](const IInspectable& sender, const PointerRoutedEventArgs&) {
             if (const auto b = sender.try_as<Border>())
@@ -316,5 +336,37 @@ namespace winrt::TerminalApp::implementation
         Run text{};
         text.Text(winrt::hstring{ rest });
         _line.Inlines().Append(text);
+
+        // Row 2: "<root workdir folder>/<branch>" — the leaf of the session's working dir joined with
+        // its git branch (e.g. C:/folder/myworkdir + "feature/issue123" -> "myworkdir/feature/issue123").
+        // Prefer the persisted M-axis workingDir (the dir the session belongs to); fall back to the live
+        // PEB cwd. Hidden when neither a folder nor a branch is known.
+        if (_subline)
+        {
+            std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+            while (!dir.empty() && (dir.back() == L'/' || dir.back() == L'\\'))
+            {
+                dir.pop_back(); // strip trailing separators so the leaf isn't empty
+            }
+            std::wstring leaf = dir;
+            if (const auto pos = dir.find_last_of(L"/\\"); pos != std::wstring::npos)
+            {
+                leaf = dir.substr(pos + 1);
+            }
+            std::wstring sub = leaf;
+            if (!s.branch.empty())
+            {
+                sub = sub.empty() ? s.branch : (sub + L"/" + s.branch);
+            }
+            if (sub.empty())
+            {
+                _subline.Visibility(Visibility::Collapsed);
+            }
+            else
+            {
+                _subline.Text(winrt::hstring{ sub });
+                _subline.Visibility(Visibility::Visible);
+            }
+        }
     }
 }

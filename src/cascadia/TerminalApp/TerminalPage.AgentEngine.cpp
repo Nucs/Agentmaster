@@ -410,21 +410,25 @@ namespace winrt::TerminalApp::implementation
             }
         });
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL
-        // scope — resolve its conversation id from the transcript and resume it into a managed tab.
-        content->SetAdoptExternalHandler([weakThis](uint32_t pid, winrt::hstring cwd) {
+        // scope — bring its conversation under management. `fork` (chosen in the Manager's Adopt
+        // dialog) selects the two-writers-safe branch (--fork-session into a NEW transcript) vs. a
+        // straight --resume of the same conversation (true take-over; the user stops the original).
+        content->SetAdoptExternalHandler([weakThis](uint32_t pid, winrt::hstring cwd, bool fork) {
             if (auto self = weakThis.get())
             {
-                self->_AdoptExternalClaude(pid, cwd);
+                self->_AdoptExternalClaude(pid, cwd, fork);
             }
         });
-        // Agentmaster (Codex-launch): the EXTERNAL-codex menu — Adopt (resume its rollout into a managed
-        // tab) or Open New Codex Session Here (a fresh managed codex in the cwd). Lifecycle + state only.
-        content->SetCodexLaunchHandler([weakThis](uint32_t pid, winrt::hstring cwd, bool adopt) {
+        // Agentmaster (Codex-launch): the EXTERNAL-codex menu — Adopt (bring its rollout under
+        // management: `fork` => `codex fork` into a NEW rollout [safe on a live codex], else
+        // `codex resume` the same) or Open New Codex Session Here (a fresh managed codex in the cwd,
+        // adopt==false). Lifecycle + state only.
+        content->SetCodexLaunchHandler([weakThis](uint32_t pid, winrt::hstring cwd, bool adopt, bool fork) {
             if (auto self = weakThis.get())
             {
                 if (adopt)
                 {
-                    self->_AdoptExternalCodex(pid, cwd);
+                    self->_AdoptExternalCodex(pid, cwd, fork);
                 }
                 else
                 {

@@ -138,6 +138,15 @@ namespace Agentmaster
             std::wstring gitBranch;
             int64_t createdUnixMs{};
             int64_t lastActivityUnixMs{};
+            // PID-reuse guard: the process start time (ProcessStartUnixMs) this entry was resolved
+            // for. The cache is pid-keyed and pruned only to live codex pids, so a dead codex's pid
+            // can be reused by a NEW codex before the prune drops it — the resolved fast path below
+            // would then serve the dead one's rollout uuid/state (and _ReconcileManagedCodex would
+            // stamp the wrong codexSessionId -> a later `codex resume <wrong-uuid>`). getCodexInfo
+            // requires this to equal the current facts' startUnixMs before reusing a resolved entry;
+            // a mismatch (PID reused) falls through to re-resolve. Mirrors the (pid,start) pairing the
+            // O7 liveness skip already uses in _lastCodexAlive.
+            int64_t startUnixMs{};
             bool resolved{}; // the rollout was found + head-read once (don't re-resolve a known one)
             // Phase C2 turn-state: a byte cursor into the rollout + the last-derived state. The cursor
             // advances past complete lines each survey (ReadCodexStateDelta), so steady-state is a few

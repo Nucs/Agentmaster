@@ -181,6 +181,10 @@ namespace Agentmaster
         RunningApp runningApp{ RunningApp::Unknown };
         bool background{};
         std::wstring model, effort, permissionMode, sessionName;
+        // Agentmaster: the git branch recorded in the transcript (ReadTranscriptInfo, cached per
+        // sid). The live writer for SessionInfo::branch — drives the per-tab overlay's row-2
+        // "<workdir folder>/<branch>". Empty when the transcript records none / isn't read yet.
+        std::wstring gitBranch;
         // Claude's self-reported presence heartbeat (busy/idle/waiting/shell) from
         // ~/.claude/sessions/<pid>.json, pid-liveness-validated by the S-lane. A display FACT,
         // never SessionState (Rule #13). Empty when no live presence file matches this claude.

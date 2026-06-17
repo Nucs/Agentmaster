@@ -186,6 +186,43 @@ namespace Agentmaster
         return IsInteractiveTool(pendingInteractiveTool);
     }
 
+    // PURE + total: should the reconciler release a NeedsApproval session back to Running because the
+    // user ANSWERED the blocking question / approval and the agent has RESUMED working? NeedsApproval
+    // is entered by a real permission Notification OR the synthesized AskUserQuestion block above, and
+    // until now its ONLY pull-side exit was -> WaitingForInput at the turn's END (ShouldSynthesizeStop)
+    // — so a session that was answered and KEPT WORKING (more assistant output, not yet end-of-turn)
+    // showed "needs you" (orange) for the whole rest of the turn. It has RESUMED when a fresh
+    // assistant/user line appended THIS pass (consumedTurnEvent) on an already-PRIMED cursor (the
+    // initial history replay never counts — exactly as ShouldSynthesizeRunning), the blocking
+    // interactive tool is no longer pending (answered / moved on; a NEW AskUserQuestion keeps it set ->
+    // stay blocked), the user did NOT interrupt, and the tail is NOT a terminal stop_reason (a finished
+    // turn is ShouldSynthesizeStop's job -> Waiting, never a Running blip). The interrupt + terminal
+    // guards make this MUTUALLY EXCLUSIVE with ShouldSynthesizeStop (no single pass satisfies both), so
+    // the two never fight regardless of the fresh/quiescent window overlap. It is the NeedsApproval
+    // mirror of ShouldSynthesizeRunning (which stays Idle/Waiting-ONLY — Running needs no repair); the
+    // caller synthesizes it as tool ACTIVITY (PostToolUse), NOT a UserPromptSubmit, because a
+    // UserPromptSubmit from NeedsApproval would wrongly ++queuedPrompts (the type-ahead accounting).
+    inline bool ShouldSynthesizeResumed(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view pendingInteractiveTool, std::wstring_view lastStopReason, bool interrupted, int64_t sinceWriteMs) noexcept
+    {
+        if (state != SessionState::NeedsApproval)
+        {
+            return false; // only NeedsApproval lacks a resume edge; Idle/Waiting -> ShouldSynthesizeRunning
+        }
+        if (!consumedTurnEvent || !primedBeforePass)
+        {
+            return false; // no live append this pass (or still replaying history) -> not a resume
+        }
+        if (!pendingInteractiveTool.empty())
+        {
+            return false; // still blocked on a (possibly NEW) question -> stay NeedsApproval
+        }
+        if (interrupted || IsTerminalStopReason(lastStopReason))
+        {
+            return false; // the turn ENDED -> ShouldSynthesizeStop's job (-> Waiting), not a resume
+        }
+        return sinceWriteMs <= kScanRunRepairFreshMs; // a live, fresh turn (not an old write surfacing late)
+    }
+
     // Ticked on the scanner thread on the slow cadence; the probe marshals to ITS OWN UI thread
     // and archives any of its claude tabs whose ConPTY connection has Closed. One per window (M9).
     using LivenessProbe = std::function<void()>;

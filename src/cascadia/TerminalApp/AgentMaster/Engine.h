@@ -75,6 +75,16 @@ namespace Agentmaster
         // save); gating reads it through ClaudeAvailable().
         std::wstring claudeExePath;
 
+        // Agentmaster (Codex managed-session support). The codex launcher to spawn, resolved once at
+        // engine init via ResolveCodexLauncher(): the full path to codex.exe / codex.cmd / codex.bat
+        // (on PATH or ~/.local/bin), or EMPTY when none is found. Threaded into the managed-Codex
+        // launch command line by full path (BuildCodexCommandline) — ConPTY's CreateProcessW appends
+        // only ".exe" and ignores PATHEXT, so a bare `codex` token would miss an npm codex.cmd and die
+        // 0x80070002 (ERROR_FILE_NOT_FOUND). Unlike claudeExePath there is NO native-exe-only gate: the
+        // Fleet Observer finds codex.exe as a descendant, so a .cmd/.bat (run via `cmd /c`) is fine, and
+        // empty just means the spawn falls back to the bare token and surfaces the not-found error.
+        std::wstring codexExePath;
+
         // Restore (loading sessions.json + re-launching the saved fleet) is a PROCESS-once
         // action — the registry is now shared, so if every window's _OnFirstLayout restored,
         // a second window would re-launch the same conversations into the one registry (dup

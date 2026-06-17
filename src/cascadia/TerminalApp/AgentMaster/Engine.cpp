@@ -148,6 +148,13 @@ namespace Agentmaster
                 // PATHEXT — a bare `claude` would miss the npm install, the 0x80070002 bug).
                 e->claudeExePath = ResolveClaudeExe(LoadAppSettings().claudeExePath);
                 AppendStateLog(L"hooks.log", L"[engine] claude.exe: " + (e->claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e->claudeExePath) + L"\n");
+                // Resolve the codex launcher too (managed-Codex support), while PATH is still pristine.
+                // Same CreateProcessW/PATHEXT hazard as claude (a bare `codex` misses an npm codex.cmd ->
+                // 0x80070002), but Codex is NOT native-exe-only — the observer finds codex.exe as a
+                // descendant — so a .cmd/.bat launcher is accepted (BuildCodexCommandline runs it via
+                // `cmd /c`). Empty => not found; the spawn falls back to the bare token and surfaces the error.
+                e->codexExePath = ResolveCodexLauncher();
+                AppendStateLog(L"hooks.log", L"[engine] codex: " + (e->codexExePath.empty() ? std::wstring{ L"<not detected>" } : e->codexExePath) + L"\n");
                 // Author the adoption shim BEFORE touching PATH (so ResolveRealClaude inside it never
                 // finds our own shim), then prepend the shim dir for hand-typed `+`-tab self-wiring.
                 const auto shimDir = MaterializeClaudeShim(stateDir, hookFiles.first);

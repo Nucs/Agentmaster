@@ -3,8 +3,10 @@
 //
 // Agentmaster: the per-tab "link badge" overlay (see doc/agentmaster/TAB_OVERLAY.md). A small,
 // read-only HUD pinned to the top-right of a Claude session's terminal, summarizing the tab <->
-// Agentmaster link at a glance: hook-driven status (color-matched to the Triage Board), Autopilot
-// mode (Off/Semi/Full), queued (Pending) count, and link state (⛓ linked vs observe-only).
+// Agentmaster link at a glance. Row 1: hook-driven status (color-matched to the Triage Board),
+// Autopilot mode (Off/Semi/Full), queued (Pending) count, and link state (⛓ linked vs observe-only).
+// Row 2 (dim/secondary): "<root workdir folder>/<branch>" (e.g. myworkdir/feature/issue123) so the
+// session's place + branch read at a glance; hidden when there's no dir/branch (and on observe badges).
 //
 // Built imperatively (no IDL/XAML markup), like AgentManagerContent. It is NOT an IPaneContent —
 // it just produces a FrameworkElement the app installs into the pane's overlay slot
@@ -60,6 +62,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
         winrt::Windows::UI::Xaml::Controls::Border _root{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBlock _line{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _line{ nullptr }; // row 1: status · model · mode · queue · link
+        winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2: "<root workdir folder>/<branch>"
     };
 }
