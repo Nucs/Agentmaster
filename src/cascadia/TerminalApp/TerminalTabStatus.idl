@@ -22,5 +22,13 @@ namespace TerminalApp
         // observed-only tab. Hidden (the default) on tabs Agentmaster doesn't classify.
         Boolean AgentStatusVisible { get; set; };
         Windows.UI.Xaml.Media.Brush AgentStatusBrush { get; set; };
+
+        // Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background drawn
+        // BEHIND the tab header (bound by TabHeaderControl.xaml), shown ONLY while the Agent Manager
+        // tab is active and this session is hovered/selected in the Manager (TerminalPage drives it
+        // via Tab.TabStatus()). Presentation-only — it makes the session's tab read as the active tab
+        // without changing the real TabView selection or the per-dir tab color.
+        Boolean AgentSelectionVisible { get; set; };
+        Windows.UI.Xaml.Media.Brush AgentSelectionBrush { get; set; };
     }
 }

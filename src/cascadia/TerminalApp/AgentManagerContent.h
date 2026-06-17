@@ -44,6 +44,12 @@ namespace winrt::TerminalApp::implementation
         void SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry);
         void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (workingDir, title)
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
+        // Agentmaster (Linked Lenses): report a pointer enter/leave on a managed session's board card
+        // / tree row (id, entering). The PAGE owns the effective-hover bookkeeping (so it can't desync
+        // from a missed PointerExited on a keyboard tab-switch) and pills that session's terminal tab
+        // while the Manager tab is active — a live preview that follows the mouse, falling back to the
+        // selected session.
+        void SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler);
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
@@ -107,6 +113,10 @@ namespace winrt::TerminalApp::implementation
         // row highlighted + its Flight Plan). Equivalent to a single-click on the session's board card;
         // a no-op when the id is empty or already selected. Marshal to the UI thread is the caller's job.
         void SelectSession(winrt::hstring id);
+        // Agentmaster (Linked Lenses): the currently-selected managed session id (the board card /
+        // tree row selection), or empty. The page reads it live to decide which tab wears the
+        // "selected/active" pill when nothing is hovered.
+        winrt::hstring SelectedSessionId() const noexcept { return winrt::hstring{ _selectedId }; }
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
@@ -189,6 +199,11 @@ namespace winrt::TerminalApp::implementation
 
         void _SelectSession(const std::wstring& id);
         void _ClearSelection(); // Agentmaster: the board header's "Clear" button — deselect the managed OR external selection
+        // Agentmaster (Linked Lenses): forward a pointer enter/leave on a managed card/row to the
+        // page (id, entering). Stateless here — the page does the effective-hover matching (which
+        // absorbs the enter-B-before-leave-A ordering when sliding between rows) so the content holds
+        // no hover state to desync.
+        void _ReportHover(const std::wstring& id, bool entering);
         void _SetScope(const std::wstring& dir);
         std::optional<::Agentmaster::SessionInfo> _Selected(const std::vector<::Agentmaster::SessionInfo>& sessions) const;
 
@@ -344,6 +359,7 @@ namespace winrt::TerminalApp::implementation
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;
+        std::function<void(winrt::hstring, bool)> _hoverSessionHandler; // Agentmaster (Linked Lenses): push a managed card/row pointer enter/leave (id, entering) so the page pills its tab
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)

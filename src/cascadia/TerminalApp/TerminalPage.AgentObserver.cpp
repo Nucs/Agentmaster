@@ -114,6 +114,125 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (Linked Lenses): show/hide the "selected/active" pill behind a tab's header — the
+    // filled accent background TabHeaderControl.xaml binds to TerminalTabStatus.AgentSelectionVisible
+    // / AgentSelectionBrush. It makes a session's tab read as the active tab while you stay on the
+    // Manager tab, WITHOUT changing the real TabView selection or the per-dir tab color (Rule #12) —
+    // a separate presentation layer, exactly like the status dot. UI thread only.
+    void TerminalPage::_SetTabSelectionPill(const TerminalApp::Tab& tab, bool on)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            const auto status = tab.TabStatus();
+            if (!status)
+            {
+                return;
+            }
+            if (!on)
+            {
+                status.AgentSelectionVisible(false); // WINRT_OBSERVABLE_PROPERTY no-ops when already false
+                return;
+            }
+            // The "selected" fill: the system accent at partial alpha, so the title + dot stay legible
+            // on top (and it reads as one consistent "this is the picked tab" tint regardless of the
+            // tab's own dir color). Resolved the same way WT picks the active-pane border accent
+            // (_updatePaneResources) — guard with HasKey, with a sane WT-blue fallback.
+            auto accent = winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x00, 0x78, 0xD4);
+            const auto res = Application::Current().Resources();
+            if (const auto accentKey = winrt::box_value(L"SystemAccentColor"); res.HasKey(accentKey))
+            {
+                accent = winrt::unbox_value_or<winrt::Windows::UI::Color>(res.Lookup(accentKey), accent);
+            }
+            accent.A = 0x66; // ~40% — present enough to read "selected" without washing out the title
+            status.AgentSelectionBrush(SolidColorBrush{ accent });
+            status.AgentSelectionVisible(true);
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the "selected/active" pill.
+    // The target is the managed session HOVERED in the Manager (a live preview that follows the
+    // mouse), else the SELECTED session — but ONLY while the Agent Manager tab is the active tab and
+    // that session actually has a tab in THIS window. Otherwise nothing is pilled. Idempotent: a
+    // no-op when the target is unchanged; on a change it clears the old tab's pill and sets the new.
+    // Called on a Manager lens change, a hover push, and a tab switch (so it clears when you leave
+    // the Manager tab and re-applies when you return). UI thread only.
+    void TerminalPage::_UpdateManagerSelectionHighlight()
+    {
+        // Gate: the Manager tab must be the active (selected) tab.
+        bool onManager = false;
+        if (_managerTab && _tabView)
+        {
+            const auto idx = _tabView.SelectedIndex();
+            if (idx >= 0 && idx < static_cast<int32_t>(_tabs.Size()))
+            {
+                onManager = (_tabs.GetAt(idx) == _managerTab);
+            }
+        }
+        if (!onManager)
+        {
+            // Off the Manager tab, hover is meaningless. Clear it so returning to the Manager falls
+            // back to the SELECTION until a genuine PointerEntered re-arms hover — otherwise a hover
+            // left dangling by a keyboard tab-switch (no PointerExited) would wrongly pill on return.
+            _managerHoverSessionId.clear();
+        }
+
+        std::wstring desired;
+        if (onManager)
+        {
+            // Hover wins over the pinned lens selection (a preview); fall back to the selection,
+            // read live from the content so a restored/seeded selection is honored without caching.
+            std::wstring target = _managerHoverSessionId;
+            if (target.empty())
+            {
+                if (const auto ipc = _agentManagerContent.get())
+                {
+                    if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+                    {
+                        target = std::wstring{ mgr->SelectedSessionId() };
+                    }
+                }
+            }
+            // Only pill a session whose tab lives in THIS window (a GLOBAL-scope card can name a
+            // session hosted elsewhere — that window pills it, not this one).
+            if (!target.empty() && _claudeTabs.find(target) != _claudeTabs.end())
+            {
+                desired = target;
+            }
+        }
+
+        if (desired == _pilledSessionId)
+        {
+            return; // no change
+        }
+        // Clear the previously-pilled tab.
+        if (!_pilledSessionId.empty())
+        {
+            if (const auto it = _claudeTabs.find(_pilledSessionId); it != _claudeTabs.end())
+            {
+                if (const auto t = it->second.get())
+                {
+                    _SetTabSelectionPill(t, false);
+                }
+            }
+        }
+        _pilledSessionId = desired;
+        if (!desired.empty())
+        {
+            if (const auto it = _claudeTabs.find(desired); it != _claudeTabs.end())
+            {
+                if (const auto t = it->second.get())
+                {
+                    _SetTabSelectionPill(t, true);
+                }
+            }
+        }
+    }
+
     // Agentmaster (TAB_OVERLAY.md): build the per-tab "link badge" overlay for a Claude session and
     // install it into its terminal pane's top-right slot. Gated on AppSettings.showTabOverlay. A
     // re-attach replaces the prior overlay for that id (the old com_ptr's release detaches its

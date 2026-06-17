@@ -276,6 +276,14 @@ namespace winrt::TerminalApp::implementation
         // push the observer's External (WindowsTerminal) census to it each tick. Weak so there is no
         // page<->content cycle; the content is owned by the (non-closable) Manager pane regardless.
         winrt::weak_ref<winrt::TerminalApp::IPaneContent> _agentManagerContent;
+        // Agentmaster (Linked Lenses): per-tab "selected/active" pill state. _managerHoverSessionId is
+        // the managed session the pointer is over in the Manager (a board card / tree row), pushed by
+        // the content's hover handler; _pilledSessionId is the session whose tab currently wears the
+        // pill (so the next update can clear the old one). The pill shows ONLY while the Manager tab is
+        // the active tab; hover takes precedence over the lens selection (a live preview that follows
+        // the mouse). Driven by _UpdateManagerSelectionHighlight / _SetTabSelectionPill.
+        std::wstring _managerHoverSessionId;
+        std::wstring _pilledSessionId;
 
         // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
         // the single source of truth; HooksBridge feeds it authoritative state from Claude
@@ -487,11 +495,12 @@ namespace winrt::TerminalApp::implementation
         std::atomic<uint64_t> _sessionsSearchGen{ 0 }; // bumps per query — a stale slow search self-cancels
         std::atomic<bool> _sessionsIndexing{ false }; // a background gather/index pass is running
         std::shared_ptr<ThrottledFunc<>> _sessionsSearchThrottled{ nullptr }; // keystroke debounce
-        // One-entry detail prompt-list cache, keyed by (id, transcript mtime) — the archive
-        // detail's pattern: the head read happens off-thread once, re-shows hit the cache.
+        // One-entry detail SUMMARY cache, keyed by (id, transcript mtime) — the archive detail's
+        // pattern: the whole-file analyze + box render happen off-thread once, re-shows hit the
+        // cache. The text carries kSummarySepMark sentinel lines (rendered as full-width rules).
         std::wstring _sessionsDetailTiId;
         int64_t _sessionsDetailTiMtime{ 0 };
-        std::vector<std::wstring> _sessionsDetailPrompts;
+        std::wstring _sessionsDetailSummary;
         bool _sessionsDetailPending{ false };
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
@@ -601,6 +610,8 @@ namespace winrt::TerminalApp::implementation
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
+        void _SetTabSelectionPill(const TerminalApp::Tab& tab, bool on); // Agentmaster (Linked Lenses): show/hide the "selected/active" accent pill behind a tab's header via Tab.TabStatus(); UI thread
+        void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
@@ -677,9 +688,9 @@ namespace winrt::TerminalApp::implementation
         void _BuildSessionsPageShell(); // one-time: host + search bar (text + scope toggles + window selector) + table/detail split
         winrt::fire_and_forget _RefreshSessionsRows(); // BG: enumerate the window + load-or-refresh each sidecar index -> UI: rows + render
         void _RenderSessionsTable(); // apply the current search result set + sort -> rebuild the table
-        void _ShowSessionsDetail(const std::wstring& sessionId); // populate the right pane (metadata + hit snippets + prompts + actions)
+        void _ShowSessionsDetail(const std::wstring& sessionId); // populate the right pane (metadata + actions + hit snippets + the full session-summary box)
         winrt::fire_and_forget _RunSessionsSearch(); // the two-phase search: fast inline, slow on a background pass (generation-cancelled)
-        winrt::fire_and_forget _LoadSessionsPrompts(std::wstring sessionId, std::wstring dir, int64_t mtime); // detail: off-thread prompt-list read (head), cached by (id, mtime)
+        winrt::fire_and_forget _LoadSessionsSummary(std::wstring sessionId, std::wstring dir, int64_t mtime); // detail: off-thread whole-file analyze + RenderSessionSummaryBox(full), cached by (id, mtime)
         void _CycleSessionsWindow(); // [1 month] click: 1d -> 3d -> 7d -> 14d -> 1mo -> 3mo -> wrap (clears a custom range)
         void _ApplySessionsRange(); // the hover popup's Apply: parse From/To (YYYY-MM-DD) into a custom range
         int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)

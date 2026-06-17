@@ -1301,6 +1301,10 @@ namespace winrt::TerminalApp::implementation
                 // tab's managed session so returning to the Manager tab shows the session you were just
                 // in. No-op for the Manager tab, a non-session tab, or before startup completes.
                 _SyncManagerSelectionToTab(tab);
+                // Agentmaster (Linked Lenses): re-evaluate the per-tab "selected/active" pill — it
+                // shows only while the Manager tab is active, so leaving the Manager clears it and
+                // returning re-applies it for the current hover/selection.
+                _UpdateManagerSelectionHighlight();
             }
             // Agentmaster (M10): the focused tab is part of the per-window record, so a reopen restores
             // it. Debounce-save on switch so the selection persists LIVE (not only at the graceful

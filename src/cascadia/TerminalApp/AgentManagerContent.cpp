@@ -795,6 +795,10 @@ namespace winrt::TerminalApp::implementation
     {
         _activateHandler = std::move(handler);
     }
+    void AgentManagerContent::SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler)
+    {
+        _hoverSessionHandler = std::move(handler);
+    }
     void AgentManagerContent::SetArchiveHandler(std::function<void(winrt::hstring)> handler)
     {
         _archiveHandler = std::move(handler);
@@ -1901,6 +1905,12 @@ namespace winrt::TerminalApp::implementation
             });
         }
         const auto id = s.id;
+        // Agentmaster (Linked Lenses): report hover so the page pills THIS session's terminal tab
+        // while the Manager tab is active (a live preview that follows the mouse). Capture id by
+        // value + `this` (never the Button into its own handler — a self-capture leaks the element);
+        // fires for selected cards too, so hovering the selected card keeps its tab pilled.
+        card.PointerEntered([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, true); });
+        card.PointerExited([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, false); });
         // Single click = select; double click (within the OS threshold) = Activate (jump to
         // the session's live terminal tab — the page fans out to the hosting WINDOW when the
         // tab lives in another one), mirroring the Explorer Tree rows. A Button swallows
@@ -2882,6 +2892,11 @@ namespace winrt::TerminalApp::implementation
                 rowBtn.Background(Fill(selected ? 0x40 : 0x00, 0x80, 0x80, 0x80));
                 rowBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
 
+                // Agentmaster (Linked Lenses): report hover so the page pills this session's terminal
+                // tab while the Manager tab is active (the board-card twin, above). Capture id by value
+                // + `this`, never the Button into its own handler (a self-capture leaks the element).
+                rowBtn.PointerEntered([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, true); });
+                rowBtn.PointerExited([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, false); });
                 // Single click = select; double click (within the OS threshold) = Activate
                 // (jump to the live tab). A Button swallows DoubleTapped, so we time the
                 // successive clicks ourselves.
@@ -5393,6 +5408,20 @@ namespace winrt::TerminalApp::implementation
         _selectedExternalTitle.clear();
         _NotifyLensChanged(); // selection is part of the per-window lens
         _Refresh();
+    }
+
+    // Agentmaster (Linked Lenses): a managed board card / tree row was entered or left by the
+    // pointer. Forward the raw event (id, entering) to the page, which owns the effective-hover
+    // bookkeeping (the enter-B-before-leave-A matching + the "clear on leaving the Manager tab"
+    // reset) — so this control holds no hover state to desync from the page. The page pills that
+    // session's terminal tab while the Manager tab is active. NOT part of the lens — hover is
+    // transient and per-pointer, never persisted.
+    void AgentManagerContent::_ReportHover(const std::wstring& id, bool entering)
+    {
+        if (_hoverSessionHandler)
+        {
+            _hoverSessionHandler(winrt::hstring{ id }, entering);
+        }
     }
 
     // Agentmaster: select an EXTERNAL (observe-only) row -> the Flight Plan shows its conversation

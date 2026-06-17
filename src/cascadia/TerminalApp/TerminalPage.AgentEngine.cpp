@@ -388,6 +388,26 @@ namespace winrt::TerminalApp::implementation
                 self->_ActivateClaudeSession(id);
             }
         });
+        // Agentmaster (Linked Lenses): the Manager reports a pointer enter/leave on a managed
+        // card/row (id, entering). Track the effective hovered session here — a leave only clears
+        // when it's still the hovered id, which absorbs the enter-B-before-leave-A ordering when the
+        // pointer slides between rows — then re-evaluate the per-tab "selected/active" pill (a live
+        // preview that follows the mouse while you're on the Manager tab).
+        content->SetHoverSessionHandler([weakThis](winrt::hstring id, bool entering) {
+            if (auto self = weakThis.get())
+            {
+                const std::wstring sid{ id };
+                if (entering)
+                {
+                    self->_managerHoverSessionId = sid;
+                }
+                else if (self->_managerHoverSessionId == sid)
+                {
+                    self->_managerHoverSessionId.clear();
+                }
+                self->_UpdateManagerSelectionHighlight();
+            }
+        });
         content->SetArchiveHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())
             {
@@ -592,6 +612,9 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_windowRecord.manager = std::move(st);
                 self->_ScheduleWindowRecordSave();
+                // Linked Lenses: a selection change is one of the lens mutations — re-pill the
+                // selected session's tab (when nothing is hovered, the pill tracks the selection).
+                self->_UpdateManagerSelectionHighlight();
             }
         });
     }
