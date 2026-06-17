@@ -2029,6 +2029,176 @@ namespace Agentmaster
         return info;
     }
 
+    std::wstring ReadConversationText(std::wstring_view transcriptPath, bool codex, size_t maxBytes)
+    {
+        if (transcriptPath.empty())
+        {
+            return {};
+        }
+        const std::wstring path{ transcriptPath };
+        const std::string bytes = ReadFileHead(path, maxBytes);
+        if (bytes.empty())
+        {
+            return {};
+        }
+        const bool truncated = (maxBytes != 0); // a head read may end mid-line -> skip the last segment
+        const std::wstring wide = Utf8ToWide(bytes);
+
+        std::wstring out;
+        const auto emit = [&out](const wchar_t* who, std::wstring t) {
+            // Trim surrounding whitespace/newlines so blocks pack cleanly.
+            while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' ' || t.back() == L'\t'))
+            {
+                t.pop_back();
+            }
+            size_t b = 0;
+            while (b < t.size() && (t[b] == L'\n' || t[b] == L'\r' || t[b] == L' ' || t[b] == L'\t'))
+            {
+                ++b;
+            }
+            if (b)
+            {
+                t.erase(0, b);
+            }
+            if (t.empty())
+            {
+                return;
+            }
+            if (!out.empty())
+            {
+                out += L"\n\n";
+            }
+            out += who;
+            out += L":\n";
+            out += t;
+        };
+
+        size_t start = 0;
+        for (size_t i = 0; i <= wide.size(); ++i)
+        {
+            if (i < wide.size() && wide[i] != L'\n')
+            {
+                continue;
+            }
+            if (i == wide.size() && truncated)
+            {
+                break;
+            }
+            std::wstring_view line(wide.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+
+            if (codex)
+            {
+                // Codex rollout: the CLEAN visible messages are event_msg/{user_message,agent_message};
+                // reasoning, tool calls, response_item context blobs, etc. are all skipped.
+                if (obj.StrAt(L"type") != L"event_msg")
+                {
+                    continue;
+                }
+                const auto* pl = obj.Find(L"payload");
+                if (!pl || pl->type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                const std::wstring pt = pl->StrAt(L"type");
+                if (pt == L"user_message")
+                {
+                    const std::wstring msg = pl->StrAt(L"message");
+                    if (!msg.empty() && !IsNoiseUserPrompt(msg))
+                    {
+                        emit(L"User", msg);
+                    }
+                }
+                else if (pt == L"agent_message")
+                {
+                    emit(L"Assistant", pl->StrAt(L"message"));
+                }
+                continue;
+            }
+
+            // Claude transcript: type user/assistant only; drop meta/compact/sidechain turns.
+            const std::wstring lineType = obj.StrAt(L"type");
+            const bool isUser = (lineType == L"user");
+            const bool isAssistant = (lineType == L"assistant");
+            if ((!isUser && !isAssistant) || obj.BoolAt(L"isMeta") || obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isSidechain"))
+            {
+                continue;
+            }
+            const auto* msg = obj.Find(L"message");
+            if (!msg || msg->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto* content = msg->Find(L"content");
+            if (!content)
+            {
+                continue;
+            }
+            std::wstring text;
+            bool hasToolResult = false;
+            if (content->type == json::Value::Type::Str)
+            {
+                text = content->str;
+            }
+            else if (content->type == json::Value::Type::Arr)
+            {
+                for (const auto& blk : content->arr)
+                {
+                    if (blk.type != json::Value::Type::Obj)
+                    {
+                        continue;
+                    }
+                    const std::wstring bt = blk.StrAt(L"type");
+                    if (bt == L"tool_result")
+                    {
+                        hasToolResult = true; // a tool-result turn (user role), not a human message
+                        break;
+                    }
+                    if (bt == L"text")
+                    {
+                        if (!text.empty())
+                        {
+                            text += L"\n";
+                        }
+                        text += blk.StrAt(L"text");
+                    }
+                    // tool_use / thinking / image / etc. -> skipped (only visible TEXT is kept)
+                }
+            }
+            if (isUser)
+            {
+                if (hasToolResult || text.empty() || IsNoiseUserPrompt(text))
+                {
+                    continue; // tool-result turn, empty, or a control marker — not a human message
+                }
+                emit(L"User", text);
+            }
+            else // assistant
+            {
+                if (text.empty())
+                {
+                    continue; // a pure tool_use / thinking turn — no visible assistant text
+                }
+                emit(L"Assistant", text);
+            }
+        }
+        return out;
+    }
+
     // ===== Codex turn-state (Phase C2): rollout-tail -> Running / Waiting / Idle ===============
 
     CodexBoundary ClassifyCodexLine(std::wstring_view jsonLine)

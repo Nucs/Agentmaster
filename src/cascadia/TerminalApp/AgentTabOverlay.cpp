@@ -6,12 +6,20 @@
 
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
+#include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
+#include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
+#include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
 #include <winrt/Windows.UI.Text.h> // FontWeights
 #include <winrt/Windows.UI.Xaml.Documents.h> // Run / Inlines
 #include <winrt/Windows.UI.Xaml.Input.h> // PointerRoutedEventArgs
-#include <winrt/Windows.UI.Xaml.Media.h> // SolidColorBrush
+#include <winrt/Windows.UI.Xaml.Media.h> // SolidColorBrush / FontFamily
+#include <winrt/Windows.UI.Xaml.Controls.Primitives.h> // FlyoutBase (Button.Flyout)
+#include <winrt/Windows.ApplicationModel.DataTransfer.h> // Clipboard / DataPackage (row 3 copy)
+
+#include <shellapi.h> // ShellExecuteExW (row 3 folder button)
 
 #include <string>
 
@@ -103,6 +111,100 @@ namespace
             return L"Off";
         }
     }
+
+    // Put text on the system clipboard (row 3's copy menu). Mirrors AgentManagerContent's
+    // CopyTextToClipboard. Flush so the content survives the app losing focus (it can refuse —
+    // non-fatal). WinRT Clipboard is STA, so call this on the UI thread. Best-effort.
+    void CopyTextToClipboard(const std::wstring& text)
+    {
+        try
+        {
+            winrt::Windows::ApplicationModel::DataTransfer::DataPackage pkg;
+            pkg.RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Copy);
+            pkg.SetText(winrt::hstring{ text });
+            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
+            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
+        }
+        CATCH_LOG();
+    }
+
+    // Open a directory via explorer.exe OFF the UI thread (ShellExecuteExW may block; SEE_MASK_NOASYNC
+    // makes it safe off the main thread — the AppActionHandlers idiom). The user asked specifically for
+    // explorer.exe, so launch it with the (quoted) path as its argument. Best-effort.
+    winrt::fire_and_forget OpenPathInExplorerAsync(std::wstring dir)
+    {
+        co_await winrt::resume_background();
+        const std::wstring args = L"\"" + dir + L"\"";
+        SHELLEXECUTEINFOW seInfo{ 0 };
+        seInfo.cbSize = sizeof(seInfo);
+        seInfo.fMask = SEE_MASK_NOASYNC;
+        seInfo.lpVerb = L"open";
+        seInfo.lpFile = L"explorer.exe";
+        seInfo.lpParameters = args.c_str();
+        seInfo.nShow = SW_SHOWNORMAL;
+        LOG_IF_WIN32_BOOL_FALSE(ShellExecuteExW(&seInfo));
+    }
+
+    // The REAL launch command for a session's agent — "the one the tab had / would use", the full
+    // thing with hooks (NOT a toy `--resume <id>`). For the session's OWN agent we return its LIVE
+    // process commandline (read from the PEB: the exact claude.exe/codex.exe invocation, with the
+    // full path, --settings <hooks>, --dangerously-skip-permissions, --session-id/--resume, ...).
+    // For the OTHER agent (or when the pid isn't known yet) we reproduce what Agentmaster WOULD use
+    // to launch that agent in this dir, via the SAME builders the launch/restore path uses.
+    std::wstring BuildLaunchCli(const SessionInfo& s, bool wantCodex)
+    {
+        const bool ownCodex = (s.kind == AgentKind::Codex);
+        auto& eng = ::Agentmaster::SharedEngine();
+        if (wantCodex == ownCodex && s.pid)
+        {
+            const std::wstring live = ::Agentmaster::ReadProcessCommandLine(s.pid);
+            if (!live.empty())
+            {
+                return live; // exactly the command this tab is running
+            }
+        }
+        if (wantCodex)
+        {
+            const std::wstring resumeUuid = ownCodex ? s.codexSessionId : std::wstring{};
+            return ::Agentmaster::BuildCodexCommandline(resumeUuid, {}, eng.codexExePath);
+        }
+        const std::wstring settingsPath = ::Agentmaster::ToForwardSlashes(::Agentmaster::AgentmasterStateDir() + L"\\hooks-settings.json");
+        const bool skipPerms = ::Agentmaster::LoadAppSettings().skipPermissions;
+        const bool resume = !ownCodex && !s.id.empty() && ::Agentmaster::ClaudeConversationExists(s.id);
+        const std::wstring id = (!ownCodex && !s.id.empty()) ? s.id : ::Agentmaster::NewSessionId();
+        return ::Agentmaster::BuildClaudeCommandline(settingsPath, id, resume, skipPerms, {}, eng.claudeExePath);
+    }
+
+    // Resolve a session's transcript OFF the UI thread (the claude glob is shallow, but the codex
+    // rollout glob recurses the date-sharded sessions tree), read it into a plain-text conversation
+    // (user + assistant TEXT only — no tools/results/thinking), then hop back to `disp` to copy
+    // (WinRT Clipboard is UI-thread only). No-op when there is no transcript / nothing to copy.
+    winrt::fire_and_forget CopyConversationAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId)
+    {
+        co_await winrt::resume_background();
+        std::wstring path;
+        if (codex)
+        {
+            if (!codexId.empty())
+            {
+                path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexId);
+            }
+        }
+        else
+        {
+            path = ::Agentmaster::ResolveClaudeTranscriptPath(claudeId);
+        }
+        if (path.empty())
+        {
+            co_return; // no transcript yet (never prompted)
+        }
+        const std::wstring convo = ::Agentmaster::ReadConversationText(path, codex, 0 /* whole file */);
+        if (convo.empty() || !disp)
+        {
+            co_return;
+        }
+        disp.TryEnqueue([convo]() { CopyTextToClipboard(convo); });
+    }
 }
 
 namespace winrt::TerminalApp::implementation
@@ -132,10 +234,10 @@ namespace winrt::TerminalApp::implementation
         _subline.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0));
         _subline.Visibility(Visibility::Collapsed);
 
-        StackPanel stack{};
-        stack.Orientation(Orientation::Vertical);
-        stack.Children().Append(_line);
-        stack.Children().Append(_subline);
+        _stack = StackPanel{};
+        _stack.Orientation(Orientation::Vertical);
+        _stack.Children().Append(_line);
+        _stack.Children().Append(_subline);
 
         _root = Border{};
         _root.Background(Fill(0xCC, 0x20, 0x20, 0x20)); // dark translucent so it reads on any terminal
@@ -144,20 +246,11 @@ namespace winrt::TerminalApp::implementation
         _root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         _root.Padding(ThicknessHelper::FromLengths(7, 2, 7, 2));
         _root.Opacity(0.55); // dim at rest; full on hover (the chosen interaction)
-        _root.Child(stack);
+        _root.Child(_stack);
 
-        _root.PointerEntered([](const IInspectable& sender, const PointerRoutedEventArgs&) {
-            if (const auto b = sender.try_as<Border>())
-            {
-                b.Opacity(1.0);
-            }
-        });
-        _root.PointerExited([](const IInspectable& sender, const PointerRoutedEventArgs&) {
-            if (const auto b = sender.try_as<Border>())
-            {
-                b.Opacity(0.55);
-            }
-        });
+        // Hover handlers are wired in _WireHover() (from Initialize / first ShowActivity), NOT here:
+        // they capture get_weak() so they can also reveal row 3 + honor the pinned (menu-open) state,
+        // and get_weak() is only valid once the object is fully constructed + ref-counted.
     }
 
     AgentTabOverlay::~AgentTabOverlay()
@@ -204,6 +297,8 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
+        _WireHover(); // pointer-over expand (opacity + row 3)
+        _BuildActionsRow(); // row 3: folder + copy menu (linked sessions only)
         _Refresh();
     }
 
@@ -219,6 +314,7 @@ namespace winrt::TerminalApp::implementation
         {
             _dispatcher = DispatcherQueue::GetForCurrentThread();
         }
+        _WireHover(); // observe badges still brighten on hover (no row 3 — that's linked-only)
         if (!_line || !_root)
         {
             return;
@@ -367,6 +463,190 @@ namespace winrt::TerminalApp::implementation
                 _subline.Text(winrt::hstring{ sub });
                 _subline.Visibility(Visibility::Visible);
             }
+        }
+    }
+
+    void AgentTabOverlay::_WireHover()
+    {
+        if (_hoverWired || !_root)
+        {
+            return;
+        }
+        _hoverWired = true;
+        auto weak = get_weak();
+        // Expanded == pointer over the badge OR the copy menu pinned open. Weak captures only, so the
+        // handlers (owned by _root) never keep the overlay (which owns _root) alive -> no ref cycle.
+        _root.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_hovering = true;
+                self->_SetExpanded(true);
+            }
+        });
+        _root.PointerExited([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_hovering = false;
+                self->_SetExpanded(self->_pinned); // stay open while the copy menu is up
+            }
+        });
+    }
+
+    void AgentTabOverlay::_SetExpanded(bool on)
+    {
+        if (_root)
+        {
+            _root.Opacity(on ? 1.0 : 0.55);
+        }
+        if (_row3)
+        {
+            _row3.Visibility(on ? Visibility::Visible : Visibility::Collapsed);
+        }
+    }
+
+    void AgentTabOverlay::_BuildActionsRow()
+    {
+        if (_row3 || !_stack)
+        {
+            return; // built once, and only for a LINKED session (never an observe badge)
+        }
+        auto weak = get_weak();
+
+        // A minimal transparent icon button: no chrome at rest, the default template still gives a
+        // hover highlight. IsTabStop(false) so it never pulls keyboard focus off the ConPTY.
+        const auto mkIconBtn = [](const wchar_t* glyph, const wchar_t* tip) {
+            Button b{};
+            b.Background(Fill(0x00, 0, 0, 0)); // transparent (alpha 0) — still hit-testable, unlike null
+            b.BorderThickness(ThicknessHelper::FromUniformLength(0));
+            b.Padding(ThicknessHelper::FromLengths(4, 0, 4, 0));
+            b.MinWidth(0);
+            b.IsTabStop(false);
+            FontIcon fi{};
+            fi.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            fi.Glyph(glyph);
+            fi.FontSize(12);
+            b.Content(fi);
+            ToolTipService::SetToolTip(b, winrt::box_value(winrt::hstring{ tip }));
+            return b;
+        };
+
+        Button folderBtn = mkIconBtn(L"\xE8B7", L"Open the working folder in Explorer"); // Folder
+        folderBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_OpenFolder();
+            }
+        });
+
+        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy\x2026"); // Copy
+        MenuFlyout flyout{};
+        const auto addItem = [&flyout, weak](const wchar_t* text, int which) {
+            MenuFlyoutItem item{};
+            item.Text(text);
+            item.Click([weak, which](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_CopyField(which);
+                }
+            });
+            flyout.Items().Append(item);
+        };
+        addItem(L"Session Id", 0);
+        addItem(L"Copy Path", 1);
+        addItem(L"Claude Launch CLI", 2);
+        addItem(L"Codex Launch CLI", 3);
+        addItem(L"Transcript", 4);
+        // The pointer must LEAVE the badge to reach the menu, so pin the expanded state while it's open.
+        flyout.Opened([weak](const IInspectable&, const IInspectable&) {
+            if (auto self = weak.get())
+            {
+                self->_pinned = true;
+                self->_SetExpanded(true);
+            }
+        });
+        flyout.Closed([weak](const IInspectable&, const IInspectable&) {
+            if (auto self = weak.get())
+            {
+                self->_pinned = false;
+                self->_SetExpanded(self->_hovering);
+            }
+        });
+        copyBtn.Flyout(flyout);
+
+        _row3 = StackPanel{};
+        _row3.Orientation(Orientation::Horizontal);
+        _row3.HorizontalAlignment(HorizontalAlignment::Right);
+        _row3.Spacing(2);
+        _row3.Margin(ThicknessHelper::FromLengths(0, 2, 0, 0));
+        _row3.Visibility(Visibility::Collapsed); // hover-only
+        _row3.Children().Append(folderBtn);
+        _row3.Children().Append(copyBtn);
+        _stack.Children().Append(_row3);
+    }
+
+    void AgentTabOverlay::_OpenFolder()
+    {
+        if (!_registry || _sessionId.empty())
+        {
+            return;
+        }
+        const auto info = _registry->Get(_sessionId);
+        if (!info)
+        {
+            return;
+        }
+        // Prefer the persisted M-axis workingDir; fall back to the live PEB cwd (same as row 2).
+        std::wstring dir = !info->workingDir.empty() ? info->workingDir : info->liveCwd;
+        if (!dir.empty())
+        {
+            OpenPathInExplorerAsync(dir);
+        }
+    }
+
+    void AgentTabOverlay::_CopyField(int which)
+    {
+        if (!_registry || _sessionId.empty())
+        {
+            return;
+        }
+        const auto info = _registry->Get(_sessionId);
+        if (!info)
+        {
+            return;
+        }
+        const auto& s = *info;
+        const bool codex = (s.kind == AgentKind::Codex);
+        switch (which)
+        {
+        case 0: // Session Id — the resumable conversation id (Codex: its rollout uuid)
+        {
+            const std::wstring convId = codex ? (s.codexSessionId.empty() ? s.id : s.codexSessionId) : s.id;
+            if (!convId.empty())
+            {
+                CopyTextToClipboard(convId);
+            }
+            break;
+        }
+        case 1: // Copy Path — the session's working directory
+        {
+            const std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+            if (!dir.empty())
+            {
+                CopyTextToClipboard(dir);
+            }
+            break;
+        }
+        case 2: // Claude Launch CLI — the REAL full command (live commandline / would-use builder)
+            CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ false));
+            break;
+        case 3: // Codex Launch CLI — the REAL full command
+            CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ true));
+            break;
+        case 4: // Transcript — the whole conversation (user + assistant text only), off-thread
+            CopyConversationAsync(_dispatcher, codex, s.id, s.codexSessionId);
+            break;
+        default:
+            break;
         }
     }
 }

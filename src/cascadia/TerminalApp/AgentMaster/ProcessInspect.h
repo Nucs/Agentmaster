@@ -273,6 +273,16 @@ namespace Agentmaster
     TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
 
+    // Agentmaster (TAB_OVERLAY.md row 3 "Transcript"): read a transcript into a plain-text
+    // conversation — ONLY the human + assistant TEXT messages, in order. Tool calls, tool results,
+    // thinking, meta/summary/sidechain lines are all dropped (the user asked for "the whole
+    // conversation where only the text messages of user and assistant are present"). Each message
+    // becomes "User:\n<text>" / "Assistant:\n<text>" separated by a blank line. `codex` selects the
+    // rollout format (event_msg user_message / agent_message); otherwise the Claude projects .jsonl
+    // (type user/assistant -> message.content text blocks, skipping tool_result/tool_use/thinking +
+    // IsNoiseUserPrompt). `maxBytes` 0 == the whole file. Filesystem only; empty on any read failure.
+    std::wstring ReadConversationText(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
+
     // The ONE display-title precedence over a TranscriptInfo (SESSIONS.md §6.3): customTitle >
     // aiTitle > legacy summary > title (the first REAL prompt). Pure.
     std::wstring TranscriptDisplayTitle(const TranscriptInfo& info);
