@@ -28,7 +28,8 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   that makes the tab ⇄ Agentmaster link legible *while you work inside the session*. A **linked**
   Claude session shows the full badge — status (color-matched to the Triage Board) + the Fleet
   Observer's `model · effort · kind`, Autopilot mode (**Manual/Semi/Full**), queued count, and link
-  state **⛓ linked**. Any **other** tab shows a dim **observe badge** `○ <kind> · unlinked` (kind =
+  state **⛓ linked**, plus a dim **second row** `<workdir folder>/<branch>`. Any **other** tab shows a
+  dim **observe badge** `○ <kind> · unlinked` (kind =
   `pwsh` / `cmd` / `claude` *started-but-not-yet-prompted* (§11d) / `codex`) that **flips in place**
   as the tab's activity changes — a `pwsh` tab → `claude` the moment you run it → the full linked
   badge on its first prompt; cleared when claude exits or the tab closes — so a started-but-unprompted
@@ -196,12 +197,20 @@ each a focused commit — all zero writes to `~/.codex` (every read is out-of-ba
   **Claude⇄Codex toggle** (Part 4, the scope/sort/autopilot toggle idiom; Codex is *directory-only* — no
   typed-id resume/fork, button reads "Launch Codex"), and the EXTERNAL menu's **Open New Codex Session
   Here** spawns one in a running codex's cwd → `_SpawnCodexSession` → `_LaunchCodexSession`
-  (`BuildCodexCommandline` = `codex` / `codex resume <uuid>`; immediate managed card, `AM_SESSION` stamp,
-  no `CCMGR_*`). **Restore** — the Archive page's Restore here branches on `kind` (`_RestoreArchivedSession`
+  (`BuildCodexCommandline` = `<codex>` / `<codex> resume <uuid>` / `<codex> fork <uuid>`, where `<codex>`
+  is the launcher resolved ONCE at engine init to a **full path** (`ResolveCodexLauncher` →
+  `Engine::codexExePath`) and run by path — a `.exe` quoted, a `.cmd`/`.bat` via `cmd /c` — because
+  ConPTY's `CreateProcessW` appends only `.exe` and IGNORES `PATHEXT`, so a bare `codex` token would miss
+  an npm `codex.cmd` and die `0x80070002` (the same trap Claude's native-exe policy fixed; Codex is NOT
+  exe-only — the observer finds `codex.exe` as a DESCENDANT, so a `.cmd` re-exec is fine, and an empty
+  launcher falls back to the bare `codex` token + the surfaced error); immediate managed card,
+  `AM_SESSION` stamp, no `CCMGR_*`). **Restore** — the Archive page's Restore here branches on `kind` (`_RestoreArchivedSession`
   → `_LaunchCodexSession`, transcript-gated on the rollout existing, else fresh — Rule #6). **Window-restore**
   — `_RestoreWindowTabs` re-homes a Codex tab ref via `_LaunchCodexSession`. **Adopt** — the EXTERNAL menu's
-  Adopt resumes an external codex's rollout into a managed tab (`_AdoptExternalCodex` → `codex resume <uuid>`,
-  original left running). A managed Codex reads distinct everywhere via a teal **`codex` pill** (Part 3 —
+  Adopt brings an external codex's rollout under management via a **Fork-a-copy vs Resume-anyway** choice
+  (`_AdoptExternalCodex(pid,cwd,fork)` behind `_ConfirmChoice`): fork = `codex fork <uuid>` into a NEW
+  rollout — safe while the original is still running (no two-writers hazard) — else `codex resume <uuid>`
+  (take-over); original left running. A managed Codex reads distinct everywhere via a teal **`codex` pill** (Part 3 —
   board card + tree row, the same teal as the External pill). **Lifecycle + state ONLY** — NO stdin
   injector / Autopilot / Send-now (driving the Codex TUI is C4); a managed codex's `autopilot.mode` is Off.
 
@@ -450,8 +459,15 @@ What works, by area:
   **`NeedsApproval` as well as `Running`** on a terminal/interrupt tail, so an approved (or
   answered) session whose post-turn `Stop` hook was dropped is released to `WaitingForInput`
   instead of stranding in `NeedsApproval` (the original "answer the question, stay needs-approval"
-  report). `ParseTranscriptDelta` now also emits a `ToolResult` marker (a tool completed → it
-  answers the pending question) that does NOT count as a run-repair turn event.
+  report); and (d) **needs-approval RESUME** — `ShouldSynthesizeResumed` releases a `NeedsApproval`
+  session BACK to **`Running`** when the user answered/approved and the agent kept working (a fresh live
+  append this pass on a primed cursor, no pending interactive tool, no interrupt, non-terminal tail) —
+  previously its only pull-side exit was → `WaitingForInput` at end-of-turn, so an answered-but-still-
+  working session showed orange "needs you" for the rest of the turn; mutually exclusive with
+  `ShouldSynthesizeStop` (the interrupt + terminal guards), synthesized as tool ACTIVITY (PostToolUse),
+  NOT a `UserPromptSubmit` (which would wrongly `++queuedPrompts`). `ParseTranscriptDelta` now also emits
+  a `ToolResult` marker (a tool completed → it answers the pending question) that does NOT count as a
+  run-repair turn event.
 - **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
   type yourself into any tab (the WT `+` button → `cd` → `claude`) is managed too, not just
   Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env
@@ -565,7 +581,21 @@ What works, by area:
   within the board instead of clipping past the bottom edge (the board's own ScrollViewer scrolls
   only horizontally). The Board header's **"Show all"** (clears the directory scope) is shown only
   when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
-  already showing all directories. A managed **board card** mirrors the Explorer-Tree row's
+  already showing all directories. Next to the LOCAL/GLOBAL twin a **"Clear"** button (`_clearSelBtn`,
+  the same hide-when-idle idiom as "Show all") **deselects** the current card/row — managed OR external
+  (`_ClearSelection`) — so the Flight Plan reads nothing-selected. A managed card's **state-colored
+  border shows only on hover or when selected** (thickness 0/1/2 at rest/hover/selected, the accent
+  pushed onto the Button's PointerOver state) — borderless at rest to cut visual noise on a busy board.
+  **Selecting any card/row — by click, by switching to its terminal tab (`SelectSession` →
+  `_SelectSession`), or an external (`_SelectExternal`) — drops that session's cwd into the "Launch
+  Claude" box** (unfocused then, so no path-picker pop), pre-aiming Launch / Open-New-Session. A
+  title-only `_Refresh` (a rename, or claude floating its OSC title) **preserves keyboard focus** on the
+  clicked card/row: each card/row is tagged `b:<id>`/`t:<id>` + mapped (`_boardCardsById` /
+  `_treeRowsById`), and `_Refresh` re-focuses the rebuilt element (sync try + `Loaded` fallback) so a
+  recreated element never drops focus. All Manager / Archive / Sessions hover tooltips (`AgentSetTip`)
+  now open at **~1/3 the system hover delay** — a manual `DispatcherTimer` open (this SDK exposes no
+  `ToolTipService.InitialShowDelay`), mirroring WT's `MinMaxCloseControl`. A managed **board card**
+  mirrors the Explorer-Tree row's
   interactions (one card/row, one action set): single-click selects, **double-click Activates**
   (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row
   (`_MakeSessionMenu` — Rename… / Archive… / Open New Session Here; a board-invoked Rename first
@@ -682,9 +712,11 @@ What works, by area:
   queue/Autopilot). Selecting an external is **Linked-Lenses-synced** (`_SelectExternal`): it switches
   the tree to **EXTERNAL** with the row highlighted, highlights the board card, and renders the
   read-only plan — so a board click behaves exactly like a tree click. **Right-click** (on either the
-  tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Adopt** (resume its
-  conversation into a managed, controllable tab — `_AdoptExternalClaude` resolves the id via
-  `ResolveSessionId`, then `claude --resume`s it, leaving the original external running — Rule #13),
+  tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Adopt** (bring its conversation
+  under management via a **Fork-a-copy vs Resume-anyway** choice — `_AdoptExternalClaude(pid,cwd,fork)`
+  behind `_ConfirmChoice`: fork = `claude --resume <id> --fork-session` into a NEW transcript (safe while
+  the original is still running — no two-writers hazard), else `claude --resume <id>` take-over; id via
+  `ResolveSessionId`, original left running — Rule #13),
   **Open New Session Here** (spawn a managed session in that cwd, a new independent conversation),
   and, **as the last item, Bring Window To Front** (surface the external's HOSTING window:
   `_BringExternalToFront` resolves the row's `hostPid`/`sessionId`/title from the latest snapshot
@@ -930,7 +962,14 @@ in `_pendingOverlays`, idempotent on an unchanged kind) — a `pwsh` / `cmd` / `
 never-prompted `claude` (correlated but no transcript id yet, §11d). The badge flips kind in place as
 activity changes and is **promoted to the bound `_AttachClaudeOverlay`** the instant a claude resolves
 an id (its first prompt); `_DropPendingOverlay` collapses + releases it when the tab binds, the claude
-exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
+exits, or the tab leaves the window's roster. The linked badge now also carries a **second (dim) row** —
+`<root workdir folder>/<branch>` (e.g. `myworkdir/feature/issue123`, `AgentTabOverlay::_subline`) so the
+session's place + branch read at a glance; hidden when there's no dir/branch and on observe badges. The
+branch is the **live** current branch (`ReadGitBranchForDir` — read from `.git/HEAD`, handling a
+worktree/submodule `.git` FILE + a detached HEAD → short SHA), distinct from a transcript's historical
+first-seen snapshot; and the observer's `TabActivityRow.gitBranch` is now also the **live writer** for
+`SessionInfo.branch` (the round-3 audit's "no live writer" gap), beside the off-thread transcript backfill.
+Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
 
 ## Repo facts
 
@@ -1102,10 +1141,12 @@ exits, or the tab leaves the window's roster. Milestones tracked in `doc/agentma
   the `Engine::restoreMutex` load barrier — a 2nd window blocks until it's loaded, then skips),
   `_RestoreArchivedSession()` = the on-demand resume.
   **Codex mirrors these seams (lifecycle + state only — NO injector/Autopilot):**
-  `_LaunchCodexSession(dir, title, restored)` builds a `codex` / `codex resume <uuid>`
-  `ConptyConnection` (`BuildCodexCommandline`; `AM_SESSION` stamp, no `CCMGR_*`) and opens it as a
-  normal tab; `_SpawnCodexSession` = fresh, the Archive page's Restore + `_RestoreWindowTabs` re-launch
-  a Codex record by `SessionInfo::kind`, and `_AdoptExternalCodex` resumes an external codex's rollout.
+  `_LaunchCodexSession(dir, title, restored, forkFromCodexUuid)` builds a `codex` / `codex resume <uuid>`
+  / `codex fork <uuid>` `ConptyConnection` (`BuildCodexCommandline`, launcher resolved to a FULL PATH —
+  `ResolveCodexLauncher` / `Engine::codexExePath`, a `.cmd`/`.bat` run via `cmd /c`; `AM_SESSION` stamp,
+  no `CCMGR_*`) and opens it as a normal tab; `_SpawnCodexSession` = fresh, the Archive page's Restore +
+  `_RestoreWindowTabs` re-launch a Codex record by `SessionInfo::kind`, and `_AdoptExternalCodex(pid,cwd,
+  fork)` forks (`codex fork`) or resumes an external codex's rollout (the Fork-a-copy vs Resume-anyway choice).
   The launch bar's **Claude⇄Codex toggle** retargets the cwd box's Launch button to `_SpawnCodexSession`.
   A managed codex's rollout state (the C2 deriver) is folded onto the registry by the UI lane's
   `_ReconcileManagedCodex` (which also fills `codexSessionId` + `tabToken` on first prompt) —
