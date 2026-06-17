@@ -757,7 +757,29 @@ What works, by area:
   the just-injected prompt is picked up, so a change-driven advance never drains the queue (one
   prompt per turn). `RequestAdvance` dedups; a failed inject (no injector bound yet, e.g.
   mid-restore) rolls the prompt back to `Pending` rather than stranding a phantom `Sent` — on **every** inject
-  path: auto-send, the SemiAuto `Confirm`, and the Manager's Send-now (Rule #4).
+  path: auto-send, the SemiAuto `Confirm`, and the Manager's Send-now (Rule #4). **Enter-retry (the
+  "TUI ate my submit Enter" backstop) — pure `DecideEnterRetry()`:** the ConPTY can deliver an
+  injected `prompt + CR` faster than Claude's Ink TUI initializes its input handler, so the submit
+  Enter is absorbed as a **newline** instead of sending — the prompt sits typed-but-unsubmitted and
+  the turn never starts (no `UserPromptSubmit`, no transcript write, state stuck `Idle`/
+  `WaitingForInput`). The scheduler **watches** every just-sent Flight prompt and, if the turn hasn't
+  **started** within `kEnterRetryIntervalMs` (10s), re-presses a **lone Enter** (never the text again
+  — it is already typed; resending would duplicate it), up to `kEnterRetryMax` (3) times, then gives
+  up (the prompt stays `Sent`; Send-now still works). **"Started" = OR of three signals** so it
+  degrades across hook / no-hook sessions: the prompt's `UserPromptSubmit` echo arrived (`echoed`) ·
+  the session left the ready set (state advanced past `Idle`/`WaitingForInput`, e.g. `Running` — the
+  transcript-tail-driven adopted path) · the transcript advanced past the send
+  (`convLastActivityUnixMs`, with `kEnterRetryActivityMarginMs` slop — the no-hook fast-turn
+  fallback). Only **live, non-external** (injector-bound) sessions are driven. The watch is **armed
+  from `OnObserved`** — every send path marks the prompt `Sent` through the registry, which notifies
+  this observer — so no send path needs to know about it, and it works regardless of autopilot **mode**
+  (a manual Send-now must still submit). The worker `wait_for`s a `kEnterRetryPollMs` poll cadence
+  while a send awaits pickup; `_sweepPendingPickups()` does the re-press + give-up (all registry I/O
+  **outside** the scheduler mutex). A retry **restarts** the prompt's `sentAtUnixMs` so a late press's
+  echo still lands inside the registry's 15s echo window (else it'd be mis-recorded as a fresh `Typed`
+  prompt) AND the pickup guard stays armed (the queue won't drain past the stuck prompt during
+  retries). `enterRetries` is transient (reset to 0 at each fresh send). Logs: `[enter-retry] <id>
+  press k/3` · `[enter-retry-giveup] <id>` (`autopilot.log`).
 - **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
   templates + the path-picker's recent-dirs MRU (de)serialize to JSON under the **ACTIVE
   PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`, dev package
