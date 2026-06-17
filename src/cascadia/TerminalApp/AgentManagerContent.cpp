@@ -1484,6 +1484,7 @@ namespace winrt::TerminalApp::implementation
                 sv.Content(_planListHost);
                 Grid::SetRow(sv, 1);
                 outer.Children().Append(sv);
+                _planScroll = sv; // Agentmaster: kept so the plan can default-scroll to the bottom (see _PinPlanToBottomOnSubjectChange)
 
                 // Action bar (persistent).
                 auto actions = StackPanel{};
@@ -4940,6 +4941,7 @@ namespace winrt::TerminalApp::implementation
             else
             {
                 _planHeaderHost.Children().Append(Text(L"External claudes are observe-only \x2014 click one in the tree to see its conversation (read-only), or right-click to Adopt / Open New Session Here / Bring Window To Front.", 13, false, 0.6));
+                _PinPlanToBottomOnSubjectChange(L""); // nothing scrollable shown — re-arm for the next real selection
             }
             return;
         }
@@ -4949,6 +4951,7 @@ namespace winrt::TerminalApp::implementation
         {
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
             _UpdateAutopilotButton(AutopilotMode::Off, false); // no live session: dim the header toggle
+            _PinPlanToBottomOnSubjectChange(L""); // re-arm so re-selecting a session pins to bottom again
             return;
         }
 
@@ -5039,6 +5042,7 @@ namespace winrt::TerminalApp::implementation
         if (sent.empty() && upcoming.empty())
         {
             _planListHost.Children().Append(Text(L"No messages yet. Type into the session, or queue one below.", 12, false, 0.6));
+            _PinPlanToBottomOnSubjectChange(L""); // re-arm: the first message that arrives will pin to bottom
             return;
         }
 
@@ -5122,6 +5126,9 @@ namespace winrt::TerminalApp::implementation
                 appendRow(*p, false);
             }
         }
+        // Default the view to the bottom (latest sent + the upcoming queue) the first time this
+        // session's plan is shown — but not on a same-session _Refresh (keep the user's scroll).
+        _PinPlanToBottomOnSubjectChange(sel->id);
     }
 
     // Agentmaster: the READ-ONLY Flight Plan for a selected EXTERNAL session — its conversation's
@@ -5155,16 +5162,19 @@ namespace winrt::TerminalApp::implementation
         if (_selectedExternalSessionId.empty())
         {
             _planListHost.Children().Append(Text(L"This external session hasn't been prompted yet \x2014 no conversation to show.", 12, false, 0.6));
+            _PinPlanToBottomOnSubjectChange(L""); // nothing scrollable
             return;
         }
         if (_externalPlanLoadedFor != _selectedExternalSessionId)
         {
             _planListHost.Children().Append(Text(L"Loading conversation\x2026", 12, false, 0.6));
+            _PinPlanToBottomOnSubjectChange(L""); // re-arm: pin once the prompts finish loading (the deferred render reaches the bottom call below)
             return;
         }
         if (_externalPlanPrompts.empty())
         {
             _planListHost.Children().Append(Text(L"No human prompts found in this conversation.", 12, false, 0.6));
+            _PinPlanToBottomOnSubjectChange(L""); // nothing scrollable
             return;
         }
 
@@ -5211,6 +5221,43 @@ namespace winrt::TerminalApp::implementation
             rowBorder.Child(rowSp);
             _planListHost.Children().Append(rowBorder);
         }
+        _PinPlanToBottomOnSubjectChange(L"x:" + _selectedExternalSessionId);
+    }
+
+    // Agentmaster: scroll the Flight Plan to the bottom the FIRST time a subject is shown (a managed
+    // session's plan, or an external's read-only conversation). The newest SENT message + the UPCOMING
+    // queue live at the bottom, so a freshly-opened plan defaults to "where things stand" rather than
+    // the oldest message. Gated on the subject CHANGING — a same-subject _Refresh (a background state
+    // change, claude floating its OSC title, a queue edit) must keep the user's current scroll, so we
+    // never re-pin while you're reading history. The scroll is deferred to a clean tick and forces a
+    // layout pass first, because _planListHost was just (re)populated this frame and the ScrollViewer's
+    // ScrollableHeight isn't valid until it re-measures.
+    void AgentManagerContent::_PinPlanToBottomOnSubjectChange(const std::wstring& subjectKey)
+    {
+        if (subjectKey == _planAutoScrolledFor)
+        {
+            return; // same subject as last pin (or both empty) — leave the user's scroll alone
+        }
+        _planAutoScrolledFor = subjectKey;
+        if (subjectKey.empty() || !_planScroll)
+        {
+            return; // nothing scrollable shown (a hint / loading / empty state)
+        }
+        auto weak = get_weak();
+        auto disp = _dispatcher;
+        if (!disp)
+        {
+            return;
+        }
+        disp.TryEnqueue([weak]() {
+            auto self = weak.get();
+            if (!self || !self->_planScroll)
+            {
+                return;
+            }
+            self->_planScroll.UpdateLayout(); // realize the rows appended this frame so ScrollableHeight is real
+            self->_planScroll.ChangeView(nullptr, self->_planScroll.ScrollableHeight(), nullptr, true); // jump (no animation) to the bottom
+        });
     }
 
     // ---- selection / scope --------------------------------------------------

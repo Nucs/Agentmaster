@@ -163,6 +163,16 @@ namespace winrt::TerminalApp::implementation
         void _SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath);
         void _LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath);
         void _RebuildExternalPlan();
+        // Agentmaster: pin the Flight Plan's scroll to the BOTTOM the first time a given subject is
+        // viewed (the latest SENT message + the UPCOMING queue sit at the bottom of the list, so a
+        // freshly-opened plan defaults to "where the conversation left off"). `subjectKey` identifies
+        // what the list currently shows — a managed session id, or "x:<id>" for an external's
+        // read-only conversation; empty means nothing scrollable. We only scroll when the subject
+        // CHANGES from the last one we pinned (_planAutoScrolledFor): a mere _Refresh on the same
+        // subject (a background state change, an OSC title float) must NOT yank the user's scroll
+        // position. Deferred to a clean tick + UpdateLayout so ScrollableHeight is valid (the list was
+        // just (re)populated this frame).
+        void _PinPlanToBottomOnSubjectChange(const std::wstring& subjectKey);
 
         // Agentmaster: Explorer Tree scope toggle, cycling LOCAL -> GLOBAL -> EXTERNAL (this
         // window's tabs / all windows / observe-only externals). _ToggleTreeScope advances the mode
@@ -415,6 +425,8 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _treeRowsById;
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _planScroll{ nullptr }; // Agentmaster: hosts _planListHost — pinned to the bottom on first view of a subject (see _PinPlanToBottomOnSubjectChange)
+        std::wstring _planAutoScrolledFor; // Agentmaster: the subject key (session id / "x:<extId>") we last auto-scrolled the Flight Plan to bottom for; only a CHANGE re-pins (a same-subject _Refresh keeps the user's scroll)
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
         winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr }; // Agentmaster (Codex-launch): the Claude<->Codex agent toggle before the box
