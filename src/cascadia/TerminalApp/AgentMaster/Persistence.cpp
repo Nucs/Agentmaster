@@ -13,6 +13,8 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <random>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
@@ -338,6 +340,10 @@ namespace Agentmaster
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
         o.Set(L"external", json::Value::MkBool(s.external));
+        if (s.summaryShown)
+        {
+            o.Set(L"summaryShown", json::Value::MkBool(true)); // TAB_OVERLAY.md summary panel toggle (default OFF => omitted)
+        }
         // Codex managed-session support: persist the agent kind + the rollout resume target. Both
         // are omitted when default (Claude / empty), so an all-Claude sessions.json is byte-unchanged.
         if (s.kind == AgentKind::Codex)
@@ -368,6 +374,7 @@ namespace Agentmaster
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
         s.external = v.BoolAt(L"external", false);
+        s.summaryShown = v.BoolAt(L"summaryShown", false); // TAB_OVERLAY.md summary panel toggle (absent => OFF)
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
         if (const auto* q = v.Find(L"queue"); q && q->type == json::Value::Type::Arr)
@@ -918,6 +925,88 @@ namespace Agentmaster
 
         // dir-colors.json is read-modify-written; one process (M9) but many window threads.
         std::mutex g_dirColorMtx;
+
+        // --- Auto tab-color allocator (Agentmaster) -------------------------------------------------
+        // A fixed palette of distinct, readable tab colors. A directory with no explicit (user-picked)
+        // color gets one of these AUTO — but collision-avoided against the OTHER currently-open
+        // directories so two open tabs never share a color (the "two folders, same color" bug), and
+        // re-rolled each startup from a random per-process seed so the fleet looks fresh every launch.
+        // Auto colors are NOT persisted (only an explicit color-picker choice is, via SetDirColor);
+        // they are re-derived each run. g_dirColorMtx guards all of this state.
+        const wchar_t* const kAutoPalette[] = {
+            L"#E06C75", L"#E5C07B", L"#98C379", L"#56B6C2", L"#61AFEF", L"#C678DD",
+            L"#D19A66", L"#BE5046", L"#528BFF", L"#7FD962", L"#FF9E64", L"#2BBAC5",
+            L"#B267E6", L"#F78C6C",
+        };
+        constexpr size_t kAutoPaletteCount = sizeof(kAutoPalette) / sizeof(kAutoPalette[0]);
+
+        uint64_t g_colorSeed{ 0 }; // per-startup randomization (SeedDirColors); arbitrary until set
+        bool g_colorSeedSet{ false };
+        std::unordered_map<std::wstring, std::wstring> g_autoAssigned; // NormDirKey -> assigned hex (this run)
+
+        // Install a fresh random seed if one was never set. The Engine seeds at init; this is the
+        // fallback for headless/test callers that touch a color before the engine runs. Caller holds
+        // g_dirColorMtx.
+        void EnsureColorSeedLocked()
+        {
+            if (!g_colorSeedSet)
+            {
+                std::random_device rd;
+                g_colorSeed = (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
+                g_colorSeedSet = true;
+            }
+        }
+
+        // splitmix64 — a tiny, well-distributed PRNG step used to shuffle the probe order.
+        uint64_t Splitmix64(uint64_t& s)
+        {
+            uint64_t z = (s += 0x9E3779B97F4A7C15ull);
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            return z ^ (z >> 31);
+        }
+
+        // The "fixed but randomized sequence": a deterministic permutation of palette indices for a
+        // directory key, keyed by (g_colorSeed, key). Fixed within a run (so a dir's color is stable
+        // and shared by its tabs), randomized across runs (the seed). The first element is the dir's
+        // preferred color; collision-avoidance walks the rest. Caller holds g_dirColorMtx.
+        std::vector<size_t> ColorProbeOrderLocked(const std::wstring& key)
+        {
+            uint64_t h = 1469598103934665603ull ^ g_colorSeed; // FNV-1a basis, seeded
+            for (const wchar_t c : key)
+            {
+                h ^= static_cast<uint64_t>(static_cast<uint16_t>(c));
+                h *= 1099511628211ull;
+            }
+            std::vector<size_t> order(kAutoPaletteCount);
+            for (size_t i = 0; i < kAutoPaletteCount; ++i)
+            {
+                order[i] = i;
+            }
+            uint64_t st = h ? h : 0x123456789abcdefull; // avoid an all-zero PRNG state
+            for (size_t i = kAutoPaletteCount; i > 1; --i) // Fisher-Yates over the indices
+            {
+                const size_t j = static_cast<size_t>(Splitmix64(st) % i);
+                std::swap(order[i - 1], order[j]);
+            }
+            return order;
+        }
+
+        // Case-insensitive "#RRGGBB" membership in the auto palette. This is the sound signal that a
+        // persisted entry was AUTO-assigned (the auto path can only ever emit a palette color), used
+        // by the one-time v1->v2 migration to drop stale auto colors while keeping user picks.
+        bool IsAutoPaletteColor(const std::wstring& hex)
+        {
+            const std::wstring low = LowerCopy(hex);
+            for (const auto* p : kAutoPalette)
+            {
+                if (low == LowerCopy(p))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
     }
 
     bool IsGenericDirName(const std::wstring& segment)
@@ -1030,31 +1119,130 @@ namespace Agentmaster
         return s;
     }
 
+    void SeedDirColors(uint64_t seed)
+    {
+        std::lock_guard guard{ g_dirColorMtx };
+        g_colorSeed = seed;
+        g_colorSeedSet = true;
+    }
+
     std::wstring AutoDirColorHex(const std::wstring& dir)
     {
-        // A fixed palette of distinct, readable tab colors. Same dir => same color (hash of the
-        // canonical key); different dirs spread across the palette.
-        static const wchar_t* const kPalette[] = {
-            L"#E06C75", L"#E5C07B", L"#98C379", L"#56B6C2", L"#61AFEF", L"#C678DD",
-            L"#D19A66", L"#BE5046", L"#528BFF", L"#7FD962", L"#FF9E64", L"#2BBAC5",
-            L"#B267E6", L"#F78C6C",
-        };
+        // PURE PREVIEW (no allocation): the color a directory currently shows. If it has a live auto
+        // assignment this run, return exactly that — so an off-tab chip (the Sessions page) matches
+        // the real tab; otherwise the first color of its seeded probe order, a stable representative
+        // for a dir that isn't open. Collision-avoidance lives in AssignDirAutoColor.
         const std::wstring key = NormDirKey(dir);
-        // FNV-1a over the key's code units (stable across runs).
-        uint64_t h = 1469598103934665603ull;
-        for (const wchar_t c : key)
+        std::lock_guard guard{ g_dirColorMtx };
+        EnsureColorSeedLocked();
+        if (const auto it = g_autoAssigned.find(key); it != g_autoAssigned.end())
         {
-            h ^= static_cast<uint64_t>(static_cast<uint16_t>(c));
-            h *= 1099511628211ull;
+            return it->second;
         }
-        const size_t n = sizeof(kPalette) / sizeof(kPalette[0]);
-        return kPalette[static_cast<size_t>(h % n)];
+        return kAutoPalette[ColorProbeOrderLocked(key).front()];
+    }
+
+    std::wstring AssignDirAutoColor(const std::wstring& dir, const std::vector<std::wstring>& openDirKeys)
+    {
+        // ALLOCATING: hand a directory an auto color that no OTHER currently-open directory holds,
+        // walking its seeded probe order until a free color is found (the "if taken, take the next
+        // one" rule — the fix for two folders sharing a color). The choice is remembered for the run
+        // so the dir's color is stable and shared by every tab in it (Rule #12); a dir keeps its color
+        // across reassignments while it stays free, and a color freed by a closed dir is reused. When
+        // every palette color is taken (more open dirs than colors) it falls back to the preferred
+        // one. NOT persisted (only explicit user picks persist — Rule #12); re-derived each run from
+        // the random per-startup seed. `openDirKeys` are the NormDirKeys of the currently-open dirs.
+        const std::wstring key = NormDirKey(dir);
+        std::lock_guard guard{ g_dirColorMtx };
+        EnsureColorSeedLocked();
+
+        std::unordered_set<std::wstring> taken; // colors held by OTHER open dirs (their auto assignments)
+        for (const auto& k : openDirKeys)
+        {
+            if (k == key)
+            {
+                continue;
+            }
+            if (const auto it = g_autoAssigned.find(k); it != g_autoAssigned.end())
+            {
+                taken.insert(it->second);
+            }
+        }
+
+        // Keep the dir's existing color if it is still free (stable within a run).
+        if (const auto cur = g_autoAssigned.find(key); cur != g_autoAssigned.end() && taken.find(cur->second) == taken.end())
+        {
+            return cur->second;
+        }
+
+        const auto order = ColorProbeOrderLocked(key);
+        for (const size_t idx : order)
+        {
+            std::wstring cand = kAutoPalette[idx];
+            if (taken.find(cand) == taken.end())
+            {
+                g_autoAssigned[key] = cand;
+                return cand;
+            }
+        }
+        // Palette exhausted (more open dirs than colors) — reuse the preferred color.
+        std::wstring cand = kAutoPalette[order.front()];
+        g_autoAssigned[key] = cand;
+        return cand;
+    }
+
+    std::optional<std::wstring> CurrentDirAutoColor(const std::wstring& dir)
+    {
+        // The dir's live auto assignment this run, or nullopt if it has none (never auto-colored, or
+        // it carries an explicit user color). Lets _OnClaudeTabColorChanged recognize our own auto
+        // application and skip persisting it (only a genuine user pick should land in dir-colors.json).
+        const std::wstring key = NormDirKey(dir);
+        std::lock_guard guard{ g_dirColorMtx };
+        if (const auto it = g_autoAssigned.find(key); it != g_autoAssigned.end())
+        {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+
+    void MigrateDirColorsToV2IfNeeded()
+    {
+        // One-time upgrade of dir-colors.json (v1 -> v2). v1 persisted BOTH user-picked colors and the
+        // old per-dir AUTO colors indistinguishably, so its auto colors (a) went stale and (b) collided
+        // (two dirs hashing to one palette slot — the reported bug). v2 persists ONLY user picks; auto
+        // is now ephemeral + collision-avoided. Migrate by dropping every entry whose color is a
+        // palette member (provably auto — the auto path emits nothing else) and keeping the rest (an
+        // off-palette hex can only be an explicit user pick). Idempotent via the version stamp.
+        std::lock_guard guard{ g_dirColorMtx };
+        const auto path = AgentmasterStateDir() + L"\\dir-colors.json";
+        const auto text = ReadAllUtf8(path);
+        if (text.empty())
+        {
+            return; // nothing persisted yet
+        }
+        const auto parsed = json::Parse(text);
+        if (!parsed || parsed->NumAt(L"version", 1) >= 2)
+        {
+            return; // already migrated (or unreadable — leave it untouched)
+        }
+        std::vector<std::pair<std::wstring, std::wstring>> kept;
+        for (auto& entry : DeserializeDirColors(text))
+        {
+            if (!IsAutoPaletteColor(entry.second))
+            {
+                kept.push_back(std::move(entry)); // an off-palette hex can only be a user pick — keep it
+            }
+        }
+        SaveDirColors(kept); // rewrites at version 2 (SerializeDirColors stamps it) -> no re-migrate
     }
 
     std::wstring SerializeDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& colors)
     {
         auto root = json::Value::MkObj();
-        root.Set(L"version", json::Value::MkNum(1));
+        // v2: persists ONLY explicit user color picks (auto colors are ephemeral + collision-avoided,
+        // re-derived each run from a random seed). v1 mixed in the old per-dir auto colors; the
+        // one-time MigrateDirColorsToV2IfNeeded drops those on first run.
+        root.Set(L"version", json::Value::MkNum(2));
         auto arr = json::Value::MkArr();
         for (const auto& [dir, color] : colors)
         {

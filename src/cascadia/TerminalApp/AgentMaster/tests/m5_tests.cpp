@@ -1586,11 +1586,65 @@ static void TestTabNamingAndColor()
     // --- NormDirKey: slash + trailing + (windows) case fold collapse to one key ---
     CHECK(NormDirKey(L"K:\\A\\B\\") == NormDirKey(L"K:/a/b"), "case/slash/trailing variants share a key");
 
-    // --- AutoDirColorHex: deterministic, palette form, stable across path spelling ---
+    // --- AutoDirColorHex (preview): deterministic, palette form, stable across path spelling ---
+    SeedDirColors(0xA11CE5EEull); // fix the seed so probe orders are deterministic in this test
     const auto c1 = AutoDirColorHex(L"K:\\source\\NumSharp");
     CHECK(c1.size() == 7 && c1[0] == L'#', "auto color is #RRGGBB");
     CHECK(c1 == AutoDirColorHex(L"K:\\source\\NumSharp"), "auto color deterministic");
     CHECK(c1 == AutoDirColorHex(L"k:/source/numsharp"), "auto color stable across spelling");
+
+    // --- AssignDirAutoColor: stable per dir, collision-free across concurrently-open dirs ---
+    {
+        // Same dir => same color regardless of the open set; stable across spelling; CurrentDirAutoColor
+        // mirrors it; an unassigned dir reports none.
+        const auto a = AssignDirAutoColor(L"K:\\proj\\alpha", {});
+        CHECK(a.size() == 7 && a[0] == L'#', "assigned color is #RRGGBB");
+        CHECK(a == AssignDirAutoColor(L"K:\\proj\\alpha", {}), "assigned color stable for a dir");
+        CHECK(a == AssignDirAutoColor(L"k:/proj/alpha/", {}), "assigned color stable across spelling");
+        CHECK(CurrentDirAutoColor(L"K:\\proj\\alpha").has_value() && *CurrentDirAutoColor(L"K:\\proj\\alpha") == a,
+              "CurrentDirAutoColor returns the assignment");
+        CHECK(!CurrentDirAutoColor(L"K:\\proj\\never-assigned").has_value(), "unassigned dir has no current color");
+    }
+    {
+        // Collision avoidance: 14 dirs (the palette size), each seeing the prior ones as open, get 14
+        // DISTINCT colors — this is the "two folders, same color" fix.
+        const size_t n = 14; // == kAutoPalette size in Persistence.cpp
+        std::vector<std::wstring> openKeys;
+        std::vector<std::wstring> assigned;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const std::wstring dir = L"K:\\fleet\\dir" + std::to_wstring(i);
+            assigned.push_back(AssignDirAutoColor(dir, openKeys));
+            openKeys.push_back(NormDirKey(dir));
+        }
+        bool allDistinct = true;
+        for (size_t i = 0; i < assigned.size() && allDistinct; ++i)
+        {
+            for (size_t j = i + 1; j < assigned.size(); ++j)
+            {
+                if (assigned[i] == assigned[j])
+                {
+                    allDistinct = false;
+                    break;
+                }
+            }
+        }
+        CHECK(allDistinct, "N<=palette concurrently-open dirs get N distinct colors (no collision)");
+
+        // Palette exhausted: the (n+1)-th open dir reuses a slot but still yields a valid palette color.
+        const auto overflow = AssignDirAutoColor(L"K:\\fleet\\overflow", openKeys);
+        CHECK(overflow.size() == 7 && overflow[0] == L'#', "overflow dir still gets a palette color");
+    }
+    {
+        // A color freed by a closed dir is reusable; a new dir still avoids a STILL-open dir's color.
+        SeedDirColors(0xBEEFCAFEull);
+        const auto x = AssignDirAutoColor(L"K:\\reuse\\x", {});
+        const auto y = AssignDirAutoColor(L"K:\\reuse\\y", { NormDirKey(L"K:\\reuse\\x") });
+        CHECK(x != y, "two concurrently-open dirs differ");
+        const auto z = AssignDirAutoColor(L"K:\\reuse\\z", { NormDirKey(L"K:\\reuse\\y") }); // x closed
+        CHECK(z != y, "a new dir avoids the still-open dir's color");
+    }
+    CHECK(SerializeDirColors({}).find(L"\"version\":2") != std::wstring::npos, "dir-colors serializes at version 2");
 
     // --- DirColors serialize round-trip (pure; no disk) ---
     {

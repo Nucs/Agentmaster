@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -134,9 +135,26 @@ namespace Agentmaster
     // stripped, and (on Windows) lowercased — so case/slash variants of one dir collapse to one
     // key. Keys the per-directory color map and matches sibling tabs in the same directory.
     std::wstring NormDirKey(const std::wstring& dir);
-    // A stable, pleasant default tab color ("#RRGGBB") for a directory, chosen from a fixed palette
-    // by hashing NormDirKey(dir) — same dir => same color; different dirs spread across the palette.
+    // Install the per-startup color seed (the Engine calls this once at init with a random value, so
+    // the auto palette assignment is re-rolled every launch). A test/headless caller may pass a fixed
+    // seed for determinism; a caller that touches a color before any seed is set gets a lazy random one.
+    void SeedDirColors(uint64_t seed);
+    // A directory's auto tab color "#RRGGBB" — PURE PREVIEW, no allocation/mutation. Returns the dir's
+    // live auto assignment if it has one (so an off-tab chip matches the real tab), else the first
+    // color of its seeded probe order. Use AssignDirAutoColor to actually claim a collision-free color.
     std::wstring AutoDirColorHex(const std::wstring& dir);
+    // Claim a collision-free auto color for a directory: walk the dir's seeded probe sequence and take
+    // the first color no OTHER currently-open dir holds (the "if taken, take the next one" rule — the
+    // fix for two folders sharing a color). `openDirKeys` = the NormDirKeys of the currently-open dirs.
+    // Stable + shared within a run (Rule #12); freed colors are reused; NOT persisted (re-derived each
+    // run). Falls back to the preferred color when every palette slot is taken.
+    std::wstring AssignDirAutoColor(const std::wstring& dir, const std::vector<std::wstring>& openDirKeys);
+    // The dir's live auto assignment this run (set by AssignDirAutoColor), or nullopt. Lets the color-
+    // change handler recognize our own auto application and skip persisting it.
+    std::optional<std::wstring> CurrentDirAutoColor(const std::wstring& dir);
+    // One-time dir-colors.json upgrade (v1 -> v2): drop the old per-dir AUTO colors (palette members,
+    // now ephemeral + collision-avoided) while keeping explicit user picks. Idempotent (version stamp).
+    void MigrateDirColorsToV2IfNeeded();
 
     // ---- templates: build + apply ----
     // Capture a session's current queue as a reusable template.

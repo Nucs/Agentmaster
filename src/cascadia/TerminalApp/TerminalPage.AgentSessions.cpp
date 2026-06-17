@@ -1141,17 +1141,32 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: paint a Claude tab from its working directory's color — the persisted color for
-    // the dir if any, else a stable auto-assigned one (which we persist so it survives + is shared
-    // by the dir). SetRuntimeTabColor re-enters _OnClaudeTabColorChanged once, which settles
-    // immediately (the persisted color now equals the tab's color), so this never loops.
+    // Agentmaster: paint a Claude tab from its working directory's color — the explicit user-picked
+    // color for the dir if one is persisted, else a collision-free AUTO color. The auto color is
+    // claimed from the dir's seeded probe sequence so it never matches another currently-open dir's
+    // color (the "two folders, same color" fix), is shared by every tab in the dir (Rule #12), and is
+    // re-rolled each startup from a random seed — so it is NOT persisted (only user picks are).
+    // SetRuntimeTabColor re-enters _OnClaudeTabColorChanged once, which settles immediately (it
+    // recognizes the live auto assignment / persisted user color and no-ops), so this never loops.
     void TerminalPage::_ApplyDirColorToTab(const TerminalApp::Tab& tab, const std::wstring& dir)
     {
         auto hex = ::Agentmaster::GetDirColor(dir);
         if (!hex)
         {
-            hex = ::Agentmaster::AutoDirColorHex(dir);
-            ::Agentmaster::SetDirColor(dir, hex); // persist the auto color -> stable + shared by the dir
+            // The currently-open dirs (across all windows — the registry is process-wide) whose colors
+            // an auto pick must avoid. Archived (non-live) sessions don't show, so they don't count.
+            std::vector<std::wstring> openDirKeys;
+            if (_sessionRegistry)
+            {
+                for (const auto& s : _sessionRegistry->Snapshot())
+                {
+                    if (s.live)
+                    {
+                        openDirKeys.push_back(::Agentmaster::NormDirKey(s.workingDir));
+                    }
+                }
+            }
+            hex = ::Agentmaster::AssignDirAutoColor(dir, openDirKeys); // collision-free; not persisted
         }
         if (const auto color = ClaudeHexToColor(*hex))
         {
@@ -1202,8 +1217,11 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: the user changed a Claude tab's color (color picker / setTabColor action ->
     // Tab::SetRuntimeTabColor/Reset -> TabColorChanged -> here). Color is ONE value per working
-    // directory: persist it for the dir and fan it out to every live tab in that dir. The de-dupe
-    // vs the persisted color makes our own launch/propagation writes no-ops (no loop).
+    // directory: persist it for the dir and fan it out to every live tab in that dir. Two de-dupes
+    // make our OWN writes no-ops (no loop, no spurious persist): (1) vs the persisted user color (our
+    // user-pick fan-out + a reset), and (2) vs the live AUTO assignment (our launch-time auto paint —
+    // which must NOT be persisted, since auto colors are ephemeral/re-rolled each run). Only a genuine
+    // user pick differs from both and is persisted.
     void TerminalPage::_OnClaudeTabColorChanged(const TerminalApp::Tab& tab)
     {
         if (!_sessionRegistry)
@@ -1232,7 +1250,11 @@ namespace winrt::TerminalApp::implementation
         }
         if (::Agentmaster::GetDirColor(dir) == newHex)
         {
-            return; // already in sync (our own launch/propagation write) -> no persist, no loop
+            return; // matches the persisted user color (our user-pick fan-out / a reset) -> no loop
+        }
+        if (newHex && ::Agentmaster::CurrentDirAutoColor(dir) == newHex)
+        {
+            return; // our own launch-time auto paint -> apply only, never persist (auto is ephemeral)
         }
         ::Agentmaster::SetDirColor(dir, newHex); // upsert the color, or drop it on reset
         _ApplyDirColorToTabs(dir, newHex); // every live tab in this dir tracks the change

@@ -18,6 +18,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <random>
 #include <string>
 
 namespace Agentmaster
@@ -30,6 +31,17 @@ namespace Agentmaster
         static Engine* const g = []() -> Engine* {
             auto* e = new Engine{};
             e->registry = std::make_shared<SessionRegistry>();
+
+            // Per-startup tab-color randomization + one-time dir-colors migration (Agentmaster). A
+            // fresh random seed each launch re-rolls the auto palette assignment (so the fleet looks
+            // different every run, and two open dirs never share a color — collision-avoided in
+            // AssignDirAutoColor), and the migration upgrades a v1 dir-colors.json (which mixed user
+            // picks with the old colliding auto colors) to v2 = user picks only. Process-global state.
+            {
+                std::random_device rd;
+                SeedDirColors((static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd()));
+                MigrateDirColorsToV2IfNeeded();
+            }
 
             // Observer: record every state change to a log file (and the debugger). Runs on a
             // bridge thread, so it must touch no XAML.
