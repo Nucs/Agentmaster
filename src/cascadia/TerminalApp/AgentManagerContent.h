@@ -391,7 +391,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch session" (dir) / "Resume session" (a found session id); disabled on a red box
+        winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
         winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr }; // Agentmaster (Codex-launch): the Claude<->Codex agent toggle before the box
         bool _launchCodex{ false }; // Agentmaster (Codex-launch): false = launch a Claude (default, unchanged); true = launch a managed Codex in the typed dir
         winrt::Windows::UI::Xaml::Controls::Button _forkBtn{ nullptr }; // Agentmaster: "Fork" — visible only when the box holds a FOUND session id

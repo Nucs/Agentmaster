@@ -86,7 +86,7 @@ namespace winrt::TerminalApp::implementation
         return c;
     }
 
-    // Agentmaster: launch a fresh Claude session (the Manager's "Launch session").
+    // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude").
     void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title)
     {
         _LaunchClaudeSession(workingDir, title, std::nullopt);

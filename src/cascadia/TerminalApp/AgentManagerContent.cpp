@@ -1227,7 +1227,7 @@ namespace winrt::TerminalApp::implementation
             bar.Children().Append(cwdCol);
 
             _launchBtn = Button{};
-            _launchBtn.Content(winrt::box_value(L"Launch session"));
+            _launchBtn.Content(winrt::box_value(L"Launch Claude"));
             _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
             bar.Children().Append(_launchBtn);
 
@@ -2467,7 +2467,7 @@ namespace winrt::TerminalApp::implementation
             // (and hint at GLOBAL) rather than implying the whole fleet is empty.
             const wchar_t* empty = (_treeScope == TreeScope::Local && haveLocal)
                                        ? L"No sessions in this window \x2014 Launch above, or switch to GLOBAL for all windows."
-                                       : L"No sessions yet \x2014 use Launch session above.";
+                                       : L"No sessions yet \x2014 use Launch Claude above.";
             _treeHost.Children().Append(Text(empty, 12, false, 0.6));
             return;
         }
@@ -5221,9 +5221,9 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster: paint the Launch box's validation underline + drive the launch/fork buttons.
-    // EMPTY -> neutral, "Launch session" enabled (defaults). A UUID -> session id: FOUND = green +
+    // EMPTY -> neutral, "Launch Claude" enabled (defaults). A UUID -> session id: FOUND = green +
     // "Resume session" enabled + Fork shown; NOT found = red + disabled. Otherwise a directory:
-    // EXISTS = neutral + "Launch session" enabled; MISSING = red + disabled. (Per the design: green
+    // EXISTS = neutral + "Launch Claude" enabled; MISSING = red + disabled. (Per the design: green
     // is reserved for a found session id; a valid folder stays neutral.)
     void AgentManagerContent::_ValidateLaunchBox()
     {
@@ -5283,7 +5283,7 @@ namespace winrt::TerminalApp::implementation
         {
             paint(0);
             _launchBtn.IsEnabled(true);
-            _launchBtn.Content(winrt::box_value(L"Launch session"));
+            _launchBtn.Content(winrt::box_value(L"Launch Claude"));
             showFork(false);
             return;
         }
@@ -5300,7 +5300,7 @@ namespace winrt::TerminalApp::implementation
         const bool exists = IsDir(NormPath(trimmed));
         paint(exists ? 0 : 2);
         _launchBtn.IsEnabled(exists);
-        _launchBtn.Content(winrt::box_value(L"Launch session"));
+        _launchBtn.Content(winrt::box_value(L"Launch Claude"));
         showFork(false);
     }
 
