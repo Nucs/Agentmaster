@@ -67,6 +67,11 @@ namespace
     constexpr double kSummaryMaxHFrac = 0.75; // never taller than THREE-QUARTERS of the pane
     constexpr double kSummaryDefMaxH = 480.0; // the original auto-height cap (px), still capped at 0.75*pane
 
+    // Summary-panel opacity: matches the badge above it (_root.Opacity) at rest, and fades FURTHER on
+    // hover so you can peek at the terminal content behind the panel.
+    constexpr double kSummaryRestOpacity = 0.55; // == the badge's rest opacity (the overlay panel above)
+    constexpr double kSummaryHoverOpacity = 0.30; // less opaque while the pointer is over the panel
+
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
@@ -1284,6 +1289,22 @@ namespace winrt::TerminalApp::implementation
         // Padding now lives on contentBorder (so the grips reach the panel edges).
         _summaryRoot.Child(layout);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
+        _summaryRoot.Opacity(kSummaryRestOpacity); // match the badge (the overlay panel above)
+        // Hover fades the panel further (peek at the terminal behind it). PointerExited fires only when
+        // the pointer truly leaves the panel — moving onto a child grip keeps the parent "entered" — so
+        // the faded state holds steadily while hovering anywhere on the panel (incl. resizing).
+        _summaryRoot.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (const auto self = weak.get())
+            {
+                self->_summaryRoot.Opacity(kSummaryHoverOpacity);
+            }
+        });
+        _summaryRoot.PointerExited([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (const auto self = weak.get())
+            {
+                self->_summaryRoot.Opacity(kSummaryRestOpacity);
+            }
+        });
         _ApplySummarySize(); // seed MaxWidth/scroll-MaxHeight from the (default/seeded) fractions
 
         // The live "ago" ticker for the times line. Tick fires on the UI thread; it self-stops once the
