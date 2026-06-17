@@ -7,6 +7,8 @@
 #include "NotificationEventArgs.g.h"
 #include "BasicPaneEvents.h"
 
+#include <functional> // Agentmaster: _summaryPaneSizeHandler (TAB_OVERLAY.md resize)
+
 namespace winrt::TerminalApp::implementation
 {
     struct TerminalSettingsCache;
@@ -45,9 +47,15 @@ namespace winrt::TerminalApp::implementation
         // element collapses the slot, so a non-Claude pane is visually unchanged.
         void SetAgentOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay);
         // Agentmaster (TAB_OVERLAY.md summary panel): install/clear a SECOND overlay — the summary
-        // panel — into a slot stacked BELOW the link badge (top-right). Its width is capped to 20% of
-        // the pane (re-sized on the wrapper's SizeChanged). Non-projected (call via get_self).
+        // panel — into a slot stacked BELOW the link badge (top-right). The overlay sizes ITSELF as a
+        // (resizable, persisted) fraction of the pane; this host just pushes the live pane size into it
+        // via SetSummaryPaneSizeHandler. Non-projected (call via get_self).
         void SetAgentSummaryOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay);
+        // Agentmaster (TAB_OVERLAY.md summary panel resize): the summary overlay sizes itself as a
+        // fraction of the PANE, so the host pushes the live pane size into it through this handler —
+        // called on the wrapper's SizeChanged AND once immediately on set (so an already-laid-out pane
+        // seeds it). Wired by _AttachClaudeOverlay. Non-projected (call via get_self).
+        void SetSummaryPaneSizeHandler(std::function<void(double, double)> handler);
         // Agentmaster: mark this pane's content as hosting a MANAGED Claude session (set on bind via
         // _AttachClaudeOverlay). toggleBroadcastInput EXCLUDES such panes — a Claude session's stdin is
         // driven by the orchestrator's injector / Flight Plan, never raw broadcast keystrokes, and a
@@ -96,7 +104,13 @@ namespace winrt::TerminalApp::implementation
         // top-right; _agentOverlaySlot hosts it (collapsed until SetAgentOverlay fills it).
         winrt::Windows::UI::Xaml::Controls::Grid _rootWrapper{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Border _agentOverlaySlot{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Border _agentSummarySlot{ nullptr }; // Agentmaster: summary panel slot (below the badge, max 20% pane width)
+        winrt::Windows::UI::Xaml::Controls::Border _agentSummarySlot{ nullptr }; // Agentmaster: summary panel slot (below the badge; the overlay self-sizes as a pane fraction)
+        // Agentmaster (TAB_OVERLAY.md resize): the wrapper's SizeChanged pushes the live pane size to
+        // the summary overlay through this sink. Held by shared_ptr so the grid's SizeChanged lambda can
+        // capture it by VALUE (not `this`) — the grid can outlive this content in the XAML tree, so a raw
+        // `this` capture would dangle; the captured std::function only weak-refs the overlay, so a fire
+        // after teardown is a safe no-op.
+        std::shared_ptr<std::function<void(double, double)>> _summaryPaneSizeHandler{};
         bool _agentManaged{ false }; // Agentmaster: hosts a managed Claude session -> excluded from broadcast input
         bool _suppressAutoClose{ false }; // Agentmaster: block closeOnExit auto-close (Claude sessions leave dead tab open)
         winrt::Microsoft::Terminal::TerminalConnection::ConnectionState _connectionState{ winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected };

@@ -157,6 +157,11 @@ namespace winrt::TerminalApp::implementation
         // per-session — seed this overlay with the current value, and wire the pencil to flip the global
         // setting (freshest-disk RMW) + broadcast live to every linked overlay in this window.
         overlay->SetSummaryEnabled(_appSettings.showSummaryPanel);
+        // Summary panel SIZE (TAB_OVERLAY.md resize): a GLOBAL setting
+        // (AppSettings::summaryPanelWidthFraction/HeightFraction) stored as fractions of the pane so it
+        // scales with the window. Seed this overlay with the current fractions; the grips persist a new
+        // size on drag release via the resize handler below.
+        overlay->SetSummarySize(_appSettings.summaryPanelWidthFraction, _appSettings.summaryPanelHeightFraction);
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {
@@ -165,11 +170,47 @@ namespace winrt::TerminalApp::implementation
                     self->_ToggleSummaryPanel();
                 }
             });
+            // A grip drag persists the new size GLOBALLY (the treeSort / archiveSplitFraction idiom): a
+            // freshest-disk read-modify-write of just these two fields, keep this window's in-memory copy
+            // in step (so a later cog Save can't regress it), then apply it LIVE to every linked overlay
+            // in this window. Other already-open windows adopt it on their next launch.
+            overlay->SetSummaryResizeHandler([weakThis](double wf, double hf) {
+                auto self = weakThis.get();
+                if (!self)
+                {
+                    return;
+                }
+                auto s = ::Agentmaster::LoadAppSettings();
+                s.summaryPanelWidthFraction = wf;
+                s.summaryPanelHeightFraction = hf;
+                ::Agentmaster::SaveAppSettings(s);
+                self->_appSettings.summaryPanelWidthFraction = wf;
+                self->_appSettings.summaryPanelHeightFraction = hf;
+                for (const auto& [id, ov] : self->_claudeOverlays)
+                {
+                    if (ov)
+                    {
+                        ov->SetSummarySize(wf, hf);
+                    }
+                }
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
             impl->SetAgentOverlay(overlay->Root());
             impl->SetAgentSummaryOverlay(overlay->SummaryRoot()); // 2nd slot: the pencil-toggled summary panel (TAB_OVERLAY.md)
+            {
+                // Push the live pane size into the overlay (on the wrapper's SizeChanged + once now) so it
+                // can size the summary panel as a fraction of the pane (TAB_OVERLAY.md resize). Weak so the
+                // pane handler can't keep the overlay alive past tab teardown.
+                auto weakOverlay = overlay->get_weak();
+                impl->SetSummaryPaneSizeHandler([weakOverlay](double w, double h) {
+                    if (const auto ov = weakOverlay.get())
+                    {
+                        ov->OnSummaryPaneSize(w, h);
+                    }
+                });
+            }
             impl->SetAgentManaged(true); // exclude this managed-session pane from broadcast input (item 2)
             _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");

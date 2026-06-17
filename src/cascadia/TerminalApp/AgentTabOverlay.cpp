@@ -12,6 +12,7 @@
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
+#include <winrt/Windows.UI.Core.h> // CoreWindow / CoreCursor (summary-panel resize-grip cursors)
 #include <winrt/Windows.UI.Text.h> // FontWeights
 #include <winrt/Windows.UI.Xaml.Documents.h> // Run / Inlines
 #include <winrt/Windows.UI.Xaml.Input.h> // PointerRoutedEventArgs
@@ -23,6 +24,7 @@
 #include <mmsystem.h> // PlaySoundW (row 3 copy/open confirmation chime)
 #pragma comment(lib, "winmm.lib")
 
+#include <algorithm> // std::clamp / std::min (summary-panel size fractions)
 #include <chrono> // DispatcherTimer interval (summary times-line ticker)
 #include <string>
 
@@ -32,6 +34,7 @@ using namespace winrt::Windows::Foundation;
 // AgentManagerContent gotcha / CLAUDE.md).
 using winrt::Windows::UI::Color;
 using winrt::Windows::UI::ColorHelper;
+using winrt::Windows::UI::Core::CoreCursorType; // summary-panel resize-grip cursors
 using namespace winrt::Windows::UI::Text; // FontWeights
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Controls;
@@ -53,9 +56,30 @@ namespace
     // in transcript content, so it's an unambiguous marker.
     constexpr wchar_t kSepMark = L'\x1F';
 
+    // Summary-panel resize bounds (TAB_OVERLAY.md), as FRACTIONS of the pane. The panel is anchored
+    // top-right: the left grip grows it leftward (width), the bottom grip downward (height). A 0 stored
+    // fraction means "auto" — width capped at kSummaryDefWFrac (the original 20%), height content-driven
+    // up to kSummaryDefMaxH. A drag pins an explicit fraction, clamped to these bands.
+    constexpr double kSummaryMinWFrac = 0.08; // never thinner than 8% of the pane
+    constexpr double kSummaryMaxWFrac = 0.50; // never wider than HALF the pane
+    constexpr double kSummaryDefWFrac = 0.20; // the original 20% cap when unset (auto)
+    constexpr double kSummaryMinHFrac = 0.06; // never shorter than 6% of the pane
+    constexpr double kSummaryMaxHFrac = 0.75; // never taller than THREE-QUARTERS of the pane
+    constexpr double kSummaryDefMaxH = 480.0; // the original auto-height cap (px), still capped at 0.75*pane
+
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
+    }
+
+    // Drive the window pointer cursor for the resize grips (no per-element cursor in this XAML
+    // projection — ProtectedCursor needs a subclass; the Manager/Archive splitters do the same).
+    void ApplyCursor(winrt::Windows::UI::Core::CoreCursorType type)
+    {
+        if (const auto w = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread())
+        {
+            w.PointerCursor(winrt::Windows::UI::Core::CoreCursor{ type, 0 });
+        }
     }
 
     // Color-matched to the Triage Board — now via the ONE shared palette (AgentStatusColors.h, the
@@ -1130,32 +1154,129 @@ namespace winrt::TerminalApp::implementation
         _summaryStack = StackPanel{};
         _summaryStack.Orientation(Orientation::Vertical);
 
-        ScrollViewer sv{};
-        sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-        sv.MaxHeight(480); // a long session can't run off the bottom of the pane
-        sv.Content(_summaryStack);
+        _summaryScroll = ScrollViewer{};
+        _summaryScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        _summaryScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        // No fixed MaxHeight here — the panel's height is RESIZABLE: _ApplySummarySize sets this
+        // viewport's MaxHeight from the (global, persisted) height fraction, defaulting to
+        // min(480, 0.75*pane). A long session scrolls past it.
+        _summaryScroll.Content(_summaryStack);
 
         StackPanel outer{}; // times (pinned) over the scrolling content
         outer.Orientation(Orientation::Vertical);
         outer.Children().Append(_summaryTimesText);
-        outer.Children().Append(sv);
+        outer.Children().Append(_summaryScroll);
+
+        // The padded content sits in its own inner border so the resize grips (siblings below) can hug
+        // the TRUE panel edges (outside the content's 8/6px inset) while the text keeps its padding.
+        Border contentBorder{};
+        contentBorder.Padding(ThicknessHelper::FromLengths(8, 6, 8, 6));
+        contentBorder.Child(outer);
+
+        // Resize grips (TAB_OVERLAY.md): the panel is anchored top-right, so the LEFT edge grows width,
+        // the BOTTOM edge grows height, and the BOTTOM-LEFT corner does both. Each is a thin,
+        // ~invisible-but-hit-testable strip that brightens + shows a resize cursor on hover. They live
+        // INSIDE _summaryRoot (a Grid child), so they collapse with the panel — no extra visibility wiring.
+        auto weak = get_weak();
+        const auto idleGrip = Fill(0x01, 0xFF, 0xFF, 0xFF); // ~invisible, yet hit-testable
+        const auto hotGrip = Fill(0x55, 0xC0, 0xC0, 0xC0); // subtle highlight on hover / drag
+        const auto wireGrip = [weak, idleGrip, hotGrip](const Border& grip, bool left, bool bottom, CoreCursorType cursor) {
+            grip.Background(idleGrip);
+            grip.PointerEntered([grip, hotGrip, cursor](const IInspectable&, const PointerRoutedEventArgs&) {
+                ApplyCursor(cursor);
+                grip.Background(hotGrip);
+            });
+            grip.PointerExited([weak, grip, idleGrip](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto self = weak.get(); self && self->_summaryDragging)
+                {
+                    return; // mid-drag the pointer may leave the thin grip — keep it hot
+                }
+                ApplyCursor(CoreCursorType::Arrow);
+                grip.Background(idleGrip);
+            });
+            grip.PointerPressed([weak, left, bottom, cursor](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                const auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                self->_summaryDragging = true;
+                self->_summaryDragLeft = left;
+                self->_summaryDragBottom = bottom;
+                const auto p = e.GetCurrentPoint(nullptr).Position(); // island-relative; only the delta matters
+                self->_summaryDragStartX = p.X;
+                self->_summaryDragStartY = p.Y;
+                self->_summaryDragStartW = self->_CurrentSummaryWidthPx();
+                self->_summaryDragStartH = self->_CurrentSummaryHeightPx();
+                if (const auto el = sender.try_as<UIElement>())
+                {
+                    el.CapturePointer(e.Pointer());
+                }
+                ApplyCursor(cursor);
+                e.Handled(true);
+            });
+            grip.PointerMoved([weak](const IInspectable&, const PointerRoutedEventArgs& e) {
+                const auto self = weak.get();
+                if (!self || !self->_summaryDragging)
+                {
+                    return;
+                }
+                const auto p = e.GetCurrentPoint(nullptr).Position();
+                self->_OnSummaryDragMove(p.X, p.Y);
+                e.Handled(true);
+            });
+            const auto endHandler = [weak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                if (const auto self = weak.get())
+                {
+                    self->_OnSummaryDragEnd(sender);
+                    e.Handled(true);
+                }
+            };
+            grip.PointerReleased(endHandler);
+            grip.PointerCaptureLost(endHandler);
+        };
+
+        Border leftGrip{};
+        leftGrip.Width(6);
+        leftGrip.HorizontalAlignment(HorizontalAlignment::Left);
+        leftGrip.VerticalAlignment(VerticalAlignment::Stretch);
+        wireGrip(leftGrip, true, false, CoreCursorType::SizeWestEast);
+
+        Border bottomGrip{};
+        bottomGrip.Height(6);
+        bottomGrip.HorizontalAlignment(HorizontalAlignment::Stretch);
+        bottomGrip.VerticalAlignment(VerticalAlignment::Bottom);
+        wireGrip(bottomGrip, false, true, CoreCursorType::SizeNorthSouth);
+
+        Border cornerGrip{};
+        cornerGrip.Width(14);
+        cornerGrip.Height(14);
+        cornerGrip.HorizontalAlignment(HorizontalAlignment::Left);
+        cornerGrip.VerticalAlignment(VerticalAlignment::Bottom);
+        wireGrip(cornerGrip, true, true, CoreCursorType::SizeNortheastSouthwest); // bottom-left corner == NE/SW diagonal
+
+        Grid layout{};
+        layout.Children().Append(contentBorder);
+        layout.Children().Append(leftGrip);
+        layout.Children().Append(bottomGrip);
+        layout.Children().Append(cornerGrip); // last == on top, so the corner wins over the edge grips
 
         _summaryRoot = Border{};
         _summaryRoot.Background(Fill(0xE6, 0x20, 0x20, 0x20)); // near-opaque dark, matching the badge
         _summaryRoot.BorderBrush(Fill(0x40, 0xFF, 0xFF, 0xFF));
         _summaryRoot.BorderThickness(ThicknessHelper::FromUniformLength(1));
         _summaryRoot.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
-        _summaryRoot.Padding(ThicknessHelper::FromLengths(8, 6, 8, 6));
-        _summaryRoot.Child(outer);
+        // Padding now lives on contentBorder (so the grips reach the panel edges).
+        _summaryRoot.Child(layout);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
+        _ApplySummarySize(); // seed MaxWidth/scroll-MaxHeight from the (default/seeded) fractions
 
         // The live "ago" ticker for the times line. Tick fires on the UI thread; it self-stops once the
         // overlay is gone (weak), so a closed tab never leaks a ticking timer (and we never Stop() it off
         // the UI thread from the dtor). Started/stopped by SetSummaryEnabled.
         _summaryTimer = DispatcherTimer{};
         _summaryTimer.Interval(std::chrono::seconds(5));
-        auto weak = get_weak();
+        // (reuses the `weak` captured above for the grip handlers)
         _summaryTimer.Tick([weak](const IInspectable& sender, const IInspectable&) {
             if (auto self = weak.get())
             {
@@ -1166,6 +1287,110 @@ namespace winrt::TerminalApp::implementation
                 t.Stop(); // overlay destroyed — stop ticking (UI thread, safe)
             }
         });
+    }
+
+    // The panel's current effective MAX WIDTH in px: an explicit width fraction (clamped to band) times
+    // the pane width, or the 20% default when unset. 0 until the host has pushed a pane size.
+    double AgentTabOverlay::_CurrentSummaryWidthPx() const
+    {
+        const double wf = (_summaryWidthFraction > 0.0) ? std::clamp(_summaryWidthFraction, kSummaryMinWFrac, kSummaryMaxWFrac) : kSummaryDefWFrac;
+        return (_summaryPaneW > 0.0) ? wf * _summaryPaneW : 0.0;
+    }
+
+    // The scroll viewport's current effective MAX HEIGHT in px: an explicit height fraction (clamped)
+    // times the pane height, or the original auto cap min(480, 0.75*pane). Always sane (defaults to 480).
+    double AgentTabOverlay::_CurrentSummaryHeightPx() const
+    {
+        if (_summaryHeightFraction > 0.0 && _summaryPaneH > 0.0)
+        {
+            return std::clamp(_summaryHeightFraction, kSummaryMinHFrac, kSummaryMaxHFrac) * _summaryPaneH;
+        }
+        return (_summaryPaneH > 0.0) ? std::min(kSummaryDefMaxH, kSummaryMaxHFrac * _summaryPaneH) : kSummaryDefMaxH;
+    }
+
+    // Re-apply the panel size from the (global) fractions + the cached pane size. WIDTH is a MaxWidth
+    // cap on the panel border — the wrapping monospace body fills to it, and since the panel hugs the
+    // top-right the growth is leftward. HEIGHT is the scroll viewport's MaxHeight — the body scrolls
+    // past it. Called on a fraction change (SetSummarySize), a pane resize (OnSummaryPaneSize), and live
+    // during a grip drag, so the panel stays a constant % of the pane as the window resizes.
+    void AgentTabOverlay::_ApplySummarySize()
+    {
+        if (!_summaryRoot)
+        {
+            return;
+        }
+        if (const double wpx = _CurrentSummaryWidthPx(); wpx > 0.0)
+        {
+            _summaryRoot.MaxWidth(wpx);
+        }
+        if (_summaryScroll)
+        {
+            _summaryScroll.MaxHeight(_CurrentSummaryHeightPx());
+        }
+    }
+
+    void AgentTabOverlay::OnSummaryPaneSize(double paneWidth, double paneHeight)
+    {
+        _summaryPaneW = paneWidth;
+        _summaryPaneH = paneHeight;
+        _ApplySummarySize();
+    }
+
+    void AgentTabOverlay::SetSummarySize(double widthFraction, double heightFraction)
+    {
+        // Page-driven mirror of the GLOBAL AppSettings size fractions — on attach (seed) and on a resize
+        // anywhere (broadcast). Pure apply; never calls the resize handler (so a broadcast can't loop).
+        _summaryWidthFraction = widthFraction;
+        _summaryHeightFraction = heightFraction;
+        _ApplySummarySize();
+    }
+
+    void AgentTabOverlay::SetSummaryResizeHandler(std::function<void(double, double)> handler)
+    {
+        _onResizeSummary = std::move(handler);
+    }
+
+    // Live grip drag: translate the pointer delta (island-relative; only the delta matters) into the
+    // dragged size fraction(s), clamped to band, and re-apply. The panel is anchored top-right, so the
+    // LEFT edge widens as the pointer moves left and the BOTTOM edge grows as it moves down.
+    void AgentTabOverlay::_OnSummaryDragMove(double pointerX, double pointerY)
+    {
+        if (!_summaryDragging)
+        {
+            return;
+        }
+        if (_summaryDragLeft && _summaryPaneW > 0.0)
+        {
+            const double newW = _summaryDragStartW - (pointerX - _summaryDragStartX);
+            _summaryWidthFraction = std::clamp(newW / _summaryPaneW, kSummaryMinWFrac, kSummaryMaxWFrac);
+        }
+        if (_summaryDragBottom && _summaryPaneH > 0.0)
+        {
+            const double newH = _summaryDragStartH + (pointerY - _summaryDragStartY);
+            _summaryHeightFraction = std::clamp(newH / _summaryPaneH, kSummaryMinHFrac, kSummaryMaxHFrac);
+        }
+        _ApplySummarySize();
+    }
+
+    // Grip release: drop pointer capture, restore the cursor, and persist the new size GLOBALLY (the
+    // page does the freshest-disk RMW + the live broadcast to every linked overlay in the window). The
+    // fractions are already band-clamped by _OnSummaryDragMove.
+    void AgentTabOverlay::_OnSummaryDragEnd(const IInspectable& sender)
+    {
+        if (!_summaryDragging)
+        {
+            return; // a capture-lost echo of our own release, or a stray event
+        }
+        _summaryDragging = false; // clear BEFORE releasing capture so the re-entrant CaptureLost no-ops
+        if (const auto el = sender.try_as<UIElement>())
+        {
+            el.ReleasePointerCaptures();
+        }
+        ApplyCursor(CoreCursorType::Arrow);
+        if (_onResizeSummary)
+        {
+            _onResizeSummary(_summaryWidthFraction, _summaryHeightFraction);
+        }
     }
 
     // Re-render the times line ("age 2d4h12m, last user msg 34m, last activity 1m13s") from the cached

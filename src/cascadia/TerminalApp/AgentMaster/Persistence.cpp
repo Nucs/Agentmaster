@@ -432,6 +432,8 @@ namespace Agentmaster
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
+        o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
+        o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
         auto hidden = json::Value::MkArr();
         for (const auto& id : s.hiddenSessionIds)
         {
@@ -466,6 +468,16 @@ namespace Agentmaster
             // must not collapse a pane (fall back to the 50/50 default instead).
             const double f = v.NumAt(L"archiveSplitFraction", 0.5);
             s.archiveSplitFraction = (f > 0.05 && f < 0.95) ? f : 0.5;
+        }
+        {
+            // Summary panel size fractions (TAB_OVERLAY.md): 0 == "auto" (the original look). A stored
+            // explicit fraction must be within the same band the resize grips clamp to — width
+            // (0.08, 0.5], height (0.06, 0.75] — else fall back to 0 (auto), so a corrupt value can't
+            // wedge the panel at a degenerate size.
+            const double wf = v.NumAt(L"summaryPanelWidthFraction", 0.0);
+            s.summaryPanelWidthFraction = (wf >= 0.08 && wf <= 0.5) ? wf : 0.0;
+            const double hf = v.NumAt(L"summaryPanelHeightFraction", 0.0);
+            s.summaryPanelHeightFraction = (hf >= 0.06 && hf <= 0.75) ? hf : 0.0;
         }
         if (const auto* h = v.Find(L"hiddenSessionIds"); h && h->type == json::Value::Type::Arr)
         {

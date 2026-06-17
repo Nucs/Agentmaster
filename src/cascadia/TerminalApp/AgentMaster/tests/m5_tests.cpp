@@ -1503,6 +1503,8 @@ static void TestAppSettings()
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
+        in.summaryPanelWidthFraction = 0.4; // in-band (0.08..0.5)
+        in.summaryPanelHeightFraction = 0.6; // in-band (0.06..0.75)
         in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to 5
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
@@ -1517,6 +1519,8 @@ static void TestAppSettings()
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
+        CHECK(out.summaryPanelWidthFraction > 0.399 && out.summaryPanelWidthFraction < 0.401, "settings summaryPanelWidthFraction round-trip");
+        CHECK(out.summaryPanelHeightFraction > 0.599 && out.summaryPanelHeightFraction < 0.601, "settings summaryPanelHeightFraction round-trip");
         CHECK(out.waitingDecayMinutes == 0u, "settings waitingDecayMinutes stored 0 (= never) round-trips as 0");
         CHECK(out.hiddenSessionIds.size() == 2 &&
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
@@ -1530,6 +1534,7 @@ static void TestAppSettings()
         CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
         CHECK(out.defaultAutopilotMode == AutopilotMode::Off && out.maxAutoSends == 100u, "settings autopilot defaults on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
+        CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");
         CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
@@ -1553,6 +1558,23 @@ static void TestAppSettings()
         CHECK(lo.archiveSplitFraction > 0.499 && lo.archiveSplitFraction < 0.501, "settings archiveSplitFraction clamped (too small)");
         const auto hi = DeserializeAppSettings(L"{\"settings\":{\"archiveSplitFraction\":1.5}}");
         CHECK(hi.archiveSplitFraction > 0.499 && hi.archiveSplitFraction < 0.501, "settings archiveSplitFraction clamped (too large)");
+    }
+
+    // summaryPanel size fractions (TAB_OVERLAY.md resize): an in-band value is honored; 0 (auto) or an
+    // out-of-band/corrupt value falls back to 0 (auto), so a bad value can't wedge the panel at a
+    // degenerate size. Bands: width (0.08, 0.5], height (0.06, 0.75].
+    {
+        const auto ok = DeserializeAppSettings(L"{\"settings\":{\"summaryPanelWidthFraction\":0.45,\"summaryPanelHeightFraction\":0.7}}");
+        CHECK(ok.summaryPanelWidthFraction > 0.449 && ok.summaryPanelWidthFraction < 0.451, "settings summaryPanelWidthFraction honored in-band");
+        CHECK(ok.summaryPanelHeightFraction > 0.699 && ok.summaryPanelHeightFraction < 0.701, "settings summaryPanelHeightFraction honored in-band");
+        const auto zero = DeserializeAppSettings(L"{\"settings\":{\"summaryPanelWidthFraction\":0,\"summaryPanelHeightFraction\":0}}");
+        CHECK(zero.summaryPanelWidthFraction == 0.0 && zero.summaryPanelHeightFraction == 0.0, "settings summaryPanel size 0 (auto) preserved");
+        const auto wide = DeserializeAppSettings(L"{\"settings\":{\"summaryPanelWidthFraction\":0.9}}");
+        CHECK(wide.summaryPanelWidthFraction == 0.0, "settings summaryPanelWidthFraction out-of-band (too wide) -> 0 (auto)");
+        const auto tall = DeserializeAppSettings(L"{\"settings\":{\"summaryPanelHeightFraction\":0.95}}");
+        CHECK(tall.summaryPanelHeightFraction == 0.0, "settings summaryPanelHeightFraction out-of-band (too tall) -> 0 (auto)");
+        const auto tiny = DeserializeAppSettings(L"{\"settings\":{\"summaryPanelWidthFraction\":0.02}}");
+        CHECK(tiny.summaryPanelWidthFraction == 0.0, "settings summaryPanelWidthFraction out-of-band (too thin) -> 0 (auto)");
     }
 }
 

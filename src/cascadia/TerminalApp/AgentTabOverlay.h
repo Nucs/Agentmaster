@@ -82,6 +82,21 @@ namespace winrt::TerminalApp::implementation
         // broadcast. Set by _AttachClaudeOverlay.
         void SetSummaryToggleHandler(std::function<void()> handler);
 
+        // Agentmaster (TAB_OVERLAY.md summary panel resize): the panel SIZE is a GLOBAL setting
+        // (AppSettings::summaryPanelWidthFraction/HeightFraction), stored as FRACTIONS of the pane so it
+        // scales with the window. The page seeds this overlay (on attach) and broadcasts (when ANY tab
+        // resizes the panel); the overlay applies fraction*paneSize. 0 == "auto" (the original look).
+        // Call on the UI thread.
+        void SetSummarySize(double widthFraction, double heightFraction);
+        // The host (TerminalPaneContent) pushes the live PANE size here — on its wrapper's SizeChanged
+        // and once on wire — so the overlay can convert the size fractions to pixels and re-apply when
+        // the window resizes (keeping the panel a constant % of the pane). Call on the UI thread.
+        void OnSummaryPaneSize(double paneWidth, double paneHeight);
+        // The resize grips flip the GLOBAL fractions; the overlay can't reach AppSettings, so on drag
+        // release it calls this handler (wired by the page) to do the freshest-disk read-modify-write +
+        // the live broadcast to every linked overlay in the window. Set by _AttachClaudeOverlay.
+        void SetSummaryResizeHandler(std::function<void(double, double)> handler);
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
@@ -94,6 +109,11 @@ namespace winrt::TerminalApp::implementation
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules
         void _UpdateTimesLine(); // re-render the live "age / last user msg / last activity" ago line (DispatcherTimer-driven)
         void _ApplySummaryVisibility(); // show the 2nd pane only when enabled AND non-empty (content rows or a times line); else collapse it
+        void _ApplySummarySize(); // re-apply the panel width (MaxWidth) + height (scroll MaxHeight) from the size fractions + cached pane size
+        double _CurrentSummaryWidthPx() const; // the panel's current effective max width in px (fraction*pane, or the 20% default)
+        double _CurrentSummaryHeightPx() const; // the scroll viewport's current effective max height in px (fraction*pane, or min(480, 0.75*pane))
+        void _OnSummaryDragMove(double pointerX, double pointerY); // live grip-drag: update the dragged size fraction(s) from the pointer delta + re-apply
+        void _OnSummaryDragEnd(const winrt::Windows::Foundation::IInspectable& sender); // grip-drag release: release pointer capture + persist via the resize handler
         void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
         winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime); // analyze + render off-thread, set text on the UI thread
@@ -128,5 +148,22 @@ namespace winrt::TerminalApp::implementation
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
+
+        // Summary panel RESIZE (TAB_OVERLAY.md): the panel is anchored top-right; left/bottom/corner
+        // grips drag it bigger (left=width, bottom=height, corner=both). Size is kept as FRACTIONS of
+        // the pane (0 == auto) so it scales with the window; the page persists them GLOBALLY.
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _summaryScroll{ nullptr }; // the body scroller — its MaxHeight is the panel's height control
+        double _summaryWidthFraction{ 0.0 }; // 0 == auto (20% cap); else explicit width fraction of the pane (0.08..0.5)
+        double _summaryHeightFraction{ 0.0 }; // 0 == auto (content up to min(480,0.75*pane)); else explicit height fraction (0.06..0.75)
+        double _summaryPaneW{ 0.0 }; // last pane width pushed by the host (px)
+        double _summaryPaneH{ 0.0 }; // last pane height pushed by the host (px)
+        bool _summaryDragging{ false }; // a grip drag is in flight
+        bool _summaryDragLeft{ false }; // the in-flight drag adjusts width (left edge / corner)
+        bool _summaryDragBottom{ false }; // the in-flight drag adjusts height (bottom edge / corner)
+        double _summaryDragStartX{ 0.0 }; // pointer X at press (island-relative)
+        double _summaryDragStartY{ 0.0 }; // pointer Y at press
+        double _summaryDragStartW{ 0.0 }; // panel width px at press
+        double _summaryDragStartH{ 0.0 }; // scroll viewport height px at press
+        std::function<void(double, double)> _onResizeSummary; // grip release -> page (persist the fractions globally + broadcast)
     };
 }

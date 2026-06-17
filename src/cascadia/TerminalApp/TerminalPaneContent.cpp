@@ -83,13 +83,21 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(summary);
             grid.Children().Append(stack);
 
-            // Cap the summary panel to 20% of the pane width, re-evaluated as the pane resizes (weak
-            // capture: the handler lives on the grid, so it must not keep its own descendant alive).
-            auto weakSummary = winrt::make_weak(summary);
-            grid.SizeChanged([weakSummary](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::SizeChangedEventArgs& e) {
-                if (const auto s = weakSummary.get())
+            // Agentmaster (TAB_OVERLAY.md resize): the summary overlay sizes ITSELF as a resizable,
+            // globally-persisted FRACTION of the pane (left/bottom/corner grips), so push the live pane
+            // size into it on every wrapper resize — the overlay re-applies fraction*size, keeping the
+            // panel a constant % as the window resizes. The sink is a shared_ptr captured BY VALUE (not
+            // `this`): the grid can outlive this content in the XAML tree, so a raw `this` capture would
+            // dangle; the captured std::function only weak-refs the overlay (set by _AttachClaudeOverlay).
+            if (!_summaryPaneSizeHandler)
+            {
+                _summaryPaneSizeHandler = std::make_shared<std::function<void(double, double)>>();
+            }
+            auto handlerPtr = _summaryPaneSizeHandler;
+            grid.SizeChanged([handlerPtr](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::SizeChangedEventArgs& e) {
+                if (handlerPtr && *handlerPtr)
                 {
-                    s.MaxWidth(e.NewSize().Width * 0.2);
+                    (*handlerPtr)(e.NewSize().Width, e.NewSize().Height);
                 }
             });
 
@@ -119,6 +127,27 @@ namespace winrt::TerminalApp::implementation
         {
             _agentSummarySlot.Child(overlay);
             _agentSummarySlot.Visibility(overlay ? Visibility::Visible : Visibility::Collapsed);
+        }
+    }
+    // Agentmaster (TAB_OVERLAY.md summary panel resize): store the pane-size sink and feed it the
+    // current size NOW — the wrapper's SizeChanged may not fire again for an already-laid-out pane, so
+    // without this seed the overlay couldn't convert its size fractions to pixels until the next resize.
+    void TerminalPaneContent::SetSummaryPaneSizeHandler(std::function<void(double, double)> handler)
+    {
+        GetRoot(); // ensure the wrapper exists (and the shared sink is allocated)
+        if (!_summaryPaneSizeHandler)
+        {
+            _summaryPaneSizeHandler = std::make_shared<std::function<void(double, double)>>();
+        }
+        *_summaryPaneSizeHandler = std::move(handler);
+        if (*_summaryPaneSizeHandler && _rootWrapper)
+        {
+            const double w = _rootWrapper.ActualWidth();
+            const double h = _rootWrapper.ActualHeight();
+            if (w > 0.0 && h > 0.0)
+            {
+                (*_summaryPaneSizeHandler)(w, h);
+            }
         }
     }
     winrt::Windows::Foundation::Size TerminalPaneContent::MinimumSize()

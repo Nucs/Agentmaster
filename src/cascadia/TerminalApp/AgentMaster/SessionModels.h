@@ -315,6 +315,17 @@ namespace Agentmaster
         // tab flips this one value (a freshest-disk read-modify-write), every linked overlay in the
         // window applies it live, and it seeds every window on launch. Default ON (panel shown).
         bool showSummaryPanel{ true };
+        // Agentmaster (TAB_OVERLAY.md summary panel): the panel's SIZE, stored as FRACTIONS of the
+        // pane (so it scales with the window — the archiveSplitFraction idiom). The panel is anchored
+        // top-right; the user drags its LEFT edge (width), BOTTOM edge (height), or BOTTOM-LEFT corner
+        // (both). 0 == "auto" — the original look (width capped at 20% of the pane, height content-
+        // driven up to a modest cap); a drag pins an explicit fraction. Width is clamped to (0.08, 0.5)
+        // — at most HALF the pane wide; height to (0.06, 0.75) — at most THREE-QUARTERS of the pane
+        // tall. GLOBAL like showSummaryPanel: written by the resize grips (freshest-disk RMW),
+        // broadcast live to every linked overlay in the window, and seeds every window on launch.
+        // Default 0 (a no-op default — the pre-resize behavior).
+        double summaryPanelWidthFraction{ 0.0 };
+        double summaryPanelHeightFraction{ 0.0 };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };

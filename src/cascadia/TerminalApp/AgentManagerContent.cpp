@@ -4744,6 +4744,15 @@ namespace winrt::TerminalApp::implementation
             }
             _appSettings.recentDirsLimit = (any && v > 0) ? v : 10; // empty/zero/garbage -> default
         }
+        // Preserve fields owned by out-of-cog UI actions, freshest from disk (the page's settings handler
+        // does the same for hiddenSessionIds/showSummaryPanel): the summary panel SIZE (width/height
+        // fractions, TAB_OVERLAY.md) is written by the panel's resize grips, not this form, so a form Save
+        // must not regress a resize done since the modal was seeded (incl. from another window).
+        {
+            const auto disk = ::Agentmaster::LoadAppSettings();
+            _appSettings.summaryPanelWidthFraction = disk.summaryPanelWidthFraction;
+            _appSettings.summaryPanelHeightFraction = disk.summaryPanelHeightFraction;
+        }
         if (_settingsSink)
         {
             _settingsSink(_appSettings); // page persists + applies to future spawns
