@@ -247,7 +247,7 @@
     <value>Rename tab (F2)</value>
   </data>
   <data name="DuplicateTabText" xml:space="preserve">
-    <value>Duplicate tab</value>
+    <value>Duplicate session</value>
   </data>
   <data name="InvalidMediaResource" xml:space="preserve">
     <value>One or more resources (such as icon or backgroundImage) specified in your settings could not be found.</value>
