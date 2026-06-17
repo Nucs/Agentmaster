@@ -486,7 +486,32 @@ What works, by area:
   (Rule #13: a pid-validated FACT) — the IDLE counterpart to the same `busy` reading that elsewhere only
   ever HELD Running; proved live (session `d271a31f`). `ParseTranscriptDelta` now also emits
   a `ToolResult` marker (a tool completed → it answers the pending question) that does NOT count as a
-  run-repair turn event.
+  run-repair turn event. **Subagent / fork activity — the out-of-band `Running` mirror
+  (`recon-subagent`).** A turn that delegates to a Task/Agent **subagent** leaves the tailed parent
+  `<id>.jsonl` **quiescent** while the work streams to a SIDE file
+  (`projects/<proj>/<id>/subagents/agent-<agentId>.jsonl` — shares the parent's `sessionId`,
+  `isSidechain:true`, linked to the parent's `Agent` tool_use by `<agentId>.meta.json` `toolUseId`;
+  empirically the parent does NOT grow for the whole subagent run — Claude Code v2.1.x); a live
+  `/fork`|`/clear`|`/compact`|`/resume` likewise moves the work to a NEW conversation id the pid-keyed
+  presence heartbeat already tracks — so the tab wrongly read **Idle/`WaitingForInput`**. Two
+  out-of-band signals (read-only, never screen-scraped) recover "still working":
+  `ProcessInspect::SubagentActivityUnixMs` (newest write across `<id>/subagents/*.jsonl` +
+  `<id>/tool-results/*` — FILES enumerated, since Windows doesn't bump a dir mtime on a child append)
+  and `PresenceIsBusy(SessionInfo.presenceStatus)` (claude's own pid-validated **`busy`** heartbeat —
+  the BUSY half whose IDLE counterpart is (e) above). Both fold into the scanner's quiescence clock — a
+  fresh subagent write counts as a recent transcript write, and `busy` forces `quietForMs`→0 — so
+  (a)/(b)'s missed-Stop / blocked-on-user synths can't demote a working session, and `busy` also blocks
+  the Waiting→Idle decay (`_maybeDecayWaiting`). `ShouldSynthesizeRunningFromExternalWork` then promotes
+  an Idle/`WaitingForInput` session → **`Running`** (synthesized as `PostToolUse`, so no
+  `++queuedPrompts`; logged `[recon-subagent]`) — the `recon-run` mirror for work OUTSIDE the parent
+  transcript. BOTH arms are gated on a **non-terminal** tail (subagent freshness window
+  `kScanSubagentFreshMs` 15s): a subagent's final write lands µs BEFORE the parent's `end_turn` and
+  `busy` lingers a tick after a real `Stop`, so a TERMINAL tail (the turn truly ended) must never bounce
+  a settled session back to Running. `TranscriptTimesIn` also folds the newest subagent mtime into
+  `convLastActivityUnixMs`, so the per-tab overlay's `-lastActivityAgo` reflects subagent writes instead
+  of reading stale. The pure gates (`PresenceIsBusy` / `ShouldSynthesizeRunningFromExternalWork`) are
+  unit-tested (m5_tests). No UI code changed — this feeds the existing state→overlay→tab-dot pipe a
+  corrected `Running`.
 - **Adopt any `claude` — observe + control of sessions we did NOT Launch.** A `claude` you
   type yourself into any tab (the WT `+` button → `cd` → `claude`) is managed too, not just
   Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env
