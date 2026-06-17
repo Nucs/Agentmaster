@@ -526,6 +526,7 @@ namespace winrt::TerminalApp::implementation
                     const auto disk = ::Agentmaster::LoadAppSettings();
                     s.hiddenSessionIds = disk.hiddenSessionIds;
                     s.showSummaryPanel = disk.showSummaryPanel;
+                    s.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
                 }
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);

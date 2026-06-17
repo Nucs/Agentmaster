@@ -4829,6 +4829,7 @@ namespace winrt::TerminalApp::implementation
             const auto disk = ::Agentmaster::LoadAppSettings();
             _appSettings.summaryPanelWidthFraction = disk.summaryPanelWidthFraction;
             _appSettings.summaryPanelHeightFraction = disk.summaryPanelHeightFraction;
+            _appSettings.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
         }
         if (_settingsSink)
         {

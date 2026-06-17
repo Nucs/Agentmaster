@@ -1506,6 +1506,7 @@ static void TestAppSettings()
         in.archiveSplitFraction = 0.33;
         in.summaryPanelWidthFraction = 0.4; // in-band (0.08..0.5)
         in.summaryPanelHeightFraction = 0.6; // in-band (0.06..0.75)
+        in.summaryPanelWrapNewlines = true; // non-default (default false = the literal-\n look)
         in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to 5
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
@@ -1523,6 +1524,7 @@ static void TestAppSettings()
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
         CHECK(out.summaryPanelWidthFraction > 0.399 && out.summaryPanelWidthFraction < 0.401, "settings summaryPanelWidthFraction round-trip");
         CHECK(out.summaryPanelHeightFraction > 0.599 && out.summaryPanelHeightFraction < 0.601, "settings summaryPanelHeightFraction round-trip");
+        CHECK(out.summaryPanelWrapNewlines == true, "settings summaryPanelWrapNewlines round-trip");
         CHECK(out.waitingDecayMinutes == 0u, "settings waitingDecayMinutes stored 0 (= never) round-trips as 0");
         CHECK(out.hiddenSessionIds.size() == 2 &&
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
@@ -1537,6 +1539,7 @@ static void TestAppSettings()
         CHECK(out.defaultAutopilotMode == AutopilotMode::Off && out.maxAutoSends == 100u, "settings autopilot defaults on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");
+        CHECK(out.summaryPanelWrapNewlines == false, "settings summaryPanelWrapNewlines default false (literal-\\n look) on empty");
         CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");

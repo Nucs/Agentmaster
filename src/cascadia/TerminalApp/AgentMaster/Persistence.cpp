@@ -453,6 +453,7 @@ namespace Agentmaster
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
+        o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
@@ -486,6 +487,7 @@ namespace Agentmaster
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
+        s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value

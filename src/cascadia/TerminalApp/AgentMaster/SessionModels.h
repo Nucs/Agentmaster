@@ -344,6 +344,13 @@ namespace Agentmaster
         // Default 0 (a no-op default — the pre-resize behavior).
         double summaryPanelWidthFraction{ 0.0 };
         double summaryPanelHeightFraction{ 0.0 };
+        // Agentmaster (TAB_OVERLAY.md summary panel): how the panel renders newlines INSIDE a message.
+        // false (default) == the session-end.js look: each message is collapsed to ONE line, real
+        // newlines escaped to a literal "\n" (and tabs to "\t"). true == preserve the message's real
+        // newlines so a multi-line prompt reads as multiple lines. GLOBAL like showSummaryPanel — toggled
+        // by the wrap-line icon at the right of the panel's times bar (a freshest-disk RMW), broadcast
+        // live to every linked overlay in the window, and seeds every window on launch.
+        bool summaryPanelWrapNewlines{ false };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };

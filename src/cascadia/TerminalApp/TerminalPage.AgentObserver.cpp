@@ -281,12 +281,22 @@ namespace winrt::TerminalApp::implementation
         // scales with the window. Seed this overlay with the current fractions; the grips persist a new
         // size on drag release via the resize handler below.
         overlay->SetSummarySize(_appSettings.summaryPanelWidthFraction, _appSettings.summaryPanelHeightFraction);
+        // Summary panel newline-wrap mode (TAB_OVERLAY.md): a GLOBAL setting
+        // (AppSettings::summaryPanelWrapNewlines) — seed this overlay with the current value; the wrap-line
+        // toggle at the right of the panel's times bar flips it via the handler below.
+        overlay->SetSummaryWrapNewlines(_appSettings.summaryPanelWrapNewlines);
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {
                 if (auto self = weakThis.get())
                 {
                     self->_ToggleSummaryPanel();
+                }
+            });
+            overlay->SetSummaryWrapToggleHandler([weakThis]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_ToggleSummaryWrap();
                 }
             });
             // A grip drag persists the new size GLOBALLY (the treeSort / archiveSplitFraction idiom): a
@@ -354,6 +364,28 @@ namespace winrt::TerminalApp::implementation
             if (ov)
             {
                 ov->SetSummaryEnabled(next);
+            }
+        }
+    }
+
+    // Agentmaster (TAB_OVERLAY.md summary panel): the wrap-line toggle in the panel's times bar flips
+    // whether messages keep their real newlines (multi-line) or collapse to a literal "\n". Like the
+    // pencil/showSummaryPanel, it is a GLOBAL setting (AppSettings::summaryPanelWrapNewlines) shared
+    // across windows and persisted: a freshest-disk read-modify-write of just this field (so a concurrent
+    // cog Save / another window can't be clobbered), keep this window's in-memory copy in step, then apply
+    // it LIVE to every linked overlay in this window (other already-open windows adopt it on next launch).
+    void TerminalPage::_ToggleSummaryWrap()
+    {
+        auto s = ::Agentmaster::LoadAppSettings();
+        const bool next = !s.summaryPanelWrapNewlines;
+        s.summaryPanelWrapNewlines = next;
+        ::Agentmaster::SaveAppSettings(s);
+        _appSettings.summaryPanelWrapNewlines = next;
+        for (const auto& [id, ov] : _claudeOverlays)
+        {
+            if (ov)
+            {
+                ov->SetSummaryWrapNewlines(next);
             }
         }
     }

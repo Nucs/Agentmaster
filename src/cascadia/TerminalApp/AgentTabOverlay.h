@@ -82,6 +82,17 @@ namespace winrt::TerminalApp::implementation
         // broadcast. Set by _AttachClaudeOverlay.
         void SetSummaryToggleHandler(std::function<void()> handler);
 
+        // Agentmaster (TAB_OVERLAY.md summary panel): whether the panel preserves a message's real
+        // newlines (true) or collapses each message to one line with a literal "\n" (false, the default
+        // session-end.js look). A GLOBAL setting (AppSettings::summaryPanelWrapNewlines), mirrored in here
+        // by the page — on attach (seed) and on every wrap-toggle (broadcast to every linked overlay in
+        // the window). Re-renders the panel (the flag is baked into the rendered text). Call on the UI thread.
+        void SetSummaryWrapNewlines(bool on);
+        // The wrap-line toggle (right of the times bar) flips the GLOBAL setting; the overlay can't reach
+        // AppSettings, so it calls this handler (wired by the page) to do the freshest-disk read-modify-
+        // write + the live broadcast. Set by _AttachClaudeOverlay.
+        void SetSummaryWrapToggleHandler(std::function<void()> handler);
+
         // Agentmaster (TAB_OVERLAY.md summary panel resize): the panel SIZE is a GLOBAL setting
         // (AppSettings::summaryPanelWidthFraction/HeightFraction), stored as FRACTIONS of the pane so it
         // scales with the window. The page seeds this overlay (on attach) and broadcasts (when ANY tab
@@ -115,8 +126,10 @@ namespace winrt::TerminalApp::implementation
         void _OnSummaryDragMove(double pointerX, double pointerY); // live grip-drag: update the dragged size fraction(s) from the pointer delta + re-apply
         void _OnSummaryDragEnd(const winrt::Windows::Foundation::IInspectable& sender); // grip-drag release: release pointer capture + persist via the resize handler
         void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
+        void _ToggleSummaryWrap(); // wrap-line button: invoke the page handler (flips the GLOBAL summaryPanelWrapNewlines)
+        void _UpdateSummaryWrapButtonVisual(); // recolor the wrap-line icon: dim (off) / lighter (on), per _summaryWrapNewlines
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
-        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime); // analyze + render off-thread, set text on the UI thread
+        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n), set text on the UI thread
 
         std::wstring _sessionId;
         bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
@@ -137,7 +150,8 @@ namespace winrt::TerminalApp::implementation
         // Summary panel (the 2nd slot): a scrollable box, shown while the global showSummaryPanel is ON.
         // The body is a StackPanel (not one TextBlock) so separators can be full-width Border rules.
         winrt::Windows::UI::Xaml::Controls::Border _summaryRoot{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTimesText{ nullptr }; // pinned top: the live "ago" times line
+        winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTimesText{ nullptr }; // pinned top (left): the live "ago" times line
+        winrt::Windows::UI::Xaml::Controls::FontIcon _summaryWrapIcon{ nullptr }; // pinned top (right): the wrap-line toggle glyph — recolored by _UpdateSummaryWrapButtonVisual
         winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
         winrt::Windows::UI::Xaml::DispatcherTimer _summaryTimer{ nullptr }; // drives the live times line; self-stops when the overlay is gone
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
@@ -146,8 +160,11 @@ namespace winrt::TerminalApp::implementation
         int64_t _summaryLastUserMs{ 0 }; // times line: last real user prompt (unix ms) — "last user msg"
         int64_t _summaryLastActivityMs{ 0 }; // times line: last transcript entry (unix ms) — "last activity"
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
+        bool _summaryWrapDirty{ false }; // a wrap-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
+        bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
+        std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
 
         // Summary panel RESIZE (TAB_OVERLAY.md): the panel is anchored top-right; left/bottom/corner
         // grips drag it bigger (left=width, bottom=height, corner=both). Size is kept as FRACTIONS of
