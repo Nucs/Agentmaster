@@ -296,8 +296,9 @@ namespace Agentmaster
         std::vector<std::wstring> filesRead; // Read tool file_path basenames, sorted + unique
         std::vector<std::wstring> filesEdited; // Edit/Write tool file_path basenames, sorted + unique
         std::wstring branch; // first gitBranch seen
-        std::wstring firstTs; // first entry.timestamp (ISO) — duration start
-        std::wstring lastTs; // last entry.timestamp (ISO) — duration end
+        std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age)
+        std::wstring lastTs; // last entry.timestamp (ISO) — last activity
+        std::wstring lastUserTs; // last REAL external-user message's entry.timestamp (ISO) — "last user msg" ago
         int tasksCompleted{ 0 };
         int tasksPending{ 0 }; // pending + in_progress, from the LAST TodoWrite
         bool hasExitPlanMode{ false }; // an ExitPlanMode tool_use (plan-end signal)

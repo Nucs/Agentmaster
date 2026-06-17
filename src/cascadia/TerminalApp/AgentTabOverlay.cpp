@@ -23,6 +23,7 @@
 #include <mmsystem.h> // PlaySoundW (row 3 copy/open confirmation chime)
 #pragma comment(lib, "winmm.lib")
 
+#include <chrono> // DispatcherTimer interval (summary times-line ticker)
 #include <string>
 
 using namespace winrt::Windows::Foundation;
@@ -258,6 +259,121 @@ namespace
         return esc;
     }
 
+    // ---- "ago" timing for the summary panel's times line (age / last user msg / last activity) ----
+    // All timestamps are UTC; "now" is UTC too, so deltas are correct regardless of local TZ.
+    constexpr uint64_t kFtEpoch1970 = 116444736000000000ULL; // 100ns ticks 1601-01-01 -> 1970-01-01
+
+    int64_t NowUnixMs()
+    {
+        FILETIME ft{};
+        ::GetSystemTimeAsFileTime(&ft);
+        ULARGE_INTEGER u{};
+        u.LowPart = ft.dwLowDateTime;
+        u.HighPart = ft.dwHighDateTime;
+        return static_cast<int64_t>((u.QuadPart - kFtEpoch1970) / 10000ULL);
+    }
+
+    // Parse "YYYY-MM-DDThh:mm:ss[...]" (the transcript entry.timestamp, UTC) -> unix ms. 0 if unparseable.
+    int64_t IsoToUnixMs(const std::wstring& iso)
+    {
+        if (iso.size() < 19)
+        {
+            return 0;
+        }
+        const auto num = [&](size_t pos, int len) -> int {
+            int v = 0;
+            for (int k = 0; k < len; ++k)
+            {
+                const wchar_t c = iso[pos + k];
+                if (c < L'0' || c > L'9')
+                {
+                    return -1;
+                }
+                v = v * 10 + (c - L'0');
+            }
+            return v;
+        };
+        const int y = num(0, 4), mo = num(5, 2), d = num(8, 2), h = num(11, 2), mi = num(14, 2), s = num(17, 2);
+        if (y < 1970 || mo < 1 || d < 1 || h < 0 || mi < 0 || s < 0)
+        {
+            return 0;
+        }
+        SYSTEMTIME st{};
+        st.wYear = static_cast<WORD>(y);
+        st.wMonth = static_cast<WORD>(mo);
+        st.wDay = static_cast<WORD>(d);
+        st.wHour = static_cast<WORD>(h);
+        st.wMinute = static_cast<WORD>(mi);
+        st.wSecond = static_cast<WORD>(s);
+        FILETIME ft{};
+        if (!::SystemTimeToFileTime(&st, &ft))
+        {
+            return 0;
+        }
+        ULARGE_INTEGER u{};
+        u.LowPart = ft.dwLowDateTime;
+        u.HighPart = ft.dwHighDateTime;
+        return static_cast<int64_t>((u.QuadPart - kFtEpoch1970) / 10000ULL);
+    }
+
+    // Compact "ago" from a unix-ms instant to now: 2d4h12m / 4h12m / 34m / 1m13s / 45s. "" if ms<=0.
+    std::wstring FormatAgoMs(int64_t tsUnixMs)
+    {
+        if (tsUnixMs <= 0)
+        {
+            return {};
+        }
+        int64_t sec = (NowUnixMs() - tsUnixMs) / 1000;
+        if (sec < 0)
+        {
+            sec = 0;
+        }
+        const int64_t d = sec / 86400, h = (sec / 3600) % 24, m = (sec / 60) % 60, s = sec % 60;
+        const auto n = [](int64_t v) { return std::to_wstring(v); };
+        if (d > 0)
+        {
+            return n(d) + L"d" + n(h) + L"h" + n(m) + L"m";
+        }
+        if (h > 0)
+        {
+            return n(h) + L"h" + n(m) + L"m";
+        }
+        if (m >= 10)
+        {
+            return n(m) + L"m";
+        }
+        if (m > 0)
+        {
+            return n(m) + L"m" + n(s) + L"s";
+        }
+        return n(s) + L"s";
+    }
+
+    // The one-line times summary: "age 2d4h12m, last user msg 34m, last activity 1m13s". Each part is
+    // omitted when its instant is unknown (ms<=0) — so a never-prompted session shows just age, etc.
+    std::wstring FormatTimesLine(int64_t createdMs, int64_t lastUserMs, int64_t lastActivityMs)
+    {
+        std::wstring o;
+        const auto add = [&](const wchar_t* label, int64_t ms) {
+            const std::wstring ago = FormatAgoMs(ms);
+            if (ago.empty())
+            {
+                return;
+            }
+            if (!o.empty())
+            {
+                o += L", ";
+            }
+            o += label;
+            o += L" ";
+            o += ago;
+        };
+        add(L"age", createdMs);
+        add(L"last user msg", lastUserMs);
+        add(L"last activity", lastActivityMs);
+        return o;
+    }
+
     // Render the session-end.js box, adapted to the narrow (20%) summary panel: the same labels +
     // section dividers + mapping, but wrapped (no fixed-width rules). plan-start/plan-end override the
     // header glyph+label; otherwise the live state glyph+label (passed in) is used.
@@ -439,14 +555,17 @@ namespace
             co_return; // no transcript yet (never prompted)
         }
         std::wstring text;
+        std::wstring times; // age / last user msg / last activity, snapshotted at copy time
         if (codex)
         {
             const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
+            times = FormatTimesLine(info.createdUnixMs, 0 /* no last-user ts in a rollout */, info.lastActivityUnixMs);
             text = RenderCodexSummary(info, id, cwd, path, resumeCmd, glyph, label, /*full*/ true);
         }
         else
         {
             const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+            times = FormatTimesLine(IsoToUnixMs(a.firstTs), IsoToUnixMs(a.lastUserTs), IsoToUnixMs(a.lastTs));
             std::wstring planFile = a.planFilePath;
             if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
             {
@@ -461,6 +580,10 @@ namespace
         if (text.empty() || !disp)
         {
             co_return;
+        }
+        if (!times.empty())
+        {
+            text = times + L"\n" + text; // the times line leads the copied box (the display shows it live)
         }
         // The clipboard gets PLAIN text, so turn each separator sentinel into a visible ─ rule (the
         // display path turns the same sentinel into a Border instead).
@@ -979,6 +1102,18 @@ namespace winrt::TerminalApp::implementation
         {
             return; // built once (Initialize), and only for a LINKED session (never an observe badge)
         }
+        // The times line (age / last user msg / last activity) is a SEPARATE, pinned-at-top TextBlock —
+        // NOT part of the mtime-gated content below — so a DispatcherTimer can re-render its "ago"
+        // deltas live (every few seconds) without re-reading the transcript. Collapsed until it has text.
+        _summaryTimesText = TextBlock{};
+        _summaryTimesText.FontFamily(FontFamily{ L"Cascadia Mono" });
+        _summaryTimesText.FontSize(11);
+        _summaryTimesText.TextWrapping(TextWrapping::Wrap);
+        _summaryTimesText.IsTextSelectionEnabled(true);
+        _summaryTimesText.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0)); // dimmer than the body
+        _summaryTimesText.Margin(ThicknessHelper::FromLengths(0, 0, 0, 3)); // a small gap above the content
+        _summaryTimesText.Visibility(Visibility::Collapsed);
+
         // The body is a vertical StackPanel (not one TextBlock) so a section separator can be a
         // full-width Border rule that fills the panel border-to-border + re-fills on resize — a fixed
         // run of ─ chars can't do that in a wrapping block. _SetSummaryContent fills it: monospace,
@@ -992,14 +1127,67 @@ namespace winrt::TerminalApp::implementation
         sv.MaxHeight(480); // a long session can't run off the bottom of the pane
         sv.Content(_summaryStack);
 
+        StackPanel outer{}; // times (pinned) over the scrolling content
+        outer.Orientation(Orientation::Vertical);
+        outer.Children().Append(_summaryTimesText);
+        outer.Children().Append(sv);
+
         _summaryRoot = Border{};
         _summaryRoot.Background(Fill(0xE6, 0x20, 0x20, 0x20)); // near-opaque dark, matching the badge
         _summaryRoot.BorderBrush(Fill(0x40, 0xFF, 0xFF, 0xFF));
         _summaryRoot.BorderThickness(ThicknessHelper::FromUniformLength(1));
         _summaryRoot.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         _summaryRoot.Padding(ThicknessHelper::FromLengths(8, 6, 8, 6));
-        _summaryRoot.Child(sv);
+        _summaryRoot.Child(outer);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
+
+        // The live "ago" ticker for the times line. Tick fires on the UI thread; it self-stops once the
+        // overlay is gone (weak), so a closed tab never leaks a ticking timer (and we never Stop() it off
+        // the UI thread from the dtor). Started/stopped by SetSummaryEnabled.
+        _summaryTimer = DispatcherTimer{};
+        _summaryTimer.Interval(std::chrono::seconds(5));
+        auto weak = get_weak();
+        _summaryTimer.Tick([weak](const IInspectable& sender, const IInspectable&) {
+            if (auto self = weak.get())
+            {
+                self->_UpdateTimesLine();
+            }
+            else if (const auto t = sender.try_as<DispatcherTimer>())
+            {
+                t.Stop(); // overlay destroyed — stop ticking (UI thread, safe)
+            }
+        });
+    }
+
+    // Re-render the times line ("age 2d4h12m, last user msg 34m, last activity 1m13s") from the cached
+    // instants + NOW, so the "ago" deltas grow live between content reloads (the DispatcherTimer drives
+    // this). Last-activity prefers the transcript's CURRENT mtime (a cheap stat) so it keeps ticking
+    // even when no content reload happened. Hidden when nothing is known yet.
+    void AgentTabOverlay::_UpdateTimesLine()
+    {
+        if (!_summaryTimesText)
+        {
+            return;
+        }
+        int64_t lastAct = _summaryLastActivityMs;
+        if (!_summaryPath.empty())
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(_summaryPath.c_str(), GetFileExInfoStandard, &fad))
+            {
+                ULARGE_INTEGER li{};
+                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                const int64_t mtimeMs = static_cast<int64_t>((li.QuadPart - kFtEpoch1970) / 10000ULL);
+                if (mtimeMs > lastAct)
+                {
+                    lastAct = mtimeMs;
+                }
+            }
+        }
+        const std::wstring line = FormatTimesLine(_summaryCreatedMs, _summaryLastUserMs, lastAct);
+        _summaryTimesText.Text(winrt::hstring{ line });
+        _summaryTimesText.Visibility(line.empty() ? Visibility::Collapsed : Visibility::Visible);
     }
 
     // Render the rendered-text box into the StackPanel: contiguous text lines become one monospace,
@@ -1079,9 +1267,18 @@ namespace winrt::TerminalApp::implementation
         }
         if (!on)
         {
+            if (_summaryTimer)
+            {
+                _summaryTimer.Stop(); // no need to tick the times line while hidden
+            }
             _summaryRoot.Visibility(Visibility::Collapsed);
             return;
         }
+        if (_summaryTimer)
+        {
+            _summaryTimer.Start(); // drive the live "ago" times line
+        }
+        _UpdateTimesLine(); // show the times immediately from whatever is cached
         // Enabled: show + (re)load from the freshest session snapshot.
         if (_registry && !_sessionId.empty())
         {
@@ -1150,6 +1347,8 @@ namespace winrt::TerminalApp::implementation
 
         std::wstring text;
         int64_t mtime = prevMtime;
+        int64_t createdMs = 0, lastUserMs = 0, lastActivityMs = 0; // times-line instants (computed on reload)
+        bool timesComputed = false;
         if (!path.empty())
         {
             // Cheap stat: only do the heavy read+analyze when the transcript grew (mtime advanced) or
@@ -1170,11 +1369,17 @@ namespace winrt::TerminalApp::implementation
                 if (codex)
                 {
                     const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
+                    createdMs = info.createdUnixMs;
+                    lastActivityMs = info.lastActivityUnixMs;
+                    lastUserMs = 0; // a rollout carries no per-message timestamp for the last human prompt
                     text = RenderCodexSummary(info, sessionId, cwd, path, L"", liveGlyph, liveLabel, /*full*/ false);
                 }
                 else
                 {
                     const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                    createdMs = IsoToUnixMs(a.firstTs);
+                    lastUserMs = IsoToUnixMs(a.lastUserTs);
+                    lastActivityMs = IsoToUnixMs(a.lastTs);
                     // plan-start: the plan file lives in the PARENT transcript (session-end.js
                     // getPlanFileFromParent) — resolve + scan it when this session points at one.
                     std::wstring planFile = a.planFilePath;
@@ -1188,22 +1393,30 @@ namespace winrt::TerminalApp::implementation
                     }
                     text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false);
                 }
+                timesComputed = true;
             }
         }
 
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
-            disp.TryEnqueue([weak = get_weak(), text, path, mtime]() {
+            disp.TryEnqueue([weak = get_weak(), text, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed]() {
                 if (auto self = weak.get())
                 {
                     if (!text.empty())
                     {
                         self->_SetSummaryContent(text); // text runs -> TextBlocks, sentinels -> full-width rules
                     }
+                    if (timesComputed)
+                    {
+                        self->_summaryCreatedMs = createdMs; // refresh the times-line instants (the ticker re-renders the deltas)
+                        self->_summaryLastUserMs = lastUserMs;
+                        self->_summaryLastActivityMs = lastActivityMs;
+                    }
                     self->_summaryPath = path; // cache the resolved path for the next reload
                     self->_summaryMtime = mtime;
                     self->_summaryLoading = false;
+                    self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
                 }
             });
         }

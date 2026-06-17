@@ -2429,9 +2429,15 @@ namespace Agentmaster
                             }
                         }
                     }
-                    if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content) && seenMsgs.insert(content).second)
+                    if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content))
                     {
-                        out.userMsgs.push_back(content);
+                        // Track the LAST real user prompt's time (for the "last user msg" ago), even if
+                        // the text dedups against an earlier identical prompt — recency is what matters.
+                        out.lastUserTs = ts;
+                        if (seenMsgs.insert(content).second)
+                        {
+                            out.userMsgs.push_back(content);
+                        }
                     }
                 }
             }
