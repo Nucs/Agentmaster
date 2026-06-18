@@ -576,6 +576,29 @@ namespace
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
     }
 
+    // Case-insensitive (the Windows filesystem default) leaf tests for the path-picker's
+    // type-to-filter: whether `name` begins with `prefix`, and whether the two are equal.
+    // Both compare ordinally, so a partial leaf "Agent" matches "Agentmaster" (prefix) while
+    // a complete leaf "Agentmaster" matches it exactly (then hoisted to the top of the list).
+    bool LeafStartsWith(const std::wstring& name, const std::wstring& prefix)
+    {
+        if (prefix.empty())
+        {
+            return true;
+        }
+        if (name.size() < prefix.size())
+        {
+            return false;
+        }
+        return ::CompareStringOrdinal(name.c_str(), static_cast<int>(prefix.size()),
+                                      prefix.c_str(), static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL;
+    }
+
+    bool LeafEquals(const std::wstring& a, const std::wstring& b)
+    {
+        return ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+    }
+
     // Agentmaster: the Launch box accepts EITHER a working directory OR a Claude session id. A
     // UUID-shaped token (8-4-4-4-12 hex, with optional surrounding braces / whitespace) is treated
     // as a session id (resume / fork); anything else is a path. A directory is never UUID-shaped and
@@ -6514,25 +6537,86 @@ namespace winrt::TerminalApp::implementation
         }
 
         // SUBFOLDERS of the current path (+ a parent up-nav).
+        //
+        // Agentmaster: typing a partial leaf FILTERS. A path that ends with a separator
+        // ("K:\source\") lists that directory's folders unfiltered; a partial leaf
+        // ("K:\source\Agent") lists the PARENT directory's folders whose name STARTS WITH the
+        // leaf ("Agent*"), case-insensitively, with an EXACT name match hoisted to the top.
+        // (Drilling into a folder is therefore "type — or click a row, which appends — the
+        // trailing separator".)
         if (!current.empty())
         {
-            _pathListHost.Children().Append(sectionLabel(winrt::hstring{ L"SUBFOLDERS OF " } + winrt::hstring{ current }));
+            std::wstring listDir = current; // the directory whose subfolders we enumerate
+            std::wstring filter; // leaf prefix to match; empty => list everything
+            const wchar_t lastCh = current.back();
+            const bool endsSep = (lastCh == L'\\' || lastCh == L'/');
+            if (!endsSep)
+            {
+                if (const auto pos = current.find_last_of(L"\\/"); pos != std::wstring::npos)
+                {
+                    filter = current.substr(pos + 1); // the leaf being typed
+                    listDir = current.substr(0, pos + 1); // its parent (keep the trailing sep)
+                }
+                // else: a bare relative token with no separator — there's no parent in the box
+                // to anchor a listing to, so fall through and list `current` itself (no filter).
+            }
 
-            if (const auto parent = ParentDir(current))
+            {
+                winrt::hstring hdr = winrt::hstring{ L"SUBFOLDERS OF " } + winrt::hstring{ listDir };
+                if (!filter.empty())
+                {
+                    hdr = hdr + winrt::hstring{ L"  \x2022  \"" } + winrt::hstring{ filter } + winrt::hstring{ L"\"" };
+                }
+                _pathListHost.Children().Append(sectionLabel(hdr));
+            }
+
+            if (const auto parent = ParentDir(listDir))
             {
                 _pathListHost.Children().Append(_MakePathRow(*parent, L"\x2191", winrt::hstring{ L".. (parent)" }));
             }
 
-            if (IsDir(current))
+            if (IsDir(listDir))
             {
-                const auto subs = EnumSubdirs(current);
+                auto subs = EnumSubdirs(listDir);
+                if (!filter.empty())
+                {
+                    // Keep only names that start with the typed leaf; hoist an exact match to
+                    // the front (a directory's leaf is unique within its parent, so at most one),
+                    // leaving the remaining prefix matches in their newest-modified-first order.
+                    std::wstring exact;
+                    std::vector<std::wstring> matched;
+                    for (auto& leaf : subs)
+                    {
+                        if (!LeafStartsWith(leaf, filter))
+                        {
+                            continue;
+                        }
+                        if (exact.empty() && LeafEquals(leaf, filter))
+                        {
+                            exact = std::move(leaf);
+                        }
+                        else
+                        {
+                            matched.push_back(std::move(leaf));
+                        }
+                    }
+                    subs.clear();
+                    if (!exact.empty())
+                    {
+                        subs.push_back(std::move(exact));
+                    }
+                    for (auto& m : matched)
+                    {
+                        subs.push_back(std::move(m));
+                    }
+                }
                 for (const auto& leaf : subs)
                 {
-                    _pathListHost.Children().Append(_MakePathRow(JoinDir(current, leaf), L"\x25B8", winrt::hstring{ leaf }));
+                    _pathListHost.Children().Append(_MakePathRow(JoinDir(listDir, leaf), L"\x25B8", winrt::hstring{ leaf }));
                 }
                 if (subs.empty())
                 {
-                    _pathListHost.Children().Append(Text(L"(no subfolders)", 12, false, 0.5));
+                    _pathListHost.Children().Append(Text(filter.empty() ? L"(no subfolders)" : L"(no matches)", 12, false, 0.5));
                 }
             }
             else
@@ -6605,7 +6689,15 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const std::wstring norm = NormPath(dir); // selecting from the list normalizes too
+        std::wstring norm = NormPath(dir); // selecting from the list normalizes too
+        // Clicking a directory row DRILLS INTO it: append a separator so the rebuilt picker
+        // lists that folder's children unfiltered (the trailing-separator rule above), turning
+        // a click into a drill-down like the old picker. The slash is cosmetic — _NormalizeCwdBox
+        // strips it again on commit / launch, and a drive root ("K:\") already carries one.
+        if (IsDir(norm) && !norm.empty() && norm.back() != L'\\' && norm.back() != L'/')
+        {
+            norm += L'\\';
+        }
         _cwdBox.Text(winrt::hstring{ norm }); // fires TextChanged -> _RebuildPathPicker (popup open)
         _cwdBox.Select(static_cast<int32_t>(norm.size()), 0); // caret to end
         _cwdBox.Focus(FocusState::Programmatic); // keep the box focused so the popup stays open
