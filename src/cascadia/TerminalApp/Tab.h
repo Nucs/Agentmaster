@@ -113,6 +113,7 @@ namespace winrt::TerminalApp::implementation
         void CloseButtonVisibility(Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility visible);
 
         void DisableCloseAndMoveMenuItems(); // Agentmaster
+        void DisableTabRename(); // Agentmaster
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
@@ -169,6 +170,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _moveSubMenu{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _closeSubMenu{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabMenuItem{};
+        // Agentmaster: kept as a member (not a local in _CreateContextMenu) so the pinned Manager
+        // tab can gray out the "Rename Tab" item via DisableTabRename(). _renameDisabled also gates
+        // ActivateTabRenamer() so the double-tap / openTabRenamer-action paths are blocked too.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _renameTabMenuItem{};
+        bool _renameDisabled{ false };
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };
         winrt::hstring _keyChord{};

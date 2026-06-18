@@ -1004,6 +1004,14 @@ namespace winrt::TerminalApp::implementation
     {
         ASSERT_UI_THREAD();
 
+        // Agentmaster: the pinned Manager tab has rename disabled. This is the single funnel for
+        // every interactive rename gesture (double-tap, context-menu "Rename Tab", openTabRenamer
+        // action), so one guard here blocks them all.
+        if (_renameDisabled)
+        {
+            return;
+        }
+
         _headerControl.BeginRename();
     }
 
@@ -1692,21 +1700,22 @@ namespace winrt::TerminalApp::implementation
             Automation::AutomationProperties::SetHelpText(chooseColorMenuItem, chooseColorToolTip);
         }
 
-        Controls::MenuFlyoutItem renameTabMenuItem;
         {
             // "Rename tab"
+            // Agentmaster: kept as a member (_renameTabMenuItem) so the pinned Manager tab can gray
+            // it out via DisableTabRename().
             Controls::FontIcon renameTabSymbol;
             renameTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
             renameTabSymbol.Glyph(L"\xE8AC"); // Rename
 
-            renameTabMenuItem.Click({ get_weak(), &Tab::_renameTabClicked });
-            renameTabMenuItem.Text(RS_(L"RenameTabText"));
-            renameTabMenuItem.Icon(renameTabSymbol);
+            _renameTabMenuItem.Click({ get_weak(), &Tab::_renameTabClicked });
+            _renameTabMenuItem.Text(RS_(L"RenameTabText"));
+            _renameTabMenuItem.Icon(renameTabSymbol);
 
             const auto renameTabToolTip = RS_(L"RenameTabToolTip");
 
-            WUX::Controls::ToolTipService::SetToolTip(renameTabMenuItem, box_value(renameTabToolTip));
-            Automation::AutomationProperties::SetHelpText(renameTabMenuItem, renameTabToolTip);
+            WUX::Controls::ToolTipService::SetToolTip(_renameTabMenuItem, box_value(renameTabToolTip));
+            Automation::AutomationProperties::SetHelpText(_renameTabMenuItem, renameTabToolTip);
         }
 
         {
@@ -1809,7 +1818,7 @@ namespace winrt::TerminalApp::implementation
         Controls::MenuFlyout contextMenuFlyout;
         Controls::MenuFlyoutSeparator menuSeparator;
         contextMenuFlyout.Items().Append(chooseColorMenuItem);
-        contextMenuFlyout.Items().Append(renameTabMenuItem);
+        contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
@@ -1885,6 +1894,19 @@ namespace winrt::TerminalApp::implementation
         _moveSubMenu.IsEnabled(false);
         _closeSubMenu.IsEnabled(false);
         _closeTabMenuItem.IsEnabled(false);
+    }
+
+    // Agentmaster: permanently disable renaming for this tab. Used by the pinned Manager tab,
+    // whose title is fixed ("Agent Manager"). Grays out the context-menu "Rename Tab" entry and sets
+    // _renameDisabled, which ActivateTabRenamer() honors so the double-tap and openTabRenamer
+    // action are blocked too. Like DisableCloseAndMoveMenuItems(), this is a one-shot disable
+    // that nothing in the tab re-indexing path undoes.
+    void Tab::DisableTabRename()
+    {
+        ASSERT_UI_THREAD();
+
+        _renameDisabled = true;
+        _renameTabMenuItem.IsEnabled(false);
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs)

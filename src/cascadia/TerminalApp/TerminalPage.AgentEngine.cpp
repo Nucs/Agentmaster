@@ -165,10 +165,13 @@ namespace winrt::TerminalApp::implementation
             _managerTab.CloseButtonVisibility(winrt::Microsoft::Terminal::Settings::Model::TabCloseButtonVisibility::Never);
 
             // Agentmaster: also gray out the right-click "Move tab" / "Close" / "Close tab"
-            // entries so the pinned Manager tab can't be relocated or closed from the menu.
+            // entries so the pinned Manager tab can't be relocated or closed from the menu, and
+            // disable rename (the Manager tab's title is fixed): grays the "Rename Tab" menu item
+            // and blocks the double-tap / openTabRenamer-action rename gestures.
             if (const auto tabImpl{ _GetTabImpl(_managerTab) })
             {
                 tabImpl->DisableCloseAndMoveMenuItems();
+                tabImpl->DisableTabRename();
             }
             // Non-movable by drag, too: CanDrag(false) stops the tab being dragged/torn out;
             // the drag/move seams additionally call _PinManagerTabFirst() to snap it back to

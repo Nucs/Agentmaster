@@ -732,6 +732,13 @@ namespace winrt::TerminalApp::implementation
 
         if (const auto activeTab{ _senderOrFocusedTab(sender) })
         {
+            // Agentmaster: the pinned Manager tab has a fixed title — ignore the programmatic
+            // renameTab action on it (the interactive renamer is blocked in ActivateTabRenamer()).
+            if (_managerTab && activeTab == _GetTabImpl(_managerTab))
+            {
+                args.Handled(true);
+                return;
+            }
             if (title.has_value())
             {
                 activeTab->SetTabText(title.value());
