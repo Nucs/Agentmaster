@@ -600,7 +600,7 @@ namespace
             line(L"Files Read:");
             for (const auto& f : readShown)
             {
-                line(L"   * " + f);
+                line(L"* " + f);
             }
         }
         if (!a.filesCreated.empty())
@@ -609,7 +609,7 @@ namespace
             line(L"Files Created:");
             for (const auto& f : a.filesCreated)
             {
-                line(L"   * " + f);
+                line(L"* " + f);
             }
         }
         if (!editedShown.empty())
@@ -618,7 +618,7 @@ namespace
             line(L"Files Edited:");
             for (const auto& f : editedShown)
             {
-                line(L"   * " + f);
+                line(L"* " + f);
             }
         }
         while (!o.empty() && o.back() == L'\n')

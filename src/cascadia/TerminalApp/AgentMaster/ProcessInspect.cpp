@@ -3833,7 +3833,7 @@ namespace Agentmaster
             line(L"Files Read:");
             for (const auto& f : a.filesRead)
             {
-                line(L"   * " + f);
+                line(L"* " + f);
             }
         }
         if (!a.filesCreated.empty())
@@ -3842,7 +3842,7 @@ namespace Agentmaster
             line(L"Files Created:");
             for (const auto& f : a.filesCreated)
             {
-                line(L"   * " + f);
+                line(L"* " + f);
             }
         }
         if (!a.filesEdited.empty())
@@ -3851,7 +3851,7 @@ namespace Agentmaster
             line(L"Files Edited:");
             for (const auto& f : a.filesEdited)
             {
-                line(L"   * " + f);
+                line(L"* " + f);
             }
         }
         while (!o.empty() && o.back() == L'\n')
