@@ -17,18 +17,24 @@
     <Grid HorizontalAlignment="Left">
         <!--  Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background
               drawn BEHIND the header content (first Grid child, so the icon/dot/title render on top).
-              The Grid sizes to the header StackPanel, so the pill wraps the header content exactly.
-              Shown ONLY while the Agent Manager tab is active and this session is hovered/selected in
-              the Manager — TerminalPage::_SetTabSelectionPill drives AgentSelectionVisible/Brush via
-              Tab.TabStatus(). Presentation-only: the Manager tab stays the actually-selected tab, and
-              this never touches the per-dir tab color (Rule #12). Margin gives the pill a touch of
-              vertical height; NO negative LEFT (a left overhang clips on the tab border — see the dot
-              note below).  -->
+              The Grid sizes to the header StackPanel; the NEGATIVE Margin then grows the pill OUTWARD
+              past the content on all sides (it stays Stretch, so a negative margin makes it larger
+              than its cell) for breathing room — a rounded pill, not a tight box hugging the glyphs —
+              WITHOUT shifting the content (the icon/dot/title don't move). Shown ONLY while the Agent
+              Manager tab is active and this session is hovered/selected in the Manager
+              (TerminalPage::_SetTabSelectionPill drives AgentSelectionVisible/Brush via Tab.TabStatus()).
+              Presentation-only: the Manager tab stays the actually-selected tab, and this never touches
+              the per-dir tab color (Rule #12).
+              The negative LEFT is safe HERE (unlike the dot, which must also work on no-icon shell
+              tabs): the pill only ever shows on a MANAGED Claude/Codex tab, which always carries a
+              profile icon, so the header content is inset from the tab's left edge by the icon — the
+              overhang extends into that icon gap, not past the tab border. CornerRadius rounds it into
+              a pill; the translucent accent fill keeps the title/dot legible on top.  -->
         <Border x:Name="HeaderAgentSelectionPill"
-                Margin="0,-1,0,-1"
+                Margin="-8,-3,-8,-3"
                 VerticalAlignment="Stretch"
                 HorizontalAlignment="Stretch"
-                CornerRadius="4"
+                CornerRadius="8"
                 Background="{x:Bind TabStatus.AgentSelectionBrush, Mode=OneWay}"
                 Visibility="{x:Bind TabStatus.AgentSelectionVisible, Mode=OneWay}" />
         <StackPanel x:Name="HeaderStackPanel"
