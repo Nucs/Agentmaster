@@ -344,37 +344,18 @@ jobs:
 
             A fork of Windows Terminal that manages multiple Claude Code sessions.
 
-            ### Install or upgrade (recommended) — one command
-            From PowerShell — this downloads, trusts the signing cert, and installs/upgrades the
-            MSIX (one UAC prompt, only for trusting the cert):
+            ### Install
+            Paste into PowerShell — installs **v${{ needs.prep.outputs.ver3 }}** (one UAC prompt, only to trust the signing cert):
             ```powershell
-            irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1 | iex
+            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.ver3 }}
             ```
-            **Re-run that exact command anytime to upgrade** — it skips if you're already current.
-            To pass options, run it as a scriptblock:
+            Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
             ```powershell
-            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Launch
+            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.ver3 }} -Portable -Launch
             ```
-            Options: `-Portable` (cert-free, no admin) · `-Version X.Y.Z` · `-Prerelease` · `-Force` ·
-            `-Launch` · `-Uninstall`.
 
             Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
-
-            ### Install — portable (no cert, no admin)
-            1. Download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`).
-            2. Unzip anywhere and run `WindowsTerminal.exe` in place.
-
-            The zip is **fully self-contained** (it ships a `.portable` marker): Terminal
-            settings live in `<unzip>\settings` and all Agentmaster state in `<unzip>\profile`.
-            Nothing outside the folder is touched.
-
-            ### Install — MSIX bundle (manual)
-            The `.msixbundle` is **self-signed** (see the cert caveat in the workflow). To install by hand:
-            1. Download `Agentmaster.cer` and the `.msixbundle`.
-            2. Import the cert (admin PowerShell):
-               `Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`
-            3. Double-click the `.msixbundle`, or:
-               `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`
+            The `.msixbundle` + `.cer` and portable `.zip`s are attached below for manual install (see the README).
 
             ### Profiles & coexistence with a dev build
             On **first launch** Agentmaster asks which **profile folder** to use — Production

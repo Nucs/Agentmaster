@@ -466,6 +466,10 @@ try {
 catch {
     Write-Host ""
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "       For a cert-free, no-admin alternative, re-run with -Portable." -ForegroundColor DarkGray
-    exit 1
+    Write-Host "       For a cert-free, no-admin alternative, add -Portable." -ForegroundColor DarkGray
+    # Only set a failure exit code when invoked as a downloaded .ps1 file. A one-liner
+    # (irm|iex or & ([scriptblock]::Create(...))) shares the caller's shell, where 'exit'
+    # would CLOSE their window — so signal failure by message + LASTEXITCODE only.
+    $global:LASTEXITCODE = 1
+    if ($PSCommandPath) { exit 1 }
 }

@@ -84,23 +84,24 @@ tracker.
 
 ## Download & install
 
-**One command (recommended)** — install *or upgrade* to the latest release from PowerShell. It
-downloads the bundle, trusts the signing certificate (one UAC prompt, for the cert only), and
-installs — and **re-running it later is the upgrade path** (it skips if you're already current):
+**One line, no download** — paste into PowerShell. It fetches the installer in memory, downloads
+the bundle, trusts the signing certificate (one UAC prompt, for the cert only), and installs the
+**latest** release:
 
 ```powershell
-irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1 | iex
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-To pass options, run it as a scriptblock — e.g. the cert-free, no-admin portable build, or a
-specific version:
+Pin a version, install the cert-free portable build, and/or launch right after — pass options on
+the same line:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Portable -Launch
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0 -Portable -Launch
 ```
 
-Options: `-Portable` (no cert / no admin) · `-Version X.Y.Z` · `-Prerelease` · `-Force` ·
-`-Launch` · `-Uninstall` (see [`tools/Install-Agentmaster.ps1`](tools/Install-Agentmaster.ps1)).
+Options: `-Version X.Y.Z` (default: latest) · `-Portable` (no cert / no admin) · `-Launch` ·
+`-Prerelease` · `-Force` · `-Uninstall` (see [`tools/Install-Agentmaster.ps1`](tools/Install-Agentmaster.ps1)).
+Each [release](https://github.com/Nucs/Agentmaster/releases) page also shows a one-liner pinned to that version.
 
 ---
 
