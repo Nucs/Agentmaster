@@ -736,6 +736,7 @@ namespace winrt::TerminalApp::implementation
         void _AboutButtonOnClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& eventArgs);
 
         void _KeyDownHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
+        void _ManagerPaneNavPreviewKeyDown(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e); // Agentmaster: tunneling handler on the Manager pane root — dispatch TAB-SWITCHING chords (NextTab/PrevTab/SwitchToTab) so alt+left/alt+right (and ctrl+tab) work even when a Manager box is focused (the bubbling _KeyDownHandler is eaten by the box); other keys fall through.
         static ::Microsoft::Terminal::Core::ControlKeyStates _GetPressedModifierKeys() noexcept;
         static void _ClearKeyboardState(const WORD vkey, const WORD scanCode) noexcept;
         void _HookupKeyBindings(const Microsoft::Terminal::Settings::Model::IActionMapView& actionMap) noexcept;

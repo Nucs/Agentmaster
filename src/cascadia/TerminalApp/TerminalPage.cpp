@@ -1906,6 +1906,71 @@ namespace winrt::TerminalApp::implementation
         e.Handled(true);
     }
 
+    // Agentmaster (Manager-tab tab nav): the Manager tab hosts custom XAML content with focusable
+    // boxes (cwd / search / prompt compose / inline rename). WT routes keybindings to the page via a
+    // BUBBLING KeyDown on the pane root (_KeyDownHandler, wired in _OpenAgentManagerTab / _MakePane) —
+    // "keys the content didn't handle" — so a focused box that consumes a key (arrow keys especially)
+    // swallows it before it can bubble. That made alt+left / alt+right (and ctrl+tab) do nothing from
+    // the Manager tab, because AgentManagerContent::Focus() lands focus on the cwd TextBox. Catch the
+    // TAB-SWITCHING chords at the TUNNELING PreviewKeyDown stage (root->down, before the box) so they
+    // fire regardless of focus; every other key is left alone and falls through to the control, so
+    // typing / Enter in the boxes is untouched. The chord is resolved through the live ActionMap
+    // (honors user keybindings, not hardcoded), and ONLY tab-switching actions are taken — stealing
+    // every bound chord here (e.g. Enter -> CopyToClipboard) would break text input. Mirrors the
+    // Archive/Sessions pages' selective PreviewKeyDown. Defined here (next to _KeyDownHandler) so it
+    // shares the complete ControlKeyStates / KeyChord / ShortcutAction types this TU already includes.
+    void TerminalPage::_ManagerPaneNavPreviewKeyDown(const Windows::Foundation::IInspectable& /*sender*/, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e)
+    {
+        if (e.Handled())
+        {
+            return;
+        }
+        const auto keyStatus = e.KeyStatus();
+        const auto vkey = gsl::narrow_cast<WORD>(e.OriginalKey());
+        const auto scanCode = gsl::narrow_cast<WORD>(keyStatus.ScanCode);
+        if (!vkey && !scanCode)
+        {
+            return;
+        }
+        const auto modifiers = _GetPressedModifierKeys();
+        if (modifiers.IsAltGrPressed())
+        {
+            return; // AltGr == Ctrl+Alt ambiguity — same guard as _KeyDownHandler
+        }
+        const auto actionMap = _settings.ActionMap();
+        if (!actionMap)
+        {
+            return;
+        }
+        const auto cmd = actionMap.GetActionByKeyChord({
+            modifiers.IsCtrlPressed(),
+            modifiers.IsAltPressed(),
+            modifiers.IsShiftPressed(),
+            modifiers.IsWinPressed(),
+            vkey,
+            scanCode,
+        });
+        if (!cmd)
+        {
+            return;
+        }
+        // Only intercept TAB-SWITCHING actions at the tunneling stage; let everything else reach the
+        // focused control so the Manager's text boxes keep their typing / Enter / caret keys.
+        switch (cmd.ActionAndArgs().Action())
+        {
+        case ShortcutAction::NextTab:
+        case ShortcutAction::PrevTab:
+        case ShortcutAction::SwitchToTab:
+            break;
+        default:
+            return;
+        }
+        if (_actionDispatch->DoAction(cmd.ActionAndArgs()))
+        {
+            e.Handled(true);
+        }
+    }
+
     bool TerminalPage::OnDirectKeyEvent(const uint32_t vkey, const uint8_t scanCode, const bool down)
     {
         const auto modifiers = _GetPressedModifierKeys();
@@ -3966,6 +4031,9 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster: content for the pinned, leftmost Manager tab (C1 "Linked Lenses").
             const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
             managerPane->GetRoot().KeyDown({ get_weak(), &TerminalPage::_KeyDownHandler });
+            // Agentmaster: tab-switching chords must beat a focused Manager box (it eats them before
+            // the bubbling KeyDown). Tunnel them in. See _ManagerPaneNavPreviewKeyDown.
+            managerPane->GetRoot().PreviewKeyDown({ get_weak(), &TerminalPage::_ManagerPaneNavPreviewKeyDown });
             _WireAgentManagerContent(managerPane);
             content = *managerPane;
         }

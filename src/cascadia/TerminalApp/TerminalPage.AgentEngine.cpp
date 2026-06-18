@@ -149,6 +149,9 @@ namespace winrt::TerminalApp::implementation
         const auto& managerPane{ winrt::make_self<AgentManagerContent>() };
         // Route keys the content didn't handle back to the page (as other content panes do).
         managerPane->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
+        // Agentmaster: ...but tab-switching chords (alt+left/alt+right, ctrl+tab) must beat a focused
+        // Manager box, which would eat them before the bubbling KeyDown above. Tunnel them in.
+        managerPane->GetRoot().PreviewKeyDown({ this, &TerminalPage::_ManagerPaneNavPreviewKeyDown });
 
         // Agentmaster: wire the Manager UI to the engine (registry + spawn/activate/kill).
         _WireAgentManagerContent(managerPane);
