@@ -176,7 +176,7 @@ namespace winrt::TerminalApp::implementation
         bool _summaryTruncateDirty{ false }; // a truncate-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
         bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
-        bool _summaryTruncate{ false }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven): OFF=show every message in full; ON=cap each (6 lines if wrapped, else 500 chars)
+        bool _summaryTruncate{ true }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven, default ON): ON=cap each message (6 lines if wrapped, else 500 chars); OFF=show every message in full
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
         std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
         std::function<void()> _onToggleSummaryTruncate; // truncate icon -> page (flip the global truncate setting + broadcast)

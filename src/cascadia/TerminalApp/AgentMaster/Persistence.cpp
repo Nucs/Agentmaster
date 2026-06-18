@@ -489,7 +489,7 @@ namespace Agentmaster
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
-        s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", false); // TAB_OVERLAY.md: truncate long messages (absent => OFF, show everything)
+        s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value

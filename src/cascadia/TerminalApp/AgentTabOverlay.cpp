@@ -288,10 +288,10 @@ namespace
     //  - wrapNewlines == true: PRESERVE the message's real newlines (and tabs) so a multi-line prompt
     //    reads as multiple lines in the panel. \r is dropped either way (CRLF -> LF).
     // Truncation is governed by `truncate` (the GLOBAL summaryPanelTruncate toggle):
-    //  - truncate == false (default): show the WHOLE message, no cap.
-    //  - truncate == true: cap each message — 6 lines if wrapped (the 7th line onward becomes "..."),
-    //    else 500 chars (overflow becomes "...") for the one-line view. The panel scrolls + is height-
-    //    capped, so the bound is about per-message readability, not layout safety.
+    //  - truncate == true (default): cap each message — 6 lines if wrapped (the 7th line onward becomes
+    //    "..."), else 500 chars (overflow becomes "...") for the one-line view. The panel scrolls + is
+    //    height-capped, so the bound is about per-message readability, not layout safety.
+    //  - truncate == false: show the WHOLE message, no cap.
     std::wstring SummaryEscapeMsg(const std::wstring& m, bool wrapNewlines, bool truncate)
     {
         std::wstring esc;
@@ -1320,10 +1320,10 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        // truncate TOGGLE, to the LEFT of the wrap toggle (same glyph size + scale). OFF (default) shows
-        // every message in full; ON caps each one — 6 lines when wrapped (7th+ -> "..."), else 500 chars.
-        // Also a GLOBAL, persisted setting (AppSettings::summaryPanelTruncate) flipped via the page
-        // (_onToggleSummaryTruncate) so it broadcasts to every linked overlay.
+        // truncate TOGGLE, to the LEFT of the wrap toggle (same glyph size + scale). ON (default) caps
+        // each message — 6 lines when wrapped (7th+ -> "..."), else 500 chars; OFF shows every message
+        // in full. Also a GLOBAL, persisted setting (AppSettings::summaryPanelTruncate) flipped via the
+        // page (_onToggleSummaryTruncate) so it broadcasts to every linked overlay.
         _summaryTruncateIcon = FontIcon{};
         _summaryTruncateIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // carries U+2026 (the horizontal ellipsis)
         _summaryTruncateIcon.Glyph(L"\x2026"); // … — the truncate / elision symbol
@@ -1384,7 +1384,7 @@ namespace winrt::TerminalApp::implementation
         outer.Children().Append(_summaryScroll);
 
         _UpdateSummaryWrapButtonVisual(); // seed the wrap toggle's color from _summaryWrapNewlines (default: dim/off)
-        _UpdateSummaryTruncateButtonVisual(); // seed the truncate toggle's color from _summaryTruncate (default: dim/off)
+        _UpdateSummaryTruncateButtonVisual(); // seed the truncate toggle's color from _summaryTruncate (default: lighter/on)
 
         // The padded content sits in its own inner border so the resize grips (siblings below) can hug
         // the TRUE panel edges (outside the content's 8/6px inset) while the text keeps its padding.
