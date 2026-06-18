@@ -170,6 +170,29 @@ namespace winrt::TerminalApp::implementation
             return std::to_wstring(s / (365LL * 86400)) + L"y";
         }
 
+        // Absolute local datetime ("2026-06-10 14:32") for the Created/Active hover tooltips — the
+        // cells show only the compact relative age ("3h" / "2d"), which answers "how long ago?" but
+        // not "which day was that?". "" when unknown (0) so the tooltip helper no-ops (mirrors the
+        // Archive page's ArchiveLocalDateTime).
+        std::wstring SessLocalDateTime(int64_t unixMs)
+        {
+            if (unixMs <= 0)
+            {
+                return L"";
+            }
+            const __time64_t t = unixMs / 1000;
+            struct tm local
+            {
+            };
+            if (_localtime64_s(&local, &t) != 0)
+            {
+                return L"";
+            }
+            wchar_t buf[24]{};
+            swprintf_s(buf, L"%04d-%02d-%02d %02d:%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min);
+            return buf;
+        }
+
         // "#RRGGBB" -> Color (the dir-color chip). nullopt on anything malformed.
         std::optional<Color> SessHexToColor(const std::wstring& hex)
         {
@@ -361,7 +384,7 @@ namespace winrt::TerminalApp::implementation
         search.PlaceholderText(L"search for sessions");
         search.Width(240);
         search.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(search, L"Words AND-match (each may hit a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a whole session-id GUID to find that session (and its forks)");
+        SessSetTip(search, L"Filter the list \x2014 every word must match (each may match a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a session-id GUID to find that session and its forks");
         _sessionsSearchBox = search;
         search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
             if (const auto tb = s.try_as<TextBox>())
@@ -390,28 +413,28 @@ namespace winrt::TerminalApp::implementation
         // a semantics toggle (subsequence matching is noisy as a default, and its `.*?`-joined
         // rg patterns inflate the slow phase's candidate set). IsChecked is set BEFORE Click is
         // wired — and programmatic IsChecked never raises Click anyway (no spurious search).
-        _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Also search USER messages (typed prompts)");
+        _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Also match inside user messages \x2014 the prompts you typed. Scans transcript text (slower).");
         _sessScopeUserBtn.Click(onToggle);
         bar.Children().Append(_sessScopeUserBtn);
-        _sessScopeAgentBtn = SessToggle(L"\U0001F916", L"Also search AGENT + TOOLS (everything but user messages)");
+        _sessScopeAgentBtn = SessToggle(L"\U0001F916", L"Also match inside Claude's replies and tool calls/results \x2014 everything except your messages. Scans transcript text (slower).");
         _sessScopeAgentBtn.Click(onToggle);
         bar.Children().Append(_sessScopeAgentBtn);
-        _sessScopeDirsBtn = SessToggle(L"\U0001F4C1", L"Match DIRECTORIES accessed (tool-call paths + working dir) \x00B7 on by default (in-memory, free)");
+        _sessScopeDirsBtn = SessToggle(L"\U0001F4C1", L"Match the directories a session worked in \x2014 its working dir plus folders its tools touched. On by default (instant, no transcript scan).");
         _sessScopeDirsBtn.IsChecked(true);
         _sessScopeDirsBtn.Click(onToggle);
         bar.Children().Append(_sessScopeDirsBtn);
-        _sessScopeFilesBtn = SessToggle(L"\U0001F4C4", L"Match FILES accessed (tool-call paths) \x00B7 on by default (in-memory, free)");
+        _sessScopeFilesBtn = SessToggle(L"\U0001F4C4", L"Match the files a session read or edited (tool-call paths). On by default (instant, no transcript scan).");
         _sessScopeFilesBtn.IsChecked(true);
         _sessScopeFilesBtn.Click(onToggle);
         bar.Children().Append(_sessScopeFilesBtn);
-        _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy search (characters in order, gaps allowed)");
+        _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy matching \x2014 the query's characters must appear in order, with gaps allowed (\"agmst\" matches \"agentmaster\").");
         _sessFuzzyBtn.Click(onToggle);
         bar.Children().Append(_sessFuzzyBtn);
 
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
         _sessWindowBtn.Content(winrt::box_value(winrt::hstring{ kSessPresets[_sessionsWindowPreset].label }));
-        SessSetTip(_sessWindowBtn, L"Click: cycle 1d → 3d → 7d → 14d → 1mo → 3mo · Hover: pick a From/To range");
+        SessSetTip(_sessWindowBtn, L"Time window \x2014 only list sessions active within this span. Click to cycle 1d \x2192 3d \x2192 7d \x2192 14d \x2192 1mo \x2192 3mo \x00B7 hover to set a custom From/To range.");
         _sessWindowBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Defer — the cycle re-gathers + re-renders the table (tree mutation).
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
@@ -442,7 +465,7 @@ namespace winrt::TerminalApp::implementation
         // The _sessionsIndexing flag dedupes against an in-flight pass, so a double-click is safe.
         _sessRefreshBtn = Button{};
         _sessRefreshBtn.Content(winrt::box_value(winrt::hstring{ L"\x21BB" }));
-        SessSetTip(_sessRefreshBtn, L"Refresh \x2014 rescan for new sessions and re-index changed ones");
+        SessSetTip(_sessRefreshBtn, L"Refresh \x2014 rescan the folder for new or changed sessions and re-index them.");
         _sessRefreshBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Defer off the click tick (the page's pointer-handler discipline); the gather itself
             // runs on a background pass and re-renders when it lands.
@@ -496,7 +519,7 @@ namespace winrt::TerminalApp::implementation
             actions.Children().Append(apply);
             Button clear;
             clear.Content(winrt::box_value(winrt::hstring{ L"Preset" }));
-            SessSetTip(clear, L"Drop the custom range, back to the preset window");
+            SessSetTip(clear, L"Clear the custom range and go back to the time-window preset.");
             clear.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                     if (auto self = weak.get())
@@ -943,10 +966,11 @@ namespace winrt::TerminalApp::implementation
         _sessionsHeaderRow.ColumnDefinitions().Clear();
         SessAddColumns(_sessionsHeaderRow);
         _sessionsHeaderRow.Margin(Thickness{ 8, 0, 8, 4 });
-        const auto addHeader = [this](int col, winrt::hstring label, bool sortable) {
+        const auto addHeader = [this](int col, winrt::hstring label, bool sortable, winrt::hstring tip = L"") {
             if (!sortable)
             {
                 auto t = SessText(label, 11, true, 0.5);
+                SessSetTip(t, tip);
                 Grid::SetColumn(t, col);
                 _sessionsHeaderRow.Children().Append(t);
                 return;
@@ -966,6 +990,7 @@ namespace winrt::TerminalApp::implementation
             b.HorizontalAlignment(HorizontalAlignment::Stretch);
             b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(SessText(label + arrow, 11, true, 0.7));
+            SessSetTip(b, tip);
             b.Click([this, col](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), col]() {
                     auto self = weak.get();
@@ -988,14 +1013,14 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(b, col);
             _sessionsHeaderRow.Children().Append(b);
         };
-        addHeader(0, L"", false);
-        addHeader(1, L"Title", true);
-        addHeader(2, L"Directory", true);
-        addHeader(3, L"Branch", true);
-        addHeader(4, L"Created", true);
-        addHeader(5, L"Active", true);
-        addHeader(6, L"Msgs\x00B7Tools", true);
-        addHeader(7, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false);
+        addHeader(0, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
+        addHeader(1, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
+        addHeader(2, L"Directory", true, L"The session's working directory. Click to sort.");
+        addHeader(3, L"Branch", true, L"Git branch the session was on. Click to sort.");
+        addHeader(4, L"Created", true, L"When the session was first created. Click to sort.");
+        addHeader(5, L"Active", true, L"When the session was last active. Click to sort.");
+        addHeader(6, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
+        addHeader(7, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, searching ? winrt::hstring{ L"Number of search matches in this session" } : winrt::hstring{ L"" });
 
         // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
         // minus the user's "Hide from list" set. This render is the single chokepoint both the
@@ -1097,16 +1122,17 @@ namespace winrt::TerminalApp::implementation
                 chip.HorizontalAlignment(HorizontalAlignment::Center);
                 chip.Background(color ? SolidColorBrush{ *color } : SessBrush(0xFF, 0x60, 0x60, 0x60));
                 chip.Opacity(live ? 1.0 : 0.35);
-                std::wstring tip = live ? L"OPEN in this app" : (reg ? L"archived (restorable)" : L"on disk");
+                std::wstring tip = live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
+                tip += L"\nDot color = this session's working-directory color (matches its tab)";
                 if (pres)
                 {
-                    tip += L" \x00B7 claude: " + pres->status;
+                    tip += L"\nClaude is " + pres->status; // its own busy / idle / waiting heartbeat
                     chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60));
                     chip.BorderThickness(Thickness{ 1.5, 1.5, 1.5, 1.5 });
                 }
                 if (r.fork)
                 {
-                    tip += L" \x00B7 fork of " + r.forkedFromId.substr(0, 8);
+                    tip += L"\nFork of " + r.forkedFromId.substr(0, 8);
                 }
                 SessSetTip(chip, winrt::hstring{ tip });
                 Grid::SetColumn(chip, 0);
@@ -1114,26 +1140,35 @@ namespace winrt::TerminalApp::implementation
             }
 
             auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
-            SessSetTip(title, winrt::hstring{ r.title + L"\n" + r.id });
+            SessSetTip(title, winrt::hstring{ r.title + L"\nSession id: " + r.id });
             Grid::SetColumn(title, 1);
             g.Children().Append(title);
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
-            SessSetTip(dir, winrt::hstring{ r.dir });
+            SessSetTip(dir, winrt::hstring{ r.dir }); // the full path — the cell end-trims, losing the leaf
             Grid::SetColumn(dir, 2);
             g.Children().Append(dir);
 
             auto branch = SessText(winrt::hstring{ r.branch }, 11, false, 0.6);
+            SessSetTip(branch, winrt::hstring{ r.branch }); // the full branch name — no-op when empty
             Grid::SetColumn(branch, 3);
             g.Children().Append(branch);
 
             auto created = SessText(winrt::hstring{ SessAgo(r.createdMs, now) }, 11, false, 0.6);
             created.HorizontalAlignment(HorizontalAlignment::Center);
+            if (const auto abs = SessLocalDateTime(r.createdMs); !abs.empty())
+            {
+                SessSetTip(created, winrt::hstring{ L"Created " + abs }); // the exact moment behind the relative age
+            }
             Grid::SetColumn(created, 4);
             g.Children().Append(created);
 
             auto active = SessText(winrt::hstring{ SessAgo(r.lastActivityMs, now) }, 11, false, 0.75);
             active.HorizontalAlignment(HorizontalAlignment::Center);
+            if (const auto abs = SessLocalDateTime(r.lastActivityMs); !abs.empty())
+            {
+                SessSetTip(active, winrt::hstring{ L"Last active " + abs });
+            }
             Grid::SetColumn(active, 5);
             g.Children().Append(active);
 
@@ -1212,7 +1247,7 @@ namespace winrt::TerminalApp::implementation
                 MenuFlyout rowMenu;
                 MenuFlyoutItem hideItem;
                 hideItem.Text(L"Hide from list");
-                SessSetTip(hideItem, L"Hide this session from the browser (resettable in Settings) \x2014 the transcript on disk is untouched");
+                SessSetTip(hideItem, L"Hide this session from the list \x2014 it stays on disk and can be brought back from Settings.");
                 const std::wstring rid = r.id;
                 hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
@@ -1311,6 +1346,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button jump;
             jump.Content(winrt::box_value(winrt::hstring{ L"Jump to tab" }));
+            SessSetTip(jump, L"Switch to this session's open tab.");
             jump.Click([this, id](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id]() {
                     if (auto self = weak.get())
@@ -1325,7 +1361,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button resume;
             resume.Content(winrt::box_value(winrt::hstring{ L"Resume here" }));
-            SessSetTip(resume, L"claude --resume into a managed tab (Flight Plan + Autopilot)");
+            SessSetTip(resume, L"Resume this conversation in a managed tab \x2014 continue where it left off, with Flight Plan + Autopilot (claude --resume).");
             resume.Click([this, id, dir, title](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, title]() {
                     if (auto self = weak.get())
@@ -1341,7 +1377,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button forkBtn;
             forkBtn.Content(winrt::box_value(winrt::hstring{ L"Fork here" }));
-            SessSetTip(forkBtn, L"Fork into a NEW conversation (claude --resume \x00B7 --fork-session) — the original transcript is untouched");
+            SessSetTip(forkBtn, L"Fork a NEW conversation from this one \x2014 a copy you can diverge freely; the original transcript is untouched (--fork-session).");
             // A never-prompted row's display title is the page's placeholder — pass empty so the
             // fork seam derives a smart name instead of "(no prompt yet) (fork)".
             const std::wstring forkTitle = row->msgs > 0 ? title : std::wstring{};
@@ -1357,6 +1393,7 @@ namespace winrt::TerminalApp::implementation
         }
         Button fresh;
         fresh.Content(winrt::box_value(winrt::hstring{ L"Open New Session Here" }));
+        SessSetTip(fresh, L"Start a fresh Claude session in this session's working directory.");
         fresh.Click([this, dir](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), dir]() {
                 if (auto self = weak.get())

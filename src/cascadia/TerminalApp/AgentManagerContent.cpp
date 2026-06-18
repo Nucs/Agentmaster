@@ -1354,7 +1354,7 @@ namespace winrt::TerminalApp::implementation
             // EVERY session on the machine in a selectable window, searchable. RIGHT AFTER Archived.
             _sessionsBtn = Button{};
             _sessionsBtn.Content(winrt::box_value(L"Sessions"));
-            AgentSetTip(_sessionsBtn, L"Browse and search every Claude Code session on this machine (last month by default).");
+            AgentSetTip(_sessionsBtn, L"Browse and search every Claude Code session on this machine \x2014 not just managed ones (last month by default).");
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             bar.Children().Append(_sessionsBtn);
 
