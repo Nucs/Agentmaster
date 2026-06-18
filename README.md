@@ -86,22 +86,21 @@ tracker.
 
 **One line, no download** — paste into PowerShell. It fetches the installer in memory, downloads
 the bundle, trusts the signing certificate (one UAC prompt, for the cert only), and installs the
-**latest** release:
+version you pick (here `0.4.0` — every [release](https://github.com/Nucs/Agentmaster/releases) page
+shows a one-liner pinned to that version):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0
 ```
 
-Pin a version, install the cert-free portable build, and/or launch right after — pass options on
-the same line:
+Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0 -Portable -Launch
 ```
 
-Options: `-Version X.Y.Z` (default: latest) · `-Portable` (no cert / no admin) · `-Launch` ·
+Options: `-Version X.Y.Z` (omit for latest) · `-Portable` (no cert / no admin) · `-Launch` ·
 `-Prerelease` · `-Force` · `-Uninstall` (see [`tools/Install-Agentmaster.ps1`](tools/Install-Agentmaster.ps1)).
-Each [release](https://github.com/Nucs/Agentmaster/releases) page also shows a one-liner pinned to that version.
 
 ---
 
