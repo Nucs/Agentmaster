@@ -10,6 +10,8 @@
 
 ![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue + Autopilot)](doc/agentmaster/img/agent-manager.png)
 
+![The Agentmaster Sessions browser — a full-window page listing every on-disk Claude Code session (Title · Directory · Branch · Created · Active · Msgs·Tools), with a scoped/fuzzy search bar and time-range filter on the left, and a detail pane on the right (session metadata, the conversation, and Resume / Fork / Open-New-Session-Here actions)](doc/agentmaster/img/sessions-browser.png)
+
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a
 shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state
 taken from **Claude Code hooks** — never screen-scraping.
