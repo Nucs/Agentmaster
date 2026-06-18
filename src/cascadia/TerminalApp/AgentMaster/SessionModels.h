@@ -351,6 +351,12 @@ namespace Agentmaster
         // by the wrap-line icon at the right of the panel's times bar (a freshest-disk RMW), broadcast
         // live to every linked overlay in the window, and seeds every window on launch.
         bool summaryPanelWrapNewlines{ false };
+        // Agentmaster (TAB_OVERLAY.md summary panel): TRUNCATE long messages in the numbered list. OFF
+        // (default) shows EVERYTHING; ON limits each message — to 6 lines when wrap is on (a 7th+ line
+        // collapses to "..."), or to 500 characters when wrap is off. GLOBAL like summaryPanelWrapNewlines:
+        // written by the truncate toggle (left of the wrap toggle) in the panel's times bar, a freshest-
+        // disk RMW, broadcast live to every linked overlay. Default false (show everything).
+        bool summaryPanelTruncate{ false };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };

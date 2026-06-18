@@ -93,6 +93,15 @@ namespace winrt::TerminalApp::implementation
         // write + the live broadcast. Set by _AttachClaudeOverlay.
         void SetSummaryWrapToggleHandler(std::function<void()> handler);
 
+        // Agentmaster (TAB_OVERLAY.md summary panel): TRUNCATE long messages — a GLOBAL setting
+        // (AppSettings::summaryPanelTruncate), mirrored in by the page (seed on attach, broadcast on
+        // toggle). OFF shows everything; ON limits each message (6 lines wrapped / 500 chars unwrapped).
+        // Re-renders the panel (the flag is baked into the rendered text). Call on the UI thread.
+        void SetSummaryTruncate(bool on);
+        // The truncate toggle (left of the wrap toggle) flips the GLOBAL setting; the overlay can't reach
+        // AppSettings, so it calls this handler (wired by the page) for the freshest-disk RMW + broadcast.
+        void SetSummaryTruncateToggleHandler(std::function<void()> handler);
+
         // Agentmaster (TAB_OVERLAY.md summary panel resize): the panel SIZE is a GLOBAL setting
         // (AppSettings::summaryPanelWidthFraction/HeightFraction), stored as FRACTIONS of the pane so it
         // scales with the window. The page seeds this overlay (on attach) and broadcasts (when ANY tab
@@ -128,8 +137,10 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSummary(); // pencil button: invoke the page handler (flips the GLOBAL showSummaryPanel)
         void _ToggleSummaryWrap(); // wrap-line button: invoke the page handler (flips the GLOBAL summaryPanelWrapNewlines)
         void _UpdateSummaryWrapButtonVisual(); // recolor the wrap-line icon: dim (off) / lighter (on), per _summaryWrapNewlines
+        void _ToggleSummaryTruncate(); // truncate button: invoke the page handler (flips the GLOBAL summaryPanelTruncate)
+        void _UpdateSummaryTruncateButtonVisual(); // recolor the truncate icon: dim (off) / lighter (on), per _summaryTruncate
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
-        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n), set text on the UI thread
+        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message), set text on the UI thread
 
         std::wstring _sessionId;
         bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
@@ -152,6 +163,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Border _summaryRoot{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTimesText{ nullptr }; // pinned top (left): the live "ago" times line
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryWrapIcon{ nullptr }; // pinned top (right): the wrap-line toggle glyph — recolored by _UpdateSummaryWrapButtonVisual
+        winrt::Windows::UI::Xaml::Controls::FontIcon _summaryTruncateIcon{ nullptr }; // pinned top (right, LEFT of the wrap toggle): the truncate toggle glyph — recolored by _UpdateSummaryTruncateButtonVisual
         winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
         winrt::Windows::UI::Xaml::DispatcherTimer _summaryTimer{ nullptr }; // drives the live times line; self-stops when the overlay is gone
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
@@ -161,10 +173,13 @@ namespace winrt::TerminalApp::implementation
         int64_t _summaryLastActivityMs{ 0 }; // times line: last transcript entry (unix ms) — "last activity"
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
         bool _summaryWrapDirty{ false }; // a wrap-mode toggle landed while a load was in flight — re-render when it completes
+        bool _summaryTruncateDirty{ false }; // a truncate-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
         bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
+        bool _summaryTruncate{ false }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven): OFF=show every message in full; ON=cap each (6 lines if wrapped, else 500 chars)
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
         std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
+        std::function<void()> _onToggleSummaryTruncate; // truncate icon -> page (flip the global truncate setting + broadcast)
 
         // Summary panel RESIZE (TAB_OVERLAY.md): the panel is anchored top-right; left/bottom/corner
         // grips drag it bigger (left=width, bottom=height, corner=both). Size is kept as FRACTIONS of

@@ -527,6 +527,7 @@ namespace winrt::TerminalApp::implementation
                     s.hiddenSessionIds = disk.hiddenSessionIds;
                     s.showSummaryPanel = disk.showSummaryPanel;
                     s.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
+                    s.summaryPanelTruncate = disk.summaryPanelTruncate; // truncate toggle (panel times bar), out-of-cog UI action
                 }
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);

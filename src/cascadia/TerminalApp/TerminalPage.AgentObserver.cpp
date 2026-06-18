@@ -285,6 +285,10 @@ namespace winrt::TerminalApp::implementation
         // (AppSettings::summaryPanelWrapNewlines) — seed this overlay with the current value; the wrap-line
         // toggle at the right of the panel's times bar flips it via the handler below.
         overlay->SetSummaryWrapNewlines(_appSettings.summaryPanelWrapNewlines);
+        // Summary panel truncate mode (TAB_OVERLAY.md): also a GLOBAL setting
+        // (AppSettings::summaryPanelTruncate) — seed this overlay; the truncate toggle (left of the wrap
+        // toggle) flips it via the handler below.
+        overlay->SetSummaryTruncate(_appSettings.summaryPanelTruncate);
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {
@@ -297,6 +301,12 @@ namespace winrt::TerminalApp::implementation
                 if (auto self = weakThis.get())
                 {
                     self->_ToggleSummaryWrap();
+                }
+            });
+            overlay->SetSummaryTruncateToggleHandler([weakThis]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_ToggleSummaryTruncate();
                 }
             });
             // A grip drag persists the new size GLOBALLY (the treeSort / archiveSplitFraction idiom): a
@@ -386,6 +396,26 @@ namespace winrt::TerminalApp::implementation
             if (ov)
             {
                 ov->SetSummaryWrapNewlines(next);
+            }
+        }
+    }
+
+    // Agentmaster (TAB_OVERLAY.md summary panel): the truncate toggle (left of the wrap toggle in the
+    // panel's times bar) flips whether each message is capped — 6 lines when wrapped (7th+ -> "..."),
+    // else 500 chars — or shown in full (the default). Same GLOBAL setting + freshest-disk RMW + live
+    // broadcast idiom as _ToggleSummaryWrap (AppSettings::summaryPanelTruncate).
+    void TerminalPage::_ToggleSummaryTruncate()
+    {
+        auto s = ::Agentmaster::LoadAppSettings();
+        const bool next = !s.summaryPanelTruncate;
+        s.summaryPanelTruncate = next;
+        ::Agentmaster::SaveAppSettings(s);
+        _appSettings.summaryPanelTruncate = next;
+        for (const auto& [id, ov] : _claudeOverlays)
+        {
+            if (ov)
+            {
+                ov->SetSummaryTruncate(next);
             }
         }
     }

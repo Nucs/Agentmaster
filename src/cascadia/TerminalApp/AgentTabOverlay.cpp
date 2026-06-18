@@ -282,13 +282,17 @@ namespace
         return s2 == std::wstring::npos ? dir : dir.substr(s2 + 1);
     }
 
-    // Escape a message for the summary box + truncate. Two modes:
+    // Escape a message for the summary box, then optionally truncate. Newline handling has two modes:
     //  - wrapNewlines == false (default, the session-end.js look): collapse to ONE line — real newlines
-    //    become a literal "\n", tabs a literal "\t" — and cap at 240 chars (a compact one-line preview).
+    //    become a literal "\n", tabs a literal "\t".
     //  - wrapNewlines == true: PRESERVE the message's real newlines (and tabs) so a multi-line prompt
-    //    reads as multiple lines in the panel. A more generous cap (the panel scrolls), still bounded so
-    //    a pathological paste can't blow up the layout. \r is dropped either way (CRLF -> LF).
-    std::wstring SummaryEscapeMsg(const std::wstring& m, bool wrapNewlines)
+    //    reads as multiple lines in the panel. \r is dropped either way (CRLF -> LF).
+    // Truncation is governed by `truncate` (the GLOBAL summaryPanelTruncate toggle):
+    //  - truncate == false (default): show the WHOLE message, no cap.
+    //  - truncate == true: cap each message — 6 lines if wrapped (the 7th line onward becomes "..."),
+    //    else 500 chars (overflow becomes "...") for the one-line view. The panel scrolls + is height-
+    //    capped, so the bound is about per-message readability, not layout safety.
+    std::wstring SummaryEscapeMsg(const std::wstring& m, bool wrapNewlines, bool truncate)
     {
         std::wstring esc;
         for (const wchar_t ch : m)
@@ -302,10 +306,38 @@ namespace
             else
                 esc += ch;
         }
-        const size_t cap = wrapNewlines ? 2000 : 240;
-        if (esc.size() > cap)
+        if (!truncate)
         {
-            esc = esc.substr(0, cap - 3) + L"...";
+            return esc; // show everything (the default)
+        }
+        if (wrapNewlines)
+        {
+            // Keep at most 6 lines; a 7th (or beyond) collapses to a trailing "..." line.
+            size_t seen = 0;
+            size_t sixthNl = std::wstring::npos;
+            for (size_t i = 0; i < esc.size(); ++i)
+            {
+                if (esc[i] == L'\n' && ++seen == 6)
+                {
+                    sixthNl = i;
+                    break;
+                }
+            }
+            if (sixthNl != std::wstring::npos)
+            {
+                // Only elide if there's real content past line 6 — a bare trailing newline (6 lines + an
+                // empty remainder) shouldn't sprout a misleading "..." line.
+                const bool hasMore = esc.find_first_not_of(L" \t\r\n", sixthNl + 1) != std::wstring::npos;
+                esc.erase(sixthNl); // drop the 6th newline + everything after -> keep 6 lines
+                if (hasMore)
+                {
+                    esc += L"\n...";
+                }
+            }
+        }
+        else if (esc.size() > 500)
+        {
+            esc = esc.substr(0, 500) + L"...";
         }
         return esc;
     }
@@ -436,7 +468,7 @@ namespace
     //    the value-add: Parent/Plan, Duration, Tasks, Messages, Files Read/Edited.
     //  - full=true (the COPYABLE "Summary" — copy menu): the COMPLETE box, including everything trimmed
     //    above (id + resume CLI + Dir + Folder + Branch + the state header), so a copy loses nothing.
-    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines)
+    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
@@ -502,7 +534,7 @@ namespace
             int i = 1;
             for (const auto& m : a.userMsgs)
             {
-                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines));
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
             }
         }
         // De-duplicate the file lists so each path appears in exactly ONE section. Precedence is
@@ -601,7 +633,7 @@ namespace
     // panel (full=false) shows ONLY the value-add the badge doesn't (the prompts), since the badge
     // already carries state / model·effort / branch; the copyable Summary (full=true) is the complete
     // box (header + id + Dir + Folder + Resume + Model + Branch + prompts).
-    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full, bool wrapNewlines)
+    std::wstring RenderCodexSummary(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full, bool wrapNewlines, bool truncate)
     {
         std::wstring o;
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };
@@ -637,7 +669,7 @@ namespace
             int i = 1;
             for (const auto& m : info.userPrompts)
             {
-                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines));
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
             }
         }
         while (!o.empty() && o.back() == L'\n')
@@ -651,7 +683,7 @@ namespace
     // Folder + Branch + Model + Duration + Tasks + Messages + Files, i.e. everything the DISPLAYED panel
     // trims because the badge already shows it). Mirrors CopyConversationAsync: resolve + analyze OFF the
     // UI thread, render full=true, then hop back to copy. No-op if there's no transcript / nothing to copy.
-    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines)
+    winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines, bool truncate)
     {
         co_await winrt::resume_background();
         const std::wstring id = codex ? codexId : claudeId;
@@ -677,7 +709,7 @@ namespace
         {
             const auto info = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
             times = FormatTimesLine(info.createdUnixMs, 0 /* no last-user ts in a rollout */, info.lastActivityUnixMs);
-            text = RenderCodexSummary(info, id, cwd, path, resumeCmd, glyph, label, /*full*/ true, wrapNewlines);
+            text = RenderCodexSummary(info, id, cwd, path, resumeCmd, glyph, label, /*full*/ true, wrapNewlines, truncate);
         }
         else
         {
@@ -692,7 +724,7 @@ namespace
                     planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                 }
             }
-            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true, wrapNewlines);
+            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true, wrapNewlines, truncate);
         }
         if (text.empty() || !disp)
         {
@@ -1205,7 +1237,7 @@ namespace winrt::TerminalApp::implementation
             const std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
             const std::wstring resume = BuildLaunchCli(s, codex); // the same REAL launch CLI as cases 3/4
             CopySummaryAsync(_dispatcher, codex, s.id, s.codexSessionId, dir, resume,
-                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, _summaryWrapNewlines);
+                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, _summaryWrapNewlines, _summaryTruncate);
             break;
         }
         default:
@@ -1288,26 +1320,71 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // truncate TOGGLE, to the LEFT of the wrap toggle (same glyph size + scale). OFF (default) shows
+        // every message in full; ON caps each one — 6 lines when wrapped (7th+ -> "..."), else 500 chars.
+        // Also a GLOBAL, persisted setting (AppSettings::summaryPanelTruncate) flipped via the page
+        // (_onToggleSummaryTruncate) so it broadcasts to every linked overlay.
+        _summaryTruncateIcon = FontIcon{};
+        _summaryTruncateIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // carries U+2026 (the horizontal ellipsis)
+        _summaryTruncateIcon.Glyph(L"\x2026"); // … — the truncate / elision symbol
+        _summaryTruncateIcon.FontSize(11); // match the times font + the wrap toggle
+        _summaryTruncateIcon.FontWeight(FontWeights::SemiBold());
+        {
+            ScaleTransform truncScale{};
+            truncScale.ScaleX(1.18); // same ~1-2px visual bump as the wrap toggle, row height unaffected
+            truncScale.ScaleY(1.18);
+            _summaryTruncateIcon.RenderTransform(truncScale);
+            _summaryTruncateIcon.RenderTransformOrigin(Point{ 0.5f, 0.5f });
+        }
+        // The icon color (dim when off / lighter when on) is set by _UpdateSummaryTruncateButtonVisual.
+
+        Button truncBtn{};
+        truncBtn.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable + hover highlight
+        truncBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        truncBtn.Padding(ThicknessHelper::FromLengths(3, 0, 1, 0));
+        truncBtn.MinWidth(0);
+        truncBtn.MinHeight(0);
+        truncBtn.IsTabStop(false); // never pull keyboard focus off the ConPTY
+        truncBtn.VerticalAlignment(VerticalAlignment::Top);
+        truncBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        truncBtn.Content(_summaryTruncateIcon);
+        ToolTipService::SetToolTip(truncBtn, winrt::box_value(winrt::hstring{
+            L"Truncate long messages: cap each to 6 lines (when wrapping) or 500 characters; off shows everything" }));
+        truncBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_ToggleSummaryTruncate();
+            }
+        });
+
         Grid timesRow{};
         {
             ColumnDefinition cStar{};
             cStar.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star)); // times line takes the remaining width
             ColumnDefinition cAuto{};
-            cAuto.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto)); // toggle hugs the right edge
+            cAuto.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto)); // toggles hug the right edge
             timesRow.ColumnDefinitions().Append(cStar);
             timesRow.ColumnDefinitions().Append(cAuto);
         }
+        // Both toggles live in col1, in a horizontal strip: truncate on the LEFT, wrap on the RIGHT.
+        StackPanel toggles{};
+        toggles.Orientation(Orientation::Horizontal);
+        toggles.VerticalAlignment(VerticalAlignment::Top);
+        toggles.HorizontalAlignment(HorizontalAlignment::Right);
+        toggles.Children().Append(truncBtn);
+        toggles.Children().Append(wrapBtn);
         Grid::SetColumn(_summaryTimesText, 0);
-        Grid::SetColumn(wrapBtn, 1);
+        Grid::SetColumn(toggles, 1);
         timesRow.Children().Append(_summaryTimesText);
-        timesRow.Children().Append(wrapBtn);
+        timesRow.Children().Append(toggles);
 
-        StackPanel outer{}; // header (times + wrap toggle) pinned over the scrolling content
+        StackPanel outer{}; // header (times + truncate/wrap toggles) pinned over the scrolling content
         outer.Orientation(Orientation::Vertical);
         outer.Children().Append(timesRow);
         outer.Children().Append(_summaryScroll);
 
-        _UpdateSummaryWrapButtonVisual(); // seed the toggle's color from _summaryWrapNewlines (default: dim/off)
+        _UpdateSummaryWrapButtonVisual(); // seed the wrap toggle's color from _summaryWrapNewlines (default: dim/off)
+        _UpdateSummaryTruncateButtonVisual(); // seed the truncate toggle's color from _summaryTruncate (default: dim/off)
 
         // The padded content sits in its own inner border so the resize grips (siblings below) can hug
         // the TRUE panel edges (outside the content's 8/6px inset) while the text keeps its padding.
@@ -1789,6 +1866,66 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    void AgentTabOverlay::SetSummaryTruncateToggleHandler(std::function<void()> handler)
+    {
+        _onToggleSummaryTruncate = std::move(handler);
+    }
+
+    void AgentTabOverlay::_ToggleSummaryTruncate()
+    {
+        // The truncate icon flips the GLOBAL setting (AppSettings::summaryPanelTruncate), not per-session
+        // state: hand off to the page, which does the freshest-disk read-modify-write of settings.json AND
+        // applies it live to every linked overlay in the window (SetSummaryTruncate).
+        if (_onToggleSummaryTruncate)
+        {
+            _onToggleSummaryTruncate();
+        }
+    }
+
+    // Recolor the truncate icon to reflect the toggle: a dim gray when OFF (everything shown), a clearly
+    // lighter shade when ON (messages capped) — same dim/active palette as the wrap toggle.
+    void AgentTabOverlay::_UpdateSummaryTruncateButtonVisual()
+    {
+        if (!_summaryTruncateIcon)
+        {
+            return;
+        }
+        _summaryTruncateIcon.Foreground(_summaryTruncate ? Fill(0xFF, 0xE6, 0xE6, 0xE6)  // ON: lighter (active)
+                                                         : Fill(0xFF, 0x8C, 0x8C, 0x8C)); // OFF: dim (inactive)
+    }
+
+    void AgentTabOverlay::SetSummaryTruncate(bool on)
+    {
+        // The truncate mode is a GLOBAL setting (AppSettings::summaryPanelTruncate), mirrored into the
+        // overlay here by the page — on attach (seed) and on every truncate-toggle (broadcast to every
+        // linked overlay in the window). The flag is BAKED into the rendered text (SummaryEscapeMsg), so a
+        // real change must force a re-analyze+render: reset the mtime gate and re-pull from the freshest
+        // snapshot. Always refresh the icon color (the seed may match the default but still needs painting).
+        const bool changed = (_summaryTruncate != on);
+        _summaryTruncate = on;
+        _UpdateSummaryTruncateButtonVisual();
+        if (!changed)
+        {
+            return; // seed with the same value — nothing baked differently, no reload
+        }
+        _summaryMtime = 0; // invalidate the mtime gate so _LoadSummaryAsync re-renders with the new flag
+        if (_summaryLoading)
+        {
+            // A load is in flight with the OLD flag; _UpdateSummary would no-op on the guard. Mark dirty so
+            // the load's completion re-renders with the now-current flag (else the toggle wouldn't take
+            // until the transcript next grew).
+            _summaryTruncateDirty = true;
+            return;
+        }
+        if (_summaryEnabled && _registry && !_sessionId.empty())
+        {
+            if (const auto info = _registry->Get(_sessionId))
+            {
+                _UpdateSummary(*info);
+            }
+        }
+    }
+
     void AgentTabOverlay::_UpdateSummary(const SessionInfo& s)
     {
         if (!_summaryRoot)
@@ -1815,10 +1952,10 @@ namespace winrt::TerminalApp::implementation
         std::wstring liveGlyph{ StateGlyph(s.state) };
         std::wstring liveLabel{ StateLabel(s.state) };
         _summaryLoading = true;
-        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines);
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate);
     }
 
-    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines)
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
         co_await winrt::resume_background();
@@ -1859,7 +1996,7 @@ namespace winrt::TerminalApp::implementation
                     createdMs = info.createdUnixMs;
                     lastActivityMs = info.lastActivityUnixMs;
                     lastUserMs = 0; // a rollout carries no per-message timestamp for the last human prompt
-                    text = RenderCodexSummary(info, sessionId, cwd, path, L"", liveGlyph, liveLabel, /*full*/ false, wrapNewlines);
+                    text = RenderCodexSummary(info, sessionId, cwd, path, L"", liveGlyph, liveLabel, /*full*/ false, wrapNewlines, truncate);
                 }
                 else
                 {
@@ -1878,7 +2015,7 @@ namespace winrt::TerminalApp::implementation
                             planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                         }
                     }
-                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false, wrapNewlines);
+                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false, wrapNewlines, truncate);
                 }
                 timesComputed = true;
             }
@@ -1904,11 +2041,12 @@ namespace winrt::TerminalApp::implementation
                     self->_summaryMtime = mtime;
                     self->_summaryLoading = false;
                     self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
-                    if (self->_summaryWrapDirty)
+                    if (self->_summaryWrapDirty || self->_summaryTruncateDirty)
                     {
-                        // The wrap mode flipped mid-load: this render used the OLD flag. Re-render now
-                        // with the current flag (invalidate the mtime gate so it isn't skipped).
+                        // The wrap and/or truncate mode flipped mid-load: this render used the OLD flag(s).
+                        // Re-render now with the current flags (invalidate the mtime gate so it isn't skipped).
                         self->_summaryWrapDirty = false;
+                        self->_summaryTruncateDirty = false;
                         self->_summaryMtime = 0;
                         if (self->_summaryEnabled && self->_registry && !self->_sessionId.empty())
                         {
