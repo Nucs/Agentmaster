@@ -848,8 +848,8 @@
   </data>
   <data name="RenameTabToolTip" xml:space="preserve">
     <value>Rename this tab.
-Commit the new name with Enter or Shift+Enter; the other key inserts a newline. Esc cancels; clicking away always commits.
-Which key commits is configurable in Settings &#x2192; "Tab rename: commit with".</value>
+By default, Shift+Enter commits the new name and Enter inserts a line break (swap them in Settings &#x2192; "Tab rename: commit with").
+Esc cancels; clicking away always commits.</value>
   </data>
   <data name="SettingsToolTip" xml:space="preserve">
     <value>Open the settings page</value>
@@ -883,7 +883,7 @@ Which key commits is configurable in Settings &#x2192; "Tab rename: commit with"
     <value>Move tab to new window</value>
   </data>
   <data name="MoveTabToNewWindowToolTip" xml:space="preserve">
-    <value>Moves tab to a new window </value>
+    <value>Move this tab to a new window</value>
   </data>
   <data name="RunAsAdminFlyout.Text" xml:space="preserve">
     <value>Run as administrator</value>
