@@ -3,8 +3,9 @@
 > **Goal:** installing the GitHub **release** and the local **dev** build on one machine must
 > produce two fully independent apps — different identity, different launchers, and **zero shared
 > persisted state**. The app "merely loads a profile folder": everything an install stores —
-> engine state *and* Terminal's own settings — lives in ONE folder the user picks on first launch
-> (Production / Development / **Browse…**).
+> engine state *and* Terminal's own settings — lives in ONE folder chosen **automatically by
+> package identity on first launch** (release → Production, dev → Development), and changeable later
+> from the cog (Production / Development / **Browse…**).
 
 Status: **implemented** (lib-compiled green; engine harness 604/604 incl. the new profile checks).
 Runtime verification of the picker + side-by-side install rides the next deploy cycle (the running
@@ -68,29 +69,30 @@ operate on Claude's store).
 Resolution is cached process-wide — a profile cannot change mid-run; the cog's "Change…" applies
 on the next launch.
 
-### The first-launch picker
+### First launch — auto-select by identity (no prompt)
 
 `WindowEmperor::HandleCommandlineArgs` calls `EnsureProfileResolvedAtStartup(allowUi)` **after**
 winning the single-instance handoff (a handed-off second process never shows UI) and **before**
 anything reads persisted state (`ReloadSettings`, `ApplicationState`, the `windows/*.json` reopen
-scan, and — much later — the engine's `AgentmasterStateDir()`). With no saved choice it shows a
-pure-Win32 `TaskDialogIndirect` (command links; `WindowsTerminal.manifest` now declares the
-Common-Controls v6 dependency it needs):
+scan, and — much later — the engine's `AgentmasterStateDir()`). With no saved choice it **does not
+prompt** — it auto-selects the **per-identity default** (`DefaultProfileDir()`) and persists it:
 
-- **Production profile** — `%USERPROFILE%\.agentmaster`
-- **Development profile** — `%USERPROFILE%\.agentmaster-dev` (the default button on a dev package)
-- **Browse…** — `IFileDialog` in `FOS_PICKFOLDERS` mode; cancelling Browse returns to the picker.
+- the **RELEASE** install (`Agentmaster`) → **Production**, `%USERPROFILE%\.agentmaster`
+- the **DEV** install (`AgentmasterDev`) → **Development**, `%USERPROFILE%\.agentmaster-dev`
+- unpackaged / portable-without-marker → the release default (the historical `~/.agentmaster`)
 
-Plus a **"Copy existing data from `~/.agentmaster`"** checkbox (shown when that legacy dir exists;
-checked by default): a `skip_existing` recursive copy that excludes `locks\` (machine-global dev
-tooling), `shim\` + `bridge.json` (absolute paths / a live pipe name — the engine regenerates both
-at init) and `*.tmp`. After any choice the bootstrap **seeds `<profile>\terminal\`** with the
-install's current Terminal settings (from package `LocalState` / the unpackaged dir) so the first
-redirected launch looks identical instead of resetting to defaults.
+It then **seeds `<profile>\terminal\`** with the install's current Terminal settings (from package
+`LocalState` / the unpackaged dir) so the first redirected launch looks identical instead of
+resetting to defaults. The auto-pick needs no UI, so it runs identically for a real launch and a
+`-Embedding` COM activation (defterm handoff) — `allowUi` now governs only the "profile in use by
+another instance" warning, never the choice itself.
 
-Cancelling the picker (X / Esc) runs this launch on the per-identity default **without saving**, so
-the question is asked again next time. A `-Embedding` COM activation (defterm handoff) never shows
-UI: it resolves silently and the picker waits for the next real launch.
+> Earlier builds showed a one-time **Production / Development / Browse…** `TaskDialogIndirect`
+> picker (with a "Copy existing data from `~/.agentmaster`" migrate checkbox). That UI still exists
+> (`ShowProfilePicker`, plus `MigrateProfileData` for the migrate path) but is now reached **only**
+> from the cog's **Change profile folder…** — first launch is silent. To land on a non-default
+> folder (a synced drive, a shared dir, or to copy the legacy `~/.agentmaster` into a fresh dev
+> profile), launch once, then switch via the cog (below).
 
 ### Changing later
 
@@ -114,15 +116,18 @@ Add-AppxPackage -Register "K:\source\Agentmaster\src\cascadia\CascadiaPackage\bi
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
 ```
 
-On first launch pick where the dev data should live:
-- **Development** + the migrate checkbox → current state is **copied** to `~/.agentmaster-dev`
-  (original kept), or
-- **Browse… → `~/.agentmaster`** → keep using the existing folder in place (then give the release
-  a fresh dir when it installs).
+First launch no longer prompts — the dev build **auto-lands on the fresh `~/.agentmaster-dev`**, so
+the existing `~/.agentmaster` dev fleet is NOT picked up automatically. To keep using it, do ONE of:
+- **before** the first launch, set `AGENTMASTER_PROFILE=%USERPROFILE%\.agentmaster` (or write that
+  line into `%USERPROFILE%\.agentmaster.profiles` under the `AgentmasterDev_56k4f06dsfp9r=` key) →
+  the dev build resolves straight to the existing folder, in place; or
+- **after** the first launch (which lands on the empty `~/.agentmaster-dev`), open the cog →
+  **Change profile folder… → Browse… → `~/.agentmaster`** to use the existing folder in place
+  (applies on the next restart). Give the release a fresh dir when it installs.
 
 Installing the GitHub release afterwards (`Add-AppxPackage Agentmaster_<ver>.msixbundle`) is clean —
-the family is free after step 1 — and ITS first launch asks the same question (typically
-**Production**).
+the family is free after step 1 — and ITS first launch silently lands on **Production**
+(`~/.agentmaster`); change it from the cog if needed.
 
 ## 4. What runs where (quick reference)
 

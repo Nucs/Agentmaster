@@ -527,11 +527,13 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // ANYTHING reads or writes persisted state: Terminal's own settings/state (ReloadSettings
     // below routes through GetBaseSettingsPath's AGENTMASTER_PROFILE redirect), the reopen
     // scan further down, and — much later — the engine's AgentmasterStateDir(). An install's
-    // first launch (no saved choice) shows the one-time picker (Production / Development /
-    // Browse…); a `-Embedding` COM activation (defterm handoff) must never block on UI, so it
-    // resolves silently and the picker waits for the next real launch. A false return means
-    // the profile is live in ANOTHER instance (release+dev pointed at one folder) and the user
-    // declined to continue — exit like a handoff, before any state is touched.
+    // first launch (no saved choice) AUTO-SELECTS the per-identity default profile (release →
+    // Production ~/.agentmaster, dev → Development ~/.agentmaster-dev) and persists it WITHOUT
+    // prompting — the user changes it later from the cog's "Change profile folder…". The
+    // `embedding` flag now only governs the "profile in use by another instance" warning (a
+    // defterm handoff must never block on UI). A false return means the profile is live in
+    // ANOTHER instance (release+dev pointed at one folder) and the user declined to continue —
+    // exit like a handoff, before any state is touched.
     {
         const std::wstring_view cmdline{ GetCommandLineW() };
         const bool embedding = cmdline.find(L"-Embedding") != std::wstring_view::npos;

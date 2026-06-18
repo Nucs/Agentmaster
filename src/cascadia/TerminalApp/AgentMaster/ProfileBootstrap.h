@@ -12,7 +12,9 @@
 // WHY: the RELEASE package (Agentmaster_...) and the DEV package (AgentmasterDev_...) install
 // side by side; without per-install profiles they would fight over ONE ~/.agentmaster (two
 // SharedEngines clobbering sessions.json / open-windows.json / bridge.json). Each install
-// remembers its OWN profile choice, picked on first launch (Production / Development / Browse…).
+// remembers its OWN profile choice. First launch AUTO-SELECTS the per-identity default WITHOUT
+// prompting — release → Production (~/.agentmaster), dev → Development (~/.agentmaster-dev) — and
+// persists it; the user can switch later (Production / Development / Browse…) from the cog.
 //
 // RESOLUTION ORDER (ResolveProfileDir):
 //   1. env  AGENTMASTER_PROFILE        — explicit override (also exported by the bootstrap so
@@ -29,10 +31,10 @@
 //                                        shows UI and lands here, which preserves the historical
 //                                        ~/.agentmaster for unpackaged tools and the test harness.
 //
-// The first-launch PICKER (TaskDialogIndirect command links + an IFileDialog folder browse) is
-// only ever shown by the WindowEmperor (after the single-instance handoff, before anything reads
-// persisted state) and by the Settings cog's "Change profile folder…". It is pure Win32 — in
-// XAML Islands a Win32 modal gets its keyboard input directly (no ContentDialog input trap).
+// The PICKER (TaskDialogIndirect command links + an IFileDialog folder browse, ShowProfilePicker)
+// is NO LONGER shown on first launch — that path auto-selects by identity (above). It is now only
+// shown by the Settings cog's "Change profile folder…" (an explicit user action). It is pure Win32
+// — in XAML Islands a Win32 modal gets its keyboard input directly (no ContentDialog input trap).
 //
 // SAFETY: EnsureProfileResolvedAtStartup also takes a kernel mutex named after the resolved
 // profile dir. Two live instances (e.g. release + dev pointed at one folder via Browse…) would
@@ -694,10 +696,12 @@ namespace Agentmaster::Profiles
     // The WindowEmperor calls this ONCE, right after winning the single-instance handoff and
     // BEFORE anything reads persisted state (Terminal settings via the GetBaseSettingsPath
     // redirect, ApplicationState, the windows/<id>.json reopen scan, and — later — the engine's
-    // AgentmasterStateDir). `allowUi` is false for a `-Embedding` COM activation (defterm
-    // handoff must not block on a dialog): it resolves silently and asks on the next real
-    // launch. Returns false ONLY when the profile is held by another live instance and the user
-    // chose not to continue — the caller should exit.
+    // AgentmasterStateDir). First launch (no env / portable marker / saved choice) AUTO-SELECTS the
+    // per-identity default profile (release → Production, dev → Development) and persists it — no
+    // prompt. `allowUi` no longer gates the resolution (the auto-pick needs no UI); it only gates
+    // the "profile already in use by another instance" warning below — a `-Embedding` COM activation
+    // (defterm handoff) passes false so it can never block on a dialog. Returns false ONLY when the
+    // profile is held by another live instance and the user chose not to continue — caller exits.
     inline bool EnsureProfileResolvedAtStartup(bool allowUi)
     {
         std::wstring dir = detail::GetEnvVar(L"AGENTMASTER_PROFILE");
@@ -709,28 +713,20 @@ namespace Agentmaster::Profiles
         {
             dir = ReadSavedChoice();
         }
-        if (dir.empty() && allowUi)
-        {
-            // First launch of this install: ask. The migration source is the legacy/shared
-            // ~/.agentmaster — the pre-profile state dir every earlier build wrote to.
-            const auto pick = ShowProfilePicker(nullptr, true, DefaultReleaseProfileDir());
-            if (pick.chosen)
-            {
-                dir = pick.dir;
-                detail::EnsureDirExists(dir);
-                SaveChoice(dir);
-                if (pick.migrate)
-                {
-                    MigrateProfileData(DefaultReleaseProfileDir(), dir);
-                }
-                SeedTerminalSettings(dir);
-            }
-        }
         if (dir.empty())
         {
-            // Cancelled (or silent -Embedding): run on the per-identity default WITHOUT saving,
-            // so the picker offers the choice again next launch.
+            // First launch of this install: AUTO-SELECT the per-identity default profile and
+            // remember it, WITHOUT prompting — the RELEASE install picks the Production profile
+            // (~/.agentmaster), the DEV install picks the Development profile (~/.agentmaster-dev).
+            // (Was: a Production / Development / Browse… TaskDialog picker — see ShowProfilePicker,
+            // still used by the cog's "Change profile folder…".) The choice is keyed off the package
+            // identity (DefaultProfileDir == IsDevPackage() ? dev : release), so it needs no UI and
+            // runs for headless -Embedding/defterm activations too (allowUi only gates the in-use
+            // warning below). It stays changeable later from the cog's "Change profile folder…".
             dir = DefaultProfileDir();
+            detail::EnsureDirExists(dir);
+            SaveChoice(dir);
+            SeedTerminalSettings(dir);
         }
 
         detail::EnsureDirExists(dir);

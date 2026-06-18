@@ -363,13 +363,17 @@ settings.json/state.json (a `GetBaseSettingsPath` redirect to `<profile>\termina
 **profile folder** per install: resolved env `AGENTMASTER_PROFILE` > `.portable` marker
 (`<exedir>\profile`, true-portable zips now pass `-PortableMode`) > the per-install slot in
 `~/.agentmaster.profiles` > per-identity default (`~/.agentmaster` release+unpackaged /
-`~/.agentmaster-dev` dev). An install's **first launch shows a picker** (TaskDialog command links —
-comctl32 v6 dep added to `WindowsTerminal.manifest`): **Production / Development / Browse…** (+ a
-"copy existing data from `~/.agentmaster`" checkbox; skips `locks/`+`shim/`+`bridge.json`, never
-clobbers), runs from `WindowEmperor::HandleCommandlineArgs` AFTER the single-instance handoff and
-BEFORE any state read (`-Embedding` defterm activations resolve silently); the choice persists
-per-package-family, is changeable from the cog's new **PROFILE** row (applies on restart), and a
-kernel **profile mutex** warns if two live instances point at one folder. The generated hook
+`~/.agentmaster-dev` dev). An install's **first launch AUTO-SELECTS the per-identity default WITHOUT
+prompting** — release → **Production** (`~/.agentmaster`), dev → **Development** (`~/.agentmaster-dev`)
+— and persists it (`EnsureProfileResolvedAtStartup` → `DefaultProfileDir()` + `SaveChoice` +
+`SeedTerminalSettings`), running from `WindowEmperor::HandleCommandlineArgs` AFTER the single-instance
+handoff and BEFORE any state read (no UI, so a `-Embedding` defterm activation takes the same path —
+`allowUi` now gates only the two-instances-on-one-profile warning). The old **Production / Development /
+Browse…** TaskDialog picker (comctl32 v6 dep in `WindowsTerminal.manifest`; + a "copy existing data from
+`~/.agentmaster`" checkbox that skips `locks/`+`shim/`+`bridge.json` and never clobbers) still exists
+(`ShowProfilePicker` / `MigrateProfileData`) but is now reached **only** from the cog's **PROFILE** row's
+Change… (applies on restart) — first launch is silent. A kernel **profile mutex** warns if two live
+instances point at one folder. The generated hook
 forwarder's bridge discovery is now per-profile too (`BuildForwarderScript(stateDir)` — was a
 hardcoded `~/.agentmaster/bridge.json`, a cross-instance hook-routing bug). Engine code is
 otherwise untouched: `AgentmasterStateDir()` simply resolves through `ProfileBootstrap.h`, so
@@ -1844,9 +1848,11 @@ build **binlog uploads as an artifact** to diagnose the first run.
     explicit `--session-id` / `--resume <guid>` is authoritative and wins (collision-free, known
     before the transcript exists).
 15. **One profile per install, resolved ONCE, before ANY state read; everything persists inside
-    it.** The WindowEmperor resolves the profile (and shows the first-launch picker) **after**
-    winning the single-instance handoff and **before** the first settings/state read — never show
-    the picker from a handed-off process or a `-Embedding` (defterm) activation, and never read or
+    it.** The WindowEmperor resolves the profile **after** winning the single-instance handoff and
+    **before** the first settings/state read — first launch **auto-selects the per-identity default**
+    (release → Production, dev → Development) WITHOUT UI, so a handed-off process or a `-Embedding`
+    (defterm) activation takes the same silent path; the only profile picker left is the cog's
+    explicit **Change…** (never shown from a handed-off / `-Embedding` process). Never read or
     write persisted state (engine files, Terminal settings, window records, the reopen scan)
     through any path that isn't `AgentmasterStateDir()` / the `AGENTMASTER_PROFILE`-redirected
     `GetBaseSettingsPath()`. The resolution is cached for the process lifetime — a profile change
