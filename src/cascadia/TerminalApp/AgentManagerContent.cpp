@@ -1138,7 +1138,7 @@ namespace winrt::TerminalApp::implementation
             _launchAgentBtn = Button{};
             _launchAgentBtn.FontSize(11);
             _launchAgentBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_launchAgentBtn, L"Agent to launch \x2014 click to switch between Claude and Codex");
+            AgentSetTip(_launchAgentBtn, L"Agent to launch \x2014 click to toggle between Claude and Codex (the Launch button and box retarget to match).");
             _launchAgentBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _launchCodex = !_launchCodex;
                 _UpdateLaunchAgentButton();
@@ -1152,7 +1152,7 @@ namespace winrt::TerminalApp::implementation
             _cwdBox = TextBox{};
             _cwdBox.Width(360);
             _cwdBox.PlaceholderText(L"working directory (the M axis)");
-            AgentSetTip(_cwdBox, L"path to workdir / session id"); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
+            AgentSetTip(_cwdBox, L"Where to launch: a working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders."); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
             {
                 wchar_t up[MAX_PATH];
                 const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
@@ -1285,6 +1285,7 @@ namespace winrt::TerminalApp::implementation
 
             _launchBtn = Button{};
             _launchBtn.Content(winrt::box_value(L"Launch Claude"));
+            AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered.");
             _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
             bar.Children().Append(_launchBtn);
 
@@ -1293,7 +1294,7 @@ namespace winrt::TerminalApp::implementation
             _forkBtn = Button{};
             _forkBtn.Content(winrt::box_value(L"Fork"));
             _forkBtn.Visibility(Visibility::Collapsed);
-            AgentSetTip(_forkBtn, L"Fork this conversation into a NEW session (claude --resume --fork-session) \x2014 the original is untouched");
+            AgentSetTip(_forkBtn, L"Fork the entered session into a NEW, independent conversation \x2014 the original transcript is left untouched.");
             _forkBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnForkFromBox(); });
             bar.Children().Append(_forkBtn);
 
@@ -1306,7 +1307,7 @@ namespace winrt::TerminalApp::implementation
             _reopenBtn = Button{};
             _reopenBtn.Content(winrt::box_value(L"Reopen Windows"));
             _reopenBtn.Visibility(Visibility::Collapsed);
-            AgentSetTip(_reopenBtn, L"Reopen previously-saved windows that aren't currently open");
+            AgentSetTip(_reopenBtn, L"Reopen saved windows that aren't currently open \x2014 restores each window's tabs, layout, and sessions.");
             _reopenBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnReopenWindows(); });
             bar.Children().Append(_reopenBtn);
 
@@ -1318,13 +1319,14 @@ namespace winrt::TerminalApp::implementation
                 cog.Glyph(L"\xE713"); // Settings (cog)
                 _settingsBtn.Content(cog);
             }
-            AgentSetTip(_settingsBtn, L"Settings");
+            AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Autopilot defaults, the Claude binary, the active profile, and app behavior.");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             bar.Children().Append(_settingsBtn);
 
             // Global Autopilot backstop: Pause-all / Resume-all. Placed AFTER the Settings cog.
             _pauseBtn = Button{};
             _pauseBtn.Content(winrt::box_value(L"Pause Autopilot"));
+            AgentSetTip(_pauseBtn, L"Global Autopilot backstop \x2014 pauses or resumes auto-sending across ALL sessions at once.");
             _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _globalPaused = !_globalPaused;
                 if (_pauseHandler)
@@ -1344,7 +1346,7 @@ namespace winrt::TerminalApp::implementation
             // Placed AFTER the Settings cog (alongside Pause Autopilot).
             _archivedBtn = Button{};
             _archivedBtn.Content(winrt::box_value(L"Archived"));
-            AgentSetTip(_archivedBtn, L"Restore archived (closed) sessions");
+            AgentSetTip(_archivedBtn, L"Open the Archive \x2014 browse and restore closed sessions and saved windows.");
             _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openArchiveHandler) { _openArchiveHandler(); } });
             bar.Children().Append(_archivedBtn);
 
@@ -1352,7 +1354,7 @@ namespace winrt::TerminalApp::implementation
             // EVERY session on the machine in a selectable window, searchable. RIGHT AFTER Archived.
             _sessionsBtn = Button{};
             _sessionsBtn.Content(winrt::box_value(L"Sessions"));
-            AgentSetTip(_sessionsBtn, L"Browse + search ALL Claude Code sessions on this machine (last month by default)");
+            AgentSetTip(_sessionsBtn, L"Browse and search every Claude Code session on this machine (last month by default).");
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             bar.Children().Append(_sessionsBtn);
 
