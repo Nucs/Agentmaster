@@ -4041,20 +4041,17 @@ namespace winrt::TerminalApp::implementation
         const TerminalApp::TerminalPaneContent& paneContent,
         const winrt::Windows::Foundation::IInspectable&)
     {
-        // Agentmaster: if this is a managed Claude pane, capture its session BEFORE the swap. The
-        // restart reuses the SAME commandline (claude --resume <id> / --session-id <id>; see
-        // _duplicateConnectionForRestart), so the new connection runs the SAME conversation as a fresh
-        // process — but with a NEW WT_SESSION. Our injector captured the OLD connection (which the swap
-        // below replaces -> writes would hit a dead pipe), so we re-point it to the new connection
-        // afterward, keeping the session driveable on the same conversation id. The observer would NOT
-        // fix this on its own: it sees the tab still bound to <id> (alreadyBound) and skips re-binding.
-        std::wstring claudeId;
-        if (_sessionRegistry && paneContent)
+        // Agentmaster: a managed Claude/Codex pane restarts by RESUMING its current conversation, NOT by
+        // replaying its original launch commandline. The launch commandline is `--session-id <id>` for a
+        // fresh session (which collides with the now-existing transcript after the first turn — claude
+        // refuses an in-use id, so the relaunch dies immediately) or a `--fork-session` form for a fork
+        // (which would re-fork from the parent). _RestartManagedSession rebuilds the connection from the
+        // CURRENT conversation state (resume, transcript/rollout-gated), swaps it in, and re-points the
+        // stdin injector; it returns false for a plain shell / external tab, which falls through to the
+        // upstream replay below (correct there — a shell has no conversation to resume).
+        if (_RestartManagedSession(paneContent))
         {
-            if (const auto ctrl = paneContent.GetTermControl())
-            {
-                claudeId = _ClaudeSessionForConnection(ctrl.Connection());
-            }
+            return;
         }
 
         // Note: callers are likely passing in `nullptr` as the args here, as
@@ -4071,19 +4068,6 @@ namespace winrt::TerminalApp::implementation
             termControl.HardResetWithoutErase();
             termControl.Connection(connection);
             connection.Start();
-
-            // Agentmaster: re-point this session's stdin injector at the freshly-started connection
-            // (same conversation id; Correctness Rule #3 binds by sessionId). Without this, Autopilot /
-            // Send-now would keep writing to the replaced, dead connection.
-            if (!claudeId.empty() && _sessionRegistry)
-            {
-                const auto conn = connection;
-                _sessionRegistry->SetInjector(claudeId, [conn](const std::wstring& text) {
-                    const auto* begin = reinterpret_cast<const char16_t*>(text.data());
-                    conn.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
-                });
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] re-pointed injector for " + claudeId + L"\n");
-            }
         }
     }
 

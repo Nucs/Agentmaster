@@ -642,6 +642,39 @@ static void TestSpawnBuilders()
     // Empty launcher => the bare-token fallback (unchanged from the original behavior).
     CHECK(BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, true, L"", L"") == rcmd, "empty launcher falls back to the bare `claude` token");
 
+    // BuildClaudeRestartSpec (Agentmaster — the "Restart session" fix). Relaunch an EXISTING conversation
+    // IN PLACE instead of replaying the launch commandline. The invariants vs the old behavior: it KEEPS
+    // the conversation id (never re-keys), it NEVER forks, and it RESUMES when a transcript exists else
+    // starts FRESH reusing the id. A freshly-minted random id has no transcript, so this is the
+    // deterministic FRESH form — `--session-id <id>`, NOT `--resume`, NOT `--fork-session`, SAME id. (Like
+    // BuildClaudeSpawn it materializes the hook files in the active profile dir; we assert only the
+    // profile-dir-independent parts, so the embedded --settings path is irrelevant to the checks.)
+    {
+        AppSettings rst;
+        rst.skipPermissions = true;
+        const std::wstring rid = NewSessionId(); // random => guaranteed no transcript => the fresh form
+        const auto rspec = BuildClaudeRestartSpec(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", rid, rst, L"C:\\bin\\claude.exe");
+        CHECK(rspec.sessionId == rid, "restart spec KEEPS the conversation id (never re-keys)");
+        CHECK(rspec.commandline.find(L"--session-id " + rid) != std::wstring::npos, "restart of a transcript-less id uses the FRESH form (--session-id <id>)");
+        CHECK(rspec.commandline.find(L"--resume") == std::wstring::npos, "restart (no transcript) does NOT --resume");
+        CHECK(rspec.commandline.find(L"--fork-session") == std::wstring::npos, "restart NEVER forks");
+        CHECK(rspec.commandline.rfind(L"\"C:\\bin\\claude.exe\"", 0) == 0, "restart launches the resolved claude.exe by full path");
+        bool hasSid = false, hasPipe = false;
+        for (const auto& [k, v] : rspec.env)
+        {
+            if (k == L"CCMGR_SESSION_ID" && v == rid)
+            {
+                hasSid = true;
+            }
+            if (k == L"CCMGR_HOOK_PIPE" && v == L"\\\\.\\pipe\\agentmaster.42")
+            {
+                hasPipe = true;
+            }
+        }
+        CHECK(hasSid, "restart spec env carries CCMGR_SESSION_ID = the kept id");
+        CHECK(hasPipe, "restart spec env carries CCMGR_HOOK_PIPE = the bridge pipe");
+    }
+
     // ResolveClaudeExeIn (native-exe-only policy): resolve a real claude.exe; a .cmd is only a
     // breadcrumb to its npm binary; a pure-Node .cmd (no binary) resolves to empty (gated). Temp fixture.
     {

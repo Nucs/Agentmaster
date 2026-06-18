@@ -1066,6 +1066,25 @@ try {
         return out;
     }
 
+    // The child-env block shared by every managed-Claude spawn — fresh launch, resume, fork, AND the
+    // in-place RESTART rebuild (BuildClaudeRestartSpec). CCMGR_SESSION_ID + CCMGR_HOOK_PIPE drive hook
+    // correlation; the cog's global env is layered on top but can NEVER clobber the CCMGR_* vars (a stray
+    // user entry that begins CCMGR_ is skipped). Factored out so the launch and restart specs produce a
+    // byte-identical env.
+    static void AppendManagedClaudeEnv(ClaudeSpawnSpec& spec, const AppSettings& settings)
+    {
+        spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
+        spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);
+        for (auto& kv : ParseEnvAssignments(settings.env))
+        {
+            if (kv.first.rfind(L"CCMGR_", 0) == 0)
+            {
+                continue;
+            }
+            spec.env.emplace_back(std::move(kv.first), std::move(kv.second));
+        }
+    }
+
     ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher)
     {
         ClaudeSpawnSpec spec;
@@ -1088,18 +1107,43 @@ try {
         const auto settingsFwd = ToForwardSlashes(settingsPath);
         spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher);
 
-        spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
-        spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);
-        // The cog's global env, applied to every session. Skip CCMGR_* so a stray user entry
-        // can't clobber the hook-correlation vars (which must win in the child env map).
-        for (auto& kv : ParseEnvAssignments(settings.env))
-        {
-            if (kv.first.rfind(L"CCMGR_", 0) == 0)
-            {
-                continue;
-            }
-            spec.env.emplace_back(std::move(kv.first), std::move(kv.second));
-        }
+        // The cog's global env + the hook-correlation vars, applied to every session (CCMGR_* always win).
+        AppendManagedClaudeEnv(spec, settings);
+        return spec;
+    }
+
+    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher)
+    {
+        // Relaunch an EXISTING managed conversation IN PLACE (the tab's connection died and the user hit
+        // "Restart session"). Unlike BuildClaudeSpawn this NEVER mints a new id and NEVER forks:
+        //   * a transcript exists -> RESUME it (claude --resume <id>), continuing the conversation;
+        //   * no transcript yet    -> a FRESH launch that REUSES <id> (claude --session-id <id>). A
+        //     never-prompted / early-crashed session wrote no transcript, so reusing the id is a legit
+        //     fresh start with no "session id already in use" collision — and keeping the id holds the
+        //     registry / tab / injector binding stable across the restart (no re-key).
+        //
+        // This is the whole point of the rewrite: the ORIGINAL launch commandline must NOT be replayed.
+        // A fresh launch's stored commandline is `--session-id <id>` (NOT --resume), which after the first
+        // turn collides with the now-existing transcript (claude refuses an in-use id -> the restart dies
+        // immediately); a fork's is `--resume <parent> --fork-session`, which would re-fork from the
+        // parent into a since-grown id. Deriving the command from the CURRENT transcript state fixes both.
+        ClaudeSpawnSpec spec;
+        spec.workingDir = std::wstring{ workingDir };
+        spec.title = std::wstring{ title };
+        spec.pipeName = std::wstring{ pipeName };
+        spec.sessionId = std::wstring{ sessionId }; // ALWAYS keep the conversation id (no re-key)
+
+        const auto stateDir = AgentmasterStateDir();
+        auto [settingsPath, forwarderPath] = MaterializeSharedHookFiles(stateDir, settings);
+        spec.settingsPath = settingsPath;
+        spec.forwarderPath = forwarderPath;
+
+        const bool resume = ClaudeConversationExists(spec.sessionId);
+        const auto settingsFwd = ToForwardSlashes(settingsPath);
+        // forkFromSessionId is empty: a restart resumes or starts fresh, it never forks.
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, {}, claudeLauncher);
+
+        AppendManagedClaudeEnv(spec, settings);
         return spec;
     }
 }
