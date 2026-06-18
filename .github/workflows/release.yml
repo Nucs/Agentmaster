@@ -344,7 +344,23 @@ jobs:
 
             A fork of Windows Terminal that manages multiple Claude Code sessions.
 
-            ### Install — portable (recommended, no cert)
+            ### Install or upgrade (recommended) — one command
+            From PowerShell — this downloads, trusts the signing cert, and installs/upgrades the
+            MSIX (one UAC prompt, only for trusting the cert):
+            ```powershell
+            irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1 | iex
+            ```
+            **Re-run that exact command anytime to upgrade** — it skips if you're already current.
+            To pass options, run it as a scriptblock:
+            ```powershell
+            & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Launch
+            ```
+            Options: `-Portable` (cert-free, no admin) · `-Version X.Y.Z` · `-Prerelease` · `-Force` ·
+            `-Launch` · `-Uninstall`.
+
+            Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
+
+            ### Install — portable (no cert, no admin)
             1. Download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`).
             2. Unzip anywhere and run `WindowsTerminal.exe` in place.
 
@@ -352,15 +368,13 @@ jobs:
             settings live in `<unzip>\settings` and all Agentmaster state in `<unzip>\profile`.
             Nothing outside the folder is touched.
 
-            ### Install — MSIX bundle (self-signed)
-            The `.msixbundle` is **self-signed** (see the cert caveat in the workflow). To install:
+            ### Install — MSIX bundle (manual)
+            The `.msixbundle` is **self-signed** (see the cert caveat in the workflow). To install by hand:
             1. Download `Agentmaster.cer` and the `.msixbundle`.
             2. Import the cert (admin PowerShell):
                `Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`
             3. Double-click the `.msixbundle`, or:
                `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`
-
-            Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
 
             ### Profiles & coexistence with a dev build
             On **first launch** Agentmaster asks which **profile folder** to use — Production

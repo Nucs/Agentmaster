@@ -84,9 +84,29 @@ tracker.
 
 ## Download & install
 
-Grab the latest build from [**Releases**](https://github.com/Nucs/Agentmaster/releases):
+**One command (recommended)** — install *or upgrade* to the latest release from PowerShell. It
+downloads the bundle, trusts the signing certificate (one UAC prompt, for the cert only), and
+installs — and **re-running it later is the upgrade path** (it skips if you're already current):
 
-- **Portable (recommended)** — download `Agentmaster_<version>_x64.zip` (or `_arm64`), unzip
+```powershell
+irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1 | iex
+```
+
+To pass options, run it as a scriptblock — e.g. the cert-free, no-admin portable build, or a
+specific version:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Portable -Launch
+```
+
+Options: `-Portable` (no cert / no admin) · `-Version X.Y.Z` · `-Prerelease` · `-Force` ·
+`-Launch` · `-Uninstall` (see [`tools/Install-Agentmaster.ps1`](tools/Install-Agentmaster.ps1)).
+
+---
+
+Or grab the assets yourself from [**Releases**](https://github.com/Nucs/Agentmaster/releases):
+
+- **Portable** — download `Agentmaster_<version>_x64.zip` (or `_arm64`), unzip
   anywhere, and run `WindowsTerminal.exe` in place. No install and no certificate required. The zip
   is **fully self-contained**: Terminal settings live in `<unzip>\settings` and all Agentmaster
   state in `<unzip>\profile` — nothing outside the folder is touched.
