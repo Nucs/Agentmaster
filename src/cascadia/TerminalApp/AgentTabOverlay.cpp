@@ -1256,6 +1256,17 @@ namespace winrt::TerminalApp::implementation
         _summaryWrapIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // a TEXT font carrying U+21B5 (the icon font would tofu a non-PUA glyph)
         _summaryWrapIcon.Glyph(L"\x21B5"); // ↵ — the newline / line-wrap symbol
         _summaryWrapIcon.FontSize(11); // "same size as the font" (the times line is 11)
+        _summaryWrapIcon.FontWeight(FontWeights::SemiBold()); // a touch bolder so the small glyph reads better
+        // Enlarge the glyph ~1-2px WITHOUT growing the times-bar row: a centered RenderTransform scale,
+        // NOT a bigger FontSize. RenderTransform is applied AFTER layout, so the icon's measured box (and
+        // thus the row's line height) is unchanged — the ↵ just renders a hair larger about its center.
+        {
+            ScaleTransform wrapScale{};
+            wrapScale.ScaleX(1.18); // ~11px -> ~13px visual (within the requested 1-2px), height unaffected
+            wrapScale.ScaleY(1.18);
+            _summaryWrapIcon.RenderTransform(wrapScale);
+            _summaryWrapIcon.RenderTransformOrigin(Point{ 0.5f, 0.5f }); // scale about the glyph's center
+        }
         // The icon color (dim when off / lighter when on) is set by _UpdateSummaryWrapButtonVisual.
 
         Button wrapBtn{};
