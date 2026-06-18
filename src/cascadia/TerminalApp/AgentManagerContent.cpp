@@ -13,6 +13,21 @@
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 
+// Agentmaster: the build-stamped git commit + branch (the Settings page header). Generated into
+// $(GeneratedFilesDir) by TerminalAppLib.vcxproj's AgentmasterGenerateBuildInfo target, which is
+// on the include path. The __has_include guard + fallback defines keep this file compilable if
+// the generator hasn't run yet (e.g. opened in an IDE before any build); a real build always
+// regenerates the header first (BeforeTargets ClCompile).
+#if __has_include("AgentmasterBuildInfo.g.h")
+#include "AgentmasterBuildInfo.g.h"
+#endif
+#ifndef AGENTMASTER_COMMIT_HASH
+#define AGENTMASTER_COMMIT_HASH L"unknown"
+#endif
+#ifndef AGENTMASTER_COMMIT_BRANCH
+#define AGENTMASTER_COMMIT_BRANCH L"unknown"
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <thread> // background transcript read for an external's read-only plan
@@ -4433,6 +4448,47 @@ namespace winrt::TerminalApp::implementation
         auto panel = StackPanel{};
         panel.Spacing(10);
         panel.Children().Append(Text(L"Agentmaster Settings", 18, true, 1.0));
+
+        // Agentmaster: build identity line at the very top — the release VERSION (read live from the
+        // package manifest; the release pipeline stamps Package-Rel.appxmanifest, a dev loose layout
+        // shows its own manifest version), the git COMMIT this build was made from (build-stamped via
+        // AgentmasterBuildInfo.g.h), and whether this is the RELEASE or DEV install (package family:
+        // Agentmaster vs AgentmasterDev) plus the compile CONFIGURATION (Debug/Release). Full detail
+        // (branch, package family name) rides a hover tooltip.
+        {
+            std::wstring version{ L"?" };
+            try
+            {
+                version = std::wstring{ CascadiaSettings::ApplicationVersion() };
+            }
+            CATCH_LOG();
+
+            const std::wstring pfn = ::Agentmaster::Profiles::PackageFamilyName();
+            const std::wstring channel = pfn.empty()                                 ? std::wstring{ L"Unpackaged" } :
+                                         ::Agentmaster::Profiles::IsDevPackage()     ? std::wstring{ L"Dev" } :
+                                                                                       std::wstring{ L"Release" };
+#if defined(_DEBUG)
+            const std::wstring config{ L"Debug" };
+#else
+            const std::wstring config{ L"Release" };
+#endif
+            const std::wstring commit{ AGENTMASTER_COMMIT_HASH };
+            const std::wstring branch{ AGENTMASTER_COMMIT_BRANCH };
+
+            // e.g. "v0.0.1.0  ·  3c4e2a942  ·  Dev · Debug"  (· = U+00B7, always trailed by a space
+            // so the \x00B7 hex escape can't swallow a following hex digit).
+            const std::wstring line = L"v" + version + L"  \x00B7  " + commit + L"  \x00B7  " + channel + L" \x00B7 " + config;
+            auto sub = Text(winrt::hstring{ line }, 12, false, 0.6);
+
+            std::wstring tip = L"Version " + version + L"\nCommit " + commit + L" (" + branch + L")\nChannel " + channel;
+            if (!pfn.empty())
+            {
+                tip += L" (" + pfn + L")";
+            }
+            tip += L"\nConfiguration " + config;
+            AgentSetTip(sub, winrt::hstring{ tip });
+            panel.Children().Append(sub);
+        }
 
         // CLAUDE SESSIONS
         panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
