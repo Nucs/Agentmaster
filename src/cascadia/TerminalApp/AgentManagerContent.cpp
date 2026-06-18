@@ -3873,7 +3873,7 @@ namespace winrt::TerminalApp::implementation
         // Advertise the in-place editor's commit keys + that they're configurable. Which key commits
         // (Enter vs Shift+Enter) follows the GLOBAL TabRenameCommitMode setting; the other inserts a
         // newline (titles can be multi-line), Esc cancels, and clicking away always commits.
-        AgentSetTip(rename, L"Rename this session \x2014 its Explorer name and tab title.\nCommit the new name with Enter or Shift+Enter; the other key inserts a newline. Esc cancels; clicking away always commits.\nWhich key commits is configurable in Settings (\x2699) \x2192 \x201CTab rename: commit with\x201D.");
+        AgentSetTip(rename, L"Rename this session \x2014 its Explorer name and tab title.\nBy default, Shift+Enter commits the new name and Enter inserts a line break (swap them in Settings (\x2699) \x2192 \x201CTab rename: commit with\x201D).\nEsc cancels; clicking away always commits.");
         rename.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
@@ -4789,7 +4789,7 @@ namespace winrt::TerminalApp::implementation
         _setRenameCommit.Items().Append(winrt::box_value(L"Click away only"));
         _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Shift+Enter"));
         _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Enter"));
-        AgentSetTip(_setRenameCommit, L"How renaming a tab is accepted & saved. Clicking away always commits; this picks the keyboard shortcut. The other key inserts a newline (titles can be multi-line).");
+        AgentSetTip(_setRenameCommit, L"Which key commits a tab rename: Shift+Enter (default) or Enter. The other inserts a line break (titles can be multi-line); clicking away always commits.");
         panel.Children().Append(_setRenameCommit);
         _setWaitingDecay = TextBox{};
         _setWaitingDecay.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after (minutes)"));
