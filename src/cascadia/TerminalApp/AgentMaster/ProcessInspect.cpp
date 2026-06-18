@@ -2755,6 +2755,17 @@ namespace Agentmaster
         std::sort(out.filesRead.begin(), out.filesRead.end());
         std::sort(out.filesCreated.begin(), out.filesCreated.end());
         std::sort(out.filesEdited.begin(), out.filesEdited.end());
+        // A file shown under Files Created / Files Edited is already accounted for there — drop it
+        // from Files Read so the same basename is never listed twice (working on a file is the
+        // meaningful line; the read of it is implied). Read keeps only files that were ONLY read.
+        if (!out.filesRead.empty() && (!out.filesEdited.empty() || !out.filesCreated.empty()))
+        {
+            std::unordered_set<std::wstring> written(out.filesEdited.begin(), out.filesEdited.end());
+            written.insert(out.filesCreated.begin(), out.filesCreated.end());
+            out.filesRead.erase(std::remove_if(out.filesRead.begin(), out.filesRead.end(),
+                                                [&written](const std::wstring& f) { return written.count(f) != 0; }),
+                                out.filesRead.end());
+        }
         if (haveTodos)
         {
             for (const auto& t : lastTodos.arr)

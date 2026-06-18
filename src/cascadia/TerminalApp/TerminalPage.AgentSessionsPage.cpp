@@ -332,8 +332,9 @@ namespace winrt::TerminalApp::implementation
                 header.ColumnDefinitions().Append(c);
             };
             hcol(0, GridUnitType::Auto); // back
-            hcol(1, GridUnitType::Star); // title/count
-            hcol(0, GridUnitType::Auto); // the search bar cluster
+            hcol(0, GridUnitType::Auto); // title/count — sized to content so the search bar sits right after it
+            hcol(0, GridUnitType::Auto); // the search bar cluster — now left-aligned, next to the title
+            hcol(1, GridUnitType::Star); // trailing spacer absorbs the rest, keeping the cluster on the LEFT
         }
         Button back;
         back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
@@ -354,6 +355,7 @@ namespace winrt::TerminalApp::implementation
         bar.Orientation(Orientation::Horizontal);
         bar.Spacing(6);
         bar.VerticalAlignment(VerticalAlignment::Center);
+        bar.Margin(Thickness{ 18, 0, 0, 0 }); // gap from the title (the cluster now sits next to it, not at the right edge)
 
         TextBox search;
         search.PlaceholderText(L"search for sessions");
