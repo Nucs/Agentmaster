@@ -6538,12 +6538,16 @@ namespace winrt::TerminalApp::implementation
 
         // SUBFOLDERS of the current path (+ a parent up-nav).
         //
-        // Agentmaster: typing a partial leaf FILTERS. A path that ends with a separator
-        // ("K:\source\") lists that directory's folders unfiltered; a partial leaf
-        // ("K:\source\Agent") lists the PARENT directory's folders whose name STARTS WITH the
-        // leaf ("Agent*"), case-insensitively, with an EXACT name match hoisted to the top.
-        // (Drilling into a folder is therefore "type — or click a row, which appends — the
-        // trailing separator".)
+        // Agentmaster: typing a partial leaf FILTERS. The box text splits at its LAST separator
+        // into (listDir, leaf):
+        //   - a path ending in a separator ("K:\source\") has an empty leaf => list ALL of
+        //     listDir, unfiltered;
+        //   - a partial leaf ("K:\source\Agent") lists listDir's folders whose name STARTS WITH
+        //     the leaf ("Agent*"), case-insensitively, with the EXACT match hoisted to the top.
+        // When the WHOLE text is itself an existing directory ("K:\source", no trailing
+        // separator), a SECOND section below ALSO lists that directory's own subfolders — so
+        // "K:\source" shows the K:\source* siblings (above) AND everything inside K:\source.
+        // (Clicking any folder row appends the separator, drilling into it.)
         if (!current.empty())
         {
             std::wstring listDir = current; // the directory whose subfolders we enumerate
@@ -6561,37 +6565,23 @@ namespace winrt::TerminalApp::implementation
                 // to anchor a listing to, so fall through and list `current` itself (no filter).
             }
 
-            {
-                winrt::hstring hdr = winrt::hstring{ L"SUBFOLDERS OF " } + winrt::hstring{ listDir };
-                if (!filter.empty())
+            // Append `dir`'s subfolders, optionally keeping only names that start with `filt`
+            // (case-insensitive) and hoisting an exact match to the front (a directory's leaf is
+            // unique within its parent, so at most one); the rest stay newest-modified-first.
+            // Returns how many folder rows were appended.
+            auto appendFolderRows = [&](const std::wstring& dir, const std::wstring& filt) -> size_t {
+                auto subs = EnumSubdirs(dir);
+                if (!filt.empty())
                 {
-                    hdr = hdr + winrt::hstring{ L"  \x2022  \"" } + winrt::hstring{ filter } + winrt::hstring{ L"\"" };
-                }
-                _pathListHost.Children().Append(sectionLabel(hdr));
-            }
-
-            if (const auto parent = ParentDir(listDir))
-            {
-                _pathListHost.Children().Append(_MakePathRow(*parent, L"\x2191", winrt::hstring{ L".. (parent)" }));
-            }
-
-            if (IsDir(listDir))
-            {
-                auto subs = EnumSubdirs(listDir);
-                if (!filter.empty())
-                {
-                    // Keep only names that start with the typed leaf; hoist an exact match to
-                    // the front (a directory's leaf is unique within its parent, so at most one),
-                    // leaving the remaining prefix matches in their newest-modified-first order.
                     std::wstring exact;
                     std::vector<std::wstring> matched;
                     for (auto& leaf : subs)
                     {
-                        if (!LeafStartsWith(leaf, filter))
+                        if (!LeafStartsWith(leaf, filt))
                         {
                             continue;
                         }
-                        if (exact.empty() && LeafEquals(leaf, filter))
+                        if (exact.empty() && LeafEquals(leaf, filt))
                         {
                             exact = std::move(leaf);
                         }
@@ -6612,9 +6602,26 @@ namespace winrt::TerminalApp::implementation
                 }
                 for (const auto& leaf : subs)
                 {
-                    _pathListHost.Children().Append(_MakePathRow(JoinDir(listDir, leaf), L"\x25B8", winrt::hstring{ leaf }));
+                    _pathListHost.Children().Append(_MakePathRow(JoinDir(dir, leaf), L"\x25B8", winrt::hstring{ leaf }));
                 }
-                if (subs.empty())
+                return subs.size();
+            };
+
+            // Section A — matches in listDir (the typed leaf's siblings, or — with no leaf — the
+            // whole directory). Carries the parent up-nav (one level above listDir).
+            {
+                const winrt::hstring hdr = filter.empty() ?
+                    (winrt::hstring{ L"SUBFOLDERS OF " } + winrt::hstring{ listDir }) :
+                    (winrt::hstring{ L"MATCHES FOR \"" } + winrt::hstring{ filter } + winrt::hstring{ L"\" IN " } + winrt::hstring{ listDir });
+                _pathListHost.Children().Append(sectionLabel(hdr));
+            }
+            if (const auto parent = ParentDir(listDir))
+            {
+                _pathListHost.Children().Append(_MakePathRow(*parent, L"\x2191", winrt::hstring{ L".. (parent)" }));
+            }
+            if (IsDir(listDir))
+            {
+                if (appendFolderRows(listDir, filter) == 0)
                 {
                     _pathListHost.Children().Append(Text(filter.empty() ? L"(no subfolders)" : L"(no matches)", 12, false, 0.5));
                 }
@@ -6622,6 +6629,17 @@ namespace winrt::TerminalApp::implementation
             else
             {
                 _pathListHost.Children().Append(Text(L"(path not found)", 12, false, 0.5));
+            }
+
+            // Section B — when the WHOLE text names an existing directory (and a leaf was matched
+            // above), ALSO list everything INSIDE it, below the sibling matches.
+            if (!endsSep && !filter.empty() && IsDir(current))
+            {
+                _pathListHost.Children().Append(sectionLabel(winrt::hstring{ L"SUBFOLDERS OF " } + winrt::hstring{ current }));
+                if (appendFolderRows(NormPath(current), std::wstring{}) == 0)
+                {
+                    _pathListHost.Children().Append(Text(L"(no subfolders)", 12, false, 0.5));
+                }
             }
         }
 
