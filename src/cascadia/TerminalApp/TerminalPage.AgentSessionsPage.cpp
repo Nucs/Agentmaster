@@ -422,10 +422,17 @@ namespace winrt::TerminalApp::implementation
             });
         });
         _sessWindowBtn.PointerEntered([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-            if (_sessRangePopup)
+            if (!_sessRangePopup || !_sessWindowBtn || !_sessionsPageHost)
             {
-                _sessRangePopup.IsOpen(true);
+                return;
             }
+            // Anchor the popup under the window button's CURRENT position (root-relative). The header
+            // cluster moved from the right edge to just after the title, so a fixed offset no longer
+            // points at the button — read its live top-left within the host instead.
+            const auto pt = _sessWindowBtn.TransformToVisual(_sessionsPageHost).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+            _sessRangePopup.HorizontalOffset(pt.X);
+            _sessRangePopup.VerticalOffset(pt.Y + _sessWindowBtn.ActualHeight() + 4);
+            _sessRangePopup.IsOpen(true);
         });
         bar.Children().Append(_sessWindowBtn);
 
@@ -519,16 +526,15 @@ namespace winrt::TerminalApp::implementation
 
             _sessRangePopup = Primitives::Popup{};
             _sessRangePopup.Child(card);
-            _sessRangePopup.HorizontalAlignment(HorizontalAlignment::Right);
-            // Anchored near the header's right edge, just under the search bar.
+            // Top/left aligned so HorizontalOffset/VerticalOffset are root-relative (the path-picker
+            // Popup recipe). The hover handler positions it under the window button's CURRENT spot via
+            // TransformToVisual — the header cluster is left-aligned now, not pinned to the right edge.
+            _sessRangePopup.HorizontalAlignment(HorizontalAlignment::Left);
             _sessRangePopup.HorizontalOffset(0);
             _sessRangePopup.VerticalOffset(52);
             Grid::SetRow(_sessRangePopup, 0);
             Grid::SetRowSpan(_sessRangePopup, 2);
             host.Children().Append(_sessRangePopup);
-            // Right-align the popup horizontally by parenting trick: Popup ignores alignment for
-            // offsets, so place it via a right-aligned wrapper margin instead.
-            _sessRangePopup.HorizontalOffset(-260);
         }
 
         // --- body: table | detail (fixed 60/40 split — the draggable splitter is the Archive

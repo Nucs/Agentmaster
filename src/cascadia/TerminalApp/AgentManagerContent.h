@@ -259,14 +259,20 @@ namespace winrt::TerminalApp::implementation
         // column (e.g. a large External census) scrolls within the board instead of clipping past
         // the bottom edge (the board's own ScrollViewer has vertical scroll disabled). With
         // `fill=false` the box hugs its content (a collapsed column: header only, nothing to scroll).
+        // `columnKey` (when `fill`) registers the new card ScrollViewer in _boardColumnScrollers and,
+        // with `restoreOffset > 0`, re-applies that vertical offset once the column lays out — so a
+        // rebuild preserves the user's scroll instead of snapping to the top (see _RebuildBoard).
         winrt::Windows::UI::Xaml::Controls::Border _MakeBoardColumn(
             const winrt::Windows::UI::Xaml::UIElement& header,
             const winrt::Windows::UI::Xaml::UIElement& cards,
-            bool fill = true);
+            bool fill = true,
+            const std::wstring& columnKey = {},
+            double restoreOffset = 0.0);
         // Agentmaster (O6): build the "External (N)" board column (real-WindowsTerminal claudes,
         // observe-only); empty if there are none. The header toggles _externalCollapsed; each card is
         // non-interactive with an (currently disabled) Adopt seam for future external-session restore.
-        winrt::Windows::UI::Xaml::Controls::Border _MakeExternalColumn();
+        // `restoreOffset` preserves the column's scroll across a rebuild (see _RebuildBoard).
+        winrt::Windows::UI::Xaml::Controls::Border _MakeExternalColumn(double restoreOffset = 0.0);
         winrt::Windows::UI::Xaml::Controls::Button _MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex);
 
         // Draggable pane splitters (resize + on-hover cursor + persisted sizes).
@@ -439,6 +445,13 @@ namespace winrt::TerminalApp::implementation
         // not). The focused element is identified by its "b:<id>" / "t:<id>" Tag.
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _boardCardsById;
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _treeRowsById;
+        // Agentmaster: column title (e.g. "Running", "External") -> that column's live card
+        // ScrollViewer, repopulated on every _RebuildBoard. Used ONLY to PRESERVE each column's
+        // vertical scroll offset across a rebuild: _RebuildBoard recreates the per-column ScrollViewers
+        // from scratch (fresh => offset 0), so without capturing+restoring the offset, any _Refresh (a
+        // select, a state/title change, an observer enrichment) would snap a scrolled column to the TOP
+        // and lose the card the user just clicked. Captured before the clear, restored on Loaded.
+        std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::ScrollViewer> _boardColumnScrollers;
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _planScroll{ nullptr }; // Agentmaster: hosts _planListHost — pinned to the bottom on first view of a subject (see _PinPlanToBottomOnSubjectChange)

@@ -2147,6 +2147,26 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_RebuildBoard(const std::vector<SessionInfo>& sessions)
     {
+        // Agentmaster: preserve each column's vertical scroll offset across this rebuild. _RebuildBoard
+        // recreates the per-column ScrollViewers from scratch (a fresh ScrollViewer sits at offset 0),
+        // so without this a mere _Refresh — a select, a state/title change, an observer enrichment —
+        // would snap the board to the TOP, losing the card the user just clicked near the bottom of a
+        // tall column. Capture the live offsets now (the old scrollers are still valid); each new column
+        // re-applies its saved offset on Loaded (see _MakeBoardColumn). Keyed by column title.
+        std::unordered_map<std::wstring, double> savedOffsets;
+        for (const auto& [key, sv] : _boardColumnScrollers)
+        {
+            if (sv)
+            {
+                const auto off = sv.VerticalOffset();
+                if (off > 0.0)
+                {
+                    savedOffsets[key] = off;
+                }
+            }
+        }
+        _boardColumnScrollers.clear(); // refilled by _MakeBoardColumn below
+
         _boardHost.Children().Clear();
         _boardCardsById.clear(); // refilled by _MakeCard below (focus-restore map; see _Refresh)
         if (_boardScope)
@@ -2240,7 +2260,11 @@ namespace winrt::TerminalApp::implementation
                 colStack.Children().Append(_MakeCard(*s));
             }
 
-            _boardHost.Children().Append(_MakeBoardColumn(hdr, colStack));
+            // Preserve this column's pre-rebuild scroll offset (keyed by its title).
+            const std::wstring colKey{ col.title };
+            const auto savedIt = savedOffsets.find(colKey);
+            const double restore = (savedIt != savedOffsets.end()) ? savedIt->second : 0.0;
+            _boardHost.Children().Append(_MakeBoardColumn(hdr, colStack, true, colKey, restore));
         }
 
         // Agentmaster (O6): a trailing observe-only "External (N)" group for real-WindowsTerminal
@@ -2248,7 +2272,8 @@ namespace winrt::TerminalApp::implementation
         // unscoped (it is a global census, not part of the managed directory tree).
         if (!_externalClaudes.empty())
         {
-            _boardHost.Children().Append(_MakeExternalColumn());
+            const auto extIt = savedOffsets.find(L"External");
+            _boardHost.Children().Append(_MakeExternalColumn(extIt != savedOffsets.end() ? extIt->second : 0.0));
         }
     }
 
@@ -2258,7 +2283,7 @@ namespace winrt::TerminalApp::implementation
     // past the bottom edge — the board's own ScrollViewer (BuildUI) has vertical scroll disabled.
     // When `fill` is false the box hugs its content (a collapsed column: header only, no scroll).
     // Shared by the per-state columns and the External group so they stay visually in lockstep.
-    Border AgentManagerContent::_MakeBoardColumn(const UIElement& header, const UIElement& cards, bool fill)
+    Border AgentManagerContent::_MakeBoardColumn(const UIElement& header, const UIElement& cards, bool fill, const std::wstring& columnKey, double restoreOffset)
     {
         auto col_border = Border{};
         col_border.Width(220);
@@ -2288,6 +2313,25 @@ namespace winrt::TerminalApp::implementation
             Grid::SetRow(cardsSv, 1);
             grid.Children().Append(cardsSv);
 
+            // Agentmaster: track this column's ScrollViewer so the NEXT _RebuildBoard can capture its
+            // offset, and re-apply the offset this rebuild inherited. A fresh ScrollViewer sits at 0
+            // until restored; do it on Loaded (post-first-layout, when ScrollableHeight is valid) with
+            // animation disabled (an instant restore, no visible jump). Capture only the offset — the
+            // sender IS the ScrollViewer, never self-capture the element (that leaks it via the delegate).
+            if (!columnKey.empty())
+            {
+                _boardColumnScrollers[columnKey] = cardsSv;
+                if (restoreOffset > 0.0)
+                {
+                    cardsSv.Loaded([restoreOffset](const IInspectable& sender, const RoutedEventArgs&) {
+                        if (const auto sv = sender.try_as<ScrollViewer>())
+                        {
+                            sv.ChangeView(nullptr, restoreOffset, nullptr, true);
+                        }
+                    });
+                }
+            }
+
             // Stretch so the board's horizontal StackPanel gives the column the full viewport height
             // (the board SV's vertical scroll is off, so the cross-axis is bounded) -> the inner
             // ScrollViewer has a real height to scroll within.
@@ -2308,7 +2352,7 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster (O6): the "External (N)" board column. Observe-only — each card is a real
     // Windows Terminal claude the observer correlated out-of-band but will never bind (Rule #9/#13).
-    Border AgentManagerContent::_MakeExternalColumn()
+    Border AgentManagerContent::_MakeExternalColumn(double restoreOffset)
     {
         auto colStack = StackPanel{};
         colStack.Spacing(0);
@@ -2350,7 +2394,7 @@ namespace winrt::TerminalApp::implementation
         {
             colStack.Children().Append(_MakeExternalCard(ex));
         }
-        return _MakeBoardColumn(hdrBtn, colStack, true);
+        return _MakeBoardColumn(hdrBtn, colStack, true, L"External", restoreOffset);
     }
 
     winrt::Windows::UI::Xaml::Controls::Button AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)
@@ -3645,6 +3689,10 @@ namespace winrt::TerminalApp::implementation
         // spawn / tree rebuild for Open New Session Here).
         MenuFlyoutItem rename;
         rename.Text(L"Rename (F2)");
+        // Advertise the in-place editor's commit keys + that they're configurable. Which key commits
+        // (Enter vs Shift+Enter) follows the GLOBAL TabRenameCommitMode setting; the other inserts a
+        // newline (titles can be multi-line), Esc cancels, and clicking away always commits.
+        AgentSetTip(rename, L"Rename this session \x2014 its Explorer name and tab title.\nCommit the new name with Enter or Shift+Enter; the other key inserts a newline. Esc cancels; clicking away always commits.\nWhich key commits is configurable in Settings (\x2699) \x2192 \x201CTab rename: commit with\x201D.");
         rename.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
