@@ -247,7 +247,10 @@
     <value>Rename tab (F2)</value>
   </data>
   <data name="DuplicateTabText" xml:space="preserve">
-    <value>Duplicate session</value>
+    <value>Fork session</value>
+  </data>
+  <data name="NewSessionHereText" xml:space="preserve">
+    <value>New Session Here</value>
   </data>
   <data name="InvalidMediaResource" xml:space="preserve">
     <value>One or more resources (such as icon or backgroundImage) specified in your settings could not be found.</value>
@@ -833,6 +836,9 @@
   </data>
   <data name="DuplicateTabToolTip" xml:space="preserve">
     <value>Open a new tab using the active profile in the current directory</value>
+  </data>
+  <data name="NewSessionHereToolTip" xml:space="preserve">
+    <value>Launch a new managed agent session in this tab's working directory (a new, independent conversation)</value>
   </data>
   <data name="ExportTabToolTip" xml:space="preserve">
     <value>Export the contents of the text buffer into a text file</value>

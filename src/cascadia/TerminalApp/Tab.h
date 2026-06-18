@@ -128,6 +128,7 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> TabColorChanged; // Agentmaster: runtime tab color set/reset -> page syncs the per-directory color
         til::event<winrt::delegate<>> MoveTabToStartRequested; // Agentmaster: context-menu "Move to start" -> page relocates this tab to the first movable slot
         til::event<winrt::delegate<>> MoveTabToEndRequested; // Agentmaster: context-menu "Move to end" -> page relocates this tab to the last slot
+        til::event<winrt::delegate<>> NewSessionHereRequested; // Agentmaster: context-menu "New Session Here" -> page spawns a managed agent session in this tab's working dir
         til::event<winrt::delegate<winrt::hstring /*title*/, winrt::hstring /*body*/, winrt::TerminalApp::IPaneContent /*content*/>> TabToastNotificationRequested;
         til::typed_event<IInspectable, IInspectable> TaskbarProgressChanged;
 
@@ -161,6 +162,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _exportTabMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _findMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _restartConnectionMenuItem{};
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _newSessionHereMenuItem{}; // Agentmaster: spawn a managed agent session in this tab's working dir
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeOtherTabsMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsAfterMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closePaneMenuItem{};

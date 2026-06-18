@@ -1382,6 +1382,7 @@ namespace winrt::TerminalApp::implementation
         _exportTabMenuItem.IsEnabled(isTerm);
         _findMenuItem.IsEnabled(isTerm);
         _restartConnectionMenuItem.IsEnabled(isTerm);
+        _newSessionHereMenuItem.IsEnabled(isTerm); // Agentmaster: only meaningful for a terminal tab (a cwd to spawn in)
 
         // Snippets Pane can technically be split
         _splitTabMenuItem.IsEnabled(isTerm || (content && content.try_as<winrt::TerminalApp::SnippetsPaneContent>() != nullptr));
@@ -1794,6 +1795,29 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "New Session Here" (Agentmaster) — spawn a managed agent session in this tab's working
+            // dir (a new, independent conversation). The page computes the dir + agent kind (Codex vs
+            // Claude) and does the spawn, so this only raises the request.
+            Controls::FontIcon newSessionSymbol;
+            newSessionSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            newSessionSymbol.Glyph(L"\xE710"); // Add
+
+            _newSessionHereMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->NewSessionHereRequested.raise();
+                }
+            });
+            _newSessionHereMenuItem.Text(RS_(L"NewSessionHereText"));
+            _newSessionHereMenuItem.Icon(newSessionSymbol);
+
+            const auto newSessionHereToolTip = RS_(L"NewSessionHereToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(_newSessionHereMenuItem, box_value(newSessionHereToolTip));
+            Automation::AutomationProperties::SetHelpText(_newSessionHereMenuItem, newSessionHereToolTip);
+        }
+
+        {
             // "Restart session"
             Controls::FontIcon restartConnectionSymbol;
             restartConnectionSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
@@ -1823,8 +1847,9 @@ namespace winrt::TerminalApp::implementation
         _AppendMoveMenuItems(contextMenuFlyout);
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
         contextMenuFlyout.Items().Append(_findMenuItem);
+        contextMenuFlyout.Items().Append(_newSessionHereMenuItem); // Agentmaster: "New Session Here" directly above "Restart session"
         contextMenuFlyout.Items().Append(_restartConnectionMenuItem);
-        // Agentmaster: place "Duplicate tab" directly below "Restart session"
+        // Agentmaster: place "Fork session" directly below "Restart session"
         contextMenuFlyout.Items().Append(_duplicateTabMenuItem);
         contextMenuFlyout.Items().Append(menuSeparator);
 
