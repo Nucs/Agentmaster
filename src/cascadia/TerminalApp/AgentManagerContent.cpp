@@ -1941,7 +1941,24 @@ namespace winrt::TerminalApp::implementation
             }
             else
             {
+                // Agentmaster (Linked Lenses): a managed board-card single-click syncs the Explorer
+                // Tree scope to where THIS session lives — LOCAL when this window hosts it, else
+                // GLOBAL (hosted by another window). The managed twin of an External card click
+                // switching the tree to EXTERNAL (_SelectExternal), so all three regions agree on the
+                // clicked card's lens. Select FIRST (aims the Launch box, sets the selection), THEN
+                // sync the scope LAST with its own refresh: _SetTreeScope no-ops (no refresh) when the
+                // scope is already correct, and refreshes when it changes — so a re-click of the
+                // already-selected card (where _SelectSession early-outs without refreshing) still
+                // repaints if the user toggled the scope away in between. Only when the locality is
+                // knowable: with no provider (mid-init / standalone tests) leave the scope as-is,
+                // exactly like the board's own LOCAL filter (see _RebuildBoard).
                 _SelectSession(id);
+                if (_localScopeProvider)
+                {
+                    const auto localIds = _localScopeProvider();
+                    const bool isLocal = localIds.find(id) != localIds.end();
+                    _SetTreeScope(isLocal ? TreeScope::Local : TreeScope::Global, /*refresh*/ true);
+                }
             }
         });
         // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
@@ -5556,6 +5573,7 @@ namespace winrt::TerminalApp::implementation
         {
             _treeScope = TreeScope::External;
             _UpdateTreeScopeButton();
+            _UpdateBoardScopeButton(); // keep the board's 2-way toggle in step (External reads GLOBAL there) — it shares the one scope state
         }
         _LoadExternalPlan(sessionId, cwd, kind, rolloutPath); // kicks off the (cached) background transcript/rollout read
         _NotifyLensChanged();
