@@ -354,8 +354,15 @@ jobs:
             & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version ${{ needs.prep.outputs.ver3 }} -Portable -Launch
             ```
 
+            **Portable (recommended, no cert):** download `Agentmaster_${{ needs.prep.outputs.ver4 }}_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.
+
+            **MSIX bundle (self-signed):**
+            1. Download `Agentmaster.cer` + `Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle`.
+            2. Trust the cert once (admin PowerShell):
+               `Import-Certificate -FilePath Agentmaster.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`
+            3. `Add-AppxPackage .\Agentmaster_${{ needs.prep.outputs.ver4 }}.msixbundle` (or double-click it).
+
             Installed, it runs as **`agentmaster`** (execution alias) / Start-menu **Agentmaster**.
-            The `.msixbundle` + `.cer` and portable `.zip`s are attached below for manual install (see the README).
 
             ### Profiles & coexistence with a dev build
             On **first launch** Agentmaster asks which **profile folder** to use — Production
