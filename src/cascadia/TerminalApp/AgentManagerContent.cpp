@@ -953,9 +953,11 @@ namespace winrt::TerminalApp::implementation
         // The shared tree/board scope. Direct assignment, NOT _SetTreeScope: this is a seed, not a
         // user transition — no enter/leave-External selection cleanup (the persisted lens is already
         // self-consistent: entering External cleared the managed selection before it was saved), and
-        // no lens push (we are APPLYING the lens). Range-guarded like the loader (a hand-built
-        // state isn't necessarily clamped).
-        _treeScope = (state.treeScope >= 0 && state.treeScope <= 2) ? static_cast<TreeScope>(state.treeScope) : TreeScope::Local;
+        // no lens push (we are APPLYING the lens). EXTERNAL (2) is a transient observe-only view, never
+        // a window's OPENING scope: a window left in EXTERNAL at close reopens in LOCAL (the default
+        // working lens) rather than staring at other hosts' claudes. So only LOCAL (0) / GLOBAL (1)
+        // restore as saved; EXTERNAL — and any out-of-range value — fall back to LOCAL.
+        _treeScope = (state.treeScope == 1) ? TreeScope::Global : TreeScope::Local;
         _UpdateTreeScopeButton();
         _UpdateBoardScopeButton();
         // A restored per-window layout overrides the global default loaded in the ctor; push the
@@ -1886,10 +1888,50 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(bt);
         }
 
+        // Agentmaster: a hover-revealed "\x22EF" more-button in the card's top-right corner — a
+        // discoverable twin of the right-click menu (some users never right-click). Wrap the content
+        // in a Grid so the dots float over the top-right; they carry the SAME session menu as a
+        // Button.Flyout (a click opens it). Hidden at rest, faded in on the card's hover (wired on
+        // PointerEntered/Exited below; OpacityTransition animates the Opacity change — no Storyboard
+        // to manage). IsHitTestVisible(false) at rest keeps the transparent corner from eating a card
+        // click. Built per-card; cheap.
+        auto dotsBtn = Button{};
+        {
+            FontIcon moreGlyph;
+            moreGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            moreGlyph.Glyph(L"\xE712"); // "More" — three dots
+            moreGlyph.FontSize(14);
+            dotsBtn.Content(moreGlyph);
+        }
+        dotsBtn.Padding(Thickness{ 4, 0, 4, 0 });
+        dotsBtn.MinWidth(26);
+        dotsBtn.Height(20);
+        dotsBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        dotsBtn.VerticalAlignment(VerticalAlignment::Top);
+        dotsBtn.Background(Fill(0x66, 0x30, 0x30, 0x30)); // faint chip so the glyph reads over the title behind it
+        dotsBtn.Foreground(Fill(0xF0, 0xFF, 0xFF, 0xFF));
+        dotsBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        dotsBtn.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+        dotsBtn.Opacity(0.0); // hidden at rest; the card's hover fades it in
+        dotsBtn.IsHitTestVisible(false); // an invisible corner must not swallow a card click
+        dotsBtn.IsTabStop(false); // a hover affordance — keep the invisible button out of the keyboard tab order (the menu is reachable via right-click / the context-menu key)
+        {
+            ScalarTransition st;
+            st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
+            dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
+        }
+        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)");
+        dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir)); // a click opens the session menu
+        const auto dotsWeak = winrt::make_weak(dotsBtn);
+
+        auto grid = Grid{};
+        grid.Children().Append(stack);
+        grid.Children().Append(dotsBtn);
+
         auto card = Button{};
-        card.Content(stack);
+        card.Content(grid);
         card.HorizontalAlignment(HorizontalAlignment::Stretch);
-        card.HorizontalContentAlignment(HorizontalAlignment::Left);
+        card.HorizontalContentAlignment(HorizontalAlignment::Stretch); // let the Grid fill so the dots reach the true top-right corner
         card.Padding(Thickness{ 8, 6, 8, 6 });
         card.Margin(Thickness{ 0, 0, 0, 6 });
         card.Background(Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
@@ -1924,8 +1966,27 @@ namespace winrt::TerminalApp::implementation
         // while the Manager tab is active (a live preview that follows the mouse). Capture id by
         // value + `this` (never the Button into its own handler — a self-capture leaks the element);
         // fires for selected cards too, so hovering the selected card keeps its tab pilled.
-        card.PointerEntered([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, true); });
-        card.PointerExited([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, false); });
+        // Also fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered;
+        // fade it out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button
+        // it lives under (the codebase's no-self-capture rule). Hovering the dots (a child) keeps the
+        // card "entered" — a child within the card's bounds doesn't raise the card's PointerExited —
+        // so the dots stay up while you aim for them.
+        card.PointerEntered([this, id, dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            _ReportHover(id, true);
+            if (const auto d = dotsWeak.get())
+            {
+                d.IsHitTestVisible(true);
+                d.Opacity(0.85);
+            }
+        });
+        card.PointerExited([this, id, dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            _ReportHover(id, false);
+            if (const auto d = dotsWeak.get())
+            {
+                d.Opacity(0.0);
+                d.IsHitTestVisible(false);
+            }
+        });
         // Single click = select; double click (within the OS threshold) = Activate (jump to
         // the session's live terminal tab — the page fans out to the hosting WINDOW when the
         // tab lives in another one), mirroring the Explorer Tree rows. A Button swallows
@@ -2542,10 +2603,47 @@ namespace winrt::TerminalApp::implementation
         // inline "observe"/"Adopt" affordance: the card itself is the observe action; the rest lives
         // on the right-click menu.)
         const bool selected = !ex.sessionId.empty() && ex.sessionId == _selectedExternalSessionId;
+
+        // Agentmaster: the same hover-revealed "\x22EF" more-button as the managed cards (_MakeCard) —
+        // here it opens the EXTERNAL menu (Adopt / Open New Session Here / Bring Window To Front). Wrap
+        // the content in a Grid so the dots float top-right; faded in on the card's hover (wired below).
+        auto dotsBtn = Button{};
+        {
+            FontIcon moreGlyph;
+            moreGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            moreGlyph.Glyph(L"\xE712"); // "More" — three dots
+            moreGlyph.FontSize(14);
+            dotsBtn.Content(moreGlyph);
+        }
+        dotsBtn.Padding(Thickness{ 4, 0, 4, 0 });
+        dotsBtn.MinWidth(26);
+        dotsBtn.Height(20);
+        dotsBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        dotsBtn.VerticalAlignment(VerticalAlignment::Top);
+        dotsBtn.Background(Fill(0x66, 0x30, 0x30, 0x30));
+        dotsBtn.Foreground(Fill(0xF0, 0xFF, 0xFF, 0xFF));
+        dotsBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        dotsBtn.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+        dotsBtn.Opacity(0.0); // hidden at rest; the card's hover fades it in
+        dotsBtn.IsHitTestVisible(false); // an invisible corner must not swallow a card click
+        dotsBtn.IsTabStop(false); // a hover affordance — keep the invisible button out of the keyboard tab order (the menu is reachable via right-click / the context-menu key)
+        {
+            ScalarTransition st;
+            st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
+            dotsBtn.OpacityTransition(st);
+        }
+        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)");
+        dotsBtn.Flyout(_MakeExternalTreeMenu(ex)); // a click opens the external menu
+        const auto dotsWeak = winrt::make_weak(dotsBtn);
+
+        auto grid = Grid{};
+        grid.Children().Append(stack);
+        grid.Children().Append(dotsBtn);
+
         auto card = Button{};
-        card.Content(stack);
+        card.Content(grid);
         card.HorizontalAlignment(HorizontalAlignment::Stretch);
-        card.HorizontalContentAlignment(HorizontalAlignment::Left);
+        card.HorizontalContentAlignment(HorizontalAlignment::Stretch); // let the Grid fill so the dots reach the true top-right corner
         card.Padding(Thickness{ 8, 6, 8, 6 });
         card.Margin(Thickness{ 0, 0, 0, 6 });
         card.Background(Fill(selected ? 0x40 : 0x18, 0x80, 0x80, 0x80));
@@ -2559,6 +2657,23 @@ namespace winrt::TerminalApp::implementation
         const auto exRollout = ex.rolloutPath; // Codex rollout path (empty for Claude)
         card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
             _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
+        });
+        // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
+        // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
+        // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
+        card.PointerEntered([dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (const auto d = dotsWeak.get())
+            {
+                d.IsHitTestVisible(true);
+                d.Opacity(0.85);
+            }
+        });
+        card.PointerExited([dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (const auto d = dotsWeak.get())
+            {
+                d.Opacity(0.0);
+                d.IsHitTestVisible(false);
+            }
         });
         return card;
     }
@@ -3704,6 +3819,30 @@ namespace winrt::TerminalApp::implementation
         // All items defer one tick: a MenuFlyout restores focus to its target as it closes,
         // which would otherwise yank focus out of the freshly-shown rename editor / dialog (and the
         // spawn / tree rebuild for Open New Session Here).
+
+        // Jump to Tab — Activate: switch to this session's live terminal tab (the page fans out to the
+        // hosting WINDOW when the tab lives in another one). The menu twin of a double-click on the
+        // card / tree row (and Enter on a tree row). First item — it's the most common action; a
+        // separator sets the navigate action apart from the session-edit ops below.
+        MenuFlyoutItem jump;
+        jump.Text(L"Jump to Tab");
+        AgentSetTip(jump, L"Switch to this session's live terminal tab (jumps to its hosting window if it lives elsewhere)");
+        jump.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { if (self->_activateHandler) { self->_activateHandler(winrt::hstring{ id }); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_activateHandler)
+                {
+                    self->_activateHandler(winrt::hstring{ id });
+                }
+            }
+        });
+        menu.Items().Append(jump);
+        menu.Items().Append(MenuFlyoutSeparator{});
+
         MenuFlyoutItem rename;
         rename.Text(L"Rename (F2)");
         // Advertise the in-place editor's commit keys + that they're configurable. Which key commits
