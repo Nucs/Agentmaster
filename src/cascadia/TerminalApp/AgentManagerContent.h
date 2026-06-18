@@ -232,7 +232,9 @@ namespace winrt::TerminalApp::implementation
 
         // Launch path-picker drop-down (a Popup anchored under the cwd box). Opens on user
         // focus of the box; shows the recent dirs (excluding the current one) over the
-        // subfolders of the current path; clicking a row drives the box and re-lists.
+        // subfolders of the current path; clicking a row drives the box and re-lists. When the
+        // box holds a bare token with NO root path (e.g. "agent"), the recent section instead
+        // becomes case-insensitive fuzzy MATCHES ranked by Levenshtein closeness (closest first).
         void _OpenPathPicker();
         void _ClosePathPicker();
         void _RebuildPathPicker();
@@ -249,7 +251,11 @@ namespace winrt::TerminalApp::implementation
         void _OnForkFromBox(); // the Fork button (visible for a found session id) -> _forkSessionHandler
         bool _ResolveSessionDirTitle(const std::wstring& id, std::wstring& dir, std::wstring& title); // registry first, transcript cwd fallback
         void _PushRecentDir(const std::wstring& dir);
-        std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current) const;
+        // Recent/known working dirs for the path-picker. `current` is the box text (excluded from
+        // the result). A non-empty `query` (a bare token typed with no root path) switches the
+        // result from plain MRU order to case-insensitive fuzzy matches ranked by Levenshtein
+        // closeness (closest first); an empty query keeps the historical MRU order.
+        std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
         winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
 
         // Build one session card for the Triage Board.

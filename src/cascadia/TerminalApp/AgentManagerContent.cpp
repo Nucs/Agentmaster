@@ -599,6 +599,80 @@ namespace
         return ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
     }
 
+    // Lower-case a string for the path-picker's fuzzy matching. Uses the OS full-Unicode case
+    // fold (the same LCMapStringEx the search paths use), keyed to LOCALE_NAME_INVARIANT so a
+    // folder match is deterministic regardless of the user's locale.
+    std::wstring ToLowerInvariant(const std::wstring& s)
+    {
+        if (s.empty())
+        {
+            return {};
+        }
+#ifdef _WIN32
+        const int needed = ::LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+                                           s.c_str(), static_cast<int>(s.size()),
+                                           nullptr, 0, nullptr, nullptr, 0);
+        if (needed > 0)
+        {
+            std::wstring out(static_cast<size_t>(needed), L'\0');
+            const int wrote = ::LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+                                              s.c_str(), static_cast<int>(s.size()),
+                                              out.data(), needed, nullptr, nullptr, 0);
+            if (wrote > 0)
+            {
+                out.resize(static_cast<size_t>(wrote));
+                return out;
+            }
+        }
+        return s; // mapping failed (shouldn't, for paths): fall back to the original
+#else
+        std::wstring out = s;
+        for (auto& c : out)
+        {
+            c = static_cast<wchar_t>(::towlower(static_cast<wint_t>(c)));
+        }
+        return out;
+#endif
+    }
+
+    // Approximate-substring edit distance: the MINIMUM number of single-character edits
+    // (insert / delete / substitute) to turn `pattern` into SOME substring of `text` — i.e.
+    // the match may begin AND end anywhere in `text` (row 0 is all zeros; the answer is the
+    // min over the last row). 0 == `pattern` occurs verbatim. The result never exceeds
+    // pattern.size() (turning the pattern into the empty substring costs exactly that), so it
+    // doubles as a "how far off" score in [0, m]. Used to rank recent directories against a
+    // typed bare token, closest (smallest) first. BOTH inputs must already be lower-cased by
+    // the caller (so the compare is a plain wchar_t == ).
+    size_t FuzzySubstringDistance(const std::wstring& pattern, const std::wstring& text)
+    {
+        const size_t m = pattern.size();
+        const size_t n = text.size();
+        if (m == 0)
+        {
+            return 0;
+        }
+        if (n == 0)
+        {
+            return m;
+        }
+        std::vector<size_t> prev(n + 1, 0); // row i-1; row 0 = all zeros => a match may start anywhere
+        std::vector<size_t> cur(n + 1, 0);
+        for (size_t i = 1; i <= m; ++i)
+        {
+            cur[0] = i; // the first i pattern chars against an empty text prefix == i inserts
+            for (size_t j = 1; j <= n; ++j)
+            {
+                const size_t cost = (pattern[i - 1] == text[j - 1]) ? 0u : 1u;
+                const size_t del = prev[j] + 1; // drop pattern[i-1]
+                const size_t ins = cur[j - 1] + 1; // skip text[j-1]
+                const size_t sub = prev[j - 1] + cost; // match / substitute
+                cur[j] = (std::min)(del, (std::min)(ins, sub));
+            }
+            std::swap(prev, cur);
+        }
+        return *std::min_element(prev.begin(), prev.end()); // a match may end anywhere
+    }
+
     // Agentmaster: the Launch box accepts EITHER a working directory OR a Claude session id. A
     // UUID-shaped token (8-4-4-4-12 hex, with optional surrounding braces / whitespace) is treated
     // as a session id (resume / fork); anything else is a path. A directory is never UUID-shaped and
@@ -6421,14 +6495,20 @@ namespace winrt::TerminalApp::implementation
 
     // ---- Launch path-picker drop-down ---------------------------------------
 
-    std::vector<std::wstring> AgentManagerContent::_CollectRecentDirs(const std::wstring& current) const
+    std::vector<std::wstring> AgentManagerContent::_CollectRecentDirs(const std::wstring& current, const std::wstring& query) const
     {
         // The RECENT section length is a global setting (AppSettings::recentDirsLimit, default
         // 10); 0/garbage falls back to 10.
         const size_t limit = _appSettings.recentDirsLimit > 0 ? _appSettings.recentDirsLimit : 10;
-        std::vector<std::wstring> out;
+
+        // Gather the full candidate pool first — recents (MRU) over live-session dirs — deduped,
+        // with the box's own path excluded. In MRU mode we'd cap while gathering; in query mode
+        // we rank the WHOLE pool before truncating, so the best matches surface even when they're
+        // not the most recent. The pool is small (recents are capped at the same limit on save,
+        // plus the live fleet), so gathering it whole is cheap.
+        std::vector<std::wstring> pool;
         auto add = [&](const std::wstring& d) {
-            if (d.empty() || out.size() >= limit)
+            if (d.empty())
             {
                 return;
             }
@@ -6436,23 +6516,25 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // exclude the path that's currently in the box
             }
-            for (const auto& e : out)
+            for (const auto& e : pool)
             {
                 if (PathEq(e, d))
                 {
                     return; // dedup
                 }
             }
-            out.push_back(d);
+            pool.push_back(d);
         };
 
         for (const auto& d : _recentDirs)
         {
             add(d);
         }
-        // Supplement from live sessions (most-recently-active first) so the list is useful
-        // even before anything has been launched this run.
-        if (out.size() < limit && _registry)
+        // Supplement from live sessions (most-recently-active first) so the list is useful even
+        // before anything has been launched this run. In query mode we need the WHOLE pool to
+        // rank; in MRU mode we can stop (and skip the snapshot entirely) once it's full.
+        const bool ranking = !query.empty();
+        if (_registry && (ranking || pool.size() < limit))
         {
             auto snap = _registry->Snapshot();
             std::sort(snap.begin(), snap.end(), [](const SessionInfo& a, const SessionInfo& b) {
@@ -6461,7 +6543,65 @@ namespace winrt::TerminalApp::implementation
             for (const auto& s : snap)
             {
                 add(s.workingDir);
+                if (!ranking && pool.size() >= limit)
+                {
+                    break;
+                }
             }
+        }
+
+        if (query.empty())
+        {
+            // Plain MRU order (recents first, then live-session dirs), capped to the limit — the
+            // historical behavior when the box is empty or holds a rooted path.
+            if (pool.size() > limit)
+            {
+                pool.resize(limit);
+            }
+            return pool;
+        }
+
+        // Query mode: a bare token was typed with no root path. Rank the pool by case-insensitive
+        // fuzzy closeness to the token (Levenshtein approximate-substring distance over the whole
+        // path — so a mid-path segment like "...\Agentmaster" matches "agent"), keep only the
+        // genuine matches, and order them closest-first. The threshold allows roughly half the
+        // token to differ, which keeps near-misses ("agen", "agnet") while dropping unrelated
+        // recents; the gather order (MRU) is the stable tiebreaker so equally-close recents keep
+        // their recency order. Very short tokens (<=2 chars) require an EXACT substring — one
+        // allowed edit on a 2-char token would otherwise match almost anything — and the filter
+        // tightens naturally as more characters are typed.
+        const std::wstring q = ToLowerInvariant(query);
+        const size_t threshold = q.size() <= 2 ? 0 : q.size() / 2;
+        struct Scored
+        {
+            std::wstring dir;
+            size_t dist;
+            size_t order;
+        };
+        std::vector<Scored> scored;
+        for (size_t i = 0; i < pool.size(); ++i)
+        {
+            const size_t dist = FuzzySubstringDistance(q, ToLowerInvariant(pool[i]));
+            if (dist <= threshold)
+            {
+                scored.push_back({ pool[i], dist, i });
+            }
+        }
+        std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+            if (a.dist != b.dist)
+            {
+                return a.dist < b.dist; // closest match topmost
+            }
+            return a.order < b.order; // ...then most-recent first
+        });
+        std::vector<std::wstring> out;
+        for (const auto& s : scored)
+        {
+            if (out.size() >= limit)
+            {
+                break;
+            }
+            out.push_back(s.dir);
         }
         return out;
     }
@@ -6527,11 +6667,34 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring current = _cwdBox ? std::wstring{ _cwdBox.Text() } : std::wstring{};
 
-        // RECENT (up to AppSettings::recentDirsLimit, current excluded).
-        const auto recents = _CollectRecentDirs(current);
+        // "No root path" = a bare token typed with no path anchor: no separator AND not drive-
+        // qualified ("agent", not "K:\..." / "K:" / "/home" / "\\server"). In that case the box
+        // text can't anchor a subfolder listing, so instead of the (useless) "(path not found)"
+        // we treat the token as a fuzzy QUERY over the recent directories — matched case-
+        // insensitively and ranked by Levenshtein closeness (closest first). A session id is a
+        // bare token too but is never a directory query, so it stays in plain MRU mode.
+        auto looksRooted = [](const std::wstring& s) {
+            if (s.find_first_of(L"\\/") != std::wstring::npos)
+            {
+                return true; // has a path separator
+            }
+            if (s.size() >= 2 && s[1] == L':' &&
+                ((s[0] >= L'A' && s[0] <= L'Z') || (s[0] >= L'a' && s[0] <= L'z')))
+            {
+                return true; // drive-qualified ("K:" / "K:foo")
+            }
+            return false;
+        };
+        const bool queryMode = !current.empty() && !looksRooted(current) && !LooksLikeSessionId(current).has_value();
+
+        // RECENT (up to AppSettings::recentDirsLimit, current excluded). In query mode the section
+        // is filtered + ranked by closeness to the typed token; otherwise it's plain MRU order.
+        const auto recents = _CollectRecentDirs(current, queryMode ? current : std::wstring{});
         if (!recents.empty())
         {
-            _pathListHost.Children().Append(sectionLabel(L"RECENT"));
+            _pathListHost.Children().Append(sectionLabel(queryMode ?
+                (winrt::hstring{ L"RECENT MATCHES FOR \"" } + winrt::hstring{ current } + winrt::hstring{ L"\"" }) :
+                winrt::hstring{ L"RECENT" }));
             for (const auto& d : recents)
             {
                 _pathListHost.Children().Append(_MakePathRow(d, L"\x21BB", winrt::hstring{}));
@@ -6550,7 +6713,11 @@ namespace winrt::TerminalApp::implementation
         // separator), a SECOND section below ALSO lists that directory's own subfolders — so
         // "K:\source" shows the K:\source* siblings (above) AND everything inside K:\source.
         // (Clicking any folder row appends the separator, drilling into it.)
-        if (!current.empty())
+        //
+        // Skipped in query mode: a bare token (no root path) has no directory to enumerate, so
+        // this would only ever produce "(path not found)" — the RECENT MATCHES section above is
+        // the whole answer there.
+        if (!current.empty() && !queryMode)
         {
             std::wstring listDir = current; // the directory whose subfolders we enumerate
             std::wstring filter; // leaf prefix to match; empty => list everything
@@ -6647,7 +6814,12 @@ namespace winrt::TerminalApp::implementation
 
         if (_pathListHost.Children().Size() == 0)
         {
-            _pathListHost.Children().Append(Text(L"Type a path or pick a recent directory.", 12, false, 0.6));
+            // In query mode an empty list means the token matched no recent directory; otherwise
+            // it's the initial empty-box hint.
+            _pathListHost.Children().Append(Text(queryMode ?
+                L"No recent directory matches — type a full path to browse subfolders." :
+                L"Type a path or pick a recent directory.",
+                12, false, 0.6));
         }
     }
 
