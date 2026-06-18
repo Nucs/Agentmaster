@@ -841,7 +841,9 @@
     <value>Open the search dialog</value>
   </data>
   <data name="RenameTabToolTip" xml:space="preserve">
-    <value>Rename this tab</value>
+    <value>Rename this tab.
+Commit the new name with Enter or Shift+Enter; the other key inserts a newline. Esc cancels; clicking away always commits.
+Which key commits is configurable in Settings &#x2192; "Tab rename: commit with".</value>
   </data>
   <data name="SettingsToolTip" xml:space="preserve">
     <value>Open the settings page</value>
