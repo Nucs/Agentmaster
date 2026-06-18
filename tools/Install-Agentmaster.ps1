@@ -12,6 +12,8 @@
       * Trusts the self-signed certificate (LocalMachine\TrustedPeople) - elevating ONLY for
         that one step, and ONLY when the cert is not already trusted (so upgrades are prompt-free).
       * Installs / upgrades the package, auto-resolving the VCLibs framework dependency if missing.
+      * If a conflicting earlier install (e.g. a registered / "loose layout" unpackaged dev install)
+        blocks deployment, offers to uninstall it and then continues. Your data is preserved.
 
     Alternatively, -Portable installs/upgrades the cert-free, self-contained portable build into
     a folder (default %LOCALAPPDATA%\Programs\Agentmaster) with a Start-menu shortcut - no admin,
@@ -268,6 +270,34 @@ function Resolve-MissingDeps {
     return , $deps
 }
 
+# A conflicting existing registration (an unpackaged / "registered loose layout" dev install,
+# or any install of the same identity that can't be replaced in place) makes Add-AppxPackage fail
+# with 0x80073CFB. Offer to uninstall it, then let the caller retry. Per-user removal needs no admin,
+# and Agentmaster's data lives OUTSIDE the package (e.g. %USERPROFILE%\.agentmaster), so it survives.
+function Remove-BlockingInstall {
+    param([bool]$AutoYes)
+    $pkg = Get-InstalledMsix
+    if (-not $pkg) {
+        Write-Warn "A conflicting Agentmaster registration is present but not visible to remove automatically."
+        Write-Warn "Remove it manually, then re-run:  Get-AppxPackage Agentmaster | Remove-AppxPackage"
+        return $false
+    }
+    $kind = if ($pkg.IsDevelopmentMode) { 'a registered (unpackaged) layout' } else { 'a packaged install' }
+    Write-Warn "An existing Agentmaster install is blocking this one and must be removed first:"
+    Write-Info "  $($pkg.PackageFullName)"
+    Write-Info "  ($kind, version $($pkg.Version))"
+    $go = $AutoYes
+    if (-not $go) {
+        $ans = Read-Host "  Uninstall it and continue? Your data (e.g. %USERPROFILE%\.agentmaster) is kept [Y/n]"
+        $go = [string]::IsNullOrWhiteSpace($ans) -or $ans -match '^(y|yes)$'
+    }
+    if (-not $go) { Write-Warn "Left the existing install in place; nothing changed."; return $false }
+    Write-Step "Uninstalling the conflicting install"
+    Remove-AppxPackage -Package $pkg.PackageFullName -ErrorAction Stop
+    Write-Ok "uninstalled"
+    return $true
+}
+
 function Install-Bundle {
     param($BundlePath, $Dir, [bool]$ForceFlag)
     $splat = @{ Path = $BundlePath; ErrorAction = 'Stop' }
@@ -277,6 +307,8 @@ function Install-Bundle {
         return
     } catch {
         $msg = $_.Exception.Message
+
+        # Missing framework dependency -> fetch it and retry.
         if ($msg -match '0x80073CF3' -or $msg -match 'dependency') {
             Write-Warn "Resolving missing framework dependencies..."
             $deps = Resolve-MissingDeps -Message $msg -Dir $Dir
@@ -286,6 +318,17 @@ function Install-Bundle {
                 return
             }
         }
+
+        # Conflicting existing install (unpackaged/registered, or otherwise unreplaceable) ->
+        # offer to uninstall it, then retry. -Force auto-confirms.
+        if ($msg -match '0x80073CFB' -or $msg -match 'already installed' -or
+            $msg -match 'cannot replace' -or $msg -match 'unpackaged') {
+            if (Remove-BlockingInstall -AutoYes:$ForceFlag) {
+                Add-AppxPackage @splat   # retry after removing the blocker
+                return
+            }
+        }
+
         throw
     }
 }
