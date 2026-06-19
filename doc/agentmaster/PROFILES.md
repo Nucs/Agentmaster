@@ -45,7 +45,8 @@ A **profile** is one folder holding everything an install persists:
   settings.json            templates.json           recent-dirs.json
   dir-colors.json          sessions-index\          hooks-settings.json
   agentmaster-hook.ps1     shim\                    bridge.json
-  hooks.log                autopilot.log
+  hooks.log                autopilot.log            scanner.log
+  forwarder-errors.log
   terminal\settings.json   terminal\state.json      ← Terminal's OWN settings (seam #6)
 ```
 
@@ -90,7 +91,9 @@ another instance" warning, never the choice itself.
 
 > Earlier builds showed a one-time **Production / Development / Browse…** `TaskDialogIndirect`
 > picker (with a "Copy existing data from `~/.agentmaster`" migrate checkbox). That UI still exists
-> (`ShowProfilePicker`, plus `MigrateProfileData` for the migrate path) but is now reached **only**
+> (`ShowProfilePicker`, plus `MigrateProfileData` for the migrate path — a skip-existing copy that
+> excludes `locks/`, `shim/`, `bridge.json` and `*.tmp`, all machine-global or regenerated per-profile
+> at engine init) but is now reached **only**
 > from the cog's **Change profile folder…** — first launch is silent. To land on a non-default
 > folder (a synced drive, a shared dir, or to copy the legacy `~/.agentmaster` into a fresh dev
 > profile), launch once, then switch via the cog (below).
