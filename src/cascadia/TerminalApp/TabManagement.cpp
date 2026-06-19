@@ -1118,10 +1118,70 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
-        // Show a single aggregate confirmation instead of per-tab dialogs.
         const auto weak = get_weak();
-        if (_settings.GlobalSettings().ConfirmOnClose() != ConfirmOnClose::Never)
+
+        // Agentmaster: a bulk close that includes managed agent sessions asks ONCE for the whole
+        // batch — Delete All / Archive All / Cancel All — instead of silently archiving every
+        // session or walking a train of per-tab confirms. Archive All keeps each session
+        // restorable from the Manager's "Archived" list (with its Flight Plan); Delete All drops
+        // the records (the conversation .jsonl files on disk are KEPT and still appear in the
+        // Sessions browser); Cancel All stops the close entirely. A batch of only plain shell tabs
+        // keeps upstream's single generic confirm (gated on ConfirmOnClose). The resolved decision
+        // is then applied to each tab below WITHOUT re-prompting (skipConfirm).
+        size_t managedCount = 0;
+        for (const auto& tab : closable)
         {
+            if (!_ClaudeSessionForTab(tab).empty())
+            {
+                ++managedCount;
+            }
+        }
+
+        bool deleteAll = false; // false => Archive All (the safe, reversible default)
+        if (managedCount > 0)
+        {
+            if (const auto presenter{ _dialogPresenter.get() })
+            {
+                const auto shellCount = closable.size() - managedCount;
+                std::wstring body = std::to_wstring(managedCount) + (managedCount == 1 ? L" session" : L" sessions");
+                if (shellCount > 0)
+                {
+                    body += L" and ";
+                    body += std::to_wstring(shellCount);
+                    body += (shellCount == 1 ? L" other tab" : L" other tabs");
+                }
+                body += L" will be closed.\n\nArchive All keeps the sessions restorable from the Manager’s “Archived” button (with their Flight Plans). Delete All removes them from Agentmaster — the conversation files on disk are kept and still appear in Sessions. Other tabs are closed either way.";
+
+                const std::wstring titleStr = L"Close " + std::to_wstring(closable.size()) + (closable.size() == 1 ? L" tab?" : L" tabs?");
+
+                ContentDialog dialog;
+                dialog.Title(winrt::box_value(winrt::hstring{ titleStr }));
+                dialog.Content(winrt::box_value(winrt::hstring{ body }));
+                dialog.PrimaryButtonText(L"\U0001F5D1 Delete All"); // trash, leftmost; NOT the default button
+                dialog.SecondaryButtonText(L"Archive All");
+                dialog.CloseButtonText(L"Cancel All");
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel (neither destructive button is the default)
+
+                const auto result = co_await presenter.ShowDialog(dialog);
+                const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+                if (!strong)
+                {
+                    co_return;
+                }
+                if (result == ContentDialogResult::Primary)
+                {
+                    deleteAll = true; // Delete All
+                }
+                else if (result != ContentDialogResult::Secondary)
+                {
+                    co_return; // Cancel All -> stop the close (Secondary == Archive All falls through)
+                }
+            }
+            // No presenter to confirm with -> archive anyway (reversible; don't strand the close).
+        }
+        else if (_settings.GlobalSettings().ConfirmOnClose() != ConfirmOnClose::Never)
+        {
+            // Pure shell-tab batch: keep upstream's single aggregate confirmation.
             auto warningResult = co_await _ShowConfirmCloseDialog(ConfirmCloseDialogKind::MultipleTabs);
 
             // Hold a strong reference to `this` after the co_await so that
@@ -1133,20 +1193,36 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Apply the resolved decision to each tab, without re-prompting.
         for (auto& tab : closable)
         {
-            winrt::Windows::Foundation::IAsyncAction action{ nullptr };
-            if (const auto strong = weak.get())
-            {
-                action = _HandleCloseTabRequested(tab, /*skipConfirmClose*/ true);
-            }
-
-            if (!action)
+            const auto strong = weak.get();
+            if (!strong)
             {
                 co_return;
             }
 
-            co_await action;
+            const auto sessionId = _ClaudeSessionForTab(tab);
+            if (!sessionId.empty())
+            {
+                if (deleteAll)
+                {
+                    // Drop the record (the transcript on disk is kept) + close the tab. Mirrors
+                    // _ArchiveAndCloseClaudeTab's Delete branch; the batch dialog already confirmed.
+                    _RemoveSessionRecord(sessionId);
+                    tab.Close();
+                }
+                else
+                {
+                    // Archive bookkeeping + close (skipConfirm: the batch dialog already ran).
+                    co_await _ArchiveAndCloseClaudeTab(tab, sessionId, /*skipConfirm*/ true);
+                }
+            }
+            else
+            {
+                // Plain shell tab: reopen-buffer + close (a read-only tab still gets its guard).
+                co_await _HandleCloseTabRequested(tab, /*skipConfirmClose*/ true);
+            }
         }
     }
     // Method Description:
