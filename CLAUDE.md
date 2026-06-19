@@ -24,8 +24,8 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
 - **Design A — Native Graft:** the management "brain" lives *inside* the fork (C++/WinRT).
 - **Manager tab (C1 "Linked Lenses"):** a pinned, leftmost, non-closable tab (tab 0, open
   by default), split into three selection-synced regions:
-  - **Triage Board** (top) — sessions as cards in state columns (Running · Waiting-for-you
-    · Needs-approval · Error).
+  - **Triage Board** (top) — sessions as cards in five state columns (Running · Waiting-for-you
+    · Needs-approval · Error · Idle/Done), plus an observe-only **External** census column.
   - **Explorer Tree** (bottom-left) — the M working directories → their N sessions.
   - **Flight Plan** (bottom-right) — a per-session prompt queue + **Autopilot**.
 - **Flight Plan / Autopilot:** queue prompts; on **turn-complete** (`Stop` hook) the next
@@ -116,7 +116,7 @@ every window's id): each `TerminalPage` `RegisterLiveWindow`s its `_windowId` at
 set **except** a change that empties it (skip-empty preserves the final snapshot; a hard shutdown that
 kills the threads before they unregister leaves the full set). So a window closed mid-session is
 **pruned** from the manifest (won't be re-offered) while its record stays on disk. The Manager's
-**"Reopen Windows (N)"** recover button (next to Archived, shown when N>0 == records-minus-live,
+**"Reopen Windows (N)"** recover button (in the toolbar before the cog — `_reopenBtn`, shown when N>0 == records-minus-live,
 `Engine::RecoverableWindows`) is the "if I answered No" path: it reopens each not-currently-open record
 via `<our alias> -w -1 -s <idx>` (`TerminalPage::_ReopenSavedWindows` ShellExecutes
 **`_AgentmasterReopenTarget()`** — the per-IDENTITY execution alias **by name**, `agentmaster.exe`
@@ -352,11 +352,22 @@ title — while keeping the 10px slot so the header row doesn't grow) in
 **managed** session's tab wears its Triage-Board state color (Running blue · Waiting goldenrod ·
 NeedsApproval orange-red · Error crimson · Done green · Idle gray — a MANAGED Codex tab wears the
 same dot at its 3-state floor: Running blue · Waiting goldenrod · Idle gray); an observed-but-unmanaged
-tab (pwsh / cmd / unprompted-claude / external codex) a **dim gray** dot; the Manager tab none. Deliberately
+tab (pwsh / cmd / unprompted-claude / external codex) a **dim gray** dot; the Manager tab none. A
+**red-flash alert** rides the dot too: when a session leaves **Running** for a *needs-you* state —
+`Running → {Idle · WaitingForInput · NeedsApproval}` (NOT `→Done` / `→Error`) — on a tab that is **not
+the currently-focused one**, that tab's dot **outline flashes red** until you switch to it
+(`_EvaluateAgentFlash` — the active tab counts as visited so it never flashes; visiting it clears the
+flash via `_VisitTabClearFlash` from `_OnTabSelectionChanged`). ONE shared per-window `DispatcherTimer`
+toggles `_agentFlashPhase` every **600 ms** so all flashing tabs blink in **lockstep** (a tab joining
+mid-cycle adopts the current phase); an archived (`!live`) session forgets its last state so a later
+background restore can't spuriously flash. Deliberately
 NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab title == persisted
-title) must never carry presentation glyphs through renames/persistence. The state palette now
-lives ONCE in **`AgentStatusColors.h`** (the overlay's hand-synced copy folded in — board dot,
-per-tab overlay, and tab-strip dot read the same table).
+title) must never carry presentation glyphs through renames/persistence. The state palette is
+shared through **`AgentStatusColors.h`** (`AgentStatusColorFor`): the **per-tab overlay**
+(`AgentTabOverlay`) + the **tab-strip dot** (`TerminalTabStatus`) read it (the overlay's hand-synced
+copy folded in — the third consumer, the tab dot, was the cue to factor it). **`AgentManagerContent.cpp`
+still holds its own identical `StateColor` copy** for the board cards/columns (a concurrently-edited
+file — converge on a quiet day), so a color change must be made in BOTH places.
 
 **Release/dev separation + per-install state PROFILES ([`PROFILES.md`](doc/agentmaster/PROFILES.md))
 is implemented — lib-compiled green + engine-tested (604/604 incl. new profile checks); it rides the
@@ -641,6 +652,17 @@ What works, by area:
   (`_ClearSelection`) — so the Flight Plan reads nothing-selected. A managed card's **state-colored
   border shows only on hover or when selected** (thickness 0/1/2 at rest/hover/selected, the accent
   pushed onto the Button's PointerOver state) — borderless at rest to cut visual noise on a busy board.
+  A managed card's **title sits in a colored band** across the card top, painted the session's
+  **working-directory color** — the SAME permanent per-dir color its terminal TABS wear (Rule #12 /
+  `dir-colors.json`; `GetDirColor` persisted-first, else the deterministic `AutoDirColorHex`) — with
+  **rounded top corners** (matching the card) over a **straight, square bottom edge**, covering ONLY
+  the title; the body below (codex pill · working dir · `model·effort` · timing · autopilot badge)
+  stays the neutral gray fill. The title text **flips black/white for contrast** (`PreferDarkTextOn`
+  — the WCAG relative-luminance crossover ~0.179: near-black ink on a LIGHT band, white on a DARK
+  one), so a card reads its folder at a glance and same-dir cards cluster across the state columns
+  (`_MakeCard`: card Padding→0 so the band reaches the rounded corners + side edges, an explicit
+  `CornerRadius{4,4,4,4}` so the band's `{4,4,0,0}` top corners line up, a `#RRGGBB`→Color `HexToColor`
+  parser; External-census cards (`_MakeExternalCard`) stay plain — they are not our tabs).
   **Selecting any card/row — by click, by switching to its terminal tab (`SelectSession` →
   `_SelectSession`), or an external (`_SelectExternal`) — drops that session's cwd into the "Launch
   Claude" box** (unfocused then, so no path-picker pop), pre-aiming Launch / Open-New-Session. A
@@ -652,7 +674,9 @@ What works, by area:
   `ToolTipService.InitialShowDelay`), mirroring WT's `MinMaxCloseControl`. A managed **board card**
   mirrors the Explorer-Tree row's
   interactions (one card/row, one action set): single-click selects, **double-click Activates**
-  (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row
+  (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row —
+  also surfaced by a **hover-revealed `⋯` more-button** in the card's top-right corner (a
+  discoverable twin for users who never right-click)
   (`_MakeSessionMenu` — Rename… / Archive… / Open New Session Here; a board-invoked Rename first
   makes the tree row renderable — un-collapses its dir, widens a LOCAL scope to GLOBAL for a
   session hosted elsewhere — since the in-place editor lives in the tree). **Activate is
@@ -822,7 +846,11 @@ What works, by area:
   **envelope** = Add to the queue) beside a **multiline textarea** that grows as you type;
   per-message actions moved off a button strip onto a **right-click menu over the messages**
   (`_MakePromptMenu`: **Move up / Move down / Delete** on upcoming rows, **Archive session** on
-  any). **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
+  any). The compose box **recalls prompt history with Up / Down** (`VirtualKey::Up` walks older,
+  Down newer; the in-progress text is saved as `_promptHistoryDraft` and restored at the bottom of
+  the walk; the list is built lazily by `_BuildPromptHistory`, applied via `_ApplyPromptHistoryText`
+  behind a `_promptHistoryNavigating` latch so a recall write doesn't reset the index), and **focus
+  snaps back to the compose box after a queue/send** so you can keep typing. **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
   LOCAL/GLOBAL/EXTERNAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
   **cycles** Off → Semi-auto → Full on click (`_CycleAutopilot` / `_UpdateAutopilotButton`,
   replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed
@@ -969,7 +997,7 @@ What works, by area:
   refs, in order — so closing and reopening a window brings the whole workspace back, not just
   geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
   "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
-- **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Reopen · `⚙` ·
+- **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Fork · Reopen · `⚙` ·
   Pause Autopilot · Archived · **Sessions** — the cog sits *before* Pause Autopilot / Archived; the
   Sessions browser button comes right after Archived) opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
