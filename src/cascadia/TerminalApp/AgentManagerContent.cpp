@@ -964,17 +964,37 @@ namespace winrt::TerminalApp::implementation
         _recentDirs = ::Agentmaster::LoadRecentDirs(); // MRU for the Launch path-picker
         _layout = ::Agentmaster::LoadLayout(); // persisted splitter geometry (pane sizes)
 
+        // Agentmaster: paint the Manager pane an OPAQUE background. This is LOAD-BEARING for input,
+        // not cosmetics. IPaneContent::BackgroundBrush() returns _root.Background(), and the WT pane
+        // root is left transparent on purpose (Pane.cpp — so vintage/acrylic opacity shows through),
+        // so the CONTENT must paint its own fill. A Grid with a NULL Background is not hit-test-visible,
+        // so a click on the gaps between widgets (the tip of a text run, a thin border, any empty spot)
+        // falls THROUGH the transparent pane -> the XAML island -> NonClientIslandWindow::_OnNcHitTest,
+        // which returns HTCAPTION for any client point the island doesn't consume: the window then DRAGS
+        // on left-drag and pops the system/caption menu on right-click, exactly as if you'd grabbed the
+        // title bar (the user-reported "the tabs bar moves / its context menu opens" bug).
+        //
+        // The brush used to be set only inside `if (res.HasKey(L"UnfocusedBorderBrush"))`, but HasKey
+        // does NOT look through merged/theme dictionaries (where that key lives), so it returned false
+        // and _root was left transparent. Always set a non-null fill: look the themed brush up DIRECTLY
+        // (Lookup DOES traverse the theme dicts — exactly how ScratchpadContent, the reference
+        // IPaneContent, does it), and fall back to an opaque color if that fails, so _root is NEVER
+        // transparent — the same "don't leave it Transparent or it won't hit-test" guard WT uses in
+        // TerminalPage::_updatePaneResources.
+        Brush rootFill{ nullptr };
         try
         {
             auto res = Application::Current().Resources();
-            if (res.HasKey(winrt::box_value(L"UnfocusedBorderBrush")))
-            {
-                _root.Background(res.Lookup(winrt::box_value(L"UnfocusedBorderBrush")).try_as<Brush>());
-            }
+            rootFill = res.Lookup(winrt::box_value(L"UnfocusedBorderBrush")).try_as<Brush>();
         }
         catch (...)
         {
         }
+        if (!rootFill)
+        {
+            rootFill = Fill(0xFF, 0x2E, 0x2E, 0x2E); // opaque #2e2e2e == TabViewBackground (dark)
+        }
+        _root.Background(rootFill);
 
         _BuildLayout();
     }
