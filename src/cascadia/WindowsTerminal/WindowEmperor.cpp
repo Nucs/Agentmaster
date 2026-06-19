@@ -32,6 +32,9 @@
 // PICKED: Production / Development / Browse…) before anything reads persisted state. Header-only
 // on purpose: the Emperor links TerminalApp.dll, not the TerminalAppLib static lib.
 #include "../TerminalApp/AgentMaster/ProfileBootstrap.h"
+// Agentmaster: the in-app updater — the startup GitHub-release check + prompt, run BEFORE the
+// window-restoration prompt below. Header-only + pure Win32 for the same reason as ProfileBootstrap.
+#include "../TerminalApp/AgentMaster/Updater.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
@@ -538,6 +541,24 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         const std::wstring_view cmdline{ GetCommandLineW() };
         const bool embedding = cmdline.find(L"-Embedding") != std::wstring_view::npos;
         if (!::Agentmaster::Profiles::EnsureProfileResolvedAtStartup(!embedding))
+        {
+            TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
+            __assume(false);
+        }
+    }
+
+    // Agentmaster (updater; Updater.h): with the profile resolved, check GitHub for a newer release
+    // and prompt (Update now / Postpone 3·7·30 days / Skip this version / Not now) BEFORE the window-
+    // restoration prompt further down — the requested ordering ("ask before the windows restoration
+    // prompts"). On "Update now" the embedded am-update.cmd installer is launched detached and we exit
+    // (exactly like the single-instance handoff above) so the package isn't in use while it upgrades +
+    // relaunches. The check is gated to the published RELEASE install, bounded by a short network
+    // timeout, and skipped while postponed — so it can never wedge or nag a normal launch. A `-Embedding`
+    // (defterm) activation has no console/UI surface to update through, so skip it there too.
+    {
+        const std::wstring_view cmdline{ GetCommandLineW() };
+        const bool embedding = cmdline.find(L"-Embedding") != std::wstring_view::npos;
+        if (!embedding && ::Agentmaster::Updater::RunStartupUpdateCheck(nullptr))
         {
             TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
             __assume(false);

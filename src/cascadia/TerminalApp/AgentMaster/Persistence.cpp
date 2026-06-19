@@ -459,6 +459,9 @@ namespace Agentmaster
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
+        o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
+        o.Set(L"updateSkippedVersion", json::Value::MkStr(s.updateSkippedVersion));
+        o.Set(L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(s.updatePostponedUntilUnixMs)));
         auto hidden = json::Value::MkArr();
         for (const auto& id : s.hiddenSessionIds)
         {
@@ -507,6 +510,11 @@ namespace Agentmaster
             const double hf = v.NumAt(L"summaryPanelHeightFraction", 0.0);
             s.summaryPanelHeightFraction = (hf >= 0.06 && hf <= 0.75) ? hf : 0.0;
         }
+        // Updater (Updater.h): the prerelease opt-in + the skip/postpone state (the latter two are
+        // written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).
+        s.allowUpdatePrerelease = v.BoolAt(L"allowUpdatePrerelease", false);
+        s.updateSkippedVersion = v.StrAt(L"updateSkippedVersion");
+        s.updatePostponedUntilUnixMs = v.I64At(L"updatePostponedUntilUnixMs", 0);
         if (const auto* h = v.Find(L"hiddenSessionIds"); h && h->type == json::Value::Type::Arr)
         {
             for (const auto& e : h->arr)

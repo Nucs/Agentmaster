@@ -12,6 +12,7 @@
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
 #include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
+#include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 
 // Agentmaster: the build-stamped git commit + branch (the Settings page header). Generated into
 // $(GeneratedFilesDir) by TerminalAppLib.vcxproj's AgentmasterGenerateBuildInfo target, which is
@@ -4797,6 +4798,33 @@ namespace winrt::TerminalApp::implementation
             panel.Children().Append(sub);
         }
 
+        // UPDATES (Agentmaster updater; Updater.h) — check GitHub Releases for a newer version
+        // (the same prompt the startup check shows) + the pre-release opt-in. The status label
+        // beside the button shows "vX.Y.Z available!" in dark green when a newer release exists
+        // (filled by a silent check kicked when the cog opens — see _ShowSettings/_CheckForUpdates).
+        panel.Children().Append(Text(L"UPDATES", 11, true, 0.6));
+        {
+            auto row = StackPanel{};
+            row.Orientation(Orientation::Horizontal);
+            row.Spacing(10);
+            _setCheckUpdates = Button{};
+            _setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+            AgentSetTip(_setCheckUpdates, L"Check GitHub for a newer Agentmaster release, then choose to update now, postpone (3 / 7 / 30 days), or skip this version.");
+            _setCheckUpdates.Click([this](const IInspectable&, const RoutedEventArgs&) { _CheckForUpdates(true); });
+            _setUpdateStatus = TextBlock{};
+            _setUpdateStatus.Opacity(0.9);
+            _setUpdateStatus.FontSize(12);
+            _setUpdateStatus.VerticalAlignment(VerticalAlignment::Center);
+            _setUpdateStatus.TextWrapping(TextWrapping::Wrap);
+            row.Children().Append(_setCheckUpdates);
+            row.Children().Append(_setUpdateStatus);
+            panel.Children().Append(row);
+        }
+        _setAllowPrerelease = ToggleSwitch{};
+        _setAllowPrerelease.Header(winrt::box_value(L"Allow updating to pre-release versions"));
+        AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default.");
+        panel.Children().Append(_setAllowPrerelease);
+
         // CLAUDE SESSIONS
         panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
         _setSkipPermissions = ToggleSwitch{};
@@ -5069,7 +5097,19 @@ namespace winrt::TerminalApp::implementation
                 _setProfileDir.Text(winrt::hstring{ active });
             }
         }
+        if (_setAllowPrerelease)
+        {
+            _setAllowPrerelease.IsOn(_appSettings.allowUpdatePrerelease);
+        }
+        if (_setUpdateStatus)
+        {
+            _setUpdateStatus.Text(L""); // cleared until the silent check (below) finds an update
+        }
         _settingsOverlay.Visibility(Visibility::Visible);
+        // Updater: a silent check on open — if a newer release exists, the label next to "Check for
+        // updates" reads "vX.Y.Z available!" in dark green. Quiet on no-update / no-network (the
+        // explicit button gives that feedback). Runs off the UI thread (Updater.h uses WinHTTP).
+        _CheckForUpdates(false);
     }
 
     void AgentManagerContent::_HideSettings()
@@ -5184,15 +5224,23 @@ namespace winrt::TerminalApp::implementation
             }
             _appSettings.recentDirsLimit = (any && v > 0) ? v : 10; // empty/zero/garbage -> default
         }
+        if (_setAllowPrerelease)
+        {
+            _appSettings.allowUpdatePrerelease = _setAllowPrerelease.IsOn(); // UPDATES: the form OWNS this field
+        }
         // Preserve fields owned by out-of-cog UI actions, freshest from disk (the page's settings handler
         // does the same for hiddenSessionIds/showSummaryPanel): the summary panel SIZE (width/height
         // fractions, TAB_OVERLAY.md) is written by the panel's resize grips, not this form, so a form Save
-        // must not regress a resize done since the modal was seeded (incl. from another window).
+        // must not regress a resize done since the modal was seeded (incl. from another window). The
+        // updater's skip/postpone state (Updater.h) is likewise written outside this form (a JSON RMW),
+        // so preserve it too — only allowUpdatePrerelease (above) is the form's to write.
         {
             const auto disk = ::Agentmaster::LoadAppSettings();
             _appSettings.summaryPanelWidthFraction = disk.summaryPanelWidthFraction;
             _appSettings.summaryPanelHeightFraction = disk.summaryPanelHeightFraction;
             _appSettings.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
+            _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)
+            _appSettings.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs; // updater "Postpone N days" (out-of-cog JSON RMW)
         }
         if (_settingsSink)
         {
@@ -5203,6 +5251,108 @@ namespace winrt::TerminalApp::implementation
         // the shared engine's cached path; ClaudeAvailable() flips accordingly).
         ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
         _HideSettings();
+    }
+
+    void AgentManagerContent::SetQuitForUpdateHandler(std::function<void()> handler)
+    {
+        _quitForUpdateHandler = std::move(handler);
+    }
+
+    void AgentManagerContent::_CheckForUpdates(bool interactive)
+    {
+        // A double-click of the button must not stack two prompts; a silent on-open check is allowed
+        // to overlap (both are idempotent GitHub reads — the later result just wins the label).
+        if (interactive && _interactiveUpdateInFlight)
+        {
+            return;
+        }
+        if (interactive)
+        {
+            _interactiveUpdateInFlight = true;
+            if (_setCheckUpdates)
+            {
+                _setCheckUpdates.IsEnabled(false);
+                _setCheckUpdates.Content(winrt::box_value(L"Checking\x2026"));
+            }
+            if (_setUpdateStatus)
+            {
+                _setUpdateStatus.Text(L"Checking GitHub\x2026");
+                _setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0xB0, 0xB0, 0xB0) });
+            }
+        }
+
+        // Prefer the LIVE pre-release toggle (so toggling it, then clicking Check, uses the new value
+        // before a Save) over the saved setting.
+        bool prerelease = _appSettings.allowUpdatePrerelease;
+        if (_setAllowPrerelease)
+        {
+            prerelease = _setAllowPrerelease.IsOn();
+        }
+
+        const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
+        const auto cur = ::Agentmaster::Updater::CurrentPackageVersion();
+
+        auto weak = get_weak();
+        auto disp = _dispatcher;
+        std::thread([weak, disp, interactive, prerelease, stateDir, cur]() {
+            // The network round-trip (Updater.h uses WinHTTP) — bounded; a longer budget for the
+            // explicit button than the silent on-open check.
+            const ::Agentmaster::Updater::UpdateInfo info =
+                ::Agentmaster::Updater::CheckForUpdate(cur, prerelease, interactive ? 8000 : 5000);
+            if (!disp)
+            {
+                return;
+            }
+            disp.TryEnqueue([weak, interactive, stateDir, info]() {
+                auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                if (interactive)
+                {
+                    self->_interactiveUpdateInFlight = false;
+                    if (self->_setCheckUpdates)
+                    {
+                        self->_setCheckUpdates.IsEnabled(true);
+                        self->_setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
+                    }
+                }
+                if (self->_setUpdateStatus)
+                {
+                    if (info.available)
+                    {
+                        // "v0.4.3 available!" — dark green, legible on the dark settings card.
+                        self->_setUpdateStatus.Text(winrt::hstring{ ::Agentmaster::Updater::DisplayVersion(info) + L" available!" });
+                        self->_setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x2E, 0xA0, 0x43) });
+                    }
+                    else if (interactive)
+                    {
+                        self->_setUpdateStatus.Text(info.checked ? winrt::hstring{ L"You're on the latest version" } : winrt::hstring{ L"Couldn't reach GitHub" });
+                        self->_setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x99, 0x99, 0x99) });
+                    }
+                    else
+                    {
+                        self->_setUpdateStatus.Text(L""); // silent check: stay quiet unless there IS an update
+                    }
+                }
+                // Interactive only: prompt + apply on a found update (the silent on-open check just labels).
+                if (interactive && info.available)
+                {
+                    const HWND owner = ::GetActiveWindow();
+                    const auto d = ::Agentmaster::Updater::ShowUpdatePrompt(owner, info);
+                    if (::Agentmaster::Updater::ApplyDecision(stateDir, info, d, owner))
+                    {
+                        // The installer was launched detached; close the app gracefully so the package
+                        // isn't in use while it upgrades + relaunches (the page's RequestQuit).
+                        if (self->_quitForUpdateHandler)
+                        {
+                            self->_quitForUpdateHandler();
+                        }
+                    }
+                }
+            });
+        }).detach();
     }
 
     // ---- "Claude not detected" overlay (native-exe-only policy gate) --------

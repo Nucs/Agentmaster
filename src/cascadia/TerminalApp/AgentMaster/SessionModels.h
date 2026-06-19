@@ -366,6 +366,18 @@ namespace Agentmaster
         // the splitter itself on drag release (read-modify-write of settings.json, not the cog),
         // seeded into every window's Archive shell. Default 0.5 == the original 50/50 split.
         double archiveSplitFraction{ 0.5 };
+        // Agentmaster (updater; Updater.h): the in-app GitHub-release updater's state. allowUpdatePrerelease
+        // is the Settings cog's "Allow updating to pre-release versions" toggle (default OFF — the check
+        // uses /releases/latest, which excludes prereleases; ON uses the list endpoint, newest published).
+        // updateSkippedVersion / updatePostponedUntilUnixMs are written OUTSIDE the cog form by the updater
+        // (a freshest-disk JSON read-modify-write that the WindowsTerminal EXE can do without linking the
+        // engine — see Updater.h), so the cog's Save PRESERVES them from disk like the summary-panel fields:
+        // skip == the exact tag the user chose to "Skip this version" (never re-prompt for it); postpone ==
+        // the epoch-ms before which no check/prompt fires ("Remind me in 3/7/30 days"). All three default to
+        // a no-op (prompt normally, nothing skipped, not postponed) so a missing settings.json changes nothing.
+        bool allowUpdatePrerelease{ false };
+        std::wstring updateSkippedVersion{};
+        int64_t updatePostponedUntilUnixMs{ 0 };
         // Agentmaster (Sessions page; SESSIONS.md): the session ids the user chose to HIDE from the
         // global Sessions browser ("Hide from list" on a row's right-click menu). Persisted here so
         // a hide sticks across restarts; cleared from the Settings cog's "Reset hidden sessions"

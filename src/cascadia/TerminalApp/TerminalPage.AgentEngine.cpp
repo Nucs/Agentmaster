@@ -534,6 +534,11 @@ namespace winrt::TerminalApp::implementation
                     s.showSummaryPanel = disk.showSummaryPanel;
                     s.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
                     s.summaryPanelTruncate = disk.summaryPanelTruncate; // truncate toggle (panel times bar), out-of-cog UI action
+                    // Updater (Updater.h): skip/postpone are written outside the cog form (a JSON RMW
+                    // from the prompt, possibly from another window or the startup check). The form
+                    // owns ONLY allowUpdatePrerelease, so preserve these two from disk on Save.
+                    s.updateSkippedVersion = disk.updateSkippedVersion;
+                    s.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs;
                 }
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
@@ -595,6 +600,15 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ResetHiddenSessions();
+            }
+        });
+        // Agentmaster (updater; Updater.h): the cog's "Update now" launches the embedded am-update
+        // installer detached, then asks the app to close gracefully (RequestQuit) so the package
+        // isn't in use while the installer Add-AppxPackages the new build and relaunches it.
+        content->SetQuitForUpdateHandler([weakThis]() {
+            if (auto self = weakThis.get())
+            {
+                self->RequestQuit();
             }
         });
 

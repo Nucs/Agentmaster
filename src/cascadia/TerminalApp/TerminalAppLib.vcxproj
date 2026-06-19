@@ -188,6 +188,7 @@
     <ClInclude Include="AgentMaster\ProcessObserver.h" />
     <ClInclude Include="AgentMaster\TranscriptStore.h" />
     <ClInclude Include="AgentMaster\SessionSearch.h" />
+    <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>

@@ -99,6 +99,10 @@ namespace winrt::TerminalApp::implementation
         // button — clear the user's "Hide from list" set (AppSettings.hiddenSessionIds). The page
         // (TerminalPage) owns the list + the Sessions browser, so the cog just fires the action there.
         void SetResetHiddenSessionsHandler(std::function<void()> handler);
+        // Agentmaster (updater; Updater.h): "Update now" closes the app gracefully
+        // (TerminalPage::RequestQuit) so the embedded installer can Add-AppxPackage the new build and
+        // relaunch. Fired only AFTER the installer has been launched detached.
+        void SetQuitForUpdateHandler(std::function<void()> handler);
         // Agentmaster: the Explorer Tree's "refresh" button (after the sort toggle) — reload the data
         // for the CURRENT scope. The content redraws immediately; this fires so the page can force the
         // Fleet Observer to re-survey now (re-enrich the registry + recompute the External census)
@@ -325,6 +329,16 @@ namespace winrt::TerminalApp::implementation
         void _HideSettings();
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
 
+        // Agentmaster (updater; Updater.h): the Settings cog's UPDATES section. Runs a GitHub
+        // release check OFF the UI thread (WinHTTP), then marshals back. interactive==true (the
+        // "Check for updates" button): show the prompt (Update now / Postpone 3·7·30 days / Skip
+        // this version / Not now) on a found update, else report "up to date" / "couldn't reach
+        // GitHub". interactive==false (the silent check kicked when the cog opens): only set the
+        // "vX.Y.Z available!" label (dark green) when a newer release exists; stay quiet otherwise.
+        // "Update now" launches the embedded am-update installer (detached) and asks the app to quit
+        // via _quitForUpdateHandler so the package isn't in use while it upgrades + relaunches.
+        void _CheckForUpdates(bool interactive);
+
         // Agentmaster (native-exe-only policy): the "Claude not detected" modal — shown when a
         // launch/fork is attempted with no native claude.exe (::Agentmaster::ClaudeAvailable() false).
         // Carries why (native required, the Node CLI is unsupported), the install path (`claude install`
@@ -388,6 +402,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void()> _openArchiveHandler; // Agentmaster (Archive page): open the full-window Archive page (TerminalPage-hosted)
         std::function<void()> _openSessionsHandler; // Agentmaster (Sessions page): open the full-window global Sessions browser (TerminalPage-hosted)
         std::function<void()> _resetHiddenSessionsHandler; // Agentmaster (Sessions page): the Settings cog's "Reset hidden sessions" action — clear AppSettings.hiddenSessionIds (TerminalPage-side)
+        std::function<void()> _quitForUpdateHandler; // Agentmaster (updater): "Update now" -> quit the app gracefully (page's RequestQuit) so the installer can replace it
         std::function<void()> _refreshHandler; // Agentmaster: Explorer Tree refresh -> page re-surveys the Fleet Observer (reload the current scope's data)
         std::function<void(::Agentmaster::ManagerState)> _lensChangedHandler; // Agentmaster (M10): push lens changes to the hosting window
         ::Agentmaster::AppSettings _appSettings{}; // current settings (seeded by SetSettings; edited via the cog)
@@ -506,6 +521,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
         winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
+        // ---- UPDATES (Agentmaster updater; Updater.h) ----
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF)
+        winrt::Windows::UI::Xaml::Controls::Button _setCheckUpdates{ nullptr }; // "Check for updates" -> the same prompt the startup check shows
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setUpdateStatus{ nullptr }; // status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…")
+        bool _interactiveUpdateInFlight{ false }; // guard so a double-click of "Check for updates" can't fire two prompts
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;
