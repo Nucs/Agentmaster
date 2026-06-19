@@ -1846,6 +1846,23 @@ namespace winrt::TerminalApp::implementation
                 // rename box uses PreviewKeyDown for Enter).
                 _addPromptBox.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
                     const auto key = e.Key();
+                    if (key != VirtualKey::Up && key != VirtualKey::Down)
+                    {
+                        return; // only the bare Up/Down arrows drive history
+                    }
+                    // Don't hijack a MODIFIED arrow: Shift+Arrow extends the selection, Ctrl/Alt+Arrow are
+                    // editor/system motions — leave them all to the TextBox (mirrors the rename box's
+                    // CoreWindow::GetKeyState modifier check).
+                    if (const auto w = CoreWindow::GetForCurrentThread())
+                    {
+                        const auto down = winrt::Windows::UI::Core::CoreVirtualKeyStates::Down;
+                        if (WI_IsFlagSet(w.GetKeyState(VirtualKey::Shift), down) ||
+                            WI_IsFlagSet(w.GetKeyState(VirtualKey::Control), down) ||
+                            WI_IsFlagSet(w.GetKeyState(VirtualKey::Menu), down))
+                        {
+                            return;
+                        }
+                    }
                     if (key == VirtualKey::Up)
                     {
                         if (_promptHistoryIndex < 0)
@@ -6928,7 +6945,27 @@ namespace winrt::TerminalApp::implementation
     // focus places the caret in the box. A no-op if the box isn't present.
     void AgentManagerContent::_FocusPromptBox()
     {
-        if (_addPromptBox)
+        if (!_addPromptBox)
+        {
+            return;
+        }
+        // Defer the focus to the dispatcher. When this follows the Send-now ContentDialog confirm, the
+        // dialog restores focus to its pre-open element (the "!" button) AS it closes — which happens
+        // AFTER _DoSendNow (the PrimaryButtonClick callback) returns — so a synchronous Focus() here
+        // would be clobbered. A queued focus runs after the click handler unwinds, so the compose box
+        // keeps it. (The queue path has no dialog, so this is just a harmless one-tick delay there.)
+        if (_dispatcher)
+        {
+            auto weak = get_weak();
+            _dispatcher.TryEnqueue([weak]() {
+                auto self = weak.get();
+                if (self && self->_addPromptBox)
+                {
+                    self->_addPromptBox.Focus(FocusState::Programmatic);
+                }
+            });
+        }
+        else
         {
             _addPromptBox.Focus(FocusState::Programmatic);
         }
