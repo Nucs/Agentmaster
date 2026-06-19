@@ -1014,6 +1014,10 @@ namespace winrt::TerminalApp::implementation
         if (_cwdBox && !settings.defaultLaunchDir.empty())
         {
             _cwdBox.Text(winrt::hstring{ settings.defaultLaunchDir });
+            _ValidateLaunchBox(); // re-validate explicitly: don't lean on TextChanged for this programmatic
+                                  // set. It works today only because SetSettings runs while the Manager tab
+                                  // is active (attached), but a future detached caller (cross-window settings
+                                  // push) would otherwise leave the underline/button stale (see _SelectSession).
         }
         // Reflect the (global, persisted) Explorer Tree sort on its toggle. Safe before the UI is
         // built (the updater no-ops while _treeSortBtn is null); the tree itself adopts the order on
