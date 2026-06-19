@@ -323,11 +323,12 @@ namespace winrt::TerminalApp::implementation
         // _claudeOverlays entry once the session resolves; pruned when the tab leaves this window's roster.
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _pendingOverlays;
 
-        // Agentmaster (tab status-dot RED FLASH): when a hosted session leaves the Running state while
+        // Agentmaster (tab status-dot RED FLASH): when a hosted session goes from Running to a "now it's
+        // on you / at rest" state — Idle / WaitingForInput / NeedsApproval (NOT Done or Error) — while
         // its tab is NOT the active/visited one, that tab's status-dot OUTLINE flashes red until you
         // switch to it (the current tab is always considered visited, so it never flashes).
         // _agentFlashLastState remembers each hosted session's last state so the registry-observer
-        // reaction can detect the Running -> (any other state) edge; _flashingSessions is the set of
+        // reaction can detect the Running -> {Idle/WaitingForInput/NeedsApproval} edge; _flashingSessions is the set of
         // sessions whose tab is currently flashing. ONE shared per-window DispatcherTimer toggles
         // _agentFlashPhase every 600ms and repaints EVERY flashing tab's stroke together, so multiple
         // flashing tabs blink in lockstep (the synchronization requirement) — and a tab that starts
@@ -632,11 +633,12 @@ namespace winrt::TerminalApp::implementation
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
-        // Agentmaster (tab status-dot RED FLASH): a hosted session that leaves Running on an UNVISITED
-        // tab flashes that tab's status-dot outline red (synchronized across tabs via one shared timer)
-        // until you switch to it. _EvaluateAgentFlash detects the Running -> (other) edge per registry
-        // update; _Set/_Stop/_Start/_Ensure drive the shared 600ms timer + per-tab stroke. UI thread only.
-        void _EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // detect the Running -> (any other state) edge + start/stop the flash (never the active/visited tab); forgets state on !live so a later restore re-tracks fresh
+        // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
+        // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab flashes
+        // that tab's status-dot outline red (synchronized across tabs via one shared timer) until you
+        // switch to it. _EvaluateAgentFlash detects the Running -> {Idle/Waiting/NeedsApproval} edge per
+        // registry update; _Set/_Stop/_Start/_Ensure drive the shared 600ms timer + per-tab stroke. UI thread only.
+        void _EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // detect the Running -> {Idle/WaitingForInput/NeedsApproval} edge + start/stop the flash (never the active/visited tab; not for ->Done/->Error); forgets state on !live so a later restore re-tracks fresh
         void _StartAgentFlash(const std::wstring& sessionId); // begin flashing this session's tab-dot outline red; joins the shared timer in-phase with any others
         void _StopAgentFlash(const std::wstring& sessionId); // stop flashing + restore the resting black outline; stops the shared timer when none remain
         void _VisitTabClearFlash(const TerminalApp::Tab& tab); // visiting (selecting) a tab marks it seen -> stop its red flash (from _OnTabSelectionChanged)

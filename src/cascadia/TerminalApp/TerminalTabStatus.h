@@ -26,8 +26,9 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(bool, AgentStatusVisible, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentStatusBrush, PropertyChanged.raise, nullptr);
         // Agentmaster (status-dot OUTLINE): the dot's Stroke — black at rest, flashed red by the
-        // TerminalPage shared timer when a hosted session leaves Running unvisited (default null;
-        // _SetTabAgentDot seeds black the first time the dot shows, so the binding never paints null).
+        // TerminalPage shared timer when a hosted session goes from Running to a resting state
+        // (Idle / WaitingForInput / NeedsApproval) unvisited (default null; _SetTabAgentDot seeds
+        // black the first time the dot shows, so the binding never paints null).
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentStatusStrokeBrush, PropertyChanged.raise, nullptr);
         // Agentmaster (Linked Lenses): the "selected/active" pill behind the header (see the idl
         // note) — driven by TerminalPage::_SetTabSelectionPill via Tab.TabStatus().

@@ -122,14 +122,15 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session leaves the
-    // Running state (Stop/Done/Waiting/NeedsApproval/Error/Idle) while its tab is NOT the one you're
-    // looking at, that tab's status-dot OUTLINE flashes red until you switch to the tab. "The current
-    // tab is always considered visited", so the active tab never flashes. The trigger is precisely the
-    // Running -> (any other state) edge — so we remember each hosted session's last state. Back to
-    // Running clears the flash (it's working again — a blue dot, not an attention state). A
-    // non-Running -> non-Running change (e.g. the Waiting->Idle cache decay) leaves an existing flash
-    // alone — a tab already flagged keeps flashing until you visit it. UI thread (the observer hop).
+    // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session goes from
+    // Running to one of the "it's on you / at rest" states — Idle, WaitingForInput (waiting-for-you),
+    // or NeedsApproval (approval-required) — while its tab is NOT the one you're looking at, that tab's
+    // status-dot OUTLINE flashes red until you switch to the tab. "The current tab is always considered
+    // visited", so the active tab never flashes. The trigger is precisely the Running -> {Idle /
+    // WaitingForInput / NeedsApproval} edge (NOT -> Done or -> Error), so we remember each hosted
+    // session's last state. Any move OUT of a target state — back to Running (working again), or to
+    // Done / Error — clears the flash; a target -> target move (e.g. the WaitingForInput -> Idle cache
+    // decay) keeps it flashing until you visit. UI thread (the observer hop).
     void TerminalPage::_EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live)
     {
         using ::Agentmaster::SessionState;
@@ -148,25 +149,34 @@ namespace winrt::TerminalApp::implementation
         const auto prev = hadPrev ? prevIt->second : SessionState::Idle;
         _agentFlashLastState[sessionId] = newState;
 
-        if (newState == SessionState::Running)
+        // We flash ONLY for the "now it's on you / at rest" states: Idle, WaitingForInput
+        // (waiting-for-you), NeedsApproval (approval-required). Any other state — Running (working
+        // again), Done (finished clean), or Error — is NOT one we flash for, so a move there stops any
+        // existing flash. (This is also how "back to Running" clears it.)
+        const bool isTarget = (newState == SessionState::Idle ||
+                               newState == SessionState::WaitingForInput ||
+                               newState == SessionState::NeedsApproval);
+        if (!isTarget)
         {
-            _StopAgentFlash(sessionId); // working again — never flash a Running tab
+            _StopAgentFlash(sessionId);
             return;
         }
 
-        // The Running -> (any other state) edge: begin the flash UNLESS this is the active/visited tab.
+        // newState is a target state. START the flash only on the Running -> target EDGE, and only on
+        // an UNVISITED tab. A target -> target move (e.g. the WaitingForInput -> Idle cache decay)
+        // leaves an existing flash alone — still on you until you visit the tab.
         if (hadPrev && prev == SessionState::Running)
         {
             if (tab == _GetFocusedTab())
             {
-                _StopAgentFlash(sessionId); // current tab is always considered visited
+                _StopAgentFlash(sessionId); // the current tab is always considered visited
             }
             else
             {
                 _StartAgentFlash(sessionId);
             }
         }
-        // else: not a Running edge — leave any existing flash as-is (keeps flashing until visited).
+        // else: target -> target (or first sight) — leave any existing flash as-is.
     }
 
     // Agentmaster (tab status-dot red flash): add this session to the flashing set + ensure the shared

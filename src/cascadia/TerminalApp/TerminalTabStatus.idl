@@ -25,8 +25,9 @@ namespace TerminalApp
 
         // Agentmaster (status-dot OUTLINE): the dot's Stroke brush. Normally black (a thin contrast
         // ring, set by TerminalPage::_SetTabAgentDot the first time the dot shows). When a hosted
-        // session leaves Running while its tab is unvisited, TerminalPage's shared flash timer drives
-        // this between red and black every 600ms so the dot's outline blinks red for attention.
+        // session goes from Running to a resting state (Idle / WaitingForInput / NeedsApproval) while
+        // its tab is unvisited, TerminalPage's shared flash timer drives this between red and black
+        // every 600ms so the dot's outline blinks red for attention.
         Windows.UI.Xaml.Media.Brush AgentStatusStrokeBrush { get; set; };
 
         // Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background drawn

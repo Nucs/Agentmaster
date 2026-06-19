@@ -86,8 +86,9 @@
               (originally a "●" TextBlock): a real filled shape renders BOLDER than the glyph's ink at
               the same size, takes a thin Stroke (AgentStatusStrokeBrush — black at rest, seeded by
               _SetTabAgentDot the first time the dot shows; bound, not a literal, so TerminalPage's
-              shared timer can FLASH it red when a hosted session leaves Running on a tab you haven't
-              visited) so the dot stays legible on ANY tab background
+              shared timer can FLASH it red when a hosted session goes from Running to a resting state
+              [idle / waiting-for-you / approval-required] on a tab you haven't visited) so the dot
+              stays legible on ANY tab background
               (per-dir colored tabs, the selected-tab highlight, light themes), and centers
               deterministically — no font line-box / baseline concerns. The Fill binds the same
               AgentStatusBrush the code already writes, so this is presentation-only. Margin
