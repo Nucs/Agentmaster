@@ -699,6 +699,29 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (Linked Lenses — the reveal half of the per-tab -> Manager sync): when the user
+    // switches TO the Manager tab, scroll the currently-selected board card / tree row into view. The
+    // lens selection follows tab switches (_SyncManagerSelectionToTab) while the Manager is hidden, so
+    // on return the highlighted card can be scrolled off-screen in a tall column (or after a state
+    // change moved it to another column); this synchronizes its visibility with its highlight. Called
+    // from the one tab-switch funnel (_OnTabSelectionChanged) only when the Manager tab is selected.
+    void TerminalPage::_BringManagerSelectionIntoView()
+    {
+        // Pre-startup the focused-tab restore is in flight (the lens selection is being seeded from the
+        // WindowRecord); don't yank the view — the same gate _SyncManagerSelectionToTab uses.
+        if (_startupState != StartupState::Initialized)
+        {
+            return;
+        }
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->BringSelectedIntoView();
+            }
+        }
+    }
+
     // Agentmaster: keep the pinned, non-closable Manager tab at index 0 after any reorder. Tab
     // creation appends (the Manager is created first), so the only ways it can drift are a tab
     // drag-drop or a move-tab action; this snaps it back. No-op when it is already first.

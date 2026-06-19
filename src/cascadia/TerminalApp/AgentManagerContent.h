@@ -118,6 +118,12 @@ namespace winrt::TerminalApp::implementation
         // row highlighted + its Flight Plan). Equivalent to a single-click on the session's board card;
         // a no-op when the id is empty or already selected. Marshal to the UI thread is the caller's job.
         void SelectSession(winrt::hstring id);
+        // Agentmaster (Linked Lenses — selection VISIBILITY sync): scroll the currently-selected board
+        // card / Explorer-tree row into view. The page calls this when the user switches TO the Manager
+        // tab: while it was hidden the selection followed the user's tab switches (SelectSession), so the
+        // highlighted card can be scrolled off-screen on return — this synchronizes its visibility with
+        // its highlight. A no-op when nothing managed is selected or the card/row isn't currently shown.
+        void BringSelectedIntoView();
         // Agentmaster (Linked Lenses): the currently-selected managed session id (the board card /
         // tree row selection), or empty. The page reads it live to decide which tab wears the
         // "selected/active" pill when nothing is hovered.

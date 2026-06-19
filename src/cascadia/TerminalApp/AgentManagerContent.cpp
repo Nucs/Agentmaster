@@ -1147,6 +1147,57 @@ namespace winrt::TerminalApp::implementation
         }
         _SelectSession(sid);
     }
+    // Agentmaster (Linked Lenses — selection VISIBILITY sync): scroll the currently-selected board card
+    // (and its Explorer-tree row) into view within their scrolling regions. The page calls this when the
+    // user switches TO the Manager tab: while the Manager was hidden the selection followed the user's
+    // tab switches (SelectSession from _SyncManagerSelectionToTab), or a state change moved the card into
+    // a column where it sits below the fold — so on return the HIGHLIGHTED card can be scrolled
+    // off-screen. Revealing it ON tab-entry — deliberately NOT on every _Refresh, which would fight the
+    // user's own scrolling while they sit on the Manager tab and undo _RebuildBoard's offset
+    // preservation — synchronizes the selection's visibility with its highlight. A no-op when nothing
+    // managed is selected (an external selection has no tracked card) or the selected session has no
+    // visible card/row (archived / out of the current scope / its directory group collapsed).
+    void AgentManagerContent::BringSelectedIntoView()
+    {
+        if (_selectedId.empty())
+        {
+            return;
+        }
+        auto weak = get_weak();
+        auto disp = _dispatcher;
+        if (!disp)
+        {
+            return;
+        }
+        // Defer to a clean tick: the Manager content was just made the visible tab, so its board may not
+        // have completed a layout pass yet (MUX TabView hosts only the selected tab's content). Realize
+        // it (UpdateLayout) so each card has a real extent, then StartBringIntoView walks up to the
+        // card's column ScrollViewer and scrolls it into view (a no-op if already fully visible) — the
+        // same UpdateLayout-then-scroll recipe the Flight-Plan auto-scroll-to-bottom uses. Run at LOW
+        // priority so this lands AFTER the framework's own restore work this attach triggers (each fresh
+        // column ScrollViewer re-applies its saved offset on Loaded; see _MakeBoardColumn) — our reveal
+        // must be the last word on the selected card's column, else the offset restore would re-hide it.
+        // _selectedId is re-read inside (it may change before this runs).
+        disp.TryEnqueue(winrt::Windows::System::DispatcherQueuePriority::Low, [weak]() {
+            auto self = weak.get();
+            if (!self || self->_selectedId.empty())
+            {
+                return;
+            }
+            if (self->_boardHost)
+            {
+                self->_boardHost.UpdateLayout();
+            }
+            if (const auto it = self->_boardCardsById.find(self->_selectedId); it != self->_boardCardsById.end() && it->second)
+            {
+                it->second.StartBringIntoView();
+            }
+            if (const auto it = self->_treeRowsById.find(self->_selectedId); it != self->_treeRowsById.end() && it->second)
+            {
+                it->second.StartBringIntoView();
+            }
+        });
+    }
     void AgentManagerContent::SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler)
     {
         _confirmHandler = std::move(handler);

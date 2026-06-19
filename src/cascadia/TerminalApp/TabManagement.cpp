@@ -1428,6 +1428,13 @@ namespace winrt::TerminalApp::implementation
                 // shows only while the Manager tab is active, so leaving the Manager clears it and
                 // returning re-applies it for the current hover/selection.
                 _UpdateManagerSelectionHighlight();
+                // Agentmaster (Linked Lenses): switching TO the Manager tab REVEALS the current
+                // selection — scroll the selected card/row into view, since it may have scrolled off
+                // while the selection followed tab switches with the Manager hidden. Manager tab only.
+                if (_managerTab && tab == _managerTab)
+                {
+                    _BringManagerSelectionIntoView();
+                }
             }
             // Agentmaster (M10): the focused tab is part of the per-window record, so a reopen restores
             // it. Debounce-save on switch so the selection persists LIVE (not only at the graceful
