@@ -219,6 +219,10 @@ namespace winrt::TerminalApp::implementation
 
         // Action-bar handlers (operate on _selectedId / _selectedPromptId).
         void _OnLaunch();
+        // Agentmaster: "Create & Launch" — ensure the typed working dir exists, creating it (and any
+        // missing parents) when it's a not-yet-existing absolute path. Returns false (and warns) if the
+        // create failed, so the caller aborts the launch. An existing dir is a no-op pass-through.
+        bool _EnsureLaunchDirExists(const std::wstring& dir);
         void _OnAddPrompt();
         void _OnSendNow(); // the "!" icon — confirms, then _DoSendNow
         void _DoSendNow(); // actual inject, after the Send-now confirm

@@ -32,6 +32,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem> // create_directories — the "Create & Launch" affordance for a not-yet-existing dir
+#include <system_error> // std::error_code — non-throwing create_directories
 #include <thread> // background transcript read for an external's read-only plan
 #include <shobjidl.h> // IFileOpenDialog — Browse for claude.exe (native-exe-only policy)
 
@@ -576,6 +578,49 @@ namespace
         }
         const DWORD a = ::GetFileAttributesW(d.c_str());
         return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+
+    // Agentmaster: whether `p` is a well-formed ABSOLUTE path we could create as a brand-new working
+    // directory — the gate for the launch box's "Create & Launch" affordance (a folder the user typed
+    // that doesn't exist yet). We require an absolute/rooted path (a drive root "X:\…" or a UNC
+    // "\\server\share…") so a stray relative token ("agent") never offers to create a folder at some
+    // surprising process cwd, and we reject the Win32-illegal path characters so the eventual
+    // create_directories can't fail on garbage. Pass an already-NormPath'd string (separators unified).
+    // The caller checks existence separately — this says only "this looks like a path we could make".
+    bool LooksLikeCreatableDir(const std::wstring& p)
+    {
+#ifdef _WIN32
+        if (p.size() < 3)
+        {
+            return false; // shortest creatable rooted path is "X:\" (a bare drive root already exists)
+        }
+        // Reject characters illegal in a Windows path. The drive ':' (index 1) is allowed and checked
+        // below; wildcards / redirection / control chars can never be a real folder name.
+        for (const wchar_t c : p)
+        {
+            if (c == L'<' || c == L'>' || c == L'"' || c == L'|' || c == L'?' || c == L'*' || c < 0x20)
+            {
+                return false;
+            }
+        }
+        const auto isDriveLetter = [](wchar_t c) { return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z'); };
+        // Drive-rooted "X:\…" (NormPath already turned '/' into '\'). A bare "X:" or drive-relative
+        // "X:rel" is rejected: no ':' may appear past the drive separator, and a real subfolder must
+        // follow the root.
+        if (isDriveLetter(p[0]) && p[1] == L':' && p[2] == L'\\')
+        {
+            return p.size() > 3 && p.find(L':', 2) == std::wstring::npos;
+        }
+        // UNC "\\server\share\…" — needs a share component past the host, and carries no drive ':'.
+        if (p[0] == L'\\' && p[1] == L'\\')
+        {
+            const auto host = p.find(L'\\', 2);
+            return host != std::wstring::npos && host + 1 < p.size() && p.find(L':') == std::wstring::npos;
+        }
+        return false;
+#else
+        return p.size() > 1 && p.front() == L'/'; // POSIX: absolute paths only
+#endif
     }
 
     // Case-insensitive (the Windows filesystem default) leaf tests for the path-picker's
@@ -6103,7 +6148,12 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _NormalizeCwdBox(); // launch with — and remember — a normalized path (a session id is unaffected)
-        const std::wstring text{ _cwdBox.Text() };
+        std::wstring text{ _cwdBox.Text() };
+        { // trim surrounding whitespace so the launch target matches exactly what _ValidateLaunchBox judged
+            const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+            while (!text.empty() && isws(text.front())) { text.erase(text.begin()); }
+            while (!text.empty() && isws(text.back())) { text.pop_back(); }
+        }
         // Agentmaster (Codex-launch): a Codex launch is DIRECTORY-ONLY — codex has no typed-id resume/fork
         // here (Codex resume is reached via the Archive page / window-restore / EXTERNAL Adopt), and while
         // Codex is selected _ValidateLaunchBox keeps the box in directory semantics. Spawn a managed codex in
@@ -6113,6 +6163,10 @@ namespace winrt::TerminalApp::implementation
         {
             if (_codexLaunchHandler)
             {
+                if (!_EnsureLaunchDirExists(text)) // "Create & Launch": make the folder first if it doesn't exist yet
+                {
+                    return; // creation failed (already warned) — don't launch into a missing dir
+                }
                 _PushRecentDir(text); // remember it as "recently selected" (shared MRU with Claude launches)
                 _ClosePathPicker();
                 _codexLaunchHandler(0, winrt::hstring{ text }, false, false); // fresh launch: adopt=false, fork=false
@@ -6145,10 +6199,67 @@ namespace winrt::TerminalApp::implementation
         // A working directory = a new, independent session there.
         if (_spawnHandler)
         {
+            if (!_EnsureLaunchDirExists(text)) // "Create & Launch Claude": make the folder first if it doesn't exist yet
+            {
+                return; // creation failed (already warned) — don't launch into a missing dir
+            }
             _PushRecentDir(text); // remember it as "recently selected"
             _ClosePathPicker();
             _spawnHandler(winrt::hstring{ text }, winrt::hstring{});
         }
+    }
+
+    // Agentmaster: ensure the launch target directory exists, creating it (and any missing parents)
+    // when the user typed a not-yet-existing absolute path — the "Create & Launch" affordance. The
+    // launch button only reads "Create & Launch …" (and only enables for a missing path) when
+    // _ValidateLaunchBox judged the path creatable (LooksLikeCreatableDir), so this is the matching
+    // commit step. Returns true if the dir exists (already, or after a successful create) and the
+    // launch may proceed; false if creation failed (a buttons-only error is shown and the caller
+    // aborts). An already-existing dir is a no-op pass-through; a non-creatable path can't reach here
+    // (the button is disabled for it) but is rejected defensively.
+    bool AgentManagerContent::_EnsureLaunchDirExists(const std::wstring& dir)
+    {
+        const std::wstring norm = NormPath(dir);
+        if (IsDir(norm))
+        {
+            return true; // already there — nothing to create
+        }
+        if (!LooksLikeCreatableDir(norm))
+        {
+            return false; // not an absolute path we offered to create (button is disabled for this)
+        }
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ norm }, ec);
+        if (ec || !IsDir(norm))
+        {
+            // Surface the failure (permission denied, a missing drive, a path too long, …) instead of
+            // silently doing nothing after the user clicked "Create & Launch". Buttons-only ContentDialog
+            // (a text box inside one gets no keypresses in XAML Islands, but an info dialog needs none).
+            ContentDialog dialog;
+            dialog.Title(winrt::box_value(L"Couldn't create folder"));
+            dialog.Content(winrt::box_value(winrt::hstring{ L"Could not create the working directory:\n\n" } + winrt::hstring{ norm }));
+            dialog.CloseButtonText(L"OK");
+            if (_root)
+            {
+                try
+                {
+                    dialog.XamlRoot(_root.XamlRoot());
+                    dialog.RequestedTheme(_root.ActualTheme());
+                }
+                catch (...)
+                {
+                }
+            }
+            try
+            {
+                dialog.ShowAsync();
+            }
+            catch (...)
+            {
+            }
+            return false;
+        }
+        return true;
     }
 
     // Agentmaster: the Fork button (shown only for a FOUND session id) -> fork that conversation
@@ -6183,8 +6294,10 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: paint the Launch box's validation underline + drive the launch/fork buttons.
     // EMPTY -> neutral, "Launch Claude" enabled (defaults). A UUID -> session id: FOUND = green +
     // "Resume session" enabled + Fork shown; NOT found = red + disabled. Otherwise a directory:
-    // EXISTS = neutral + "Launch Claude" enabled; MISSING = red + disabled. (Per the design: green
-    // is reserved for a found session id; a valid folder stays neutral.)
+    // EXISTS = neutral + "Launch Claude" enabled; a not-yet-existing ABSOLUTE path = amber +
+    // "Create & Launch Claude" enabled (the folder is created on launch); a malformed / relative path
+    // = red + disabled. (Per the design: green is reserved for a found session id; a valid folder
+    // stays neutral; amber flags a folder that will be created.)
     void AgentManagerContent::_ValidateLaunchBox()
     {
         if (!_cwdBox || !_launchBtn)
@@ -6202,14 +6315,19 @@ namespace winrt::TerminalApp::implementation
             trimmed.pop_back();
         }
 
-        const auto paint = [this](int state) { // 0 neutral (hidden), 1 green, 2 red
+        const auto paint = [this](int state) { // 0 neutral (hidden), 1 green, 2 red, 3 amber (will create)
             if (!_cwdUnderline)
             {
                 return;
             }
-            // transparent (neutral) / green (found id) / red (missing dir or unknown id); kept always
-            // present (Height 2) so toggling color never reflows the toolbar.
-            _cwdUnderline.Background(state == 0 ? Fill(0x00, 0x00, 0x00, 0x00) : (state == 1 ? Fill(0xFF, 0x4C, 0xAF, 0x50) : Fill(0xFF, 0xE5, 0x39, 0x35)));
+            // transparent (neutral) / green (found id) / red (missing dir or unknown id) / amber (a
+            // not-yet-existing dir we'll CREATE on launch); kept always present (Height 2) so toggling
+            // color never reflows the toolbar.
+            const SolidColorBrush b = state == 1 ? Fill(0xFF, 0x4C, 0xAF, 0x50) :
+                                      state == 2 ? Fill(0xFF, 0xE5, 0x39, 0x35) :
+                                      state == 3 ? Fill(0xFF, 0xDA, 0xA5, 0x20) :
+                                                   Fill(0x00, 0x00, 0x00, 0x00);
+            _cwdUnderline.Background(b);
         };
         const auto showFork = [this](bool v) {
             if (_forkBtn)
@@ -6220,7 +6338,8 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (Codex-launch): while Codex is the selected agent the box is DIRECTORY-ONLY — codex
         // has no --session-id, so there is no typed-id resume (the green found-id state) and no Fork. Empty
-        // or an existing dir => enabled "Launch Codex" (neutral underline); a missing dir => red + disabled.
+        // or an existing dir => enabled "Launch Codex" (neutral underline); a not-yet-existing absolute path
+        // => amber + "Create & Launch Codex"; a malformed / relative path => red + disabled.
         if (_launchCodex)
         {
             showFork(false);
@@ -6228,14 +6347,19 @@ namespace winrt::TerminalApp::implementation
             {
                 paint(0);
                 _launchBtn.IsEnabled(true);
+                _launchBtn.Content(winrt::box_value(L"Launch Codex"));
             }
             else
             {
-                const bool exists = IsDir(NormPath(trimmed));
-                paint(exists ? 0 : 2);
-                _launchBtn.IsEnabled(exists);
+                // An existing dir launches as-is; a not-yet-existing absolute path flips to amber +
+                // "Create & Launch Codex" (made on launch); a malformed/relative path stays red+disabled.
+                const std::wstring norm = NormPath(trimmed);
+                const bool exists = IsDir(norm);
+                const bool creatable = !exists && LooksLikeCreatableDir(norm);
+                paint(exists ? 0 : (creatable ? 3 : 2));
+                _launchBtn.IsEnabled(exists || creatable);
+                _launchBtn.Content(winrt::box_value(creatable ? L"Create & Launch Codex" : L"Launch Codex"));
             }
-            _launchBtn.Content(winrt::box_value(L"Launch Codex"));
             return;
         }
 
@@ -6256,11 +6380,15 @@ namespace winrt::TerminalApp::implementation
             showFork(found);
             return;
         }
-        // a working directory: green is reserved for session ids, so a valid dir stays neutral.
-        const bool exists = IsDir(NormPath(trimmed));
-        paint(exists ? 0 : 2);
-        _launchBtn.IsEnabled(exists);
-        _launchBtn.Content(winrt::box_value(L"Launch Claude"));
+        // a working directory: green is reserved for session ids, so a valid dir stays neutral. A
+        // not-yet-existing absolute path flips to amber + "Create & Launch Claude" (_OnLaunch makes the
+        // folder first); a malformed / relative path that we won't create stays red + disabled.
+        const std::wstring norm = NormPath(trimmed);
+        const bool exists = IsDir(norm);
+        const bool creatable = !exists && LooksLikeCreatableDir(norm);
+        paint(exists ? 0 : (creatable ? 3 : 2));
+        _launchBtn.IsEnabled(exists || creatable);
+        _launchBtn.Content(winrt::box_value(creatable ? L"Create & Launch Claude" : L"Launch Claude"));
         showFork(false);
     }
 
