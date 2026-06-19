@@ -1241,11 +1241,18 @@ namespace winrt::TerminalApp::implementation
                             return;
                         }
                     }
+                    // Not open: don't resume silently — prompt Resume / Fork / Cancel (the adopt
+                    // dialog's idiom), since forking a recognized conversation is just as common as
+                    // continuing it. (The detail pane + right-click menu offer both as buttons; the
+                    // double-click used to pick Resume for you.)
                     for (const auto& row : self->_sessionsRows)
                     {
                         if (row.id == id)
                         {
-                            self->_ResumeSessionFromDisk(row.id, row.dir, row.title);
+                            // never-prompted -> empty fork title so the fork seam derives a smart name
+                            // (matches the detail-pane Fork button + the right-click "Fork here").
+                            const std::wstring forkTitle = row.msgs > 0 ? row.title : std::wstring{};
+                            self->_PromptResumeOrForkSession(row.id, row.dir, row.title, forkTitle);
                             break;
                         }
                     }
@@ -1711,6 +1718,54 @@ namespace winrt::TerminalApp::implementation
         {
             _HideSessionsPage(); // foreground: land on the fork. Background bulk-open keeps the list open.
         }
+    }
+
+    // Agentmaster: the Sessions-page double-click prompt — Resume / Fork / Cancel. Double-clicking a
+    // CLOSED on-disk session used to resume it silently; offer the choice instead (the adopt dialog's
+    // Fork-a-copy-vs-Resume idiom — _ConfirmChoice), since forking a recognized conversation is just as
+    // common as continuing it. Resume (Primary) = continue this conversation (claude --resume); Fork
+    // (Secondary) = branch a NEW conversation from it (--fork-session, the original transcript
+    // untouched); Cancel = nothing. Shown only for a NOT-live row — a live session's double-click jumps
+    // straight to its tab (handled before this is called). forkTitle is empty for a never-prompted row
+    // so the fork seam derives a smart name.
+    winrt::fire_and_forget TerminalPage::_PromptResumeOrForkSession(std::wstring sessionId, std::wstring dir, std::wstring title, std::wstring forkTitle)
+    {
+        const auto presenter{ _dialogPresenter.get() };
+        if (!presenter)
+        {
+            // No presenter to confirm with -> preserve the prior behavior (resume) rather than
+            // stranding the double-click.
+            _ResumeSessionFromDisk(sessionId, dir, title);
+            co_return;
+        }
+
+        ContentDialog dialog;
+        dialog.Title(winrt::box_value(L"Open session"));
+        dialog.Content(winrt::box_value(
+            title.empty() ?
+                winrt::hstring{ L"Resume continues this conversation in a managed tab (claude --resume). Fork branches a NEW conversation from it \x2014 a copy you can diverge freely; the original transcript is untouched (--fork-session)." } :
+                winrt::hstring{ L"\x201C" + title + L"\x201D \x2014 Resume continues this conversation in a managed tab (claude --resume). Fork branches a NEW conversation from it \x2014 a copy you can diverge freely; the original transcript is untouched (--fork-session)." }));
+        dialog.PrimaryButtonText(L"Resume");
+        dialog.SecondaryButtonText(L"Fork");
+        dialog.CloseButtonText(L"Cancel");
+        dialog.DefaultButton(ContentDialogButton::Primary); // safe default = Resume (continue where you left off)
+
+        const auto weak = get_weak();
+        const auto result = co_await presenter.ShowDialog(dialog);
+        const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+        if (!strong)
+        {
+            co_return;
+        }
+        if (result == ContentDialogResult::Primary)
+        {
+            _ResumeSessionFromDisk(sessionId, dir, title);
+        }
+        else if (result == ContentDialogResult::Secondary)
+        {
+            _ForkSessionFromDisk(sessionId, dir, forkTitle);
+        }
+        // else Close/Cancel -> do nothing
     }
 
     // Recolor the row highlights for _sessionsSelectedId WITHOUT rebuilding the table (the
