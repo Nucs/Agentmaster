@@ -42,7 +42,9 @@ optional low-latency *hint* during migration, then get deleted. Rule #13 already
 > hook-less session is now lit up by the missed-`UserPromptSubmit` repair (`[recon-run]`), held through
 > subagent/`/fork` work (`[recon-subagent]`), then released on a terminal tail (`ShouldSynthesizeStop`)
 > or claude's idle heartbeat (`[recon-stop-idle]`) — so it cycles Idle→Running→WaitingForInput like a
-> hooked one. The mechanism is **reconcilers on the hook machine**, not §5's `DeriveState`. The
+> hooked one. (Every `[recon-*]` synth + the `[decay-waiting]` cache-window demotion is traced to
+> `scanner.log` in the active profile dir — distinct from the hook bridge's `hooks.log`.) The
+> mechanism is **reconcilers on the hook machine**, not §5's `DeriveState`. The
 > API-error / compaction / Done process-fact arms (§5) did **not** ship.
 
 ## 1. Decisions (locked — from design review)
