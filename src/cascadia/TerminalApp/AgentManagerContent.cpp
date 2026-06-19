@@ -5726,13 +5726,19 @@ namespace winrt::TerminalApp::implementation
         // SelectSession() routes here) — drops that session's working directory into the Launch box, so
         // "Launch Claude" / Open-New-Session is pre-aimed where you're working. Done BEFORE the
         // already-selected early-out so a re-select re-aims it. The box is not focused during a card
-        // click / tab switch, so its TextChanged early-outs (it never pops the path-picker) — it just
-        // repaints the launch button via _ValidateLaunchBox.
+        // click / tab switch, so its TextChanged path-picker logic early-outs (it never pops the
+        // dropdown). We must re-validate EXPLICITLY here, not lean on TextChanged: a programmatic
+        // _cwdBox.Text() set lands while the Manager content is OFF the live visual tree (a tab switch
+        // makes another tab active, and MUX TabView hosts only the selected tab's content). The Text DP
+        // value persists (you see the right path on return), but TextChanged does NOT reliably fire while
+        // detached — so without this call the underline/button stay frozen on the previously-typed
+        // value's RED/disabled state even though a valid working dir now shows (the reported bug).
         if (_cwdBox && _registry && !id.empty())
         {
             if (const auto s = _registry->Get(id); s && !s->workingDir.empty())
             {
                 _cwdBox.Text(winrt::hstring{ s->workingDir });
+                _ValidateLaunchBox();
             }
         }
 
@@ -5795,10 +5801,14 @@ namespace winrt::TerminalApp::implementation
         _selectedExternalCwd = cwd;
         _selectedExternalTitle = title;
         // Agentmaster: like a managed select, aim the Launch box at this external's cwd (so Launch /
-        // Open-New-Session here is one keystroke). Unfocused box => no path-picker pop (see _SelectSession).
+        // Open-New-Session here is one keystroke). Unfocused box => no path-picker pop, and re-validate
+        // EXPLICITLY — a programmatic Text set on the (detached, non-active-tab) Manager content does not
+        // reliably raise TextChanged, so the launch underline/button would otherwise stay stuck on a
+        // previously-typed invalid value's RED/disabled state (see _SelectSession).
         if (_cwdBox && !cwd.empty())
         {
             _cwdBox.Text(winrt::hstring{ cwd });
+            _ValidateLaunchBox();
         }
         _selectedExternalKind = kind; // Phase C1: the read-only plan reader (Claude transcript vs Codex rollout)
         _selectedExternalRolloutPath = rolloutPath;
@@ -5935,7 +5945,8 @@ namespace winrt::TerminalApp::implementation
             {
                 _ClosePathPicker();
                 _resumeSessionHandler(winrt::hstring{ *sid }, winrt::hstring{ dir }, winrt::hstring{ title });
-                _cwdBox.Text(L""); // Agentmaster: consume the session id — clear the box after resume (TextChanged -> _ValidateLaunchBox resets the underline/buttons)
+                _cwdBox.Text(L""); // Agentmaster: consume the session id — clear the box after resume
+                _ValidateLaunchBox(); // re-validate explicitly: the resume handler just opened+selected a new tab, so the Manager content is detached and TextChanged won't reliably fire to reset the underline/buttons
             }
             return;
         }
@@ -5972,7 +5983,8 @@ namespace winrt::TerminalApp::implementation
         {
             _ClosePathPicker();
             _forkSessionHandler(winrt::hstring{ *sid }, winrt::hstring{ dir }, winrt::hstring{ title });
-            _cwdBox.Text(L""); // Agentmaster: consume the session id — clear the box after fork (TextChanged -> _ValidateLaunchBox resets the underline/buttons)
+            _cwdBox.Text(L""); // Agentmaster: consume the session id — clear the box after fork
+            _ValidateLaunchBox(); // re-validate explicitly: the fork handler just opened+selected a new tab, so the Manager content is detached and TextChanged won't reliably fire to reset the underline/buttons
         }
     }
 
