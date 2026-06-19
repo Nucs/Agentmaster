@@ -1834,18 +1834,16 @@ namespace winrt::TerminalApp::implementation
                 // TextBox has no direct VerticalScrollBarVisibility in this projection — it's the
                 // attached ScrollViewer property (see Gotchas: this XAML projection differs from WPF).
                 ScrollViewer::SetVerticalScrollBarVisibility(_addPromptBox, ScrollBarVisibility::Auto);
-                // Agentmaster (prompt history + compose chords): recall the selected session's previously
-                // SENT prompts (the shell/REPL idiom) and submit from the keyboard — see _BuildPromptHistory
-                // / _ApplyPromptHistoryText. On the live DRAFT (the "bottom prompt") Up enters history once
-                // the caret reaches the FIRST VISUAL ROW (so it walks within a wrapped/multi-line draft and
-                // only recalls at the very top), while Down is plain caret motion — nothing is newer than the
-                // draft, so only it is "moved by Down". Once BROWSING history Up/Down walk older/newer FREELY
-                // (no caret gate — a recalled prompt is navigated, not caret-edited; Esc cancels back to the
-                // draft), and Down off the newest entry restores the draft. Shift+Enter sends the composed/
-                // recalled prompt now (the "!" action); a plain Enter stays a newline. PreviewKeyDown
-                // (tunneling) runs BEFORE the TextBox's own handling — the only place we can read the caret's
-                // pre-move position AND suppress the default motion/newline via Handled (the rename box uses
-                // PreviewKeyDown for Enter for the same reason).
+                // Agentmaster (prompt history): recall the selected session's previously SENT prompts
+                // (the shell/REPL idiom) — see _BuildPromptHistory / _ApplyPromptHistoryText. On the live
+                // DRAFT (the "bottom prompt") Up enters history once the caret reaches the FIRST VISUAL ROW
+                // (so it walks within a wrapped/multi-line draft and only recalls at the very top), while
+                // Down is plain caret motion — nothing is newer than the draft, so only it is "moved by
+                // Down". Once BROWSING history Up/Down walk older/newer FREELY (no caret gate — a recalled
+                // prompt is navigated, not caret-edited; Esc cancels back to the draft), and Down off the
+                // newest entry restores the draft. PreviewKeyDown (tunneling) runs BEFORE the TextBox's own
+                // arrow handling — the only place we can read the caret's pre-move position AND suppress the
+                // default caret motion via Handled (the rename box uses PreviewKeyDown for Enter likewise).
                 _addPromptBox.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
                     const auto key = e.Key();
                     // Modifier snapshot (mirrors the rename box's CoreWindow::GetKeyState check).
@@ -1856,26 +1854,6 @@ namespace winrt::TerminalApp::implementation
                         shift = WI_IsFlagSet(w.GetKeyState(VirtualKey::Shift), down);
                         ctrl = WI_IsFlagSet(w.GetKeyState(VirtualKey::Control), down);
                         alt = WI_IsFlagSet(w.GetKeyState(VirtualKey::Menu), down);
-                    }
-                    // Shift+Enter = Send now (the "!" action, confirm included); a plain Enter stays a
-                    // newline (the compose box is multi-line). Defer the send so the confirm dialog isn't
-                    // shown from inside the key handler (mirrors the rename box not committing on KeyDown).
-                    if (key == VirtualKey::Enter)
-                    {
-                        if (shift && !ctrl && !alt)
-                        {
-                            e.Handled(true); // suppress the newline for the send chord
-                            if (_dispatcher)
-                            {
-                                auto weak = get_weak();
-                                _dispatcher.TryEnqueue([weak]() { auto self = weak.get(); if (self) { self->_OnSendNow(); } });
-                            }
-                            else
-                            {
-                                _OnSendNow();
-                            }
-                        }
-                        return;
                     }
                     // Esc while browsing history cancels back to the draft you started from.
                     if (key == VirtualKey::Escape)
@@ -1955,7 +1933,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 // Discoverability: surface the keyboard affordances (they have no on-screen control).
-                AgentSetTip(_addPromptBox, L"Compose a prompt for the selected session.\n\x2191 / \x2193  recall previously sent prompts\nShift+Enter  send now  \x00B7  Enter  newline");
+                AgentSetTip(_addPromptBox, L"Compose a prompt for the selected session.\n\x2191 / \x2193  recall previously sent prompts");
                 Grid::SetColumn(_addPromptBox, 1);
                 composeRow.Children().Append(_addPromptBox);
 
