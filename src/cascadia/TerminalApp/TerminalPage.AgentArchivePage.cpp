@@ -416,6 +416,32 @@ namespace winrt::TerminalApp::implementation
             return tb;
         }
 
+        // Agentmaster (permanent remove): a QUIET trash (Delete) button — the record-only remove twin
+        // beside the restore/reopen actions. Subdued background (like the detail's mini-buttons) so it
+        // never competes with the positive primary action; the destructive step always confirms first.
+        winrt::Windows::UI::Xaml::Controls::Button ArchiveTrashButton(winrt::hstring label)
+        {
+            using namespace winrt::Windows::UI::Xaml;
+            using namespace winrt::Windows::UI::Xaml::Controls;
+            Button b;
+            StackPanel sp;
+            sp.Orientation(Orientation::Horizontal);
+            sp.Spacing(6);
+            sp.VerticalAlignment(VerticalAlignment::Center);
+            FontIcon fi;
+            fi.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Segoe Fluent Icons" });
+            fi.Glyph(L"\xE74D"); // Delete (trash can)
+            fi.FontSize(14);
+            sp.Children().Append(fi);
+            if (!label.empty())
+            {
+                sp.Children().Append(ArchiveText(label, 13, false, 0.85));
+            }
+            b.Content(sp);
+            b.Background(ArchiveBrush(0x22, 0x80, 0x80, 0x80)); // quiet — distinct from the accented primary
+            return b;
+        }
+
         // Agentmaster: collapse a (now possibly multi-line) title to ONE line for the dense table
         // row — each CR/LF/TAB run becomes a single space. Titles can carry newlines (the rename
         // boxes accept Return); the full form rides the row tooltip (ArchiveSetTip) and the wrapping
@@ -776,6 +802,16 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         });
+        // Agentmaster (permanent remove): the bulk Delete twin, to the LEFT of Restore (the footer is
+        // right-aligned + horizontal, so appending it FIRST places it left — the trash-left vision).
+        // Subdued styling; confirms before removing. Record-only — the conversation files on disk are kept.
+        _archiveDeleteSelBtn = ArchiveTrashButton(L"Delete selected");
+        _archiveDeleteSelBtn.IsEnabled(false);
+        ArchiveSetTip(_archiveDeleteSelBtn, L"Permanently remove the checked sessions from Agentmaster \x2014 record-only; their conversation files on disk are kept (still in Sessions)");
+        _archiveDeleteSelBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            _PromptDeleteCheckedArchived(); // coroutine: confirm (suspends off this click) -> delete checked ∩ visible -> refresh
+        });
+        footer.Children().Append(_archiveDeleteSelBtn);
         footer.Children().Append(_archiveRestoreSelBtn);
         Grid::SetRow(footer, 2);
         host.Children().Append(footer);
@@ -1691,6 +1727,18 @@ namespace winrt::TerminalApp::implementation
             actions.Orientation(Orientation::Horizontal);
             actions.Spacing(8);
             actions.Margin(Thickness{ 0, 8, 0, 0 });
+            {
+                // Permanent remove: delete this saved-window RECORD (geometry + tab list). Record-only —
+                // the sessions' conversation files on disk are kept. A simple trash icon (tooltip explains),
+                // to the LEFT of Reopen (the vision).
+                auto del = ArchiveTrashButton(L"");
+                ArchiveSetTip(del, L"Permanently delete this saved window's layout (geometry + tab list). The sessions' conversation files on disk are kept (still in Sessions).");
+                const std::wstring wid = row->windowId;
+                del.Click([this, wid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    _PromptDeleteArchivedWindow(wid); // coroutine: confirm (suspends off this click) -> DeleteWindowRecord -> refresh
+                });
+                actions.Children().Append(del);
+            }
             actions.Children().Append(makeReopenButton(row->windowIndex, row->windowId));
             _archiveDetailHost.Children().Append(actions);
             return;
@@ -1922,6 +1970,18 @@ namespace winrt::TerminalApp::implementation
         StackPanel actions;
         actions.Orientation(Orientation::Horizontal);
         actions.Spacing(8);
+        {
+            // Permanent remove: a simple trash icon (tooltip explains) to the LEFT of Restore (the
+            // vision). Record-only — drops the Agentmaster record; the conversation .jsonl on disk is
+            // kept (it still appears in Sessions).
+            auto del = ArchiveTrashButton(L"");
+            ArchiveSetTip(del, L"Permanently remove this session from Agentmaster \x2014 it will NOT be restorable from the Archive. The conversation file on disk is kept (still in Sessions).");
+            const std::wstring did{ id };
+            del.Click([this, did](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                _PromptDeleteArchivedSession(did); // coroutine: confirm (suspends off this click) -> _DeleteClaudeSession -> refresh
+            });
+            actions.Children().Append(del);
+        }
         Button restore;
         restore.Content(winrt::box_value(winrt::hstring{ L"Restore here" }));
         const winrt::hstring hid{ id };
@@ -2021,12 +2081,12 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_UpdateArchiveBulkButton()
     {
-        if (!_archiveRestoreSelBtn)
+        if (!_archiveRestoreSelBtn && !_archiveDeleteSelBtn)
         {
             return;
         }
         // Agentmaster: count only checked rows that are currently VISIBLE (pass the filter), so the button's
-        // "(N)" agrees with what _RestoreCheckedArchived will actually restore.
+        // "(N)" agrees with what _RestoreCheckedArchived / _PromptDeleteCheckedArchived will actually act on.
         size_t n = 0;
         for (const auto& id : _archiveChecked)
         {
@@ -2035,10 +2095,17 @@ namespace winrt::TerminalApp::implementation
                 ++n;
             }
         }
-        _archiveRestoreSelBtn.Content(winrt::box_value(n > 0 ?
-                                                           winrt::hstring{ L"Restore selected (" + std::to_wstring(n) + L")" } :
-                                                           winrt::hstring{ L"Restore selected" }));
-        _archiveRestoreSelBtn.IsEnabled(n > 0);
+        if (_archiveRestoreSelBtn)
+        {
+            _archiveRestoreSelBtn.Content(winrt::box_value(n > 0 ?
+                                                               winrt::hstring{ L"Restore selected (" + std::to_wstring(n) + L")" } :
+                                                               winrt::hstring{ L"Restore selected" }));
+            _archiveRestoreSelBtn.IsEnabled(n > 0);
+        }
+        if (_archiveDeleteSelBtn)
+        {
+            _archiveDeleteSelBtn.IsEnabled(n > 0); // label stays "Delete selected" (icon+text); the count rides Restore
+        }
     }
 
     // Agentmaster: re-gather + re-render an OPEN page. The poke behind the registry-observer refresh
@@ -2176,5 +2243,129 @@ namespace winrt::TerminalApp::implementation
         }
         CATCH_LOG();
         co_return;
+    }
+
+    // Agentmaster (Archive page — permanent remove, record-only): confirm, then drop the session's
+    // record via _DeleteClaudeSession (the conversation .jsonl on disk is KEPT — it still appears in
+    // Sessions). The confirm SUSPENDS this coroutine off the originating click, so no archive-page tree
+    // mutation lands mid-pointer-routing (the page's crash class); the refresh runs on the clean
+    // continuation. (The registry observer would also poke a refresh — Remove notifies — but the direct
+    // call is snappier.) No presenter (UI down) => proceed; the trash click is itself the intent.
+    winrt::fire_and_forget TerminalPage::_PromptDeleteArchivedSession(std::wstring sessionId)
+    {
+        if (sessionId.empty() || !_sessionRegistry)
+        {
+            co_return;
+        }
+        std::wstring titleStr;
+        if (const auto s = _sessionRegistry->Get(sessionId))
+        {
+            titleStr = s->title;
+        }
+        if (const auto presenter{ _dialogPresenter.get() })
+        {
+            winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Title(winrt::box_value(winrt::hstring{ L"Delete permanently?" }));
+            dialog.Content(winrt::box_value(winrt::hstring{ (titleStr.empty() ? std::wstring{ L"This session" } : (L"\x201C" + titleStr + L"\x201D")) + L" will be removed from Agentmaster. The conversation file on disk is KEPT \x2014 it still appears in Sessions and can be reopened from there." }));
+            dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
+            dialog.CloseButtonText(L"Cancel");
+            dialog.DefaultButton(winrt::Windows::UI::Xaml::Controls::ContentDialogButton::Close);
+            const auto weak = get_weak();
+            const auto result = co_await presenter.ShowDialog(dialog);
+            const auto strong = weak.get();
+            if (!strong)
+            {
+                co_return;
+            }
+            if (result != winrt::Windows::UI::Xaml::Controls::ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+        }
+        _DeleteClaudeSession(winrt::hstring{ sessionId });
+        _RefreshArchivePageIfVisible();
+    }
+
+    // Agentmaster (Archive page — permanent remove): delete a SAVED-WINDOW record (geometry + tab list).
+    // Record-only: the referenced sessions' conversation files on disk are kept. Confirm, then
+    // DeleteWindowRecord + refresh. (RecoverableWindows() reads disk each call, so the row drops out.)
+    winrt::fire_and_forget TerminalPage::_PromptDeleteArchivedWindow(std::wstring windowId)
+    {
+        if (windowId.empty())
+        {
+            co_return;
+        }
+        if (const auto presenter{ _dialogPresenter.get() })
+        {
+            winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Title(winrt::box_value(winrt::hstring{ L"Delete saved window?" }));
+            dialog.Content(winrt::box_value(winrt::hstring{ L"This removes the saved window's layout (geometry + tab list) from Agentmaster. The sessions' conversation files on disk are kept and still appear in Sessions." }));
+            dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
+            dialog.CloseButtonText(L"Cancel");
+            dialog.DefaultButton(winrt::Windows::UI::Xaml::Controls::ContentDialogButton::Close);
+            const auto weak = get_weak();
+            const auto result = co_await presenter.ShowDialog(dialog);
+            const auto strong = weak.get();
+            if (!strong)
+            {
+                co_return;
+            }
+            if (result != winrt::Windows::UI::Xaml::Controls::ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+        }
+        try
+        {
+            ::Agentmaster::DeleteWindowRecord(windowId);
+        }
+        CATCH_LOG();
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[delete] saved window " + windowId + L"\n");
+        _RefreshArchivePageIfVisible();
+    }
+
+    // Agentmaster (Archive page — permanent remove): bulk delete every CHECKED ∩ VISIBLE session, in
+    // table order (mirrors _RestoreCheckedArchived's checked-∩-visible discipline). One confirm for the
+    // batch; record-only — the conversation files on disk are kept.
+    winrt::fire_and_forget TerminalPage::_PromptDeleteCheckedArchived()
+    {
+        std::vector<std::wstring> ids;
+        for (const auto& id : _archiveVisibleOrder)
+        {
+            if (_archiveChecked.find(id) != _archiveChecked.end())
+            {
+                ids.push_back(id);
+            }
+        }
+        if (ids.empty())
+        {
+            co_return;
+        }
+        if (const auto presenter{ _dialogPresenter.get() })
+        {
+            winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Title(winrt::box_value(winrt::hstring{ L"Delete " + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" session permanently?" : L" sessions permanently?") }));
+            dialog.Content(winrt::box_value(winrt::hstring{ L"They will be removed from Agentmaster. Their conversation files on disk are KEPT \x2014 they still appear in Sessions and can be reopened from there." }));
+            dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
+            dialog.CloseButtonText(L"Cancel");
+            dialog.DefaultButton(winrt::Windows::UI::Xaml::Controls::ContentDialogButton::Close);
+            const auto weak = get_weak();
+            const auto result = co_await presenter.ShowDialog(dialog);
+            const auto strong = weak.get();
+            if (!strong)
+            {
+                co_return;
+            }
+            if (result != winrt::Windows::UI::Xaml::Controls::ContentDialogResult::Primary)
+            {
+                co_return;
+            }
+        }
+        for (const auto& id : ids)
+        {
+            _DeleteClaudeSession(winrt::hstring{ id });
+            _archiveChecked.erase(id);
+        }
+        _RefreshArchivePageIfVisible();
     }
 }

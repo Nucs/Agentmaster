@@ -51,6 +51,7 @@ namespace winrt::TerminalApp::implementation
         // selected session.
         void SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler);
         void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
+        void SetDeleteHandler(std::function<void(winrt::hstring)> handler); // Agentmaster: (sessionId) -> permanently remove from Agentmaster (record-only; the transcript on disk is kept)
         void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
         // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
@@ -324,6 +325,7 @@ namespace winrt::TerminalApp::implementation
         void _CommitRename(); // apply the in-place editor's text to the session title
         void _CancelRename(); // discard the in-place editor (Esc)
         void _RequestArchive(const std::wstring& id); // route to the page's archive seam (which presents the consequence + closes the tab)
+        void _RequestDelete(const std::wstring& id); // Agentmaster: confirm, then route to the page's permanent-remove seam (record-only; transcript on disk kept)
 
         // Settings cog: an in-content modal overlay (NOT a ContentDialog — a text box inside a
         // ContentDialog receives no keypresses in XAML Islands; see the _renameBox note). Built
@@ -391,6 +393,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _activateHandler;
         std::function<void(winrt::hstring, bool)> _hoverSessionHandler; // Agentmaster (Linked Lenses): push a managed card/row pointer enter/leave (id, entering) so the page pills its tab
         std::function<void(winrt::hstring)> _archiveHandler;
+        std::function<void(winrt::hstring)> _deleteHandler; // Agentmaster: permanent remove (record-only)
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)

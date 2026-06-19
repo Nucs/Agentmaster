@@ -393,6 +393,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _archiveSearchBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _archiveCountText{ nullptr };    // header "N sessions · M windows"
         winrt::Windows::UI::Xaml::Controls::Button _archiveRestoreSelBtn{ nullptr };   // footer bulk action
+        winrt::Windows::UI::Xaml::Controls::Button _archiveDeleteSelBtn{ nullptr };    // Agentmaster: footer bulk PERMANENT delete (record-only; transcript on disk kept)
         std::vector<_ArchiveRow> _archiveRows;
         std::wstring _archiveSelectedId;                  // the row whose detail is shown
         std::unordered_set<std::wstring> _archiveChecked;    // multi-select set (by session id)
@@ -651,6 +652,16 @@ namespace winrt::TerminalApp::implementation
         void _OnClaudeTabColorChanged(const TerminalApp::Tab& tab); // Agentmaster: user changed a tab color -> persist per dir + propagate to same-dir tabs
         winrt::Windows::Foundation::IAsyncAction _ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm); // Agentmaster: confirm -> archive bookkeeping -> close
         void _ArchiveWindowSessionsOnTeardown(); // Agentmaster (lifecycle gap #1): on window close/quit, archive this window's live sessions (live=false + unbind injector -> claude.exe exits) so they don't linger as phantom cards / orphaned processes
+        // Agentmaster (permanent remove — record-only, transcript on disk KEPT): the trash-icon seam
+        // beside Archive everywhere it appears (close dialog, Manager menus, Archive page). Archive keeps
+        // the session restorable; this DROPS the Agentmaster record. _RemoveSessionRecord does the shared
+        // bookkeeping (registry Remove + persist + clear this window's maps + strip the id from SAVED
+        // (non-live) window records); _DeleteClaudeSession is the UI seam (closes a live tab here; refuses
+        // a session still running in ANOTHER window — Rule #7; removes an archived one);
+        // _StripSessionFromSavedWindows prunes dangling tab refs so a reopen can't resurrect it.
+        void _DeleteClaudeSession(winrt::hstring sessionId);
+        void _RemoveSessionRecord(const std::wstring& sessionId);
+        void _StripSessionFromSavedWindows(const std::wstring& sessionId);
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)
@@ -694,6 +705,12 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _LoadArchiveAssistantTail(std::wstring sessionId, std::wstring dir, int64_t mtime); // tail-read the transcript's LAST assistant message off-thread -> cache (id, mtime) + re-show the detail
         winrt::fire_and_forget _OpenArchiveTranscript(std::wstring path); // detail "Open transcript": ShellExecute the .jsonl (system open/picker; Explorer /select fallback) — read-only, off the UI thread
         void _ReopenSavedWindowById(int fallbackIndex, const std::wstring& windowId); // re-resolve the live record index from the STABLE windowId at action time (a gather-time index goes stale), then _ReopenSavedWindow — shared by the detail "Reopen its window" + the row double-click
+        // Agentmaster (Archive page — permanent remove, record-only): confirm, then drop the record(s)
+        // via _DeleteClaudeSession / DeleteWindowRecord; the conversation file on disk is KEPT. Routed
+        // from the detail pane's trash (session + saved-window) and the footer's "Delete selected".
+        winrt::fire_and_forget _PromptDeleteArchivedSession(std::wstring sessionId);
+        winrt::fire_and_forget _PromptDeleteArchivedWindow(std::wstring windowId);
+        winrt::fire_and_forget _PromptDeleteCheckedArchived();
 
         // Agentmaster (Sessions page; SESSIONS.md): the global Claude-sessions browser — every
         // on-disk session in a selectable window (default 1 month), two-phase searched (fast

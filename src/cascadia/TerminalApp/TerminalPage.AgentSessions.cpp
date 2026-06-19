@@ -396,6 +396,105 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (permanent remove — record-only): the shared bookkeeping behind the trash twin of
+    // Archive. Archive keeps the record (live=false, restorable); this DROPS it — Remove from the
+    // registry (fires _notify -> board / tree / Archive-page refresh) + persist, clear this window's
+    // per-session maps, and strip the id from SAVED (non-live) window records so a reopen can't
+    // resurrect it. The conversation .jsonl on disk is deliberately KEPT (it still appears in the
+    // Sessions browser and can be reopened from there).
+    void TerminalPage::_RemoveSessionRecord(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        if (_sessionRegistry)
+        {
+            _sessionRegistry->Remove(sessionId); // erases the record + its injector (releases the connection) + notifies
+            ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        }
+        _claudeTabs.erase(sessionId);
+        _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
+        _StripSessionFromSavedWindows(sessionId);
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[delete] " + sessionId + L"\n");
+    }
+
+    // Agentmaster: strip a removed session's tab refs from SAVED (non-live) window records, so reopening
+    // such a window can't resurrect the deleted session. Only RecoverableWindows() (records minus the
+    // live set) is touched: a LIVE window re-captures its OWN record on the next autosave (the removed
+    // session's tab is closed, so it's naturally excluded) — rewriting its on-disk record here would
+    // clobber its freshest geometry/lens. (A dangling ref left behind is already harmless —
+    // _RestoreWindowTabs skips a ref whose registry record is gone — this just keeps the Archive page's
+    // saved-window composition honest and the reopen tidy.) Best-effort; never throws into the caller.
+    void TerminalPage::_StripSessionFromSavedWindows(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        try
+        {
+            for (const auto& rw : ::Agentmaster::RecoverableWindows())
+            {
+                ::Agentmaster::WindowRecord rec = rw.record;
+                bool changed = false;
+                const auto before = rec.tabs.size();
+                rec.tabs.erase(std::remove_if(rec.tabs.begin(), rec.tabs.end(),
+                                              [&sessionId](const ::Agentmaster::TabEntry& t) { return t.sessionId == sessionId; }),
+                               rec.tabs.end());
+                if (rec.tabs.size() != before)
+                {
+                    changed = true;
+                }
+                if (rec.selectedSessionId == sessionId)
+                {
+                    rec.selectedSessionId.clear();
+                    changed = true;
+                }
+                if (changed)
+                {
+                    ::Agentmaster::SaveWindowRecord(rec);
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // Agentmaster (permanent remove — record-only): the UI seam routed from the Manager's "Delete
+    // permanently" menus (which confirm first) and the Archive page's trash. If a live tab hosts the
+    // session in THIS window, tear it down (the record drop releases the injector/connection, then
+    // close the tab); a session still RUNNING but hosted in ANOTHER window is refused (the Fleet
+    // Observer would re-create it next survey — Rule #7); an archived/exited session is simply removed.
+    void TerminalPage::_DeleteClaudeSession(winrt::hstring sessionId)
+    {
+        const std::wstring id{ sessionId };
+        if (id.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        TerminalApp::Tab liveTab{ nullptr };
+        if (const auto it = _claudeTabs.find(id); it != _claudeTabs.end())
+        {
+            liveTab = it->second.get();
+        }
+        if (!liveTab)
+        {
+            if (const auto info = _sessionRegistry->Get(id); info && info->pid != 0 && ::Agentmaster::ProcessAlive(info->pid))
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[delete] " + id + L" not removed here \x2014 claude pid=" + std::to_wstring(info->pid) + L" still alive, not hosted in this window\n");
+                return;
+            }
+        }
+        _RemoveSessionRecord(id);
+        if (liveTab)
+        {
+            liveTab.Close(); // -> Closed -> _RemoveTab (tab.Shutdown disconnects -> claude.exe exits)
+        }
+    }
+
     // Agentmaster: the shared archive seam — confirm the consequence (unless suppressed), do the
     // archive bookkeeping, then close the tab. KEEPING the registry record (live=false) is what
     // makes archive reversible: the session persists and lists under the Manager's "Archived"
@@ -420,13 +519,16 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
                 ContentDialog dialog;
-                dialog.Title(winrt::box_value(L"Archive session?"));
+                dialog.Title(winrt::box_value(L"Close session?"));
+                // Archive (the safe action) keeps it restorable; Delete (the trash, leftmost) removes it
+                // from Agentmaster but KEEPS the conversation file on disk (it still appears in Sessions).
                 dialog.Content(winrt::box_value(title.empty() ?
-                                                    winrt::hstring{ L"This shuts the session down and moves it to Archived. You can restore it (with its Flight Plan) anytime from the Manager’s “Archived” button." } :
-                                                    winrt::hstring{ L"“" + title + L"” will be shut down and moved to Archived. You can restore it (with its Flight Plan) anytime from the Manager’s “Archived” button." }));
-                dialog.PrimaryButtonText(L"Archive");
+                                                    winrt::hstring{ L"Archive shuts the session down and keeps it restorable from the Manager’s “Archived” button (with its Flight Plan). Delete removes it from Agentmaster — the conversation file on disk is kept and still appears in Sessions." } :
+                                                    winrt::hstring{ L"“" + title + L"” — Archive shuts it down and keeps it restorable from the Manager’s “Archived” button (with its Flight Plan). Delete removes it from Agentmaster — the conversation file on disk is kept and still appears in Sessions." }));
+                dialog.PrimaryButtonText(L"\U0001F5D1 Delete"); // trash, leftmost (the vision); NOT the default button
+                dialog.SecondaryButtonText(L"Archive");
                 dialog.CloseButtonText(L"Cancel");
-                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel (neither destructive button is the default)
 
                 const auto weak = get_weak();
                 const auto result = co_await presenter.ShowDialog(dialog);
@@ -435,10 +537,19 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return;
                 }
-                if (result != ContentDialogResult::Primary)
+                if (result == ContentDialogResult::Primary)
                 {
-                    co_return; // cancelled -> leave the session Open
+                    // Permanent remove (record-only): drop the record + persist + strip saved-window refs,
+                    // then close the tab. The conversation .jsonl on disk is KEPT.
+                    _RemoveSessionRecord(sessionId);
+                    tab.Close();
+                    co_return;
                 }
+                if (result != ContentDialogResult::Secondary)
+                {
+                    co_return; // Cancel -> leave the session Open
+                }
+                // Secondary == Archive -> fall through to the archive bookkeeping below.
             }
             // No presenter to confirm with -> archive anyway (it's reversible; don't strand the close).
         }

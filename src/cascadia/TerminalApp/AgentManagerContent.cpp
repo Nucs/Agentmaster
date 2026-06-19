@@ -311,7 +311,10 @@ namespace
         }
     }
 
-    winrt::hstring StateGlyph(SessionState s)
+    // No longer used for the Explorer tree (the tree now uses StateDot, the tab-strip Ellipse), but kept
+    // for parity with the overlay's own StateGlyph + potential reuse. [[maybe_unused]] avoids C4505 under
+    // /W4 /WX now that nothing references it.
+    [[maybe_unused]] winrt::hstring StateGlyph(SessionState s)
     {
         switch (s)
         {
@@ -329,6 +332,24 @@ namespace
         default:
             return L"\x25CB"; // ○
         }
+    }
+
+    // Agentmaster: the Explorer-tree state dot — IDENTICAL to the tab-strip status dot
+    // (TabHeaderControl.xaml HeaderAgentStatusDot): a 10x10 filled Ellipse with a state-colored Fill and
+    // a thin black Stroke so it stays legible on any row / selection background, vertically centered. A
+    // real filled shape renders bolder + more uniform than the per-state geometric glyphs (○/●/◐/⚠/✕/✓)
+    // the tree used before, and matches the tab so the two views speak ONE visual language. The StateLabel
+    // text beside it still names the state, so dropping the varied glyphs loses no information.
+    winrt::Windows::UI::Xaml::Shapes::Ellipse StateDot(Color fill)
+    {
+        winrt::Windows::UI::Xaml::Shapes::Ellipse e{};
+        e.Width(10);
+        e.Height(10);
+        e.Fill(SolidColorBrush{ fill });
+        e.Stroke(SolidColorBrush{ Colors::Black() });
+        e.StrokeThickness(1);
+        e.VerticalAlignment(VerticalAlignment::Center);
+        return e;
     }
 
     winrt::hstring PromptGlyph(PromptStatus s)
@@ -961,6 +982,10 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetArchiveHandler(std::function<void(winrt::hstring)> handler)
     {
         _archiveHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetDeleteHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _deleteHandler = std::move(handler);
     }
     void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
     {
@@ -3197,9 +3222,10 @@ namespace winrt::TerminalApp::implementation
                 auto row = StackPanel{};
                 row.Orientation(Orientation::Horizontal);
                 row.Spacing(6);
-                auto g = Text(StateGlyph(s.state), 12, false, 1.0);
-                g.Foreground(SolidColorBrush{ StateColor(s.state) });
-                row.Children().Append(g);
+                // State dot — the SAME filled Ellipse as the tab strip (StateDot == HeaderAgentStatusDot),
+                // not the old per-state glyph, so the tree and the tab speak one visual language. The
+                // StateLabel text appended below still names the state.
+                row.Children().Append(StateDot(StateColor(s.state)));
                 row.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 13, false, 1.0));
                 // Agentmaster (Codex-launch): a teal "codex" agent pill on a MANAGED Codex row, mirroring
                 // the Board card — distinguishes it from a Claude row at a glance (Claude = no pill).
@@ -3476,18 +3502,13 @@ namespace winrt::TerminalApp::implementation
                 auto row = StackPanel{};
                 row.Orientation(Orientation::Horizontal);
                 row.Spacing(6);
-                // ● state dot. A Claude external carries no PULL state -> gray (observe-only). For a
-                // Codex row (Phase C2) the rollout-derived turn state colors it: blue running / gold
-                // waiting / gray idle.
-                auto g = Text(L"\x25CF", 12, false, 1.0);
+                // State dot — the SAME filled Ellipse as the tab strip (StateDot == HeaderAgentStatusDot).
+                // A Claude external carries no PULL state -> gray (observe-only). For a Codex row (Phase
+                // C2) the rollout-derived turn state colors it: blue running / gold waiting / gray idle.
+                auto g = StateDot(ex.kind == AgentKind::Codex ? CodexStateColor(ex.codexState) : Color{ 0xFF, 0x9E, 0x9E, 0x9E });
                 if (ex.kind == AgentKind::Codex)
                 {
-                    g.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
                     AgentSetTip(g, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
-                }
-                else
-                {
-                    g.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E));
                 }
                 row.Children().Append(g);
                 // Agentmaster (Phase C1): a teal "codex" agent pill on Codex rows (Claude = default, no pill).
@@ -4030,6 +4051,30 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(archive);
 
+        // Delete permanently — the trash twin beside Archive. Archive keeps the session restorable; this
+        // DROPS the Agentmaster record (record-only — the conversation file on disk is kept, still in
+        // Sessions). _RequestDelete confirms first (this path has no archive-style consequence dialog).
+        MenuFlyoutItem del;
+        del.Text(L"Delete permanently\x2026");
+        {
+            FontIcon trash;
+            trash.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            trash.Glyph(L"\xE74D"); // Delete (trash can)
+            del.Icon(trash);
+        }
+        AgentSetTip(del, L"Permanently remove this session from Agentmaster \x2014 it will NOT be restorable from the Archive. The conversation file on disk is kept (it still appears in Sessions).");
+        del.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestDelete(id); } });
+            }
+            else if (auto self = weak.get())
+            {
+                self->_RequestDelete(id);
+            }
+        });
+        menu.Items().Append(del);
+
         // Open New Session Here — the LAST option in every scope (LOCAL/GLOBAL here, EXTERNAL in
         // _MakeExternalTreeMenu): spawn a managed Claude session in THIS row's working dir, a new
         // independent conversation. Uses the row's cwd captured at build time (a session's workingDir
@@ -4170,6 +4215,31 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(archive);
 
+        // Delete permanently — the trash twin beside Archive (record-only; transcript on disk kept).
+        MenuFlyoutItem del;
+        del.Text(L"Delete session permanently\x2026");
+        {
+            FontIcon trash;
+            trash.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            trash.Glyph(L"\xE74D"); // Delete (trash can)
+            del.Icon(trash);
+        }
+        AgentSetTip(del, L"Permanently remove this session from Agentmaster \x2014 it will NOT be restorable from the Archive. The conversation file on disk is kept (it still appears in Sessions).");
+        del.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak]() { if (auto self = weak.get()) { if (!self->_selectedId.empty()) { self->_RequestDelete(self->_selectedId); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (!self->_selectedId.empty())
+                {
+                    self->_RequestDelete(self->_selectedId);
+                }
+            }
+        });
+        menu.Items().Append(del);
+
         return menu;
     }
 
@@ -4287,6 +4357,41 @@ namespace winrt::TerminalApp::implementation
         {
             _archiveHandler(winrt::hstring{ id });
         }
+    }
+
+    // Agentmaster: permanently REMOVE a session from Agentmaster (record-only). Unlike Archive (which
+    // keeps the session restorable), this drops its registry record + persisted entry + saved-window
+    // refs — but the conversation .jsonl on disk is KEPT (it still appears in the Sessions browser and
+    // can be reopened from there). Confirm here (this path has no archive-style consequence dialog of
+    // its own), then route to the page's _DeleteClaudeSession seam.
+    void AgentManagerContent::_RequestDelete(const std::wstring& id)
+    {
+        if (id.empty())
+        {
+            return;
+        }
+        const std::wstring idCopy = id;
+        std::wstring titleStr;
+        if (_registry)
+        {
+            if (const auto s = _registry->Get(idCopy))
+            {
+                titleStr = s->title;
+            }
+        }
+        const std::wstring body = (titleStr.empty() ? std::wstring{ L"This session" } : (L"\x201C" + titleStr + L"\x201D")) +
+                                  L" will be removed from Agentmaster \x2014 its place in the fleet, its queue, and its saved-window slot. "
+                                  L"The conversation file on disk is KEPT: it still appears in Sessions and can be reopened from there.";
+        auto weak = get_weak();
+        _Confirm(L"Delete permanently?", winrt::hstring{ body }, L"Delete", [weak, idCopy]() {
+            if (auto self = weak.get())
+            {
+                if (self->_deleteHandler)
+                {
+                    self->_deleteHandler(winrt::hstring{ idCopy });
+                }
+            }
+        });
     }
 
     // A buttons-only confirm (XAML-Islands-safe: a text box inside a ContentDialog gets no

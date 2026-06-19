@@ -420,6 +420,14 @@ namespace winrt::TerminalApp::implementation
                 self->_ArchiveClaudeSession(id);
             }
         });
+        // Agentmaster: permanent remove (record-only) — the trash twin of Archive. Drops the registry
+        // record + persisted entry + saved-window refs; the conversation .jsonl on disk is KEPT.
+        content->SetDeleteHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_DeleteClaudeSession(id);
+            }
+        });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())
             {
