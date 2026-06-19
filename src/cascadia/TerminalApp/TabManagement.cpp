@@ -1069,6 +1069,27 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster: close every tab to the LEFT of the given tab — the left-hand twin of the
+    // upstream "Close tabs to the right" (CloseTabsAfter), which shipped without a mirror.
+    // Driven by the tab context-menu "Close > Close tabs to the left" item (the
+    // CloseTabsBeforeRequested event). Snapshots [0, index) and hands it to _RemoveTabs, which
+    // owns the aggregate close confirmation, the per-session archive bookkeeping, AND the
+    // Manager-tab skip — the pinned Manager tab sits at index 0 (to the left of everything) and
+    // must never be closed, so it is filtered out there.
+    void TerminalPage::_CloseTabsBefore(const winrt::TerminalApp::Tab& tab)
+    {
+        uint32_t index{};
+        if (!_tabs.IndexOf(tab, index) || index == 0)
+        {
+            return;
+        }
+
+        // Since _RemoveTabs is asynchronous, create a snapshot of the tabs we want to remove.
+        std::vector<winrt::TerminalApp::Tab> tabsToRemove;
+        std::copy(begin(_tabs), begin(_tabs) + index, std::back_inserter(tabsToRemove));
+        _RemoveTabs(tabsToRemove);
+    }
+
     // Method Description:
     // - Closes provided tabs one by one
     // - Shows a single aggregate confirmation dialog upfront if the confirmOnClose setting warrants it.
@@ -1076,7 +1097,23 @@ namespace winrt::TerminalApp::implementation
     // - tabs - tabs to remove
     safe_void_coroutine TerminalPage::_RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs)
     {
-        if (tabs.empty())
+        // Agentmaster: never bulk-close the pinned, non-closable Manager tab. Upstream's
+        // "Close other tabs" copies every tab but the focused one (which includes the Manager
+        // tab at index 0), and our "Close tabs to the left" targets [0, index) (likewise). This
+        // is the single chokepoint for every bulk close, so filtering the Manager tab out here
+        // keeps it alive no matter which direction the user closed from. (_managerTab is null when
+        // there is no Manager tab, in which case nothing is filtered — plain upstream behavior.)
+        std::vector<winrt::TerminalApp::Tab> closable;
+        closable.reserve(tabs.size());
+        for (const auto& tab : tabs)
+        {
+            if (tab != _managerTab)
+            {
+                closable.push_back(tab);
+            }
+        }
+
+        if (closable.empty())
         {
             co_return;
         }
@@ -1096,7 +1133,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        for (auto& tab : tabs)
+        for (auto& tab : closable)
         {
             winrt::Windows::Foundation::IAsyncAction action{ nullptr };
             if (const auto strong = weak.get())

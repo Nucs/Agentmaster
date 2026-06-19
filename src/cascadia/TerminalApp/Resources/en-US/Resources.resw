@@ -174,6 +174,9 @@
   <data name="TabMoveSubMenu" xml:space="preserve">
     <value>Move tab</value>
   </data>
+  <data name="TabCloseBefore" xml:space="preserve">
+    <value>Close tabs to the left</value>
+  </data>
   <data name="TabCloseAfter" xml:space="preserve">
     <value>Close tabs to the right</value>
   </data>
@@ -856,6 +859,9 @@ Esc cancels; clicking away always commits.</value>
   </data>
   <data name="SplitTabToolTip" xml:space="preserve">
     <value>Open a new pane using the active profile in the current directory</value>
+  </data>
+  <data name="TabCloseBeforeToolTip" xml:space="preserve">
+    <value>Close all tabs to the left of this tab</value>
   </data>
   <data name="TabCloseAfterToolTip" xml:space="preserve">
     <value>Close all tabs to the right of this tab</value>

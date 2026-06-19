@@ -759,6 +759,7 @@ namespace winrt::TerminalApp::implementation
         int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)
         void _ResumeSessionFromDisk(const std::wstring& sessionId, const std::wstring& dir, const std::wstring& title); // resume ANY on-disk session into a managed tab: live here -> Jump; archived -> Restore; unknown -> minimal record + the transcript-gated resume seam
         void _ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title); // fork ANY on-disk session into a NEW managed conversation (`--resume <parent> --fork-session --session-id <new>`) — the parent transcript is untouched, so it is safe even while the parent is LIVE; transcript-gated (no transcript -> fresh), the duplicate-tab fork's convention ("<title> (fork)")
+        winrt::fire_and_forget _PromptResumeOrForkSession(std::wstring sessionId, std::wstring dir, std::wstring title, std::wstring forkTitle); // Sessions-page double-click on a NOT-live row: a Resume / Fork / Cancel ContentDialog (the adopt dialog's idiom) instead of resuming silently. Primary=Resume (claude --resume), Secondary=Fork (--fork-session, parent untouched), Close=Cancel; forkTitle is empty for a never-prompted row so the fork seam derives a smart name
         std::wstring _ResolveRestoreChainTail(const std::wstring& clickedId, const std::wstring& dirHint, const std::wstring& titleHint); // Agentmaster: follow a /clear+plan-restart continuation chain to its TAIL (TranscriptStore) so resume/restore land where the user LEFT OFF, not the earliest link they recognize by title; upserts a minimal archived-shaped record for an unmanaged tail. Returns clickedId when there is no newer continuation (or for a Codex record).
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends
@@ -813,6 +814,7 @@ namespace winrt::TerminalApp::implementation
 
         winrt::Windows::Foundation::IAsyncAction _HandleCloseTabRequested(winrt::TerminalApp::Tab tab, bool skipConfirmClose = false);
         void _CloseTabAtIndex(uint32_t index);
+        void _CloseTabsBefore(const winrt::TerminalApp::Tab& tab); // Agentmaster: context-menu "Close tabs to the left"
         void _RemoveTab(const winrt::TerminalApp::Tab& tab);
         safe_void_coroutine _RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs);
 

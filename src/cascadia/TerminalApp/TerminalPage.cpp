@@ -2301,6 +2301,19 @@ namespace winrt::TerminalApp::implementation
                 page->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{});
             }
         });
+
+        // Agentmaster: context-menu "Close > Close tabs to the left" -> close every tab to the left
+        // of this one. The mirror of the upstream "Close tabs to the right" (CloseTabsAfter) action,
+        // routed through _CloseTabsBefore -> _RemoveTabs so it shares the aggregate confirmation, the
+        // per-session archive bookkeeping, and the pinned-Manager-tab skip.
+        hostingTab.CloseTabsBeforeRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (page && tab)
+            {
+                page->_CloseTabsBefore(*tab);
+            }
+        });
     }
 
     // Method Description:

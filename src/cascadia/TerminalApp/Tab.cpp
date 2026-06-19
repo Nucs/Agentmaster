@@ -1609,6 +1609,23 @@ namespace winrt::TerminalApp::implementation
     {
         auto weakThis{ get_weak() };
 
+        // Close tabs before (Agentmaster: the left-hand twin of "Close tabs to the right").
+        // Upstream only ships "close tabs after"; this adds the mirror. It raises an Agentmaster
+        // event (like "New Session Here" / "Move to start") rather than dispatching a ShortcutAction,
+        // because there is no CloseTabsBefore action to bind — the page closes [0, index) directly,
+        // skipping the pinned Manager tab. Inserted FIRST so the submenu reads left-to-right.
+        _closeTabsBeforeMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->CloseTabsBeforeRequested.raise();
+            }
+        });
+        _closeTabsBeforeMenuItem.Text(RS_(L"TabCloseBefore"));
+        const auto closeTabsBeforeToolTip = RS_(L"TabCloseBeforeToolTip");
+
+        WUX::Controls::ToolTipService::SetToolTip(_closeTabsBeforeMenuItem, box_value(closeTabsBeforeToolTip));
+        Automation::AutomationProperties::SetHelpText(_closeTabsBeforeMenuItem, closeTabsBeforeToolTip);
+
         // Close tabs after
         _closeTabsAfterMenuItem.Click([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
@@ -1663,6 +1680,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
         // out the whole "Close" sub-menu. See DisableCloseAndMoveMenuItems().
         _closeSubMenu.Text(RS_(L"TabCloseSubMenu"));
+        _closeSubMenu.Items().Append(_closeTabsBeforeMenuItem); // Agentmaster: left, then right, then "other"
         _closeSubMenu.Items().Append(_closeTabsAfterMenuItem);
         _closeSubMenu.Items().Append(_closeOtherTabsMenuItem);
         flyout.Items().Append(_closeSubMenu);
@@ -1892,6 +1910,12 @@ namespace winrt::TerminalApp::implementation
 
         // enabled if there are other tabs
         _closeOtherTabsMenuItem.IsEnabled(numOfTabs > 1);
+
+        // Agentmaster: enabled if there are tabs on the left (mirror of "close tabs after").
+        // The pinned Manager tab always holds index 0, so from index 1 the only tab to the left
+        // is the Manager, which the page's close path skips — a harmless no-op, same as the
+        // "Move to start" item behaves from the first movable slot.
+        _closeTabsBeforeMenuItem.IsEnabled(tabIndex > 0);
 
         // enabled if there are other tabs on the right
         _closeTabsAfterMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
