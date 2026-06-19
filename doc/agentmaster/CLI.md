@@ -112,8 +112,8 @@ agentmaster show <ref> [--tail N] [--json]   # full introspection of one session
             tabs [--window W]                 # every tab across windows (claude + shells), kind, link
             windows                           # geometry, ordered tabs, Manager lens
             external                          # unmanaged-claude census (real-WT / bare console)
-            restore <ref> [--window W]        # archived → live   (control; app required)
-            archive <ref>                     # live → archived   (control; app required)
+            restore <ref> [--window W]        # archived → live   (control; P2 — deferred, §9)
+            archive <ref>                     # live → archived   (control; P2 — deferred, §9)
 
 global: --json  --profile <dir>  --instance dev|release  --self  --help  --version
 ```
@@ -121,8 +121,9 @@ global: --json  --profile <dir>  --instance dev|release  --self  --help  --versi
 (All reads are already offline-style — persisted + OS-observable state only — so there is no
 distinct online mode; `--offline` is reserved as a shim dispatch token, not yet a parsed flag.)
 
-- **`<ref>`** resolves a conversation UUID / unique id-prefix / title substring / `w<N>:t<M>` tab-ref /
-  `--pid <n>`; ambiguity prints the candidates and exits non-zero.
+- **`<ref>`** resolves a conversation UUID / unique id-prefix / title substring (`ResolveSessionRef`;
+  a live claude managed by the *other* instance also matches by id/prefix — see below); ambiguity prints
+  the candidates and exits non-zero. (`w<N>:t<M>` tab-refs and `--pid <n>` are designed but not yet parsed.)
 - **`--self`** introspects the tab the agent is *calling from* (reads its own `WT_SESSION` and
   correlates) — "what's my queue, am I being autopiloted, what window am I in".
 - **`--profile` / `--instance`** retarget another install's state (release vs dev, or an explicit
