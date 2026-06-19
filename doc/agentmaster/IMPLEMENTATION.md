@@ -41,9 +41,9 @@ content implements `IPaneContent`. Prior art: `ScratchpadContent`, `SettingsPane
 | --- | --- |
 | Content interface | `src/cascadia/TerminalApp/IPaneContent.idl` |
 | Simplest example to mirror | `src/cascadia/TerminalApp/ScratchpadContent.{h,cpp}` |
-| Content dispatch by type string | `TerminalPage::_MakePane` — `TerminalPage.cpp:3815` (add `"agentManager"`) |
-| Create tab at a position | `TerminalPage::_CreateNewTabFromPane(pane, insertPosition)` — `TabManagement.cpp:215` |
-| Track a special tab (pattern) | `_settingsTab = _CreateNewTabFromPane(...)` — `TerminalPage.cpp:4559` |
+| Content dispatch by type string | `TerminalPage::_MakePane` — `TerminalPage.cpp:4073` (add `"agentManager"`) |
+| Create tab at a position | `TerminalPage::_CreateNewTabFromPane(pane, insertPosition)` — `TabManagement.cpp:241` |
+| Track a special tab (pattern) | `_settingsTab = _CreateNewTabFromPane(...)` — `TerminalPage.cpp:4822` |
 | Project that compiles content classes | `src/cascadia/TerminalApp/TerminalAppLib.vcxproj` |
 | Per-session terminal I/O | `src/cascadia/TerminalConnection/ConptyConnection.{h,cpp,idl}` |
 
