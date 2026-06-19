@@ -323,6 +323,20 @@ namespace winrt::TerminalApp::implementation
         // _claudeOverlays entry once the session resolves; pruned when the tab leaves this window's roster.
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _pendingOverlays;
 
+        // Agentmaster (tab status-dot RED FLASH): when a hosted session leaves the Running state while
+        // its tab is NOT the active/visited one, that tab's status-dot OUTLINE flashes red until you
+        // switch to it (the current tab is always considered visited, so it never flashes).
+        // _agentFlashLastState remembers each hosted session's last state so the registry-observer
+        // reaction can detect the Running -> (any other state) edge; _flashingSessions is the set of
+        // sessions whose tab is currently flashing. ONE shared per-window DispatcherTimer toggles
+        // _agentFlashPhase every 600ms and repaints EVERY flashing tab's stroke together, so multiple
+        // flashing tabs blink in lockstep (the synchronization requirement) — and a tab that starts
+        // flashing mid-cycle joins at the current phase. UI thread only.
+        std::unordered_map<std::wstring, ::Agentmaster::SessionState> _agentFlashLastState;
+        std::unordered_set<std::wstring> _flashingSessions;
+        winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
+        bool _agentFlashPhase{ false };
+
         // Agentmaster (M10; PERSISTENCE.md §13): per-window workspace persistence. _windowId is
         // this window's stable GUID; _windowRecord is its persisted UI state (geometry + Manager
         // lens + ORDERED tab refs). Claimed at engine init (an existing windows/<id>.json, or a
@@ -618,6 +632,19 @@ namespace winrt::TerminalApp::implementation
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
+        // Agentmaster (tab status-dot RED FLASH): a hosted session that leaves Running on an UNVISITED
+        // tab flashes that tab's status-dot outline red (synchronized across tabs via one shared timer)
+        // until you switch to it. _EvaluateAgentFlash detects the Running -> (other) edge per registry
+        // update; _Set/_Stop/_Start/_Ensure drive the shared 600ms timer + per-tab stroke. UI thread only.
+        void _EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // detect the Running -> (any other state) edge + start/stop the flash (never the active/visited tab); forgets state on !live so a later restore re-tracks fresh
+        void _StartAgentFlash(const std::wstring& sessionId); // begin flashing this session's tab-dot outline red; joins the shared timer in-phase with any others
+        void _StopAgentFlash(const std::wstring& sessionId); // stop flashing + restore the resting black outline; stops the shared timer when none remain
+        void _VisitTabClearFlash(const TerminalApp::Tab& tab); // visiting (selecting) a tab marks it seen -> stop its red flash (from _OnTabSelectionChanged)
+        void _EnsureAgentFlashTimer(); // lazily create + (re)start the shared 600ms flash timer (a fresh burst begins on the red phase)
+        void _StopAgentFlashTimer(); // stop the shared flash timer (no flashing tabs remain)
+        void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + repaint every flashing tab's outline together (the synchronized blink)
+        void _ApplyAgentFlashStrokeForSession(const std::wstring& sessionId); // paint one flashing session's tab-dot outline at the CURRENT shared phase (used when it joins mid-flash)
+        void _SetTabAgentDotStroke(const TerminalApp::Tab& tab, winrt::Windows::UI::Color color); // set a tab's status-dot OUTLINE brush via Tab.TabStatus() (idempotent on an unchanged color)
         void _SetTabSelectionPill(const TerminalApp::Tab& tab, bool on); // Agentmaster (Linked Lenses): show/hide the "selected/active" accent pill behind a tab's header via Tab.TabStatus(); UI thread
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)

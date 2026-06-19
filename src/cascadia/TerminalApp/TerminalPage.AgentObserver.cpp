@@ -92,6 +92,13 @@ namespace winrt::TerminalApp::implementation
             }
             status.AgentStatusBrush(Media::SolidColorBrush{ *color });
             status.AgentStatusVisible(true);
+            // The dot's Stroke binds to AgentStatusStrokeBrush (default null). Seed the resting black
+            // outline the first time the dot appears, so the binding never paints a null stroke. Don't
+            // stomp an existing brush — the red-flash timer may have already set it (red/black).
+            if (!status.AgentStatusStrokeBrush())
+            {
+                status.AgentStatusStrokeBrush(Media::SolidColorBrush{ Colors::Black() });
+            }
         }
         CATCH_LOG();
     }
@@ -111,7 +118,212 @@ namespace winrt::TerminalApp::implementation
         if (const auto tab = it->second.get())
         {
             _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt);
+            _EvaluateAgentFlash(sessionId, tab, state, live); // start/stop the unvisited "left Running" red flash
         }
+    }
+
+    // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session leaves the
+    // Running state (Stop/Done/Waiting/NeedsApproval/Error/Idle) while its tab is NOT the one you're
+    // looking at, that tab's status-dot OUTLINE flashes red until you switch to the tab. "The current
+    // tab is always considered visited", so the active tab never flashes. The trigger is precisely the
+    // Running -> (any other state) edge — so we remember each hosted session's last state. Back to
+    // Running clears the flash (it's working again — a blue dot, not an attention state). A
+    // non-Running -> non-Running change (e.g. the Waiting->Idle cache decay) leaves an existing flash
+    // alone — a tab already flagged keeps flashing until you visit it. UI thread (the observer hop).
+    void TerminalPage::_EvaluateAgentFlash(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live)
+    {
+        using ::Agentmaster::SessionState;
+        if (!live)
+        {
+            // Archived/closed: stop any flash AND forget the last state, so if this session is later
+            // RESTORED its first update starts a fresh track (no phantom Running -> other edge that
+            // would spuriously flash a freshly resumed tab opened in the background).
+            _StopAgentFlash(sessionId);
+            _agentFlashLastState.erase(sessionId);
+            return;
+        }
+
+        const auto prevIt = _agentFlashLastState.find(sessionId);
+        const bool hadPrev = (prevIt != _agentFlashLastState.end());
+        const auto prev = hadPrev ? prevIt->second : SessionState::Idle;
+        _agentFlashLastState[sessionId] = newState;
+
+        if (newState == SessionState::Running)
+        {
+            _StopAgentFlash(sessionId); // working again — never flash a Running tab
+            return;
+        }
+
+        // The Running -> (any other state) edge: begin the flash UNLESS this is the active/visited tab.
+        if (hadPrev && prev == SessionState::Running)
+        {
+            if (tab == _GetFocusedTab())
+            {
+                _StopAgentFlash(sessionId); // current tab is always considered visited
+            }
+            else
+            {
+                _StartAgentFlash(sessionId);
+            }
+        }
+        // else: not a Running edge — leave any existing flash as-is (keeps flashing until visited).
+    }
+
+    // Agentmaster (tab status-dot red flash): add this session to the flashing set + ensure the shared
+    // timer runs, then paint its outline at the CURRENT phase so it blinks in lockstep with any tabs
+    // already flashing (no per-tab phase drift). No-op if already flashing.
+    void TerminalPage::_StartAgentFlash(const std::wstring& sessionId)
+    {
+        if (!_flashingSessions.insert(sessionId).second)
+        {
+            return; // already flashing
+        }
+        _EnsureAgentFlashTimer();
+        _ApplyAgentFlashStrokeForSession(sessionId);
+    }
+
+    // Agentmaster (tab status-dot red flash): stop this session flashing + restore the resting black
+    // outline; when no flashing tabs remain, stop the shared timer. No-op if it wasn't flashing.
+    void TerminalPage::_StopAgentFlash(const std::wstring& sessionId)
+    {
+        if (_flashingSessions.erase(sessionId) == 0)
+        {
+            return; // wasn't flashing
+        }
+        if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
+        {
+            if (const auto tab = it->second.get())
+            {
+                _SetTabAgentDotStroke(tab, Colors::Black());
+            }
+        }
+        if (_flashingSessions.empty())
+        {
+            _StopAgentFlashTimer();
+        }
+    }
+
+    // Agentmaster (tab status-dot red flash): visiting a tab marks it seen — switching to a flashing
+    // session's tab stops its flash. Called from the one tab-switch funnel (_OnTabSelectionChanged), so
+    // a user click, Ctrl+Tab, a switchToTab action, or a cross-window Activate all clear it. Cheap
+    // no-op for a non-session tab or a tab that isn't flashing.
+    void TerminalPage::_VisitTabClearFlash(const TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        const auto id = _ClaudeSessionForTab(tab);
+        if (!id.empty())
+        {
+            _StopAgentFlash(id);
+        }
+    }
+
+    // Agentmaster (tab status-dot red flash): lazily build the ONE shared per-window flash timer and
+    // (re)start it. One timer + one phase drive every flashing tab, so they blink together. A fresh
+    // burst begins on the red ("on") phase. The Tick self-stops if the page is gone (weak), so a closed
+    // window never leaks a ticking timer.
+    void TerminalPage::_EnsureAgentFlashTimer()
+    {
+        if (!_agentFlashTimer)
+        {
+            _agentFlashTimer = WUX::DispatcherTimer{};
+            _agentFlashTimer.Interval(std::chrono::milliseconds(600));
+            _agentFlashTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_OnAgentFlashTick();
+                }
+                else if (const auto t = sender.try_as<WUX::DispatcherTimer>())
+                {
+                    t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+                }
+            });
+        }
+        if (!_agentFlashTimer.IsEnabled())
+        {
+            _agentFlashPhase = true; // a fresh burst begins on the red "on" phase
+            _agentFlashTimer.Start();
+        }
+    }
+
+    // Agentmaster (tab status-dot red flash): stop the shared timer (called when the flashing set empties).
+    void TerminalPage::_StopAgentFlashTimer()
+    {
+        if (_agentFlashTimer)
+        {
+            _agentFlashTimer.Stop();
+        }
+        _agentFlashPhase = false;
+    }
+
+    // Agentmaster (tab status-dot red flash): the shared-timer tick. Toggle the one phase and repaint
+    // EVERY flashing tab's outline together (red on the "on" phase, black on the "off" phase) — this is
+    // what keeps multiple flashing tabs synchronized. Prunes any session whose tab has gone away, and
+    // stops the timer once none remain.
+    void TerminalPage::_OnAgentFlashTick()
+    {
+        _agentFlashPhase = !_agentFlashPhase;
+        const auto stroke = _agentFlashPhase ? Colors::Red() : Colors::Black();
+        for (auto it = _flashingSessions.begin(); it != _flashingSessions.end();)
+        {
+            TerminalApp::Tab tab{ nullptr };
+            if (const auto tabIt = _claudeTabs.find(*it); tabIt != _claudeTabs.end())
+            {
+                tab = tabIt->second.get();
+            }
+            if (!tab)
+            {
+                it = _flashingSessions.erase(it); // tab closed / re-homed — drop it
+                continue;
+            }
+            _SetTabAgentDotStroke(tab, stroke);
+            ++it;
+        }
+        if (_flashingSessions.empty())
+        {
+            _StopAgentFlashTimer();
+        }
+    }
+
+    // Agentmaster (tab status-dot red flash): paint one flashing session's outline at the current shared
+    // phase. Used when a tab joins an in-progress flash so it lands on the same red/black beat as the rest.
+    void TerminalPage::_ApplyAgentFlashStrokeForSession(const std::wstring& sessionId)
+    {
+        if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
+        {
+            if (const auto tab = it->second.get())
+            {
+                _SetTabAgentDotStroke(tab, _agentFlashPhase ? Colors::Red() : Colors::Black());
+            }
+        }
+    }
+
+    // Agentmaster (tab status-dot red flash): set a tab's status-dot OUTLINE brush (the Ellipse Stroke,
+    // bound to AgentStatusStrokeBrush). Idempotent on an unchanged color so a repeated same-phase paint
+    // doesn't churn the binding. UI thread only.
+    void TerminalPage::_SetTabAgentDotStroke(const TerminalApp::Tab& tab, winrt::Windows::UI::Color color)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            const auto status = tab.TabStatus();
+            if (!status)
+            {
+                return;
+            }
+            if (const auto cur = status.AgentStatusStrokeBrush().try_as<Media::SolidColorBrush>();
+                cur && cur.Color() == color)
+            {
+                return; // already this exact stroke — don't re-raise the binding
+            }
+            status.AgentStatusStrokeBrush(Media::SolidColorBrush{ color });
+        }
+        CATCH_LOG();
     }
 
     // Agentmaster (Linked Lenses): show/hide the "selected/active" pill behind a tab's header — the

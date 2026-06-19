@@ -84,7 +84,10 @@
               managed Claude session (the Triage-Board palette via AgentStatusColors.h), dim gray for
               an observed-only tab; collapsed on anything Agentmaster doesn't classify. An Ellipse
               (originally a "●" TextBlock): a real filled shape renders BOLDER than the glyph's ink at
-              the same size, takes a thin black Stroke so the dot stays legible on ANY tab background
+              the same size, takes a thin Stroke (AgentStatusStrokeBrush — black at rest, seeded by
+              _SetTabAgentDot the first time the dot shows; bound, not a literal, so TerminalPage's
+              shared timer can FLASH it red when a hosted session leaves Running on a tab you haven't
+              visited) so the dot stays legible on ANY tab background
               (per-dir colored tabs, the selected-tab highlight, light themes), and centers
               deterministically — no font line-box / baseline concerns. The Fill binds the same
               AgentStatusBrush the code already writes, so this is presentation-only. Margin
@@ -102,7 +105,7 @@
                  Margin="0,1,6,-1"
                  VerticalAlignment="Center"
                  Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
-                 Stroke="Black"
+                 Stroke="{x:Bind TabStatus.AgentStatusStrokeBrush, Mode=OneWay}"
                  StrokeThickness="1"
                  Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
         <TextBlock x:Name="HeaderTextBlock"

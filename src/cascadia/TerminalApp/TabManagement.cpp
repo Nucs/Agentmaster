@@ -1304,6 +1304,9 @@ namespace winrt::TerminalApp::implementation
             {
                 const auto tab{ _tabs.GetAt(selectedIndex) };
                 _UpdatedSelectedTab(tab);
+                // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
+                // tab is always considered visited, so stop any red flash on the now-focused tab.
+                _VisitTabClearFlash(tab);
                 // Agentmaster (Linked Lenses): follow the switch into the Manager lens — select this
                 // tab's managed session so returning to the Manager tab shows the session you were just
                 // in. No-op for the Manager tab, a non-session tab, or before startup completes.
