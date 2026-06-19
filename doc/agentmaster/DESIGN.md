@@ -108,7 +108,7 @@ ApprovalPolicy{ pauseForHuman, autoApproveTools[] }
 ```
 
 - **M × N structure** is first-class: `workingDir` is the grouping axis; multiple sessions can share a dir.
-- **Isolation:** new sessions can be created in **git worktrees** so parallel agents don't collide (own branch/dir).
+- **Isolation (design intent, not yet built — §18):** new sessions could be placed in **git worktrees** so parallel agents don't collide (own branch/dir).
 - **Correlation:** each session's `id` is injected into its `claude.exe` as `CCMGR_SESSION_ID` so hook events map back (§8).
 
 **Shipped (schema/correlation deltas):** `SessionInfo` gained an `AgentKind kind` (default `Claude`)
@@ -138,7 +138,7 @@ The crucial subtlety: **"the agent is waiting" is three different states**, and 
 
 Authoritative state with no screen-scraping. Full contract in [`HOOKS.md`](./HOOKS.md); summary:
 
-- On spawn, set `CCMGR_SESSION_ID=<guid>` on the child and write a hooks config whose commands post `{sessionId, cwd, event, …}` to a **local named pipe** (`\\.\pipe\agentmaster.<pid>`), read on a dedicated thread. (Fallback: per-session JSONL the app watches.)
+- On spawn, set `CCMGR_SESSION_ID=<guid>` on the child and write a hooks config whose commands post `{sessionId, cwd, event, …}` to a **local named pipe** (`\\.\pipe\agentmaster.<pid>`), read on a dedicated thread. (Fallback: the forwarder discovers the pipe via a `bridge.json` file when it didn't inherit the env; the always-on floor beneath the lossy push is the Fleet Observer — §8a.)
 - Event → effect: `SessionStart`→register/Idle; `UserPromptSubmit`→Running (also confirms our injected prompt landed → idempotency); `PreToolUse/PostToolUse`→activity; `Notification(permission)`→NeedsApproval + ApprovalPolicy; `Stop`→WaitingForInput + `Autopilot.tryAdvance`; `SubagentStop`→info; `SessionEnd`→Done.
 - The hook payload carries a best-effort `lastMessageIsQuestion` flag that feeds the question-guard.
 
@@ -177,8 +177,8 @@ MANAGER (tab 0 · pinned · non-closable)
 ```
 
 ### 9.2 Triage Board (top) — *triage*
-- Columns are hook-driven states: **Running · Waiting-for-you · Needs-approval · Error** (+ Idle/Done filterable). Cards = sessions tagged with dir/branch/task/elapsed; they auto-move as hooks fire. Optional **swimlanes by working directory**.
-- The **Waiting / Needs-approval** columns are the work queue — act only on what's blocked. Cards show an autopilot badge **⚙ sent/total**. Batch actions per column (approve all, broadcast a prompt to a column/lane).
+- Columns are hook-driven states: **Running · Waiting-for-you · Needs-approval · Error** (+ an **Idle/Done** column and the Observer's **External** census). Cards = sessions tagged with dir/branch/task/elapsed; they auto-move as hooks fire.
+- The **Waiting / Needs-approval** columns are the work queue — act only on what's blocked. Cards show an autopilot badge **⚙ sent/total**.
 
 ### 9.3 Explorer Tree (bottom-left) — *structure*
 - Roots = the M working directories (branch/worktree + roll-up like "3 · 1◐"); children = that dir's sessions with status badges (●running ◐waiting ○idle ✕error). Collapse to scale.
@@ -250,7 +250,7 @@ dot (`[icon] ● <title>`).
 Stop hook ─▶ WaitingForInput ─▶ tryAdvance(session)
 tryAdvance(s):
   if s.autopilot.mode == Off: return
-  if s.state != WaitingForInput: return
+  if s.state != WaitingForInput && s.state != Idle: return  # Idle: a launched/resumed plan must START
   if humanTypedWithin(s, ~1500ms): return                 # pauseOnHumanInput
   item = s.queue.firstPending(); if none: notifyPlanDone; return
   if !passesGuard(s, item): item=Held; flag card; return  # e.g. not-a-question
@@ -271,9 +271,9 @@ tryAdvance(s):
 ### Policy & guards
 - **Default mode:** `Off` (the cog stamps a configurable default onto new sessions). `SemiAuto`
   gives a one-click confirm per send; `Full` is hands-off.
-- **Question-guard ON** by default; per-item override `answers-a-question: ok`.
+- **Question-guard ON** by default; per-item override `answers-a-question:ok` (set as the prompt's `guardPattern`).
 - **Approval policy** is separate: auto-approve an allowlist of safe tools, else pause for human.
-- **Backstops:** `stopOnError`, `maxAutoSends`, throttle, global **Pause-all / Kill-all**, `pauseOnHumanInput`.
+- **Backstops:** `stopOnError`, `maxAutoSends`, throttle, global **Pause-all**, `pauseOnHumanInput`.
 - **Idempotency:** mark `Sent` atomically + persist; `UserPromptSubmit` confirms landing; survive restart without replay.
 - **Multiline:** a bare `\n` may submit early in the Ink input — use the paste/bracketed-paste path for multi-line bodies, then one submit.
 
@@ -339,7 +339,7 @@ Claude session (not just managed ones) with two-phase search and Jump / Resume /
 ## 14. Safety & security
 
 - **No silent wrong actions:** approvals never consume planned prompts; question-guard catches clarifications.
-- **Runaway protection:** `maxAutoSends`, `stopOnError`, global Kill-all, optional per-session token/turn budget.
+- **Runaway protection:** `maxAutoSends`, `stopOnError`, global **Pause-all**, optional per-session token/turn budget.
 - **Approvals:** default to pausing for human; only an explicit allowlist auto-approves.
 - **Local-only IPC:** the hooks pipe is local; no network surface by default.
 - **Don't fight the OS:** never `taskkill` deploy locks or touch the user's running terminal (see Gotchas in `CLAUDE.md`).
