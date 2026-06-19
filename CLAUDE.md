@@ -108,7 +108,7 @@ live-verified — including both refinements.** On startup the `WindowEmperor` r
 tokens — it links `TerminalApp.dll`, not the `TerminalAppLib` static lib, so it can't call the JSON
 helpers), intersects, and dispatches `wt -w new -s <idx>` only for the records that were open at last
 exit; each window resolves `records[idx]` for geometry (TerminalWindow) and claims it by id
-(TerminalPage), so geometry + lens agree. A **decide-prompt** (Yes/No "Reopen your N previous windows?")
+(TerminalPage), so geometry + lens agree. A **decide-prompt** (Yes/No "Reopen your N previous Agentmaster windows?")
 gates the reopen when >1; a lone record / first run is silent. The **manifest** is owned by the
 process-wide `SharedEngine` (NOT the Emperor enumerating the projected surface — the engine already has
 every window's id): each `TerminalPage` `RegisterLiveWindow`s its `_windowId` at engine init and
@@ -288,7 +288,7 @@ accelerator**; SLOW = **ripgrep**-prefiltered transcript content (`rg -il`, PATH
 batched under the cmdline cap, full in-process fallback), every match **scope-attributed
 in-process** (👤 typed prompts vs 🤖 assistant text/thinking + tool inputs/results — rg can't tell
 them apart, `ClassifyTranscriptLine` can), generation-cancelled on re-type. Both message scopes
-OFF ⇒ title+directory only; 📁/📄 match the **directories/files a session's tool calls touched**
+OFF ⇒ title + directory + the sidecar's cached first prompt (message *bodies* still need a 👤/🤖 scope); 📁/📄 match the **directories/files a session's tool calls touched**
 (`TranscriptStats::pathsAccessed`) and **default ON** (fast-phase-only — in-memory over the
 sidecar, no rg/transcript IO; 👤/🤖/(F) default OFF — either message scope flips on the SLOW
 content scan); (F) fuzzy has identical rg/in-process semantics
@@ -307,13 +307,21 @@ here, dim = on-disk) with a **presence ring** when claude's own heartbeat report
 waiting. Detail = metadata + scope-tagged match snippets + the numbered prompt list (off-thread,
 (id,mtime)-cached); actions: **Jump** (OPEN here), **Resume here** (`_ResumeSessionFromDisk`: an
 unknown sid gets a minimal archived-shaped record, then the SAME transcript-gated `--resume` seam
-— title pinning, dir color, hook correlation all reused), **Fork here** (`_ForkSessionFromDisk` —
+— title pinning, dir color, hook correlation all reused). **Resume / Fork (and Archive Restore) first
+follow the continuation CHAIN to its TAIL** (`ResolveContinuationTailOnDisk`): a `/clear`, a plan-mode
+parent→child, or an auto-continuation writes a NEW same-cwd session id, so they land where the user LEFT
+OFF — not on the earliest link recognizable by its first-prompt title. An A→B edge needs same cwd
+(`NormDirKey`) + B non-fork + B the earliest session created in `[A.lastActivity − 5s, +15min]`
+(`kContinuationSkewMs`/`kContinuationGapMaxMs`), and BAILS on ambiguity (parallel same-cwd sessions) so
+two claudes in one dir are never silently merged (Rule #14 spirit). **Fork here** (`_ForkSessionFromDisk` —
 the duplicate-tab fork's recipe: `claude --resume <parent> --fork-session --session-id <new>`, the
 new id minted by us so hooks/registry correlate from the first event; offered on EVERY row
 **including a LIVE one** — a fork writes its OWN transcript, so the adopt path's two-writers
 hazard doesn't apply; transcript-gated → fresh; titled via `DeriveForkTitle` (`"<title> (fork)"`,
 then `(fork 2)`/`(fork 3)`/… on a fork-of-a-fork, never stacked `(fork) (fork)`), logged
-`[sessions-page->fork]`), **Open New Session Here**; double-click = resume. **Presence
+`[sessions-page->fork]`), **Open New Session Here**, and a right-click **Hide from list**
+(`_HideSessionFromList` → `AppSettings.hiddenSessionIds`, persisted + filtered out of the browser;
+cleared from the cog's **Reset hidden sessions**); double-click = resume. **Presence
 integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
 owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
 process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + the transient
@@ -340,10 +348,11 @@ the concurrent UIA work; the tree as a whole builds green.
 
 **The tab strip itself now carries the state dot.** Every classified tab's header reads
 `[icon] ● <title>`: a state-colored **Ellipse** (thin black stroke for contrast on any tab
-chrome; Margin `-6,1,6,-1` — the **negative left (-6)** pulls the dot toward the profile icon,
-tightening the MUX `TabViewItemHeaderIconMargin` (10px) icon→dot gap to ~4px WITHOUT touching the
-shared global margin other tabs use (the title left-shifts with it; +6 right keeps the dot→title
-gap); **+1/−1** dips it 1px below slot-center — dead-center reads optically high against the
+chrome; Margin `0,1,6,-1` — **left is 0**: an earlier negative-left overhang (to pull the dot toward
+the profile icon) was reverted because it hung past the header's left edge and got CLIPPED. The MUX
+`TabViewItemHeaderIconMargin` (10px) icon→dot gap is instead tightened the **safe, global way** — a
+`TabViewItemHeaderIconMargin` override on the `TabView` in `TabRowControl.xaml` (+6 right keeps the
+dot→title gap); **+1/−1** dips it 1px below slot-center — dead-center reads optically high against the
 title — while keeping the 10px slot so the header row doesn't grow) in
 `TabHeaderControl.xaml`'s indicator row right before the title — one more
 `x:Bind`'ed element over `TerminalTabStatus` (two new observable properties,
@@ -403,22 +412,28 @@ and live-verified; the ONE unexercised step is a full package build of the commi
 fleet is queryable from a shell so an AI agent can understand *what is going on inside any tab/session*
 WITHOUT the UI: **`show <ref>`** (full introspection — identity/placement, derived state + presence,
 the conversation tail + last assistant reply, activity [msgs/tools/**files touched**], the last user
-prompt, the Flight-Plan queue + autopilot), **`list` / `sessions` / `tabs` / `windows` / `external`**,
-plus **`--self`** (introspect the calling agent's OWN tab via `WT_SESSION`) and **`--json`**
-(`schemaVersion`-stamped). It **always works — app up OR down** — by reading only persisted +
+prompt, the Flight-Plan queue + autopilot; `--tail N` sets how many conversation turns `show` emits,
+**default 8** — no effect on the other verbs), **`list` / `sessions` / `tabs` / `windows` / `external`**
+(**`sessions` defaults to OPEN/live only** — `--archived` adds shut-down sessions, `--state <S>`
+exact-matches the derived state, `--dir <D>` substring-matches the working dir; **`tabs --window <W>`**
+filters by window-id substring), plus **`--self`** (introspect the calling agent's OWN tab via
+`WT_SESSION`), **`--version`** (prints the CLI's schema version), and **`--json`** — each reply a
+`{schemaVersion: 1, profile, <verb-key>: …}` envelope (full per-verb schema in CLI.md). Exit codes:
+**0** success · **1** ref-not-found / ambiguous / `--self`-found-no-session · **2** usage/arg error. It **always works — app up OR down** — by reading only persisted +
 OS-observable state (the Fleet Observer's PULL model run one-shot from a separate process):
 `sessions.json` + `windows/<id>.json` + PEB process facts + transcripts + claude's presence heartbeat;
 no live responder, no new IPC, **no engine edits for the reads** (`AgentMaster/cli/agentcli.cpp` links
 the existing pure-C++ engine units, like the test harness). A live claude is bound to its conversation
 by claude's OWN presence self-report (`sessions/<pid>.json`, **pid-keyed** — immune to the cwd-density
 mis-bind Rule #14 warns of), then explicit `--session-id` / `--resume`, then the cwd→transcript
-fallback; `external` rows are **host-classified** (`windows-terminal` / `agentmaster-other` [a sibling
-install's session] / `console`). State is **derived** offline from the presence heartbeat +
+fallback; `external` rows are **host-classified** (`agentmaster-self` [a claude THIS instance launched but not
+in our roster] / `agentmaster-other` [a sibling install's session] / `windows-terminal` / `console`). State is **derived** offline from the presence heartbeat +
 transcript-tail via the same `SessionScanner` predicates (`ParseTranscriptDelta` /
 `IsTerminalStopReason` / `IsInteractiveTool`). **Transport — the overload:** the execution alias
 already targets the tiny `wt`/`wtd` launcher shim (`src/cascadia/wt/shim.cpp`, NOT the GUI), now
-**console-subsystem + DUAL-MODE** — a CLI verb (or a CLI-only LEADING flag: `--json`/`--self`/
-`--offline`/`--tail`/`--instance`/`--state`/`--dir`, none of which collide with a WT commandline)
+**console-subsystem + DUAL-MODE** — a CLI verb (or a CLI-only LEADING flag the shim routes to the CLI:
+`--json`/`--self`/`--tail`/`--instance`/`--state`/`--dir` — plus `--offline`, **reserved**: the shim
+routes it, but the P1 reader (`agentcli.cpp`) does not yet implement it and rejects it as unknown — none of which collide with a WT commandline)
 execs **`agentmaster-cli.exe`** on the caller's console; **any other commandline forwards to
 `WindowsTerminal.exe` byte-for-byte** (bare launch / `-w` / `-s` reopen / `-Embedding` defterm
 unaffected — defterm + Start-menu activate the GUI directly, never the alias). A GUI-subsystem exe
@@ -440,6 +455,25 @@ runs on **hand-copied binaries** until then (needs the dev instance closed); and
 `agentmaster show` is **not deployed** (only `agentmasterdev`). **P2 (control — `restore`/`archive` via
 the existing `WM_COPYDATA` handoff + a disk-poll confirm) and P3 (`watch` event stream + prompt-driving
 `enqueue`/`send-now`/`set-autopilot`) are designed + deferred** (CLI.md §4/§9).
+
+**In-app auto-updater (`Updater.h`) — implemented + wired (startup check + cog), header-only.** A
+GitHub-release self-updater for our side-by-side packaged app, header-only pure-Win32 like
+`ProfileBootstrap.h` (so the WindowsTerminal EXE includes it without the engine lib). On launch the
+`WindowEmperor` runs `RunStartupUpdateCheck` **after the profile resolves and BEFORE the "Reopen your
+N windows?" prompt** — a bounded (≤6 s, on a worker so a slow network can't wedge launch) GitHub-API
+query for the newest release, gated to **packaged RELEASE installs** (dev/unpackaged skip unless
+`AGENTMASTER_UPDATE_STARTUP` is set). When a strictly-newer version exists it shows a TaskDialog —
+**Update now / Postpone (3·7·30 days) / Skip this version / Not now** (Cancel == Not now). **Update
+now** materializes a BAKED-IN installer (`am-update.cmd` + `am-update.ps1`, written into the active
+profile — never fetched) that downloads the `.msixbundle` + `.cer`, trusts the self-signed cert
+(elevating only if needed), `Add-AppxPackage`s it (with the VCLibs-dependency fallback), and
+relaunches; the app then quits so the package isn't in use. Only the **release** family is ever
+published, so a dev install that updates **graduates** to release. The Settings cog's **UPDATES**
+section is the manual twin — a "Check for updates" button, a "vX.Y.Z available!" label, and an "Allow
+pre-release versions" toggle (NOT startup-gated, available on any build). State persists in
+`settings.json`: `allowUpdatePrerelease` (round-trips through the cog form) + `updateSkippedVersion` /
+`updatePostponedUntilUnixMs` (written by a freshest-disk JSON RMW outside the form — so the EXE can
+write them without linking the engine — and preserved from disk on a cog Save, the summary-panel idiom).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -502,9 +536,13 @@ What works, by area:
   idle. `ShouldSynthesizeStopFromPresenceIdle` releases it (→ `WaitingForInput` as a `quiescentStop`,
   logged `[recon-stop-idle]`) when claude's OWN pid-validated presence heartbeat reads **`idle`**
   (`PresenceIsAtRest` — `idle`-only; `waiting`/`shell`/empty excluded) on a non-terminal, non-interrupted
-  tail quiet ≥ `kScanPresenceIdleQuiescenceMs` (5s, > the 2s stop-quiescence so it outlasts the ~2s
-  S-lane presence-refresh lag — a just-STARTED turn's heartbeat already reads `busy`) with NO pending
-  interactive tool (so it never pre-empts (b)). Claude's heartbeat is consumed as a state INPUT here
+  tail with NO pending interactive tool (so it never pre-empts (b)). The quiescence floor is **per-state**
+  (`ShouldSynthesizeStopFromPresenceIdle`): a `NeedsApproval` session uses `kScanPresenceIdleQuiescenceMs`
+  (5s, > the 2s stop-quiescence so it outlasts the ~2s S-lane presence-refresh lag), but a **`Running`**
+  cleared-tail turn requires the far longer `kScanPresenceIdleRunningQuiescenceMs` (30s) — and a `Running`
+  session with a still-**pending** (non-empty, non-terminal) `stop_reason` tail is **never** released here
+  at all (the idle↔running flap fix: an API-retry pause mid-turn must not be mistaken for turn-end; a
+  just-STARTED turn's heartbeat already reads `busy`). Claude's heartbeat is consumed as a state INPUT here
   (Rule #13: a pid-validated FACT) — the IDLE counterpart to the same `busy` reading that elsewhere only
   ever HELD Running; proved live (session `d271a31f`). `ParseTranscriptDelta` now also emits
   a `ToolResult` marker (a tool completed → it answers the pending question) that does NOT count as a
@@ -526,8 +564,9 @@ What works, by area:
   the Waiting→Idle decay (`_maybeDecayWaiting`). `ShouldSynthesizeRunningFromExternalWork` then promotes
   an Idle/`WaitingForInput` session → **`Running`** (synthesized as `PostToolUse`, so no
   `++queuedPrompts`; logged `[recon-subagent]`) — the `recon-run` mirror for work OUTSIDE the parent
-  transcript. BOTH arms are gated on a **non-terminal** tail (subagent freshness window
-  `kScanSubagentFreshMs` 15s): a subagent's final write lands µs BEFORE the parent's `end_turn` and
+  transcript. BOTH arms are gated on a **non-terminal** tail; the **subagent** arm additionally requires a side-file
+  write within `kScanSubagentFreshMs` (15s), while the `busy` arm is an instantaneous heartbeat read (no
+  freshness window): a subagent's final write lands µs BEFORE the parent's `end_turn` and
   `busy` lingers a tick after a real `Stop`, so a TERMINAL tail (the turn truly ended) must never bounce
   a settled session back to Running. `TranscriptTimesIn` also folds the newest subagent mtime into
   `convLastActivityUnixMs`, so the per-tab overlay's `-lastActivityAgo` reflects subagent writes instead
@@ -539,7 +578,8 @@ What works, by area:
   Manager-Launched ones. At engine init we export `CCMGR_HOOK_PIPE` into the app's process env
   and prepend a transparent **`claude` PATH shim** (`<profile>\shim\` — the ACTIVE profile dir,
   default `~/.agentmaster/shim/`; `claude.cmd` for
-  cmd/PowerShell + a POSIX `claude`) that injects `--settings <ours>` then execs the real claude
+  cmd/PowerShell + a POSIX `claude`) that injects `--settings <ours>` + `--dangerously-skip-permissions` (unless the caller already passed
+  `--settings`, in which case it runs untouched) then execs the real claude
   (`ResolveRealClaude`, resolved BEFORE the PATH prepend so it never finds the shim); every new
   tab is *meant* to inherit this env so a bare `claude` self-wires for hooks (but WT's env
   regeneration breaks that for `+` tabs — see the caveat below). (Launch/Restore does **not** go
@@ -572,8 +612,14 @@ What works, by area:
     commented, WOW64-guarded): `ReadProcessCwd` (the claude PROCESS cwd — tracks `cd` across a relaunch;
     PowerShell never syncs ITS process cwd, but spawns claude with the right one), `ReadProcessCommandLine`
     (exposes `--resume`/`--session-id`/`--model`/`--effort`/`--permission-mode`), `ReadProcessEnv`
-    (`WT_SESSION` + `AM_SESSION` + `CLAUDE_*`); `ProcessStartUnixMs`/`ProcessAlive`; pure tree helpers
-    (`FindDescendantByImage`/`ChildrenOf`, replacing the old `FindClaudeDescendantPid`); `ReadClaudeFacts`
+    (`WT_SESSION` + `AM_SESSION` + `CLAUDE_*`); `ProcessStartUnixMs`/`ProcessAlive`;
+    `ReadProcessImageSubsystem` → `IsClaudeDesktopGuiApp` (the **Claude DESKTOP Electron app** ships a
+    binary *also* named `Claude.exe` — a GUI subsystem, not the console CLI — so the census **excludes**
+    it by PE subsystem; an undeterminable read is treated as the CLI so a real session is never hidden);
+    pure tree helpers (`FindDescendantByImage`/`ChildrenOf`, replacing the old `FindClaudeDescendantPid`) +
+    `CommandChildrenOf`/`ResolveShellCwd` (a `pwsh` **freezes its OWN process cwd**, so a shell tab's live
+    cwd is read from its NEWEST command child's PEB — the frozen shell cwd is only the fallback);
+    `ReadClaudeFacts`
     (cmdline+env parse); `ClassifyRunningApp`; transcript resolution (`EncodeCwdToProjectDir` — every
     non-`[A-Za-z0-9]` → `-`; `ResolveSessionId` — see Rule #14); and **transcript content** —
     `TranscriptTimes` (cheap ctime/mtime stat = conversation age + last activity) + `ReadTranscriptInfo`
@@ -594,7 +640,7 @@ What works, by area:
   - **Registry feed (O3, `SessionRegistry::ObserveClaude`).** A provenance-aware upsert: first sight of a
     claude we did NOT Launch creates an `external` record + fires adoption; thereafter it idempotently
     ENRICHES the transient `SessionInfo` facts (pid / liveCwd / model / effort / permissionMode /
-    background / runningApp / amSession / ownerWindowId, plus the transcript timing
+    background / runningApp / amSession / ownerWindowId / branch / presenceStatus, plus the transcript timing
     `convCreated/convLastActivityUnixMs` that drives the per-session timing adornment — all runtime-only,
     NOT persisted) but **NEVER** sets `SessionState` (push hooks + the transcript tail own state, Rule
     #1/#7). The timing is refreshed silently (like `lastObservedUnixMs`) — mtime ticks constantly, so it
@@ -603,7 +649,7 @@ What works, by area:
     in `OnHookEvent` for provenance.
   - **S-lane (`ProcessObserver`).** A process-wide worker (next to the scanner, thread/condvar shape
     mirrored) on a ~2 s heartbeat + on-roster-change `Wake()`: ONE snapshot → `ReadClaudeFacts` + classify
-    EVERY claude (the census, logged `[observer] census claudes=N ours=A wt=W other=O rostered=R`) → merge
+    EVERY claude (the census, logged `[observer] census claudes=N ours=A wt=W other=O orphan=P codex=C rostered=R`) → merge
     every window's published tab roster → per roster tab, `FindDescendantByImage` the shell's claude,
     resolve its id, and feed `ObserveClaude`. **A claude correlated to a tab in OUR roster is OURS
     regardless of `AM_SESSION`** (Rule #13). Publishes two copy-under-lock tables (Correlation + Activity).
@@ -621,7 +667,9 @@ What works, by area:
     census now includes **cmd-/console-hosted** claudes too (the `Other` bucket — previously counted but
     hidden), not only real-WindowsTerminal, and each `ExternalClaudeRow` is **enriched from its
     transcript** (worker-thread title cache so the head-read happens once): resolved `sessionId`, a
-    **title** (first prompt), `gitBranch`, host kind (`wt` / `cmd` / shell leaf), and `created/lastActivity`
+    **title** (first prompt), `gitBranch`, a resolved **host label** (`ResolveExternalHostLabel` via
+    `ReadProcessPackageFamily` — "Windows Terminal" for real WT vs "Agentmaster" / "Agentmaster Dev" for a
+    SIBLING install's session vs a bare shell leaf), and `created/lastActivity`
     timing. Observe-only — surfaced on the board AND the Explorer Tree's **EXTERNAL** scope, where a row's
     **Open New Session Here** / **Adopt** lives on the right-click menu and a **left-click → a read-only Flight Plan**
     of the conversation. **Codex rides this same External group** (`ExternalClaudeRow.kind == Codex`): a
@@ -677,7 +725,9 @@ What works, by area:
   (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row —
   also surfaced by a **hover-revealed `⋯` more-button** in the card's top-right corner (a
   discoverable twin for users who never right-click)
-  (`_MakeSessionMenu` — Rename… / Archive… / Open New Session Here; a board-invoked Rename first
+  (`_MakeSessionMenu` — **Jump to Tab** / Rename (F2) / Archive… / **Delete permanently…** / Open New
+  Session Here / a **Copy** submenu [Session Id · Path · Branch · Launch CLI · Transcript · Summary, via
+  the shared `CopySessionField`]; a board-invoked Rename first
   makes the tree row renderable — un-collapses its dir, widens a LOCAL scope to GLOBAL for a
   session hosted elsewhere — since the in-place editor lives in the tree). **Activate is
   cross-window**: the board and the tree's GLOBAL scope show the WHOLE fleet, but a session's tab
@@ -776,7 +826,9 @@ What works, by area:
   **EXTERNAL** (`_RebuildExternalTree`) lists every claude we do NOT manage — both real-WindowsTerminal
   **and cmd-/console-hosted** (the `Other` census bucket, previously hidden) — grouped by cwd. Each row is
   **enriched out-of-band from the transcript**: a real **title** (the conversation's first prompt — recent
-  transcripts carry no `summary`), a **host** tag (`wt` / `cmd` / the shell leaf), `gitBranch`,
+  transcripts carry no `summary`), a resolved **host label** (`ResolveExternalHostLabel` →
+  `ReadProcessPackageFamily`: "Windows Terminal" / "Agentmaster" / "Agentmaster Dev" / shell leaf —
+  telling real WT from a sibling install apart), `gitBranch`,
   `model · effort · pid`, and the timing adornment. The **pid number carries a color-coded underline**
   keyed by its **host window/shell** (`ExternalClaudeRow::hostPid` = the claude's parent shell pid,
   filled by the observer census; `WindowKeyColor` maps it through a stable palette) — claudes running in
@@ -821,7 +873,7 @@ What works, by area:
   non-WT host (cmd console / ConEmu / VS Code) is just foregrounded. Window activation only — never
   input into the foreign session, upholding the Rule-#13 invariant). **Open New
   Session Here is offered in EVERY scope** — it is also the **last item** on the LOCAL/GLOBAL
-  session-row menu (`_MakeSessionMenu`, after Rename / Archive), spawning in that session's working
+  session-row menu (`_MakeSessionMenu`, after Jump to Tab / Rename / Archive / Delete permanently), spawning in that session's working
   dir. With no external selected the
   Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
   **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /
@@ -859,13 +911,27 @@ What works, by area:
   messages a session got, not just queued ones: a chronological **SENT** summary (each row
   tagged **flight** = we queued+injected it vs **typed** = you typed it into the terminal) over
   the **UPCOMING** queue (Pending/Held). `Focus()` focuses the cwd `TextBox`. The Launch cwd box has a
-  focus-triggered **path-picker drop-down** (`Primitives::Popup`): up to 5 recent dirs (the
+  focus-triggered **path-picker drop-down** (`Primitives::Popup`): up to `recentDirsLimit` recent dirs (default 10; the
   current one excluded) over the subfolders of the current path + a `..` up-nav; click a row
-  to navigate, and it re-lists. Working dirs are grouped/scoped with a filesystem-aware
+  to navigate, and it re-lists. **Typing filters it live** — the subfolder listing is leaf-prefix-filtered
+  (`LeafStartsWith`) and a fuzzy-ranked **RECENT MATCHES** section is shown above it (`_RebuildPathPicker` —
+  full-Unicode lowercased, Levenshtein approximate-substring closeness to the typed token). The cwd box is **live-validated** (`_ValidateLaunchBox`) — it repaints a
+  2px underline + the Launch button by what you typed: an **existing dir** = neutral + "Launch Claude"; a
+  typed **conversation GUID** (`LooksLikeSessionId`) present on disk (`ClaudeConversationExists`) =
+  **green** + the button becomes **"Resume session"** with a **Fork** twin (`_ResumeSessionFromDisk` /
+  `_ForkSessionFromDisk`); a **not-yet-existing but creatable** absolute path = **amber** + **"Create &
+  Launch Claude"** (`_EnsureLaunchDirExists` makes the folder on launch); a missing id / malformed-relative
+  path = **red** + disabled. (With the Claude⇄Codex toggle on **Codex** the box is **directory-only** — no
+  green id-resume, no Fork — keeping only the amber "Create & Launch Codex".) Working dirs are
+  grouped/scoped with a filesystem-aware
   `PathEq`, so case-variant spellings collapse to one Explorer Tree root (Rule #8).
 - **Autopilot (M7, `Scheduler`).** Pure `DecideAdvance()` + a worker thread on the registry
   advance seam. Turn-complete → auto-send next Pending (Full) / one-click confirm (SemiAuto)
-  / Held by the question-guard (transient) / skip Manual gate. Backstops: pause-on-human-
+  / Held by the question-guard (transient) / skip Manual gate. Each `QueuedPrompt` also carries optional
+  per-prompt scheduling metadata the data model supports beyond this default path — `gate` (OnTurnComplete /
+  AfterDelay `delayMs` / Manual), a custom `guardPattern` (empty ⇒ the default not-a-question guard),
+  `dependsOn` (a prompt id that must be `Sent` first), and `attempts`/`maxAttempts` (the current Flight-Plan
+  UI queues at the `OnTurnComplete` default). Backstops: pause-on-human-
   input, maxAutoSends, stopOnError, global Pause-all. Idempotent (atomic mark-Sent before
   inject). Advances fire on **two** triggers: the `Stop` seam (turn-complete) AND observed
   changes (`OnObserved`), so a session sitting **Idle** (freshly launched / just `--resume`d —
@@ -908,10 +974,13 @@ What works, by area:
   **Archived** and does **NOT** auto-launch it (Rule #6) — the app opens to just the Manager
   tab; the prior fleet comes back from the **Archive page** (per-row **Restore here** or **multi-select bulk Restore**). Closing a session's tab
   (the X, the tree `Del`, the Manager's Delete/Archive, or the Flight-Plan **Archive** button)
-  all route through the ONE archive seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`):
-  a single consequence confirm (gated by `confirmBeforeKill`), then `live=false` + clear injector
-  + persist + close the tab — the record is **kept**, so it lists under Archived. **There is no
-  discard**: archive is terminal, and the Claude transcript on disk is never touched. Restore
+  all route through the ONE close seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`): a
+  consequence confirm (gated by `confirmBeforeKill`) that offers **Archive · Delete · Cancel** —
+  **Archive** flips `live=false` + clears the injector + persists + closes the tab, KEEPING the record so
+  it lists under Archived (restorable); **Delete permanently** (`_RemoveSessionRecord`) DROPS the registry
+  record (+ strips it from saved window records) but **keeps the conversation `.jsonl` on disk** — a
+  deleted session leaves the Board/Archive yet still appears in the **Sessions** browser, resumable from
+  there. The Claude transcript on disk is **never** deleted by either path. Restore
   re-launches in the working dir + reloads the Flight Plan + autopilot; resume is
   **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
   that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived
@@ -926,37 +995,37 @@ What works, by area:
     end-to-end. #1 & #2 are ✅ FIXED since the audit; #3 (by design), #4 (mitigated), #5 (moot),
     #6 (cosmetic) remain — all low-severity.** The tab-X archive seam above is sound; the *non-tab-X*
     exits were the risk. **(1, HIGH — ✅ FIXED) closing a _window_ now archives its sessions.**
-    `_ArchiveWindowSessionsOnTeardown` (`TerminalPage.cpp:1825`, commit `4fa9fb7bc`) mirrors
+    `_ArchiveWindowSessionsOnTeardown` (`TerminalPage.AgentSessions.cpp:590`, commit `4fa9fb7bc`) mirrors
     `_ArchiveAndCloseClaudeTab`'s bookkeeping for every hosted session — minus the dialog + `tab.Close()`
     (the tabs go with the window): flip `live=false`, clear the injector (releases the ConptyConnection →
     claude.exe exits), drop the per-window maps, persist once. It runs from the deterministic close seam
-    (`CloseWindow:4605`, after the confirm) for immediate phantom-clearing AND idempotently from
-    `~TerminalPage:254` as the catch-all for quit / any other teardown. So a window-chrome ✕ (still the
+    (`CloseWindow`, `TerminalPage.cpp:2652`, after the confirm) for immediate phantom-clearing AND idempotently from
+    `~TerminalPage` (`TerminalPage.AgentEngine.cpp:94`) as the catch-all for quit / any other teardown. So a window-chrome ✕ (still the
     _primary_ window exit — the non-closable Manager tab means `_RemoveTab`'s `size()==0` path can't fire)
     no longer leaves `live=true` **phantom cards** or **leaked injectors/connections** on the other
     windows' Triage Boards. **(2, MED — ✅ FIXED) no-tab archive no longer fake-archives a still-running
-    session.** `_ArchiveClaudeSession`'s no-tab branch (`:1730`, commit `0336fa420`) now guards on
+    session.** `_ArchiveClaudeSession`'s no-tab branch (`TerminalPage.AgentSessions.cpp:384`, commit `0336fa420`) now guards on
     `ProcessAlive(info->pid)`: it refuses to flip `live=false` on a claude that is still alive but not
     hosted in THIS window (an *ours* claude the S-lane carded a tick before its bind completed, or one
     hosted by another window) — which `ObserveClaude` would otherwise bounce back to `live=true` the next
-    survey (`SessionRegistry.cpp:339`, Rule #7). Only a claude that has actually EXITED archives there.
+    survey (`SessionRegistry.cpp:388`, Rule #7). Only a claude that has actually EXITED archives there.
     **(3, MED — open, by design) adopt-external = two writers on one transcript** — `_AdoptExternalClaude`
-    (`:1877`) `--resume`s the id into a managed tab while the original external keeps running, both
+    (`TerminalPage.AgentSessions.cpp:859`) `--resume`s the id into a managed tab while the original external keeps running, both
     appending the same `.jsonl` (only a code comment — "the user closes it" — mitigates). **(4, LOW —
     mitigated) `SessionEnd`/`Done` doesn't eagerly archive** — only the liveness sweep
-    (`_SweepClaudeLiveness:2334`) does, when the hosting connection reaches Closed; the window-close case
+    (`_SweepClaudeLiveness`, `TerminalPage.AgentObserver.cpp:949`) does, when the hosting connection reaches Closed; the window-close case
     it once missed (→ gap 1) is now covered by the teardown archive, leaving only ~one slow heartbeat
     (~2 s) of a finished claude lingering as a live card. **(5, LOW — effectively moot) Launch with a null
     tab** — `Upsert(live=true)`+`SetInjector` still run unconditionally after `_CreateNewTabFromPane`
-    (`:1213`), but the `pane==null` guard (`:1183`) makes a null `tab` unreachable
+    (`TerminalPage.AgentSessions.cpp:183`; the upsert/inject at `:209`/`:219`), but the `pane==null` guard (`:160`) makes a null `tab` unreachable
     (`_CreateNewTabFromPane` returns null only for a null pane), so there is no phantom in practice; the
     unconditional upsert is a latent defensive nit. **(6, LOW — open) persisted `state` is dead weight** —
-    `ToJson(SessionInfo)` writes it but `_RestoreClaudeSessions` forces `Idle` on load (`:1389`); written,
+    `ToJson(SessionInfo)` writes it but `_RestoreClaudeSessions` forces `Idle` on load (`TerminalPage.AgentSessions.cpp:296`); written,
     never read (the resume-gating gotcha already says don't trust it). **Verified clean (not gaps):**
     external WindowsTerminal/Other claudes never enter the registry or `sessions.json` (`ObserveClaude` is
-    gated on rostered + resolved id, `ProcessObserver.cpp:427`) — no foreign-claude leak into the Archived
+    gated on rostered + resolved id, `ProcessObserver.cpp:680`) — no foreign-claude leak into the Archived
     list; cross-window double-bind is guarded (`HasInjector`; one ConPTY lives in one window); and
-    resume-fresh drops the stale archived record (`:1218`).
+    resume-fresh drops the stale archived record (`TerminalPage.AgentSessions.cpp:216`).
   - **Archive-page + resume/restore + persistence audit (round 2) — 13 findings, all ✅ FIXED + deployed**
     (commit `b5768081e`; a read-only sweep of the Archive page, resume/restore, and the `WindowRecord`
     layer). *Archive page:* the header count tracks the active filter ("K of N"); **Reopen its window**
@@ -1011,7 +1080,10 @@ What works, by area:
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
-  `defaultLaunchDir` seeds the cwd box). A **PROFILE row** (read-only path + **Change profile
+  `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
+  commit key — click-away-or-Shift+Enter vs Enter), `waitingDecayMinutes` (how long a `WaitingForInput`
+  session waits before decaying to `Idle`), and `recentDirsLimit` (the path-picker MRU size, default 10).
+  A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
   deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored
   in the `.agentmaster.profiles` choice file / env, never inside the profile it selects); a change
@@ -1025,7 +1097,10 @@ What works, by area:
   NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
   the cog), and **`archiveSplitFraction`** (the Archive page's table|detail split as the table's
   fraction — written by the splitter's drag release via a read-modify-write of settings.json; star
-  ratios, so it scales with the window). Loaded at engine init, seeded via `SetSettings`,
+  ratios, so it scales with the window), plus **`summaryPanelWidthFraction`/`summaryPanelHeightFraction`**
+  (the summary panel's drag-resized size), **`summaryPanelTruncate`** (its truncate-long-messages toggle),
+  and **`hiddenSessionIds`** (the Sessions browser's per-row **Hide from list** set; the cog also carries a
+  **Reset hidden sessions** button — `_resetHiddenSessionsHandler` — that clears it). Loaded at engine init, seeded via `SetSettings`,
   persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
   behavior, so a missing `settings.json` (or any unset field) is a no-op.
 
@@ -1056,17 +1131,19 @@ exits, or the tab leaves the window's roster. The linked badge now also carries 
 session's place + branch read at a glance; hidden when there's no dir/branch and on observe badges. The
 branch is the **live** current branch (`ReadGitBranchForDir` — read from `.git/HEAD`, handling a
 worktree/submodule `.git` FILE + a detached HEAD → short SHA), distinct from a transcript's historical
-first-seen snapshot; and the observer's `TabActivityRow.gitBranch` is now also the **live writer** for
-`SessionInfo.branch` (the round-3 audit's "no live writer" gap), beside the off-thread transcript backfill.
-The badge also carries a **hover-only action row (row 3)** — a **folder** button (Open Path: the
-session's working dir via `explorer.exe`, off-thread) + a **copy** menu + a **pencil**. The copy menu
+first-seen snapshot; and the observer's `ObservedClaude.gitBranch` (fed into `SessionRegistry::ObserveClaude`,
+which does `assign(s.branch, o.gitBranch)`) is now also a **live writer** for `SessionInfo.branch` (the
+round-3 audit's "no live writer" gap), beside the off-thread transcript backfill.
+The badge also carries an **always-shown action group on row 2** (left of the dir/branch label) — a
+**folder** button (Open Path: the session's working dir via `explorer.exe`, off-thread) + a **copy** menu + a **pencil**. The copy menu
 yields `Session Id` · `Copy Path` (working dir) · `Copy Branch Name` · `Claude Launch CLI` · `Codex
 Launch CLI` (each the **REAL** full command — the live process commandline read from the PEB
 `ReadProcessCommandLine`, or the builder Launch/Restore would use, NOT a toy `--resume <id>`) ·
 `Summary` (the full textual session box) · `Transcript` (the whole conversation, user + assistant TEXT
 only via `ReadConversationText` — no tools/results/thinking). Every copy / Open Path plays a short
-confirmation chime (`PlaySoundW`). Built only for a LINKED session; collapsed at rest, revealed while
-the pointer is over the badge OR the copy menu is open.
+confirmation chime (`PlaySoundW`). Built only for a LINKED session; the action buttons stay visible —
+the whole badge is dim at rest (opacity ~0.55) and brightens on hover or while the copy menu is open
+(`_SetExpanded` toggles the badge opacity, not the buttons' visibility).
 The pencil toggles a **SUMMARY PANEL** — a **second overlay** in its own slot stacked **below the
 badge** (`TerminalPaneContent::SetAgentSummaryOverlay`, capped to **20% of the pane width**, re-capped
 on the wrapper's `SizeChanged`), shown while the **GLOBAL** `AppSettings.showSummaryPanel` is ON. The
@@ -1088,7 +1165,7 @@ for the plan-start/plan-end signal], session id, Dir, Folder, the resume CLI, Br
 dim when off / a lighter shade when on) at the RIGHT of the panel's **times bar** (the live
 age/last-user-msg/last-activity line stays left — a 2-column `Grid`) flips how a message renders its
 newlines: OFF (default, the session-end.js look) collapses each message to ONE line with newlines
-escaped to a literal `\n` (240-char cap), ON **preserves** the real newlines (multi-line, 2000-char cap;
+escaped to a literal `\n` (500-char cap), ON **preserves** the real newlines (multi-line, capped at 6 lines;
 the panel scrolls). GLOBAL + persisted exactly like `showSummaryPanel` (`AppSettings.summaryPanelWrapNewlines`,
 default off): `TerminalPage::_ToggleSummaryWrap` does the freshest-disk RMW + **live broadcast**
 (`AgentTabOverlay::SetSummaryWrapNewlines`, which invalidates the mtime gate so the panel re-renders —
@@ -1099,7 +1176,7 @@ and Codex (`RenderCodexSummary` — via `SummaryEscapeMsg`'s `wrapNewlines` mode
 `Border` rules (`HorizontalAlignment::Stretch`, re-fills on resize; a fixed run of `─` can't in a
 wrapping block), driven by a sentinel line (`\x1F`) the display turns into a `Border` and the plain-text
 copy turns into a `─` rule. **System-injected "user" messages are filtered** out of the Messages list
-(`ProcessInspect::SeIsCommandNoise` — the summary-only filter, distinct from titles/Flight-Plan's
+(`SeIsCommandNoise` (file-local in `ProcessInspect.cpp`) — the summary-only filter, distinct from titles/Flight-Plan's
 `IsNoiseUserPrompt`): `<command-*>` / `<bash-*>` echoes, `<task-notification>` /
 `<output-file>` / `<status>`+`<summary>`, subagent telemetry `<usage>` / `<subagent_tokens>`, background
 bash `<bash-notification>` / `<shell-id>` / `<persisted-output>`, `<background-task-input>`, and
@@ -1166,6 +1243,11 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,
     Terminal-settings seeding, and the one-instance-per-profile kernel mutex; included by the
     engine, AgentManagerContent, TerminalPage AND the WindowsTerminal EXE — PROFILES.md),
+    `Updater.h` (header-only, pure Win32 like `ProfileBootstrap.h` — the in-app GitHub-release
+    **auto-updater**: a bounded GitHub-API version check, the Update / Postpone (3·7·30 days) / Skip /
+    Not-now TaskDialog, and the BAKED-IN `am-update.cmd` + `am-update.ps1` installer it writes into the
+    active profile; included by the WindowsTerminal EXE [startup check] AND `TerminalApp.dll`'s Settings
+    cog — see the *In-app auto-updater* Status block),
     `tests/` (standalone harness, not in the msbuild — run `tests/run-m5-tests.bat`), and
     `cli/` — the **commandline introspection tool** (CLI.md): `agentcli.cpp` (the read-only P1
     reader — `show`/`list`/`sessions`/`tabs`/`windows`/`external`/`--self`/`--json`, linking these
@@ -1184,6 +1266,14 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
     overlay's hand-synced palette copy).
+  - `src/cascadia/TerminalApp/AgentTipHelpers.h` — the ONE islands-safe hover-tooltip recipe
+    (`AgentSetTip` / `AgentCloseTipOn`, a fast-open `DispatcherTimer`; `ToolTipService`'s auto-dismiss
+    is unreliable under XAML Islands), shared by `AgentManagerContent` + the Archive/Sessions pages
+    (thin TU-local wrappers `SessSetTip`/`ArchiveSetTip` delegate here).
+  - `src/cascadia/TerminalApp/AgentCopyActions.h` — the ONE shared `CopySessionField` action
+    (Session Id · working-dir Path · Branch · Claude/Codex Launch CLI · Transcript · Summary) behind
+    BOTH the per-tab overlay's copy menu (`AgentTabOverlay`) AND the Triage Board / Explorer-tree
+    session menu's Copy submenu (`AgentManagerContent`), so the two copy menus can never drift apart.
   - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,ArchivePage,SessionsPage}.cpp`
     — the TerminalPage-side Agentmaster *implementation* in six same-class TUs (the upstream
     `TabManagement.cpp` pattern; the original five were split out of `TerminalPage.cpp` as a pure
@@ -1236,7 +1326,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   auto-assigned colors, so a folder keeps its color across restarts), `sessions-index/<sid>.json` (the Sessions browser's
   per-session search/stats sidecar cache — `(size,mtime)`-keyed, incrementally re-accumulated
   from the stored byte offset), `settings.json`
-  (the Settings cog's `AppSettings`), `windows/<id>.json` (M10 per-window UI-state records —
+  (the Settings cog's `AppSettings`, incl. the updater's `allowUpdatePrerelease` / `updateSkippedVersion` /
+  `updatePostponedUntilUnixMs` keys), `am-update.cmd` + `am-update.ps1` (the in-app updater's baked-in
+  installer, written here on "Update now"; *Updater.h*), `windows/<id>.json` (M10 per-window UI-state records —
   one file per window; captured + autosaved + restored), `open-windows.json` (the M10 Increment-3
   open-at-exit manifest — the live window-id set the next launch reopens), `bridge.json`
   (live-bridge discovery for the shim), `shim/` (the transparent `claude` PATH shim —
@@ -1778,8 +1870,10 @@ build **binlog uploads as an artifact** to diagnose the first run.
    user-initiated **Restore** re-launches one: `claude --resume <id>` (same id ⇒ hooks still
    correlate) **only when Claude has a transcript for that id**, else a fresh session (new id,
    same dir + queue, stale archived record dropped). Queues reload with statuses intact. Closing
-   a tab **archives** (keeps the record, `live=false`); there is **no discard** — archive is
-   terminal, and the Claude transcript on disk is never deleted. Never decide resume from the
+   a tab confirms **Archive vs Delete**: Archive keeps the record (`live=false`, restorable); **Delete
+   permanently** drops the registry record but **keeps the conversation `.jsonl` on disk** (it still
+   appears in the Sessions browser, resumable from there). The Claude transcript on disk is never
+   deleted by either path. Never decide resume from the
    persisted `SessionState` (it's the live post-restore state) — see Gotchas.
 7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).
 8. **Same directory = same path, filesystem-aware.** Group/scope/match sessions by working
