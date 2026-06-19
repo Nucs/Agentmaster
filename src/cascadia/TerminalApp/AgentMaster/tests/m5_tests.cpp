@@ -2046,6 +2046,14 @@ static void TestBlockedAndInterruptedStates()
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Idle, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: an Idle session has no turn to end");
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::WaitingForInput, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: already settled -> no-op");
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Done, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Done is never re-ended/revived");
+    // Agentmaster (idle<->running flap fix): a RUNNING session whose tail is a PENDING tool_use is
+    // mid-turn — claude is running a tool (a long Bash/build) or waiting/retrying the next API call
+    // ("No response from API · Retrying in …"), during which it is not generating so its heartbeat
+    // reads "idle" and the transcript sits quiet. Releasing it would flap Running<->Waiting against
+    // recon-run every scan (the "card bg" report). It must NOT release regardless of how long it has
+    // been quiet; only the cleared-tail no-op turn (above) releases for Running.
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Running + idle + PENDING tool_use tail (mid-tool / API-retry backoff) -> NOT released (would flap against recon-run)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs * 100), "presence-idle: a Running pending tool_use stays held no matter how long quiet (a long Bash/build or multi-minute API retry is still the same turn)");
 
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {

@@ -272,6 +272,16 @@ namespace Agentmaster
     // genuine in-flight turn (incl. an extended-thinking pause, which keeps the heartbeat "busy") reads
     // "busy". The caller additionally gates this on no pending interactive tool so it never pre-empts
     // recon-block's blocked-on-question -> NeedsApproval path.
+    //
+    // Agentmaster (idle<->running flap fix): for the RUNNING state this fires ONLY when the tail's
+    // stop_reason is CLEARED (a bare user prompt that produced no assistant output — the no-op turn it
+    // was built for), NEVER on a PENDING tool_use. A pending tool_use means claude is MID-TURN — running
+    // a tool (a long Bash/build) or waiting on the next API call, INCLUDING a "No response from API ·
+    // Retrying in …" backoff — during which claude is not generating, so its heartbeat reads "idle" and
+    // the transcript sits quiet, yet the turn is NOT over. Releasing it there oscillates the session
+    // Running<->WaitingForInput against recon-run every scan (the reported "card bg" flap, and the
+    // "jumps to idle/waiting while the API is retrying" bug). NeedsApproval is unaffected (its pending
+    // tool_use is the AskUserQuestion — once answered + idle, that turn really is settled).
     inline bool ShouldSynthesizeStopFromPresenceIdle(SessionState state, std::wstring_view presenceStatus, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs) noexcept
     {
         if (state != SessionState::Running && state != SessionState::NeedsApproval)
@@ -281,6 +291,15 @@ namespace Agentmaster
         if (interrupted || IsTerminalStopReason(lastStopReason))
         {
             return false; // a terminal / interrupted tail is the plain missed-Stop's job (no double-fire)
+        }
+        if (state == SessionState::Running && !lastStopReason.empty())
+        {
+            // A non-terminal-but-PENDING tail (tool_use) on a Running session == claude is mid-turn
+            // (tool running, or waiting/retrying the next API call). "idle" presence here is a not-
+            // generating signal, not a turn-end one — releasing it would flap against recon-run. The
+            // no-op-turn release this backstop exists for has the stop_reason CLEARED (empty), so it
+            // still fires for that case. (NeedsApproval keeps the pending-tool_use release above.)
+            return false;
         }
         if (quietForMs < kScanPresenceIdleQuiescenceMs)
         {
