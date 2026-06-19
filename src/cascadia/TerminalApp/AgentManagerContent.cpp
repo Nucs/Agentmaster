@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath> // std::pow — relative-luminance black/white contrast pick for the card title band
 #include <filesystem> // create_directories — the "Create & Launch" affordance for a not-yet-existing dir
 #include <system_error> // std::error_code — non-throwing create_directories
 #include <thread> // background transcript read for an external's read-only plan
@@ -64,6 +65,58 @@ namespace
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
+    }
+
+    // Agentmaster: "#RRGGBB" -> opaque Color (the per-working-directory tab color, for the Triage
+    // card's title band). Mirrors the Sessions page's SessHexToColor. nullopt on anything malformed.
+    std::optional<Color> HexToColor(const std::wstring& hex)
+    {
+        if (hex.size() != 7 || hex[0] != L'#')
+        {
+            return std::nullopt;
+        }
+        auto nib = [](wchar_t c) -> int {
+            if (c >= L'0' && c <= L'9')
+            {
+                return c - L'0';
+            }
+            if (c >= L'a' && c <= L'f')
+            {
+                return 10 + (c - L'a');
+            }
+            if (c >= L'A' && c <= L'F')
+            {
+                return 10 + (c - L'A');
+            }
+            return -1;
+        };
+        int v[6];
+        for (int i = 0; i < 6; ++i)
+        {
+            v[i] = nib(hex[1 + i]);
+            if (v[i] < 0)
+            {
+                return std::nullopt;
+            }
+        }
+        return ColorHelper::FromArgb(0xFF,
+                                     static_cast<uint8_t>(v[0] * 16 + v[1]),
+                                     static_cast<uint8_t>(v[2] * 16 + v[3]),
+                                     static_cast<uint8_t>(v[4] * 16 + v[5]));
+    }
+
+    // Agentmaster: pick BLACK vs WHITE text for the best contrast over a solid fill, so the Triage
+    // card's title stays legible on ANY working-dir band color — black on a LIGHT band, white on a
+    // DARK one. Uses the WCAG relative-luminance crossover (~0.179): above it black has the higher
+    // contrast ratio, below it white does. Returns true when DARK (black) text should be used.
+    bool PreferDarkTextOn(const Color& c)
+    {
+        const auto lin = [](uint8_t v) {
+            const double s = v / 255.0;
+            return s <= 0.03928 ? s / 12.92 : std::pow((s + 0.055) / 1.055, 2.4);
+        };
+        const double luminance = 0.2126 * lin(c.R) + 0.7152 * lin(c.G) + 0.0722 * lin(c.B);
+        return luminance > 0.179;
     }
 
     // Agentmaster: put text on the system clipboard (the context menus' "Copy Session Id"). Mirrors
@@ -2056,10 +2109,37 @@ namespace winrt::TerminalApp::implementation
         const bool selected = (s.id == _selectedId);
         const auto accent = StateColor(s.state);
 
+        // Agentmaster: the card BODY (everything below the colored title band) — codex pill,
+        // working dir, model·effort, timing, autopilot badge. The title itself lives in the band.
         auto stack = StackPanel{};
         stack.Spacing(2);
 
-        stack.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0));
+        // Agentmaster: a colored TITLE BAND across the top of the card, painted the session's
+        // working-directory color — the SAME permanent color the dir's terminal TABS wear (Rule
+        // #12 / dir-colors.json) — so a card reads its folder at a glance and clusters with its
+        // siblings across the state columns. Its TOP corners follow the card's rounding while its
+        // BOTTOM is a straight edge (square corners) where it meets the neutral body: it covers
+        // ONLY the title. The title text flips black/white for contrast (PreferDarkTextOn) so it
+        // stays legible on a LIGHT or DARK band. Falls back to the neutral card fill (white text)
+        // if the dir has no resolvable color. Persisted color first (matches the tab exactly),
+        // else the deterministic auto color — the same precedence the Sessions-page chip uses.
+        std::optional<Color> bandColor;
+        {
+            const auto hex = ::Agentmaster::GetDirColor(s.workingDir);
+            bandColor = HexToColor(hex ? *hex : ::Agentmaster::AutoDirColorHex(s.workingDir));
+        }
+        auto titleText = Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0);
+        if (bandColor)
+        {
+            const uint8_t ink = PreferDarkTextOn(*bandColor) ? 0x10 : 0xFF; // near-black on light, white on dark
+            titleText.Foreground(Fill(0xFF, ink, ink, ink));
+        }
+        Border band;
+        band.Background(bandColor ? SolidColorBrush{ *bandColor } : Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
+        band.CornerRadius(CornerRadius{ 4, 4, 0, 0 }); // rounded top (matches the card), straight bottom edge
+        band.Padding(Thickness{ 8, 4, 8, 4 });
+        band.Child(titleText);
+
         // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
         // from Claude (the implicit default — no pill, visuals unchanged).
         if (s.kind == AgentKind::Codex)
@@ -2160,6 +2240,7 @@ namespace winrt::TerminalApp::implementation
         dotsBtn.Height(20);
         dotsBtn.HorizontalAlignment(HorizontalAlignment::Right);
         dotsBtn.VerticalAlignment(VerticalAlignment::Top);
+        dotsBtn.Margin(Thickness{ 0, 4, 6, 0 }); // inset from the top-right corner (the card no longer pads its content); floats over the title band, clear of the rounded corner
         dotsBtn.Background(Fill(0x66, 0x30, 0x30, 0x30)); // faint chip so the glyph reads over the title behind it
         dotsBtn.Foreground(Fill(0xF0, 0xFF, 0xFF, 0xFF));
         dotsBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
@@ -2176,16 +2257,30 @@ namespace winrt::TerminalApp::implementation
         dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir)); // a click opens the session menu
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
+        // Agentmaster: the body carries the inset the card used to own (card Padding is now 0 so
+        // the colored band can bleed to the card's rounded top corners + side edges); the outer
+        // StackPanel pins the band over the body with spacing 0 so the band's straight bottom sits
+        // flush against the body.
+        auto bodyBorder = Border{};
+        bodyBorder.Padding(Thickness{ 8, 6, 8, 6 });
+        bodyBorder.Child(stack);
+
+        auto outer = StackPanel{};
+        outer.Spacing(0);
+        outer.Children().Append(band);
+        outer.Children().Append(bodyBorder);
+
         auto grid = Grid{};
-        grid.Children().Append(stack);
+        grid.Children().Append(outer);
         grid.Children().Append(dotsBtn);
 
         auto card = Button{};
         card.Content(grid);
         card.HorizontalAlignment(HorizontalAlignment::Stretch);
-        card.HorizontalContentAlignment(HorizontalAlignment::Stretch); // let the Grid fill so the dots reach the true top-right corner
-        card.Padding(Thickness{ 8, 6, 8, 6 });
+        card.HorizontalContentAlignment(HorizontalAlignment::Stretch); // let the Grid fill so the band reaches the card edges + the dots reach the true top-right corner
+        card.Padding(Thickness{ 0, 0, 0, 0 }); // band + body own their insets now, so the title band can reach the rounded top corners
         card.Margin(Thickness{ 0, 0, 0, 6 });
+        card.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // explicit, so the title band's top corners (4,4,0,0) line up with the card rounding
         card.Background(Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
         // Agentmaster: the state-colored border is visual noise at rest on a busy board — show it
         // only when the card is SELECTED or HOVERED. The brush stays the state accent (also pushed
