@@ -6,6 +6,9 @@
 ## Development Rules
 
 - Do not build or deploy or install without the user's permission.
+- Do commit changes once done — a single `git add` + `git commit` with an extensive
+  message (see *Commit Instructions* in the global guidance). Committing needs no
+  permission; only build/deploy/install do.
 
 ## What we're doing & our aim
 
