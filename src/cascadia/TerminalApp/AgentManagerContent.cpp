@@ -1814,58 +1814,56 @@ namespace winrt::TerminalApp::implementation
                 // TextBox has no direct VerticalScrollBarVisibility in this projection — it's the
                 // attached ScrollViewer property (see Gotchas: this XAML projection differs from WPF).
                 ScrollViewer::SetVerticalScrollBarVisibility(_addPromptBox, ScrollBarVisibility::Auto);
-                // Agentmaster (prompt history): Up on the first line / Down on the last line recall the
-                // selected session's previously SENT prompts (the shell/REPL idiom) — see
-                // _BuildPromptHistory / _ApplyPromptHistoryText. PreviewKeyDown (tunneling) runs BEFORE
-                // the TextBox's own arrow handling — the only place we can both read the caret's
-                // pre-move position AND suppress the default caret motion (marking it Handled) when the
-                // caret is at the relevant edge; the same reason the rename box uses PreviewKeyDown for
-                // Enter. When the caret is NOT at the edge we return without handling, so the arrow
-                // moves within a multi-line prompt as usual.
+                // Agentmaster (prompt history): recall the selected session's previously SENT prompts
+                // (the shell/REPL idiom) — see _BuildPromptHistory / _ApplyPromptHistoryText. On the live
+                // DRAFT (the "bottom prompt") Up enters history once the caret reaches the FIRST line (the
+                // "cursor at the top line" trigger), while Down is left as normal caret motion — nothing is
+                // newer than the draft, so only it is "moved by Down". Once BROWSING history, Up/Down walk
+                // older/newer FREELY (no caret gate — a recalled prompt is navigated, not caret-edited),
+                // and Down off the newest entry restores the pre-history draft. PreviewKeyDown (tunneling)
+                // runs BEFORE the TextBox's own arrow handling — the only place we can read the caret's
+                // pre-move position AND suppress the default caret motion via Handled (the same reason the
+                // rename box uses PreviewKeyDown for Enter).
                 _addPromptBox.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
                     const auto key = e.Key();
                     if (key == VirtualKey::Up)
                     {
-                        if (!_PromptCaretOnFirstLine())
-                        {
-                            return; // not at the top line — let Up move the caret up within the text
-                        }
                         if (_promptHistoryIndex < 0)
                         {
-                            // Enter navigation: snapshot the sent prompts (newest first) + stash the draft.
+                            // On the draft: move the caret up within a multi-line draft until the first
+                            // line; only THERE enter history (the "cursor at the top line" trigger).
+                            if (!_PromptCaretOnFirstLine())
+                            {
+                                return;
+                            }
                             _promptHistory = _BuildPromptHistory();
                             if (_promptHistory.empty())
                             {
-                                return; // nothing to recall
+                                return; // nothing to recall — leave Up alone
                             }
                             _promptHistoryDraft = _addPromptBox ? std::wstring{ _addPromptBox.Text() } : std::wstring{};
                             _promptHistoryIndex = 0;
+                            _ApplyPromptHistoryText(_promptHistory[_promptHistoryIndex]);
                         }
                         else if (_promptHistoryIndex + 1 < static_cast<int>(_promptHistory.size()))
                         {
-                            ++_promptHistoryIndex; // older
+                            // Browsing history: Up walks OLDER freely (no caret gate).
+                            ++_promptHistoryIndex;
+                            _ApplyPromptHistoryText(_promptHistory[_promptHistoryIndex]);
                         }
-                        else
-                        {
-                            e.Handled(true); // already at the oldest — swallow so the caret doesn't jump
-                            return;
-                        }
-                        _ApplyPromptHistoryText(_promptHistory[_promptHistoryIndex]);
+                        // else: already at the oldest — fall through to swallow so the caret doesn't jump.
                         e.Handled(true);
                     }
                     else if (key == VirtualKey::Down)
                     {
                         if (_promptHistoryIndex < 0)
                         {
-                            return; // not navigating — Down moves the caret normally
+                            return; // the bottom prompt (draft) — nothing newer; let Down move the caret
                         }
-                        if (!_PromptCaretOnLastLine())
-                        {
-                            return; // mid-text — let Down move the caret down within the recalled prompt
-                        }
+                        // Browsing history: Down walks NEWER freely (no caret gate). Off the newest entry
+                        // it restores the draft you had before entering history (back to the bottom prompt).
                         if (_promptHistoryIndex == 0)
                         {
-                            // Step below the newest: restore the draft and leave navigation.
                             _promptHistoryIndex = -1;
                             _ApplyPromptHistoryText(_promptHistoryDraft);
                         }
@@ -6996,26 +6994,6 @@ namespace winrt::TerminalApp::implementation
         const int32_t caret = _addPromptBox.SelectionStart();
         const int32_t limit = std::min<int32_t>(caret, static_cast<int32_t>(text.size()));
         for (int32_t i = 0; i < limit; ++i)
-        {
-            if (text[i] == L'\n' || text[i] == L'\r')
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // Agentmaster (prompt history): is the caret on the LAST logical line? True when no line break
-    // follows it (the far edge of any selection). An empty box / caret at end counts as the last line.
-    bool AgentManagerContent::_PromptCaretOnLastLine() const
-    {
-        if (!_addPromptBox)
-        {
-            return false;
-        }
-        const std::wstring text{ _addPromptBox.Text() };
-        const int32_t caret = _addPromptBox.SelectionStart() + _addPromptBox.SelectionLength();
-        for (int32_t i = std::max<int32_t>(0, caret); i < static_cast<int32_t>(text.size()); ++i)
         {
             if (text[i] == L'\n' || text[i] == L'\r')
             {
