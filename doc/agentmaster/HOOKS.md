@@ -15,7 +15,7 @@ un-hooked one converge on the same record — the difference is latency.
 ## Session correlation
 
 When the Manager spawns a session it sets two environment variables on the child `claude.exe`
-(`ClaudeSpawn.cpp`, `BuildClaudeSpec`):
+(`ClaudeSpawn.cpp` — `BuildClaudeSpawn`, via `AppendManagedClaudeEnv`):
 
 ```
 CCMGR_SESSION_ID=<guid>     # == Claude's own --session-id  (the correlation key)
@@ -219,14 +219,14 @@ Two fields are computed in the forwarder, not just relayed:
 
 ## How a session gets the hook config
 
-- **Manager-Launched** (`BuildClaudeSpec`): claude is spawned with
+- **Manager-Launched** (`BuildClaudeSpawn`): claude is spawned with
   `--settings <~/.agentmaster/hooks-settings.json>` plus `CCMGR_SESSION_ID` / `CCMGR_HOOK_PIPE` in
   `spec.env`. The settings file (`BuildHooksSettingsJson`) carries the six hook blocks **and** the
   cog's optional Claude-session settings (`model`, `includeCoAuthoredBy`, `permissions.defaultMode`)
   — each emitted only when it differs from Claude's default, so an all-defaults config stays
   byte-for-byte the prior hooks-only file.
 - **Hand-typed `claude`** (a `+` tab): a transparent **PATH shim** (`~/.agentmaster/shim/claude.cmd`
-  + a POSIX `claude`, authored by `MaterializeClaudeShim`) injects `--settings <ours>` then execs
+  + a POSIX `claude`, authored by `MaterializeClaudeShim`) prepends `--dangerously-skip-permissions --settings <ours>` (only when you didn't already pass `--settings`) then execs
   the real claude (resolved *before* the PATH prepend so it never finds itself). Combined with the
   `bridge.json` pipe-discovery and the payload `session_id` fallback, a bare `claude` self-wires —
   **when** it inherits our process env. See the degradation caveat above; the Fleet Observer is the
