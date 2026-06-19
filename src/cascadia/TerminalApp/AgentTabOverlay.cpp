@@ -53,7 +53,6 @@ namespace
     // Geometric, monochrome glyphs only (match the Manager / Triage Board; no wide color emoji).
     constexpr const wchar_t* kDot = L"\x00B7"; // ·
     constexpr const wchar_t* kHourglass = L"\x23F3"; // ⏳
-    constexpr const wchar_t* kLink = L"\x26D3"; // ⛓
     // Summary-box section separator SENTINEL: the renderers emit this as a lone line; the DISPLAYED
     // panel turns each into a full-width Border rule (border to border, re-fills on resize), and the
     // COPYABLE summary turns each into a plain-text ─ rule. \x1F (ASCII Unit Separator) never occurs
@@ -761,8 +760,8 @@ namespace winrt::TerminalApp::implementation
 
         // Row 2 label: "<root workdir folder>/<branch>" — secondary (smaller + dimmer), width-capped +
         // ellipsized so a long branch path can't balloon the HUD. Collapsed until _Refresh() fills it;
-        // stays collapsed on the registry-less observe badge (no session). Vertically centered so it lines
-        // up with the (taller) action buttons that sit to its left.
+        // stays collapsed on the registry-less observe badge (no session). (The action buttons used to sit
+        // to its left in row 2; they now live in row 1, right after the status block.)
         _subline = TextBlock{};
         _subline.FontSize(11);
         _subline.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0));
@@ -773,9 +772,9 @@ namespace winrt::TerminalApp::implementation
         _subline.MaxWidth(380);
         _subline.Visibility(Visibility::Collapsed);
 
-        // Row 2: the action buttons (folder/copy/pencil, built lazily by _BuildActionsRow for a LINKED
-        // session) are inserted at index 0, to the LEFT of the dir/branch label, and are ALWAYS shown
-        // (no longer hover-only). The whole row is right-aligned so [actions][label] hug the right edge.
+        // Row 2: just the "<root workdir folder>/<branch>" label, right-aligned so it hugs the right edge.
+        // (The action buttons used to live here at index 0; they now sit in ROW 1, immediately after the
+        // status block — see _BuildActionsRow / _Refresh.)
         _row2 = StackPanel{};
         _row2.Orientation(Orientation::Horizontal);
         _row2.HorizontalAlignment(HorizontalAlignment::Right);
@@ -934,13 +933,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         const bool bound = _registry->HasInjector(_sessionId);
-        const std::wstring link = bound ? (std::wstring{ kLink } + L" linked") :
-                                          (s.external ? std::wstring{ L"observe" } : std::wstring{ L"unlinked" });
+        // Link state is surfaced ONLY when NOT linked (observe / unlinked). When linked (bound) the badge
+        // shows NOTHING for link state — a managed tab's badge being present already implies the link, so
+        // only the abnormal states are worth calling out.
+        const std::wstring link = s.external ? std::wstring{ L"observe" } : std::wstring{ L"unlinked" };
 
-        // Row 1 is built as DISCRETE, individually-tooltipped parts (task 3): status · model·effort ·
-        // Autopilot[button] · queue · link. A small helper appends a text part (optional tooltip);
-        // separators reproduce the one-line look ("  ·  ") as their own tooltip-less elements so the
-        // strip still reads as one continuous line.
+        // Row 1 is built as DISCRETE, individually-tooltipped parts: status · Autopilot[button] · queue
+        // · link. A small helper appends a text part (optional tooltip); separators reproduce the
+        // one-line look ("  ·  ") as their own tooltip-less elements so the strip reads as one line.
         _row1.Children().Clear();
         const auto fg = Fill(0xFF, 0xEC, 0xEC, 0xEC);
         const auto appendText = [&](const std::wstring& t, const wchar_t* tip, const SolidColorBrush& brush) {
@@ -982,36 +982,12 @@ namespace winrt::TerminalApp::implementation
             _row1.Children().Append(tb);
         }
 
-        // model · effort · bg (only the parts the Fleet Observer knows).
+        // Action buttons (folder / copy menu / pencil) sit immediately AFTER the status block, so the strip
+        // reads status (leftmost) -> actions -> autopilot · queue · link. Built once by _BuildActionsRow
+        // (a LINKED session only); re-appended here every pass because _row1 is cleared+rebuilt above.
+        if (_actions)
         {
-            std::wstring me;
-            const auto addPart = [&](const std::wstring& part) {
-                if (part.empty())
-                {
-                    return;
-                }
-                if (!me.empty())
-                {
-                    me += L" ";
-                    me += kDot;
-                    me += L" ";
-                }
-                me += part;
-            };
-            addPart(s.model);
-            addPart(s.effort);
-            if (s.background)
-            {
-                addPart(L"bg");
-            }
-            if (!me.empty())
-            {
-                appendSep();
-                appendText(me,
-                           L"Model \x00B7 reasoning effort this session is running"
-                           L" (\x00B7 bg marks a background session).",
-                           fg);
-            }
+            _row1.Children().Append(_actions);
         }
 
         // Autopilot mode — a CLICKABLE button that cycles Off -> Semi -> Full -> Off (task 2). Colored
@@ -1064,12 +1040,15 @@ namespace winrt::TerminalApp::implementation
                        L"Prompts queued and waiting to be sent (Pending).", fg);
         }
 
-        // link state.
-        appendSep();
-        appendText(link,
-                   L"Link state \x2014 whether Agentmaster can drive this session.\n"
-                   L"\x26D3 linked: bound, can send. observe: read-only (hosted elsewhere). unlinked: not bound.",
-                   fg);
+        // link state — surfaced ONLY when NOT linked (observe / unlinked); a linked session shows nothing.
+        if (!bound)
+        {
+            appendSep();
+            appendText(link,
+                       L"Link state \x2014 Agentmaster cannot drive this session.\n"
+                       L"observe: read-only (hosted elsewhere). unlinked: not bound.",
+                       fg);
+        }
 
         // Row 2: "<root workdir folder>/<branch>" — the leaf of the session's working dir joined with
         // its git branch (e.g. C:/folder/myworkdir + "feature/issue123" -> "myworkdir/feature/issue123").
@@ -1145,7 +1124,7 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTabOverlay::_SetExpanded(bool on)
     {
-        // The action buttons are ALWAYS shown now (they live in row 2, left of the dir/branch label), so
+        // The action buttons are ALWAYS shown now (they live in row 1, right after the status block), so
         // this only dims/brightens the WHOLE badge: dim at rest, full on hover OR while the copy menu is
         // pinned open.
         if (_root)
@@ -1189,7 +1168,7 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTabOverlay::_BuildActionsRow()
     {
-        if (_actions || !_row2)
+        if (_actions || !_row1)
         {
             return; // built once, and only for a LINKED session (never an observe badge)
         }
@@ -1283,15 +1262,15 @@ namespace winrt::TerminalApp::implementation
 
         _actions = StackPanel{};
         _actions.Orientation(Orientation::Horizontal);
-        _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the dir/branch label to its right
+        _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the row-1 status/autopilot parts
         _actions.Spacing(2);
-        _actions.Margin(ThicknessHelper::FromLengths(0, 0, 4, 0)); // a small gap before the dir/branch label
+        _actions.Margin(ThicknessHelper::FromLengths(4, 0, 0, 0)); // a small gap after the status block to its left
         _actions.Children().Append(folderBtn);
         _actions.Children().Append(copyBtn);
         _actions.Children().Append(pencilBtn);
-        // ALWAYS shown now (no longer hover-only): insert at index 0 of row 2 so the buttons sit to the
-        // LEFT of the dir/branch label, with [actions][label] right-aligned as a group.
-        _row2.Children().InsertAt(0u, _actions);
+        // ALWAYS shown (no longer hover-only). The buttons live in ROW 1 now, immediately to the RIGHT of
+        // the status block (so the strip reads status -> actions -> autopilot · queue · link). The actual
+        // append is done by _Refresh (it clears + rebuilds row 1 each pass), right after the status part.
     }
 
     void AgentTabOverlay::_OpenFolder()
@@ -1577,8 +1556,17 @@ namespace winrt::TerminalApp::implementation
                 const auto p = e.GetCurrentPoint(nullptr).Position(); // island-relative; only the delta matters
                 self->_summaryDragStartX = p.X;
                 self->_summaryDragStartY = p.Y;
-                self->_summaryDragStartW = self->_CurrentSummaryWidthPx();
-                self->_summaryDragStartH = self->_CurrentSummaryHeightPx();
+                // Start from the ACTUAL rendered size, NOT the fraction cap. At rest the panel hugs THIS
+                // tab's content (Width/Height == auto), which on a short transcript is much smaller than the
+                // shared cap — and the grip sits at that content edge. Seeding the start from the cap would
+                // desync the grip from the pointer (the panel jumps to the cap on the first move). Seeding
+                // from ActualWidth/Height makes the grip track the pointer 1:1, so the panel grows smoothly
+                // PAST this tab's content up to the max band (the forced exact size in _ApplySummarySize).
+                // Fall back to the cap only before first layout (ActualWidth/Height == 0).
+                const double aw = self->_summaryRoot ? self->_summaryRoot.ActualWidth() : 0.0;
+                const double ah = self->_summaryScroll ? self->_summaryScroll.ActualHeight() : 0.0;
+                self->_summaryDragStartW = aw > 0.0 ? aw : self->_CurrentSummaryWidthPx();
+                self->_summaryDragStartH = ah > 0.0 ? ah : self->_CurrentSummaryHeightPx();
                 if (const auto el = sender.try_as<UIElement>())
                 {
                     el.CapturePointer(e.Pointer());
