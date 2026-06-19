@@ -298,6 +298,11 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
      including a live one, since a fork writes its OWN transcript so the two-writers hazard
      doesn't apply (`_ForkSessionFromDisk`) — **Open New Session Here**, and **Hide from list**
      (§1). Resume / Fork / Open-New open in a BACKGROUND tab so the list stays up for bulk-open.
+     **Resume / Fork follow the `/clear`+plan continuation chain to its TAIL**
+     (`ResolveContinuationTailOnDisk`): because a `/clear`'d or plan-restarted conversation mints a
+     *new* id into an UNLINKED file, they hop forward to the latest same-cwd non-fork link — so you
+     land where you left off, not on a stale early one (logged `[resume->continuation]` /
+     `[sessions-page->fork]`; the edge rule + skew/gap bounds live in `TranscriptStore`).
      **Double-click** an OPEN row jumps to its tab (`_ActivateClaudeSession`); on any other row it
      resumes (`_ResumeSessionFromDisk`).
 7. **Fork grouping:** dedupe search hits by line `uuid` (forks duplicate content verbatim);
@@ -366,8 +371,9 @@ The `si --json` schema adds what the JS rewrite dropped: **`commits[{hash,messag
 **Noise-suppression rules (adopt verbatim, §6.3/§6.4):** hide `agent-*` transcripts, 0-message
 sessions, `/clear`-only sessions, `queue-operation`-first task files; filter prompts matching
 `<command-message>`/`<command-name>`/`<local-command-`/`<bash-input|stdout|stderr>`/`^Caveat:`/
-`[Request interrupted` — **plus `<task-notification>`** (a post-hook schema addition his filter
-misses — today's log shows raw task-notification blobs as messages); dedupe repeated prompts;
+`[Request interrupted` — **plus `<task-notification>`, `<system-reminder`, `<teammate-message`**
+(post-hook schema additions his filter misses — the shipped `IsNoiseUserPrompt` catches all three;
+today's log shows raw task-notification blobs as messages); dedupe repeated prompts;
 suppress `Branch: HEAD` (detached); harvest `file-history-snapshot.trackedFileBackups` as an
 extra edited-files source (his `si` does, the JS hook doesn't).
 
