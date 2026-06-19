@@ -92,13 +92,6 @@ namespace winrt::TerminalApp::implementation
             }
             status.AgentStatusBrush(Media::SolidColorBrush{ *color });
             status.AgentStatusVisible(true);
-            // The dot's Stroke binds to AgentStatusStrokeBrush (default null). Seed the resting black
-            // outline the first time the dot appears, so the binding never paints a null stroke. Don't
-            // stomp an existing brush — the red-flash timer may have already set it (red/black).
-            if (!status.AgentStatusStrokeBrush())
-            {
-                status.AgentStatusStrokeBrush(Media::SolidColorBrush{ Colors::Black() });
-            }
         }
         CATCH_LOG();
     }
@@ -189,11 +182,11 @@ namespace winrt::TerminalApp::implementation
             return; // already flashing
         }
         _EnsureAgentFlashTimer();
-        _ApplyAgentFlashStrokeForSession(sessionId);
+        _ApplyAgentFlashRingForSession(sessionId);
     }
 
-    // Agentmaster (tab status-dot red flash): stop this session flashing + restore the resting black
-    // outline; when no flashing tabs remain, stop the shared timer. No-op if it wasn't flashing.
+    // Agentmaster (tab status-dot red flash): stop this session flashing + hide its red ring; when no
+    // flashing tabs remain, stop the shared timer. No-op if it wasn't flashing.
     void TerminalPage::_StopAgentFlash(const std::wstring& sessionId)
     {
         if (_flashingSessions.erase(sessionId) == 0)
@@ -204,7 +197,7 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto tab = it->second.get())
             {
-                _SetTabAgentDotStroke(tab, Colors::Black());
+                _SetTabFlashRing(tab, false); // hide the red ring (the dot's own black stroke + fill stay)
             }
         }
         if (_flashingSessions.empty())
@@ -268,14 +261,13 @@ namespace winrt::TerminalApp::implementation
         _agentFlashPhase = false;
     }
 
-    // Agentmaster (tab status-dot red flash): the shared-timer tick. Toggle the one phase and repaint
-    // EVERY flashing tab's outline together (red on the "on" phase, black on the "off" phase) — this is
-    // what keeps multiple flashing tabs synchronized. Prunes any session whose tab has gone away, and
-    // stops the timer once none remain.
+    // Agentmaster (tab status-dot red flash): the shared-timer tick. Toggle the one phase and show/hide
+    // EVERY flashing tab's red ring together (ring ON on the "on" phase, OFF otherwise) — this is what
+    // keeps multiple flashing tabs synchronized. Prunes any session whose tab has gone away, and stops
+    // the timer once none remain.
     void TerminalPage::_OnAgentFlashTick()
     {
         _agentFlashPhase = !_agentFlashPhase;
-        const auto stroke = _agentFlashPhase ? Colors::Red() : Colors::Black();
         for (auto it = _flashingSessions.begin(); it != _flashingSessions.end();)
         {
             TerminalApp::Tab tab{ nullptr };
@@ -288,7 +280,7 @@ namespace winrt::TerminalApp::implementation
                 it = _flashingSessions.erase(it); // tab closed / re-homed — drop it
                 continue;
             }
-            _SetTabAgentDotStroke(tab, stroke);
+            _SetTabFlashRing(tab, _agentFlashPhase); // ring ON on the red phase, OFF otherwise
             ++it;
         }
         if (_flashingSessions.empty())
@@ -297,23 +289,24 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (tab status-dot red flash): paint one flashing session's outline at the current shared
-    // phase. Used when a tab joins an in-progress flash so it lands on the same red/black beat as the rest.
-    void TerminalPage::_ApplyAgentFlashStrokeForSession(const std::wstring& sessionId)
+    // Agentmaster (tab status-dot red flash): show/hide one flashing session's red ring at the current
+    // shared phase. Used when a tab joins an in-progress flash so it lands on the same on/off beat as the rest.
+    void TerminalPage::_ApplyAgentFlashRingForSession(const std::wstring& sessionId)
     {
         if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
         {
             if (const auto tab = it->second.get())
             {
-                _SetTabAgentDotStroke(tab, _agentFlashPhase ? Colors::Red() : Colors::Black());
+                _SetTabFlashRing(tab, _agentFlashPhase);
             }
         }
     }
 
-    // Agentmaster (tab status-dot red flash): set a tab's status-dot OUTLINE brush (the Ellipse Stroke,
-    // bound to AgentStatusStrokeBrush). Idempotent on an unchanged color so a repeated same-phase paint
-    // doesn't churn the binding. UI thread only.
-    void TerminalPage::_SetTabAgentDotStroke(const TerminalApp::Tab& tab, winrt::Windows::UI::Color color)
+    // Agentmaster (tab status-dot red flash): show/hide a tab's RED FLASH RING — the ellipse behind the
+    // dot (TabHeaderControl.xaml, bound to AgentFlashRingVisible) whose edge peeks out as a red ring
+    // around the dot's black stroke. The dot's own stroke + fill are untouched. Idempotent (the
+    // WINRT_OBSERVABLE_PROPERTY no-ops on an unchanged value). UI thread only.
+    void TerminalPage::_SetTabFlashRing(const TerminalApp::Tab& tab, bool on)
     {
         if (!tab)
         {
@@ -326,12 +319,7 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            if (const auto cur = status.AgentStatusStrokeBrush().try_as<Media::SolidColorBrush>();
-                cur && cur.Color() == color)
-            {
-                return; // already this exact stroke — don't re-raise the binding
-            }
-            status.AgentStatusStrokeBrush(Media::SolidColorBrush{ color });
+            status.AgentFlashRingVisible(on);
         }
         CATCH_LOG();
     }

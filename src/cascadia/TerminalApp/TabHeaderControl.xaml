@@ -84,10 +84,7 @@
               managed Claude session (the Triage-Board palette via AgentStatusColors.h), dim gray for
               an observed-only tab; collapsed on anything Agentmaster doesn't classify. An Ellipse
               (originally a "●" TextBlock): a real filled shape renders BOLDER than the glyph's ink at
-              the same size, takes a thin Stroke (AgentStatusStrokeBrush — black at rest, seeded by
-              _SetTabAgentDot the first time the dot shows; bound, not a literal, so TerminalPage's
-              shared timer can FLASH it red when a hosted session goes from Running to a resting state
-              [idle / waiting-for-you / approval-required] on a tab you haven't visited) so the dot
+              the same size, takes a thin BLACK Stroke so the dot
               stays legible on ANY tab background
               (per-dir colored tabs, the selected-tab highlight, light themes), and centers
               deterministically — no font line-box / baseline concerns. The Fill binds the same
@@ -100,15 +97,38 @@
               sits close to the icon without any element hanging off the border. Top +1 / bottom -1
               dips the dot 1px below slot-center (dead-center reads optically HIGH against the
               title) while the consumed height stays 10px (no header-row growth).  -->
-        <Ellipse x:Name="HeaderAgentStatusDot"
-                 Width="10"
-                 Height="10"
-                 Margin="0,1,6,-1"
-                 VerticalAlignment="Center"
-                 Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
-                 Stroke="{x:Bind TabStatus.AgentStatusStrokeBrush, Mode=OneWay}"
-                 StrokeThickness="1"
-                 Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
+        <!--  Agentmaster (RED FLASH RING): the status dot wrapped so a red ring can flash AROUND it.
+              The wrap Grid keeps the dot's original 10px footprint + margin (no layout shift). The ring
+              is a larger (14px) red ellipse drawn FIRST (behind); the 10px dot on top covers its centre
+              so only a ~2px red ring peeks out AROUND the dot's black stroke — reading outside-in: red
+              ring, then black stroke, then the status-colour fill. The ring overflows the 10px wrap by
+              ~2px each side (into the icon/title gaps — not clipped). It shows only while the shared
+              flash timer toggles AgentFlashRingVisible (every 600ms) on an unvisited Running->resting
+              tab; the dot's own black stroke + status fill never change. IsHitTestVisible=False: purely
+              decorative, never eats a tab click.  -->
+        <Grid x:Name="HeaderAgentStatusDotWrap"
+              Width="10"
+              Height="10"
+              Margin="0,1,6,-1"
+              VerticalAlignment="Center">
+            <Ellipse x:Name="HeaderAgentStatusFlashRing"
+                     Width="14"
+                     Height="14"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     IsHitTestVisible="False"
+                     Fill="Red"
+                     Visibility="{x:Bind TabStatus.AgentFlashRingVisible, Mode=OneWay}" />
+            <Ellipse x:Name="HeaderAgentStatusDot"
+                     Width="10"
+                     Height="10"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
+                     Stroke="Black"
+                     StrokeThickness="1"
+                     Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
+        </Grid>
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"
                    Visibility="Visible" />

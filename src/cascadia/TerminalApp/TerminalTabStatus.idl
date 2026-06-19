@@ -23,12 +23,12 @@ namespace TerminalApp
         Boolean AgentStatusVisible { get; set; };
         Windows.UI.Xaml.Media.Brush AgentStatusBrush { get; set; };
 
-        // Agentmaster (status-dot OUTLINE): the dot's Stroke brush. Normally black (a thin contrast
-        // ring, set by TerminalPage::_SetTabAgentDot the first time the dot shows). When a hosted
-        // session goes from Running to a resting state (Idle / WaitingForInput / NeedsApproval) while
-        // its tab is unvisited, TerminalPage's shared flash timer drives this between red and black
-        // every 600ms so the dot's outline blinks red for attention.
-        Windows.UI.Xaml.Media.Brush AgentStatusStrokeBrush { get; set; };
+        // Agentmaster (status-dot RED FLASH RING): when a hosted session goes from Running to a resting
+        // state (Idle / WaitingForInput / NeedsApproval) while its tab is unvisited, TerminalPage's
+        // shared 600ms timer toggles this so a RED RING — a separate ellipse drawn BEHIND the dot, its
+        // edge peeking out AROUND the dot's black outline — blinks on and off for attention. The dot
+        // itself keeps its constant black outline + status-colour fill; only the ring flashes.
+        Boolean AgentFlashRingVisible { get; set; };
 
         // Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background drawn
         // BEHIND the tab header (bound by TabHeaderControl.xaml), shown ONLY while the Agent Manager
