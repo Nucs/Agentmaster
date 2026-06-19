@@ -1834,42 +1834,75 @@ namespace winrt::TerminalApp::implementation
                 // TextBox has no direct VerticalScrollBarVisibility in this projection — it's the
                 // attached ScrollViewer property (see Gotchas: this XAML projection differs from WPF).
                 ScrollViewer::SetVerticalScrollBarVisibility(_addPromptBox, ScrollBarVisibility::Auto);
-                // Agentmaster (prompt history): recall the selected session's previously SENT prompts
-                // (the shell/REPL idiom) — see _BuildPromptHistory / _ApplyPromptHistoryText. On the live
-                // DRAFT (the "bottom prompt") Up enters history once the caret reaches the FIRST line (the
-                // "cursor at the top line" trigger), while Down is left as normal caret motion — nothing is
-                // newer than the draft, so only it is "moved by Down". Once BROWSING history, Up/Down walk
-                // older/newer FREELY (no caret gate — a recalled prompt is navigated, not caret-edited),
-                // and Down off the newest entry restores the pre-history draft. PreviewKeyDown (tunneling)
-                // runs BEFORE the TextBox's own arrow handling — the only place we can read the caret's
-                // pre-move position AND suppress the default caret motion via Handled (the same reason the
-                // rename box uses PreviewKeyDown for Enter).
+                // Agentmaster (prompt history + compose chords): recall the selected session's previously
+                // SENT prompts (the shell/REPL idiom) and submit from the keyboard — see _BuildPromptHistory
+                // / _ApplyPromptHistoryText. On the live DRAFT (the "bottom prompt") Up enters history once
+                // the caret reaches the FIRST VISUAL ROW (so it walks within a wrapped/multi-line draft and
+                // only recalls at the very top), while Down is plain caret motion — nothing is newer than the
+                // draft, so only it is "moved by Down". Once BROWSING history Up/Down walk older/newer FREELY
+                // (no caret gate — a recalled prompt is navigated, not caret-edited; Esc cancels back to the
+                // draft), and Down off the newest entry restores the draft. Shift+Enter sends the composed/
+                // recalled prompt now (the "!" action); a plain Enter stays a newline. PreviewKeyDown
+                // (tunneling) runs BEFORE the TextBox's own handling — the only place we can read the caret's
+                // pre-move position AND suppress the default motion/newline via Handled (the rename box uses
+                // PreviewKeyDown for Enter for the same reason).
                 _addPromptBox.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
                     const auto key = e.Key();
+                    // Modifier snapshot (mirrors the rename box's CoreWindow::GetKeyState check).
+                    bool shift = false, ctrl = false, alt = false;
+                    if (const auto w = CoreWindow::GetForCurrentThread())
+                    {
+                        const auto down = winrt::Windows::UI::Core::CoreVirtualKeyStates::Down;
+                        shift = WI_IsFlagSet(w.GetKeyState(VirtualKey::Shift), down);
+                        ctrl = WI_IsFlagSet(w.GetKeyState(VirtualKey::Control), down);
+                        alt = WI_IsFlagSet(w.GetKeyState(VirtualKey::Menu), down);
+                    }
+                    // Shift+Enter = Send now (the "!" action, confirm included); a plain Enter stays a
+                    // newline (the compose box is multi-line). Defer the send so the confirm dialog isn't
+                    // shown from inside the key handler (mirrors the rename box not committing on KeyDown).
+                    if (key == VirtualKey::Enter)
+                    {
+                        if (shift && !ctrl && !alt)
+                        {
+                            e.Handled(true); // suppress the newline for the send chord
+                            if (_dispatcher)
+                            {
+                                auto weak = get_weak();
+                                _dispatcher.TryEnqueue([weak]() { auto self = weak.get(); if (self) { self->_OnSendNow(); } });
+                            }
+                            else
+                            {
+                                _OnSendNow();
+                            }
+                        }
+                        return;
+                    }
+                    // Esc while browsing history cancels back to the draft you started from.
+                    if (key == VirtualKey::Escape)
+                    {
+                        if (_promptHistoryIndex >= 0)
+                        {
+                            _promptHistoryIndex = -1;
+                            _ApplyPromptHistoryText(_promptHistoryDraft);
+                            e.Handled(true);
+                        }
+                        return;
+                    }
                     if (key != VirtualKey::Up && key != VirtualKey::Down)
                     {
                         return; // only the bare Up/Down arrows drive history
                     }
-                    // Don't hijack a MODIFIED arrow: Shift+Arrow extends the selection, Ctrl/Alt+Arrow are
-                    // editor/system motions — leave them all to the TextBox (mirrors the rename box's
-                    // CoreWindow::GetKeyState modifier check).
-                    if (const auto w = CoreWindow::GetForCurrentThread())
+                    if (shift || ctrl || alt)
                     {
-                        const auto down = winrt::Windows::UI::Core::CoreVirtualKeyStates::Down;
-                        if (WI_IsFlagSet(w.GetKeyState(VirtualKey::Shift), down) ||
-                            WI_IsFlagSet(w.GetKeyState(VirtualKey::Control), down) ||
-                            WI_IsFlagSet(w.GetKeyState(VirtualKey::Menu), down))
-                        {
-                            return;
-                        }
+                        return; // a MODIFIED arrow belongs to the TextBox (Shift selects, Ctrl/Alt move)
                     }
                     if (key == VirtualKey::Up)
                     {
                         if (_promptHistoryIndex < 0)
                         {
-                            // On the draft: move the caret up within a multi-line draft until the first
-                            // line; only THERE enter history (the "cursor at the top line" trigger).
-                            if (!_PromptCaretOnFirstLine())
+                            // On the draft: move the caret up within a wrapped/multi-line draft until the
+                            // first VISUAL ROW; only THERE enter history (the "cursor at the top" trigger).
+                            if (!_PromptCaretOnFirstRow())
                             {
                                 return;
                             }
@@ -1891,7 +1924,7 @@ namespace winrt::TerminalApp::implementation
                         // else: already at the oldest — fall through to swallow so the caret doesn't jump.
                         e.Handled(true);
                     }
-                    else if (key == VirtualKey::Down)
+                    else // VirtualKey::Down (others returned above)
                     {
                         if (_promptHistoryIndex < 0)
                         {
@@ -1921,6 +1954,8 @@ namespace winrt::TerminalApp::implementation
                         _ResetPromptHistory();
                     }
                 });
+                // Discoverability: surface the keyboard affordances (they have no on-screen control).
+                AgentSetTip(_addPromptBox, L"Compose a prompt for the selected session.\n\x2191 / \x2193  recall previously sent prompts\nShift+Enter  send now  \x00B7  Enter  newline");
                 Grid::SetColumn(_addPromptBox, 1);
                 composeRow.Children().Append(_addPromptBox);
 
@@ -7021,10 +7056,18 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _promptHistoryNavigating = true;
-        _addPromptBox.Text(winrt::hstring{ text });
-        const int32_t len = static_cast<int32_t>(text.size());
-        _addPromptBox.SelectionStart(len); // caret to the end (collapsed selection)
-        _addPromptBox.SelectionLength(0);
+        // Always clear the latch, even if a setter throws — otherwise the TextChanged reset would stay
+        // disabled and a subsequent real edit wouldn't leave history navigation.
+        try
+        {
+            _addPromptBox.Text(winrt::hstring{ text });
+            const int32_t len = static_cast<int32_t>(text.size());
+            _addPromptBox.SelectionStart(len); // caret to the end (collapsed selection)
+            _addPromptBox.SelectionLength(0);
+        }
+        catch (...)
+        {
+        }
         _promptHistoryNavigating = false;
     }
 
@@ -7038,10 +7081,14 @@ namespace winrt::TerminalApp::implementation
         _promptHistoryDraft.clear();
     }
 
-    // Agentmaster (prompt history): is the caret on the FIRST logical line of the compose box? True
-    // when no line break precedes it. (A UWP TextBox uses \r for newlines, but a programmatic set can
-    // leave \n — treat both as breaks.) An empty box / caret at 0 counts as the first line.
-    bool AgentManagerContent::_PromptCaretOnFirstLine() const
+    // Agentmaster (prompt history): is the caret on the FIRST VISUAL ROW of the compose box? This is
+    // the enter-history gate on the draft. "Visual row" (not logical line) so that with word-wrap on, a
+    // long first logical line that wraps to several rows still lets Up move the caret up a row before
+    // recalling — Up only enters history at the very top row. GetRectFromCharacterIndex respects wrap;
+    // we compare the caret's Y to the first character's Y (same top => first row). Falls back to the
+    // logical-line scan (no \n/\r before the caret — a UWP TextBox uses \r, a programmatic set may leave
+    // \n) if the rect API is unavailable. An empty box / caret at 0 counts as the first row.
+    bool AgentManagerContent::_PromptCaretOnFirstRow() const
     {
         if (!_addPromptBox)
         {
@@ -7049,15 +7096,35 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring text{ _addPromptBox.Text() };
         const int32_t caret = _addPromptBox.SelectionStart();
-        const int32_t limit = std::min<int32_t>(caret, static_cast<int32_t>(text.size()));
-        for (int32_t i = 0; i < limit; ++i)
+        if (caret <= 0 || text.empty())
         {
-            if (text[i] == L'\n' || text[i] == L'\r')
-            {
-                return false;
-            }
+            return true; // start of the box (or empty) is always the first row
         }
-        return true;
+        try
+        {
+            const auto firstR = _addPromptBox.GetRectFromCharacterIndex(0, false);
+            // For the caret use the leading edge of the char at it; at end-of-text use the trailing
+            // edge of the last char (index == length is out of range for the leading-edge form).
+            const auto caretR = (caret >= static_cast<int32_t>(text.size())) ?
+                                    _addPromptBox.GetRectFromCharacterIndex(static_cast<int32_t>(text.size()) - 1, true) :
+                                    _addPromptBox.GetRectFromCharacterIndex(caret, false);
+            // The caret is at/below the first row, so its top is >= the first row's top; "same row" if
+            // within ~half a line height (tolerant of sub-pixel/baseline differences).
+            const double tol = firstR.Height > 0 ? firstR.Height * 0.5 : 2.0;
+            return caretR.Y <= firstR.Y + tol;
+        }
+        catch (...)
+        {
+            const int32_t limit = std::min<int32_t>(caret, static_cast<int32_t>(text.size()));
+            for (int32_t i = 0; i < limit; ++i)
+            {
+                if (text[i] == L'\n' || text[i] == L'\r')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     void AgentManagerContent::_OnMovePrompt(int delta)
@@ -7246,6 +7313,7 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             _registry->Update(_selectedId, [&](SessionInfo& s) { ::Agentmaster::AppendTemplateToQueue(s.queue, tmpl); });
+            _FocusPromptBox(); // Agentmaster: return focus to the compose box after applying a template
             return;
         }
 
@@ -7269,6 +7337,7 @@ namespace winrt::TerminalApp::implementation
                 _registry->Update(s.id, [&](SessionInfo& ss) { ::Agentmaster::AppendTemplateToQueue(ss.queue, tmpl); });
             }
         }
+        _FocusPromptBox(); // Agentmaster: return focus to the compose box after applying a template
     }
 
     // ---- Launch path-picker drop-down ---------------------------------------

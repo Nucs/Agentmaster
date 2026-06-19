@@ -232,18 +232,20 @@ namespace winrt::TerminalApp::implementation
         // if the box isn't built / present.
         void _FocusPromptBox();
         // Agentmaster (prompt history — shell/REPL idiom): on the live DRAFT, pressing Up once the caret
-        // reaches the FIRST line of the compose box recalls the selected session's previously SENT
-        // prompts (newest first); while BROWSING history Up/Down walk older/newer FREELY (no caret gate)
-        // and Down off the newest entry restores the in-progress draft (the draft itself only ever moves
-        // the caret on Down — nothing is newer). _BuildPromptHistory snapshots the sent prompts (Flight +
-        // Typed), newest first, consecutive-duplicate-collapsed; _ApplyPromptHistoryText writes a recalled
-        // body (guarded so its TextChanged doesn't reset navigation) + parks the caret at the end;
-        // _ResetPromptHistory leaves navigation (called when the user edits, the box is cleared, or the
-        // selection changes). _PromptCaretOnFirstLine gates the enter-history trigger on caret position.
+        // reaches the FIRST VISUAL ROW of the compose box recalls the selected session's previously SENT
+        // prompts (newest first); while BROWSING history Up/Down walk older/newer FREELY (no caret gate,
+        // Esc cancels back to the draft) and Down off the newest entry restores the in-progress draft (the
+        // draft itself only ever moves the caret on Down — nothing is newer). Shift+Enter sends the
+        // composed/recalled prompt now (a plain Enter stays a newline). _BuildPromptHistory snapshots the
+        // sent prompts (Flight + Typed), newest first, consecutive-duplicate-collapsed; _ApplyPromptHistoryText
+        // writes a recalled body (guarded so its TextChanged doesn't reset navigation) + parks the caret at
+        // the end; _ResetPromptHistory leaves navigation (called when the user edits, the box is cleared, or
+        // the selection changes). _PromptCaretOnFirstRow gates the enter-history trigger (visual row, so it
+        // respects word-wrap).
         std::vector<std::wstring> _BuildPromptHistory() const;
         void _ApplyPromptHistoryText(const std::wstring& text);
         void _ResetPromptHistory();
-        bool _PromptCaretOnFirstLine() const;
+        bool _PromptCaretOnFirstRow() const;
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutopilotChanged(int index);
