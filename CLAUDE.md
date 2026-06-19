@@ -351,7 +351,7 @@ the concurrent UIA work; the tree as a whole builds green.
 chrome; Margin `0,1,6,-1` — **left is 0**: an earlier negative-left overhang (to pull the dot toward
 the profile icon) was reverted because it hung past the header's left edge and got CLIPPED. The MUX
 `TabViewItemHeaderIconMargin` (10px) icon→dot gap is instead tightened the **safe, global way** — a
-`TabViewItemHeaderIconMargin` override on the `TabView` in `TabRowControl.xaml` (+6 right keeps the
+`TabViewItemHeaderIconMargin` override on the `TabView` in `TabRowControl.xaml` (the override is `0,0,4,0`; the dot-wrap's own `0,1,6,-1` keeps the
 dot→title gap); **+1/−1** dips it 1px below slot-center — dead-center reads optically high against the
 title — while keeping the 10px slot so the header row doesn't grow) in
 `TabHeaderControl.xaml`'s indicator row right before the title — one more
@@ -364,12 +364,17 @@ same dot at its 3-state floor: Running blue · Waiting goldenrod · Idle gray); 
 tab (pwsh / cmd / unprompted-claude / external codex) a **dim gray** dot; the Manager tab none. A
 **red-flash alert** rides the dot too: when a session leaves **Running** for a *needs-you* state —
 `Running → {Idle · WaitingForInput · NeedsApproval}` (NOT `→Done` / `→Error`) — on a tab that is **not
-the currently-focused one**, that tab's dot **outline flashes red** until you switch to it
+the currently-focused one**, that tab's dot grows a **red ring** (a separate Ellipse drawn behind the
+dot — red ring · the dot's black stroke · its status fill, `TerminalTabStatus.AgentFlashRingVisible`; a
+ring, NOT a stroke-color change) until you switch to it
 (`_EvaluateAgentFlash` — the active tab counts as visited so it never flashes; visiting it clears the
 flash via `_VisitTabClearFlash` from `_OnTabSelectionChanged`). ONE shared per-window `DispatcherTimer`
 toggles `_agentFlashPhase` every **600 ms** so all flashing tabs blink in **lockstep** (a tab joining
 mid-cycle adopts the current phase); an archived (`!live`) session forgets its last state so a later
-background restore can't spuriously flash. Deliberately
+background restore can't spuriously flash. A **selection pill** rides the header too — a translucent
+accent pill behind the tab (`HeaderAgentSelectionPill`, driven by `TerminalTabStatus.AgentSelectionVisible`/
+`AgentSelectionBrush` at ~40% alpha via `_SetTabSelectionPill`) shown while the **Manager tab is active**
+and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. Deliberately
 NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab title == persisted
 title) must never carry presentation glyphs through renames/persistence. The state palette is
 shared through **`AgentStatusColors.h`** (`AgentStatusColorFor`): the **per-tab overlay**
@@ -902,7 +907,9 @@ What works, by area:
   Down newer; the in-progress text is saved as `_promptHistoryDraft` and restored at the bottom of
   the walk; the list is built lazily by `_BuildPromptHistory`, applied via `_ApplyPromptHistoryText`
   behind a `_promptHistoryNavigating` latch so a recall write doesn't reset the index), and **focus
-  snaps back to the compose box after a queue/send** so you can keep typing. **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
+  snaps back to the compose box after a queue/send** (deferred PAST the Send-now confirm so it can't steal
+  the dialog's focus) so you can keep typing. Only a **plain** Up/Down browses history — a **modified**
+  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked. **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
   LOCAL/GLOBAL/EXTERNAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
   **cycles** Off → Semi-auto → Full on click (`_CycleAutopilot` / `_UpdateAutopilotButton`,
   replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed
@@ -980,7 +987,14 @@ What works, by area:
   it lists under Archived (restorable); **Delete permanently** (`_RemoveSessionRecord`) DROPS the registry
   record (+ strips it from saved window records) but **keeps the conversation `.jsonl` on disk** — a
   deleted session leaves the Board/Archive yet still appears in the **Sessions** browser, resumable from
-  there. The Claude transcript on disk is **never** deleted by either path. Restore
+  there. The Claude transcript on disk is **never** deleted by either path. Closing a **batch** that holds managed
+  sessions (a window close, or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
+  train of per-tab confirms — **🗑 Delete All · Archive All · Cancel All** (Archive All is the safe default —
+  each session stays restorable with its Flight Plan; Delete All record-only-drops them, keeping the
+  `.jsonl`; Cancel All aborts the whole close; a batch of only plain shell tabs skips the dialog). The
+  tab context-menu's **Close ›** submenu also gained **Close tabs to the left** (`_CloseTabsBefore`, the
+  left twin of close-to-the-right), and both close-left/right now **skip the pinned Manager tab** (index 0)
+  so a bulk close can never kill it. Restore
   re-launches in the working dir + reloads the Flight Plan + autopilot; resume is
   **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
   that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived
@@ -1145,7 +1159,8 @@ confirmation chime (`PlaySoundW`). Built only for a LINKED session; the action b
 the whole badge is dim at rest (opacity ~0.55) and brightens on hover or while the copy menu is open
 (`_SetExpanded` toggles the badge opacity, not the buttons' visibility).
 The pencil toggles a **SUMMARY PANEL** — a **second overlay** in its own slot stacked **below the
-badge** (`TerminalPaneContent::SetAgentSummaryOverlay`, capped to **20% of the pane width**, re-capped
+badge** (`TerminalPaneContent::SetAgentSummaryOverlay`, defaulting to **20% of the pane width** but
+**drag-resizable** 8–50% wide / 6–75% tall via a grip (persisted as `summaryPanelWidthFraction`/`summaryPanelHeightFraction`), re-capped
 on the wrapper's `SizeChanged`), shown while the **GLOBAL** `AppSettings.showSummaryPanel` is ON. The
 toggle is **global, not per-session** (mirrors `showTabOverlay`/`treeSort`): the pencil hands off to
 `TerminalPage::_ToggleSummaryPanel` — a freshest-disk read-modify-write of just that field + a **live
