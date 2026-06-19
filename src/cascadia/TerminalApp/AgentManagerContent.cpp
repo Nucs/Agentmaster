@@ -1962,7 +1962,7 @@ namespace winrt::TerminalApp::implementation
                 auto meText = Text(winrt::hstring{ me }, 10, false, 0.55);
                 if (!s.presenceStatus.empty())
                 {
-                    AgentSetTip(meText, L"hb = claude's own heartbeat (busy/idle/waiting), observer-validated — independent of the hook-derived state dot");
+                    AgentSetTip(meText, L"hb = Claude's own activity heartbeat (busy / idle / waiting), reported by Claude itself \x2014 a cross-check on the colored state dot.");
                 }
                 stack.Children().Append(meText);
             }
@@ -2616,7 +2616,7 @@ namespace winrt::TerminalApp::implementation
             titleRow.VerticalAlignment(VerticalAlignment::Center);
             auto sd = Text(L"\x25CF", 11, false, 1.0);
             sd.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
-            AgentSetTip(sd, winrt::hstring{ L"Codex turn state: " } + CodexStateLabel(ex.codexState));
+            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
             titleRow.Children().Append(sd);
             titleRow.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
             stack.Children().Append(titleRow);
@@ -3438,7 +3438,7 @@ namespace winrt::TerminalApp::implementation
                 if (ex.kind == AgentKind::Codex)
                 {
                     g.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
-                    AgentSetTip(g, winrt::hstring{ L"Codex turn state: " } + CodexStateLabel(ex.codexState));
+                    AgentSetTip(g, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
                 }
                 else
                 {
@@ -3526,7 +3526,7 @@ namespace winrt::TerminalApp::implementation
                     underline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
                     underline.HorizontalAlignment(HorizontalAlignment::Stretch); // span the "pid N" width
                     underline.Background(SolidColorBrush{ WindowKeyColor(key) });
-                    AgentSetTip(underline, winrt::hstring{ L"Host window/shell pid " } + winrt::to_hstring(key) + L" \x2014 rows with the same underline color share a terminal window/tab");
+                    AgentSetTip(underline, winrt::hstring{ L"Host window / shell PID " } + winrt::to_hstring(key) + L" \x2014 rows sharing this underline color run in the same terminal window / tab");
                     pidCol.Children().Append(underline);
                     row.Children().Append(pidCol);
                 }
@@ -3594,8 +3594,8 @@ namespace winrt::TerminalApp::implementation
             MenuFlyoutItem adopt;
             adopt.Text(L"Adopt");
             AgentSetTip(adopt, sid.empty() ?
-                                   winrt::hstring{ L"This codex hasn't been prompted yet (no rollout) \x2014 Adopt launches a fresh managed codex here" } :
-                                   winrt::hstring{ L"Bring this codex's conversation under management \x2014 Fork a safe copy (codex fork) or Resume the same rollout" });
+                                   winrt::hstring{ L"This Codex session hasn't been prompted yet (no rollout) \x2014 Adopt launches a fresh managed Codex here" } :
+                                   winrt::hstring{ L"Bring this Codex session's conversation under management \x2014 Fork a safe copy (codex fork) or Resume the same rollout" });
             // Two processes can't safely share one rollout, and the external is still running, so OFFER
             // the choice (the chosen "warn and let me choose"): Fork a copy (codex fork -> a NEW rollout,
             // the source untouched -> safe) vs. Resume anyway (codex resume -> the same rollout; stop the
@@ -3645,11 +3645,11 @@ namespace winrt::TerminalApp::implementation
             if (sid.empty())
             {
                 copyIdCx.IsEnabled(false);
-                AgentSetTip(copyIdCx, L"No rollout id yet (this codex hasn't been prompted)");
+                AgentSetTip(copyIdCx, L"No rollout id yet (this Codex session hasn't been prompted)");
             }
             else
             {
-                AgentSetTip(copyIdCx, L"Copy this codex rollout's conversation id to the clipboard");
+                AgentSetTip(copyIdCx, L"Copy this Codex rollout's conversation id to the clipboard");
                 copyIdCx.Click([sid](const IInspectable&, const RoutedEventArgs&) { CopyTextToClipboard(sid); });
             }
             menu.Items().Append(copyIdCx);
@@ -3661,8 +3661,8 @@ namespace winrt::TerminalApp::implementation
             MenuFlyoutItem adopt;
             adopt.Text(L"Adopt");
             AgentSetTip(adopt, sid.empty() ?
-                                   winrt::hstring{ L"This claude hasn't been prompted yet (no transcript) \x2014 Adopt launches a fresh managed session here" } :
-                                   winrt::hstring{ L"Bring this external claude's conversation under management \x2014 Fork a safe copy (--fork-session) or Resume the same conversation" });
+                                   winrt::hstring{ L"This Claude session hasn't been prompted yet (no transcript) \x2014 Adopt launches a fresh managed session here" } :
+                                   winrt::hstring{ L"Bring this external Claude's conversation under management \x2014 Fork a safe copy (--fork-session) or Resume the same conversation" });
             // Two processes can't safely share one transcript, and the external is still running, so OFFER
             // the choice (the chosen "warn and let me choose"): Fork a copy (claude --fork-session -> a NEW
             // transcript, the source untouched -> safe) vs. Resume anyway (claude --resume -> the same
@@ -3722,7 +3722,7 @@ namespace winrt::TerminalApp::implementation
             if (sid.empty())
             {
                 copyId.IsEnabled(false);
-                AgentSetTip(copyId, L"No conversation id yet (this claude hasn't been prompted)");
+                AgentSetTip(copyId, L"No conversation id yet (this Claude session hasn't been prompted)");
             }
             else
             {
@@ -3972,6 +3972,7 @@ namespace winrt::TerminalApp::implementation
 
         MenuFlyoutItem archive;
         archive.Text(L"Archive\x2026");
+        AgentSetTip(archive, L"Archive this session \x2014 close its tab but keep it restorable from the Archive (the conversation on disk is never deleted).");
         archive.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
@@ -4108,6 +4109,7 @@ namespace winrt::TerminalApp::implementation
 
         MenuFlyoutItem archive;
         archive.Text(L"Archive session\x2026");
+        AgentSetTip(archive, L"Archive this session \x2014 close its tab but keep it restorable from the Archive (the conversation on disk is never deleted).");
         archive.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
