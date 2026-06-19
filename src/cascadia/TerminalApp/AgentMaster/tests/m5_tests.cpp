@@ -2033,27 +2033,33 @@ static void TestBlockedAndInterruptedStates()
     CHECK(!PresenceIsAtRest(L"waiting"), "presence-rest: 'waiting' (needs-you) left to recon-block, not released here");
     CHECK(!PresenceIsAtRest(L"shell"), "presence-rest: 'shell' is not a claude turn-rest signal");
     CHECK(!PresenceIsAtRest(L""), "presence-rest: no heartbeat is not 'at rest'");
-    // the bug repro: Running + 'idle' heartbeat + non-terminal tail (stop_reason cleared by the trailing
-    // prompt) + quiescent -> release to WaitingForInput. Signature: (state, presence, lastStop, interrupted, quietForMs).
-    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Running + idle + cleared (non-terminal) tail + quiet -> stop (the stuck-Running bug)");
-    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::NeedsApproval, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs), "presence-idle: a NeedsApproval stranded by a dropped post-answer Stop is released too");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleQuiescenceMs - 1), "presence-idle: not quiet long enough (S-lane refresh-lag window) -> hold");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"busy", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: heartbeat 'busy' -> never release");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: no heartbeat -> no signal, no release");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"waiting", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: 'waiting' is not released here (recon-block owns needs-you)");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"end_turn", false, kScanPresenceIdleQuiescenceMs), "presence-idle: a TERMINAL tail is plain recon-stop's job (mutually exclusive)");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", true, kScanPresenceIdleQuiescenceMs), "presence-idle: an interrupt is plain recon-stop's job (mutually exclusive)");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Idle, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: an Idle session has no turn to end");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::WaitingForInput, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: already settled -> no-op");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Done, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Done is never re-ended/revived");
+    // the no-op / stuck-Running case: Running + 'idle' heartbeat + cleared (non-terminal) tail, quiet for
+    // the LONG floor -> release to WaitingForInput. Signature: (state, presence, lastStop, interrupted, quietForMs).
+    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: Running + idle + cleared tail + quiet for the LONG floor -> stop (the no-op / stuck-Running case)");
+    // Agentmaster (idle<->running flap fix): a Running cleared tail quiet for only the SHORT base window is
+    // NOT released — that shape is indistinguishable from a turn paused behind a "No response from API ·
+    // Retrying" backoff / a slow first token, and releasing at 5s oscillated Running<->WaitingForInput
+    // against recon-run every scan (the reported "card bg" flap + "jumps to idle while the API retries").
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleQuiescenceMs), "presence-idle (flap fix): Running + idle + cleared tail quiet only the SHORT 5s window -> HOLD (a transient API-retry / stream pause, not a finished turn)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", false, kScanPresenceIdleRunningQuiescenceMs - 1), "presence-idle: Running just under the long floor -> hold");
+    CHECK(ShouldSynthesizeStopFromPresenceIdle(SessionState::NeedsApproval, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs), "presence-idle: a NeedsApproval stranded by a dropped post-answer Stop is released at the SHORT base floor (no API-retry ambiguity)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::NeedsApproval, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs - 1), "presence-idle: NeedsApproval not quiet long enough -> hold");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"busy", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: heartbeat 'busy' -> never release");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: no heartbeat -> no signal, no release");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"waiting", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: 'waiting' is not released here (recon-block owns needs-you)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"end_turn", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: a TERMINAL tail is plain recon-stop's job (mutually exclusive)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"", true, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: an interrupt is plain recon-stop's job (mutually exclusive)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Idle, L"idle", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: an Idle session has no turn to end");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::WaitingForInput, L"idle", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: already settled -> no-op");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Done, L"idle", L"", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: Done is never re-ended/revived");
     // Agentmaster (idle<->running flap fix): a RUNNING session whose tail is a PENDING tool_use is
     // mid-turn — claude is running a tool (a long Bash/build) or waiting/retrying the next API call
     // ("No response from API · Retrying in …"), during which it is not generating so its heartbeat
     // reads "idle" and the transcript sits quiet. Releasing it would flap Running<->Waiting against
-    // recon-run every scan (the "card bg" report). It must NOT release regardless of how long it has
-    // been quiet; only the cleared-tail no-op turn (above) releases for Running.
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs), "presence-idle: Running + idle + PENDING tool_use tail (mid-tool / API-retry backoff) -> NOT released (would flap against recon-run)");
-    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleQuiescenceMs * 100), "presence-idle: a Running pending tool_use stays held no matter how long quiet (a long Bash/build or multi-minute API retry is still the same turn)");
+    // recon-run every scan (the "card bg" report). It must NOT release regardless of how long quiet;
+    // only the cleared-tail no-op turn (above), and only past the long floor, releases for Running.
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: Running + idle + PENDING tool_use tail (mid-tool / API-retry backoff) -> NOT released (would flap against recon-run)");
+    CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleRunningQuiescenceMs * 100), "presence-idle: a Running pending tool_use stays held no matter how long quiet (a long Bash/build or multi-minute API retry is still the same turn)");
 
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {

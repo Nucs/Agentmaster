@@ -611,7 +611,11 @@ namespace Agentmaster
         // that the turn is OVER (PresenceIsBusy's release mirror). Gated on no pending interactive tool
         // so it never pre-empts recon-block (the blocked-on-question -> NeedsApproval path below), and
         // on the (subagent/busy-folded) quietForMs, so a live subagent / "busy" heartbeat — which
-        // already forces that clock small — can never trip it mid-work.
+        // already forces that clock small — can never trip it mid-work. For a RUNNING cleared-tail turn
+        // the predicate additionally demands a MUCH longer quiescence (kScanPresenceIdleRunningQuiescenceMs)
+        // than NeedsApproval: that shape is indistinguishable from a turn paused behind a "No response
+        // from API · Retrying" backoff, so only sustained rest (no append AND no "busy" for the long
+        // window — both reset quietForMs just below) releases it (the idle<->running flap fix).
         const bool stopFromPresenceIdle = !stopFromTail && st.pendingInteractiveTool.empty() &&
                                           ShouldSynthesizeStopFromPresenceIdle(s.state, s.presenceStatus, st.lastStopReason, st.interrupted, quietForMs);
         if (stopFromTail || stopFromPresenceIdle)

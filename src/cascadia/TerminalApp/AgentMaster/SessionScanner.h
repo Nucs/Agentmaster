@@ -46,7 +46,8 @@ namespace Agentmaster
     inline constexpr int64_t kScanLiveIdleMs = 2500; // live but Idle/Waiting: poll lazily
     inline constexpr int64_t kScanSweepMs = 2500; // min interval between liveness-probe ticks
     inline constexpr int64_t kScanStopQuiescenceMs = 2000; // transcript must be this quiet before a synthesized Stop
-    inline constexpr int64_t kScanPresenceIdleQuiescenceMs = 5000; // presence-idle release (ShouldSynthesizeStopFromPresenceIdle): the parent transcript must be quiet THIS long — longer than kScanStopQuiescenceMs, to outlast the ~2s S-lane presence-refresh lag — before claude's at-rest ("idle") heartbeat releases a stuck Running on a NON-terminal tail
+    inline constexpr int64_t kScanPresenceIdleQuiescenceMs = 5000; // presence-idle release BASE floor (ShouldSynthesizeStopFromPresenceIdle): the transcript must be quiet THIS long — longer than kScanStopQuiescenceMs, to outlast the ~2s S-lane presence-refresh lag — before claude's at-rest ("idle") heartbeat releases a NON-terminal-tail turn. Used directly for NeedsApproval; a RUNNING cleared-tail turn needs the longer kScanPresenceIdleRunningQuiescenceMs below (its shape is ambiguous with an API-retry pause)
+    inline constexpr int64_t kScanPresenceIdleRunningQuiescenceMs = 30000; // RUNNING-state presence-idle release floor (the idle<->running flap fix): a Running session with a CLEARED (empty) stop_reason must be quiet — NO transcript append AND NO "busy" heartbeat, BOTH of which reset quietForMs in _reconcileSession — for THIS long before its "idle" heartbeat releases it. FAR longer than the base floor, because a cleared-tail Running turn is AMBIGUOUS: a genuine no-op/finished turn is indistinguishable at an instant from a turn merely PAUSED behind a "No response from API · Retrying" backoff / slow first token / streaming stall (claude reports "idle" in both). The long floor lets a real pause ride — it appends or flips "busy" within the window — while still releasing a session truly at rest, killing the Running<->WaitingForInput flap vs recon-run (the reported "card bg" flap)
     inline constexpr int64_t kScanMaxDeltaBytes = 1 << 20; // read at most 1 MiB of new transcript per tick
     inline constexpr int64_t kScanForceConsumeBytes = 4 << 20; // a 4 MiB run with no newline -> skip it (corrupt/binary guard)
     inline constexpr int64_t kScanDiscoverMs = 1500; // idle keep-ticking cadence (drives each window's observer probe + liveness sweep when nothing is live)
@@ -273,15 +274,24 @@ namespace Agentmaster
     // "busy". The caller additionally gates this on no pending interactive tool so it never pre-empts
     // recon-block's blocked-on-question -> NeedsApproval path.
     //
-    // Agentmaster (idle<->running flap fix): for the RUNNING state this fires ONLY when the tail's
-    // stop_reason is CLEARED (a bare user prompt that produced no assistant output — the no-op turn it
-    // was built for), NEVER on a PENDING tool_use. A pending tool_use means claude is MID-TURN — running
-    // a tool (a long Bash/build) or waiting on the next API call, INCLUDING a "No response from API ·
-    // Retrying in …" backoff — during which claude is not generating, so its heartbeat reads "idle" and
-    // the transcript sits quiet, yet the turn is NOT over. Releasing it there oscillates the session
-    // Running<->WaitingForInput against recon-run every scan (the reported "card bg" flap, and the
-    // "jumps to idle/waiting while the API is retrying" bug). NeedsApproval is unaffected (its pending
-    // tool_use is the AskUserQuestion — once answered + idle, that turn really is settled).
+    // Agentmaster (idle<->running flap fix, TWO-part): a RUNNING session's "idle" heartbeat must clear
+    // TWO hurdles, because "idle heartbeat + non-terminal tail + quiet transcript" ALSO describes a turn
+    // merely PAUSED behind a "No response from API · Retrying" backoff / a slow first token / a streaming
+    // stall — claude stops generating, so it reports "idle" and the file sits quiet, yet the turn is NOT
+    // over. (1) A PENDING tool_use tail (non-empty, non-terminal stop_reason) is NEVER released: claude
+    // is mid-tool (a long Bash/build) or waiting on that tool's API call. (2) A CLEARED (empty)
+    // stop_reason — a bare user prompt with no assistant output yet — is the no-op-turn case this
+    // backstop was built for, BUT it is ALSO exactly what a turn looks like while its FIRST API call is
+    // retrying (the original fix wrongly assumed "No response from API" only ever coincides with a
+    // pending tool_use — the live "card bg" flap proved it fires with a CLEARED tail too). The two are
+    // indistinguishable at an instant, so a cleared-tail Running turn is released only after the LONG
+    // quiescence floor (kScanPresenceIdleRunningQuiescenceMs): any transcript append OR any "busy"
+    // heartbeat inside the window resets quietForMs (see _reconcileSession), so a real retry — which
+    // does at least one of those repeatedly — never reaches the floor, while a genuinely finished turn
+    // (no writes, no "busy") does. Together these kill the Running<->WaitingForInput oscillation against
+    // recon-run (the reported "card bg" flap + "jumps to idle/waiting while the API is retrying" bug).
+    // NeedsApproval is unaffected: it keeps the SHORT base floor (its pending tool_use is the
+    // AskUserQuestion — once answered + idle, that turn really is settled, with no API-retry ambiguity).
     inline bool ShouldSynthesizeStopFromPresenceIdle(SessionState state, std::wstring_view presenceStatus, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs) noexcept
     {
         if (state != SessionState::Running && state != SessionState::NeedsApproval)
@@ -294,16 +304,16 @@ namespace Agentmaster
         }
         if (state == SessionState::Running && !lastStopReason.empty())
         {
-            // A non-terminal-but-PENDING tail (tool_use) on a Running session == claude is mid-turn
-            // (tool running, or waiting/retrying the next API call). "idle" presence here is a not-
-            // generating signal, not a turn-end one — releasing it would flap against recon-run. The
-            // no-op-turn release this backstop exists for has the stop_reason CLEARED (empty), so it
-            // still fires for that case. (NeedsApproval keeps the pending-tool_use release above.)
-            return false;
+            return false; // hurdle 1: a PENDING tool_use tail == mid-tool / waiting on its API call — never a turn-end
         }
-        if (quietForMs < kScanPresenceIdleQuiescenceMs)
+        // hurdle 2 — the quiescence floor. NeedsApproval uses the short base; a Running cleared-tail turn
+        // uses the LONG floor, because that shape is indistinguishable from an in-flight API-retry /
+        // streaming pause (which appends or flips "busy" within the window, resetting quietForMs, so it
+        // never reaches the floor). Only a session truly at rest for the WHOLE long window is released.
+        const int64_t quiescenceFloor = (state == SessionState::Running) ? kScanPresenceIdleRunningQuiescenceMs : kScanPresenceIdleQuiescenceMs;
+        if (quietForMs < quiescenceFloor)
         {
-            return false; // not quiet long enough to outlast the S-lane's presence-refresh lag
+            return false;
         }
         return PresenceIsAtRest(presenceStatus);
     }
