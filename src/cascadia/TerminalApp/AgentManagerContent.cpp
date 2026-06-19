@@ -1118,6 +1118,7 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::SetManagerState(const ::Agentmaster::ManagerState& state)
     {
+        _ResetPromptHistory(); // a lens (re)seed changes the selected session — start history fresh
         _selectedId = state.selectedId;
         _scopeDir = state.scopeDir;
         _selectedPromptId = state.selectedPromptId;
@@ -1760,6 +1761,78 @@ namespace winrt::TerminalApp::implementation
                 // TextBox has no direct VerticalScrollBarVisibility in this projection — it's the
                 // attached ScrollViewer property (see Gotchas: this XAML projection differs from WPF).
                 ScrollViewer::SetVerticalScrollBarVisibility(_addPromptBox, ScrollBarVisibility::Auto);
+                // Agentmaster (prompt history): Up on the first line / Down on the last line recall the
+                // selected session's previously SENT prompts (the shell/REPL idiom) — see
+                // _BuildPromptHistory / _ApplyPromptHistoryText. PreviewKeyDown (tunneling) runs BEFORE
+                // the TextBox's own arrow handling — the only place we can both read the caret's
+                // pre-move position AND suppress the default caret motion (marking it Handled) when the
+                // caret is at the relevant edge; the same reason the rename box uses PreviewKeyDown for
+                // Enter. When the caret is NOT at the edge we return without handling, so the arrow
+                // moves within a multi-line prompt as usual.
+                _addPromptBox.PreviewKeyDown([this](const IInspectable&, const KeyRoutedEventArgs& e) {
+                    const auto key = e.Key();
+                    if (key == VirtualKey::Up)
+                    {
+                        if (!_PromptCaretOnFirstLine())
+                        {
+                            return; // not at the top line — let Up move the caret up within the text
+                        }
+                        if (_promptHistoryIndex < 0)
+                        {
+                            // Enter navigation: snapshot the sent prompts (newest first) + stash the draft.
+                            _promptHistory = _BuildPromptHistory();
+                            if (_promptHistory.empty())
+                            {
+                                return; // nothing to recall
+                            }
+                            _promptHistoryDraft = _addPromptBox ? std::wstring{ _addPromptBox.Text() } : std::wstring{};
+                            _promptHistoryIndex = 0;
+                        }
+                        else if (_promptHistoryIndex + 1 < static_cast<int>(_promptHistory.size()))
+                        {
+                            ++_promptHistoryIndex; // older
+                        }
+                        else
+                        {
+                            e.Handled(true); // already at the oldest — swallow so the caret doesn't jump
+                            return;
+                        }
+                        _ApplyPromptHistoryText(_promptHistory[_promptHistoryIndex]);
+                        e.Handled(true);
+                    }
+                    else if (key == VirtualKey::Down)
+                    {
+                        if (_promptHistoryIndex < 0)
+                        {
+                            return; // not navigating — Down moves the caret normally
+                        }
+                        if (!_PromptCaretOnLastLine())
+                        {
+                            return; // mid-text — let Down move the caret down within the recalled prompt
+                        }
+                        if (_promptHistoryIndex == 0)
+                        {
+                            // Step below the newest: restore the draft and leave navigation.
+                            _promptHistoryIndex = -1;
+                            _ApplyPromptHistoryText(_promptHistoryDraft);
+                        }
+                        else
+                        {
+                            --_promptHistoryIndex; // newer
+                            _ApplyPromptHistoryText(_promptHistory[_promptHistoryIndex]);
+                        }
+                        e.Handled(true);
+                    }
+                });
+                // Agentmaster (prompt history): a real user edit leaves history navigation — the recalled
+                // text becomes the new draft, so the next Up at the top line walks history fresh. Our own
+                // recall writes set _promptHistoryNavigating, which suppresses this reset.
+                _addPromptBox.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
+                    if (!_promptHistoryNavigating)
+                    {
+                        _ResetPromptHistory();
+                    }
+                });
                 Grid::SetColumn(_addPromptBox, 1);
                 composeRow.Children().Append(_addPromptBox);
 
@@ -6091,6 +6164,10 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        if (_selectedId != id)
+        {
+            _ResetPromptHistory(); // prompt history is per-session — a new session starts fresh
+        }
         _selectedExternalSessionId.clear();
         _selectedExternalCwd.clear();
         _selectedExternalTitle.clear();
@@ -6109,6 +6186,7 @@ namespace winrt::TerminalApp::implementation
         {
             return; // nothing selected
         }
+        _ResetPromptHistory(); // no session selected -> no history to recall
         _selectedId.clear();
         _selectedPromptId.clear();
         _selectedExternalSessionId.clear();
@@ -6137,6 +6215,7 @@ namespace winrt::TerminalApp::implementation
     // surfaces what was prompted. Clears the managed selection (one Flight-Plan surface).
     void AgentManagerContent::_SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath)
     {
+        _ResetPromptHistory(); // an external's Flight Plan is read-only — no managed history to recall
         _selectedId.clear();
         _selectedPromptId.clear();
         _selectedExternalSessionId = sessionId;
@@ -6550,6 +6629,7 @@ namespace winrt::TerminalApp::implementation
         });
         _addPromptBox.Text(L"");
         _Refresh();
+        _FocusPromptBox(); // Agentmaster: keep focus in the editor so the user can queue the next prompt
     }
 
     void AgentManagerContent::_OnSendNow()
@@ -6717,6 +6797,127 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _Refresh();
+        _FocusPromptBox(); // Agentmaster: return focus to the editor so the user can keep composing
+    }
+
+    // Agentmaster: return keyboard focus to the compose box after a queue/send — clicking the icon
+    // button moved focus to it, so this lets the user immediately type the next prompt. Programmatic
+    // focus places the caret in the box. A no-op if the box isn't present.
+    void AgentManagerContent::_FocusPromptBox()
+    {
+        if (_addPromptBox)
+        {
+            _addPromptBox.Focus(FocusState::Programmatic);
+        }
+    }
+
+    // Agentmaster (prompt history): the selected session's previously SENT prompts (Flight + Typed),
+    // newest first, with consecutive duplicates collapsed (the shell HISTCONTROL=ignoredups idiom).
+    // Pending/Held queue items are the FUTURE, not history, so they're excluded; only status==Sent
+    // (which both an injected Flight prompt and a Typed-into-the-terminal capture carry) is history.
+    std::vector<std::wstring> AgentManagerContent::_BuildPromptHistory() const
+    {
+        std::vector<std::wstring> out;
+        if (_selectedId.empty() || !_registry)
+        {
+            return out;
+        }
+        const auto sel = _registry->Get(_selectedId);
+        if (!sel)
+        {
+            return out;
+        }
+        std::vector<const QueuedPrompt*> sent;
+        for (const auto& p : sel->queue)
+        {
+            if (p.status == PromptStatus::Sent && !p.text.empty())
+            {
+                sent.push_back(&p);
+            }
+        }
+        // Newest first (descending send time); stable so equal-stamp items keep their queue order.
+        std::stable_sort(sent.begin(), sent.end(), [](const QueuedPrompt* a, const QueuedPrompt* b) {
+            return a->sentAtUnixMs > b->sentAtUnixMs;
+        });
+        for (const auto* p : sent)
+        {
+            if (out.empty() || out.back() != p->text)
+            {
+                out.push_back(p->text);
+            }
+        }
+        return out;
+    }
+
+    // Agentmaster (prompt history): write a recalled body into the compose box and park the caret at
+    // the end (ready to edit / Enter). The _promptHistoryNavigating latch suppresses the box's
+    // TextChanged -> _ResetPromptHistory so this recall isn't mistaken for a user edit. The UWP
+    // TextBox raises TextChanged SYNCHRONOUSLY from the Text setter, so a plain bool around the set
+    // is enough (set -> Text() -> any re-entrant TextChanged no-ops -> cleared, one stack frame).
+    void AgentManagerContent::_ApplyPromptHistoryText(const std::wstring& text)
+    {
+        if (!_addPromptBox)
+        {
+            return;
+        }
+        _promptHistoryNavigating = true;
+        _addPromptBox.Text(winrt::hstring{ text });
+        const int32_t len = static_cast<int32_t>(text.size());
+        _addPromptBox.SelectionStart(len); // caret to the end (collapsed selection)
+        _addPromptBox.SelectionLength(0);
+        _promptHistoryNavigating = false;
+    }
+
+    // Agentmaster (prompt history): leave navigation — drop the snapshot/draft and return to the
+    // "live draft" state (index -1). Called when the user edits the box (TextChanged), it's cleared
+    // after a send, or the selected session changes (history is per-session).
+    void AgentManagerContent::_ResetPromptHistory()
+    {
+        _promptHistoryIndex = -1;
+        _promptHistory.clear();
+        _promptHistoryDraft.clear();
+    }
+
+    // Agentmaster (prompt history): is the caret on the FIRST logical line of the compose box? True
+    // when no line break precedes it. (A UWP TextBox uses \r for newlines, but a programmatic set can
+    // leave \n — treat both as breaks.) An empty box / caret at 0 counts as the first line.
+    bool AgentManagerContent::_PromptCaretOnFirstLine() const
+    {
+        if (!_addPromptBox)
+        {
+            return false;
+        }
+        const std::wstring text{ _addPromptBox.Text() };
+        const int32_t caret = _addPromptBox.SelectionStart();
+        const int32_t limit = std::min<int32_t>(caret, static_cast<int32_t>(text.size()));
+        for (int32_t i = 0; i < limit; ++i)
+        {
+            if (text[i] == L'\n' || text[i] == L'\r')
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Agentmaster (prompt history): is the caret on the LAST logical line? True when no line break
+    // follows it (the far edge of any selection). An empty box / caret at end counts as the last line.
+    bool AgentManagerContent::_PromptCaretOnLastLine() const
+    {
+        if (!_addPromptBox)
+        {
+            return false;
+        }
+        const std::wstring text{ _addPromptBox.Text() };
+        const int32_t caret = _addPromptBox.SelectionStart() + _addPromptBox.SelectionLength();
+        for (int32_t i = std::max<int32_t>(0, caret); i < static_cast<int32_t>(text.size()); ++i)
+        {
+            if (text[i] == L'\n' || text[i] == L'\r')
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     void AgentManagerContent::_OnMovePrompt(int delta)

@@ -227,6 +227,23 @@ namespace winrt::TerminalApp::implementation
         void _OnAddPrompt();
         void _OnSendNow(); // the "!" icon — confirms, then _DoSendNow
         void _DoSendNow(); // actual inject, after the Send-now confirm
+        // Agentmaster: after queueing / sending a prompt, return keyboard focus to the compose box
+        // so the user can keep typing the next one (clicking the icon button stole focus). A no-op
+        // if the box isn't built / present.
+        void _FocusPromptBox();
+        // Agentmaster (prompt history — shell/REPL idiom): pressing Up while the caret is on the
+        // FIRST line of the compose box recalls the selected session's previously SENT prompts
+        // (newest first); Down on the LAST line walks back toward the newest, then restores the
+        // in-progress draft. _BuildPromptHistory snapshots the sent prompts (Flight + Typed),
+        // newest first, consecutive-duplicate-collapsed; _ApplyPromptHistoryText writes a recalled
+        // body (guarded so its TextChanged doesn't reset navigation) + parks the caret at the end;
+        // _ResetPromptHistory leaves navigation (called when the user edits, the box is cleared, or
+        // the selection changes). _PromptCaretOn{First,Last}Line gate the trigger on caret position.
+        std::vector<std::wstring> _BuildPromptHistory() const;
+        void _ApplyPromptHistoryText(const std::wstring& text);
+        void _ResetPromptHistory();
+        bool _PromptCaretOnFirstLine() const;
+        bool _PromptCaretOnLastLine() const;
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
         void _OnAutopilotChanged(int index);
@@ -496,6 +513,16 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _recentDirs; // MRU of launched working dirs (persisted)
         bool _pathPickerUserDismissed{ false }; // Esc/Enter/blur dismiss the picker; (re)focusing/tapping the box clears it
         winrt::Windows::UI::Xaml::Controls::TextBox _addPromptBox{ nullptr };
+        // Agentmaster (prompt history): navigation state for the compose box's Up/Down recall.
+        // _promptHistoryIndex == -1 means "not navigating" (the live draft); 0 == the newest sent
+        // prompt, growing older. _promptHistory is the newest-first snapshot taken when navigation
+        // begins; _promptHistoryDraft is the text that was being composed when it began (restored on
+        // Down past the newest). _promptHistoryNavigating guards our own .Text() writes so the box's
+        // TextChanged handler doesn't mistake a recall for a user edit and reset navigation.
+        int _promptHistoryIndex{ -1 };
+        std::vector<std::wstring> _promptHistory;
+        std::wstring _promptHistoryDraft;
+        bool _promptHistoryNavigating{ false };
         winrt::Windows::UI::Xaml::Controls::Button _autopilotBtn{ nullptr }; // Agentmaster: Autopilot mode toggle in the FLIGHT PLAN header (replaces the old combo)
         winrt::Windows::UI::Xaml::Controls::StackPanel _templatesRow{ nullptr }; // Agentmaster: the Templates row — collapsed by default, toggled by the paper icon
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
