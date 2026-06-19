@@ -1229,6 +1229,18 @@ namespace winrt::TerminalApp::implementation
                     {
                         return;
                     }
+                    // If the session is already open in a tab (any window), jump straight to it —
+                    // the same as the right-click "Jump to tab". Only resume from disk when it is NOT
+                    // open: the resume seam jumps a live session too, but going direct here skips its
+                    // /clear-chain tail resolution and lands on the clicked session's own tab.
+                    if (self->_sessionRegistry)
+                    {
+                        if (const auto reg = self->_sessionRegistry->Get(id); reg && reg->live)
+                        {
+                            self->_ActivateClaudeSession(winrt::hstring{ id });
+                            return;
+                        }
+                    }
                     for (const auto& row : self->_sessionsRows)
                     {
                         if (row.id == id)
