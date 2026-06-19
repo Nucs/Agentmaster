@@ -207,7 +207,11 @@ struct ObservedClaude
     RunningApp   runningApp{ RunningApp::Unknown };
     bool         background{};
     std::wstring model, effort, permissionMode, sessionName;
+    std::wstring gitBranch;           // transcript git branch — the LIVE writer for SessionInfo::branch
+    std::wstring presenceStatus;      // claude's pid-validated sessions/<pid>.json heartbeat (a FACT, never state)
+    std::wstring ownerWindowId;       // owning window (roster key / AM_SESSION suffix; §19-Q1)
     int64_t      observedUnixMs{};
+    int64_t      createdUnixMs{}, lastActivityUnixMs{};   // transcript ctime/mtime (per-session timing)
 };
 ```
 
@@ -349,6 +353,8 @@ namespace Agentmaster
         // observer -> UI lane (snapshots; copy under lock).
         std::vector<CorrelationRow> Correlation() const;
         std::vector<TabActivityRow> Activity() const;
+        std::vector<ExternalClaudeRow>  External() const;   // the WindowsTerminal/Codex observe-only census (§11c/§11f)
+        std::vector<SessionPresenceRow> Presence() const;   // pid-validated ~/.claude/sessions/<pid>.json (§8b; SESSIONS.md §7-Q5)
 
     private:
         void _worker() noexcept;                     // heartbeat ~2s + Wake()
@@ -446,10 +452,11 @@ launch id, which is correct until a divergence. (Same precedence the `agentmaste
 | `Wake()` from UI (roster changed) | immediate survey |
 | `Wake()` from M-lane (a known PID died) | immediate survey (reclassify the tab) |
 
-Cost: one ~10 ms snapshot per 2 s ≈ **0.5 % CPU**, off the UI thread. *Optimization (later):* skip the
-Toolhelp snapshot when the roster is byte-identical to last tick **and** every correlated PID is still
-alive **and** it isn't the slow heartbeat — gets steady-state to µs (benchmark §1). Ship the simple
-unconditional heartbeat first.
+Cost: one ~10 ms snapshot per 2 s ≈ **0.5 % CPU**, off the UI thread. *Optimization (SHIPPED — O7):* between full surveys the worker ticks every `kObserverFastTickMs`
+(1000 ms) and SKIPS the Toolhelp snapshot when the roster is byte-identical to last tick **and** every
+correlated `(pid, start-time)` pair is still alive **and** it isn't the slow heartbeat — a µs liveness
+check, so steady state is µs (benchmark §1). The full `kObserverHeartbeatMs` (2000 ms) cadence is preserved
+so claude *birth* in a stable tab is still caught.
 
 ---
 
@@ -524,7 +531,7 @@ _ObserverProbe():                                  // co_await resume_foreground
         c = corr[wt]
         if c && c.runningApp==Agentmaster && !c.sessionId.empty() && !bound(tab):
             _BindClaudeSessionToTab(tab, conn, c.sessionId, c.cwd)   // injector+overlay+title+color
-        _ApplyTabActivity(tab, act[wt])                 // badge / overlay mode (§11b)
+        _SetTabActivityBadge(tab, act[wt])              // badge / overlay mode (§11b)
     _SweepClaudeLiveness()                              // existing archive-on-dead seam
 ```
 
@@ -547,7 +554,7 @@ refinements: `s.background==true` or no injector ⇒ never auto-driven (nothing 
 Already an id-filtered registry observer (`AddObserver`). Additions:
 - Show `model`/`effort`/`kind` in the expanded panel; `runningApp==WindowsTerminal` → `observe`
   (disabled controls, tooltip "external — Windows Terminal").
-- `_ApplyTabActivity` lets the host tab render a dim activity chip even for non-claude tabs
+- `_SetTabActivityBadge` lets the host tab render a dim activity chip even for non-claude tabs
   (`pwsh` / `cmd` / `codex`) or keep the overlay hidden when `activity != ClaudeCode` (per
   `AppSettings.showTabOverlay`).
 
