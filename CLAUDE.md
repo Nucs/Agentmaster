@@ -3,6 +3,10 @@
 > A fork of **Windows Terminal** (`microsoft/terminal`, MIT) that turns it into a manager
 > for multiple **Claude Code** sessions.
 
+## Development Rules
+
+- Do not build or deploy or install without the user's permission.
+
 ## What we're doing & our aim
 
 **Aim:** one Windows Terminal–based app that manages **N Claude Code sessions across M
@@ -1382,9 +1386,10 @@ now), `with --wait 600 -- <cmd>` (acquire → run one command → release). `bas
 
 **Inner loop.** The loose layout is live (binaries update in place), but you **cannot
 relink `WindowsTerminal.exe` while the app is running** — it locks the exe. So: close *our*
-dev instance (spare the Store WT), rebuild, relaunch. The user has **standing-authorized
-this close→build→relaunch cycle** ("always auto deploy") — run it without prompting; just
-never touch the Store WT (it's not under our path — see Gotchas). **Hold the `build-launch`
+dev instance (spare the Store WT), rebuild, relaunch. **Building, deploying, and installing
+require the user's permission — always ask first** (see *Development Rules*; the prior "always
+auto deploy, run without prompting" standing authorization is **revoked**). Just never touch the
+Store WT (it's not under our path — see Gotchas). **Hold the `build-launch`
 mutex around the whole cycle** (acquire at step 0, release at step 4 — see *Concurrency lock*).
 ```bash
 # 0. acquire the global mutex — REQUIRED (queues behind another agent's build)
@@ -1535,11 +1540,14 @@ build **binlog uploads as an artifact** to diagnose the first run.
   resolves on PATH + follows the APPEXECLINK reparse and hands off; a full reparse-path
   `CreateProcess`/`Start-Process` bypasses the alias and cascades a fresh window instead
   (ShellExecuteEx on the full `<PFN>\<alias>` path is the verified exception — see `GetWtExePath`).
-- **Closing instances to relink.** Auto-closing **our** dev instance for the deploy inner
-  loop is standing-authorized ("always auto deploy"): filter by
+- **Closing instances to relink.** Closing **our** dev instance for the deploy inner loop
+  **requires the user's permission first** (see *Development Rules*; the prior "always auto
+  deploy, no prompt" authorization is **revoked**). Once permitted, filter by
   `ExecutablePath -like 'K:\source\Agentmaster\*'` (matches our `WindowsTerminal.exe` *and*
-  its `OpenConsole.exe` ConPTY hosts), `Stop-Process` them, build, relaunch — no prompt.
-  But **never** touch the running **Store** Windows Terminal — it's the user's live session
+  its `OpenConsole.exe` ConPTY hosts) — but **scope it tighter** (e.g. `\bin\x64\Debug\`),
+  because a **Release** instance can host the very session you're running in (`AM_SESSION` /
+  `CCMGR_HOOK_PIPE` set), so the broad path filter would **self-kill** it — then `Stop-Process`,
+  build, relaunch. But **never** touch the running **Store** Windows Terminal — it's the user's live session
   (under `Program Files\WindowsApps\…`, not our path). Never blanket-`taskkill` by image
   name; always path-filter so the Store WT is spared.
 - **Packaging (`PRI210 / 0x800704c8`) can fail to overwrite `resources.pri`.** The registered
