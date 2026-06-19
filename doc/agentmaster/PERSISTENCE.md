@@ -117,16 +117,19 @@ WindowRecord {
   windowId:  stable GUID (generated once per window, embedded in the Manager tab args)
   geometry:  { InitialPosition, InitialSize, LaunchMode }   // from WT WindowLayout
   tabs:      [ TabEntry... ]   // ORDERED
+  selectedSessionId / selectedTabIndex   // focused-at-close tab by STABLE identity (Claude convId,
+                                         //   else shell-tab index; Increment 5)
   manager:   { selectedId, scopeDir, selectedPromptId, collapsedDirs[], splitterFractions,
                treeScope }   // treeScope: 0=LOCAL 1=GLOBAL 2=EXTERNAL — the ONE scope behind the
                              // Explorer Tree's 3-way toggle AND the Triage Board's 2-way twin
                              // (the board reads External as Global); absent => 0 (older records)
 }
 
-TabEntry =
-  | Claude { sessionId, workingDir, title }   // ours — a REFERENCE by id (Option 1)
-  | Codex  { sessionId, workingDir, title }   // ours — a managed codex.exe (rollout uuid on the referenced SessionInfo.codexSessionId)
-  | Other  { actionsJson }   // WT ActionAndArgs (carries its own NewTab/SetTabColor/RenameTab)
+TabEntry { kind: Claude | Codex | Other }   // a discriminated REFERENCE, never a copy (Option 1)
+  | Claude / Codex -> sessionId    // references the session in sessions.json; title / color / queue
+                                   //   live THERE + the dir-color system (Codex rollout uuid on
+                                   //   SessionInfo.codexSessionId). workingDir/title are NOT copied here.
+  | Other          -> actionsJson  // WT ActionAndArgs (its own NewTab/SetTabColor/RenameTab)
 ```
 
 > **As built (Option 1 — refs, not copies).** A managed `TabEntry` records the
@@ -134,8 +137,10 @@ TabEntry =
 > of the session's flight-plan / autopilot / color. The session data lives in `sessions.json`
 > (the one source of truth); the record only fixes tab **order** + window↔session **affinity**
 > + the kind, so restore replays the right CLI (`claude --resume` vs `codex resume`). Color
-> + title ride the referenced `SessionInfo` / the dir-color system (Rule #12), so the
-> launch-time `tabColor` field was dropped as dead round-trip data.
+> + title ride the referenced `SessionInfo` / the dir-color system (Rule #12), so
+> `_CaptureWindowRecord` **stopped filling** the launch-time `tabColor` (dead round-trip data —
+> `_RestoreWindowTabs` re-derives color from the dir-color map); the field + a tolerant deserialize
+> survive only for back-compat.
 
 Stored under `%USERPROFILE%\.agentmaster\windows\<windowId>.json` (one file per window so
 closes/opens don't contend on a single document). The flat `sessions.json` is **kept** as the
@@ -228,7 +233,7 @@ When restoring, there are **two grains**, one model:
   M12 restore).
 - **Per-tab — the *session*.** The Manager's **Archived** list restores **one session at a
   time** (or **Restore all**) into the *current* window — a cherry-pick, decoupled from any
-  window grouping. **Already shipped** (`_RestoreArchivedSession` / the Archived overlay).
+  window grouping. **Already shipped** (`_RestoreArchivedSession` / the full-window Archived page).
 
 So **per-window is the coarse "restore my workspace" unit (the launch prompt); per-tab is the
 fine-grained cherry-pick (the Archived button), always available.** A session restored per-tab
@@ -347,7 +352,7 @@ the rest of Agentmaster.
 
 Persistence is now **two layers**:
 - **Session layer — SHIPPED.** The archive model: `sessions.json` + `SessionInfo.live`; startup
-  loads everything **Archived**; closing a tab archives it; the global **Archived** overlay
+  loads everything **Archived**; closing a tab archives it; the global full-window **Archived** page
   restores on demand (`claude --resume`, transcript-gated). This is the session source of truth
   and is done — nothing below changes it.
 - **Window layer — THIS PLAN.** Per-window **UI state** (geometry + Manager lens + ordered tab
@@ -361,7 +366,7 @@ relaunched — everything is Archived." The window layer adds: do we **reopen th
 (empty — Manager tab + their geometry + their splitter/lens), or keep launching a **single**
 window?
 - **Target (recommended):** reopen each saved window at its geometry/lens, empty of sessions; the
-  Archived overlay restores sessions, which **re-home** to their origin window. Delivers
+  Archived page restores sessions, which **re-home** to their origin window. Delivers
   "close == reopen your workspace layout" without relaunching any claude.
 - **Lite:** if multi-window restore is *not* wanted, the plan collapses to **single-window
   geometry+lens** (Phases A, B, C-lite, E — skip the Emperor multi-window work). Much smaller.
@@ -585,7 +590,7 @@ launch, gated by a decide-prompt, + a recover button** for history). Commits `bf
   `OSC 633;P;Cwd`, all already parsed by our terminal into `WorkingDirectory()`), injectable VS-Code-style
   (a prompt-WRAP that preserves oh-my-posh/starship) into our OWN pwsh profiles in `settings.json`. Deferred
   by decision (2026-06): the gap is narrow — cmd & bash already sync their PEB cwd, so only a cd-only
-  *plain pwsh* tab is affected — and the fix requires a one-time prompt-hook injection nobody wanted yet. The Archived overlay is **grouped by window** (`_RebuildArchiveList` over
+  *plain pwsh* tab is affected — and the fix requires a one-time prompt-hook injection nobody wanted yet. The Archive page is **grouped by window** (`_GatherArchiveRows` over
   `RecoverableWindows`): a per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1
   -s <idx>`) over its session rows (**Restore here** cherry-picks one into the current window). A clobber
   guard (`_FlushWindowRecord`: skip a no-tabs+no-geometry or pre-Initialized capture) + a close-flush
