@@ -15,7 +15,7 @@
 > **every classified tab** (a dim `○ <kind> · unlinked` *observe badge* — `pwsh` / `cmd` /
 > unprompted-`claude` / `codex` — that flips in place as activity changes, **not** "no badge" as §8
 > originally said); it is enriched with `model · effort · kind` and carries a **second
-> `<workdir>/<branch>` row**; the hover row is a **folder Open-Path + a copy menu** (Session Id /
+> `<workdir>/<branch>` row**; an always-shown action row carries a **folder Open-Path + a copy menu** (Session Id /
 > Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a chime) **+ a
 > pencil** that toggles a **second overlay, the SUMMARY PANEL**. A matching **tab-strip status dot**
 > rides every tab header. These are written up in **§13** below; [`../../CLAUDE.md`](../../CLAUDE.md)
@@ -303,15 +303,16 @@ working-dir folder + its **live** git branch (`ReadGitBranchForDir`, read from `
 a worktree/submodule `.git` FILE + a detached HEAD → short SHA; distinct from a transcript's
 historical first-seen branch). Hidden when there is no dir/branch, and on observe badges.
 
-### 13d. Hover **action row** (row 3) — Open Path + copy menu
-Hovering a linked badge reveals an actions row: a **folder** button (Open Path → the working dir via
+### 13d. **Action row** (row 2, left) — Open Path + copy menu
+A linked badge's action row is **always visible** (originally the hover-only "row 3"; now it sits on
+**row 2, to the LEFT of the dir/branch label**): a **folder** button (Open Path → the working dir via
 `explorer.exe`, off-thread) + a **copy menu** + a **pencil**. The copy menu yields `Session Id` ·
 `Copy Path` · `Copy Branch Name` · `Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
 command — the live process commandline from the PEB, or the builder Launch/Restore would use, *not*
 a toy `--resume <id>`) · `Summary` (the full textual session box) · `Transcript` (the whole
 conversation, user + assistant TEXT only via `ReadConversationText`). Every copy / Open Path plays a
-short confirmation chime (`PlaySoundW`). Built only for a LINKED session; revealed while the pointer
-is over the badge OR the copy menu is open.
+short confirmation chime (`PlaySoundW`). Built only for a LINKED session (never an observe badge); the
+buttons stay laid out, while the whole badge is dim at rest and brightens on hover.
 
 ### 13e. The SUMMARY PANEL (the pencil → a second overlay)
 The pencil toggles a **second overlay** stacked **below the badge** (`TerminalPaneContent::SetAgentSummaryOverlay`,
