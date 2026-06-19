@@ -132,7 +132,7 @@ namespace winrt::TerminalApp::implementation
         void _SetSummaryContent(const std::wstring& text); // fill the panel StackPanel: text runs -> TextBlocks, separator sentinels -> full-width Border rules
         void _UpdateTimesLine(); // re-render the live "age / last user msg / last activity" ago line (DispatcherTimer-driven)
         void _ApplySummaryVisibility(); // show the 2nd pane only when enabled AND non-empty (content rows or a times line); else collapse it
-        void _ApplySummarySize(); // re-apply the panel width (MaxWidth) + height (scroll MaxHeight) from the size fractions + cached pane size
+        void _ApplySummarySize(bool forced = false); // re-apply the panel size from the size fractions + cached pane size: at rest MaxWidth/MaxHeight only (fit content); forced==true (mid grip-drag) ALSO pins explicit Width/Height so the panel grows PAST its own content up to the shared max, then snaps back on release
         double _CurrentSummaryWidthPx() const; // the panel's current effective max width in px (fraction*pane, or the 20% default)
         double _CurrentSummaryHeightPx() const; // the scroll viewport's current effective max height in px (fraction*pane, or min(480, 0.75*pane))
         void _OnSummaryDragMove(double pointerX, double pointerY); // live grip-drag: update the dragged size fraction(s) from the pointer delta + re-apply

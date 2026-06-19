@@ -26,6 +26,7 @@
 #pragma comment(lib, "winmm.lib")
 
 #include <algorithm> // std::clamp / std::min (summary-panel size fractions)
+#include <cmath> // NAN (summary-panel "auto" size sentinel on drag release)
 #include <chrono> // DispatcherTimer interval (summary times-line ticker)
 #include <string>
 #include <unordered_set> // summary file-list de-dup (Edited/Created take over Read)
@@ -1700,19 +1701,48 @@ namespace winrt::TerminalApp::implementation
     // top-right the growth is leftward. HEIGHT is the scroll viewport's MaxHeight — the body scrolls
     // past it. Called on a fraction change (SetSummarySize), a pane resize (OnSummaryPaneSize), and live
     // during a grip drag, so the panel stays a constant % of the pane as the window resizes.
-    void AgentTabOverlay::_ApplySummarySize()
+    //
+    // `forced` (mid grip-drag): ALSO pin an EXPLICIT Width/Height so the panel visibly grows PAST its own
+    // content — the size is a GLOBAL/shared setting and other tabs may have more content to fill it, so a
+    // drag must be able to reach the max bands even when THIS tab's transcript is short (TAB_OVERLAY.md
+    // summary-panel resize). At rest (!forced) we clear that explicit size (NaN == auto), so the panel
+    // falls back to the MaxWidth/MaxHeight caps and snaps to hug its own content again — the
+    // "release the drag => reset to fit content" the user asked for.
+    void AgentTabOverlay::_ApplySummarySize(bool forced)
     {
         if (!_summaryRoot)
         {
             return;
         }
-        if (const double wpx = _CurrentSummaryWidthPx(); wpx > 0.0)
+        const double wpx = _CurrentSummaryWidthPx();
+        if (wpx > 0.0)
         {
             _summaryRoot.MaxWidth(wpx);
         }
+        const double hpx = _CurrentSummaryHeightPx();
         if (_summaryScroll)
         {
-            _summaryScroll.MaxHeight(_CurrentSummaryHeightPx());
+            _summaryScroll.MaxHeight(hpx);
+        }
+        // NaN is the special value XAML uses for "Auto" sizing (cf. TabManagement::_UpdateTabView).
+        if (forced)
+        {
+            if (wpx > 0.0)
+            {
+                _summaryRoot.Width(wpx); // force the exact width: grow leftward past content, up to the shared max
+            }
+            if (_summaryScroll)
+            {
+                _summaryScroll.Height(hpx); // force the exact viewport height the same way
+            }
+        }
+        else
+        {
+            _summaryRoot.Width(NAN); // auto => fit content (still capped by MaxWidth)
+            if (_summaryScroll)
+            {
+                _summaryScroll.Height(NAN); // auto => fit content (still capped by MaxHeight)
+            }
         }
     }
 
@@ -1762,7 +1792,7 @@ namespace winrt::TerminalApp::implementation
             const double newH = _summaryDragStartH + (pointerY - _summaryDragStartY);
             _summaryHeightFraction = std::clamp(newH / _summaryPaneH, kSummaryMinHFrac, kSummaryMaxHFrac);
         }
-        _ApplySummarySize();
+        _ApplySummarySize(true); // FORCED while dragging: track the pointer past this tab's content, up to the max
     }
 
     // Grip release: drop pointer capture, restore the cursor, then commit the new size. The fractions are
@@ -1786,6 +1816,11 @@ namespace winrt::TerminalApp::implementation
             el.ReleasePointerCaptures();
         }
         ApplyCursor(CoreCursorType::Arrow);
+        // Drop the forced exact Width/Height pinned during the drag and snap back to fit-content (the
+        // MaxWidth/MaxHeight caps). The dragged FRACTION is preserved either way — the cap now carries
+        // it — so this tab hugs its own (possibly short) content while the shared max we just set still
+        // lets fuller tabs fill out. This is the user's "release the drag => reset to fit content".
+        _ApplySummarySize(false);
         if (_summaryDragShift)
         {
             _summarySizeLocalOverride = true; // this tab now keeps its own size + ignores shared broadcasts
