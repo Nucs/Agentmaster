@@ -4,6 +4,7 @@
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
+#include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
@@ -750,31 +751,40 @@ namespace winrt::TerminalApp::implementation
     {
         _dispatcher = DispatcherQueue::GetForCurrentThread();
 
-        _line = TextBlock{};
-        _line.FontSize(12);
-        _line.Foreground(Fill(0xFF, 0xEC, 0xEC, 0xEC));
-        _line.IsTextSelectionEnabled(false);
-        _line.TextWrapping(TextWrapping::NoWrap);
-        _line.HorizontalAlignment(HorizontalAlignment::Right); // keep the right edge aligned when row 2 is wider
+        // Row 1: a horizontal strip of DISCRETE parts (status · model·effort · Autopilot[button] · queue
+        // · link) so every part can carry its OWN tooltip and the Autopilot part can be a clickable button.
+        // _Refresh / ShowActivity fill _row1.Children(); right-aligned so the badge hugs the right edge.
+        _row1 = StackPanel{};
+        _row1.Orientation(Orientation::Horizontal);
+        _row1.HorizontalAlignment(HorizontalAlignment::Right);
 
-        // Row 2: "<root workdir folder>/<branch>" — secondary (smaller + dimmer), right-aligned to the
-        // badge edge, width-capped + ellipsized so a long branch path can't balloon the HUD. Collapsed
-        // until _Refresh() fills it; stays collapsed on the registry-less observe badge (no session).
+        // Row 2 label: "<root workdir folder>/<branch>" — secondary (smaller + dimmer), width-capped +
+        // ellipsized so a long branch path can't balloon the HUD. Collapsed until _Refresh() fills it;
+        // stays collapsed on the registry-less observe badge (no session). Vertically centered so it lines
+        // up with the (taller) action buttons that sit to its left.
         _subline = TextBlock{};
         _subline.FontSize(11);
         _subline.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0));
         _subline.IsTextSelectionEnabled(false);
         _subline.TextWrapping(TextWrapping::NoWrap);
         _subline.TextTrimming(TextTrimming::CharacterEllipsis);
-        _subline.HorizontalAlignment(HorizontalAlignment::Right);
+        _subline.VerticalAlignment(VerticalAlignment::Center);
         _subline.MaxWidth(380);
-        _subline.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0));
         _subline.Visibility(Visibility::Collapsed);
+
+        // Row 2: the action buttons (folder/copy/pencil, built lazily by _BuildActionsRow for a LINKED
+        // session) are inserted at index 0, to the LEFT of the dir/branch label, and are ALWAYS shown
+        // (no longer hover-only). The whole row is right-aligned so [actions][label] hug the right edge.
+        _row2 = StackPanel{};
+        _row2.Orientation(Orientation::Horizontal);
+        _row2.HorizontalAlignment(HorizontalAlignment::Right);
+        _row2.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0)); // a 1px gap below row 1
+        _row2.Children().Append(_subline);
 
         _stack = StackPanel{};
         _stack.Orientation(Orientation::Vertical);
-        _stack.Children().Append(_line);
-        _stack.Children().Append(_subline);
+        _stack.Children().Append(_row1);
+        _stack.Children().Append(_row2);
 
         _root = Border{};
         _root.Background(Fill(0xCC, 0x20, 0x20, 0x20)); // dark translucent so it reads on any terminal
@@ -834,18 +844,12 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
-        _WireHover(); // pointer-over expand (opacity + row 3)
-        _BuildActionsRow(); // row 3: folder + copy menu + pencil (linked sessions only)
+        _WireHover(); // pointer-over brighten (opacity)
+        _BuildActionsRow(); // row-2 actions: folder + copy menu + pencil (linked sessions only), left of the dir/branch label
         _BuildSummaryPanel(); // the 2nd slot (summary panel), collapsed until the pencil toggles it on
-        // Explain the dense row-1 label (glyph + abbreviations): the live values are in the text, the
-        // tooltip says what each part MEANS. Linked-session wording; ShowActivity overrides it for an
-        // observe badge (defensive — the two are normally separate elements).
-        if (_line)
-        {
-            ToolTipService::SetToolTip(_line, winrt::box_value(winrt::hstring{
-                L"Status \x00B7 model \x00B7 effort \x00B7 Autopilot mode \x00B7 \x23F3 queued \x00B7 link\n"
-                L"\x26D3 linked = Agentmaster can drive it; observe = read-only; unlinked = not bound" }));
-        }
+        // No single line-wide tooltip here: _Refresh builds row 1 as DISCRETE parts, each with its OWN
+        // concise tooltip (status / model·effort / Autopilot / queue / link); the row-2 label + action
+        // buttons carry theirs too.
         _Refresh();
     }
 
@@ -861,8 +865,8 @@ namespace winrt::TerminalApp::implementation
         {
             _dispatcher = DispatcherQueue::GetForCurrentThread();
         }
-        _WireHover(); // observe badges still brighten on hover (no row 3 — that's linked-only)
-        if (!_line || !_root)
+        _WireHover(); // observe badges still brighten on hover (no actions — that's linked-only)
+        if (!_row1 || !_root)
         {
             return;
         }
@@ -871,21 +875,27 @@ namespace winrt::TerminalApp::implementation
             return; // unchanged -> no XAML churn (this runs every probe tick)
         }
         _lastActivitySig = kind;
-        // This is an observe badge, not a linked session — explain that (overrides the linked-session
-        // row-1 tooltip in case the same element was ever used both ways).
-        ToolTipService::SetToolTip(_line, winrt::box_value(winrt::hstring{
-            L"Observed by Agentmaster, not a linked session. A claude links on its first prompt;\n"
-            L"shells (pwsh/cmd) and external codex stay observe-only here." }));
         _root.Visibility(Visibility::Visible);
-        _line.Inlines().Clear();
+        // An observe badge is ONE logical statement ("○ <kind> · unlinked"), so it stays a single
+        // TextBlock with one tooltip (unlike the linked badge's per-part row-1 strip built in _Refresh).
+        _row1.Children().Clear();
+        TextBlock tb{};
+        tb.FontSize(12);
+        tb.IsTextSelectionEnabled(false);
+        tb.TextWrapping(TextWrapping::NoWrap);
+        tb.VerticalAlignment(VerticalAlignment::Center);
         Run glyph{};
         glyph.Text(winrt::hstring{ L"\x25CB" }); // ○ gray — observed, but not a linked session
         glyph.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // gray
         glyph.FontWeight(FontWeights::SemiBold());
-        _line.Inlines().Append(glyph);
+        tb.Inlines().Append(glyph);
         Run text{};
         text.Text(winrt::hstring{ std::wstring{ L" " } + kind + L"  " + kDot + L"  unlinked" });
-        _line.Inlines().Append(text);
+        tb.Inlines().Append(text);
+        ToolTipService::SetToolTip(tb, winrt::box_value(winrt::hstring{
+            L"Observed by Agentmaster, not a linked session. A claude links on its first prompt;\n"
+            L"shells (pwsh/cmd) and external codex stay observe-only here." }));
+        _row1.Children().Append(tb);
     }
 
     void AgentTabOverlay::_Refresh()
@@ -894,7 +904,7 @@ namespace winrt::TerminalApp::implementation
         {
             return; // a pending badge is static — it has no registry session to refresh from
         }
-        if (!_line || !_registry)
+        if (!_row1 || !_registry)
         {
             return;
         }
@@ -926,9 +936,52 @@ namespace winrt::TerminalApp::implementation
         const std::wstring link = bound ? (std::wstring{ kLink } + L" linked") :
                                           (s.external ? std::wstring{ L"observe" } : std::wstring{ L"unlinked" });
 
-        std::wstring rest = L" ";
-        rest += StateLabel(s.state);
-        // model · effort · kind adornment (O6, Fleet Observer enrichment): only the parts we know.
+        // Row 1 is built as DISCRETE, individually-tooltipped parts (task 3): status · model·effort ·
+        // Autopilot[button] · queue · link. A small helper appends a text part (optional tooltip);
+        // separators reproduce the one-line look ("  ·  ") as their own tooltip-less elements so the
+        // strip still reads as one continuous line.
+        _row1.Children().Clear();
+        const auto fg = Fill(0xFF, 0xEC, 0xEC, 0xEC);
+        const auto appendText = [&](const std::wstring& t, const wchar_t* tip, const SolidColorBrush& brush) {
+            TextBlock tb{};
+            tb.FontSize(12);
+            tb.IsTextSelectionEnabled(false);
+            tb.TextWrapping(TextWrapping::NoWrap);
+            tb.VerticalAlignment(VerticalAlignment::Center);
+            tb.Foreground(brush);
+            tb.Text(winrt::hstring{ t });
+            if (tip)
+            {
+                ToolTipService::SetToolTip(tb, winrt::box_value(winrt::hstring{ tip }));
+            }
+            _row1.Children().Append(tb);
+        };
+        const std::wstring sepText = std::wstring{ L"  " } + kDot + L"  ";
+        const auto appendSep = [&]() { appendText(sepText, nullptr, fg); };
+
+        // Status: the colored state glyph + its label, one tooltip for the pair.
+        {
+            TextBlock tb{};
+            tb.FontSize(12);
+            tb.IsTextSelectionEnabled(false);
+            tb.TextWrapping(TextWrapping::NoWrap);
+            tb.VerticalAlignment(VerticalAlignment::Center);
+            Run g{};
+            g.Text(winrt::hstring{ StateGlyph(s.state) });
+            g.Foreground(SolidColorBrush{ StateColor(s.state) });
+            g.FontWeight(FontWeights::SemiBold());
+            tb.Inlines().Append(g);
+            Run lbl{};
+            lbl.Text(winrt::hstring{ std::wstring{ L" " } + StateLabel(s.state) });
+            lbl.Foreground(fg);
+            tb.Inlines().Append(lbl);
+            ToolTipService::SetToolTip(tb, winrt::box_value(winrt::hstring{
+                L"Live session status, colour-matched to the Triage Board\n"
+                L"(running / waiting / needs-approval / error / done / idle)." }));
+            _row1.Children().Append(tb);
+        }
+
+        // model · effort · bg (only the parts the Fleet Observer knows).
         {
             std::wstring me;
             const auto addPart = [&](const std::wstring& part) {
@@ -952,38 +1005,70 @@ namespace winrt::TerminalApp::implementation
             }
             if (!me.empty())
             {
-                rest += L"  ";
-                rest += kDot;
-                rest += L"  ";
-                rest += me;
+                appendSep();
+                appendText(me,
+                           L"Model \x00B7 reasoning effort this session is running"
+                           L" (\x00B7 bg marks a background session).",
+                           fg);
             }
         }
-        rest += L"  ";
-        rest += kDot;
-        rest += L"  ";
-        rest += ModeLabel(s.autopilot.mode);
+
+        // Autopilot mode — a CLICKABLE button that cycles Off -> Semi -> Full -> Off (task 2). Colored
+        // by mode (gray Off / amber Semi / green Full) to match the Triage Board's Autopilot language.
+        appendSep();
+        {
+            const auto mode = s.autopilot.mode;
+            const auto modeBrush = (mode == AutopilotMode::Full)     ? Fill(0xFF, 0x3C, 0xB3, 0x71) :  // MediumSeaGreen
+                                   (mode == AutopilotMode::SemiAuto) ? Fill(0xFF, 0xDA, 0xA5, 0x20) :  // Goldenrod
+                                                                       Fill(0xFF, 0xB0, 0xB0, 0xB0);   // gray (Off)
+            Button b{};
+            b.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable; the template gives a hover highlight ("appears clickable")
+            b.BorderThickness(ThicknessHelper::FromUniformLength(0));
+            b.Padding(ThicknessHelper::FromLengths(2, 0, 2, 0));
+            b.MinWidth(0);
+            b.MinHeight(0);
+            b.IsTabStop(false); // never pull keyboard focus off the ConPTY
+            b.VerticalAlignment(VerticalAlignment::Center);
+            b.VerticalContentAlignment(VerticalAlignment::Center);
+            TextBlock t{};
+            t.FontSize(12);
+            t.VerticalAlignment(VerticalAlignment::Center);
+            t.Foreground(modeBrush);
+            t.Text(winrt::hstring{ ModeLabel(mode) });
+            b.Content(t);
+            ToolTipService::SetToolTip(b, winrt::box_value(winrt::hstring{
+                L"Autopilot \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
+                L"Off: you drive. Semi: it proposes the next queued prompt, you confirm.\n"
+                L"Full: it auto-sends the queue on each turn-complete." }));
+            const auto weak = get_weak();
+            b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_CycleAutopilot();
+                }
+            });
+            // "appear clickable on hover": a hand cursor over the button (the Button template adds the
+            // background highlight). Restore the arrow on exit. CoreWindow drives the cursor (no
+            // per-element cursor in this XAML projection — same approach as the summary-panel grips).
+            b.PointerEntered([](const IInspectable&, const PointerRoutedEventArgs&) { ApplyCursor(CoreCursorType::Hand); });
+            b.PointerExited([](const IInspectable&, const PointerRoutedEventArgs&) { ApplyCursor(CoreCursorType::Arrow); });
+            _row1.Children().Append(b);
+        }
+
+        // queued (Pending) count — ⏳N.
         if (pending > 0)
         {
-            rest += L"  ";
-            rest += kDot;
-            rest += L"  ";
-            rest += kHourglass;
-            rest += std::to_wstring(pending);
+            appendSep();
+            appendText(std::wstring{ kHourglass } + std::to_wstring(pending),
+                       L"Prompts queued and waiting to be sent (Pending).", fg);
         }
-        rest += L"  ";
-        rest += kDot;
-        rest += L"  ";
-        rest += link;
 
-        _line.Inlines().Clear();
-        Run glyph{};
-        glyph.Text(winrt::hstring{ StateGlyph(s.state) });
-        glyph.Foreground(SolidColorBrush{ StateColor(s.state) });
-        glyph.FontWeight(FontWeights::SemiBold());
-        _line.Inlines().Append(glyph);
-        Run text{};
-        text.Text(winrt::hstring{ rest });
-        _line.Inlines().Append(text);
+        // link state.
+        appendSep();
+        appendText(link,
+                   L"Link state \x2014 whether Agentmaster can drive this session.\n"
+                   L"\x26D3 linked: bound, can send. observe: read-only (hosted elsewhere). unlinked: not bound.",
+                   fg);
 
         // Row 2: "<root workdir folder>/<branch>" — the leaf of the session's working dir joined with
         // its git branch (e.g. C:/folder/myworkdir + "feature/issue123" -> "myworkdir/feature/issue123").
@@ -1013,13 +1098,15 @@ namespace winrt::TerminalApp::implementation
             else
             {
                 _subline.Text(winrt::hstring{ sub });
-                // Row 2 is width-capped + ellipsized and shows only the leaf folder; the tooltip reveals
-                // the FULL working path (+ branch) behind it (the Archive-page reveal-behind-truncation pattern).
-                std::wstring tip = dir;
+                // Row 2 is width-capped + ellipsized and shows only the leaf folder; the tooltip names
+                // what it is and reveals the FULL working path (+ branch) behind it (the Archive-page
+                // reveal-behind-truncation pattern).
+                std::wstring detail = dir;
                 if (!s.branch.empty())
                 {
-                    tip = tip.empty() ? s.branch : (tip + L"  " + kDot + L"  " + s.branch);
+                    detail = detail.empty() ? s.branch : (detail + L"  " + kDot + L"  " + s.branch);
                 }
+                const std::wstring tip = std::wstring{ L"Working directory \x00B7 git branch\n" } + detail;
                 ToolTipService::SetToolTip(_subline, winrt::box_value(winrt::hstring{ tip }));
                 _subline.Visibility(Visibility::Visible);
             }
@@ -1057,19 +1144,51 @@ namespace winrt::TerminalApp::implementation
 
     void AgentTabOverlay::_SetExpanded(bool on)
     {
+        // The action buttons are ALWAYS shown now (they live in row 2, left of the dir/branch label), so
+        // this only dims/brightens the WHOLE badge: dim at rest, full on hover OR while the copy menu is
+        // pinned open.
         if (_root)
         {
             _root.Opacity(on ? 1.0 : 0.55);
         }
-        if (_row3)
+    }
+
+    // The row-1 Autopilot button: cycle THIS session's mode Off -> Semi-auto -> Full -> Off, mirroring
+    // AgentManagerContent::_CycleAutopilot / _OnAutopilotChanged. The overlay already holds the SHARED
+    // registry, so we mutate it directly: SessionRegistry::Update fires observers, which (a) marshals our
+    // own _Refresh to repaint the button and (b) wakes the scheduler's OnObserved — cycling to Semi/Full
+    // while the session sits Idle/WaitingForInput naturally kicks a queued plan (Correctness Rule #1). No
+    // new send path is invented (Rule #2); we only set the mode + reset the per-run backstops on arming.
+    void AgentTabOverlay::_CycleAutopilot()
+    {
+        if (!_registry || _sessionId.empty())
         {
-            _row3.Visibility(on ? Visibility::Visible : Visibility::Collapsed);
+            return;
         }
+        const auto info = _registry->Get(_sessionId);
+        if (!info || !info->live)
+        {
+            return; // nothing live to drive (same guard as the Manager's header toggle)
+        }
+        const auto cur = info->autopilot.mode;
+        const AutopilotMode next = (cur == AutopilotMode::Off)      ? AutopilotMode::SemiAuto :
+                                   (cur == AutopilotMode::SemiAuto) ? AutopilotMode::Full :
+                                                                      AutopilotMode::Off;
+        _registry->Update(_sessionId, [&](SessionInfo& s) {
+            s.autopilot.mode = next;
+            if (next != AutopilotMode::Off)
+            {
+                // Arming resets the per-run backstop counter + clears any stale confirm (== _OnAutopilotChanged).
+                s.autopilot.autoSendsThisRun = 0;
+                s.pendingConfirmPromptId.clear();
+            }
+        });
+        _Refresh(); // immediate repaint (the async registry observer also refreshes)
     }
 
     void AgentTabOverlay::_BuildActionsRow()
     {
-        if (_row3 || !_stack)
+        if (_actions || !_row2)
         {
             return; // built once, and only for a LINKED session (never an observe badge)
         }
@@ -1101,7 +1220,7 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy\x2026"); // Copy
+        Button copyBtn = mkIconBtn(L"\xE8C8", L"Copy session details\x2026 (id, path, branch, launch CLI, summary, transcript)"); // Copy
         MenuFlyout flyout{};
         // Each menu item carries a tooltip that says exactly WHAT gets copied (the labels are terse;
         // the tip spells out the value), mirroring _CopyField's per-case behavior.
@@ -1161,16 +1280,17 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        _row3 = StackPanel{};
-        _row3.Orientation(Orientation::Horizontal);
-        _row3.HorizontalAlignment(HorizontalAlignment::Right);
-        _row3.Spacing(2);
-        _row3.Margin(ThicknessHelper::FromLengths(0, 2, 0, 0));
-        _row3.Visibility(Visibility::Collapsed); // hover-only
-        _row3.Children().Append(folderBtn);
-        _row3.Children().Append(copyBtn);
-        _row3.Children().Append(pencilBtn);
-        _stack.Children().Append(_row3);
+        _actions = StackPanel{};
+        _actions.Orientation(Orientation::Horizontal);
+        _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the dir/branch label to its right
+        _actions.Spacing(2);
+        _actions.Margin(ThicknessHelper::FromLengths(0, 0, 4, 0)); // a small gap before the dir/branch label
+        _actions.Children().Append(folderBtn);
+        _actions.Children().Append(copyBtn);
+        _actions.Children().Append(pencilBtn);
+        // ALWAYS shown now (no longer hover-only): insert at index 0 of row 2 so the buttons sit to the
+        // LEFT of the dir/branch label, with [actions][label] right-aligned as a group.
+        _row2.Children().InsertAt(0u, _actions);
     }
 
     void AgentTabOverlay::_OpenFolder()
@@ -1193,13 +1313,20 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void AgentTabOverlay::_CopyField(int which)
+    // Agentmaster: the shared copy-field action (declared in AgentCopyActions.h) — the SINGLE
+    // implementation behind both this overlay's copy menu (_CopyField, below) and the Triage Board /
+    // Explorer-tree session menu's Copy submenu (AgentManagerContent::_MakeSessionMenu). It lives here
+    // because the launch-CLI / transcript / summary helpers it leans on are this file's anon-namespace
+    // helpers; both menus call it so they can never drift apart. `which` is the copy-menu code (see the
+    // header). Synchronous clipboard writes (cases 0-4) run on the calling UI thread; the transcript /
+    // summary cases (5/6) read off-thread and hop back via `dispatcher`.
+    void CopySessionField(SessionRegistry& registry, const std::wstring& sessionId, int which, const DispatcherQueue& dispatcher, bool wrapNewlines, bool truncate)
     {
-        if (!_registry || _sessionId.empty())
+        if (sessionId.empty())
         {
             return;
         }
-        const auto info = _registry->Get(_sessionId);
+        const auto info = registry.Get(sessionId);
         if (!info)
         {
             return;
@@ -1239,19 +1366,30 @@ namespace winrt::TerminalApp::implementation
             CopyTextToClipboard(BuildLaunchCli(s, /*wantCodex*/ true));
             break;
         case 5: // Transcript — the whole conversation (user + assistant text only), off-thread
-            CopyConversationAsync(_dispatcher, codex, s.id, s.codexSessionId);
+            CopyConversationAsync(dispatcher, codex, s.id, s.codexSessionId);
             break;
         case 6: // Summary — the FULL textual session-end.js box (everything; the panel shows a trimmed view)
         {
             const std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
             const std::wstring resume = BuildLaunchCli(s, codex); // the same REAL launch CLI as cases 3/4
-            CopySummaryAsync(_dispatcher, codex, s.id, s.codexSessionId, dir, resume,
-                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, _summaryWrapNewlines, _summaryTruncate);
+            CopySummaryAsync(dispatcher, codex, s.id, s.codexSessionId, dir, resume,
+                             std::wstring{ StateGlyph(s.state) }, std::wstring{ StateLabel(s.state) }, wrapNewlines, truncate);
             break;
         }
         default:
             break;
         }
+    }
+
+    void AgentTabOverlay::_CopyField(int which)
+    {
+        if (!_registry)
+        {
+            return;
+        }
+        // Delegate to the shared action (reused by the Triage Board's Copy submenu); the overlay's
+        // mirrored GLOBAL flags drive the Summary case so its render matches the displayed panel.
+        CopySessionField(*_registry, _sessionId, which, _dispatcher, _summaryWrapNewlines, _summaryTruncate);
     }
 
     void AgentTabOverlay::_BuildSummaryPanel()
@@ -1271,6 +1409,9 @@ namespace winrt::TerminalApp::implementation
         _summaryTimesText.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0)); // dimmer than the body
         _summaryTimesText.Margin(ThicknessHelper::FromLengths(0, 0, 0, 3)); // a small gap above the content
         _summaryTimesText.Visibility(Visibility::Collapsed);
+        ToolTipService::SetToolTip(_summaryTimesText, winrt::box_value(winrt::hstring{
+            L"age = time since the conversation started \x00B7 last user msg = since your last prompt"
+            L" \x00B7 last activity = since the transcript last changed (updates live)." }));
 
         // The body is a vertical StackPanel (not one TextBlock) so a section separator can be a
         // full-width Border rule that fills the panel border-to-border + re-fills on resize — a fixed

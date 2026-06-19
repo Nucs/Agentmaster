@@ -1255,12 +1255,87 @@ namespace winrt::TerminalApp::implementation
             // AppSettings.hiddenSessionIds; resettable from the Settings cog). Deferred one tick (the
             // MenuFlyout restores focus to its target as it closes, and the action mutates the tree —
             // the page's pointer-handler discipline). The transcript on disk is never touched.
+            // Right-click menu: the SAME actions as the detail pane's right-side buttons, but the
+            // OPEN actions create their tab in the BACKGROUND and keep the Sessions list open (the
+            // _openClaudeTabInBackground flag), so you can BULK-open several rows without focus jumping
+            // to each new tab. (The detail-pane buttons stay foreground — a single open that lands on
+            // the tab.) Each item defers one tick (the MenuFlyout restores focus to its target as it
+            // closes + the action mutates the tree — the page's pointer-handler discipline). The flag
+            // is set around ONE open and reset via wil::scope_exit so a throw can't strand it.
             {
                 MenuFlyout rowMenu;
+                const std::wstring rid = r.id, rdir = r.dir, rtitle = r.title;
+                const std::wstring forkTitle = r.msgs > 0 ? r.title : std::wstring{}; // never-prompted -> let the fork seam derive a smart name
+                const bool rIsOpen = _claudeTabs.find(rid) != _claudeTabs.end();
+
+                if (rIsOpen)
+                {
+                    MenuFlyoutItem jump;
+                    jump.Text(L"Jump to tab");
+                    SessSetTip(jump, L"Switch to this session's already-open tab");
+                    jump.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_ActivateClaudeSession(winrt::hstring{ rid });
+                            }
+                        });
+                    });
+                    rowMenu.Items().Append(jump);
+                }
+                else
+                {
+                    MenuFlyoutItem resume;
+                    resume.Text(L"Resume here");
+                    SessSetTip(resume, L"claude --resume into a NEW BACKGROUND tab \x2014 the list stays open, so you can bulk-open more");
+                    resume.Click([this, rid, rdir, rtitle](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rdir, rtitle]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_openClaudeTabInBackground = true;
+                                auto reset = wil::scope_exit([self]() { self->_openClaudeTabInBackground = false; });
+                                self->_ResumeSessionFromDisk(rid, rdir, rtitle);
+                            }
+                        });
+                    });
+                    rowMenu.Items().Append(resume);
+                }
+
+                MenuFlyoutItem forkBtn;
+                forkBtn.Text(L"Fork here");
+                SessSetTip(forkBtn, L"Fork into a NEW BACKGROUND tab (claude --resume --fork-session) \x2014 the original is untouched; the list stays open");
+                forkBtn.Click([this, rid, rdir, forkTitle](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rdir, forkTitle]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_openClaudeTabInBackground = true;
+                            auto reset = wil::scope_exit([self]() { self->_openClaudeTabInBackground = false; });
+                            self->_ForkSessionFromDisk(rid, rdir, forkTitle);
+                        }
+                    });
+                });
+                rowMenu.Items().Append(forkBtn);
+
+                MenuFlyoutItem fresh;
+                fresh.Text(L"Open New Session Here");
+                SessSetTip(fresh, L"Start a FRESH BACKGROUND session in this directory \x2014 the list stays open");
+                fresh.Click([this, rdir](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rdir]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_openClaudeTabInBackground = true;
+                            auto reset = wil::scope_exit([self]() { self->_openClaudeTabInBackground = false; });
+                            self->_SpawnClaudeSession(winrt::hstring{ rdir }, winrt::hstring{ L"" });
+                        }
+                    });
+                });
+                rowMenu.Items().Append(fresh);
+
+                rowMenu.Items().Append(MenuFlyoutSeparator{});
+
                 MenuFlyoutItem hideItem;
                 hideItem.Text(L"Hide from list");
                 SessSetTip(hideItem, L"Hide this session from the list \x2014 it stays on disk and can be brought back from Settings.");
-                const std::wstring rid = r.id;
                 hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
                         if (auto self = weak.get())
@@ -1566,7 +1641,12 @@ namespace winrt::TerminalApp::implementation
         const auto existing = _sessionRegistry->Get(target);
         if (existing && existing->live)
         {
-            _ActivateClaudeSession(winrt::hstring{ target }); // already OPEN somewhere in this app
+            // Already OPEN somewhere in this app. Foreground: jump to it. Background bulk-open: leave
+            // focus where it is (don't yank to an already-open tab) — it's already there to switch to.
+            if (!_openClaudeTabInBackground)
+            {
+                _ActivateClaudeSession(winrt::hstring{ target });
+            }
             return;
         }
         if (!existing)
@@ -1580,7 +1660,10 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Upsert(std::move(s));
         }
         _RestoreArchivedSession(winrt::hstring{ target });
-        _HideSessionsPage(); // land on the freshly opened tab
+        if (!_openClaudeTabInBackground)
+        {
+            _HideSessionsPage(); // foreground: land on the freshly opened tab. Background bulk-open keeps the list open.
+        }
     }
 
     // Fork ANY on-disk session into a NEW managed conversation — the duplicate-tab fork's exact
@@ -1624,7 +1707,10 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[sessions-page->fork] source=" + forkParentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
         _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
-        _HideSessionsPage(); // land on the freshly forked tab
+        if (!_openClaudeTabInBackground)
+        {
+            _HideSessionsPage(); // foreground: land on the fork. Background bulk-open keeps the list open.
+        }
     }
 
     // Recolor the row highlights for _sessionsSelectedId WITHOUT rebuilding the table (the

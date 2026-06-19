@@ -5,98 +5,215 @@ _By developers, for developers - Never lose a session again - feel like Windows 
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a
 shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state
-taken from **Claude Code hooks** — never screen-scraping.
+taken from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
 ![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue + Autopilot)](doc/agentmaster/img/agent-manager.png)
 <span style='fontsize: 10px'>_The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue + Autopilot_</span>
 
+## Features
+
+Here's what Agentmaster adds — and, as an engineer, why each piece is built the way it is.
+
+### The Agent Manager tab
+
+A pinned, leftmost, non-closable tab (tab 0) that is mission control for the whole fleet — three
+regions wired into one **selection-synced lens**:
+
+- **Triage Board** — every session as a card in a state column (*Running · Waiting-for-you ·
+  Needs-approval · Error · Idle/Done*), plus an *External* column for agents running outside the
+  manager.
+- **Explorer Tree** — your working directories → their sessions, with `LOCAL` / `GLOBAL` /
+  `EXTERNAL` scope and a sort toggle (newest / oldest / most-active / A–Z / by-PID).
+- **Flight Plan** — a per-session prompt queue and the full message history, tagging each prompt
+  *queued* (by you) or *typed* (straight into the terminal).
+
+What makes it feel alive is the **Linked Lenses**: the three regions, the terminal tab strip, and
+the launch box all track one selection — *both ways*. Click a card and the tree row, Flight Plan,
+and the launch box's working directory follow; switch to a session's terminal tab and the Manager
+selects it right back; hover a card and its tab lights up in the strip without switching to it.
+And because one engine backs every window, the board and tree show the **whole fleet** — Activate,
+Rename, and Jump reach a session hosted in *any* window and bring that window forward.
+
+### The Fleet Observer
+
+The part I'm proudest of. Hooks are great when they fire — but a `claude` you type yourself (a
+shell alias shadowing the PATH shim) fires *none*. The Observer is the always-correct floor
+underneath: an out-of-band survey that **finds, correlates, and enriches every Claude (and Codex)
+session on the machine** by reading each process's PEB — working directory, command line,
+environment — and its transcript, bound to the right tab by `WT_SESSION`.
+
+No hooks, no settings, no shell cooperation, and **it never writes to a shell** — every read is
+out-of-band, so a hand-typed session is detected, bound, and driveable with nothing the user can
+feel. It tells your own sessions from a sibling install's from a real Windows Terminal's by package
+identity, survives PID reuse, and costs microseconds at steady state. It also surfaces agents
+running *outside* the manager — other Windows Terminals, a bare console — as read-only **External**
+rows you can watch, or **Adopt** (resume, or fork a safe copy) into a managed, driveable tab. It's
+the reason a session can't hide from Agentmaster no matter how you start it.
+
+### The Claude Code engine
+
+Pulling trustworthy *semantic* state out of a TUI that repaints constantly is the hard problem, and
+the engine solves it **without ever screen-scraping**. State is hook-derived first (a named-pipe
+bridge fed by Claude Code's own hooks), then reconciled by two independent backstops — a
+transcript-tail reader and the Observer — so the truth survives dropped or out-of-order events.
+
+The state machine is layered and self-healing:
+
+- Hook events carry a fire-time and per-turn identity, so a slow `Stop` landing after the next
+  prompt can't paint a stale state.
+- When a `Stop` is dropped, the engine *synthesizes* the turn boundary from the transcript tail,
+  the presence heartbeat, or subagent activity — recovering the cases a naïve reader gets wrong: a
+  session **blocked on a question**, **interrupted** with Esc, **answered and back to work**, or
+  **delegating to a subagent** while its own transcript sits silent.
+- It even follows a conversation that diverges under `/clear`, `/compact`, or `/resume`, re-binding
+  to the live conversation instead of the dead launch id.
+
+Each session is a real `claude.exe` on a ConPTY with a **shared stdin** — you and the orchestrator
+drive the same terminal — and one process-wide engine backs every window.
+
+### Autopilot & templating
+
+Queue a plan and let turn-completion drive it: on the `Stop` hook the next prompt **auto-sends**
+(Full), waits for a **one-click confirm** (Semi), or holds for you (Manual). It's bounded by real
+backstops — stop-on-error, max-auto-sends, pause-on-human-input, a global pause, and a
+question-guard that refuses to "answer" a clarifying question with a queued prompt.
+
+My favorite detail is the **Enter-retry**: Claude's Ink TUI can swallow an injected prompt's submit
+keystroke as a newline if it lands a beat too early, leaving the prompt typed-but-unsent. Autopilot
+notices the turn never started and re-presses a *lone* Enter (never the text again) until it does.
+Sends are idempotent — marked sent atomically and never replayed across a restart. **Templates**
+save a session's queue so you can re-apply it to another session or broadcast it across a whole
+working directory. Autopilot's defaults — mode, max-sends, stop-on-error — live in the **Settings
+cog**, alongside the global Claude config it stamps onto new sessions (model, skip-permissions,
+environment).
+
+### Tab status indicator
+
+Every classified tab shows its state where you actually work. The tab strip itself carries a
+**state-colored dot** next to the title (the same palette as the Triage Board), and each terminal
+pane wears a small **top-right badge**:
+
+- A **linked** Claude session shows live status + `model · effort · kind`, Autopilot mode, queued
+  count, a `⛓ linked` marker, and a dim second line with the working-directory folder and **live
+  git branch**.
+- Any **other** tab shows a dim `○ kind · unlinked` badge — `pwsh` / `cmd` / a started-but-
+  unprompted `claude` / `codex` — that **flips in place** as the tab's activity changes (a `pwsh`
+  tab becomes `claude` the instant you run it, then the full linked badge on its first prompt).
+
+Hover expands an action row: open the working directory, or copy the session id, path, branch, the
+**real** launch command line, the full summary, or the entire transcript — each with a little
+confirmation chime. It's the per-tab *here-and-now* lens that complements the Manager's fleet view.
+
+### Per-tab summary panel
+
+Click the badge's pencil and a second overlay drops in below it — a faithful in-process port of
+Claude Code's `session-end.js` analyzer, rendered live from the transcript: the plan, tasks, the
+numbered prompt history, and the files **read / created / edited** (created distinguished from
+edited; each file listed once). A times bar ticks *age · last user message · last activity* in real
+time. It's resizable, it re-reads only when the transcript actually grows (a quiet tab costs one
+file-stat), and it has wrap and truncate toggles. The panel shows the value the badge doesn't
+already cover; the copy menu hands you the complete box.
+
+### Sessions browser
+
+A full-window page over **every Claude Code session on disk** — not just the ones Agentmaster
+launched. The piece I love here is the **two-phase search**: an instant pass over per-session
+sidecar indexes (and Claude's own `history.jsonl`), then a **ripgrep-prefiltered** content scan
+whose every hit is **attributed in-process to its scope** — 👤 your typed prompts vs 🤖 the
+assistant's replies, tool inputs, and results (ripgrep can't tell them apart; the classifier can).
+Add 📁/📄 to match the directories and files a session actually *touched*, and `F` for fuzzy.
+
+The query grammar is real: `"quoted phrases"` match exactly, a pasted session-id GUID finds that
+session *and its forks*, and bare words AND-match across fields. Rows carry fork-aware creation
+dates and line-derived last-activity (file mtime lies — measured up to 43 days off), a
+per-directory color chip, and a live presence ring. From any row: **Jump**, **Resume here**,
+**Fork here**, or open a new session in that directory.
+
 ![The Agentmaster Sessions browser — a full-window page listing every on-disk Claude Code session (Title · Directory · Branch · Created · Active · Msgs·Tools), with a scoped/fuzzy search bar and time-range filter on the left, and a detail pane on the right (session metadata, the conversation, and Resume / Fork / Open-New-Session-Here actions)](doc/agentmaster/img/sessions-browser.png)
 
-## The Manager tab
+### Sessions archive page
 
-Agentmaster adds a pinned, leftmost, non-closable **Manager tab** (tab 0, open by default) split
-into three selection-synced regions:
+Closing a session **archives** it — it never destroys it, and your Claude transcripts on disk are
+never touched. The Archive page is a full-window, sortable, searchable table **grouped by window**,
+with a detail pane that reads the metadata, the conversation, and — my favorite touch — the **last
+assistant reply**, tail-read from the transcript so you can see exactly where a session left off
+before deciding to bring it back. Restore one, multi-select **bulk-restore**, or **reopen a whole
+saved window**. Restore is a transcript-gated `claude --resume`, so a never-prompted session comes
+back fresh instead of dying on "no conversation found."
 
-- **Triage Board** (top) — sessions as cards in state columns
-  (*Running* · *Waiting-for-you* · *Needs-approval* · *Error*).
-- **Explorer Tree** (bottom-left) — the working directories → their sessions, with
-  `LOCAL`/`GLOBAL`/`EXTERNAL` scope, a sort toggle (newest / oldest / most-active / A–Z / by-PID),
-  smart per-directory tab naming and per-directory tab color.
-- **Flight Plan** (bottom-right) — a per-session prompt queue plus **Autopilot**; it records the
-  full message history, tagging whether each prompt was queued by you or typed straight into the
-  terminal.
+### The `agentmaster` CLI
 
-**Flight Plan / Autopilot** — queue prompts; on turn-complete (the Claude `Stop` hook) the next
-queued prompt is auto-sent. Approvals and clarifying questions are handled separately.
+The fleet is queryable from any shell — **whether the app is running or not** — because it reads
+only persisted and OS-observable state (the Observer's pull model, run one-shot from a separate
+process). `agentmaster show <ref>` gives a session's derived state and presence, the conversation
+tail and last assistant reply, activity (messages / tools / **files touched**), the last prompt,
+and the Flight-Plan queue; plus `list` / `sessions` / `tabs` / `windows` / `external`.
 
-## Highlights
+`--self` introspects the calling tab via `WT_SESSION` — so an AI agent running *inside* a tab can
+ask Agentmaster what it's looking at — and `--json` emits a schema-stamped payload. Read-only, no
+live responder, no new IPC.
 
-- **Launch & manage** — spawn a `claude.exe` in any working directory; full terminal fidelity with
-  a shared stdin so you and the orchestrator both drive the same session.
-- **Adopt any `claude`** — a `claude` you type yourself into an ordinary tab is managed too (a
-  transparent PATH shim auto-wires it for hooks), not just Manager-launched ones.
-- **Fleet Observer** — out-of-band detection that finds, correlates, and enriches *every* Claude
-  session — even a hand-typed one that fires zero hooks — by reading each process's cwd / cmdline /
-  env and its transcript. No hooks, no settings, fully read-only and invisible to the shell.
-- **External sessions** — surfaces Claude running outside the manager (other Windows Terminals,
-  cmd/console), enriched from its transcript (title, git branch, model · effort, timing); view its
-  conversation read-only, or **Adopt** it to resume into a managed, controllable tab.
-- **Autopilot** — turn-complete auto-advance with Full / Semi-auto / Manual modes and backstops
-  (stop-on-error, max-auto-sends, pause-on-human-input, global pause).
-- **Per-tab badge** — every terminal tab carries a top-right HUD: a linked Claude shows status +
-  `model · effort · kind` + Autopilot mode + queued count, while any other tab shows a dim
-  `○ kind · unlinked` badge that flips live as the tab's activity changes.
-- **Persistence + archive/restore** — sessions, plan templates, recent dirs, and per-directory tab
-  colors persist under `%USERPROFILE%\.agentmaster\`. Sessions live as **Open ⇄ Archived**;
-  restore resumes via `claude --resume` (transcript-gated) and reloads the Flight Plan. Archiving is
-  non-destructive — your Claude transcripts on disk are never deleted.
-- **Multi-window workspace** — one engine shared across all windows; each window persists its
-  geometry, Manager lens, tab layout and focused tab, and reopens on the next launch, with a recover
-  button for windows closed along the way.
-- **One value per concept** — a session's title is one value shared by the Explorer row, the
-  Windows Terminal tab title, and the persisted record; a tab's color is one value per working
-  directory.
-- **Settings cog** — global Claude-session config (skip-permissions, model, env vars) and Autopilot
-  defaults, persisted to `settings.json`.
-- **Coexists with Windows Terminal** — installs side-by-side under its own package identity, so
-  your real Windows Terminal / Dev install is left untouched.
+### Persistence & restoration
+
+Close a window, reopen it later, and it comes back **whole**: its saved geometry, its Claude *and*
+Codex sessions **resumed in place**, its shell tabs replayed at their **real working directory**
+(recovered out-of-band — even though PowerShell freezes its own process cwd on `cd`), the focused
+tab re-selected by stable identity, and the Manager lens — selection, scopes, splitter positions —
+restored. One engine is shared across all windows, and a per-window record *references* sessions by
+id rather than copying them, so there is exactly one source of truth.
+
+Everything lives under a per-install **profile folder** — sessions, Flight Plans, plan templates,
+window layouts, settings, and Terminal's own settings too. Sessions are **Open ⇄ Archived**;
+"Restart session" resumes the current conversation rather than replaying a stale launch command;
+and a working directory keeps the **same tab color permanently**, across tabs, windows, and
+restarts.
 
 ## Status
 
-All milestones **M0–M8 + session restore** are complete, built, deployed under the `Agentmaster`
-package identity, and verified end-to-end (Launch → real `claude.exe` on a ConPTY → `--settings`
-hooks → PowerShell forwarder → named pipe → registry → state machine → UI, plus `claude --resume`
-restore on reopen). The standalone engine harness passes its checks (`src/cascadia/TerminalApp/AgentMaster/tests/`).
+Agentmaster is in active use and ships regular [releases](https://github.com/Nucs/Agentmaster/releases).
+The whole pipeline runs end-to-end in the released package — Launch → real `claude.exe` on a
+ConPTY → hooks → named-pipe bridge → registry → state machine → UI, with `claude --resume` restore
+on reopen — and the standalone engine harness passes its checks (900+).
 
-The **Fleet Observer** (O1–O7) is complete — the out-of-band detection layer that manages every
-Claude session, including hand-typed ones that fire no hooks. **Workspace persistence (M9–M14)** is
-largely landed: **M9** (one process-wide engine shared by all windows) and most of **M10**
-(per-window UI-state records — geometry re-apply, Manager-lens restore, focused-tab restore, and
-multi-window reopen) are shipped and live-verified; routing a restored session back into its owning
-window is the main piece still in progress.
+Where things stand:
+
+- **Claude Code** is fully managed end-to-end: launch, observe, drive (Autopilot), persist,
+  archive, and restore.
+- The **Fleet Observer** detects and manages *every* session — including hand-typed ones that fire
+  no hooks — and surfaces external ones read-only.
+- **Codex** (the OpenAI Codex CLI) is a first-class *managed* agent for observe + state + the full
+  launch / restore / window-restore / adopt lifecycle; driving its TUI with a stdin injector and
+  Autopilot is the next step.
+- **Workspace persistence** — geometry, Manager lens, focused tab, resumed sessions, and replayed
+  shell tabs — is shipped and live-verified across single- and multi-window reopen.
+- Installs **side-by-side** under its own package identity, distinct from real Windows Terminal and
+  from a from-source dev build, so all of them coexist.
 
 See [`doc/agentmaster/IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md) for the milestone
-tracker.
+tracker and [`CLAUDE.md`](CLAUDE.md) for the detailed status by area.
 
 ## Download & install
 
 **One line, no download** — paste into PowerShell. It fetches the installer in memory, downloads
-the bundle, trusts the signing certificate (one UAC prompt, for the cert only), and installs the
-version you pick (here `0.4.0` — every [release](https://github.com/Nucs/Agentmaster/releases) page
-shows a one-liner pinned to that version):
+the signed bundle, **verifies its SHA-256**, trusts the signing certificate behind a single UAC
+prompt (skipped when the cert is already trusted, so upgrades are usually prompt-free), and installs
+the version you pick (here `0.4.1` — every [release](https://github.com/Nucs/Agentmaster/releases)
+page shows a one-liner pinned to that version):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.1
 ```
 
 Add `-Portable` for a cert-free, no-admin install, and/or `-Launch` to start it right after:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.0 -Portable -Launch
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.1 -Portable -Launch
 ```
 
 Options: `-Version X.Y.Z` (omit for latest) · `-Portable` (no cert / no admin) · `-Launch` ·
 `-Prerelease` · `-Force` · `-Uninstall` (see [`tools/Install-Agentmaster.ps1`](tools/Install-Agentmaster.ps1)).
+A missing VCLibs dependency is fetched automatically, and a conflicting older registration is
+detected and cleared.
 
 ---
 
@@ -111,11 +228,12 @@ Or grab the assets yourself from [**Releases**](https://github.com/Nucs/Agentmas
   then double-click the bundle or `Add-AppxPackage` it. Installed, it runs as the `agentmaster`
   execution alias / the **Agentmaster** Start-menu entry.
 
-On **first launch** the installed app asks which **profile folder** to use — Production
-(`%USERPROFILE%\.agentmaster`), Development (`%USERPROFILE%\.agentmaster-dev`), or **Browse…** for
-any folder. A profile holds *everything* the app persists (sessions, Flight Plans, window layouts,
-settings — including Terminal's own settings under `<profile>\terminal\`); each install remembers
-its own choice (change it later: Manager tab → ⚙ → Profile). See
+On **first launch** the app **silently picks a per-install default profile** — Production
+(`%USERPROFILE%\.agentmaster`) for the released build, Development (`%USERPROFILE%\.agentmaster-dev`)
+for a from-source build — and remembers it; no prompt. A profile holds *everything* the app persists
+(sessions, Flight Plans, plan templates, window layouts, settings — including Terminal's own settings
+under `<profile>\terminal\`). Change it later from the Manager tab → ⚙ → Profile, or point
+`AGENTMASTER_PROFILE` at any folder (a `.portable` marker keeps state inside the unzip dir). See
 [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md).
 
 Requires Windows 10 2004 (19041) or later, on x64 or arm64, with the **native**
@@ -138,10 +256,16 @@ sharing any state. (To build from source instead, see [Building](#building) belo
 - [`doc/agentmaster/HOOKS.md`](doc/agentmaster/HOOKS.md) — the Claude Code hooks bridge.
 - [`doc/agentmaster/OBSERVER.md`](doc/agentmaster/OBSERVER.md) — the Fleet Observer (out-of-band
   pull correlation + activity).
-- [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) — the per-tab link badge.
-- [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md) — workspace persistence (M9–M14).
+- [`doc/agentmaster/STATE.md`](doc/agentmaster/STATE.md) — the observer-owned session-state engine.
+- [`doc/agentmaster/SESSIONS.md`](doc/agentmaster/SESSIONS.md) — the Sessions browser + the
+  `~/.claude` storage map.
+- [`doc/agentmaster/TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md) — the per-tab badge + summary
+  panel.
+- [`doc/agentmaster/CLI.md`](doc/agentmaster/CLI.md) — the `agentmaster <verb>` command line.
+- [`doc/agentmaster/PERSISTENCE.md`](doc/agentmaster/PERSISTENCE.md) — workspace persistence &
+  restoration.
 - [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md) — release/dev package identities +
-  the per-install state profiles (first-launch picker, migration, coexistence).
+  the per-install state profiles (first-launch default, migration, coexistence).
 - [`CLAUDE.md`](CLAUDE.md) — the working notes: status by area, build/deploy details, gotchas, and
   the correctness rules.
 
@@ -205,8 +329,8 @@ execution alias, the **Agentmaster Dev** Start-menu entry, or:
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"
 ```
 
-Runtime/session state lives in the install's **profile folder** (picked on first launch; the dev
-default is `%USERPROFILE%\.agentmaster-dev\` — see
+Runtime/session state lives in the install's **profile folder** (auto-selected on first launch; the
+dev default is `%USERPROFILE%\.agentmaster-dev\` — see
 [`doc/agentmaster/PROFILES.md`](doc/agentmaster/PROFILES.md)); tail `hooks.log` there to confirm
 the engine is live and that spawned sessions' hooks arrive.
 

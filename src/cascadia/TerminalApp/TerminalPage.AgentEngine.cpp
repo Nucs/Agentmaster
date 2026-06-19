@@ -603,12 +603,14 @@ namespace winrt::TerminalApp::implementation
             }
         });
         // Agentmaster (updater; Updater.h): the cog's "Update now" launches the embedded am-update
-        // installer detached, then asks the app to close gracefully (RequestQuit) so the package
-        // isn't in use while the installer Add-AppxPackages the new build and relaunches it.
+        // installer detached, then closes the app (no-confirm) so the package isn't in use while the
+        // installer Add-AppxPackages the new build and relaunches it. NOT RequestQuit — that pops WT's
+        // generic "close all tabs?" confirmation, which is redundant after the update dialog and whose
+        // Cancel would strand the app for the installer to force-kill 20s later.
         content->SetQuitForUpdateHandler([weakThis]() {
             if (auto self = weakThis.get())
             {
-                self->RequestQuit();
+                self->_QuitForUpdate();
             }
         });
 
@@ -639,6 +641,19 @@ namespace winrt::TerminalApp::implementation
                 self->_UpdateManagerSelectionHighlight();
             }
         });
+    }
+
+    // Agentmaster (updater; Updater.h): quit the app for an in-app update — the post-confirm half of
+    // RequestQuit (flush this window's record + raise QuitRequested) WITHOUT the "close all tabs?"
+    // confirmation. Fired by the cog's "Update now" after the embedded installer is launched detached:
+    // the user already confirmed in the update dialog, sessions archive on teardown, and the installer
+    // would force-close us regardless — so a second generic close-confirm (whose Cancel would only
+    // strand the app for the installer to force-kill seconds later) is wrong here.
+    void TerminalPage::_QuitForUpdate()
+    {
+        _FlushWindowRecord();
+        _windowRecordTeardownFlushed = true; // mirror RequestQuit: don't let ~TerminalPage re-capture post-teardown
+        QuitRequested.raise(nullptr, nullptr);
     }
 
     // Agentmaster (Linked Lenses — the per-tab -> Manager half of the selection sync): when the user

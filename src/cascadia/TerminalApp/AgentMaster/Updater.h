@@ -32,12 +32,16 @@
 #include <shellapi.h>
 #include <appmodel.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "Json.h"
@@ -902,7 +906,35 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0am-update.ps1"
                 return false; // still postponed: no network check, no prompt
             }
             const Version cur = CurrentPackageVersion();
-            const UpdateInfo info = CheckForUpdate(cur, prefs.allowPrerelease, 4000);
+
+            // Bound the TOTAL network wait so a slow-but-present network can't wedge launch: WinHTTP's
+            // per-phase timeouts (resolve/connect/send/receive) could otherwise sum to ~4x, and this
+            // runs synchronously before the window-restoration prompt. Run the check on a worker and
+            // wait at most kDeadlineMs; if it doesn't finish, skip the prompt THIS launch (we re-check
+            // next launch). The result lives in a shared_ptr so the detached worker can finish + write
+            // into it harmlessly after we've moved on (no dangling reference, no leak).
+            struct CheckResult
+            {
+                UpdateInfo info;
+                std::atomic<bool> done{ false };
+            };
+            auto shared = std::make_shared<CheckResult>();
+            std::thread([shared, cur, pre = prefs.allowPrerelease]() {
+                shared->info = CheckForUpdate(cur, pre, 4000);
+                shared->done.store(true, std::memory_order_release);
+            }).detach();
+
+            constexpr int kDeadlineMs = 6000;
+            constexpr int kPollMs = 50;
+            for (int waited = 0; waited < kDeadlineMs && !shared->done.load(std::memory_order_acquire); waited += kPollMs)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+            }
+            if (!shared->done.load(std::memory_order_acquire))
+            {
+                return false; // network too slow this launch — proceed; the detached worker self-cleans
+            }
+            const UpdateInfo info = shared->info; // done==true => the worker finished writing
             if (!info.available)
             {
                 return false;

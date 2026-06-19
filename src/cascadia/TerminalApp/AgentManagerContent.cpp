@@ -5,6 +5,7 @@
 #include "AgentManagerContent.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
@@ -1459,7 +1460,7 @@ namespace winrt::TerminalApp::implementation
             _boardScopeBtn = Button{};
             _boardScopeBtn.FontSize(11);
             _boardScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_boardScopeBtn, L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows. One state with the Explorer Tree's toggle (EXTERNAL there reads as GLOBAL here); persisted per window.");
+            AgentSetTip(_boardScopeBtn, L"Which sessions the board shows \x2014 LOCAL (this window) or GLOBAL (all windows). Shares one setting with the Explorer Tree's scope; remembered per window.");
             _boardScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _SetTreeScope(_treeScope == TreeScope::Local ? TreeScope::Global : TreeScope::Local);
             });
@@ -1473,7 +1474,7 @@ namespace winrt::TerminalApp::implementation
             _clearSelBtn.FontSize(11);
             _clearSelBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _clearSelBtn.Visibility(Visibility::Collapsed); // nothing selected at build; _RebuildBoard syncs
-            AgentSetTip(_clearSelBtn, L"Clear the current selection \x2014 deselect the card / row (the Flight Plan shows nothing selected)");
+            AgentSetTip(_clearSelBtn, L"Deselect the current card / row \x2014 nothing stays selected and the Flight Plan empties.");
             _clearSelBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ClearSelection(); });
             header.Children().Append(_clearSelBtn);
             // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
@@ -1485,6 +1486,7 @@ namespace winrt::TerminalApp::implementation
             _showAllBtn = Button{};
             _showAllBtn.Content(winrt::box_value(L"Show all"));
             _showAllBtn.Padding(Thickness{ 6, 0, 6, 0 });
+            AgentSetTip(_showAllBtn, L"Show sessions from every directory again \x2014 clears the directory filter.");
             // Hidden while we ARE showing all (the default scope is "" == all directories); it
             // reappears once a directory is scoped. _RebuildBoard keeps this in sync on every refresh.
             _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
@@ -1539,7 +1541,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn = Button{};
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTip(_treeScopeBtn, L"Scope \x2014 LOCAL: this window's sessions; GLOBAL: all windows; EXTERNAL: observe-only claudes in other hosts (right-click a row: Adopt / Open New Session Here / Bring Window To Front)");
+                AgentSetTip(_treeScopeBtn, L"Which sessions the tree shows \x2014 LOCAL (this window), GLOBAL (all windows), or EXTERNAL (claudes running outside Agentmaster, observe-only). Right-click an EXTERNAL row to Adopt it, start a session, or bring its window forward.");
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
                 _UpdateTreeScopeButton();
@@ -1551,7 +1553,7 @@ namespace winrt::TerminalApp::implementation
                 _treeSortBtn = Button{};
                 _treeSortBtn.FontSize(11);
                 _treeSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTip(_treeSortBtn, L"Sort \x2014 NEWEST / OLDEST / MOST ACTIVE (currently-running first) / A\x2013Z / BY PID (group by host window/shell \x2014 same as the pid underline color \x2014 then most active). Applies to every scope; global \x2014 it persists and applies to all windows.");
+                AgentSetTip(_treeSortBtn, L"Sort order for directories and the sessions in them \x2014 NEWEST \xB7 OLDEST \xB7 MOST ACTIVE (running first) \xB7 A\x2013Z \xB7 BY PID (group by host window). Applies to every scope and is saved across windows.");
                 _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
                 hdrow.Children().Append(_treeSortBtn);
                 _UpdateTreeSortButton();
@@ -1565,7 +1567,7 @@ namespace winrt::TerminalApp::implementation
                 _treeRefreshBtn.FontSize(11);
                 _treeRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
                 _treeRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
-                AgentSetTip(_treeRefreshBtn, L"Refresh \x2014 reload the tree's data for the current scope (LOCAL / GLOBAL / EXTERNAL): re-survey now + redraw.");
+                AgentSetTip(_treeRefreshBtn, L"Refresh now \x2014 re-scan and redraw the current view (also re-detects external sessions).");
                 _treeRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                     _Refresh(); // immediate redraw from current data (recomputes the "ago" timing)
                     if (_refreshHandler)
@@ -1664,16 +1666,16 @@ namespace winrt::TerminalApp::implementation
                 iconCol.VerticalAlignment(VerticalAlignment::Top); // stay at the top as the box grows
                 iconCol.Margin(Thickness{ 0, 0, 6, 0 });
                 // Eye = Focus the session (jump to its live tab).
-                iconCol.Children().Append(mkIconBtn(L"Focus session (jump to its tab)", fluentGlyph(L"\xE7B3"), [this]() {
+                iconCol.Children().Append(mkIconBtn(L"Jump to this session's live terminal tab", fluentGlyph(L"\xE7B3"), [this]() {
                     if (_activateHandler && !_selectedId.empty())
                     {
                         _activateHandler(winrt::hstring{ _selectedId });
                     }
                 }));
                 // Exclamation point = Send now (a literal bold "!"; confirmed before it fires).
-                iconCol.Children().Append(mkIconBtn(L"Send now (asks first)", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
+                iconCol.Children().Append(mkIconBtn(L"Send the composed prompt now \x2014 confirms first, and skips the queue", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
                 // Envelope = Add the composed prompt to the queue.
-                iconCol.Children().Append(mkIconBtn(L"Add to the queue", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
+                iconCol.Children().Append(mkIconBtn(L"Add the composed prompt to this session's queue", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
                 Grid::SetColumn(iconCol, 0);
                 composeRow.Children().Append(iconCol);
 
@@ -1695,7 +1697,7 @@ namespace winrt::TerminalApp::implementation
                 // Templates row open/closed (Agentmaster). Kept inline (not a Flyout) so its
                 // TextBox keeps receiving keypresses — a text box in a popup/ContentDialog gets
                 // none in XAML Islands (see Gotchas).
-                auto paperBtn = mkIconBtn(L"Templates \x2014 save / apply prompt plans", fluentGlyph(L"\xE8A5"), [this]() {
+                auto paperBtn = mkIconBtn(L"Templates \x2014 save the current queue as a plan, or apply a saved one", fluentGlyph(L"\xE8A5"), [this]() {
                     if (_templatesRow)
                     {
                         _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
@@ -1708,9 +1710,10 @@ namespace winrt::TerminalApp::implementation
                 actions.Children().Append(composeRow);
 
                 // mkBtn — the plain text buttons used by the Templates row below.
-                auto mkBtn = [&](const winrt::hstring& label, std::function<void()> fn) {
+                auto mkBtn = [&](const winrt::hstring& label, const winrt::hstring& tip, std::function<void()> fn) {
                     auto btn = Button{};
                     btn.Content(winrt::box_value(label));
+                    AgentSetTip(btn, tip);
                     btn.Click([fn](const IInspectable&, const RoutedEventArgs&) { fn(); });
                     return btn;
                 };
@@ -1725,13 +1728,15 @@ namespace winrt::TerminalApp::implementation
                 _templateNameBox = TextBox{};
                 _templateNameBox.Width(150);
                 _templateNameBox.PlaceholderText(L"template name");
+                AgentSetTip(_templateNameBox, L"Name to save the current queue under as a reusable template");
                 _templatesRow.Children().Append(_templateNameBox);
-                _templatesRow.Children().Append(mkBtn(L"Save as template", [this]() { _OnSaveTemplate(); }));
+                _templatesRow.Children().Append(mkBtn(L"Save as template", L"Save the selected session's current queue as a reusable plan, under the name on the left", [this]() { _OnSaveTemplate(); }));
                 _templateCombo = ComboBox{};
                 _templateCombo.MinWidth(140);
+                AgentSetTip(_templateCombo, L"Pick a saved plan template to apply");
                 _templatesRow.Children().Append(_templateCombo);
-                _templatesRow.Children().Append(mkBtn(L"Apply", [this]() { _OnApplyTemplate(false); }));
-                _templatesRow.Children().Append(mkBtn(L"Apply to dir", [this]() { _OnApplyTemplate(true); }));
+                _templatesRow.Children().Append(mkBtn(L"Apply", L"Append the selected template's prompts to this session's queue", [this]() { _OnApplyTemplate(false); }));
+                _templatesRow.Children().Append(mkBtn(L"Apply to dir", L"Append the selected template's prompts to EVERY session in this directory", [this]() { _OnApplyTemplate(true); }));
                 actions.Children().Append(_templatesRow);
                 _RefreshTemplateCombo();
 
@@ -1751,7 +1756,7 @@ namespace winrt::TerminalApp::implementation
                 _autopilotBtn = Button{};
                 _autopilotBtn.FontSize(11);
                 _autopilotBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTip(_autopilotBtn, L"Autopilot \x2014 click to cycle Off / Semi-auto / Full for the selected session");
+                AgentSetTip(_autopilotBtn, L"Autopilot for the selected session \x2014 click to cycle: Off (manual) \xB7 Semi-auto (you confirm each send) \xB7 Full (auto-send the queue when a turn completes).");
                 _autopilotBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutopilot(); });
                 headerLabel.Children().Append(_autopilotBtn);
                 _UpdateAutopilotButton(AutopilotMode::Off, false);
@@ -4001,16 +4006,41 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(openHere);
 
-        // Copy Session Id — put this session's conversation id (UUID) on the clipboard. Synchronous:
-        // a pure clipboard write has no focus/tree-rebuild race, so it needs no defer like the items
-        // above (matches the Archive page's "Copy id").
-        MenuFlyoutItem copyId;
-        copyId.Text(L"Copy Session Id");
-        AgentSetTip(copyId, L"Copy this session's conversation id to the clipboard");
-        copyId.Click([id](const IInspectable&, const RoutedEventArgs&) {
-            CopyTextToClipboard(id);
-        });
-        menu.Items().Append(copyId);
+        // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
+        // It routes through the SAME shared CopySessionField action the overlay's copy menu uses, so the
+        // two menus can never drift: Session Id / Path / Branch / the REAL Claude & Codex launch CLIs /
+        // the full Summary box / the whole Transcript. Each item is a pure clipboard write (cases 0-4) or
+        // an off-thread read that hops back to copy (Transcript/Summary) — none mutate the tree, so unlike
+        // the rename/archive/spawn items above they need no defer (matches the old single "Copy Session Id").
+        MenuFlyoutSubItem copySub;
+        copySub.Text(L"Copy");
+        AgentSetTip(copySub, L"Copy this session's id, path, branch, launch command line, transcript, or full summary");
+        const auto addCopyItem = [&copySub, weak, id](const wchar_t* text, const wchar_t* tip, int which) {
+            MenuFlyoutItem item;
+            item.Text(text);
+            AgentSetTip(item, tip);
+            item.Click([weak, id, which](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_registry)
+                    {
+                        // The Summary case renders with this window's GLOBAL summary-panel flags, so a
+                        // copied Summary matches what the panels show (wrap/truncate).
+                        CopySessionField(*self->_registry, id, which, self->_dispatcher,
+                                         self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate);
+                    }
+                }
+            });
+            copySub.Items().Append(item);
+        };
+        addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
+        addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
+        addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+        addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+        addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
+        addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
+        menu.Items().Append(copySub);
 
         return menu;
     }
@@ -5263,6 +5293,12 @@ namespace winrt::TerminalApp::implementation
         // A double-click of the button must not stack two prompts; a silent on-open check is allowed
         // to overlap (both are idempotent GitHub reads — the later result just wins the label).
         if (interactive && _interactiveUpdateInFlight)
+        {
+            return;
+        }
+        // The worker marshals its result back via the dispatcher; with no dispatcher it could never
+        // re-enable the button / clear the in-flight flag, so bail before we touch either.
+        if (!_dispatcher)
         {
             return;
         }

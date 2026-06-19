@@ -223,7 +223,14 @@ namespace winrt::TerminalApp::implementation
 
         // This kicks off TabView::SelectionChanged, in response to which
         // we'll attach the terminal's Xaml control to the Xaml root.
-        _tabView.SelectedItem(tabViewItem);
+        // Agentmaster: a Sessions-page "bulk open" creates the tab in the BACKGROUND — skip the
+        // selection so focus (and the tab-switch overlay-dismiss) stays put. The new tab's claude
+        // then starts lazily on first focus (WT's background-tab behavior), exactly what bulk-open
+        // wants. Every other caller leaves the flag false, so the normal foreground-select is intact.
+        if (!_openClaudeTabInBackground)
+        {
+            _tabView.SelectedItem(tabViewItem);
+        }
     }
 
     // Method Description:

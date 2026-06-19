@@ -502,6 +502,11 @@ namespace winrt::TerminalApp::implementation
         int64_t _sessionsDetailTiMtime{ 0 };
         std::wstring _sessionsDetailSummary;
         bool _sessionsDetailPending{ false };
+        // Agentmaster: when set, a launched/restored/forked Claude tab is created WITHOUT focus (a
+        // BACKGROUND tab) and the Sessions page is kept open — the Sessions-page right-click "bulk
+        // open" path. _InitializeTab skips the SelectedItem switch; _ResumeSessionFromDisk /
+        // _ForkSessionFromDisk skip _HideSessionsPage. Set around ONE open, reset right after.
+        bool _openClaudeTabInBackground{ false };
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
@@ -662,6 +667,13 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::WindowRecord _CaptureWindowRecord();
         void _ScheduleWindowRecordSave();
         void _FlushWindowRecord();
+        // Agentmaster (updater; Updater.h): quit the app for an in-app update — the post-confirm half
+        // of RequestQuit (flush this window's record, then raise QuitRequested) WITHOUT RequestQuit's
+        // "close all tabs?" confirmation. The user already confirmed in the update dialog, and the
+        // embedded installer would force-close the app anyway, so a second generic close-confirm (and
+        // its cancel-then-force-kill trap) is wrong here. Fired by the cog's "Update now" after the
+        // installer is launched detached.
+        void _QuitForUpdate();
 
         // Agentmaster (Archive page): the redesigned archive surface — a full-window "page" mounted over
         // TerminalPage's Root content rows (covering all panes below the tab strip), opened by the Archived button via

@@ -2,20 +2,22 @@
 // Licensed under the MIT license.
 //
 // Agentmaster: the per-tab "link badge" overlay (see doc/agentmaster/TAB_OVERLAY.md). A small,
-// read-only HUD pinned to the top-right of a Claude session's terminal, summarizing the tab <->
-// Agentmaster link at a glance. Row 1: hook-driven status (color-matched to the Triage Board),
-// Autopilot mode (Off/Semi/Full), queued (Pending) count, and link state (⛓ linked vs observe-only).
-// Row 2 (dim/secondary): "<root workdir folder>/<branch>" (e.g. myworkdir/feature/issue123) so the
-// session's place + branch read at a glance; hidden when there's no dir/branch (and on observe badges).
-// Row 3 (hover-only actions): a folder button (Open Path — the working dir via explorer.exe) + a copy
-// button whose menu copies the Session Id / Copy Path (working dir) / Copy Branch Name / Claude Launch
-// CLI / Codex Launch CLI (each the REAL full command — the live process commandline with hooks, or the
-// builder Agentmaster would use) / Summary (the FULL textual session box — everything, even what the
-// displayed panel trims) / Transcript (the whole conversation, user + assistant TEXT only).
-// A completed copy (and Open Path) plays a short confirmation chime. Collapsed at rest; revealed while
-// the pointer is over the badge OR the copy menu is open (so the menu doesn't vanish under the
-// pointer). Built only for a LINKED session (Initialize), never an observe badge. Row 3 also carries a
-// PENCIL button that toggles the SUMMARY PANEL — a SECOND overlay (its own slot, below the badge, max
+// compact HUD pinned to the top-right of a Claude session's terminal, summarizing the tab <->
+// Agentmaster link at a glance. Row 1 is a strip of DISCRETE, individually-tooltipped parts:
+// hook-driven status (color-matched to the Triage Board), model·effort, Autopilot mode (Off/Semi/Full
+// — a CLICKABLE button that cycles the mode), queued (Pending) count, and link state (⛓ linked vs
+// observe-only).
+// Row 2: action buttons (LEFT, ALWAYS shown) + "<root workdir folder>/<branch>" (RIGHT, dim; e.g.
+// myworkdir/feature/issue123) so the session's place + branch read at a glance; the label is hidden when
+// there's no dir/branch (and on observe badges). The row-2 actions (a LINKED session only) are: a folder
+// button (Open Path — the working dir via explorer.exe) + a copy button whose menu copies the Session Id
+// / Copy Path (working dir) / Copy Branch Name / Claude Launch CLI / Codex Launch CLI (each the REAL full
+// command — the live process commandline with hooks, or the builder Agentmaster would use) / Summary (the
+// FULL textual session box — everything, even what the displayed panel trims) / Transcript (the whole
+// conversation, user + assistant TEXT only) + a PENCIL button. A completed copy (and Open Path) plays a
+// short confirmation chime. The buttons sit to the LEFT of the dir/branch label and are ALWAYS visible
+// (no longer hover-only); the whole badge is dim at rest and brightens on hover. Built only for a LINKED
+// session (Initialize), never an observe badge. The PENCIL toggles the SUMMARY PANEL — a SECOND overlay (its own slot, below the badge, max
 // 20% of the pane) that renders a session-end.js-style box analyzed off-thread from the transcript via
 // ProcessInspect::AnalyzeSessionTranscript. The DISPLAYED panel is a TRIMMED view (Parent/Plan/Duration/
 // Tasks/Messages/Files Read/Files Edited) — it omits everything panel 1 (the badge) already shows
@@ -120,9 +122,10 @@ namespace winrt::TerminalApp::implementation
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
-        void _WireHover(); // attach the pointer-over expand handlers (idempotent; weak-captured)
-        void _BuildActionsRow(); // lazily build row 3 (folder + copy menu) for a LINKED session
-        void _SetExpanded(bool on); // dim<->bright + show/hide row 3 (driven by hover OR pinned)
+        void _WireHover(); // attach the pointer-over brighten handlers (idempotent; weak-captured)
+        void _BuildActionsRow(); // lazily build the row-2 action buttons (folder + copy menu + pencil), inserted left of the dir/branch label, for a LINKED session
+        void _SetExpanded(bool on); // dim<->bright the whole badge (driven by hover OR the copy-menu pinned state)
+        void _CycleAutopilot(); // row-1 Autopilot button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
@@ -153,10 +156,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
         winrt::Windows::UI::Xaml::Controls::Border _root{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2 / row 3
-        winrt::Windows::UI::Xaml::Controls::TextBlock _line{ nullptr }; // row 1: status · model · mode · queue · link
-        winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2: "<root workdir folder>/<branch>"
-        winrt::Windows::UI::Xaml::Controls::StackPanel _row3{ nullptr }; // row 3: folder + copy buttons (hover-only)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2
+        winrt::Windows::UI::Xaml::Controls::StackPanel _row1{ nullptr }; // row 1: a horizontal strip of DISCRETE, individually-tooltipped parts (status · model·effort · Autopilot[button] · queue · link)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _row2{ nullptr }; // row 2: horizontal [_actions][_subline] — action buttons (left) + the dir/branch label (right)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2 label: "<root workdir folder>/<branch>"
+        winrt::Windows::UI::Xaml::Controls::StackPanel _actions{ nullptr }; // row 2 (left): folder + copy + pencil buttons — ALWAYS shown (was the hover-only "row 3")
 
         // Summary panel (the 2nd slot): a scrollable box, shown while the global showSummaryPanel is ON.
         // The body is a StackPanel (not one TextBlock) so separators can be full-width Border rules.
