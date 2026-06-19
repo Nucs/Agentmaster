@@ -20,8 +20,9 @@
 // (no longer hover-only); the whole badge is dim at rest and brightens on hover. Built only for a LINKED
 // session (Initialize), never an observe badge. The PENCIL toggles the SUMMARY PANEL — a SECOND overlay (its own slot, below the badge, max
 // 20% of the pane) that renders a session-end.js-style box analyzed off-thread from the transcript via
-// ProcessInspect::AnalyzeSessionTranscript. The DISPLAYED panel is a TRIMMED view (Parent/Plan/Duration/
-// Tasks/Messages/Files Read/Files Edited) — it omits everything panel 1 (the badge) already shows
+// ProcessInspect::AnalyzeSessionTranscript. A pinned TITLE row (the tab/session name, SessionInfo.title) +
+// the live "ago" times line head the panel; below them the DISPLAYED box is a TRIMMED view (Parent/Plan/
+// Duration/Tasks/Messages/Files Read/Files Edited) — it omits everything panel 1 (the badge) already shows
 // (state, branch, dir/folder); the copy menu's "Summary" yields the COMPLETE box (id +
 // resume CLI + dir + folder + branch + state header included). The toggle is a GLOBAL setting
 // (AppSettings::showSummaryPanel) — shared across windows + persisted; the pencil on any tab flips every tab's panel.
@@ -166,6 +167,7 @@ namespace winrt::TerminalApp::implementation
         // Summary panel (the 2nd slot): a scrollable box, shown while the global showSummaryPanel is ON.
         // The body is a StackPanel (not one TextBlock) so separators can be full-width Border rules.
         winrt::Windows::UI::Xaml::Controls::Border _summaryRoot{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTitleText{ nullptr }; // pinned TOP row (above the times line + the numbered messages): the tab/session title (SessionInfo.title)
         winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTimesText{ nullptr }; // pinned top (left): the live "ago" times line
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryWrapIcon{ nullptr }; // pinned top (right): the wrap-line toggle glyph — recolored by _UpdateSummaryWrapButtonVisual
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryTruncateIcon{ nullptr }; // pinned top (right, LEFT of the wrap toggle): the truncate toggle glyph — recolored by _UpdateSummaryTruncateButtonVisual

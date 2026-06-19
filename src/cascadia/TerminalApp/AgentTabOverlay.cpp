@@ -1508,8 +1508,26 @@ namespace winrt::TerminalApp::implementation
         timesRow.Children().Append(_summaryTimesText);
         timesRow.Children().Append(toggles);
 
-        StackPanel outer{}; // header (times + truncate/wrap toggles) pinned over the scrolling content
+        // A pinned TITLE row at the very TOP of the panel — above the times line AND the numbered messages
+        // — showing the session's title (SessionInfo.title; the ONE value shared by the tab header + the
+        // Explorer name, Rule #11). Set live by _UpdateSummary, so a rename updates it in place. Brighter +
+        // a touch bolder than the body so it reads as the heading; a long title wraps within the panel's
+        // width cap (never balloons it). Collapsed until it has text.
+        _summaryTitleText = TextBlock{};
+        _summaryTitleText.FontFamily(FontFamily{ L"Cascadia Mono" });
+        _summaryTitleText.FontSize(12);
+        _summaryTitleText.FontWeight(FontWeights::SemiBold());
+        _summaryTitleText.TextWrapping(TextWrapping::Wrap);
+        _summaryTitleText.IsTextSelectionEnabled(true);
+        _summaryTitleText.Foreground(Fill(0xFF, 0xF0, 0xF0, 0xF0)); // brighter than the body — it's the heading
+        _summaryTitleText.Margin(ThicknessHelper::FromLengths(0, 0, 0, 2)); // a small gap above the times line
+        _summaryTitleText.Visibility(Visibility::Collapsed);
+        ToolTipService::SetToolTip(_summaryTitleText, winrt::box_value(winrt::hstring{
+            L"This session's title \x2014 the same value as the tab name." }));
+
+        StackPanel outer{}; // title + header (times + truncate/wrap toggles) pinned over the scrolling content
         outer.Orientation(Orientation::Vertical);
+        outer.Children().Append(_summaryTitleText);
         outer.Children().Append(timesRow);
         outer.Children().Append(_summaryScroll);
 
@@ -2109,6 +2127,20 @@ namespace winrt::TerminalApp::implementation
         {
             _summaryRoot.Visibility(Visibility::Collapsed);
             return;
+        }
+        // Pinned TITLE row (top of the panel): the session's title == the tab name (Rule #11). Set it every
+        // refresh — synchronously on the UI thread, independent of the off-thread transcript load below — so
+        // a rename updates it live. Guarded so an unchanged title doesn't relayout the wrapping block each
+        // pass. (The panel as a whole still only SHOWS when there's times/content to render —
+        // _ApplySummaryVisibility governs that — so this never opens a title-only box.)
+        if (_summaryTitleText)
+        {
+            const winrt::hstring title{ s.title };
+            if (_summaryTitleText.Text() != title)
+            {
+                _summaryTitleText.Text(title);
+                _summaryTitleText.Visibility(title.empty() ? Visibility::Collapsed : Visibility::Visible);
+            }
         }
         _ApplySummaryVisibility(); // show only if there's already something to render (else stay hidden until the load lands)
         if (_summaryLoading)
