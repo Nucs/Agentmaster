@@ -2128,7 +2128,8 @@ namespace winrt::TerminalApp::implementation
             const auto hex = ::Agentmaster::GetDirColor(s.workingDir);
             bandColor = HexToColor(hex ? *hex : ::Agentmaster::AutoDirColorHex(s.workingDir));
         }
-        auto titleText = Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0);
+        const std::wstring_view fullTitle = s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title };
+        auto titleText = Text(OneLine(fullTitle), 14, true, 1.0);
         if (bandColor)
         {
             const uint8_t ink = PreferDarkTextOn(*bandColor) ? 0x10 : 0xFF; // near-black on light, white on dark
@@ -2139,6 +2140,10 @@ namespace winrt::TerminalApp::implementation
         band.CornerRadius(CornerRadius{ 4, 4, 0, 0 }); // rounded top (matches the card), straight bottom edge
         band.Padding(Thickness{ 8, 4, 8, 4 });
         band.Child(titleText);
+        // Agentmaster: hovering the title band (the card's "top label") shows the FULL title \x2014 the
+        // band trims with an ellipsis on a narrow card and OneLine() collapses a multi-line title for
+        // the dense card, so the complete name is otherwise unreadable here.
+        AgentSetTip(band, winrt::hstring{ fullTitle });
 
         // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
         // from Claude (the implicit default — no pill, visuals unchanged).
@@ -2183,10 +2188,15 @@ namespace winrt::TerminalApp::implementation
             if (!me.empty())
             {
                 auto meText = Text(winrt::hstring{ me }, 10, false, 0.55);
+                // Agentmaster: this line (model / effort / hb:status) trims with an ellipsis on a
+                // narrow card, hiding its tail (e.g. the effort and hb:...) \x2014 so the tooltip carries
+                // the ENTIRE line, plus the hb explanation when a heartbeat is present.
+                std::wstring tip{ me };
                 if (!s.presenceStatus.empty())
                 {
-                    AgentSetTip(meText, L"hb = Claude's own activity heartbeat (busy / idle / waiting), reported by Claude itself \x2014 a cross-check on the colored state dot.");
+                    tip += L"\n\nhb = Claude's own activity heartbeat (busy / idle / waiting), reported by Claude itself \x2014 a cross-check on the colored state dot.";
                 }
+                AgentSetTip(meText, winrt::hstring{ tip });
                 stack.Children().Append(meText);
             }
         }
