@@ -50,6 +50,17 @@
                     <Thickness x:Key="TabViewItemBorderThickness">1,1,1,0</Thickness>
 
                     <!--
+                        Agentmaster: raise the minimum tab width to a comfortable fixed
+                        floor of 130px (well above MUX's default TabView c_tabMinimumWidth
+                        of 48). MUX's TabView reads TabViewItemMinWidth from the application
+                        resources, so in Equal width mode it sizes each tab to
+                        clamp(available/count, min, max) and the strip scrolls once tabs hit
+                        this floor instead of shrinking to an unreadable sliver. Fixed for
+                        all tabs, all the time.
+                    -->
+                    <x:Double x:Key="TabViewItemMinWidth">130</x:Double>
+
+                    <!--
                         Disable the EntranceThemeTransition for our muxc:TabView, which would slowly slide in the tabs
                         while the window opens. The difference is especially noticeable if window fade-in transitions are
                         disabled system-wide. On my system this shaves off about 10% of the startup cost and looks better.
