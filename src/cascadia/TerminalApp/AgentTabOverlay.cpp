@@ -1145,6 +1145,15 @@ namespace winrt::TerminalApp::implementation
         // a GLOBAL setting (AppSettings::showSummaryPanel) — shared across windows + persisted — so the
         // pencil hands off to the page (_ToggleSummary -> _onToggleSummary), which flips it everywhere.
         Button pencilBtn = mkIconBtn(L"\xE70F", L"Show/hide the session summary panel (all tabs)"); // Edit (pencil)
+        // Render the pencil from "Segoe MDL2 Assets" rather than "Segoe Fluent Icons": at the SAME codepoint
+        // (E70F) the MDL2 glyph draws the pencil WITH a line across its bottom (the line it's drawing), while
+        // the Fluent variant is a plain pencil with no line. The with-line look reads as "edit/notes" far
+        // better here, so override just this one button's font (folder/copy stay Fluent). MDL2 first, Fluent
+        // as the graceful fallback if MDL2 isn't present.
+        if (auto pencilIcon = pencilBtn.Content().try_as<FontIcon>())
+        {
+            pencilIcon.FontFamily(FontFamily{ L"Segoe MDL2 Assets, Segoe Fluent Icons" });
+        }
         pencilBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {
