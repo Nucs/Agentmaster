@@ -40,8 +40,11 @@ directory).
 
 For sessions the Manager did not spawn (a hand-typed `claude` in a `+` tab), two discovery
 fallbacks make it self-wire:
-- **Pipe:** if `CCMGR_HOOK_PIPE` wasn't inherited, the forwarder reads `~/.agentmaster/bridge.json`
+- **Pipe:** if `CCMGR_HOOK_PIPE` wasn't inherited, the forwarder reads `<profile>\bridge.json`
   (`{ "pid", "pipe" }`, written by `WriteBridgeDiscovery` at engine start) to find the live bridge.
+  The discovery path is baked into the generated forwarder per-profile (`BuildForwarderScript(stateDir)`) —
+  a hardcoded `~/.agentmaster` literal would route a dev-profile session's hooks to the release
+  instance's bridge (Rule #15).
 - **Adoption key:** the forwarder echoes `$env:WT_SESSION` as the wire's **`tabToken`** field, so
   the app can match the hook back to a live ConPTY (`ITerminalConnection::SessionId()`) and bind a
   stdin injector — promoting an observed session to full observe **+ control** (Rule #9).
@@ -193,10 +196,14 @@ to plain arrival order. Only a `turnComplete` transition fires the Autopilot adv
 WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all).
 
 On any hook `OnHookEvent` also sets `s.hookWired = true` and `s.lastHookUnixMs` (provenance for
-the observer — see below), remembers the `tabToken`, and — on `SessionStart` for an id it doesn't
-know — creates a minimal `external`, `live` record and fires the **adoption** handler (which tries
-to bind it to its ConPTY). Any *other* event for an unknown id is ignored (there is no connection
-to bind).
+the observer — see below) and remembers the `tabToken` (the stable ConPTY identity it reconciles
+against, kept fresh on *every* hook so it survives an in-session `/resume`). A `SessionStart` for
+an id it doesn't know creates a minimal `external`, `live` record; any *other* event for an unknown
+id is ignored (there is no connection to bind). The **adoption** handler then fires on **every**
+`SessionStart` — not only when this call created the record — so the app can (a) bind a newly-seen
+hand-typed `claude` and (b) **re-home** a tab whose claude switched conversation id via `/resume`
+(the id changes, the `tabToken` does not); the reconcile is idempotent (an already-bound session
+fast-returns).
 
 ### Forwarder-side enrichment
 
@@ -250,14 +257,17 @@ consuming its queue; a time-bounded pickup guard holds it to one prompt per turn
 
 ## Files
 
-All under **`%USERPROFILE%\.agentmaster\`** (deliberately *not* `%LOCALAPPDATA%` — MSIX
-virtualizes a packaged app's LocalCache, but the external `claude.exe` resolves the real path;
-they must agree — see Gotchas in `CLAUDE.md`):
+All under the **ACTIVE PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`
+for the release package + unpackaged runs, `%USERPROFILE%\.agentmaster-dev\` for the dev package;
+resolved once at startup — see [`PROFILES.md`](PROFILES.md)). Deliberately *not* `%LOCALAPPDATA%` —
+MSIX virtualizes a packaged app's LocalCache, but the external `claude.exe` resolves the real path;
+they must agree — see Gotchas in `CLAUDE.md`:
 
 | File | Written by | Purpose |
 | --- | --- | --- |
 | `agentmaster-hook.ps1` | `MaterializeSharedHookFiles` | the PowerShell forwarder Claude invokes |
 | `hooks-settings.json` | `MaterializeSharedHookFiles` | the `--settings` config wiring the six hooks |
 | `bridge.json` | `WriteBridgeDiscovery` | live-bridge discovery (`{ pid, pipe }`) for the shim |
+| `forwarder-errors.log` | the forwarder | local trace of a hook delivery that never reached the bridge (no sid / no pipe / a dead-pipe connect timeout) — otherwise invisible, since the bridge-side `hooks.log` only sees lines that arrived |
 | `shim/claude.cmd`, `shim/claude` | `MaterializeClaudeShim` | the transparent `claude` PATH shim |
 | `hooks.log` | engine | runtime traces (`[engine] bridge listening …`, `[SessionStart]`, `[Stop]`, …) |

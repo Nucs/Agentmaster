@@ -1,9 +1,18 @@
 # Agentmaster — Observer-Owned Session State (the PULL state engine)
 
-> **Status: DESIGN (pre-implementation).** This doc captures *what a Claude session's state is*,
-> *how the Fleet Observer can derive all of it from disk + process facts alone* (no hooks), and
-> *how that becomes the single source of truth* as we phase hooks out. Grounded in a survey of
-> **4,837 real transcripts** on this machine (see §9 evidence).
+> **Status: PARTIALLY SHIPPED — the PULL reconcilers landed; the full "tail is sole authority"
+> rewrite (§5/§6) + the 2 new enum states (§3) are still DESIGN.** Much of this doc's *signal model* +
+> *reconciliation behavior* shipped — NOT as the wholesale `DeriveState` of §5, but as targeted
+> **`SessionScanner` reconcilers layered ON the existing hook state machine** (the opposite end of the
+> dial from §1's "demote hooks": hooks own the fast path, the tail backstops what they miss). The
+> shipped pieces — missed-Stop generalization, interrupt→turn-end, blocked-on-user, needs-approval
+> exit + resume, presence-idle release, subagent/fork→Running, the ordered hook machine + its
+> history-replay guard, and the session-id-divergence fix — are each tagged in the per-section
+> **"Shipped:"** notes below; the repo-root `CLAUDE.md` Engine (M5) bullet is the live source. **Still
+> design:** the §3 taxonomy expansion (`Starting`/`Compacting` are NOT enum values yet) and the §5/§6
+> "tail-only, hooks removed" authority flip. Below: *what a session's state is*, *how the observer
+> derives it from disk + process facts (no hooks)*, *how it becomes the single source of truth* as we
+> phase hooks out. Grounded in **4,837 real transcripts** (see §9).
 > Companions: [`OBSERVER.md`](./OBSERVER.md) · [`HOOKS.md`](./HOOKS.md) · [`DESIGN.md`](./DESIGN.md) ·
 > [`TAB_OVERLAY.md`](./TAB_OVERLAY.md).
 
@@ -29,6 +38,13 @@ tail + the process observer — becomes the **sole authority** for state. Hooks 
 optional low-latency *hint* during migration, then get deleted. Rule #13 already names this owner
 ("push hooks **+ the transcript tail** own state"); we are finishing the half that was never built.
 
+> **Shipped (CLAUDE.md Engine M5 / `SessionScanner.cpp`):** the consequence above no longer bites. A
+> hook-less session is now lit up by the missed-`UserPromptSubmit` repair (`[recon-run]`), held through
+> subagent/`/fork` work (`[recon-subagent]`), then released on a terminal tail (`ShouldSynthesizeStop`)
+> or claude's idle heartbeat (`[recon-stop-idle]`) — so it cycles Idle→Running→WaitingForInput like a
+> hooked one. The mechanism is **reconcilers on the hook machine**, not §5's `DeriveState`. The
+> API-error / compaction / Done process-fact arms (§5) did **not** ship.
+
 ## 1. Decisions (locked — from design review)
 
 | # | Decision | Choice |
@@ -37,6 +53,13 @@ optional low-latency *hint* during migration, then get deleted. Rule #13 already
 | 2 | **Taxonomy this pass** | **Core 6 + `Compacting` + `Starting`.** (`Interrupted` / `Retrying` / thinking·tool sub-states deferred to annotations — §3b.) |
 | 3 | **NeedsApproval (hook-less)** | **Heuristic fallback** — dangling `tool_use` + permission-mode gate + no tool child + quiescence (§4, grounded in §9). |
 | 4 | **Scope** | **Design doc first** (this file) before any code. |
+
+> **Shipped status of the decisions:** #1 — **NOT as written.** Tail is *not* sole authority; it
+> **reconciles what the hook push missed** (the `[recon-*]` synths all feed the ONE machine
+> `OnHookEvent`). §6 precedence + hook deletion are deferred. #2 — **NOT shipped** (`SessionState` is
+> still Core 6; §3a). #3 — **sharper/narrower:** `ShouldSynthesizeBlockedOnUser` keys on an unanswered
+> **interactive** `tool_use` (`AskUserQuestion`) + quiescence, NOT the dangling-ANY-tool +
+> permission-mode + `HasActiveChild` heuristic of §4. #4 — done.
 
 ## 2. What the PULL side can see (signal inventory)
 
@@ -69,6 +92,17 @@ start; `source=away_summary` = background; `[skills] idle`). **But it is debug o
 flag-gated and format-unstable — so it is at most an *optional accelerator*, never the authority.
 **The JSONL tail is the stable oracle.**
 
+> **Shipped — which of these the scanner reads (`SessionScanner.cpp` / `ProcessInspect.cpp`):**
+> assistant `stop_reason` (generalized past `end_turn`, `IsTerminalStopReason`); the unanswered
+> interactive `tool_use` (narrowed to `AskUserQuestion`, `IsInteractiveTool` → `[recon-block]`); the
+> `[Request interrupted by user…]` marker (`IsUserInterruptMarker`); a live **subagent** side file
+> (`SubagentActivityUnixMs`); and claude's **presence heartbeat** (`PresenceIsBusy`/`PresenceIsAtRest`,
+> `sessions/<pid>.json`). The `tool_result` row shipped as a marker that ANSWERS a pending interactive
+> tool, NOT "digesting → Running". **NOT read for state:** `isApiErrorMessage`/`api_error`,
+> `compact_boundary`/`isCompactSummary`, `ExitPlanMode` as a gate, `retryAttempt`, and `HasActiveChild`
+> (the O6 `busy` adornment exists but the narrow `[recon-block]` doesn't use it, so §4's `hasChild` gate
+> is moot). `isSidechain` is NOT filtered in `ParseTranscriptDelta` (§8 bug-1).
+
 > **mtime is a liar.** Background agents (`away_summary`), scheduled tasks, and snapshot lines all
 > append to the same transcript and bump its mtime *without a user turn* (verified: session
 > `3f98f88e` finished at 20:10:33 but mtime advanced to 20:13 from an `away_summary` fork). State
@@ -97,6 +131,12 @@ flag-gated and format-unstable — so it is at most an *optional accelerator*, n
 `SessionModels.h::SessionState` and the three palette tables (`AgentManagerContent` `StateColor`/
 `StateGlyph`/`StateLabel`, mirrored in `AgentTabOverlay.cpp`).
 
+> **Shipped: NOT yet.** `SessionState` is still the Core 6 — `Starting`/`Compacting` were not added.
+> "Starting" is surfaced as the OBSERVER §11d badge (a never-prompted claude has **no registry state** —
+> `_reconcileSession` early-returns on an empty `ResolveClaudeTranscriptPath`); a compaction is absorbed
+> as ordinary tail activity; `Done` is still the connection-Closed `_SweepClaudeLiveness`, not a `pid &&
+> !ProcessAlive` derive — so §10-Q6 stays open.
+
 ### 3b. Deferred — annotations, not states (this pass)
 
 Surfaced as **enrichment fields / badges**, not lifecycle states, to keep the enum small:
@@ -107,6 +147,15 @@ Surfaced as **enrichment fields / badges**, not lifecycle states, to keep the en
 - **permission posture** (`permissionMode`) → already an adornment; also gates §4.
 
 ## 4. NeedsApproval without hooks — the grounded heuristic
+
+> **Shipped — but NARROWER (`ShouldSynthesizeBlockedOnUser`, `[recon-block]`).** What landed pulls
+> NeedsApproval from the tail ONLY for an unanswered **interactive** `tool_use` — `AskUserQuestion`
+> (`IsInteractiveTool`) as the latest assistant block, quiescent ≥ `kScanStopQuiescenceMs` (2 s). It
+> does **not** implement the broader dangling-ANY-tool + permission-mode-gate + `HasActiveChild` +
+> `APPROVAL_QUIET_MS` rule below — a generic tool awaiting a y/n prompt is still hook-owned
+> (`Notification(permission)`); the narrow signal dodged the false-amber risk the "Known limitation"
+> calls out. The exits DID ship — RESUME (`ShouldSynthesizeResumed` `[recon-resume]`) and END
+> (`ShouldSynthesizeStop`, now also from NeedsApproval). The pseudocode below stays DESIGN.
 
 This is the only state with no unambiguous *live* transcript line (the y/n block in the TUI isn't
 written until the user decides). Evidence model from §9:
@@ -168,6 +217,15 @@ heuristic is the floor for hook-less sessions.
 
 ## 5. The derivation algorithm (tail + process)
 
+> **Shipped: NOT as one `DeriveState` switch.** `_reconcileSession` became a **chain of independent
+> missed-event synthesizers** (the `[recon-*]` set) each feeding the ONE hook machine (`OnHookEvent`),
+> so state stays hook-owned and the tail fills gaps. It does run **every tick** (not only on size
+> change), so the quiescence/presence/process transitions fire while the file is NOT growing, as this
+> section asks. The `Done`/`Starting`/`Error`/`Compacting` arms were NOT built (§3a). `ObserveClaude`
+> stayed **facts-only** (Rule #13), and the "`HasActiveChild` exists, no new `ClaudeHasToolChild`
+> needed" note below is **confirmed** (`ProcessInspect.h:99`) — though `[recon-block]` does not consult
+> it (§4).
+
 Runs in the **PULL state engine** — `SessionScanner::_reconcileSession` (which already owns the
 per-session transcript cursor, `lastStopReason`, `lastAssistantText`) extended from "synthesize a
 missed Stop" to "compute the full derived state". `ObserveClaude` stays **facts-only** (Rule #13).
@@ -216,6 +274,16 @@ enumeration cost (O7 budget preserved).
 
 ## 6. Precedence & the hook phase-out
 
+> **Shipped: DEFERRED.** No `ApplyDerivedState` evidence-timestamp setter; hooks are still authority
+> and the tail feeds the SAME `OnHookEvent` (a synthesized event IS a hook event, so there is nothing
+> to reconcile against). The same-spirit thing that DID ship is the **ordered hook machine**
+> (`NextSessionStateOrdered`, `HookEvents.h`): the wire carries a `ts` + a per-session
+> `TurnAccounting turns`, so a **stale Stop** (`ts < turns.lastPromptUnixMs`) is bookkeeping-only and a
+> **type-ahead** prompt keeps the turn's Stop Running — the "second turn never shows Running" fix
+> (commit `fb0a498ec`). The synthesized missed-Stop is flagged `quiescentStop` (always WaitingForInput,
+> never stale). `lastHookUnixMs`/`hookWired` exist as provenance, not the §6 gate. "Remove hooks" not
+> started.
+
 End state: **tail only.** During migration, both paths can produce state; we reconcile by **newest
 evidence**, so deleting hooks is a no-op:
 
@@ -248,22 +316,43 @@ and the removal mechanical.
 | `AgentMaster/HookEvents.h`, `HooksBridge`, the shim/forwarder | **migration-only**, then deletion: hooks become the optional hint, then removed (§6). |
 | `doc/agentmaster/HOOKS.md`, `CLAUDE.md` | re-document state ownership as PULL/tail once shipped. |
 
+> **Shipped — the per-file deltas that differ from this table:** the §4/§5 process channel landed as
+> `SessionInfo.presenceStatus` (the pid-validated heartbeat), NOT a `hasToolChild` enrichment;
+> `SessionScanner` got the `[recon-*]` gates but NO `permission-mode` parse and NO `isSidechain` filter;
+> `SessionRegistry` got `NextSessionStateOrdered`, NOT `ApplyDerivedState`; `ProcessInspect` added
+> `SubagentActivityUnixMs`, no new child primitive; `Engine.cpp` needed no dangling-quiet wake callback;
+> the two palettes + `SessionModels.h` enum are unchanged (no new states); `HookEvents.h` was extended,
+> not demoted/deleted.
+
 ## 8. Side-bugs found during the dig (fold into the implementation)
 
 1. **Sidechain pollutes the tail.** `ParseTranscriptDelta` does **not** filter `isSidechain:true`,
    so a *subagent's* `end_turn` can satisfy the missed-Stop synth and declare the **main** turn
    complete (draining the plan into a running turn). Fix: ignore `isSidechain` lines for state; count
    a live sidechain as *Running* instead.
+   > **Shipped — DIFFERENTLY.** `ParseTranscriptDelta` still has **no** `isSidechain` filter; the
+   > hazard doesn't bite because the subagent writes a SEPARATE file (`<id>/subagents/*.jsonl`), not the
+   > parent `<id>.jsonl` the scanner tails (Claude Code v2.1.x), so the parent tail never sees its
+   > `end_turn`. "Count a live sidechain as Running" DID ship from the other end — `[recon-subagent]`
+   > (`SubagentActivityUnixMs` + `PresenceIsBusy`). If a future build inlines sidechain lines into the
+   > parent, this bullet's filter is still needed.
 2. **Interrupts recorded as prompts.** `NoteExternalPrompt` (transcript back-fill) records
    `"[Request interrupted by user]"` / `"[Request interrupted by user for tool use]"` as **Typed
    Flight-Plan prompts** (seen in `sessions.json` for the `.claude` session). These are control
    markers, not human prompts — filter them out of the queue back-fill.
+   > **Shipped — FIXED.** `_readDelta` skips `IsNoiseUserPrompt(ev.text)` before `NoteExternalPrompt`,
+   > and the shared filter (`TranscriptStore::IsNoiseUserPrompt`) catches the interrupt markers — so they
+   > no longer reach the back-fill (CLAUDE.md, "STATE.md §8 bug-2 fixed").
 3. **An Esc-interrupt strands even a HOOKED session in `Running`.** The `Stop` hook does not fire
    on a user interrupt; the prior assistant line is `tool_use`/`null` (not `end_turn`), so the
    missed-Stop synth can't fire either — and the interrupt marker is parsed as a *UserPrompt*
    (bug 2), which `_readDelta` treats as a fresh turn (`lastStopReason.clear()`), re-arming
    nothing. The session reads `Running` until the next real prompt. §3b's Interrupted →
    WaitingForInput mapping fixes this for hooked and hook-less sessions alike.
+   > **Shipped — FIXED (commit `8e88f79ae`).** `IsUserInterruptMarker` recognizes the marker; `_readDelta`
+   > sets `ScanState.interrupted`; `ShouldSynthesizeStop` (`interrupted || IsTerminalStopReason`) releases
+   > the killed turn to WaitingForInput. Shipped as a turn-ender feeding the hook machine, NOT the §3b
+   > "Interrupted annotation" — no tag/state, the turn just ends.
 
 ## 9. Evidence appendix (real data, this machine)
 
@@ -293,17 +382,35 @@ Survey of **4,837** transcripts; taxonomy over the 80–700 most recent:
    `hasChild` refresh cadence — §4); the open part is only how far above it to sit (3 s
    recommended; higher is safer against slow in-proc tools / API stalls, at the cost of approval
    latency).
+   > **Answered by what shipped:** `[recon-block]` uses `kScanStopQuiescenceMs` = **2 s** (no
+   > `APPROVAL_QUIET_MS`; it gates on the `AskUserQuestion` name, not a generic dangling tool, so it
+   > needs no `hasChild` window). The presence-idle release uses a LONGER `kScanPresenceIdleQuiescenceMs`
+   > = **5 s** to outlast the ~2 s S-lane refresh lag. The 3 s floor question reopens only if the broad
+   > §4 heuristic is built.
 2. **Keep `Idle` at all?** With `Starting` covering "alive, no transcript", `Idle` only means
    "resumed but untouched" — and even that derives as WaitingForInput (a resumed transcript's last
    main-chain line is its old `end_turn`), which is what Autopilot treats as ready anyway (Rule
    #1 already equates them). Fold into `Starting`, or keep for resumed sessions?
+   > **Answered: `Idle` kept** (still a Core-6 value; `Starting` not added — §3a). It is load-bearing:
+   > `ShouldSynthesizeRunning`/`ShouldSynthesizeRunningFromExternalWork` fire **from Idle or
+   > WaitingForInput**, and the Waiting→Idle cache decay (`_maybeDecayWaiting`) produces it. Neither
+   > foldable nor dead today.
 3. **`debug/<id>.txt` as an optional accelerator** for sub-second turn-start latency, or ignore it
    entirely (transcript-only) for stability?
+   > **Answered (by omission): ignored.** Nothing reads `debug/<id>.txt`; the shipped low-latency path
+   > is the presence heartbeat (`sessions/<pid>.json`), not the debug log.
 4. **Error transience** — auto-clear `Error` to `Running` when a retry/next line lands, or hold until
    a human looks (sticky)?
+   > **Still open** — moot until an `Error`-deriving arm ships (§5 did not build one).
 5. **Annotation surface** — do we add the deferred annotations (retrying/interrupted/bg) now as
    fields (cheap) even though the UI uses them later?
+   > **Answered: no.** `interrupted` shipped as a per-cursor `ScanState` flag (worker-only), NOT a
+   > persisted `SessionInfo` annotation; `retrying`/`bgBusy` were not added. The one durable enrichment
+   > is `presenceStatus`.
 6. **Done → auto-archive for adopted externals?** A Done derived for an adopted hand-typed claude
    (its claude exited; the hosting shell tab lives on, so the connection-Closed sweep never fires —
    §3a) leaves a green ✓ card on the board indefinitely. Auto-archive after a grace period, or keep
    the card until the user acts?
+   > **Still open** — partly moot from the other side: `Done` is still not PULL-derived (§3a), so the
+   > connection-Closed `_SweepClaudeLiveness` is the only archive path. CLAUDE.md's Lifecycle audit
+   > (gap-2 `_ArchiveClaudeSession` now `ProcessAlive`-guards) is adjacent but doesn't resolve this case.

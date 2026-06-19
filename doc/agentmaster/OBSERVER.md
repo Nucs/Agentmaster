@@ -305,17 +305,22 @@ AppendStateLog(L"hooks.log", L"[engine] AM_SESSION " + e->amSession + L"\n");
 
 - Store `e->amSession` on the `Engine` struct; the `ProcessObserver` reads it to classify
   `RunningApp`.
-- **Optional richer form:** `AM_SESSION = <instanceGuid>` (one per process). If we later attribute
-  the owning *window*, extend to `<instanceGuid>:<windowId>` — but v1 is process-scoped.
+- **Two forms (window attribution SHIPPED — resolves §19-Q1).** The process env var is the bare
+  `<instanceGuid>` (one per process), inherited by every ConPTY child (so a hand-typed `+`-tab claude
+  carries it). A **Manager-Launched** session additionally carries `AM_SESSION = <instanceGuid>:<windowId>`
+  — the launching window appends its id via `spec.env` (`_BuildAgentConnection`), so we can attribute the
+  owning window. Classification matches on the GUID **prefix**, so both forms classify `Agentmaster`.
 - `Launch`'s direct `CreateProcessW("claude …")` already inherits the process env, so launched
   sessions are also stamped (and trivially classified `Agentmaster`).
 
-Classification (S-lane, per claude facts):
+Classification (S-lane, per claude facts; `ClassifyRunningApp`):
 ```
-amSession == e->amSession                  -> RunningApp::Agentmaster      (ours; correlate + bind)
-amSession.empty() && !wtSession.empty()    -> RunningApp::WindowsTerminal  (external; acknowledge)
-else                                       -> RunningApp::Other            (bare console; ignore)
+guidPrefix(amSession) == guidPrefix(e->amSession)  -> RunningApp::Agentmaster      (ours; correlate + bind)
+amSession.empty() && !wtSession.empty()            -> RunningApp::WindowsTerminal  (external; acknowledge)
+else                                               -> RunningApp::Other            (foreign AM_SESSION / bare console; ignore)
 ```
+(`guidPrefix` = the substring before the first `:`, so the launched `<guid>:<windowId>` form and the bare
+`<guid>` form both match ours; a foreign instance's GUID does not.)
 
 ---
 
@@ -613,7 +618,8 @@ not the command line.
   `_ReconcileManagedCodex` (not the observer) folds its state onto the record.
 - **UI (`AgentManagerContent`).** The External group (Triage Board + Explorer **EXTERNAL**) renders a
   teal **`codex`** pill + `model · sandbox · approval` + timing + the C2 state dot; the right-click menu
-  is **kind-aware** — a Codex external offers **Adopt** (resume its rollout into a managed tab) / **Open
+  is **kind-aware** — a Codex external offers **Adopt** (bring its rollout under management via a
+  Fork-a-copy vs Resume-anyway choice) / **Open
   New Codex Session Here** (a fresh managed codex in the cwd; both route to the Codex launch handler) +
   the agent-agnostic **Bring Window To Front**; **left-click → a read-only Flight Plan** sourced from the
   rollout. The per-tab observe badge reads `○ codex · <model> · unlinked` (an external/unbound codex); a
@@ -644,9 +650,12 @@ dot; still observe-only as facts, zero `~/.codex` writes.
 `TabKind` gained `Codex` (window-record refs + persistence (de)serialize it). Launch = the launch bar's
 **Claude⇄Codex toggle** (directory-only — Codex has no typed-id resume/fork) or the EXTERNAL **Open New
 Codex Session Here** → `_SpawnCodexSession` → `_LaunchCodexSession` (`BuildCodexCommandline` = `codex` /
-`codex resume <uuid>`, immediate managed card, `AM_SESSION` stamp, no `CCMGR_*`); restore = the Archive
+`codex resume <uuid>` / `codex fork <uuid>` — fork WINS over resume, mutually exclusive — immediate managed
+card, `AM_SESSION` stamp, no `CCMGR_*`); restore = the Archive
 page (branch on `kind`, transcript-gated on the rollout, else fresh); window-restore = `_RestoreWindowTabs`;
-adopt = `_AdoptExternalCodex` (resume an external's rollout, original left running). A managed codex is
+adopt = `_AdoptExternalCodex(pid,cwd,fork)` (a **Fork-a-copy vs Resume-anyway** choice mirroring
+`_AdoptExternalClaude`: fork = `codex fork <uuid>` into a NEW rollout, safe while the original still runs —
+no two-writers hazard — else `codex resume <uuid>` take-over; original left running). A managed codex is
 **deduped out of the External census** (`managedCodexTokens`) and **never** fed to `ObserveClaude` (it is
 registered by the launch path; `_ReconcileManagedCodex` folds its C2 state onto the record). **Lifecycle +
 state ONLY** — no injector/Autopilot.
@@ -794,8 +803,15 @@ helpers to `AgentMaster/tests/`.
 
 ## 19. Open questions
 
-1. Window attribution in `AM_SESSION` (`:<windowId>`) now, or defer until multi-window observer needs it?
-2. Surface external (`WindowsTerminal`) claudes in the Manager at all, or only count them?
+1. ~~Window attribution in `AM_SESSION` (`:<windowId>`) now, or defer until multi-window observer needs it?~~
+   **RESOLVED — shipped (§7):** a Manager-Launched session carries `AM_SESSION = <instanceGuid>:<windowId>`
+   (the launching window appends its id via `spec.env`); a hand-typed `+`-tab claude carries the bare
+   process `<instanceGuid>`. `ClassifyRunningApp` matches on the GUID **prefix**, so both forms are ours.
+2. ~~Surface external (`WindowsTerminal`) claudes in the Manager at all, or only count them?~~
+   **RESOLVED — surfaced (§11c):** externals appear as a full **External (N)** group on the Triage Board
+   AND in the Explorer Tree's **EXTERNAL** scope — enriched (title / host label / model · effort / timing),
+   left-click → a read-only Flight Plan, right-click → Adopt / Open-New-Session-Here / Bring-Window-To-Front
+   — but never bound (observe-only).
 3. ~~Codex: keep as bare acknowledge, or reserve an enrichment slot for a future Codex integration?~~
    **RESOLVED — C1 (observe) + C2 (state) + the managed launch/restore/adopt lifecycle shipped (§11f):**
    Codex sessions are detected, rollout-resolved, state-derived, and fully lifecycle-managed

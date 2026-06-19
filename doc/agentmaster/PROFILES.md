@@ -7,9 +7,10 @@
 > package identity on first launch** (release → Production, dev → Development), and changeable later
 > from the cog (Production / Development / **Browse…**).
 
-Status: **implemented** (lib-compiled green; engine harness 604/604 incl. the new profile checks).
-Runtime verification of the picker + side-by-side install rides the next deploy cycle (the running
-dev instance could not be restarted while this was built).
+Status: **shipped & live-verified.** The identity split + per-install profiles are in public
+releases (v0.2.0+); first launch now **auto-selects** the per-identity default silently — the
+Production / Development / Browse… picker moved to the cog (§2). Engine harness 900+ incl. the
+profile checks; side-by-side release + dev installs run cleanly.
 
 ---
 

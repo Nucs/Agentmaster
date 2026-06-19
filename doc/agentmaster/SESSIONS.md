@@ -3,7 +3,7 @@
 > **Status: IMPLEMENTED (engine + UI; pending deploy).** The store API (`TranscriptStore`), the
 > two-phase search (`SessionSearch`), the presence→observer integration, and the page itself
 > (`TerminalPage.AgentSessionsPage.cpp`, the "Sessions" toolbar button after Archived) are
-> built, lib-compiled green, and engine-tested (536 harness checks). §7 records the user's
+> built, lib-compiled green, and engine-tested (926 harness checks). §7 records the user's
 > decisions. Two things in one doc: **(1)** the feature spec for a
 > global **Sessions browser** — a full-window page behind a new **"Sessions"** toolbar button,
 > right after **Archived**, listing *every* Claude Code session on the machine in a selectable
@@ -282,15 +282,24 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
    `AppSettings` via the existing settings sink (like `treeSort`).
 6. **Row affordances by relationship to the app** (correlate each listed sid against the
    registry):
-   - **OPEN** (live, `SessionRegistry::Get(sid)->live`) — state glyph + **per-dir tab color**
-     chip (`dir-colors.json` palette via the existing dir-color system) + the timing adornment +
-     **Jump** (Activate, Rule #2: focus only, never inject).
+   - **OPEN** (live, `SessionRegistry::Get(sid)->live`) — a **per-dir tab color** chip
+     (`dir-colors.json` palette via the existing dir-color system; *as shipped*, solid when OPEN
+     vs dim for an on-disk row, with a brighter **presence ring** + tooltip when claude's
+     heartbeat reports busy/idle/waiting — §7-Q5) + the timing adornment + **Jump** (Activate,
+     Rule #2: focus only, never inject).
    - **ARCHIVED** (in `sessions.json`, `!live`) — **Restore here** (the existing
      transcript-gated `claude --resume` seam).
    - **On-disk only** (not in the registry at all) — **Open / Adopt**: resume it into a managed
      tab (`_AdoptExternalClaude`-style, transcript-gated) + **Open New Session Here**.
    - A session live in a FOREIGN host (its sid in `sessions/<pid>.json` but not ours) — mark
      "live elsewhere"; adopting it means two writers on one transcript (the known adopt caveat).
+   - *As shipped*, every row's right-click menu carries the relationship-appropriate primary
+     action (**Jump to tab** when OPEN, else **Resume here**) PLUS **Fork here** on EVERY row —
+     including a live one, since a fork writes its OWN transcript so the two-writers hazard
+     doesn't apply (`_ForkSessionFromDisk`) — **Open New Session Here**, and **Hide from list**
+     (§1). Resume / Fork / Open-New open in a BACKGROUND tab so the list stays up for bulk-open.
+     **Double-click** an OPEN row jumps to its tab (`_ActivateClaudeSession`); on any other row it
+     resumes (`_ResumeSessionFromDisk`).
 7. **Fork grouping:** dedupe search hits by line `uuid` (forks duplicate content verbatim);
    group rows by root via `forkedFrom.sessionId` chains.
 8. **Reuse, don't re-build:** `ClaudeProjectsDir`, `EncodeCwdToProjectDir`,

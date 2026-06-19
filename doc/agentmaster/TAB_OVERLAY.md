@@ -10,6 +10,17 @@
 
 ---
 
+> **Status — SHIPPED, and beyond this design.** Phase 1 (the badge) and Phase 2 (hover-expand +
+> controls) shipped, plus substantial additions this design did not foresee: the badge now shows on
+> **every classified tab** (a dim `○ <kind> · unlinked` *observe badge* — `pwsh` / `cmd` /
+> unprompted-`claude` / `codex` — that flips in place as activity changes, **not** "no badge" as §8
+> originally said); it is enriched with `model · effort · kind` and carries a **second
+> `<workdir>/<branch>` row**; the hover row is a **folder Open-Path + a copy menu** (Session Id /
+> Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a chime) **+ a
+> pencil** that toggles a **second overlay, the SUMMARY PANEL**. A matching **tab-strip status dot**
+> rides every tab header. These are written up in **§13** below; [`../../CLAUDE.md`](../../CLAUDE.md)
+> is the authoritative current behavior.
+
 ## 1. The two asks (verbatim)
 
 1. **Phase 1 — the badge.** *"Each tab in Agentmaster must get an overlay on the top-right side,
@@ -198,10 +209,10 @@ Mirror the Manager's proven pattern (`AgentManagerContent.cpp:390-416`) but **id
 
 | Tab | Badge? |
 | --- | --- |
-| Managed Claude session (launched / restored) | **Yes** (full) |
+| Managed Claude **or Codex** session (launched / restored) | **Yes** (full linked badge) |
 | Adopted Claude session — bound | **Yes** (full) |
 | Adopted Claude session — observe-only | **Yes** (observe style, controls disabled) |
-| Plain terminal (`pwsh`, `cmd`, …) | **No** (slot stays empty/collapsed) |
+| Plain terminal (`pwsh`, `cmd`), a started-but-unprompted `claude`, or an external `codex` | **Yes — a dim `○ <kind> · unlinked` observe badge** that flips kind in place as activity changes, and is promoted to the full linked badge the instant a `claude` resolves a conversation id. *(Originally "No — slot stays empty"; superseded — see §13a.)* |
 | The Manager tab | **No** (it *is* the manager; and it's `AgentManagerContent`, not a `TerminalPaneContent`) |
 
 When a session is **archived in place** by the liveness sweep (claude exited, tab left open —
@@ -266,3 +277,70 @@ Wiring (all existing seams):
 | `AgentMaster/SessionModels.h` + `Json.h`/`Persistence` | `AppSettings::showTabOverlay` (+ (de)serialize). |
 | `TerminalAppLib.vcxproj` | register `AgentTabOverlay.{h,cpp}`. |
 | this doc + `CLAUDE.md` / `DESIGN.md` index links | docs. |
+
+## 13. Shipped additions beyond the original design
+
+The badge shipped (Phase 1 + 2) and then grew well past this spec. The sections above are the design
+seed; this section records what actually ships today (authoritative: [`../../CLAUDE.md`](../../CLAUDE.md)).
+
+### 13a. An observe badge on *every* classified tab (supersedes §8's "No")
+A non-bound tab is no longer badge-less. The `_ObserverProbe` UI lane reads the Fleet Observer's
+correlation/activity tables and shows a registry-LESS **observe badge** — `○ <kind> · unlinked`
+(`pwsh` / `cmd` / `codex` / a `claude` that is started-but-not-yet-prompted, §11d-style) — via
+`AgentTabOverlay::ShowActivity`. It **flips kind in place** as the tab's activity changes (a `pwsh`
+tab → `claude` the moment you run it) and is **promoted** to the bound linked badge the instant a
+claude resolves a conversation id (its first prompt). `_DropPendingOverlay` collapses/releases it
+when the tab binds, the agent exits, or the tab leaves the window's roster.
+
+### 13b. Enrichment + Codex
+The Fleet Observer enriches the badge with **`model · effort · kind`** (O6). A managed **Codex**
+session wears the full badge at its 3-state floor (Running / Waiting / Idle — Codex has no
+hook-derived NeedsApproval/Error via PULL); an external codex shows `○ codex · <model>`.
+
+### 13c. Second row — `<workdir folder>/<branch>`
+The linked badge carries a dim second line (`AgentTabOverlay::_subline`) — the session's root
+working-dir folder + its **live** git branch (`ReadGitBranchForDir`, read from `.git/HEAD`, handling
+a worktree/submodule `.git` FILE + a detached HEAD → short SHA; distinct from a transcript's
+historical first-seen branch). Hidden when there is no dir/branch, and on observe badges.
+
+### 13d. Hover **action row** (row 3) — Open Path + copy menu
+Hovering a linked badge reveals an actions row: a **folder** button (Open Path → the working dir via
+`explorer.exe`, off-thread) + a **copy menu** + a **pencil**. The copy menu yields `Session Id` ·
+`Copy Path` · `Copy Branch Name` · `Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
+command — the live process commandline from the PEB, or the builder Launch/Restore would use, *not*
+a toy `--resume <id>`) · `Summary` (the full textual session box) · `Transcript` (the whole
+conversation, user + assistant TEXT only via `ReadConversationText`). Every copy / Open Path plays a
+short confirmation chime (`PlaySoundW`). Built only for a LINKED session; revealed while the pointer
+is over the badge OR the copy menu is open.
+
+### 13e. The SUMMARY PANEL (the pencil → a second overlay)
+The pencil toggles a **second overlay** stacked **below the badge** (`TerminalPaneContent::SetAgentSummaryOverlay`,
+capped to ≤20 % of the pane width), shown while the **GLOBAL** `AppSettings.showSummaryPanel` is on
+(default ON; the pencil hands off to `TerminalPage::_ToggleSummaryPanel` — a freshest-disk
+read-modify-write + a live broadcast to every linked overlay in the window; the cog Save preserves
+it). It renders the `~/.claude/hooks/session-end.js` box — a faithful C++ port in
+`ProcessInspect::AnalyzeSessionTranscript` (user messages [deduped, noise-filtered via
+`SeIsCommandNoise`], files read / **created** / edited, branch, first/last timestamps, tasks, plan
+signals, parent/plan) — analyzed **off-thread** (`_LoadSummaryAsync`) and reloaded only when the
+transcript **mtime grows** (a quiet tab costs one `GetFileAttributesEx`). The displayed panel is a
+**TRIMMED** view (omits what the badge already shows); the copy menu's `Summary` yields the COMPLETE
+box. A live **times bar** ticks *age · last user msg · last activity*. It is **resizable** (left /
+bottom / corner grips; size persisted GLOBALLY as pane fractions, or Shift-drag for a per-tab
+ephemeral size), with a **wrap-line toggle** (↵: literal `\n` vs real newlines) and a **truncate
+toggle** (…: cap long messages, default ON) at the right of the times bar — both GLOBAL + persisted.
+Section separators fill border-to-border (a `StackPanel` of monospace `TextBlock`s interleaved with
+full-width `Border` rules driven by a `\x1F` sentinel). Codex renders a reduced box
+(`RenderCodexSummary`: model/effort + prompts).
+
+### 13f. Tab-strip status dot (companion, not the overlay)
+Independently of the in-terminal badge, every classified tab's header reads `[icon] ● <title>`: a
+state-colored `Ellipse` (thin black stroke) in `TabHeaderControl.xaml`'s indicator row — a managed
+session in its Triage-Board state color, an observed-but-unmanaged tab a dim gray, the Manager tab
+none. The palette lives once in `AgentStatusColors.h` (board dot + this overlay + the tab-strip dot
+all read it).
+
+### 13g. Settings
+`AppSettings` gained, beyond `showTabOverlay`: `showSummaryPanel`, `summaryPanelWrapNewlines`,
+`summaryPanelTruncate`, and `summaryPanelWidthFraction` / `summaryPanelHeightFraction` — all GLOBAL,
+persisted, and written by the overlay's own toggles/grips (not the cog form), with the cog Save
+preserving them freshest-from-disk.

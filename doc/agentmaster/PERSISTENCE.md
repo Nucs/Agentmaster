@@ -1,11 +1,15 @@
 # Agentmaster — Workspace Persistence & Restore (Design Plan)
 
-> **Status:** Proposed (design agreed; not yet implemented). Supersedes the flat
-> session-only persistence shipped in **M8** (see `IMPLEMENTATION.md`).
+> **Status:** SHIPPED & live-verified — the window layer is **COMPLETE** (see §13.5).
+> Supersedes the flat session-only persistence shipped in **M8** (see `IMPLEMENTATION.md`).
 > Scope: persist and restore the **whole workspace** — every window, its tabs (order,
 > color, title), panes, window geometry, the per-window **Manager tab** state, and the
-> live **Claude sessions** inside them — so first launch of the process reopens exactly
-> the state the user left.
+> live **Claude (and Codex) sessions** inside them — so first launch of the process reopens
+> exactly the state the user left.
+>
+> This document keeps the full design narrative (§1–§12 are the agreed-and-built plan; §13
+> is the as-built delivery record). The original **M9–M14** milestone ladder (§11) is
+> **superseded** by §13's Increments 1–5, all of which shipped and were live-verified.
 
 ## 1. Why
 
@@ -120,13 +124,22 @@ WindowRecord {
 }
 
 TabEntry =
-  | Claude { convId, workingDir, title, tabColor?, flightPlan[], autopilot }   // ours
+  | Claude { sessionId, workingDir, title }   // ours — a REFERENCE by id (Option 1)
+  | Codex  { sessionId, workingDir, title }   // ours — a managed codex.exe (rollout uuid on the referenced SessionInfo.codexSessionId)
   | Other  { actionsJson }   // WT ActionAndArgs (carries its own NewTab/SetTabColor/RenameTab)
 ```
 
+> **As built (Option 1 — refs, not copies).** A managed `TabEntry` records the
+> `sessionId` + a **`TabKind` discriminator** (`Claude` / `Codex` / `Other`) — NOT a copy
+> of the session's flight-plan / autopilot / color. The session data lives in `sessions.json`
+> (the one source of truth); the record only fixes tab **order** + window↔session **affinity**
+> + the kind, so restore replays the right CLI (`claude --resume` vs `codex resume`). Color
+> + title ride the referenced `SessionInfo` / the dir-color system (Rule #12), so the
+> launch-time `tabColor` field was dropped as dead round-trip data.
+
 Stored under `%USERPROFILE%\.agentmaster\windows\<windowId>.json` (one file per window so
-closes/opens don't contend on a single document). The flat `sessions.json` is retired
-(migrated — §10).
+closes/opens don't contend on a single document). The flat `sessions.json` is **kept** as the
+session source of truth (the migration in §10 never fired — there was no legacy format to convert).
 
 ### 5.3 Manager-tab state via the persist hook
 
@@ -171,14 +184,19 @@ flow is superseded by an explicit restore, so a relaunch never avalanches into N
 2. Load every `windows/<id>.json` (per-window UI state) **and** `sessions.json`; the sessions
    enter the registry **Archived** (`live=false`) — NOT auto-launched. The app opens to one
    window with just its (pinned, non-closable) Manager tab.
-3. A one-time **"Restore your previous layout?"** prompt offers to bring the workspace back.
-   Decision: it **offers all archived sessions**, and once it can read the `WindowRecord`s it
-   restores **per window** (geometry + Manager lens + that window's tabs in order — `Claude`
-   via `_LaunchClaudeSession(..., resume=convId)`, `Other` via WT action replay). Dismiss → the
-   sessions stay in the **Archived** list, restorable **per-tab** anytime. *(Held until the
-   WindowRecord capture/restore is wired — §6a.)*
+3. A **decide-prompt** offers to bring the workspace back — and the WindowRecord capture →
+   restore wiring it was once *held* on is now **SHIPPED** (Increment 3/4, §13.5), so this is
+   how launch actually behaves: when >1 record was open at last exit, a Yes/No "Reopen your N
+   previous windows?" gates the reopen (Yes → reopen each at its geometry + lens + its tabs in
+   order; No → one default window + the Manager's **Reopen Windows (N)** recover button). A lone
+   open record reopens silently; first run opens one default window. Each window's tabs rebuild
+   **per window, in order** — a `Claude` ref via `_LaunchClaudeSession(..., resume=convId)`, a
+   `Codex` ref via `_LaunchCodexSession(..., codex resume <uuid>)` (both transcript/rollout-
+   gated), an `Other` ref via WT action replay (`_RestoreWindowTabs`). The Manager's **Archived**
+   page also restores any session **per-tab** into the current window anytime.
 4. As each restored Claude `SessionStart` arrives, the engine re-attaches that `convId`'s
-   Flight Plan + autopilot from the record (correlate by id — window-scoped).
+   Flight Plan + autopilot from the record (correlate by id — window-scoped). A managed Codex
+   has no hooks; its state comes from the C2 rollout tail (`_ReconcileManagedCodex`).
 
 **Close window.** Tear down the window's tabs → each ConPTY closes → its `claude.exe` job
 exits. The record is already current (debounced autosave), so nothing else to do — the
@@ -187,9 +205,14 @@ window is restorable. App keeps running.
 **Close app.** Flush any pending debounce; tear down all windows (processes exit). All
 records remain → full restore next launch.
 
-**`Kill` (destructive).** Remove the session from its `WindowRecord.tabs` + drop its
-side-data, then close its tab (`_KillClaudeSession`, `TerminalPage.cpp:1008`). A record with
-no tabs left is deleted. Add **"Kill all sessions in this window."**
+**Session teardown — *as built*, `Kill` became `Archive` (non-destructive).** The agreed
+design above kept a destructive per-session `Kill`; **what shipped has no `Kill`** — closing a
+tab (the X, tree `Del`, the Manager's Archive, the Flight-Plan Archive button) all route through
+ONE seam (`_HandleCloseTabRequested` → `_ArchiveAndCloseClaudeTab`) that flips `live=false`,
+clears the injector, persists, and closes the tab while **keeping the record** (restorable from
+the Archived page). Archive is terminal and the Claude transcript on disk is never deleted —
+there is no discard (see §13's archive model + CLAUDE.md). The §3/§7/§9 `Kill` decisions are
+historical; the `_KillClaudeSession`/"Kill all in window" items below never shipped.
 
 **New window / new tab.** A fresh `windowId`; the Manager tab seeds from the global default
 lens; sessions launched into it are tagged `(windowId, tabId)` and autosaved.
@@ -209,22 +232,37 @@ When restoring, there are **two grains**, one model:
 
 So **per-window is the coarse "restore my workspace" unit (the launch prompt); per-tab is the
 fine-grained cherry-pick (the Archived button), always available.** A session restored per-tab
-re-homes into the current window; window↔session affinity (the `WindowRecord` tab ref) is
-advisory until full per-window restore lands.
+re-homes into the current window; full per-window restore (the `WindowRecord` tab ref →
+`_RestoreWindowTabs`) is **now shipped**, so the affinity is honored, not merely advisory.
 
-**Locked decisions for the launch prompt:**
-- It **offers all archived sessions** (not only those open at last close — so no `openAtExit`
-  marker is needed).
-- It is **held until the full per-window `WindowRecord` capture is wired first** — so when it
-  ships it restores true **per-window** layouts rather than a flat global list. Until then,
-  restore is **per-tab only** (the Archived list); startup stays clean (just the Manager tab,
-  Rule #6).
+**Locked decisions for the launch prompt (with what actually shipped):**
+- *Decided:* it would **offer all archived sessions** (not only those open at last close — so
+  no `openAtExit` marker needed). **As built (§13.5, Increment 3):** the reverse choice won —
+  an **open-at-exit manifest** (`open-windows.json`) now reopens **only the windows that were
+  open at last exit**, so a window closed mid-session is not re-offered; the Archived page still
+  lets you restore *any* session per-tab.
+- *Decided:* it would be **held until the full per-window `WindowRecord` capture is wired
+  first** (to restore true per-window layouts, not a flat global list). **As built:** that
+  capture/restore IS wired (Increments 1–5), so the prompt is **no longer held** — launch
+  reopens true per-window layouts (geometry + lens + ordered tabs). Startup still stays clean
+  (no auto-launched claude — Rule #6).
 
 ## 7. Correctness rules (extend `IMPLEMENTATION.md` §"Correctness rules")
 
 6. **Restore = resume, not replay.** Claude tabs restore via `claude --resume <convId>`
-   with the full per-session env; `Sent` prompts are never re-sent. (Unchanged in spirit;
-   now window-scoped.)
+   with the full per-session env (Codex via `codex resume <rolloutUuid>`); `Sent` prompts
+   are never re-sent. (Unchanged in spirit; now window-scoped, transcript/rollout-gated, and
+   kind-aware — `_RestoreArchivedSession` / `_RestoreWindowTabs` branch on `SessionInfo.kind`.)
+   **Restart, too, resumes — never replays the launch commandline.** "Restart session" (WT's
+   `restartConnection`, relabeled) rebuilds a managed pane from its **CURRENT** conversation
+   (`_RestartManagedSession`: Claude via `BuildClaudeRestartSpec` — keep the id, `--resume`
+   when a transcript exists else fresh-with-the-same-id; Codex via `codex resume <uuid>`,
+   rollout-gated), **not** by replaying `ConptyConnection::Commandline()` verbatim — the
+   original launch command was `--session-id <A>`, which on a transcript that now exists makes
+   claude refuse ("session id already in use") and exit immediately (a fresh-launched session
+   could never be restarted). It resumes the re-homed `_claudeTabs` key, so a conversation that
+   diverged via `/clear` · `/compact` · `/resume` is restarted at its CURRENT id, not the stale
+   launch id.
 7. **Close persists, only `Kill` discards.** Closing a window or the app must leave every
    `WindowRecord` intact and restorable; the sole removal path is `Kill`.
 8. **One engine per process.** Exactly one registry/bridge/pipe; windows share it. Never

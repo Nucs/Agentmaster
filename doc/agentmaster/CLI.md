@@ -43,7 +43,8 @@ so it is untouched by anything we do to the alias. The shim is the seam.
 
 ```
 wmain:
-  if argv[1] ∈ { show, list, sessions, tabs, windows, external, restore, archive, --help, --version }
+  if first token ∈ { show, list, sessions, tabs, windows, external, restore, archive }
+        OR a leading CLI-only flag { --json, --self, --offline, --tail, --instance, --state, --dir }
        → exec agentmaster-cli.exe on THIS console, wait, return its exit code     # CLI
   else → CreateProcessW(WindowsTerminal.exe, <forward argv verbatim>) detached     # GUI (unchanged)
 ```
@@ -114,8 +115,11 @@ agentmaster show <ref> [--tail N] [--json]   # full introspection of one session
             restore <ref> [--window W]        # archived → live   (control; app required)
             archive <ref>                     # live → archived   (control; app required)
 
-global: --json  --profile <dir>  --instance dev|release  --offline  --self  --help  --version
+global: --json  --profile <dir>  --instance dev|release  --self  --help  --version
 ```
+
+(All reads are already offline-style — persisted + OS-observable state only — so there is no
+distinct online mode; `--offline` is reserved as a shim dispatch token, not yet a parsed flag.)
 
 - **`<ref>`** resolves a conversation UUID / unique id-prefix / title substring / `w<N>:t<M>` tab-ref /
   `--pid <n>`; ambiguity prints the candidates and exits non-zero.
@@ -148,8 +152,9 @@ A live claude that is *not* in the queried profile's `sessions.json` (managed by
 or not yet persisted) still gets the **full transcript-derived view** — `show` synthesizes a record
 from the live process + transcript, so identity / state / activity / conversation are always present;
 only the queue/autopilot are blank. The `external` census additionally classifies each unmanaged
-claude's **`host`** — `windows-terminal` / `agentmaster-other` / `console` — so a sibling instance's
-session is never mistaken for a truly-foreign one.
+claude's **`host`** — `windows-terminal` / `agentmaster-other` (a sibling install's session, by its
+`AM_SESSION` GUID prefix) / `agentmaster-self` (one this same instance stamped) / `console` — so a
+sibling instance's session is never mistaken for a truly-foreign one.
 
 Default output is a compact human summary; `--json` (stable, `schemaVersion`-stamped) is the agent
 mode.
@@ -227,17 +232,23 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
 
 - **P1 — read (hybrid, standalone reader):** `show` / `list` / `sessions` / `tabs` / `windows` /
   `external` / `--self`. Zero engine edits. **Code COMPLETE + QA'd** (presence-authoritative binding,
-  host classification, activity/files/last-prompt). **Packaging authored + PROVEN:**
-  `agentmaster-cli.vcxproj` (console; links the engine units) builds clean; the `wt`/`wtd` shim flips
-  to console-subsystem + verb-dispatch (`shim.cpp` + `wt.vcxproj` `SubSystem=Console`) — verified
-  end-to-end (`wt.exe show --self` dispatches to the CLI with full output; non-verbs forward to the
-  GUI byte-for-byte); wired into `OpenConsole.slnx` + `CascadiaPackage.wapproj` so a build ships
-  `agentmaster-cli.exe` beside `WindowsTerminal.exe`. **Remaining: the destructive package
-  build + deploy** (close → build → relaunch) to make the real `agentmaster show` alias live — which
-  must be run from OUTSIDE the dev instance being closed (self-kill hazard).
-- **P2 — control:** the `--am-restore` / `--am-archive` handoff intercept + disk-poll confirm →
-  `restore` / `archive`.
-- **P3 — TODO:** a `watch` event stream, and **prompt control** (`enqueue` / `send-now` /
+  host classification, activity/files/last-prompt). **Deployed to the DEV alias by an in-place binary
+  swap** (no instance closed) and **live-verified** end-to-end via the real `agentmasterdev` alias —
+  every verb returns valid JSON, auto-targeting the dev profile by package identity. **Packaging
+  authored, but the full build is unproven:** `agentmaster-cli.vcxproj` (console; links the engine
+  units) compiles clean and the `wt`/`wtd` shim is console-subsystem + dual-mode (`shim.cpp` +
+  `wt.vcxproj` `SubSystem=Console`), wired into `OpenConsole.slnx` + `CascadiaPackage.wapproj` so a
+  build *should* ship `agentmaster-cli.exe` beside `WindowsTerminal.exe` — but this committed wiring
+  has only been **isolation-built + XML-validated**; a real full `Build-Agentmaster.ps1` / CI Release
+  build has NOT run, so the wapproj integration + a properly-branded `wtd.exe` are unconfirmed and the
+  live dev alias runs on **hand-copied binaries** until then. **Remaining: a destructive full package
+  build + deploy** (close → build → relaunch) to confirm the wiring and make a built-from-source
+  `agentmaster show` alias live — which must be run from OUTSIDE the dev instance being closed
+  (self-kill hazard); the **release** alias `agentmaster show` is **not deployed** (only
+  `agentmasterdev`).
+- **P2 — control (designed + deferred):** the `--am-restore` / `--am-archive` handoff intercept +
+  disk-poll confirm → `restore` / `archive`.
+- **P3 — designed + deferred:** a `watch` event stream, and **prompt control** (`enqueue` / `send-now` /
   `set-autopilot`) so an agent can *drive* other sessions — higher-stakes (it injects prompts), so it
   is deliberately a separate phase.
 
