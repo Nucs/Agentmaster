@@ -14,10 +14,13 @@
 > controls) shipped, plus substantial additions this design did not foresee: the badge now shows on
 > **every classified tab** (a dim `○ <kind> · unlinked` *observe badge* — `pwsh` / `cmd` /
 > unprompted-`claude` / `codex` — that flips in place as activity changes, **not** "no badge" as §8
-> originally said); it is enriched with `model · effort · kind` and carries a **second
-> `<workdir>/<branch>` row**; an always-shown action row carries a **folder Open-Path + a copy menu** (Session Id /
-> Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a chime) **+ a
-> pencil** that toggles a **second overlay, the SUMMARY PANEL**. A matching **tab-strip status dot**
+> originally said); its **row 1** now reads `status · actions · autopilot · queue`, with **link state
+> surfaced only when *not* linked** (a linked tab's badge already implies the link), over a dim **second
+> `<workdir>/<branch>` row**; the always-shown row-1 **action cluster** is a **folder Open-Path + a copy
+> menu** (Session Id / Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a
+> chime) **+ a pencil** that toggles a **second overlay, the SUMMARY PANEL**. The Observer's `model ·
+> effort · kind` enrichment feeds the Manager cards / summary panel / observe badge (no longer the
+> linked badge's strip). A matching **tab-strip status dot**
 > rides every tab header. These are written up in **§13** below; [`../../CLAUDE.md`](../../CLAUDE.md)
 > is the authoritative current behavior.
 
@@ -36,7 +39,7 @@ This document finalizes both, plus a small Phase 3 of deferred ideas.
 
 | Decision | Choice | Notes |
 | --- | --- | --- |
-| **Resting content** | **1 compact line** | `◐ waiting · Full · ⏳3 · ⛓linked` — state + autopilot mode + Pending count + link mark. |
+| **Resting content** | **1 compact line** | `◐ waiting · Full · ⏳3` — state + autopilot mode + Pending count (link state shows **only when *not* linked**; §13h). |
 | **Interaction** | **Dim, expand on hover/click** | Resting badge is dim + compact; hover (or click) expands a panel with buttons + a queue peek. |
 | **Phase-2 buttons** | Autopilot cycle · Send next now (!) · Show/hide queued · Jump to Manager | Confirm / Skip appears **contextually** in SemiAuto (not an opt-in). |
 | **Default visibility** | **On, dim until hover** | ~55 % opacity at rest, 1.0 on pointer-over; a Settings-cog toggle (`showTabOverlay`) turns it off. |
@@ -53,9 +56,9 @@ Derived from whether a stdin **injector is bound** to the session id (Correctnes
 
 | Link state | When | Badge mark | Controls |
 | --- | --- | --- | --- |
-| **Managed** | We launched it (`_LaunchClaudeSession`) | `⛓ linked` | full |
-| **Adopted + bound** | Hand-typed `claude`, correlated to its ConPTY (`_AdoptExternalSession`) | `⛓ linked` | full |
-| **Observe-only** | `external` session with no matching connection (a `claude` hosted outside this app) | `⛓̸ observe` (dimmed) | disabled, with a tooltip |
+| **Managed** | We launched it (`_LaunchClaudeSession`) | *(none — a linked badge's presence implies the link; §13h)* | full |
+| **Adopted + bound** | Hand-typed `claude`, correlated to its ConPTY (`_AdoptExternalSession`) | *(none — implied)* | full |
+| **Observe-only** | `external` session with no matching connection (a `claude` hosted outside this app) | `observe` / `unlinked` (text) | disabled, with a tooltip |
 
 Source of truth: a new `SessionRegistry::HasInjector(id) const` (trivial — the map already
 exists at `_injectors`). The overlay reads it on each refresh. *Don't* key this off
@@ -95,6 +98,9 @@ NeedsApproval ⚠ OrangeRed   Error ✕ Crimson   Done ✓ MediumSeaGreen
  > _                    │ ◐ waiting · Full · ⏳3 · ⛓linked │   ← ~55% opacity
                         └────────────────────────────────┘
 ```
+> *As shipped (§13h): a **linked** badge omits the `⛓linked` mark (its presence implies the link) and
+> drops `model·effort`, so the resting line reads `◐ waiting · Full · ⏳3`; the `observe` / `unlinked`
+> text appears only on a non-linked badge.*
 
 ### Expanded (hover or click)
 ```
@@ -293,9 +299,11 @@ claude resolves a conversation id (its first prompt). `_DropPendingOverlay` coll
 when the tab binds, the agent exits, or the tab leaves the window's roster.
 
 ### 13b. Enrichment + Codex
-The Fleet Observer enriches the badge with **`model · effort · kind`** (O6). A managed **Codex**
-session wears the full badge at its 3-state floor (Running / Waiting / Idle — Codex has no
-hook-derived NeedsApproval/Error via PULL); an external codex shows `○ codex · <model>`.
+The Fleet Observer's **`model · effort · kind`** enrichment (O6) feeds the Manager cards, the summary
+panel, and the observe badge (`○ codex · <model>`) — but the linked badge's row 1 itself was
+**decluttered** to `status · actions · autopilot · queue` (`model · effort` was dropped from the strip;
+§13h). A managed **Codex** session wears the full badge at its 3-state floor (Running / Waiting / Idle —
+Codex has no hook-derived NeedsApproval/Error via PULL); an external codex shows `○ codex · <model>`.
 
 ### 13c. Second row — `<workdir folder>/<branch>`
 The linked badge carries a dim second line (`AgentTabOverlay::_subline`) — the session's root
@@ -303,10 +311,11 @@ working-dir folder + its **live** git branch (`ReadGitBranchForDir`, read from `
 a worktree/submodule `.git` FILE + a detached HEAD → short SHA; distinct from a transcript's
 historical first-seen branch). Hidden when there is no dir/branch, and on observe badges.
 
-### 13d. **Action row** (row 2, left) — Open Path + copy menu
-A linked badge's action row is **always visible** (originally the hover-only "row 3"; now it sits on
-**row 2, to the LEFT of the dir/branch label**): a **folder** button (Open Path → the working dir via
-`explorer.exe`, off-thread) + a **copy menu** + a **pencil**. The copy menu yields `Session Id` ·
+### 13d. **Action buttons** (row 1, after the status block) — Open Path + copy menu
+A linked badge's action buttons are **always visible** (no longer hover-only): they sit in **row 1,
+immediately right of the status part** (so the strip reads `status → folder · copy · pencil → autopilot
+· queue`): a **folder** button (Open Path → the working dir via `explorer.exe`, off-thread) + a **copy
+menu** + a **pencil**. The copy menu yields `Session Id` ·
 `Copy Path` · `Copy Branch Name` · `Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
 command — the live process commandline from the PEB, or the builder Launch/Restore would use, *not*
 a toy `--resume <id>`) · `Summary` (the full textual session box) · `Transcript` (the whole
@@ -345,3 +354,12 @@ all read it).
 `summaryPanelTruncate`, and `summaryPanelWidthFraction` / `summaryPanelHeightFraction` — all GLOBAL,
 persisted, and written by the overlay's own toggles/grips (not the cog form), with the cog Save
 preserving them freshest-from-disk.
+
+### 13h. Final row-1 layout + the link-state rule
+Row 1, left → right: **status** (the Triage-Board-colored dot + label) · the **action cluster** (folder
+· copy · pencil — §13d, a linked session only) · the **Autopilot** button (§3b) · the **queue** count
+(when Pending > 0) · **link state**. Link state is surfaced **only when NOT linked** — `observe` for an
+external claude, `unlinked` otherwise; a **linked** badge shows *nothing* there, because the badge's mere
+presence on a managed tab already implies the link. `model · effort` is **not** on this strip — it lives
+on the Manager cards / summary panel / observe badge (§13b). **Row 2** is the dim `<workdir folder>/<branch>`
+label alone (§13c). (Supersedes the §2 / §3a / §4 design-seed sketches, which showed a `⛓ linked` mark.)

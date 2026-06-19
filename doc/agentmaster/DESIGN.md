@@ -223,7 +223,7 @@ A2 Mission-Control Wall (live tiles + semantic zoom), A4 Command-Palette switche
 The Manager tab is the *fleet* view; each Claude session tab also carries a small **link badge**
 pinned to the **top-right of its terminal**, so the tab ⇄ Agentmaster relationship is legible
 while you work *inside* a session: hook-driven status, whether/how Autopilot is driving it
-(`Manual` / `Semi` / `Full`), link state (`⛓ linked` vs observe-only), queued count, and — on
+(`Manual` / `Semi` / `Full`), link state (surfaced only when *not* linked), queued count, and — on
 hover/click — controls (Autopilot cycle, Send-now, queue peek, Jump-to-Manager) + a contextual
 SemiAuto confirm. Dim until hover; off-switchable. It only *reflects* registry/scheduler state
 and *requests* the same actions the Flight Plan does — never a second source of truth. Full
@@ -233,8 +233,9 @@ spec: [`TAB_OVERLAY.md`](./TAB_OVERLAY.md).
 linked badge it shows on **every** classified tab as a registry-less **observe badge**
 `○ <kind> · unlinked` (kind = `pwsh` / `cmd` / unprompted `claude` / `codex`) that **flips in place**
 as activity changes — a `pwsh` tab → `claude` the moment you run it → the full linked badge on its
-first prompt. The linked badge adds the Observer's `model · effort · kind` plus a dim **second row**
-`<workdir folder>/<live branch>`, and a **hover action row** — a folder button (Open Path), a **copy
+first prompt. The linked badge's **row 1** reads `status · actions · autopilot · queue` (**link state
+shows only when *not* linked**) over a dim **second row** `<workdir folder>/<live branch>`; its
+**always-shown row-1 action cluster** is a folder button (Open Path), a **copy
 menu** (Session Id · dir · branch · the **REAL** Claude/Codex launch CLI · Summary · Transcript), and
 a **pencil** toggling a **SUMMARY PANEL** (a second overlay ≤20% pane width rendering the
 `session-end.js` box from the transcript; GLOBAL `AppSettings.showSummaryPanel`, with a wrap-line
