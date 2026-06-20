@@ -6,6 +6,8 @@
 
 #include "TabHeaderControl.g.cpp"
 
+#include "AgentTipHelpers.h" // Agentmaster: islands-safe hover tooltip for the tab-strip status dot
+
 #include <atomic>
 
 using namespace winrt;
@@ -40,6 +42,13 @@ namespace winrt::TerminalApp::implementation
     TabHeaderControl::TabHeaderControl()
     {
         InitializeComponent();
+
+        // Agentmaster: explain the tab-strip status dot on hover. Its COLOR encodes the session's
+        // Triage state (and a dim gray dot = an observed, unmanaged tab) — not obvious without a
+        // legend, so this is a core learning-curve aid. Islands-safe tooltip (AgentTipHelpers) on the
+        // dot's wrap, set once here; only hoverable while a dot actually shows (the dot is collapsed
+        // for tabs Agentmaster doesn't classify, so there's no stray tip on a plain tab).
+        AgentSetTip(HeaderAgentStatusDotWrap(), L"Session status \x2014 the dot's color is the agent's Triage state: blue Running \xB7 goldenrod Waiting-for-you \xB7 orange-red Needs-approval \xB7 crimson Error \xB7 green Done \xB7 gray Idle. A dim gray dot marks an observed (unmanaged) tab; a flashing red ring means a background session needs you.");
 
         // We'll only process the KeyUp event if we received an initial KeyDown event first.
         // Avoids issue immediately closing the tab rename when we see the enter KeyUp event that was

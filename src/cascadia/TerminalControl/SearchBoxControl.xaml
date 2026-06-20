@@ -278,7 +278,7 @@
                       BackgroundSizing="OuterBorderEdge"
                       Click="HighlightAllButtonClicked"
                       IsChecked="True"
-                      ToolTipService.ToolTip="Highlight all matches">
+                      ToolTipService.ToolTip="Highlight all matches &#x2014; when on, every match in the buffer is highlighted; when off, only the current match is. Re-highlights without moving the current match.">
             <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
                       Glyph="&#xEE56;"
                       Style="{ThemeResource FontIconStyle}" />
