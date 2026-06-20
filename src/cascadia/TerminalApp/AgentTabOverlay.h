@@ -172,6 +172,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryWrapIcon{ nullptr }; // pinned top (right): the wrap-line toggle glyph — recolored by _UpdateSummaryWrapButtonVisual
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryTruncateIcon{ nullptr }; // pinned top (right, LEFT of the wrap toggle): the truncate toggle glyph — recolored by _UpdateSummaryTruncateButtonVisual
         winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
+        // Right-click "Copy Summary" context menu — built once (_BuildSummaryPanel) and shared as the
+        // ContextFlyout of the panel root AND every selectable text block it renders (title / times line /
+        // body runs), so a right-click anywhere on the panel offers the full-box copy (== _CopyField(6),
+        // the same action as the badge copy menu's "Summary" item).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _summaryContextMenu{ nullptr };
         winrt::Windows::UI::Xaml::DispatcherTimer _summaryTimer{ nullptr }; // drives the live times line; self-stops when the overlay is gone
         std::wstring _summaryPath; // cached resolved transcript path (resolve once)
         int64_t _summaryMtime{ 0 }; // last-loaded transcript mtime — reload only when it grows

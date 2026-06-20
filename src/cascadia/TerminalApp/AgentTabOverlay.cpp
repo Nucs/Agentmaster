@@ -1663,6 +1663,55 @@ namespace winrt::TerminalApp::implementation
                 self->_summaryRoot.Opacity(kSummaryRestOpacity);
             }
         });
+
+        // Right-click anywhere on the summary panel => a "Copy Summary" context menu, the SAME action as
+        // the badge copy menu's "Summary" item (_CopyField(6) -> the FULL session-end.js box, rendered
+        // with this overlay's mirrored wrap/truncate flags so it matches the displayed panel). Built once
+        // as a shared MenuFlyout and assigned as the ContextFlyout of the panel root (covers the title /
+        // times bar / padding / separators / scroll gaps) AND of every selectable text block the panel
+        // renders (the title, the times line, and each body run in _SetSummaryContent) — the panel is
+        // text-heavy, and a selectable TextBlock shadows the parent's context menu, so without this a
+        // right-click landing on text would offer nothing. Text selection + Ctrl+C still work (only the
+        // right-click menu is overridden, not SelectionFlyout).
+        _summaryContextMenu = MenuFlyout{};
+        {
+            MenuFlyoutItem copyItem{};
+            copyItem.Text(L"Copy Summary");
+            ToolTipService::SetToolTip(copyItem, winrt::box_value(winrt::hstring{
+                L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims" }));
+            copyItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_CopyField(6); // == the copy menu's "Summary" (the full textual box, CopySummaryAsync)
+                }
+            });
+            _summaryContextMenu.Items().Append(copyItem);
+            // Keep the panel bright while the menu is up: the right-tap moves the pointer onto the popup,
+            // which fires the panel's PointerExited and would otherwise dim it (mirrors the badge copy
+            // menu's pinned-while-open behaviour). Restore the dim rest state on close.
+            _summaryContextMenu.Opened([weak](const IInspectable&, const IInspectable&) {
+                if (const auto self = weak.get(); self && self->_summaryRoot)
+                {
+                    self->_summaryRoot.Opacity(kSummaryHoverOpacity);
+                }
+            });
+            _summaryContextMenu.Closed([weak](const IInspectable&, const IInspectable&) {
+                if (const auto self = weak.get(); self && self->_summaryRoot)
+                {
+                    self->_summaryRoot.Opacity(kSummaryRestOpacity);
+                }
+            });
+        }
+        _summaryRoot.ContextFlyout(_summaryContextMenu);
+        if (_summaryTitleText)
+        {
+            _summaryTitleText.ContextFlyout(_summaryContextMenu); // the title is selectable too
+        }
+        if (_summaryTimesText)
+        {
+            _summaryTimesText.ContextFlyout(_summaryContextMenu); // the times line is selectable too
+        }
+
         _ApplySummarySize(); // seed MaxWidth/scroll-MaxHeight from the (default/seeded) fractions
 
         // The live "ago" ticker for the times line. Tick fires on the UI thread; it self-stops once the
@@ -1908,6 +1957,10 @@ namespace winrt::TerminalApp::implementation
             tb.IsTextSelectionEnabled(true);
             tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
             tb.Text(winrt::hstring{ seg });
+            if (_summaryContextMenu)
+            {
+                tb.ContextFlyout(_summaryContextMenu); // right-click a body line => the shared "Copy Summary" menu (a selectable TextBlock shadows the parent's)
+            }
             _summaryStack.Children().Append(tb);
             seg.clear();
         };
