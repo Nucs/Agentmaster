@@ -1738,6 +1738,47 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Copy >" (Agentmaster) — a submenu mirroring the per-tab link badge's copy button
+            // (TAB_OVERLAY.md / DESIGN §9.7): Session Id / Path / Branch / the REAL Claude & Codex launch
+            // CLIs / the full Summary box / the whole Transcript. Each item raises CopySessionFieldRequested
+            // with the copy-menu code; the page resolves THIS tab's managed session and routes the copy
+            // through the SAME shared CopySessionField action the overlay + Manager menus use, so the three
+            // copy menus can never drift apart. Labels match the overlay verbatim. Built COLLAPSED — the
+            // page shows it (SetAgentCopyMenuVisible at flyout-open) only on a managed agent-session tab, so
+            // a plain shell tab never carries these session-only items.
+            Controls::FontIcon copySymbol;
+            copySymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            copySymbol.Glyph(L"\xE8C8"); // Copy
+
+            _copySessionSubMenu.Text(L"Copy");
+            _copySessionSubMenu.Icon(copySymbol);
+            _copySessionSubMenu.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+            WUX::Controls::ToolTipService::SetToolTip(_copySessionSubMenu, box_value(winrt::hstring{ L"Copy this session's id, path, branch, launch command line, transcript, or full summary" }));
+
+            const auto addCopyItem = [this, weakThis](const wchar_t* text, const wchar_t* tip, int32_t which) {
+                Controls::MenuFlyoutItem item;
+                item.Text(text);
+                WUX::Controls::ToolTipService::SetToolTip(item, box_value(winrt::hstring{ tip }));
+                item.Click([weakThis, which](auto&&, auto&&) {
+                    if (auto tab{ weakThis.get() })
+                    {
+                        tab->CopySessionFieldRequested.raise(which);
+                    }
+                });
+                _copySessionSubMenu.Items().Append(item);
+            };
+            // The `which` codes + labels are the per-tab overlay copy menu's, verbatim (AgentCopyActions.h):
+            // 0 Session Id, 1 Path, 2 Branch, 3 Claude CLI, 4 Codex CLI, 6 Summary, 5 Transcript.
+            addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
+            addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
+            addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+            addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+            addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+            addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
+            addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
+        }
+
+        {
             // "Duplicate tab"
             Controls::FontIcon duplicateTabSymbol;
             duplicateTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
@@ -1861,6 +1902,7 @@ namespace winrt::TerminalApp::implementation
         Controls::MenuFlyoutSeparator menuSeparator;
         contextMenuFlyout.Items().Append(chooseColorMenuItem);
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
+        contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
@@ -1959,6 +2001,18 @@ namespace winrt::TerminalApp::implementation
 
         _renameDisabled = true;
         _renameTabMenuItem.IsEnabled(false);
+    }
+
+    // Agentmaster: show/hide the "Copy >" submenu (session id / path / branch / launch CLI / summary /
+    // transcript). The page resolves whether THIS tab currently hosts a managed agent session and calls
+    // this at flyout-open time (a '+' shell tab can become a claude after the menu is built), so the
+    // submenu appears exactly where the per-tab overlay's copy button does — only on a linked Claude/Codex
+    // tab, never on a plain shell or the pinned Manager tab.
+    void Tab::SetAgentCopyMenuVisible(bool visible)
+    {
+        ASSERT_UI_THREAD();
+
+        _copySessionSubMenu.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading)

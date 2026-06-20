@@ -18,6 +18,7 @@
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 #include "AgentManagerContent.h"
 #include "AgentTabOverlay.h"
+#include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (tab "Copy >" submenu routes through it, like the overlay + Manager menus)
 #include "AgentMaster/ClaudeSpawn.h"
 #include "AgentMaster/Engine.h"
 #include "AgentMaster/HookWire.h"
@@ -2345,6 +2346,45 @@ namespace winrt::TerminalApp::implementation
                 page->_CloseTabsBefore(*tab);
             }
         });
+
+        // Agentmaster: context-menu "Copy > <field>" -> copy that field of the managed session hosting
+        // THIS tab, through the SAME shared CopySessionField action the per-tab overlay's copy button and
+        // the Manager's Copy submenu use (so the three copy menus can never drift). `which` is the copy-menu
+        // code (see AgentCopyActions.h). A no-op when the tab isn't a managed session (its submenu is hidden
+        // there anyway — see the Opening handler below). The Summary case (6) renders with this window's
+        // GLOBAL summary-panel flags so a copied Summary matches what the panels show.
+        hostingTab.CopySessionFieldRequested([weakTab, weakThis](int32_t which) {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab || !page->_sessionRegistry)
+            {
+                return;
+            }
+            const auto sid = page->_ClaudeSessionForTab(*tab);
+            if (sid.empty())
+            {
+                return;
+            }
+            CopySessionField(*page->_sessionRegistry, sid, which, DispatcherQueue::GetForCurrentThread(),
+                             page->_appSettings.summaryPanelWrapNewlines, page->_appSettings.summaryPanelTruncate);
+        });
+
+        // Agentmaster: the "Copy >" submenu is session-only — show it exactly where the per-tab overlay's
+        // copy button appears (a managed Claude/Codex tab), never on a plain shell / Manager tab. A tab's
+        // session binding can change after the menu is built (a '+' shell tab becomes a claude when you run
+        // it), so resolve visibility at flyout-open via _ClaudeSessionForTab (a cheap _claudeTabs reverse
+        // lookup), mirroring how the term-control context menu is populated on Opening.
+        if (const auto flyout = hostingTab.TabViewItem().ContextFlyout())
+        {
+            flyout.Opening([weakTab, weakThis](auto&&, auto&&) {
+                auto page{ weakThis.get() };
+                auto tab{ weakTab.get() };
+                if (page && tab)
+                {
+                    tab->SetAgentCopyMenuVisible(!page->_ClaudeSessionForTab(*tab).empty());
+                }
+            });
+        }
     }
 
     // Method Description:

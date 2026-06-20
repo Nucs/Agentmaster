@@ -117,6 +117,7 @@ namespace winrt::TerminalApp::implementation
 
         void DisableCloseAndMoveMenuItems(); // Agentmaster
         void DisableTabRename(); // Agentmaster
+        void SetAgentCopyMenuVisible(bool visible); // Agentmaster: show/hide the "Copy >" session-field submenu (managed agent-session tabs only; page-driven at flyout-open)
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
@@ -133,6 +134,7 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> MoveTabToEndRequested; // Agentmaster: context-menu "Move to end" -> page relocates this tab to the last slot
         til::event<winrt::delegate<>> NewSessionHereRequested; // Agentmaster: context-menu "New Session Here" -> page spawns a managed agent session in this tab's working dir
         til::event<winrt::delegate<>> CloseTabsBeforeRequested; // Agentmaster: context-menu "Close > Close tabs to the left" -> page closes every tab left of this one (skipping the pinned Manager tab)
+        til::event<winrt::delegate<int32_t /*which*/>> CopySessionFieldRequested; // Agentmaster: context-menu "Copy > <field>" -> page copies that field of this tab's managed session via the shared CopySessionField action (the same options as the per-tab overlay's copy button); `which` is the copy-menu code (see AgentCopyActions.h)
         til::event<winrt::delegate<winrt::hstring /*title*/, winrt::hstring /*body*/, winrt::TerminalApp::IPaneContent /*content*/>> TabToastNotificationRequested;
         til::typed_event<IInspectable, IInspectable> TaskbarProgressChanged;
 
@@ -182,6 +184,11 @@ namespace winrt::TerminalApp::implementation
         // ActivateTabRenamer() so the double-tap / openTabRenamer-action paths are blocked too.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _renameTabMenuItem{};
         bool _renameDisabled{ false };
+        // Agentmaster: the "Copy >" submenu (session id / path / branch / Claude & Codex launch CLI /
+        // summary / transcript) mirroring the per-tab overlay's copy button. Kept as a member so the page
+        // can show/hide it (SetAgentCopyMenuVisible) per whether this tab currently hosts a managed agent
+        // session; built collapsed in _CreateContextMenu, its items raise CopySessionFieldRequested.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _copySessionSubMenu{};
         uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs (the Manager tab); fed by UpdateTabViewIndex, read by _EnableMenuItems
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };
