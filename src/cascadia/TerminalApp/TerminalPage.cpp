@@ -4268,6 +4268,30 @@ namespace winrt::TerminalApp::implementation
         const TerminalApp::TerminalPaneContent& paneContent,
         const winrt::Windows::Foundation::IInspectable&)
     {
+        // Agentmaster: GUARD — never restart a tab that was restored on relaunch but NEVER activated.
+        // Such a tab's TermControl core was never initialized: TermControl::_InitializeTerminal (which
+        // calls ControlCore::Initialize -> Terminal::Create, the ONLY place _stateMachine + _mainBuffer
+        // are built) is gated on the SwapChainPanel's first non-zero layout, which only fires when the tab
+        // is first shown — and the connection is therefore still NotConnected (Start() is deferred to that
+        // same init). Restarting it would call control.HardResetWithoutErase() (Terminal::HardReset-
+        // WithoutErase derefs the still-null _stateMachine) and then Start() the new connection (whose
+        // first output reaches _connectionOutputHandler -> Terminal::Write on the still-null _mainBuffer)
+        // => AV 0xC0000005 in Microsoft.Terminal.Control.dll. There is nothing running to restart: the
+        // tab's existing connection (a --resume for a managed session) starts cleanly via the lazy-init
+        // path the moment it is first shown. So skip — covering BOTH the managed-agent path
+        // (_RestartManagedSession) and the upstream shell fallthrough below. (Reachable because the TAB
+        // context menu's "Restart session" is enabled for any terminal tab regardless of state —
+        // Tab::_UpdateMenuItemStates — unlike the in-control menu, which only offers it for >= Closed.)
+        if (paneContent)
+        {
+            if (const auto control{ paneContent.GetTermControl() };
+                control && control.ConnectionState() == ConnectionState::NotConnected)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] skipped \x2014 connection not started (tab never activated)\n");
+                return;
+            }
+        }
+
         // Agentmaster: a managed Claude/Codex pane restarts by RESUMING its current conversation, NOT by
         // replaying its original launch commandline. The launch commandline is `--session-id <id>` for a
         // fresh session (which collides with the now-existing transcript after the first turn — claude
