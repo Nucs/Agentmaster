@@ -314,7 +314,10 @@ namespace winrt::TerminalApp::implementation
     // - Duplicates specified tab
     // Arguments:
     // - tab: tab to duplicate
-    void TerminalPage::_DuplicateTab(const Tab& tab)
+    // - insertPosition: where to place the new tab. Agentmaster: -1 (the default) keeps the
+    //   end/NewTabPosition behavior; a "Fork session" context-menu invoke passes clickedIndex+1 so
+    //   the fork (managed agent or plain shell) lands directly next to the clicked tab.
+    void TerminalPage::_DuplicateTab(const Tab& tab, uint32_t insertPosition)
     {
         // Agentmaster: a managed Claude tab must NOT be naively duplicated. WT's duplicate re-runs the
         // tab's commandline, which for a Claude session is either `claude --settings <f>` (a blank new
@@ -353,12 +356,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     const std::wstring forkFrom = src->codexSessionId; // the REAL rollout uuid (the fork source)
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->codex-fork] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
-                    _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+                    _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
                     return;
                 }
                 const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-                _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+                _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
                 return;
             }
         }
@@ -371,10 +374,16 @@ namespace winrt::TerminalApp::implementation
             // In the future, it may be preferable to just duplicate the
             // current control's live settings (which will include changes
             // made through VT).
-            uint32_t insertPosition = _tabs.Size();
-            if (_settings.GlobalSettings().NewTabPosition() == NewTabPosition::AfterCurrentTab)
+            // Agentmaster: honor an explicit placement (a "Fork session" context-menu invoke passes
+            // clickedIndex+1 so the duplicate lands next to the clicked tab); otherwise fall back to
+            // the upstream default — end, or after the current tab when NewTabPosition says so.
+            if (insertPosition == static_cast<uint32_t>(-1))
             {
-                insertPosition = tab.TabViewIndex() + 1;
+                insertPosition = _tabs.Size();
+                if (_settings.GlobalSettings().NewTabPosition() == NewTabPosition::AfterCurrentTab)
+                {
+                    insertPosition = tab.TabViewIndex() + 1;
+                }
             }
             _CreateNewTabFromPane(_MakePane(nullptr, tab, nullptr), insertPosition);
 

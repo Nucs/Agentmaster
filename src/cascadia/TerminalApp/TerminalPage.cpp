@@ -2298,13 +2298,17 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             }
+            // Place the new session's tab right next to the tab whose menu was used ("Here"):
+            // clickedIndex+1, not the end. (_InitializeTab clamps index 0 to 1 for the pinned
+            // Manager tab, but these menu items never appear on it, so clickedIndex+1 >= 2.)
+            const uint32_t insertPosition = tab->TabViewIndex() + 1;
             if (codex)
             {
-                page->_SpawnCodexSession(winrt::hstring{ dir }, winrt::hstring{});
+                page->_SpawnCodexSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition);
             }
             else
             {
-                page->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{});
+                page->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition);
             }
         });
 

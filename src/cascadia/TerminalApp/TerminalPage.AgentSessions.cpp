@@ -86,10 +86,12 @@ namespace winrt::TerminalApp::implementation
         return c;
     }
 
-    // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude").
-    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title)
+    // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude"). insertPosition
+    // threads tab placement: -1 (the default) keeps the end/NewTabPosition behavior; a tab
+    // context-menu "New Session Here" passes clickedIndex+1 so the new tab lands next to it.
+    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
     {
-        _LaunchClaudeSession(workingDir, title, std::nullopt);
+        _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition);
     }
 
     // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a
@@ -100,7 +102,7 @@ namespace winrt::TerminalApp::implementation
     // restores its Flight Plan + autopilot from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -180,7 +182,9 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        const auto tab = _CreateNewTabFromPane(pane);
+        // insertPosition (default -1) places the tab: -1 -> end/NewTabPosition; a tab-context-menu
+        // "New Session Here" / "Fork session" passes clickedIndex+1 so the new tab lands next to it.
+        const auto tab = _CreateNewTabFromPane(pane, insertPosition);
         if (tab)
         {
             // Map sessionId -> tab so the Manager can Activate (jump) / Kill it.
@@ -664,12 +668,12 @@ namespace winrt::TerminalApp::implementation
     //     phase). The user types directly into the tab's ConPTY; Autopilot is forced Off.
     // `restored` set => RESUME that conversation (reusing its handle) with its rollout uuid, gated on
     // the rollout still existing; else a fresh codex (a new rollout the observer will resolve).
-    void TerminalPage::_SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title)
+    void TerminalPage::_SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
     {
-        _LaunchCodexSession(workingDir, title, std::nullopt);
+        _LaunchCodexSession(workingDir, title, std::nullopt, {}, insertPosition);
     }
 
-    TerminalApp::Tab TerminalPage::_LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid)
+    TerminalApp::Tab TerminalPage::_LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid, uint32_t insertPosition)
     {
         if (!_sessionRegistry)
         {
@@ -756,7 +760,9 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        const auto tab = _CreateNewTabFromPane(pane);
+        // insertPosition (default -1) places the tab: -1 -> end/NewTabPosition; a tab-context-menu
+        // "New Session Here" / "Fork session" passes clickedIndex+1 so the new tab lands next to it.
+        const auto tab = _CreateNewTabFromPane(pane, insertPosition);
         if (tab)
         {
             _claudeTabs[handleId] = winrt::make_weak(tab); // the tab map is agent-agnostic (Activate / Archive / capture)

@@ -627,8 +627,8 @@ namespace winrt::TerminalApp::implementation
         TerminalApp::Tab _CreateNewTabFromPane(std::shared_ptr<Pane> pane, uint32_t insertPosition = -1);
         void _OpenAgentManagerTab(); // Agentmaster
         void _InitAgentmasterEngine(); // Agentmaster: start the SessionRegistry + hooks bridge
-        void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title); // Agentmaster
-        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id)
+        void _SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1); // Agentmaster (insertPosition: -1 == end/NewTabPosition default; a tab-context-menu spawn passes clickedIndex+1 so the new tab lands next to the clicked tab)
+        TerminalApp::Tab _LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId = {}, uint32_t insertPosition = -1); // Agentmaster (returns the created tab; forkFromId set => fork that conversation into a new id; insertPosition threads tab placement, default -1 == end)
         winrt::fire_and_forget _RestoreClaudeSessions(); // Agentmaster: load persisted sessions as ARCHIVED (restorable) — does NOT auto-launch (Rule #6)
         void _RestoreWindowTabs(); // Agentmaster (M10 window-grouped restore): re-home THIS window's persisted tabs — resume each Claude session + replay each Other (shell) tab from its WindowRecord, in order. Only a claimed record (a reopened window) restores.
         void _AttachClaudeOverlay(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster: build + install the per-tab link badge (gated on AppSettings.showTabOverlay)
@@ -666,8 +666,8 @@ namespace winrt::TerminalApp::implementation
         // OUR minted id is the durable handle and the real rollout uuid (SessionInfo.codexSessionId,
         // filled by the Fleet Observer) is the `codex resume` target. Lifecycle + state only — no
         // injector / Autopilot (driving the Codex TUI is a later phase).
-        void _SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title); // fresh codex in a dir
-        TerminalApp::Tab _LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid = {}); // fresh, `codex resume <uuid>`, or `codex fork <uuid>` (all rollout-gated); returns the created tab
+        void _SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1); // fresh codex in a dir (insertPosition: -1 == end; a tab-context-menu spawn passes clickedIndex+1)
+        TerminalApp::Tab _LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid = {}, uint32_t insertPosition = -1); // fresh, `codex resume <uuid>`, or `codex fork <uuid>` (all rollout-gated); returns the created tab; insertPosition threads tab placement (default -1 == end)
         void _AdoptExternalCodex(uint32_t pid, winrt::hstring cwd, bool fork); // bring an EXTERNAL codex's rollout under management (fork==true => `codex fork` into a NEW rollout [safe on a live external]; else `codex resume` the same; fresh if none)
         void _ReconcileManagedCodex(const std::wstring& sessionId, const ::Agentmaster::TabActivityRow& act); // fill codexSessionId + map the C2 turn-state onto a managed Codex record (UI-lane, per probe)
         std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
@@ -817,7 +817,7 @@ namespace winrt::TerminalApp::implementation
         void _SetBackgroundImage(const winrt::Microsoft::Terminal::Settings::Model::IAppearanceConfig& newAppearance);
 
         void _DuplicateFocusedTab();
-        void _DuplicateTab(const Tab& tab);
+        void _DuplicateTab(const Tab& tab, uint32_t insertPosition = -1); // Agentmaster: insertPosition threads tab placement (default -1 == end/NewTabPosition; a "Fork session" context-menu invoke passes clickedIndex+1 so the fork lands next to the clicked tab)
 
         safe_void_coroutine _ExportTab(const Tab& tab, winrt::hstring filepath);
 

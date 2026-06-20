@@ -63,9 +63,26 @@ namespace winrt::TerminalApp::implementation
         args.Handled(true);
     }
 
-    void TerminalPage::_HandleDuplicateTab(const IInspectable& /*sender*/,
+    void TerminalPage::_HandleDuplicateTab(const IInspectable& sender,
                                            const ActionEventArgs& args)
     {
+        // Agentmaster: a tab's context-menu "Fork session" dispatches DuplicateTab with that CLICKED
+        // tab as the sender (Tab::_duplicateTabClicked passes *this). Fork THAT tab — not the focused
+        // one — and place the new tab right next to it (clickedIndex+1). The keyboard / command-palette
+        // path dispatches with a null sender, so fall back to the focused tab with the default
+        // placement (end / NewTabPosition). Guard the null sender before try_as (as _senderOrFocusedTab does).
+        if (sender)
+        {
+            if (const auto clicked = sender.try_as<TerminalApp::Tab>())
+            {
+                if (const auto clickedImpl{ _GetTabImpl(clicked) })
+                {
+                    _DuplicateTab(*clickedImpl, clickedImpl->TabViewIndex() + 1);
+                    args.Handled(true);
+                    return;
+                }
+            }
+        }
         _DuplicateFocusedTab();
         args.Handled(true);
     }
