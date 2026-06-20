@@ -2285,51 +2285,6 @@ namespace winrt::TerminalApp::implementation
         }
         stack.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
 
-        // model · effort · kind adornment (O6, Fleet Observer enrichment): only the parts we know.
-        {
-            std::wstring me;
-            const auto addPart = [&](const std::wstring& part) {
-                if (part.empty())
-                {
-                    return;
-                }
-                if (!me.empty())
-                {
-                    me += L"  \x00B7  ";
-                }
-                me += part;
-            };
-            addPart(s.model);
-            addPart(s.effort);
-            if (s.background)
-            {
-                addPart(L"bg");
-            }
-            // Presence heartbeat (#5): claude's OWN ~/.claude/sessions/<pid>.json status
-            // (busy/idle/waiting), observer-validated against the live process snapshot — an
-            // independent PULL signal beside the hook-derived state dot, so a stuck push state
-            // (dropped hooks) is visible at a glance. Display FACT only, never SessionState
-            // (Rule #13); empty (cleared by ObserveClaude) when no live heartbeat row exists.
-            if (!s.presenceStatus.empty())
-            {
-                addPart(L"hb:" + s.presenceStatus);
-            }
-            if (!me.empty())
-            {
-                auto meText = Text(winrt::hstring{ me }, 10, false, 0.55);
-                // Agentmaster: this line (model / effort / hb:status) trims with an ellipsis on a
-                // narrow card, hiding its tail (e.g. the effort and hb:...) \x2014 so the tooltip carries
-                // the ENTIRE line, plus the hb explanation when a heartbeat is present.
-                std::wstring tip{ me };
-                if (!s.presenceStatus.empty())
-                {
-                    tip += L"\n\nhb = Claude's own activity heartbeat (busy / idle / waiting), reported by Claude itself \x2014 a cross-check on the colored state dot.";
-                }
-                AgentSetTip(meText, winrt::hstring{ tip });
-                stack.Children().Append(meText);
-            }
-        }
-
         // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
         {
             const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
