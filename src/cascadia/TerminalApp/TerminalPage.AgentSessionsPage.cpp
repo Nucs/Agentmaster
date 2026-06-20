@@ -450,6 +450,18 @@ namespace winrt::TerminalApp::implementation
         _sessFuzzyBtn.Click(onToggle);
         bar.Children().Append(_sessFuzzyBtn);
 
+        // "Open" — a row FILTER (distinct from the content-scope glyphs above, which only widen what
+        // a query matches): show ONLY sessions currently live in any Agentmaster window (registry
+        // live == the solid chip), hiding archived / on-disk ones. In-memory, default OFF; flips
+        // through the same throttle so it composes (AND) with the search text + the scope toggles.
+        _sessOpenOnlyBtn = CheckBox{};
+        _sessOpenOnlyBtn.Content(winrt::box_value(winrt::hstring{ L"Open" }));
+        _sessOpenOnlyBtn.MinWidth(0);
+        _sessOpenOnlyBtn.VerticalAlignment(VerticalAlignment::Center);
+        SessSetTip(_sessOpenOnlyBtn, L"Show only sessions open in an Agentmaster window right now (the solid color chip) \x2014 hides archived / on-disk ones.");
+        _sessOpenOnlyBtn.Click(onToggle);
+        bar.Children().Append(_sessOpenOnlyBtn);
+
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
         _sessWindowBtn.Content(winrt::box_value(winrt::hstring{ kSessPresets[_sessionsWindowPreset].label }));
@@ -1109,6 +1121,10 @@ namespace winrt::TerminalApp::implementation
         // resetting from the Settings cog just re-renders (the rows stay in _sessionsRows). A
         // hidden session is untouched on disk — purely a browse-list preference. ---
         const std::unordered_set<std::wstring> hidden(_appSettings.hiddenSessionIds.begin(), _appSettings.hiddenSessionIds.end());
+        // "Open" filter: when checked, keep only sessions live in the process-wide registry (open in
+        // any Agentmaster window — the same `reg->live` the solid chip reflects). Registry Get is
+        // mutex-guarded; queried per row only while the filter is on.
+        const bool openOnly = _sessOpenOnlyBtn && _sessOpenOnlyBtn.IsChecked() && _sessOpenOnlyBtn.IsChecked().Value();
         int hiddenInWindow = 0;
         std::vector<const _SessionsRow*> view;
         for (const auto& r : _sessionsRows)
@@ -1117,6 +1133,14 @@ namespace winrt::TerminalApp::implementation
             {
                 ++hiddenInWindow;
                 continue;
+            }
+            if (openOnly)
+            {
+                const auto reg = _sessionRegistry ? _sessionRegistry->Get(r.id) : std::nullopt;
+                if (!(reg && reg->live))
+                {
+                    continue; // not open in any window — hidden by the "Open" filter
+                }
             }
             if (!searching || _sessionsFastIds.count(r.id) || _sessionsHitCounts.count(r.id))
             {
@@ -1478,6 +1502,10 @@ namespace winrt::TerminalApp::implementation
             }
             counts += L" sessions \x00B7 ";
             counts += (_sessionsFromMs > 0) ? L"custom range" : kSessPresets[std::clamp(_sessionsWindowPreset, 0, kSessPresetCount - 1)].label;
+            if (openOnly)
+            {
+                counts += L" \x00B7 open only"; // the "Open" filter is active (mirrors the "N hidden" note)
+            }
             if (hiddenInWindow > 0)
             {
                 counts += L" \x00B7 " + std::to_wstring(hiddenInWindow) + L" hidden"; // resettable in Settings
