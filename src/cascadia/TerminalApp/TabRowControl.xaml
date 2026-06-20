@@ -46,7 +46,7 @@
         <mux:TabView.TabStripHeader>
             <!--  Agentmaster: the strip header sits in the TabView's LeftContentColumn — immediately
                   to the LEFT of the `<` scroll arrow. It hosts the existing elevation shield AND a
-                  "Home" button that TerminalPage surfaces (via _UpdateManagerHomeButton) only when the
+                  "Home" button that TerminalPage surfaces (via _UpdateManagerNavButtons) only when the
                   pinned Manager tab (tab 0) has scrolled out of view; clicking Home jumps back to it.  -->
             <StackPanel Orientation="Horizontal"
                         VerticalAlignment="Stretch">
@@ -78,6 +78,27 @@
                     <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
                               FontSize="14"
                               Glyph="&#xE80F;" />
+                </Button>
+
+                <!--  Agentmaster: the inverse of Home — a "Jump Back" revert button (E7A7 = Undo glyph).
+                      Collapsed by default; TerminalPage surfaces it while the Manager tab is active and a
+                      session card is selected, and on click jumps back to that session's tab (the one
+                      auto-selected when you came from it). Click wired in C++. Same flat look as Home.  -->
+                <Button x:Name="ManagerJumpBackButton"
+                        Height="24"
+                        MinWidth="0"
+                        Margin="2,4,2,4"
+                        Padding="8,0"
+                        VerticalAlignment="Bottom"
+                        AutomationProperties.Name="Jump back to the selected session"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
+                        ToolTipService.ToolTip="Jump back to the selected session"
+                        Visibility="Collapsed">
+                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                              FontSize="14"
+                              Glyph="&#xE7A7;" />
                 </Button>
             </StackPanel>
         </mux:TabView.TabStripHeader>

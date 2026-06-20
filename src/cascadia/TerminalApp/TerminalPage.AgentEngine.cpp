@@ -94,6 +94,22 @@ static winrt::WUX::Controls::ScrollViewer _FindTabStripScrollViewer(const winrt:
     return nullptr;
 }
 
+// Agentmaster: flip a tab-strip nav button's visibility, but only when it actually changes — the
+// updater runs on the high-frequency ViewChanged stream, so a no-op write would needlessly invalidate
+// the strip's layout each tick.
+static void _SetTabStripButtonVisible(const winrt::WUX::Controls::Button& btn, bool visible)
+{
+    if (!btn)
+    {
+        return;
+    }
+    const auto desired = visible ? winrt::WUX::Visibility::Visible : winrt::WUX::Visibility::Collapsed;
+    if (btn.Visibility() != desired)
+    {
+        btn.Visibility(desired);
+    }
+}
+
 namespace winrt::TerminalApp::implementation
 {
     // Agentmaster (M9): the engine is a process singleton shared by every window. When this
@@ -227,7 +243,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: lazily bind to the TabView's internal horizontal ScrollViewer. It isn't realized
     // until the strip's template is applied (and at least one tab exists), so the first attempts
     // (from _OnFirstLayout) may find nothing — later callers (_OnTabItemsChanged, every
-    // _UpdateManagerHomeButton) retry until it's there. Once bound we watch ViewChanged (the user
+    // _UpdateManagerNavButtons) retry until it's there. Once bound we watch ViewChanged (the user
     // scrolled — buttons, wheel or drag) and SizeChanged (the strip resized, so overflow appeared or
     // vanished) to re-evaluate the Home button. The guard makes repeat calls cheap no-ops.
     void TerminalPage::_EnsureTabStripScrollViewer()
@@ -247,34 +263,55 @@ namespace winrt::TerminalApp::implementation
         _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (auto page = weakThis.get())
             {
-                page->_UpdateManagerHomeButton();
+                page->_UpdateManagerNavButtons();
             }
         });
         _tabStripSizeChangedRevoker = sv.SizeChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (auto page = weakThis.get())
             {
-                page->_UpdateManagerHomeButton();
+                page->_UpdateManagerNavButtons();
             }
         });
     }
 
-    // Agentmaster: show the tab-strip "Home" button exactly when the pinned Manager tab (tab 0) has
-    // scrolled off the left edge of the strip — so the user can jump back to it. The Manager tab sits
-    // at content-x [~0, width); once the ScrollViewer's horizontal offset passes that width it is fully
-    // off-screen (a few-px sliver hides under the `<` arrow). We cache the width while the tab is
-    // realized because the ItemsStackPanel virtualizes the container away once it's scrolled off, so a
-    // live ActualWidth read then returns 0. Gated on real overflow (ScrollableWidth > 0), so with few
-    // tabs (no `<`/`>` arrows) the button is always hidden.
-    void TerminalPage::_UpdateManagerHomeButton()
+    // Agentmaster: the Manager lens's currently-selected managed session (the highlighted board card /
+    // tree row — the same one the Linked-Lenses sync auto-selects when you switch to the Manager from a
+    // session's tab). Empty when nothing — or an external (observe-only) — is selected. Read fresh each
+    // time so it always reflects the live selection.
+    std::wstring TerminalPage::_ManagerSelectedSessionId() const
     {
-        if (!_managerHomeButton)
+        if (const auto ipc = _agentManagerContent.get())
         {
-            return;
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                return std::wstring{ mgr->SelectedSessionId() };
+            }
         }
+        return {};
+    }
+
+    // Agentmaster: recompute the two tab-strip nav buttons. They are inverses and mutually exclusive:
+    //  - Home appears when you are NOT on the Manager tab and it has scrolled off the left edge of the
+    //    strip (jump TO it). The Manager tab is index 0, content-x [~0, width); once the ScrollViewer's
+    //    horizontal offset passes that width it is fully off-screen (a few-px sliver hides under the `<`
+    //    arrow). The width is cached while the tab is realized because the ItemsStackPanel virtualizes
+    //    the container away once it's scrolled off (a live ActualWidth then reads 0). Gated on real
+    //    overflow (ScrollableWidth > 0), so with few tabs (no `<`/`>` arrows) it stays hidden.
+    //  - Jump Back appears when you ARE on the Manager tab and a managed session card is selected that
+    //    this window hosts as a live tab (jump BACK to it — the session you came from).
+    // Called from the strip's ViewChanged/SizeChanged (scroll/resize), tab add/remove, tab switch, the
+    // lens-changed push (selection), and once at first layout.
+    void TerminalPage::_UpdateManagerNavButtons()
+    {
         _EnsureTabStripScrollViewer();
 
+        // Is the pinned Manager tab the currently-focused tab? Home hides on it (you're already there);
+        // Jump Back shows only on it.
+        const bool onManager = _managerTab && (_GetFocusedTab() == _managerTab);
+
+        // --- Home: the Manager scrolled off the left edge, and we're not already on it. ---
         auto showHome = false;
-        if (_managerTab && _tabStripScrollViewer)
+        if (!onManager && _managerTab && _tabStripScrollViewer)
         {
             const auto& sv = _tabStripScrollViewer;
             if (sv.ScrollableWidth() > 0.5) // there's horizontal overflow (the scroll arrows are showing)
@@ -292,19 +329,24 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        _SetTabStripButtonVisible(_managerHomeButton, showHome);
 
-        // ViewChanged fires continuously while dragging the strip; only touch the property (and so the
-        // layout) when the state actually flips.
-        const auto desired = showHome ? WUX::Visibility::Visible : WUX::Visibility::Collapsed;
-        if (_managerHomeButton.Visibility() != desired)
+        // --- Jump Back: on the Manager tab, with a selected managed session this window hosts live. ---
+        auto showBack = false;
+        if (onManager)
         {
-            _managerHomeButton.Visibility(desired);
+            if (const auto sel = _ManagerSelectedSessionId(); !sel.empty())
+            {
+                const auto it = _claudeTabs.find(sel);
+                showBack = (it != _claudeTabs.end()) && static_cast<bool>(it->second.get());
+            }
         }
+        _SetTabStripButtonVisible(_managerJumpBackButton, showBack);
     }
 
-    // Agentmaster: the Home button's action — jump back to the pinned Manager tab and scroll the strip
-    // fully left so it's revealed (the ViewChanged that follows re-hides the button). Selecting the tab
-    // also gives it focus, which is the "jump to Agent Manager" the user asked for.
+    // Agentmaster: the Home button's action — jump TO the pinned Manager tab and scroll the strip fully
+    // left so it's revealed (the ViewChanged that follows re-hides the button). Selecting the tab also
+    // gives it focus, which is the "jump to Agent Manager" the user asked for.
     void TerminalPage::_OnManagerHomeButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
     {
         if (!_managerTab)
@@ -320,6 +362,17 @@ namespace winrt::TerminalApp::implementation
         if (_tabStripScrollViewer)
         {
             _tabStripScrollViewer.ChangeView(0.0, nullptr, nullptr, true);
+        }
+    }
+
+    // Agentmaster: the Jump Back button's action — the inverse of Home. Return to the tab of the
+    // session currently selected in the Manager lens (the card auto-selected when you came from it).
+    // _ActivateClaudeSession jumps locally, else fans out to the window that hosts the session.
+    void TerminalPage::_OnManagerJumpBackButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
+    {
+        if (const auto sel = _ManagerSelectedSessionId(); !sel.empty())
+        {
+            _ActivateClaudeSession(winrt::hstring{ sel });
         }
     }
 
@@ -814,6 +867,9 @@ namespace winrt::TerminalApp::implementation
                 // Linked Lenses: a selection change is one of the lens mutations — re-pill the
                 // selected session's tab (when nothing is hovered, the pill tracks the selection).
                 self->_UpdateManagerSelectionHighlight();
+                // Agentmaster: the Jump Back button targets the selected session, so a selection
+                // change while on the Manager tab flips whether it has somewhere to jump back to.
+                self->_UpdateManagerNavButtons();
             }
         });
     }

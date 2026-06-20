@@ -1266,9 +1266,10 @@ namespace winrt::TerminalApp::implementation
         _UpdateTabView();
 
         // Agentmaster: adding/removing tabs can make the strip overflow (the `<`/`>` arrows appear) or
-        // stop overflowing (offset snaps back to 0) — re-evaluate the Manager "Home" button. This is
-        // also a retry point for binding the internal scroller if it wasn't realized at first layout.
-        _UpdateManagerHomeButton();
+        // stop overflowing (offset snaps back to 0), and can close the tab Jump Back targets — so
+        // re-evaluate the Manager nav buttons. Also a retry point for binding the internal scroller if
+        // it wasn't realized at first layout.
+        _UpdateManagerNavButtons();
     }
 
     void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
@@ -1481,6 +1482,10 @@ namespace winrt::TerminalApp::implementation
             // _ScheduleWindowRecordSave no-ops until startup completes, so the tab-creation selection
             // churn during restore never thrashes a save, and rapid switching collapses to one write.
             _ScheduleWindowRecordSave();
+            // Agentmaster: the active tab just changed — re-evaluate the tab-strip nav buttons. Home
+            // hides when the Manager tab becomes active; Jump Back shows there (targeting the session
+            // the lens auto-selected for the tab you came from).
+            _UpdateManagerNavButtons();
         }
     }
 

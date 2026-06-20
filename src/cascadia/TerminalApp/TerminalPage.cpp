@@ -349,13 +349,19 @@ namespace winrt::TerminalApp::implementation
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
 
-        // Agentmaster: the tab-strip "Home" button — hidden by default, surfaced by
-        // _UpdateManagerHomeButton when the pinned Manager tab scrolls out of view; a click jumps back
-        // to it. It lives in the TabStripHeader, immediately left of the `<` scroll arrow.
+        // Agentmaster: the two tab-strip nav buttons (TabStripHeader, immediately left of the `<` scroll
+        // arrow), both hidden by default and driven by _UpdateManagerNavButtons. Home appears when the
+        // pinned Manager tab scrolls out of view (jump TO it); Jump Back is its inverse — shown on the
+        // Manager tab to return to the selected session's tab. Clicks wired here (like the New Tab button).
         _managerHomeButton = tabRowImpl->ManagerHomeButton();
         if (_managerHomeButton)
         {
             _managerHomeButton.Click({ get_weak(), &TerminalPage::_OnManagerHomeButtonClick });
+        }
+        _managerJumpBackButton = tabRowImpl->ManagerJumpBackButton();
+        if (_managerJumpBackButton)
+        {
+            _managerJumpBackButton.Click({ get_weak(), &TerminalPage::_OnManagerJumpBackButtonClick });
         }
 
         if (_settings.GlobalSettings().ShowTabsInTitlebar())
@@ -731,10 +737,11 @@ namespace winrt::TerminalApp::implementation
 
             _CompleteInitialization();
 
-            // Agentmaster: the tab strip is laid out now — bind the Home button to the TabView's
-            // horizontal scroller and set its initial (hidden) state. Later scroll/resize/tab changes
-            // keep it in sync (ScrollViewer ViewChanged/SizeChanged + _OnTabItemsChanged).
-            _UpdateManagerHomeButton();
+            // Agentmaster: the tab strip is laid out now — bind the nav buttons to the TabView's
+            // horizontal scroller and set their initial (hidden) state. Later scroll/resize/tab/selection
+            // changes keep them in sync (ViewChanged/SizeChanged + _OnTabItemsChanged/_OnTabSelectionChanged
+            // + the lens-changed push).
+            _UpdateManagerNavButtons();
         }
     }
 
