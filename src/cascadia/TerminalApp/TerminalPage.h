@@ -172,6 +172,7 @@ namespace winrt::TerminalApp::implementation
         void SetStartupActions(std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> actions);
         void SetStartupConnection(winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection connection);
         void SetAgentmasterWindowId(winrt::hstring windowId); // Agentmaster (M10): the Emperor-assigned restore-record id (multi-window reopen)
+        void SetAgentmasterContentWindow(bool isContentWindow); // Agentmaster: this window hosts MOVED content (tab tear-out / cross-window move) — mint a fresh record, never adopt a leftover one
 
         static std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> ConvertExecuteCommandlineToActions(const Microsoft::Terminal::Settings::Model::ExecuteCommandlineArgs& args);
 
@@ -387,6 +388,14 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (M10 Increment 3): the Emperor-assigned record id for a multi-window restore,
         // set by TerminalWindow before _OnFirstLayout. Empty => single-window (claim the front record).
         std::wstring _assignedWindowId;
+        // Agentmaster: true when this window was created from MOVED content — a tab torn out into a new
+        // window (_onTabDroppedOutside) or moved cross-window (moveTab). Set by TerminalWindow before
+        // _OnFirstLayout. Such a window's content comes from the moved-content startup actions, so it must
+        // NOT front-pop a leftover on-disk record in _InitAgentmasterEngine: claiming one sets
+        // _windowRecordClaimed, which makes _OnFirstLayout skip ProcessStartupActions (the moved content)
+        // and makes _RestoreWindowTabs replay the stale record instead — silently dropping the dragged
+        // session. Mirrors upstream's "moved content wins over a persisted layout" in TerminalWindow.
+        bool _isContentWindow{ false };
 
         // Agentmaster (Archive page): the full-window archive surface's state. _archivePageHost is the
         // collapsed Grid mounted on Root's content rows (1-2, below the tab strip); the rest are its live sub-elements +

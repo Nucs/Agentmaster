@@ -166,6 +166,11 @@ namespace winrt::TerminalApp::implementation
         }
         else if (!_initialContentArgs.empty())
         {
+            // Agentmaster: this window hosts a torn-out / cross-window-moved tab. Flag it so
+            // _InitAgentmasterEngine mints a FRESH window record instead of front-popping a leftover
+            // on-disk one — adopting a leftover record makes _OnFirstLayout skip these moved-content
+            // actions and replay the stale record's tabs instead, silently dropping the dragged session.
+            _root->SetAgentmasterContentWindow(true);
             _root->SetStartupActions(std::move(_initialContentArgs));
         }
         else if (const auto& layout = LoadPersistedLayout())

@@ -419,8 +419,25 @@ namespace winrt::TerminalApp::implementation
         // Increment 3: when the Emperor assigned this window a specific record (multi-window
         // reopen), claim THAT id so geometry (TerminalWindow) and lens (here) come from the same
         // record; otherwise claim the front record (single-window) or mint a fresh id.
-        auto claimed = _assignedWindowId.empty() ? ::Agentmaster::ClaimWindowRecord() :
-                                                    ::Agentmaster::ClaimWindowRecord(_assignedWindowId);
+        // Agentmaster (tear-out content loss): a window created from MOVED content — a tab torn out
+        // into a new window, or moved cross-window — must NEVER front-pop a leftover on-disk record.
+        // Its content comes from the moved-content startup actions (_OnFirstLayout ->
+        // ProcessStartupActions) and its geometry from the drop point. Front-popping an unclaimed
+        // record here sets _windowRecordClaimed, which makes _OnFirstLayout SKIP the moved content
+        // (the `&& !_windowRecordClaimed` gate) AND makes _RestoreWindowTabs replay the stale record's
+        // tabs instead — silently DROPPING the dragged session (the live content orphans in the
+        // process-wide ContentManager: claude.exe keeps running but no tab hosts it). This mirrors
+        // upstream TerminalWindow::Initialize, where moved content wins over a persisted layout. An
+        // explicit Emperor-assigned id (multi-window reopen) still claims THAT record by id.
+        std::optional<::Agentmaster::WindowRecord> claimed;
+        if (!_assignedWindowId.empty())
+        {
+            claimed = ::Agentmaster::ClaimWindowRecord(_assignedWindowId);
+        }
+        else if (!_isContentWindow)
+        {
+            claimed = ::Agentmaster::ClaimWindowRecord();
+        }
         if (claimed)
         {
             _windowRecord = std::move(*claimed);
@@ -1003,5 +1020,14 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::SetAgentmasterWindowId(winrt::hstring windowId)
     {
         _assignedWindowId = windowId;
+    }
+
+    // Agentmaster: TerminalWindow flags a window built from MOVED content (tab tear-out into a new
+    // window, or a cross-window tab move) BEFORE _OnFirstLayout, so _InitAgentmasterEngine mints a
+    // fresh window record for it instead of front-popping a leftover one (which would drop the moved
+    // session — see _isContentWindow + the claim block in _InitAgentmasterEngine).
+    void TerminalPage::SetAgentmasterContentWindow(bool isContentWindow)
+    {
+        _isContentWindow = isContentWindow;
     }
 }
