@@ -152,6 +152,7 @@
                 VerticalAlignment="Top"
                 Style="{StaticResource PlayButtonTemplate}"
                 Tapped="_playPressed"
+                ToolTipService.ToolTip="Run &#x2014; send this code block's command(s) to the terminal to run."
                 Visibility="{x:Bind PlayButtonVisibility, Mode=OneWay}">
             <Button.Resources>
                 <ResourceDictionary>
