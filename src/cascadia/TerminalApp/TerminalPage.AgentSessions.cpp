@@ -155,7 +155,17 @@ namespace winrt::TerminalApp::implementation
         // ownership stamp, added by the shared builder), then hand it to the normal terminal-pane path as
         // an existing connection. The default profile only supplies appearance; the process/cwd/env are
         // ours. _BuildAgentConnection is the one builder shared by launch, codex-launch, and the restart.
-        auto connection = _BuildAgentConnection(spec.commandline, dir, ttl, spec.env);
+        //
+        // Host claude INSIDE an interactive pwsh (a managed session is "claude run from a pwsh terminal"):
+        // the ConPTY root is pwsh, which execs claude and -NoExit's to a live prompt when claude quits, so
+        // Ctrl+C / /exit drops to `PS <cwd>>` at the working dir instead of the connection dying into a
+        // "press Enter to restart" dead pane that mis-replays the launch at the wrong cwd. The observer
+        // still binds it (FindDescendantByImage is descendant-OR-self, so claude.exe as a CHILD of pwsh
+        // correlates like a hand-typed one); spec.env (CCMGR_* / AM_SESSION) rides pwsh and is inherited by
+        // claude; --settings is inside spec.commandline. (BuildPwshHostedCommandline; pwsh resolved once at
+        // engine init.)
+        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+        auto connection = _BuildAgentConnection(hostedCmd, dir, ttl, spec.env);
 
         Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs{};
         const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
@@ -165,10 +175,11 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Agentmaster: suppress the profile's closeOnExit auto-close for this Claude pane.
-        // When claude.exe exits (Ctrl+C, natural completion, crash), the pane must NOT
-        // auto-close: _SweepClaudeLiveness intentionally leaves dead tabs open for the user
-        // to read while archiving the session. Without this, a graceful exit fires
-        // CloseRequested → Pane::Close() → Tab::Closed → _RemoveTab, bypassing the design.
+        // The ConPTY root is now pwsh (it hosts claude), so this fires when the user EXITS pwsh
+        // (claude quitting just drops to the pwsh prompt — the connection stays alive). When pwsh
+        // does exit, the pane must NOT auto-close: _SweepClaudeLiveness intentionally leaves dead
+        // tabs open for the user to read while archiving the session. Without this, a graceful exit
+        // fires CloseRequested → Pane::Close() → Tab::Closed → _RemoveTab, bypassing the design.
         pane->WalkTree([](auto&& p) {
             if (const auto content = p->GetContent())
             {
@@ -737,7 +748,12 @@ namespace winrt::TerminalApp::implementation
             }
             codexEnv.emplace_back(std::move(kv.first), std::move(kv.second));
         }
-        auto connection = _BuildAgentConnection(commandline, dir, ttl, codexEnv);
+        // Host codex inside an interactive pwsh too (same as claude): quitting codex drops to a live
+        // `PS <cwd>>` prompt instead of a dead "press Enter to restart" pane. The observer finds
+        // codex.exe as a descendant of pwsh (FindDescendantByImage is descendant-OR-self), so the C1/C2
+        // enrichment + state reconcile are unaffected.
+        const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, commandline);
+        auto connection = _BuildAgentConnection(hostedCmd, dir, ttl, codexEnv);
 
         Microsoft::Terminal::Settings::Model::NewTerminalArgs newTerminalArgs{};
         const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
@@ -1088,7 +1104,8 @@ namespace winrt::TerminalApp::implementation
                 }
                 codexEnv.emplace_back(std::move(kv.first), std::move(kv.second));
             }
-            newConn = _BuildAgentConnection(commandline, dir, title, codexEnv, /*inheritCursor*/ true);
+            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, commandline);
+            newConn = _BuildAgentConnection(hostedCmd, dir, title, codexEnv, /*inheritCursor*/ true);
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] codex " + managedId + (resumeUuid.empty() ? L" (fresh)" : (L" (resume " + resumeUuid + L")")) + L"\n");
         }
         else
@@ -1100,7 +1117,10 @@ namespace winrt::TerminalApp::implementation
                 return true; // handled (refused) — don't fall through to the buggy replay
             }
             const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, ::Agentmaster::LoadAppSettings(), ::Agentmaster::SharedEngine().claudeExePath);
-            newConn = _BuildAgentConnection(spec.commandline, dir, title, spec.env, /*inheritCursor*/ true);
+            // Re-host in pwsh (as the launch path does) so the relaunched session keeps the same
+            // quit-to-pwsh-prompt behavior rather than dying into a dead pane.
+            const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
+            newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] claude " + managedId + (::Agentmaster::ClaudeConversationExists(managedId) ? L" (resume)" : L" (fresh)") + L"\n");
         }
 

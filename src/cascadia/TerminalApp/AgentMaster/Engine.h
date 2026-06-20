@@ -85,6 +85,14 @@ namespace Agentmaster
         // empty just means the spawn falls back to the bare token and surfaces the not-found error.
         std::wstring codexExePath;
 
+        // Agentmaster. The PowerShell host that wraps every managed agent (Claude/Codex) session, so
+        // quitting the agent (Ctrl+C / /exit) drops to a live `PS <cwd>>` prompt at the working dir
+        // instead of the ConPTY root dying into a dead "press Enter to restart" pane (see
+        // BuildPwshHostedCommandline). Resolved ONCE at engine init via ResolvePwshLauncher(): the full
+        // path to pwsh.exe (PowerShell 7) on PATH, else Windows PowerShell under System32; EMPTY only if
+        // neither is found (the launch then falls back to the bare `pwsh.exe` token).
+        std::wstring pwshExePath;
+
         // Restore (loading sessions.json + re-launching the saved fleet) is a PROCESS-once
         // action — the registry is now shared, so if every window's _OnFirstLayout restored,
         // a second window would re-launch the same conversations into the one registry (dup

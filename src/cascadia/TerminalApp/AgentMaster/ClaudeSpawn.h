@@ -102,6 +102,23 @@ namespace Agentmaster
     // it onto SessionInfo.codexSessionId (the two-id model). Neither set => a fresh launch.
     std::wstring BuildCodexCommandline(std::wstring_view resumeCodexUuid, std::wstring_view forkCodexUuid = {}, std::wstring_view codexLauncher = {});
 
+    // Agentmaster (a managed session is "the agent run from a pwsh terminal"). Wrap an inner Windows
+    // command line (BuildClaudeCommandline / BuildCodexCommandline output) so it runs INSIDE an
+    // interactive PowerShell host that STAYS OPEN after the inner process exits:
+    //   "<pwsh>" -NoLogo -NoExit -EncodedCommand <base64(UTF-16LE of "& <inner>")>
+    // So when the agent (claude/codex) exits — Ctrl+C, /exit, a crash — the ConPTY ROOT (pwsh) lives
+    // on and the user drops to a live `PS <cwd>>` prompt at the session's working dir (the ConPTY cwd),
+    // instead of the connection dying into a "[process exited] press Enter to restart" dead pane that
+    // then mis-replays the launch commandline at the wrong cwd. The `& ` call operator INVOKES the
+    // (quoted) inner exe rather than echoing it; -EncodedCommand carries the script as a base64
+    // UTF-16LE blob, side-stepping ALL nested-quote escaping (the inner keeps its own double quotes
+    // verbatim — and a base64 token has no spaces, so it is one CreateProcessW arg). The observer still
+    // binds the agent: FindDescendantByImage is descendant-OR-self, so claude.exe as a CHILD of pwsh
+    // correlates exactly like a hand-typed one; our env (CCMGR_* / AM_SESSION) rides pwsh and is
+    // inherited by the child; --settings is in the inner command line. `pwshLauncher` is the resolved
+    // pwsh/powershell full path (empty => the bare `pwsh.exe` token). Pure + unit-tested.
+    std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline);
+
     // Convert backslashes to forward slashes (safe inside double-quoted args + JSON).
     std::wstring ToForwardSlashes(std::wstring_view path);
 
@@ -204,6 +221,14 @@ namespace Agentmaster
     // codex.bat on PATH (per-dir, .exe preferred), then <home>\.local\bin\codex.exe. Empty if codex
     // is not found anywhere (the spawn then falls back to the bare `codex` token + the error).
     std::wstring ResolveCodexLauncher();
+
+    // Agentmaster. Resolve the PowerShell host that wraps a managed agent session (see
+    // BuildPwshHostedCommandline), as a FULL PATH (ConPTY's CreateProcessW appends only ".exe" and
+    // ignores PATHEXT, so the full path is mandatory). Prefers `pwsh.exe` (PowerShell 7) on PATH;
+    // falls back to Windows PowerShell (<System32>\WindowsPowerShell\v1.0\powershell.exe — always
+    // present). Empty only if neither is found (the launch then falls back to the bare `pwsh.exe`
+    // token). Resolved ONCE at engine init into Engine::pwshExePath.
+    std::wstring ResolvePwshLauncher();
 
     // Write a transparent `claude` PATH shim (claude.cmd for cmd/PowerShell + an
     // extensionless POSIX `claude` for git-bash) into <stateDir>\shim. Each forwards all args

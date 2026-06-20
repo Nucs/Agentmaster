@@ -72,6 +72,42 @@ namespace
             return false;
         }
     }
+
+    // Standard base64 (RFC 4648) of a raw byte buffer. Used to build a pwsh -EncodedCommand payload
+    // (which expects base64 of the command's UTF-16LE bytes). Hand-rolled so the pure helper has no
+    // crypt32 dependency and the standalone test harness links it unchanged.
+    std::string Base64Encode(const unsigned char* data, size_t len)
+    {
+        static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        out.reserve(((len + 2) / 3) * 4);
+        size_t i = 0;
+        for (; i + 3 <= len; i += 3)
+        {
+            const unsigned n = (static_cast<unsigned>(data[i]) << 16) | (static_cast<unsigned>(data[i + 1]) << 8) | static_cast<unsigned>(data[i + 2]);
+            out.push_back(tbl[(n >> 18) & 0x3F]);
+            out.push_back(tbl[(n >> 12) & 0x3F]);
+            out.push_back(tbl[(n >> 6) & 0x3F]);
+            out.push_back(tbl[n & 0x3F]);
+        }
+        if (const size_t rem = len - i; rem == 1)
+        {
+            const unsigned n = static_cast<unsigned>(data[i]) << 16;
+            out.push_back(tbl[(n >> 18) & 0x3F]);
+            out.push_back(tbl[(n >> 12) & 0x3F]);
+            out.push_back('=');
+            out.push_back('=');
+        }
+        else if (rem == 2)
+        {
+            const unsigned n = (static_cast<unsigned>(data[i]) << 16) | (static_cast<unsigned>(data[i + 1]) << 8);
+            out.push_back(tbl[(n >> 18) & 0x3F]);
+            out.push_back(tbl[(n >> 12) & 0x3F]);
+            out.push_back(tbl[(n >> 6) & 0x3F]);
+            out.push_back('=');
+        }
+        return out;
+    }
 }
 
 namespace Agentmaster
@@ -765,6 +801,80 @@ try {
             }
         }
         return {};
+    }
+
+    std::wstring ResolvePwshLauncher()
+    {
+        // Prefer pwsh.exe (PowerShell 7) on PATH — mirror ResolveRealClaude's PATH walk.
+        const std::wstring path = GetEnvW(L"PATH");
+        size_t start = 0;
+        while (start <= path.size())
+        {
+            size_t sc = path.find(L';', start);
+            if (sc == std::wstring::npos)
+            {
+                sc = path.size();
+            }
+            std::wstring dir = path.substr(start, sc - start);
+            start = sc + 1;
+            // Trim surrounding quotes / whitespace, skip empties.
+            while (!dir.empty() && (dir.front() == L'"' || dir.front() == L' '))
+            {
+                dir.erase(dir.begin());
+            }
+            while (!dir.empty() && (dir.back() == L'"' || dir.back() == L' '))
+            {
+                dir.pop_back();
+            }
+            if (dir.empty())
+            {
+                continue;
+            }
+            if (dir.back() != L'\\' && dir.back() != L'/')
+            {
+                dir.push_back(L'\\');
+            }
+            const std::wstring cand = dir + L"pwsh.exe";
+            const DWORD attr = ::GetFileAttributesW(cand.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                return cand;
+            }
+        }
+        // Fall back to Windows PowerShell, always present under System32.
+        wchar_t sys[MAX_PATH];
+        const UINT n = ::GetSystemDirectoryW(sys, MAX_PATH);
+        if (n > 0 && n < MAX_PATH)
+        {
+            std::wstring cand{ sys, n };
+            if (cand.back() != L'\\' && cand.back() != L'/')
+            {
+                cand.push_back(L'\\');
+            }
+            cand += L"WindowsPowerShell\\v1.0\\powershell.exe";
+            const DWORD attr = ::GetFileAttributesW(cand.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            {
+                return cand;
+            }
+        }
+        return {};
+    }
+
+    std::wstring BuildPwshHostedCommandline(std::wstring_view pwshLauncher, std::wstring_view innerCommandline)
+    {
+        // The pwsh script: invoke the inner command line via the call operator (&) so a QUOTED exe
+        // path is EXECUTED (a bare quoted string would just be echoed). The inner keeps its own double
+        // quotes — they are literal inside the -EncodedCommand payload (no nested-shell parsing).
+        const std::wstring script = L"& " + std::wstring{ innerCommandline };
+        // -EncodedCommand wants base64 of the command's UTF-16LE bytes. On Windows wchar_t IS UTF-16LE,
+        // so the wstring's raw bytes are exactly that (no BOM).
+        const std::string b64 = Base64Encode(reinterpret_cast<const unsigned char*>(script.data()), script.size() * sizeof(wchar_t));
+        const std::wstring b64w(b64.begin(), b64.end()); // base64 is pure ASCII -> widen verbatim
+        const std::wstring pwsh = pwshLauncher.empty() ? std::wstring{ L"pwsh.exe" } : std::wstring{ pwshLauncher };
+        // -NoExit keeps the host alive (drops to an interactive prompt at the ConPTY cwd) AFTER the
+        // inner agent exits; -NoLogo suppresses the startup banner so claude/codex paints immediately.
+        return L"\"" + pwsh + L"\" -NoLogo -NoExit -EncodedCommand " + b64w;
     }
 
     namespace

@@ -167,6 +167,11 @@ namespace Agentmaster
                 // `cmd /c`). Empty => not found; the spawn falls back to the bare token and surfaces the error.
                 e->codexExePath = ResolveCodexLauncher();
                 AppendStateLog(L"hooks.log", L"[engine] codex: " + (e->codexExePath.empty() ? std::wstring{ L"<not detected>" } : e->codexExePath) + L"\n");
+                // Resolve the PowerShell host that wraps every managed agent session (so quitting the
+                // agent drops to a live pwsh prompt at the cwd — BuildPwshHostedCommandline). pwsh.exe
+                // (PS7) on PATH, else Windows PowerShell; empty => the spawn falls back to the bare token.
+                e->pwshExePath = ResolvePwshLauncher();
+                AppendStateLog(L"hooks.log", L"[engine] pwsh host: " + (e->pwshExePath.empty() ? std::wstring{ L"<not detected>" } : e->pwshExePath) + L"\n");
                 // Author the adoption shim BEFORE touching PATH (so ResolveRealClaude inside it never
                 // finds our own shim), then prepend the shim dir for hand-typed `+`-tab self-wiring.
                 const auto shimDir = MaterializeClaudeShim(stateDir, hookFiles.first);
