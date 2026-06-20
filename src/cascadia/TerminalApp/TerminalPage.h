@@ -924,7 +924,14 @@ namespace winrt::TerminalApp::implementation
         // event. Because that's dumb, we implement our own middle-click handling.
         // `_tabItemMiddleClickHookEnabled` is true whenever the close button is hidden,
         // and that enables all of the rest of this machinery (and this workaround).
+        // Agentmaster: it is ALSO gated off when AppSettings.closeTabOnMiddleClick is false.
         bool _tabItemMiddleClickHookEnabled = false;
+        // Agentmaster: set by _OnTabPointerPressed on a middle-button press over a tab, consumed
+        // (one-shot) by _OnTabCloseRequested. WinUI closes a *visible*-X tab natively on middle
+        // click and gives us no way there to tell it from an X-button click — so we remember that
+        // the in-flight close came from the middle button and can suppress it when the user turned
+        // "Close tab with middle-mouse click" off. Cleared on any non-middle press.
+        bool _middleClickClosePending = false;
         bool _tabItemMiddleClickExited = false;
         PointerEntered_revoker _tabItemMiddleClickPointerEntered;
         PointerExited_revoker _tabItemMiddleClickPointerExited;

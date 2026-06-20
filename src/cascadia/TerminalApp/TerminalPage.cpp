@@ -386,9 +386,15 @@ namespace winrt::TerminalApp::implementation
         // our TabView, to match the tab.showCloseButton property in the theme.
         if (const auto theme = _settings.GlobalSettings().CurrentTheme())
         {
-            const auto visibility = theme.Tab() ? theme.Tab().ShowCloseButton() : Settings::Model::TabCloseButtonVisibility::Always;
+            const auto themeVisibility = theme.Tab() ? theme.Tab().ShowCloseButton() : Settings::Model::TabCloseButtonVisibility::Always;
+            // Agentmaster: the cog's "Show close (x) button on tabs" overrides the theme — when off,
+            // force every tab to Never. (_appSettings is default-constructed here, before the engine
+            // loads it, so this matches prior behavior until _updateAllTabCloseButtons re-applies.)
+            const auto visibility = _appSettings.showTabCloseButton ? themeVisibility : Settings::Model::TabCloseButtonVisibility::Never;
 
-            _tabItemMiddleClickHookEnabled = visibility == Settings::Model::TabCloseButtonVisibility::Never;
+            // The manual middle-click hook runs when the X is hidden (WinUI then raises no native
+            // close) AND only while the user keeps "Close tab with middle-mouse click" on.
+            _tabItemMiddleClickHookEnabled = (visibility == Settings::Model::TabCloseButtonVisibility::Never) && _appSettings.closeTabOnMiddleClick;
 
             switch (visibility)
             {
@@ -3880,6 +3886,17 @@ namespace winrt::TerminalApp::implementation
     // - eventArgs: the event's constituent arguments
     void TerminalPage::_OnTabCloseRequested(const IInspectable& /*sender*/, const MUX::Controls::TabViewTabCloseRequestedEventArgs& eventArgs)
     {
+        // Agentmaster: honor the cog's "Close tab with middle-mouse click" toggle even for tabs whose
+        // X is shown — WinUI raises this same event for its native middle-click close, and
+        // _OnTabPointerPressed flagged whether the in-flight close came from the middle button. Consume
+        // the flag one-shot (so a later X-button close on this tab isn't mistaken for a middle click).
+        const bool fromMiddleClick = _middleClickClosePending;
+        _middleClickClosePending = false;
+        if (fromMiddleClick && !_appSettings.closeTabOnMiddleClick)
+        {
+            return;
+        }
+
         const auto tabViewItem = eventArgs.Tab();
         if (auto tab{ _GetTabByTabViewItem(tabViewItem) })
         {
@@ -4346,11 +4363,16 @@ namespace winrt::TerminalApp::implementation
         //
         // Also update every tab's individual IsClosable to match the same property.
         const auto theme = _settings.GlobalSettings().CurrentTheme();
-        const auto visibility = (theme && theme.Tab()) ?
-                                    theme.Tab().ShowCloseButton() :
-                                    Settings::Model::TabCloseButtonVisibility::Always;
+        const auto themeVisibility = (theme && theme.Tab()) ?
+                                         theme.Tab().ShowCloseButton() :
+                                         Settings::Model::TabCloseButtonVisibility::Always;
+        // Agentmaster: the cog's "Show close (x) button on tabs" overrides the theme's policy —
+        // when off, every tab (bar the always-X-less Manager) is forced to Never.
+        const auto visibility = _appSettings.showTabCloseButton ? themeVisibility : Settings::Model::TabCloseButtonVisibility::Never;
 
-        _tabItemMiddleClickHookEnabled = visibility == Settings::Model::TabCloseButtonVisibility::Never;
+        // The manual middle-click hook is needed only when the X is hidden (WinUI raises no native
+        // close then), and is itself gated by the cog's "Close tab with middle-mouse click" toggle.
+        _tabItemMiddleClickHookEnabled = (visibility == Settings::Model::TabCloseButtonVisibility::Never) && _appSettings.closeTabOnMiddleClick;
 
         for (const auto& tab : _tabs)
         {

@@ -1259,7 +1259,23 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
     {
-        if (!_tabItemMiddleClickHookEnabled || !e.GetCurrentPoint(nullptr).Properties().IsMiddleButtonPressed())
+        if (!e.GetCurrentPoint(nullptr).Properties().IsMiddleButtonPressed())
+        {
+            // Agentmaster: a left/right press clears the middle-click marker so a subsequent X-button
+            // close on this tab isn't mistaken for a middle click (see _OnTabCloseRequested).
+            _middleClickClosePending = false;
+            return;
+        }
+
+        // Agentmaster: record the middle press. When the X is SHOWN, WinUI closes the tab natively on
+        // middle release (raising TabCloseRequested) and we have no other way there to tell it from an
+        // X-button click — _OnTabCloseRequested reads this to honor "Close tab with middle-mouse click".
+        _middleClickClosePending = true;
+
+        // When the X is HIDDEN, WinUI raises no native close, so the manual hook below is the only
+        // middle-click path — but only while the user keeps middle-click-close enabled
+        // (_tabItemMiddleClickHookEnabled already folds in AppSettings.closeTabOnMiddleClick).
+        if (!_tabItemMiddleClickHookEnabled)
         {
             return;
         }
@@ -1316,6 +1332,15 @@ namespace winrt::TerminalApp::implementation
 
         const auto tab = _GetTabByTabViewItem(sender);
         if (!tab)
+        {
+            co_return;
+        }
+
+        // Agentmaster: the manual middle-click hook fires for tabs whose X is hidden — but the pinned
+        // Manager tab is hidden-X because it is permanently NON-closable, not merely styled that way.
+        // Never middle-click-close it (the X button can't, so neither should middle click); other
+        // X-hidden tabs still close normally below.
+        if (_managerTab && tab == _managerTab)
         {
             co_return;
         }
