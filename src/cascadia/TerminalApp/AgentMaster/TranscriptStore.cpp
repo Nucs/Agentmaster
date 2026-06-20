@@ -912,8 +912,6 @@ namespace Agentmaster
                 break;
             }
         }
-        // A fork's copied line timestamps predate the file — its true creation is the file birth.
-        q.createdMs = q.fork ? fileBirthMs : firstTs;
 
         // TAIL: the last non-sidechain user/assistant timestamp == the real last activity. The
         // literal tail is usually untimestamped state lines (and single lines exceed 1 MiB), so
@@ -949,6 +947,27 @@ namespace Agentmaster
                 break;
             }
         }
+
+        // CREATION TIME (resume-hardened). Claude REWRITES the whole transcript on `--resume`, which
+        // resets the file's creation time (ctime/birth) to "now" — verified live: a session whose
+        // messages are all from day 1 reports a birth that marches forward on every resume. So
+        // fileBirthMs is unreliable: it can land AFTER the session's own newest message. A session
+        // cannot be born after its last activity, so clamp a "future" birth back to the last real
+        // activity. This keeps a resumed session's created time STABLE instead of drifting forward each
+        // resume — which otherwise corrupts created-time sort/display and can spoof a continuation edge
+        // (an old session made to look freshly created lands inside a later session's gap window).
+        // Healthy transcripts (birth <= lastActivity) are unaffected; this is a no-op for them.
+        int64_t birthMs = fileBirthMs;
+        if (q.lastActivityMs > 0 && birthMs > q.lastActivityMs)
+        {
+            birthMs = q.lastActivityMs;
+        }
+        // A fork's copied line timestamps predate the file (they're the parent's verbatim), so its true
+        // creation is the file birth (clamped above). A normal session's first timestamped line IS its
+        // creation; a prefix-only (never-prompted) file keeps firstTs==0 so the CALLER falls back to
+        // birth/mtime (the established contract — do not fill it in here).
+        q.createdMs = q.fork ? birthMs : firstTs;
+
         ::CloseHandle(h);
         return q;
     }

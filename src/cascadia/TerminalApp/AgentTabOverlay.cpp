@@ -295,8 +295,19 @@ namespace
     //  - truncate == false: show the WHOLE message, no cap.
     std::wstring SummaryEscapeMsg(const std::wstring& m, bool wrapNewlines, bool truncate)
     {
+        // When collapsing to ONE line (wrap off), first collapse an embedded table — drop its horizontal
+        // rule rows ("├────┼────┤" / "|---|---|") and de-frame its data rows ("│ Name │ Age │" ->
+        // "Name · Age") — so the box-drawing noise doesn't bury the content (ProcessInspect::
+        // StripSummaryTableRules). Wrap ON keeps the table verbatim: a real multi-line table renders
+        // aligned in the monospace panel, so its bars + rules are meaningful there.
+        std::wstring collapsed;
+        if (!wrapNewlines)
+        {
+            collapsed = ::Agentmaster::StripSummaryTableRules(m);
+        }
+        const std::wstring& src = wrapNewlines ? m : collapsed;
         std::wstring esc;
-        for (const wchar_t ch : m)
+        for (const wchar_t ch : src)
         {
             if (ch == L'\n')
                 esc += wrapNewlines ? L"\n" : L"\\n";

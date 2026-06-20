@@ -2355,7 +2355,13 @@ namespace Agentmaster
                // background task, and injected system reminders.
                has(L"<bash-notification>") || has(L"<shell-id>") || has(L"<persisted-output>") ||
                has(L"<background-task-input>") || has(L"<system-reminder>") ||
-               starts(L"Caveat:") || starts(L"Overview:") || starts(L"\n") || starts(L"[Request interrupted");
+               // Agentmaster (summary fix): session-end.js also skips startsWith('\n'), but a full-corpus
+               // scan (2765 transcripts / 15314 ext-user msgs) found that rule to be a 100% false positive
+               // — all 24 matches were REAL user content (terminal-screen pastes / multi-line prompts that
+               // merely begin with a newline), so it only ever emptied the summary. It is dropped here; the
+               // caller (AnalyzeSessionTranscript) trims leading whitespace before this check, so these
+               // startsWith prefixes still catch a "\nCaveat:"/"\n[Request interrupted"-style noise line.
+               starts(L"Caveat:") || starts(L"Overview:") || starts(L"[Request interrupted");
     }
     static bool SeAllWhitespace(const std::wstring& s)
     {
@@ -2568,6 +2574,21 @@ namespace Agentmaster
                         {
                             content = std::move(cmd);
                         }
+                    }
+                    // Agentmaster (summary fix): strip leading whitespace/newlines BEFORE the noise
+                    // checks AND before storing. A pasted prompt (e.g. a terminal-screen capture) often
+                    // begins with a newline — left in place it (a) defeats SeIsCommandNoise's startsWith
+                    // prefixes (a "\nCaveat:" line would slip through) and (b) used to get the WHOLE
+                    // message dropped by the old startsWith('\n') rule (a 100% false positive, now gone),
+                    // leaving the summary panel empty for a session whose only human input is a paste.
+                    // A whitespace-only message trims to empty and is dropped by the !content.empty() gate.
+                    if (const size_t nb = content.find_first_not_of(L" \t\r\n"); nb == std::wstring::npos)
+                    {
+                        content.clear();
+                    }
+                    else if (nb > 0)
+                    {
+                        content.erase(0, nb);
                     }
                     if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content))
                     {
@@ -3735,8 +3756,11 @@ namespace Agentmaster
         }
 
         // Escape a message to ONE line (newlines/tabs -> \n / \t, like session-end.js) + truncate.
-        std::wstring SummaryEscapeMsg(const std::wstring& m)
+        // This detail box is ALWAYS one-line, so it always de-noises embedded tables first (the
+        // wrap-off behaviour the overlay panel applies conditionally) — StripSummaryTableRules.
+        std::wstring SummaryEscapeMsg(const std::wstring& mIn)
         {
+            const std::wstring m = StripSummaryTableRules(mIn);
             std::wstring esc;
             for (const wchar_t ch : m)
             {
@@ -3755,6 +3779,250 @@ namespace Agentmaster
             }
             return esc;
         }
+    }
+
+    // Is `line` a table DATA row eligible for de-framing? On true, `splitBox` says which bar to split
+    // on: box verticals (│ ┃ ║) vs markdown '|'. A box vertical ANYWHERE => a box row (│ never occurs in
+    // prose, so splitting is always safe). Otherwise a bar-FRAMED markdown row (trimmed, first AND last
+    // char '|', >=2 pipes) — the frame requirement keeps a stray prose/code pipe ("foo | grep", "| head")
+    // verbatim. (file-local helper for StripSummaryTableRules)
+    static bool SummaryIsTableDataRow(const std::wstring& line, bool& splitBox)
+    {
+        size_t b = 0, e = line.size();
+        while (b < e && (line[b] == L' ' || line[b] == L'\t' || line[b] == L'\r'))
+        {
+            ++b;
+        }
+        while (e > b && (line[e - 1] == L' ' || line[e - 1] == L'\t' || line[e - 1] == L'\r'))
+        {
+            --e;
+        }
+        if (b >= e)
+        {
+            return false;
+        }
+        for (size_t i = b; i < e; ++i)
+        {
+            const wchar_t c = line[i];
+            if (c == 0x2502 || c == 0x2503 || c == 0x2551) // │ ┃ ║
+            {
+                splitBox = true;
+                return true;
+            }
+        }
+        if (line[b] == L'|' && line[e - 1] == L'|')
+        {
+            int pipes = 0;
+            for (size_t i = b; i < e; ++i)
+            {
+                if (line[i] == L'|')
+                {
+                    ++pipes;
+                }
+            }
+            if (pipes >= 2)
+            {
+                splitBox = false;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // De-frame a table DATA row: split on the bar char, trim each cell, drop empty cells, rejoin the
+    // cell text with " · " (U+00B7). Caller guarantees SummaryIsTableDataRow(line, splitBox) was true.
+    // Defensive fallback to the trimmed line if every cell was empty (a bar-only skeleton — which the
+    // rule filter should already have dropped). (file-local helper for StripSummaryTableRules)
+    static std::wstring SummaryDeframeRow(const std::wstring& line, bool splitBox)
+    {
+        size_t b = 0, e = line.size();
+        while (b < e && (line[b] == L' ' || line[b] == L'\t' || line[b] == L'\r'))
+        {
+            ++b;
+        }
+        while (e > b && (line[e - 1] == L' ' || line[e - 1] == L'\t' || line[e - 1] == L'\r'))
+        {
+            --e;
+        }
+        const auto isBar = [splitBox](wchar_t c) {
+            return splitBox ? (c == 0x2502 || c == 0x2503 || c == 0x2551) : (c == L'|');
+        };
+        std::wstring out, cur;
+        bool first = true;
+        const auto flush = [&]() {
+            size_t cb = 0, ce = cur.size();
+            while (cb < ce && (cur[cb] == L' ' || cur[cb] == L'\t'))
+            {
+                ++cb;
+            }
+            while (ce > cb && (cur[ce - 1] == L' ' || cur[ce - 1] == L'\t'))
+            {
+                --ce;
+            }
+            if (ce > cb) // drop empty cells (incl. the leading/trailing frame's empties)
+            {
+                if (!first)
+                {
+                    out += L' ';
+                    out += static_cast<wchar_t>(0x00B7); // ·
+                    out += L' ';
+                }
+                out.append(cur, cb, ce - cb);
+                first = false;
+            }
+            cur.clear();
+        };
+        for (size_t i = b; i < e; ++i)
+        {
+            if (isBar(line[i]))
+            {
+                flush();
+            }
+            else
+            {
+                cur.push_back(line[i]);
+            }
+        }
+        flush();
+        if (out.empty())
+        {
+            return line.substr(b, e - b);
+        }
+        return out;
+    }
+
+    // Agentmaster: see ProcessInspect.h. Collapse an embedded table for one-line display — DROP its
+    // horizontal RULE rows AND DE-FRAME its data rows (strip │/| bars + padding -> cells joined by " · ").
+    std::wstring StripSummaryTableRules(const std::wstring& msg)
+    {
+        // A physical line is a droppable table RULE row iff, after trimming leading/trailing spaces /
+        // tabs / CR, it is non-empty, composed ENTIRELY of table-structure chars, and rule-shaped (has
+        // a box-drawing char, or a >=3 run of -/=/~). Any other char (letter, digit, or punctuation
+        // outside the markdown set) marks it a DATA row -> kept.
+        const auto isRuleRow = [](const std::wstring& line) -> bool {
+            size_t b = 0, e = line.size();
+            while (b < e && (line[b] == L' ' || line[b] == L'\t' || line[b] == L'\r'))
+            {
+                ++b;
+            }
+            while (e > b && (line[e - 1] == L' ' || line[e - 1] == L'\t' || line[e - 1] == L'\r'))
+            {
+                --e;
+            }
+            if (b >= e)
+            {
+                return false; // blank line -> not a rule (passes through verbatim)
+            }
+            bool sawBox = false;
+            int run = 0, maxRun = 0; // longest run of FILL chars (a >=3 run is an ASCII horizontal rule)
+            for (size_t i = b; i < e; ++i)
+            {
+                const wchar_t c = line[i];
+                const bool box = (c >= 0x2500 && c <= 0x257F); // box-drawing block: ─ │ ┼ ├ ┤ ┌ … ═ ╪ …
+                // FILL = the chars a horizontal rule / thematic break is drawn from; a run of >=3 = a rule.
+                // -=~ (markdown/setext + box ASCII) plus #*_ (markdown thematic breaks — all observed live).
+                const bool fill = (c == L'-' || c == L'=' || c == L'~' || c == L'#' || c == L'*' || c == L'_');
+                // GLUE = the rest of the table vocabulary: cell bars / alignment / corner (never a fill run).
+                const bool glue = (c == L'+' || c == L':' || c == L'|');
+                if (!box && !fill && !glue && c != L' ' && c != L'\t')
+                {
+                    return false; // a content char -> a DATA row (keep it)
+                }
+                if (box)
+                {
+                    sawBox = true;
+                }
+                if (fill)
+                {
+                    if (++run > maxRun)
+                    {
+                        maxRun = run;
+                    }
+                }
+                else
+                {
+                    run = 0;
+                }
+            }
+            return sawBox || maxRun >= 3;
+        };
+
+        // Split on '\n' (each piece keeps its own trailing '\r'; isRuleRow trims it). Classify once.
+        std::vector<std::wstring> lines;
+        {
+            std::wstring cur;
+            for (const wchar_t ch : msg)
+            {
+                if (ch == L'\n')
+                {
+                    lines.push_back(std::move(cur));
+                    cur.clear();
+                }
+                else
+                {
+                    cur.push_back(ch);
+                }
+            }
+            lines.push_back(std::move(cur));
+        }
+        // Per line: 0 = keep verbatim, 1 = drop (rule row), 2 = de-frame (box bars), 3 = de-frame ('|').
+        std::vector<char> action(lines.size(), 0);
+        bool anyDropped = false, anyKept = false, anyDeframe = false;
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            if (isRuleRow(lines[i]))
+            {
+                action[i] = 1;
+                anyDropped = true;
+                continue;
+            }
+            anyKept = true;
+            bool splitBox = false;
+            if (SummaryIsTableDataRow(lines[i], splitBox))
+            {
+                action[i] = splitBox ? 2 : 3;
+                anyDeframe = true;
+            }
+        }
+        // Every line was a rule (a degenerate all-grid message) -> leave it unchanged so a numbered
+        // bullet never renders empty. Nothing to drop AND nothing to de-frame -> a cheap no-op too.
+        if (!anyKept || (!anyDropped && !anyDeframe))
+        {
+            return msg;
+        }
+        // Rebuild: drop rule rows, de-frame data rows, keep the rest verbatim (trailing '\r' -> LF),
+        // joined by '\n'.
+        std::wstring out;
+        out.reserve(msg.size());
+        bool first = true;
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            if (action[i] == 1)
+            {
+                continue;
+            }
+            const std::wstring& ln = lines[i];
+            size_t len = ln.size();
+            if (len > 0 && ln[len - 1] == L'\r')
+            {
+                --len;
+            }
+            const std::wstring kept = ln.substr(0, len);
+            if (!first)
+            {
+                out += L'\n';
+            }
+            if (action[i] == 2 || action[i] == 3)
+            {
+                out += SummaryDeframeRow(kept, action[i] == 2);
+            }
+            else
+            {
+                out += kept;
+            }
+            first = false;
+        }
+        return out;
     }
 
     std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full)

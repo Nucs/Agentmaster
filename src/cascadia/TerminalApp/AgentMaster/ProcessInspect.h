@@ -326,6 +326,34 @@ namespace Agentmaster
     // `maxBytes` 0 == the whole file. Filesystem only; `found` is false if the file can't be read.
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes);
 
+    // Agentmaster: collapse-mode TABLE de-noiser. When a summary message is flattened to ONE line
+    // (wrap-off — the panel escapes newlines to a literal "\n", or the Sessions-page detail box which
+    // is always one-line), an embedded table buries the one-liner in a wall of ─/┼/│/| noise. This does
+    // TWO things, so a table reads as clean content:
+    //   (1) DROP the horizontal RULE rows — box-drawing "├────┼────┤" / "┌──┬──┐" / "└──┴──┘" and
+    //       markdown "|----|----|" carry no data, so the whole line goes.
+    //   (2) DE-FRAME the DATA rows — strip the │/| cell bars + cell padding and rejoin the cell TEXT
+    //       with " · " (U+00B7), dropping empty cells. So "│ Name │ Age │" -> "Name · Age".
+    //
+    // Pure + total. A line (split on '\n'; '\r' dropped) is a droppable RULE row iff, after trimming
+    // surrounding spaces/tabs, it is: non-empty; built ENTIRELY of table-structure chars — box-drawing
+    // U+2500..U+257F plus the markdown set [-+=~:|#*_ ] (so a data cell carrying other content, e.g.
+    // "│ :) │" or "│ 30 │", is kept); AND actually rule-SHAPED — it has a box-drawing char OR a run of
+    // >=3 of the FILL chars -/=/~/#/*/_ (so a lone "│ │" skeleton, a stray ":", or a "* item" bullet is
+    // not mistaken for a rule). The fill set covers markdown thematic breaks too — "------", "======",
+    // "######", "***", "___" all collapse away, while "### Title" / "=== first GET ===" keep their text
+    // (the all-structural guard fails on the letters).
+    //
+    // A surviving line is DE-FRAMED iff it is a table DATA row: it contains a box-drawing vertical
+    // (│ ┃ ║ — these never occur in prose, so any │-bearing content row is safe to split), OR it is a
+    // bar-FRAMED markdown row (trimmed, first AND last char '|', >=2 pipes) — the frame requirement
+    // keeps a stray prose/code pipe ("foo | grep", "| head") verbatim. Every other line (prose, a bar
+    // chart "1K ████ 1.96×", a titled rule "=== X ===") passes through verbatim. If the message has NO
+    // rule rows AND nothing to de-frame it is returned unchanged (cheap no-op); if EVERY line is a rule
+    // it is ALSO returned unchanged, so a numbered bullet never renders empty. Grounded in a 1.4 GB /
+    // 686-session corpus scan. Used by both SummaryEscapeMsg collapse paths.
+    std::wstring StripSummaryTableRules(const std::wstring& msg);
+
     // Agentmaster: the session-end.js summary BOX rendered to PLAIN TEXT — the SINGLE source of
     // truth shared by the per-tab overlay's summary panel (AgentTabOverlay) AND the Sessions page's
     // detail pane (TerminalPage.AgentSessionsPage), so the two renderings can never drift. Section

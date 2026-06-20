@@ -809,6 +809,65 @@ static void TestSpawnBuilders()
     const auto id = NewSessionId();
     CHECK(id.size() == 36, "uuid length 36");
     CHECK(id[8] == L'-' && id[13] == L'-' && id[18] == L'-' && id[23] == L'-', "uuid hyphens");
+
+    // BuildPwshHostedCommandline (Agentmaster — "claude run from a pwsh terminal"). Wrap an inner agent
+    // command line so the ConPTY root is an interactive pwsh that -NoExit's to a live prompt at the cwd
+    // when the agent quits, instead of the connection dying into a dead "press Enter to restart" pane.
+    // -EncodedCommand carries the script as base64 UTF-16LE, side-stepping ALL nested-quote escaping —
+    // so we decode the payload here and assert it is exactly the call-operator (&) invocation of inner.
+    {
+        const std::wstring inner = L"\"C:\\bin\\claude.exe\" --resume abc-123 --settings \"C:/x/s.json\"";
+        const auto hosted = BuildPwshHostedCommandline(L"C:\\Program Files\\PowerShell\\7\\pwsh.exe", inner);
+        CHECK(hosted.rfind(L"\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo -NoExit -EncodedCommand ", 0) == 0,
+              "pwsh host: quoted full path + -NoLogo -NoExit -EncodedCommand");
+        // Decode the base64 payload (the last space-delimited token; base64 has no spaces) back to a
+        // wstring (its bytes are UTF-16LE) and confirm it round-trips to '& <inner>'.
+        auto b64decodeToWide = [](const std::wstring& b64) -> std::wstring {
+            auto val = [](wchar_t c) -> int {
+                if (c >= L'A' && c <= L'Z')
+                    return c - L'A';
+                if (c >= L'a' && c <= L'z')
+                    return c - L'a' + 26;
+                if (c >= L'0' && c <= L'9')
+                    return c - L'0' + 52;
+                if (c == L'+')
+                    return 62;
+                if (c == L'/')
+                    return 63;
+                return -1; // '=' padding / anything else
+            };
+            std::vector<unsigned char> bytes;
+            int acc = 0, accBits = 0;
+            for (const wchar_t c : b64)
+            {
+                const int v = val(c);
+                if (v < 0)
+                    continue;
+                acc = (acc << 6) | v;
+                accBits += 6;
+                if (accBits >= 8)
+                {
+                    accBits -= 8;
+                    bytes.push_back(static_cast<unsigned char>((acc >> accBits) & 0xFF));
+                }
+            }
+            std::wstring out;
+            for (size_t i = 0; i + 1 < bytes.size(); i += 2)
+            {
+                out.push_back(static_cast<wchar_t>(bytes[i] | (static_cast<unsigned>(bytes[i + 1]) << 8)));
+            }
+            return out;
+        };
+        const auto enc = hosted.substr(hosted.rfind(L' ') + 1);
+        CHECK(!enc.empty(), "pwsh host: non-empty -EncodedCommand payload");
+        CHECK(b64decodeToWide(enc) == L"& " + inner, "pwsh host: payload decodes to '& <inner>' (UTF-16LE, & call operator)");
+        // Empty launcher => the bare `pwsh.exe` token (the not-found fallback).
+        const auto hostedBare = BuildPwshHostedCommandline(L"", inner);
+        CHECK(hostedBare.rfind(L"\"pwsh.exe\" -NoLogo -NoExit -EncodedCommand ", 0) == 0, "pwsh host: empty launcher -> quoted bare pwsh.exe token");
+        // A bare inner token (codex fresh, or claude's empty-launcher fallback) is still invoked via &.
+        const auto hostedCodex = BuildPwshHostedCommandline(L"C:\\bin\\pwsh.exe", L"codex resume 019ec0c7");
+        CHECK(b64decodeToWide(hostedCodex.substr(hostedCodex.rfind(L' ') + 1)) == L"& codex resume 019ec0c7", "pwsh host: bare inner token invoked via &");
+    }
 }
 
 // Agentmaster: the per-install state PROFILE (ProfileBootstrap.h) — the pure pieces: the choice
@@ -2534,6 +2593,38 @@ static void TestTranscriptResolve()
         std::filesystem::remove_all(std::filesystem::path{ root }, ec);
     }
 
+    // --- AnalyzeSessionTranscript: a real user prompt that BEGINS WITH A NEWLINE is kept ----------
+    // Regression (the empty-summary bug): a pasted prompt (e.g. a terminal-screen capture) frequently
+    // starts with a leading "\n". The summary noise filter ported session-end.js's startsWith('\n')
+    // skip rule, which a full-corpus scan (2765 transcripts) proved a 100% false positive — every
+    // message it dropped was real content, so a session whose only human input was such a paste showed
+    // an EMPTY summary panel. The leading whitespace is now trimmed first and that rule is gone, so the
+    // message is KEPT (and its leading newline stripped from the stored text). A leading-newline-THEN-
+    // noise message (e.g. "\nCaveat:") is still dropped — the surviving startsWith prefixes see past
+    // the trimmed whitespace — and a whitespace-only message still drops out entirely.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_nlmsg_" + std::to_wstring(::GetCurrentProcessId());
+
+        const std::wstring pNl = base + L"_nl.jsonl";
+        MakeJsonl(pNl,
+                  // (1) a REAL prompt that begins with "\n" -> KEPT (leading newline trimmed off)
+                  R"j({"type":"user","userType":"external","message":{"content":"\nrecap: pick up the non-cast task"},"timestamp":"2026-01-24T20:00:00.000Z"})j" "\n"
+                  // (2) leading "\n" THEN a Caveat: noise prefix -> still DROPPED (prefix seen post-trim)
+                  R"j({"type":"user","userType":"external","message":{"content":"\nCaveat: generated while running a local command"},"timestamp":"2026-01-24T20:01:00.000Z"})j" "\n"
+                  // (3) only whitespace/newlines -> DROPPED (trims to empty)
+                  R"j({"type":"user","userType":"external","message":{"content":"\n   \n"},"timestamp":"2026-01-24T20:02:00.000Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pNl, 0);
+        CHECK(a.userMsgs.size() == 1, "AnalyzeSessionTranscript: a leading-newline real prompt is kept; the Caveat-after-newline + whitespace-only messages are dropped");
+        CHECK(!a.userMsgs.empty() && a.userMsgs[0] == L"recap: pick up the non-cast task", "AnalyzeSessionTranscript: the kept message has its leading newline trimmed from the stored text");
+        CHECK(a.lastUserTs == L"2026-01-24T20:00:00.000Z", "AnalyzeSessionTranscript: the kept leading-newline prompt advances last-user time (was empty when it was wrongly filtered)");
+
+        std::error_code ecNl;
+        std::filesystem::remove(std::filesystem::path{ pNl }, ecNl);
+    }
+
     // --- AnalyzeSessionTranscript: answering an AskUserQuestion advances "last user msg" ----------
     // Regression: the user's answer to AskUserQuestion is a tool_result block (not a typed text
     // prompt), so it once never moved lastUserTs and "last user msg" stayed pinned to the older typed
@@ -3626,9 +3717,125 @@ static void TestSessionSearch()
     }
 }
 
+// --- StripSummaryTableRules: COLLAPSE a one-line message's embedded tables (drop rules + de-frame) ---
+// When a summary message is flattened to one line (wrap-off panel / the always-one-line Sessions
+// detail), an embedded table is pure noise. The collapser (1) DROPS box-drawing "├──┼──┤" / markdown
+// "|---|---|" rule rows, and (2) DE-FRAMES data rows: "│ Name │ Age │" -> "Name · Age" (strip the
+// │/| bars + padding, rejoin cells with " · " = U+00B7, drop empty cells). Box-drawing chars + the dot
+// are written as \x escapes / a built separator so the test is source-encoding independent.
+static void TestSummaryTableTrim()
+{
+    std::wprintf(L"[TestSummaryTableTrim]\n");
+    std::wstring D = L" "; D += static_cast<wchar_t>(0x00B7); D += L" "; // " · " de-framed cell separator
+
+    // 1) Box-drawing table: the top/sep/bottom rules (┌──┬──┐ / ├──┼──┤ / └──┴──┘) drop; the two data
+    //    rows de-frame to "Name · Age" / "Bob · 30", joined by '\n'.
+    {
+        const std::wstring in =
+            L"\x250C\x2500\x2500\x252C\x2500\x2500\x2510\n" // ┌──┬──┐
+            L"\x2502 Name \x2502 Age \x2502\n" // │ Name │ Age │
+            L"\x251C\x2500\x2500\x253C\x2500\x2500\x2524\n" // ├──┼──┤
+            L"\x2502 Bob \x2502 30 \x2502\n" // │ Bob │ 30 │
+            L"\x2514\x2500\x2500\x2534\x2500\x2500\x2518"; // └──┴──┘
+        const std::wstring want = L"Name" + D + L"Age\nBob" + D + L"30";
+        CHECK(StripSummaryTableRules(in) == want, "box-drawing table: rule rows dropped, data rows de-framed to cell · cell");
+    }
+
+    // 2) The user's actual long box-drawing separator row, between two data rows -> rule drops, data de-frames.
+    {
+        const std::wstring rule =
+            L"\x251C\x2500\x2500\x2500\x2500\x2500\x253C\x2500\x2500\x2500\x2500\x253C\x2500\x2500\x2500\x2524"; // ├────┼───┼──┤
+        const std::wstring in = L"\x2502 a \x2502 b \x2502 c \x2502\n" + rule + L"\n\x2502 1 \x2502 2 \x2502 3 \x2502";
+        const std::wstring want = L"a" + D + L"b" + D + L"c\n1" + D + L"2" + D + L"3";
+        CHECK(StripSummaryTableRules(in) == want, "long ├────┼────┤ rule row dropped; flanking rows de-framed");
+        CHECK(StripSummaryTableRules(rule) == rule, "a lone all-rule message is returned UNCHANGED (never blanked)");
+    }
+
+    // 3) Markdown table: the |---|---| separator drops; header + data de-frame.
+    {
+        const std::wstring in = L"| Name | Age |\n|------|-----|\n| Bob | 30 |";
+        const std::wstring want = L"Name" + D + L"Age\nBob" + D + L"30";
+        CHECK(StripSummaryTableRules(in) == want, "markdown table: |---| separator dropped, header+data de-framed");
+        CHECK(StripSummaryTableRules(L"|:---|:---:|---:|") == L"|:---|:---:|---:|",
+              "a markdown alignment rule alone -> unchanged (all-rules guard)");
+    }
+
+    // 4) Data rows de-frame to their CELL content (the bars are UI, the cells are the data).
+    {
+        CHECK(StripSummaryTableRules(L"\x2502 :) \x2502 :( \x2502") == L":)" + D + L":(",
+              "a box row with punctuation cells de-frames to ':) · :('");
+        CHECK(StripSummaryTableRules(L"| -1 | +2 |") == L"-1" + D + L"+2",
+              "a markdown data row of signed numbers de-frames (digits kept)");
+        CHECK(StripSummaryTableRules(L"| - | + |") == L"-" + D + L"+",
+              "a markdown row of single -/+ cells de-frames (it is bar-framed)");
+    }
+
+    // 5) A fully-EMPTY box row (│   │) is a contentless rule -> dropped; flanking rows de-frame.
+    {
+        const std::wstring in = L"\x2502 a \x2502\n\x2502   \x2502\n\x2502 b \x2502";
+        CHECK(StripSummaryTableRules(in) == L"a\nb", "an empty │   │ row drops; 'a' / 'b' single-cell rows de-frame");
+    }
+
+    // 5b) De-frame mechanics: any │-bearing row (even border-less), single-cell, and internal empty cells.
+    {
+        CHECK(StripSummaryTableRules(L"Name \x2502 Age") == L"Name" + D + L"Age", "a border-less box row (│ present) de-frames");
+        CHECK(StripSummaryTableRules(L"\x2502 MENU \x2502") == L"MENU", "a single-cell box row de-frames to just the cell");
+        CHECK(StripSummaryTableRules(L"\x2502 a \x2502   \x2502 b \x2502") == L"a" + D + L"b", "an internal empty cell is dropped");
+    }
+
+    // 5c) SAFETY: a stray prose/code pipe is NOT a table row (markdown needs a leading AND trailing bar).
+    {
+        CHECK(StripSummaryTableRules(L"run foo | grep bar") == L"run foo | grep bar", "an un-framed '|' (shell pipe) is left verbatim");
+        CHECK(StripSummaryTableRules(L"| head -5") == L"| head -5", "a leading-only '|' is not a framed row -> verbatim");
+        CHECK(StripSummaryTableRules(L"a | b | c") == L"a | b | c", "a border-less '|' row is left verbatim (ambiguous with prose)");
+    }
+
+    // 6) ASCII thematic break (>=3 of the fill set -/=/~/#/*/_) drops; a short 2-char run does NOT.
+    //    The fill set was widened to # * _ after a 1.4 GB corpus scan turned up bare "######" rule
+    //    lines (the only separator shape the original -/=/~ set missed).
+    {
+        CHECK(StripSummaryTableRules(L"intro\n---\noutro") == L"intro\noutro", "a --- thematic break row drops");
+        CHECK(StripSummaryTableRules(L"intro\n--\noutro") == L"intro\n--\noutro", "a 2-dash line is kept (run < 3, no box char)");
+        CHECK(StripSummaryTableRules(L"a\n====\nb") == L"a\nb", "a ==== underline rule drops");
+        CHECK(StripSummaryTableRules(L"a\n######\nb") == L"a\nb", "a ###### rule line drops (corpus: the real miss)");
+        CHECK(StripSummaryTableRules(L"a\n###\nb") == L"a\nb", "a bare ### (run==3) drops");
+        CHECK(StripSummaryTableRules(L"a\n***\nb") == L"a\nb", "a *** thematic break drops");
+        CHECK(StripSummaryTableRules(L"a\n___\nb") == L"a\nb", "a ___ thematic break drops");
+    }
+
+    // 6b) The all-structural GUARD protects real content built from the same fill chars: a markdown
+    //     heading, a bullet item, an emphasis marker, a titled separator (corpus had 80 of these), and
+    //     a "::: fence" all carry letters / a sub-3 run, so they are KEPT verbatim.
+    {
+        CHECK(StripSummaryTableRules(L"### Heading") == L"### Heading", "### Heading kept (has letters)");
+        CHECK(StripSummaryTableRules(L"* item") == L"* item", "a '* item' bullet kept (has letters)");
+        CHECK(StripSummaryTableRules(L"**") == L"**", "a lone ** kept (run < 3, no box)");
+        CHECK(StripSummaryTableRules(L"=== first GET ===") == L"=== first GET ===", "a titled separator keeps its label");
+        CHECK(StripSummaryTableRules(L":::") == L":::", "a ::: fence kept (colon is glue, not fill -> no run)");
+        CHECK(StripSummaryTableRules(L"1K \x2588\x2588\x2588 1.96x") == L"1K \x2588\x2588\x2588 1.96x",
+              "a bar-chart data row (block chars + numbers) is kept as data");
+    }
+
+    // 7) No table at all -> returned unchanged (cheap no-op path).
+    {
+        const std::wstring in = L"just some prose\nwith two lines";
+        CHECK(StripSummaryTableRules(in) == in, "no rule rows -> message unchanged");
+        CHECK(StripSummaryTableRules(L"") == L"", "empty message -> empty");
+        CHECK(StripSummaryTableRules(L"single line") == L"single line", "single non-rule line -> unchanged");
+    }
+
+    // 8) CRLF on kept lines is normalized to LF; the rule row (with its CR) still drops; data de-frames.
+    {
+        const std::wstring in = L"| a | b |\r\n|---|---|\r\n| 1 | 2 |";
+        const std::wstring want = L"a" + D + L"b\n1" + D + L"2";
+        CHECK(StripSummaryTableRules(in) == want, "CRLF data rows de-frame (-> LF), the |---| rule (with CR) dropped");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
+    TestSummaryTableTrim();
     TestStateMachine();
     TestOrderedStateMachine();
     TestWire();
