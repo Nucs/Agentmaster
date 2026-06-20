@@ -46,7 +46,17 @@ param(
     # Local smoke-testing of the release-identity package only; the inner dev loop never
     # needs it. NOTE: a layout built this way registers/replaces the RELEASE package family
     # (Agentmaster_56k4f06dsfp9r), i.e. an installed GitHub release.
-    [switch]$ReleaseIdentity
+    [switch]$ReleaseIdentity,
+    # Agentmaster: by DEFAULT skip the .appxsym symbol-package step. Measured on this box
+    # (binlog PerformanceSummary), GenerateAppxSymbolPackage cost ~156s of a ~204s Debug
+    # package build = 77% of the WHOLE build, because it zips every full PDB (hundreds of MB)
+    # into a Store-submission symbol bundle. That bundle is PURE WASTE for a local loose-layout
+    # deploy: the PDBs still emit next to the binaries (debugging is unaffected), and this
+    # project ships via GitHub releases (the .msix + portable zips), never the Microsoft Store,
+    # so the .appxsym is never consumed — not locally, not in release.yml (which bundles the
+    # .msix). Disabling it took the same build to ~20-50s (~4-10x). Pass -WithSymbolPackage to
+    # restore it (e.g. if you ever genuinely need a Store symbol bundle).
+    [switch]$WithSymbolPackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,6 +95,8 @@ $msbuildArgs = @(
 )
 if ($ClMpCount -gt 0) { $msbuildArgs += "/p:CL_MPCount=$ClMpCount" }
 if ($ReleaseIdentity) { $msbuildArgs += '/p:AgentmasterPackageIdentity=Release' }
+# Agentmaster: skip the ~156s .appxsym symbol-package zip by default (see -WithSymbolPackage above).
+if (-not $WithSymbolPackage) { $msbuildArgs += '/p:AppxSymbolPackageEnabled=false' }
 if ($Clean) { $msbuildArgs += '/t:Clean' }
 elseif (-not $Full -and $Target) { $msbuildArgs += "/t:$Target" }
 
