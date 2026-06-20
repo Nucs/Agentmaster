@@ -3916,6 +3916,28 @@ static void TestPromptAnchor()
         CHECK(r[1].found && r[1].outOfOrder, "outOfOrder: second prompt falls back, flagged");
     }
 
+    // RTL (Hebrew/Arabic): a terminal renders an RTL line CHARACTER-REVERSED (visual order) while the
+    // transcript stores it logical, so the prompt appears reversed in the buffer. The resolver must still
+    // find it via the reversed orientation (the matched ROW is the same, so centering works). The fix is
+    // gated on ContainsRtl so LTR matching is never perturbed. (SUMMARY_JUMP.md §5.)
+    {
+        // logical "write a program" in Hebrew, built from code points so the source stays pure ASCII
+        // (cl without /utf-8 would mis-decode a raw Hebrew literal). U+05D0..U+05EA = Hebrew letters.
+        std::wstring logical;
+        for (const int c : { 0x05DB, 0x05EA, 0x05D5, 0x05D1, 0x0020, 0x05EA, 0x05D5, 0x05DB, 0x05E0, 0x05D9, 0x05EA })
+        {
+            logical.push_back(static_cast<wchar_t>(c));
+        }
+        const std::wstring visual(logical.rbegin(), logical.rend()); // what the terminal buffer holds
+        CHECK(ResolveOnePromptAnchor(L"> " + visual + L"\n", logical, 0).found, "RTL: reversed-in-buffer Hebrew prompt resolves");
+        CHECK(ResolveOnePromptAnchor(L"> " + logical + L"\n", logical, 0).found, "RTL: forward orientation still resolves");
+        // An LTR prompt must NOT be matched by its own reversal (no RTL char => no reversed pass).
+        CHECK(!ResolveOnePromptAnchor(L"> dlrow olleh now\n", L"hello world now is the prompt", 0).found, "LTR: reversed text is NOT spuriously matched");
+        // Batch: a reversed-in-buffer RTL prompt resolves in the greedy pass too.
+        auto rb = ResolvePromptAnchors(L"> " + visual + L"\nout\n", { logical });
+        CHECK(rb.size() == 1 && rb[0].found, "RTL: batch resolve finds the reversed prompt");
+    }
+
     // Cheap validate: true at the resolved offset, false at a bogus one / past end.
     {
         const std::wstring hay = L"> fix the build\nout\n";

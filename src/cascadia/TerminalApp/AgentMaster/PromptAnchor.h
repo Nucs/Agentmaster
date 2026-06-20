@@ -186,6 +186,78 @@ namespace Agentmaster
             m.needleLen = needleLen;
             return m;
         }
+
+        // Does `s` contain a strong right-to-left character? A terminal renders an RTL line in VISUAL
+        // (reversed) order while the transcript stores it in LOGICAL order — so a Hebrew/Arabic prompt
+        // appears character-reversed in the buffer. We only attempt the reversed orientation for prompts
+        // that actually contain RTL text, so LTR matching is never perturbed. Ranges: Hebrew/Arabic/Syriac/
+        // Thaana/NKo/Samaritan/Mandaic/Arabic-Ext (U+0590..U+08FF) + Hebrew/Arabic presentation forms.
+        inline bool ContainsRtl(std::wstring_view s) noexcept
+        {
+            for (const auto c : s)
+            {
+                if ((c >= 0x0590 && c <= 0x08FF) || (c >= 0xFB1D && c <= 0xFEFC))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Locate `nmsg` — and, when `tryRev`, its char-reversal `rmsg` (the visual form an RTL line takes
+        // in the buffer) — in `norm`, longest needle first. `global`=false searches at/after `cursor`
+        // (earliest occurrence); true searches the LAST occurrence (rfind). Forward is always tried first
+        // so an LTR hit never reaches the reversed pass. On an in-order hit, *cursorEnd (if non-null) is
+        // set to the norm offset to advance the greedy cursor past this match. Returns found=false if none.
+        inline AnchorMatch LocateOriented(const std::wstring& norm,
+                                          const std::vector<uint32_t>& map,
+                                          const std::wstring& nmsg,
+                                          const std::wstring& rmsg,
+                                          bool tryRev,
+                                          size_t cursor,
+                                          const std::vector<size_t>& lens,
+                                          const AnchorOptions& opts,
+                                          bool global,
+                                          size_t* cursorEnd)
+        {
+            for (const auto len : lens)
+            {
+                const auto fpos = global ? norm.rfind(std::wstring_view{ nmsg }.substr(0, len))
+                                         : norm.find(std::wstring_view{ nmsg }.substr(0, len), cursor);
+                if (fpos != std::wstring::npos)
+                {
+                    if (cursorEnd)
+                    {
+                        *cursorEnd = fpos + (std::max)(len, CommonRun(norm, fpos, nmsg));
+                    }
+                    return ScoreHit(norm, map, fpos, nmsg, len, opts);
+                }
+                if (tryRev)
+                {
+                    const auto rpos = global ? norm.rfind(std::wstring_view{ rmsg }.substr(0, len))
+                                             : norm.find(std::wstring_view{ rmsg }.substr(0, len), cursor);
+                    if (rpos != std::wstring::npos)
+                    {
+                        if (cursorEnd)
+                        {
+                            *cursorEnd = rpos + (std::max)(len, CommonRun(norm, rpos, rmsg));
+                        }
+                        return ScoreHit(norm, map, rpos, rmsg, len, opts);
+                    }
+                }
+            }
+            return {};
+        }
+
+        // True-absence membership pre-check across BOTH orientations: shortest prefix nowhere => skip.
+        inline bool PresentEither(const std::wstring& norm, const std::wstring& nmsg, const std::wstring& rmsg, bool tryRev, size_t floorLen)
+        {
+            if (norm.find(std::wstring_view{ nmsg }.substr(0, floorLen)) != std::wstring::npos)
+            {
+                return true;
+            }
+            return tryRev && norm.find(std::wstring_view{ rmsg }.substr(0, floorLen)) != std::wstring::npos;
+        }
     }
 
     // ASCII-lowercase + collapse every run of whitespace (space/tab/CR/LF/FF/VT) to a single space +
@@ -268,35 +340,35 @@ namespace Agentmaster
             return out;
         }
 
+        // RTL prompts render character-reversed in the terminal buffer (visual order); also try the
+        // reversal for those. Forward is tried first inside LocateOriented, so LTR is never perturbed.
+        const bool tryRev = detail::ContainsRtl(nmsg);
+        std::wstring rmsg;
+        if (tryRev)
+        {
+            rmsg.assign(nmsg.rbegin(), nmsg.rend());
+        }
+
         const size_t full = (std::min)(opts.maxNeedle, nmsg.size());
         const auto lens = detail::BackoffLengths(full, opts);
 
-        // True-absence short-circuit (PERF): if even the shortest prefix is nowhere in the haystack,
-        // no longer needle can be either — one scan instead of the full backoff + global fallback.
-        if (norm.find(std::wstring_view{ nmsg }.substr(0, lens.back())) == std::wstring::npos)
+        // True-absence short-circuit (PERF): if even the shortest prefix is nowhere (either orientation),
+        // no longer needle can be either — skip the full backoff + global fallback.
+        if (!detail::PresentEither(norm, nmsg, rmsg, tryRev, lens.back()))
         {
             return out;
         }
 
         // In-order: earliest occurrence at/after the cursor, longest needle first.
-        for (const auto len : lens)
+        if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, nullptr); m.found)
         {
-            const auto pos = norm.find(std::wstring_view{ nmsg }.substr(0, len), cursor);
-            if (pos != std::wstring::npos)
-            {
-                return detail::ScoreHit(norm, map, pos, nmsg, len, opts);
-            }
+            return m;
         }
         // Fallback: the LAST (most-recent) occurrence anywhere — flagged out-of-order.
-        for (const auto len : lens)
+        if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, nullptr); m.found)
         {
-            const auto pos = norm.rfind(std::wstring_view{ nmsg }.substr(0, len));
-            if (pos != std::wstring::npos)
-            {
-                auto m = detail::ScoreHit(norm, map, pos, nmsg, len, opts);
-                m.outOfOrder = true;
-                return m;
-            }
+            m.outOfOrder = true;
+            return m;
         }
         return out;
     }
@@ -328,40 +400,38 @@ namespace Agentmaster
             {
                 continue;
             }
+            // RTL prompts render character-reversed in the buffer; also try the reversal for those
+            // (forward first inside LocateOriented, so LTR is never perturbed).
+            const bool tryRev = detail::ContainsRtl(nmsg);
+            std::wstring rmsg;
+            if (tryRev)
+            {
+                rmsg.assign(nmsg.rbegin(), nmsg.rend());
+            }
+
             const size_t full = (std::min)(opts.maxNeedle, nmsg.size());
             const auto lens = detail::BackoffLengths(full, opts);
 
-            // True-absence short-circuit (PERF): shortest prefix nowhere => skip backoff + fallback.
-            if (norm.find(std::wstring_view{ nmsg }.substr(0, lens.back())) == std::wstring::npos)
+            // True-absence short-circuit (PERF): shortest prefix nowhere (either orientation) => skip.
+            if (!detail::PresentEither(norm, nmsg, rmsg, tryRev, lens.back()))
             {
                 continue; // results[mi] stays not-found; cursor unchanged
             }
 
-            AnchorMatch m;
-            for (const auto len : lens)
+            // In-order first (advances the greedy cursor); else the last global occurrence (out-of-order,
+            // cursor unchanged) so a scrolled-off / duplicate send still offers a lower-confidence jump.
+            size_t cend = cursor;
+            AnchorMatch m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, &cend);
+            if (m.found)
             {
-                const auto pos = norm.find(std::wstring_view{ nmsg }.substr(0, len), cursor);
-                if (pos != std::wstring::npos)
-                {
-                    m = detail::ScoreHit(norm, map, pos, nmsg, len, opts);
-                    cursor = pos + (std::max)(len, detail::CommonRun(norm, pos, nmsg)); // advance past this match
-                    break;
-                }
+                cursor = cend;
             }
-            if (!m.found)
+            else
             {
-                // No in-order candidate: this send's on-screen render likely scrolled off, or its
-                // earlier duplicate(s) were already consumed. Offer the last global occurrence so the
-                // user still gets a jump, flagged lower-confidence. Do NOT advance the cursor.
-                for (const auto len : lens)
+                m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, nullptr);
+                if (m.found)
                 {
-                    const auto pos = norm.rfind(std::wstring_view{ nmsg }.substr(0, len));
-                    if (pos != std::wstring::npos)
-                    {
-                        m = detail::ScoreHit(norm, map, pos, nmsg, len, opts);
-                        m.outOfOrder = true;
-                        break;
-                    }
+                    m.outOfOrder = true;
                 }
             }
             results[mi] = m;
@@ -389,7 +459,17 @@ namespace Agentmaster
         const size_t window = needle.size() * 3 + 16;
         const auto slice = haystack.substr(offset, (std::min)(window, haystack.size() - offset));
         const auto nslice = NormalizeForMatch(slice);
-        const auto at = nslice.find(needle);
-        return at != std::wstring::npos && at <= 2;
+        if (const auto at = nslice.find(needle); at != std::wstring::npos && at <= 2)
+        {
+            return true;
+        }
+        // RTL: the buffer holds the visual (reversed) form, so the cached span starts with the reversal.
+        if (detail::ContainsRtl(needle))
+        {
+            const std::wstring rneedle(needle.rbegin(), needle.rend());
+            const auto at = nslice.find(rneedle);
+            return at != std::wstring::npos && at <= 2;
+        }
+        return false;
     }
 }

@@ -121,6 +121,12 @@ window cap already bounds it to ~16 ms, and the extra build cost would regress t
 
 - **Not on screen** → `-1`, no scroll (no chime). The transcript still has the prompt; a "open transcript
   here" fallback is a future nicety.
+- **RTL (Hebrew / Arabic)** — a terminal renders an RTL line in **visual order (character-reversed)** while
+  the transcript stores it **logical**, so an RTL prompt appears reversed in the buffer and a logical-order
+  search misses. The resolver detects an RTL prompt (`ContainsRtl`) and **also tries the character-reversal**
+  of the needle (forward is always tried first, so LTR matching is never perturbed; the matched *row* is the
+  same, so centering works). This fixes Hebrew/Arabic prompts not jumping. Mixed bidi (RTL + Latin/digits) is
+  not a pure reversal and may still miss — a full BiDi (ICU `ubidi`) reorder is a future refinement.
 - **Alt screen buffer** — if a session ran in the alt buffer (no scrollback), the resolve finds nothing in
   history → `-1`. Claude Code renders inline (real scrollback), so this is a guard, not the norm.
 - **Codex** — the summary's prompts list is wired for **Claude** (`AnalyzeSessionTranscript.userMsgs`);
