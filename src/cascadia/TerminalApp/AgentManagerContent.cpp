@@ -2281,9 +2281,16 @@ namespace winrt::TerminalApp::implementation
             auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             cp.Opacity(0.9);
             cp.HorizontalAlignment(HorizontalAlignment::Left);
+            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.");
             stack.Children().Append(cp);
         }
-        stack.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
+        {
+            // The working dir reads as plain gray text under the title; name it AND explain the
+            // per-directory color (a non-obvious concept) in one tip.
+            auto dirText = Text(winrt::hstring{ s.workingDir }, 11, false, 0.6);
+            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.");
+            stack.Children().Append(dirText);
+        }
 
         // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
         {
@@ -2311,6 +2318,7 @@ namespace winrt::TerminalApp::implementation
             {
                 bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
             }
+            AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.");
             stack.Children().Append(bt);
         }
 
@@ -3004,11 +3012,14 @@ namespace winrt::TerminalApp::implementation
             auto p = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             p.Opacity(0.9);
             p.HorizontalAlignment(HorizontalAlignment::Left);
+            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).");
             stack.Children().Append(p);
         }
         if (!ex.cwd.empty())
         {
-            stack.Children().Append(Text(winrt::hstring{ ex.cwd }, 11, false, 0.55));
+            auto cwdText = Text(winrt::hstring{ ex.cwd }, 11, false, 0.55);
+            AgentSetTip(cwdText, L"Working directory of this external session.");
+            stack.Children().Append(cwdText);
         }
 
         // host (the foreign terminal) · git branch
@@ -3039,7 +3050,9 @@ namespace winrt::TerminalApp::implementation
             {
                 hb += L"  \x00B7  [" + ex.gitBranch + L"]";
             }
-            stack.Children().Append(Text(winrt::hstring{ hb }, 10, false, 0.5));
+            auto hbText = Text(winrt::hstring{ hb }, 10, false, 0.5);
+            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.");
+            stack.Children().Append(hbText);
         }
 
         // model · effort · bg · pid
@@ -3065,7 +3078,9 @@ namespace winrt::TerminalApp::implementation
                 addPart(L"bg");
             }
             me += (me.empty() ? L"pid " : L"  \x00B7  pid ") + std::to_wstring(ex.pid);
-            stack.Children().Append(Text(winrt::hstring{ me }, 10, false, 0.5));
+            auto meText = Text(winrt::hstring{ me }, 10, false, 0.5);
+            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.");
+            stack.Children().Append(meText);
         }
 
         // timing (created-ago / active-for / last-activity-ago)
@@ -3529,7 +3544,11 @@ namespace winrt::TerminalApp::implementation
                 // State dot — the SAME filled Ellipse as the tab strip (StateDot == HeaderAgentStatusDot),
                 // not the old per-state glyph, so the tree and the tab speak one visual language. The
                 // StateLabel text appended below still names the state.
-                row.Children().Append(StateDot(StateColor(s.state)));
+                {
+                    auto dot = StateDot(StateColor(s.state));
+                    AgentSetTip(dot, L"Session state \x2014 the dot color matches the Triage Board column; the label to the right names it.");
+                    row.Children().Append(dot);
+                }
                 row.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 13, false, 1.0));
                 // Agentmaster (Codex-launch): a teal "codex" agent pill on a MANAGED Codex row, mirroring
                 // the Board card — distinguishes it from a Claude row at a glance (Claude = no pill).
@@ -3537,6 +3556,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
                     cp.Opacity(0.9);
+                    AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.");
                     row.Children().Append(cp);
                 }
                 row.Children().Append(Text(StateLabel(s.state), 11, false, 0.5));
@@ -3547,6 +3567,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto outside = Pill(L"outside", Color{ 0xFF, 0x8A, 0x8A, 0x8A });
                     outside.Opacity(0.85);
+                    AgentSetTip(outside, L"This session's tab lives in another window (shown only in GLOBAL scope). Double-click to jump to it.");
                     row.Children().Append(outside);
                 }
                 // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
@@ -3816,12 +3837,17 @@ namespace winrt::TerminalApp::implementation
                 {
                     AgentSetTip(g, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
                 }
+                else
+                {
+                    AgentSetTip(g, L"Observed only \x2014 Agentmaster doesn't track an external Claude session's turn state.");
+                }
                 row.Children().Append(g);
                 // Agentmaster (Phase C1): a teal "codex" agent pill on Codex rows (Claude = default, no pill).
                 if (ex.kind == AgentKind::Codex)
                 {
                     auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
                     cp.Opacity(0.9);
+                    AgentSetTip(cp, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed).");
                     row.Children().Append(cp);
                 }
                 row.Children().Append(Text(winrt::hstring{ title }, 13, false, 1.0));
@@ -3850,6 +3876,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     auto hp = Pill(winrt::hstring{ hostLabel }, Color{ 0xFF, 0x6E, 0x7B, 0x8A });
                     hp.Opacity(0.85);
+                    AgentSetTip(hp, L"Host \x2014 the terminal application this external session runs in (e.g. Windows Terminal, a sibling Agentmaster, cmd, or pwsh).");
                     row.Children().Append(hp);
                 }
 
@@ -3882,7 +3909,9 @@ namespace winrt::TerminalApp::implementation
                     }
                     if (!me.empty())
                     {
-                        row.Children().Append(Text(winrt::hstring{ me }, 11, false, 0.5));
+                        auto meText = Text(winrt::hstring{ me }, 11, false, 0.5);
+                        AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex adds sandbox \xB7 approval policy) \xB7 bg = running in the background.");
+                        row.Children().Append(meText);
                     }
                 }
                 // pid — its UNDERLINE is COLOR-CODED by the host window/shell (ex.hostPid): claudes
@@ -6157,7 +6186,11 @@ namespace winrt::TerminalApp::implementation
         titleRow.Orientation(Orientation::Horizontal);
         titleRow.Spacing(8);
         titleRow.Children().Append(Text(OneLine(sel->title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ sel->title }), 16, true, 1.0));
-        titleRow.Children().Append(Pill(StateLabel(sel->state), StateColor(sel->state)));
+        {
+            auto statePill = Pill(StateLabel(sel->state), StateColor(sel->state));
+            AgentSetTip(statePill, L"Current state \x2014 this session's Triage state (hover a Triage Board column header for what each state means).");
+            titleRow.Children().Append(statePill);
+        }
         _planHeaderHost.Children().Append(titleRow);
         _planHeaderHost.Children().Append(Text(winrt::hstring{ sel->workingDir }, 12, false, 0.6));
 
@@ -6261,8 +6294,12 @@ namespace winrt::TerminalApp::implementation
             {
                 const bool typed = (p.origin == PromptOrigin::Typed);
                 // Amber "typed" (a human keystroke) vs. blue "flight" (queued + injected by us).
-                row.Children().Append(Pill(typed ? winrt::hstring{ L"typed" } : winrt::hstring{ L"flight" },
-                                           typed ? ColorHelper::FromArgb(0xFF, 0xD9, 0xA6, 0x2E) : ColorHelper::FromArgb(0xFF, 0x4F, 0x8B, 0xD0)));
+                auto originPill = Pill(typed ? winrt::hstring{ L"typed" } : winrt::hstring{ L"flight" },
+                                       typed ? ColorHelper::FromArgb(0xFF, 0xD9, 0xA6, 0x2E) : ColorHelper::FromArgb(0xFF, 0x4F, 0x8B, 0xD0));
+                AgentSetTip(originPill, typed ?
+                                            winrt::hstring{ L"Typed \x2014 you typed this prompt straight into the terminal." } :
+                                            winrt::hstring{ L"Flight \x2014 Agentmaster queued this prompt and sent it for you (Autopilot or Send now)." });
+                row.Children().Append(originPill);
             }
             else
             {
@@ -6346,11 +6383,15 @@ namespace winrt::TerminalApp::implementation
         titleRow.Children().Append(Text(_selectedExternalTitle.empty() ? winrt::hstring{ isCodex ? L"codex" : L"claude" } : winrt::hstring{ _selectedExternalTitle }, 16, true, 1.0));
         if (isCodex)
         {
-            titleRow.Children().Append(Pill(L"codex \x00B7 observe-only", Color{ 0xFF, 0x4E, 0xC9, 0xB0 }));
+            auto op = Pill(L"codex \x00B7 observe-only", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+            AgentSetTip(op, L"Observe-only \x2014 a Codex session running outside Agentmaster: you can read its conversation but not drive it. Adopt it to take control.");
+            titleRow.Children().Append(op);
         }
         else
         {
-            titleRow.Children().Append(Pill(L"external \x00B7 observe-only", Colors::Gray()));
+            auto op = Pill(L"external \x00B7 observe-only", Colors::Gray());
+            AgentSetTip(op, L"Observe-only \x2014 a Claude session running outside Agentmaster: you can read its conversation but not drive it. Adopt it to take control.");
+            titleRow.Children().Append(op);
         }
         _planHeaderHost.Children().Append(titleRow);
         if (!_selectedExternalCwd.empty())
