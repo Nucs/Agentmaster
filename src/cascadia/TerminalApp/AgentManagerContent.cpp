@@ -2471,6 +2471,9 @@ namespace winrt::TerminalApp::implementation
         // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
         card.Tag(winrt::box_value(winrt::hstring{ L"b:" + s.id }));
+        // Discoverability: the card's interactions aren't obvious from its face (the band tip shows the
+        // full title; this explains what clicking does). Don't overwrite the band's own full-title tip.
+        AgentSetTip(card, L"Click to select this session (and aim its Flight Plan) \x2014 double-click to jump to its live tab, or right-click for more actions.");
         _boardCardsById[s.id] = card;
         return card;
     }
@@ -2780,6 +2783,15 @@ namespace winrt::TerminalApp::implementation
             hdr.Children().Append(dot);
             hdr.Children().Append(Text(col.title, 12, true, 0.9));
             hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(matches.size())), 12, false, 0.6));
+            // Agentmaster: explain what each Triage state means — the board's five columns ARE the
+            // state model, so naming them on hover is the core learning-curve aid.
+            const wchar_t* colTip =
+                col.state == SessionState::Running        ? L"Running \x2014 the agent is actively working on a turn." :
+                col.state == SessionState::WaitingForInput ? L"Waiting-for-you \x2014 the turn is complete; the agent is waiting for your next prompt. With Autopilot on, the next queued prompt sends automatically." :
+                col.state == SessionState::NeedsApproval  ? L"Needs-approval \x2014 the agent is paused on a tool-permission prompt or a question and needs your response to continue." :
+                col.state == SessionState::Error          ? L"Error \x2014 the agent's last turn ended in an error." :
+                                                            L"Idle / Done \x2014 no turn in progress: freshly launched, just resumed, or finished.";
+            AgentSetTip(hdr, colTip);
             // colStack holds the cards only; _MakeBoardColumn pins the header above a vertically
             // scrolling card list so a tall column scrolls within the board height instead of
             // clipping past the bottom edge (the board ScrollViewer's vertical scroll is disabled).
@@ -2905,6 +2917,7 @@ namespace winrt::TerminalApp::implementation
         hdrBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
         hdrBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
         hdrBtn.Margin(Thickness{ 0, 0, 0, 6 });
+        AgentSetTip(hdrBtn, L"Agents running outside Agentmaster (observe-only census) \x2014 click to collapse or expand this column.");
         hdrBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
             _externalCollapsed = !_externalCollapsed;
             _Refresh();
@@ -3121,6 +3134,7 @@ namespace winrt::TerminalApp::implementation
         card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
             _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
         });
+        AgentSetTip(card, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.");
         // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
         // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
         // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
@@ -3366,6 +3380,7 @@ namespace winrt::TerminalApp::implementation
             dirBtn.Background(Fill(PathEq(dir, _scopeDir) ? 0x30 : 0x00, 0x80, 0x80, 0x80));
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
+            AgentSetTip(dirBtn, L"Working directory \x2014 click to scope the board to its sessions; click the scoped one again to collapse it.");
             const auto capturedDir = dir;
             const auto capturedPrevDir = prevDir; // predecessor at build time, for "collapse + select previous"
             dirBtn.Click([this, capturedDir, capturedPrevDir](const IInspectable&, const RoutedEventArgs&) {
@@ -3594,6 +3609,7 @@ namespace winrt::TerminalApp::implementation
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
                 rowBtn.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
+                AgentSetTip(rowBtn, L"Click to select this session \x2014 double-click or Enter jumps to its live tab; F2 renames, Del archives, right-click for more.");
                 // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
                 // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
                 rowBtn.Tag(winrt::box_value(winrt::hstring{ L"t:" + id }));
@@ -3726,6 +3742,7 @@ namespace winrt::TerminalApp::implementation
             dirBtn.Background(Fill(0x00, 0x80, 0x80, 0x80));
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
+            AgentSetTip(dirBtn, L"Working directory of these external sessions \x2014 click to collapse or expand the group.");
             const auto capturedDir = dir;
             dirBtn.Click([this, capturedDir](const IInspectable&, const RoutedEventArgs&) {
                 if (_collapsedDirs.find(capturedDir) != _collapsedDirs.end())
@@ -3912,6 +3929,7 @@ namespace winrt::TerminalApp::implementation
                 rowBtn.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
                     _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
                 });
+                AgentSetTip(rowBtn, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.");
                 _treeHost.Children().Append(rowBtn);
             }
         }
@@ -4483,6 +4501,7 @@ namespace winrt::TerminalApp::implementation
         {
             MenuFlyoutItem up;
             up.Text(L"Move up");
+            AgentSetTip(up, L"Move this queued prompt earlier in the send order.");
             up.Click([weak, disp, promptId](const IInspectable&, const RoutedEventArgs&) {
                 if (disp)
                 {
@@ -4498,6 +4517,7 @@ namespace winrt::TerminalApp::implementation
 
             MenuFlyoutItem down;
             down.Text(L"Move down");
+            AgentSetTip(down, L"Move this queued prompt later in the send order.");
             down.Click([weak, disp, promptId](const IInspectable&, const RoutedEventArgs&) {
                 if (disp)
                 {
@@ -4513,6 +4533,7 @@ namespace winrt::TerminalApp::implementation
 
             MenuFlyoutItem del;
             del.Text(L"Delete");
+            AgentSetTip(del, L"Remove this prompt from the queue \x2014 it won't be sent.");
             del.Click([weak, disp, promptId](const IInspectable&, const RoutedEventArgs&) {
                 if (disp)
                 {
@@ -5343,18 +5364,22 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
         _setSkipPermissions = ToggleSwitch{};
         _setSkipPermissions.Header(winrt::box_value(L"Skip permission prompts (bypass)"));
+        AgentSetTip(_setSkipPermissions, L"Launch new sessions with --dangerously-skip-permissions \x2014 auto-accepts tool prompts and the per-folder trust dialog so an unattended session never wedges. Off pins normal prompts instead.");
         panel.Children().Append(_setSkipPermissions);
         _setModel = TextBox{};
         _setModel.Header(winrt::box_value(L"Model"));
         _setModel.PlaceholderText(L"As Is \x2014 blank keeps Claude's default (e.g. opus / sonnet)");
+        AgentSetTip(_setModel, L"Model new sessions launch with (like /model) \x2014 e.g. opus or sonnet. Blank keeps Claude's own default.");
         panel.Children().Append(_setModel);
         _setIncludeCoAuthored = ToggleSwitch{};
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
+        AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
         panel.Children().Append(_setIncludeCoAuthored);
         _setEnv = TextBox{};
         _setEnv.Header(winrt::box_value(L"Environment variables (applied to every session)"));
         _setEnv.PlaceholderText(L"NAME=VALUE;NAME=VALUE  (e.g. FOO=bar;HTTPS_PROXY=http://h:8080)");
         _setEnv.TextWrapping(TextWrapping::Wrap);
+        AgentSetTip(_setEnv, L"Extra environment variables set on every launched session \x2014 a semicolon-separated NAME=VALUE list (e.g. HTTPS_PROXY=http://h:8080).");
         panel.Children().Append(_setEnv);
 
         // CLAUDE BINARY (native-exe-only policy): the auto-detected native claude.exe + an optional
@@ -5365,14 +5390,17 @@ namespace winrt::TerminalApp::implementation
         _setClaudeDetected.TextWrapping(TextWrapping::Wrap);
         _setClaudeDetected.Opacity(0.85);
         _setClaudeDetected.FontSize(12);
+        AgentSetTip(_setClaudeDetected, L"The native claude.exe Agentmaster resolved (PATH \xB7 %USERPROFILE%\\.local\\bin \xB7 behind an npm claude.cmd). The fleet view drives this binary, so a pure-Node Claude is unsupported \x2014 launch / resume / fork stay disabled until one is found.");
         panel.Children().Append(_setClaudeDetected);
         _setClaudeExePath = TextBox{};
         _setClaudeExePath.Header(winrt::box_value(L"Override claude.exe path"));
         _setClaudeExePath.PlaceholderText(L"blank \x2014 auto-detect; or a full path to claude.exe");
+        AgentSetTip(_setClaudeExePath, L"Force a specific claude.exe instead of auto-detecting \x2014 must be a real *.exe (a .cmd / .bat or the Node CLI is rejected). Blank auto-detects.");
         panel.Children().Append(_setClaudeExePath);
         {
             auto browse = Button{};
             browse.Content(winrt::box_value(L"Browse for claude.exe\x2026"));
+            AgentSetTip(browse, L"Pick claude.exe with a file dialog \x2014 sets the override above and re-resolves the binary immediately, no restart.");
             browse.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForClaudeExe(true); });
             panel.Children().Append(browse);
         }
@@ -5384,22 +5412,27 @@ namespace winrt::TerminalApp::implementation
         _setDefaultMode.Items().Append(winrt::box_value(L"Off"));
         _setDefaultMode.Items().Append(winrt::box_value(L"SemiAuto"));
         _setDefaultMode.Items().Append(winrt::box_value(L"Full"));
+        AgentSetTip(_setDefaultMode, L"Autopilot mode each new session starts in \x2014 Off (manual) \xB7 SemiAuto (you confirm each send) \xB7 Full (auto-send the queue on turn-complete). Per-session, changeable from the Flight Plan.");
         panel.Children().Append(_setDefaultMode);
         _setMaxAutoSends = TextBox{};
         _setMaxAutoSends.Header(winrt::box_value(L"Max auto-sends per run"));
         _setMaxAutoSends.PlaceholderText(L"100");
+        AgentSetTip(_setMaxAutoSends, L"Backstop cap on how many prompts Autopilot may auto-send in one run before stopping. Blank or 0 resets to 100.");
         panel.Children().Append(_setMaxAutoSends);
         _setStopOnError = ToggleSwitch{};
         _setStopOnError.Header(winrt::box_value(L"Stop on error"));
+        AgentSetTip(_setStopOnError, L"When on, Autopilot halts a session's queue as soon as it enters the Error state instead of sending the next prompt.");
         panel.Children().Append(_setStopOnError);
         _setPauseOnHuman = ToggleSwitch{};
         _setPauseOnHuman.Header(winrt::box_value(L"Pause on human input"));
+        AgentSetTip(_setPauseOnHuman, L"When on, typing into a session's terminal yourself pauses its Autopilot so a manual interruption isn't overwritten by the next queued send.");
         panel.Children().Append(_setPauseOnHuman);
 
         // BEHAVIOR
         panel.Children().Append(Text(L"BEHAVIOR", 11, true, 0.6));
         _setConfirmKill = ToggleSwitch{};
         _setConfirmKill.Header(winrt::box_value(L"Confirm before archiving a session"));
+        AgentSetTip(_setConfirmKill, L"When on, closing a session (tab X, the tree's Del, or Archive) first asks Archive vs Delete. Off archives without the prompt. The transcript on disk is never deleted either way.");
         panel.Children().Append(_setConfirmKill);
         // How the tab/session rename box commits via the keyboard. Clicking away (focus loss) ALWAYS
         // commits; this only governs the Enter / Shift+Enter shortcut. The box is multi-line, so the
@@ -5416,14 +5449,17 @@ namespace winrt::TerminalApp::implementation
         // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn — past that the
         // session is no longer "hot", so the Triage Board demotes it out of Waiting-for-you.
         _setWaitingDecay.PlaceholderText(L"5 \x2014 Claude's server cache lifetime; 0 = never");
+        AgentSetTip(_setWaitingDecay, L"How long a Waiting-for-you session sits before the board demotes it to Idle \x2014 default 5 (Claude's ~5-minute server cache lifetime). 0 = never decay.");
         panel.Children().Append(_setWaitingDecay);
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
+        AgentSetTip(_setLaunchDir, L"Directory the Launch box is pre-filled with. Blank defaults to %USERPROFILE%.");
         panel.Children().Append(_setLaunchDir);
         _setRecentDirsLimit = TextBox{};
         _setRecentDirsLimit.Header(winrt::box_value(L"Recent Launch directories to remember"));
         _setRecentDirsLimit.PlaceholderText(L"10");
+        AgentSetTip(_setRecentDirsLimit, L"How many recently-used directories the Launch box's path-picker keeps in its history. Blank or 0 resets to 10.");
         panel.Children().Append(_setRecentDirsLimit);
 
         // Sessions browser: un-hide every session removed via the Sessions page's right-click
@@ -5469,9 +5505,11 @@ namespace winrt::TerminalApp::implementation
         _setProfileDir.TextWrapping(TextWrapping::Wrap);
         _setProfileDir.Opacity(0.85);
         _setProfileDir.FontSize(12);
+        AgentSetTip(_setProfileDir, L"This install's active profile folder \x2014 where all sessions, settings, hooks, and window layouts are stored. A staged change shows as current \x2192 new (after restart).");
         panel.Children().Append(_setProfileDir);
         auto changeProfile = Button{};
         changeProfile.Content(winrt::box_value(L"Change profile folder\x2026"));
+        AgentSetTip(changeProfile, L"Point this install at a different profile folder \x2014 applies on the next start (the running app can't re-home its state mid-run).");
         changeProfile.Click([this](const IInspectable&, const RoutedEventArgs&) {
             // Defer off the click tick (the XAML-Islands pointer-handler rule), then run the
             // pure-Win32 picker — a Win32 modal gets its keyboard input directly in islands.
@@ -5511,9 +5549,11 @@ namespace winrt::TerminalApp::implementation
         buttons.Margin(Thickness{ 0, 8, 0, 0 });
         auto cancel = Button{};
         cancel.Content(winrt::box_value(L"Cancel"));
+        AgentSetTip(cancel, L"Close without saving \x2014 discard any changes made here.");
         cancel.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideSettings(); });
         auto save = Button{};
         save.Content(winrt::box_value(L"Save"));
+        AgentSetTip(save, L"Save these settings and apply them \x2014 they persist to disk and govern future sessions (and live-apply where possible, e.g. the Claude binary and tab options).");
         save.Click([this](const IInspectable&, const RoutedEventArgs&) { _SaveSettings(); });
         buttons.Children().Append(cancel);
         buttons.Children().Append(save);
@@ -5971,6 +6011,7 @@ namespace winrt::TerminalApp::implementation
         buttons.Margin(Thickness{ 0, 8, 0, 0 });
         auto getClaude = Button{};
         getClaude.Content(winrt::box_value(L"Get Claude Code"));
+        AgentSetTip(getClaude, L"Open the Claude Code setup docs in your browser.");
         getClaude.Click([](const IInspectable&, const RoutedEventArgs&) {
             try
             {
@@ -5980,9 +6021,11 @@ namespace winrt::TerminalApp::implementation
         });
         auto browse = Button{};
         browse.Content(winrt::box_value(L"Browse for claude.exe\x2026"));
+        AgentSetTip(browse, L"Pick an existing claude.exe with a file dialog \x2014 sets it as the override and re-resolves.");
         browse.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForClaudeExe(false); });
         auto recheck = Button{};
         recheck.Content(winrt::box_value(L"Re-check"));
+        AgentSetTip(recheck, L"Look for claude.exe again \x2014 click after running claude install or installing the native build.");
         recheck.Click([this](const IInspectable&, const RoutedEventArgs&) {
             const auto exe = ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
             if (!exe.empty())
@@ -5997,6 +6040,7 @@ namespace winrt::TerminalApp::implementation
         });
         auto close = Button{};
         close.Content(winrt::box_value(L"Close"));
+        AgentSetTip(close, L"Dismiss this notice \x2014 Claude launch / resume / fork stay disabled until a native claude.exe is found.");
         close.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideClaudeMissing(); });
         buttons.Children().Append(getClaude);
         buttons.Children().Append(browse);
@@ -6137,6 +6181,7 @@ namespace winrt::TerminalApp::implementation
             banner.Children().Append(lbl);
             auto sendBtn = Button{};
             sendBtn.Content(winrt::box_value(L"Send"));
+            AgentSetTip(sendBtn, L"Semi-auto: send the next queued prompt that Autopilot armed.");
             sendBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 if (_confirmHandler && !_selectedId.empty())
                 {
@@ -6145,6 +6190,7 @@ namespace winrt::TerminalApp::implementation
             });
             auto skipBtn = Button{};
             skipBtn.Content(winrt::box_value(L"Skip"));
+            AgentSetTip(skipBtn, L"Semi-auto: skip this armed prompt without sending it.");
             skipBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 if (_confirmHandler && !_selectedId.empty())
                 {
@@ -6240,6 +6286,9 @@ namespace winrt::TerminalApp::implementation
             // (a sent/historical row can't be reordered), plus Archive session always. showOrigin
             // is true for the SENT summary, false for the UPCOMING queue.
             rowBtn.ContextFlyout(_MakePromptMenu(pid, !showOrigin));
+            AgentSetTip(rowBtn, showOrigin ?
+                                    winrt::hstring{ L"A message this session already received \x2014 right-click to archive the session." } :
+                                    winrt::hstring{ L"A queued prompt \x2014 click to select it; right-click to move or delete it." });
             _planListHost.Children().Append(rowBtn);
         };
 
@@ -7606,6 +7655,7 @@ namespace winrt::TerminalApp::implementation
         btn.IsTabStop(false);
         btn.AllowFocusOnInteraction(false);
         const auto captured = fullPath;
+        AgentSetTip(btn, winrt::hstring{ L"Use this folder \x2014 " } + winrt::hstring{ fullPath });
         btn.Click([this, captured](const IInspectable&, const RoutedEventArgs&) { _PickPath(captured); });
         return btn;
     }

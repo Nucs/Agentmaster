@@ -1632,12 +1632,18 @@ namespace winrt::TerminalApp::implementation
         leftGrip.HorizontalAlignment(HorizontalAlignment::Left);
         leftGrip.VerticalAlignment(VerticalAlignment::Stretch);
         wireGrip(leftGrip, true, false, CoreCursorType::SizeWestEast);
+        ToolTipService::SetToolTip(leftGrip, winrt::box_value(winrt::hstring{
+            L"Drag to resize the panel width (shared across tabs).\n"
+            L"Hold Shift to size this tab only." }));
 
         Border bottomGrip{};
         bottomGrip.Height(6);
         bottomGrip.HorizontalAlignment(HorizontalAlignment::Stretch);
         bottomGrip.VerticalAlignment(VerticalAlignment::Bottom);
         wireGrip(bottomGrip, false, true, CoreCursorType::SizeNorthSouth);
+        ToolTipService::SetToolTip(bottomGrip, winrt::box_value(winrt::hstring{
+            L"Drag to resize the panel height (shared across tabs).\n"
+            L"Hold Shift to size this tab only." }));
 
         Border cornerGrip{};
         cornerGrip.Width(14);
@@ -1645,6 +1651,9 @@ namespace winrt::TerminalApp::implementation
         cornerGrip.HorizontalAlignment(HorizontalAlignment::Left);
         cornerGrip.VerticalAlignment(VerticalAlignment::Bottom);
         wireGrip(cornerGrip, true, true, CoreCursorType::SizeNortheastSouthwest); // bottom-left corner == NE/SW diagonal
+        ToolTipService::SetToolTip(cornerGrip, winrt::box_value(winrt::hstring{
+            L"Drag to resize the panel width and height at once (shared across tabs).\n"
+            L"Hold Shift to size this tab only." }));
 
         Grid layout{};
         layout.Children().Append(contentBorder);

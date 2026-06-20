@@ -561,6 +561,7 @@ namespace winrt::TerminalApp::implementation
         }
         Button back;
         back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
+        ArchiveSetTip(back, L"Back \x2014 close the Archive page and return to your tabs");
         back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _HideArchivePage(); });
         Grid::SetColumn(back, 0);
         header.Children().Append(back);
@@ -578,6 +579,7 @@ namespace winrt::TerminalApp::implementation
         search.PlaceholderText(L"Search title, dir, branch, prompts\x2026");
         search.Width(260);
         search.VerticalAlignment(VerticalAlignment::Center);
+        ArchiveSetTip(search, L"Search \x2014 filter the table by title, directory, branch, session id, or any queued prompt; space-separated words all must match");
         _archiveSearchBox = search;
         search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
             if (const auto tb = s.try_as<TextBox>())
@@ -681,6 +683,7 @@ namespace winrt::TerminalApp::implementation
             bar.Margin(Thickness{ 2, 4, 2, 4 });
             bar.Background(ArchiveBrush(0x01, 0x80, 0x80, 0x80)); // ~invisible, yet hit-testable
             bar.Child(grip);
+            ArchiveSetTip(bar, L"Drag \x2014 resize the table and detail panes; the split is remembered across windows and restarts");
 
             bar.PointerEntered([grip, hotGrip](const winrt::IInspectable&, const Input::PointerRoutedEventArgs&) {
                 ArchiveApplyCursor(CoreCursorType::SizeWestEast);
@@ -792,6 +795,7 @@ namespace winrt::TerminalApp::implementation
         _archiveRestoreSelBtn = Button{};
         _archiveRestoreSelBtn.Content(winrt::box_value(winrt::hstring{ L"Restore selected" }));
         _archiveRestoreSelBtn.IsEnabled(false);
+        ArchiveSetTip(_archiveRestoreSelBtn, L"Restore the checked sessions into this window \x2014 each resumes its conversation; restored in table order");
         _archiveRestoreSelBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Agentmaster: DEFER — _RestoreCheckedArchived loops _RestoreArchivedSession (creates N tabs).
             // Mutating the tree synchronously inside this Click is the page's documented crash class.
@@ -1214,6 +1218,7 @@ namespace winrt::TerminalApp::implementation
             b.HorizontalAlignment(HorizontalAlignment::Stretch);
             b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(ArchiveText(label + arrow, 11, true, 0.7));
+            ArchiveSetTip(b, L"Sort by " + std::wstring{ label } + L" \x2014 click to sort; click again to reverse the order");
             b.Click([this, col](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 // Defer: rebuilding the header here would destroy this very sort button mid-click (XAML
                 // hit-test AV). Let the click finish routing, then re-sort + rebuild on a clean tick.
@@ -1380,6 +1385,7 @@ namespace winrt::TerminalApp::implementation
                 cb.VerticalAlignment(VerticalAlignment::Center);
                 cb.HorizontalAlignment(HorizontalAlignment::Center);
                 cb.IsChecked(_archiveChecked.find(r.id) != _archiveChecked.end()); // set BEFORE handlers (no spurious fire)
+                ArchiveSetTip(cb, L"Select \x2014 add this session to the batch for Restore selected / Delete selected");
                 cb.Checked([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                     _archiveChecked.insert(rid);
                     _UpdateArchiveBulkButton();
@@ -1664,6 +1670,7 @@ namespace winrt::TerminalApp::implementation
         const auto makeReopenButton = [this](int fallbackIdx, std::wstring wid) {
             Button reopen;
             reopen.Content(winrt::box_value(winrt::hstring{ L"Reopen its window" }));
+            ArchiveSetTip(reopen, L"Reopen its window \x2014 restore the whole saved window (its tabs and layout) at its saved position and size, as a new window");
             reopen.Click([this, fallbackIdx, wid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 // Agentmaster: DEFER — run on a clean tick like the page's other handlers (collapsing/launching
                 // off the in-flight pointer event is the crash class; see "Restore here" below). The stale-index
@@ -1984,6 +1991,7 @@ namespace winrt::TerminalApp::implementation
         }
         Button restore;
         restore.Content(winrt::box_value(winrt::hstring{ L"Restore here" }));
+        ArchiveSetTip(restore, L"Restore here \x2014 reopen this session in the current window and resume its conversation where it left off");
         const winrt::hstring hid{ id };
         restore.Click([this, hid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Agentmaster: DEFER — _RestoreArchivedSession creates a tab (mutates the visual tree). Doing that

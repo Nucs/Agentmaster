@@ -380,6 +380,7 @@ namespace winrt::TerminalApp::implementation
         }
         Button back;
         back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
+        SessSetTip(back, L"Back \x2014 close the Sessions browser and return to your tabs.");
         back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _HideSessionsPage(); });
         Grid::SetColumn(back, 0);
         header.Children().Append(back);
@@ -545,16 +546,19 @@ namespace winrt::TerminalApp::implementation
             _sessFromBox = TextBox{};
             _sessFromBox.PlaceholderText(L"from: 2026-05-10");
             _sessFromBox.Width(180);
+            SessSetTip(_sessFromBox, L"Range start \x2014 list sessions active on or after this date (YYYY-MM-DD). Overrides the time-window preset.");
             card.Children().Append(_sessFromBox);
             _sessToBox = TextBox{};
             _sessToBox.PlaceholderText(L"to: 2026-06-10 (empty = now)");
             _sessToBox.Width(180);
+            SessSetTip(_sessToBox, L"Range end \x2014 list sessions last active on or before this date (YYYY-MM-DD); leave empty for now.");
             card.Children().Append(_sessToBox);
             StackPanel actions;
             actions.Orientation(Orientation::Horizontal);
             actions.Spacing(6);
             Button apply;
             apply.Content(winrt::box_value(winrt::hstring{ L"Apply" }));
+            SessSetTip(apply, L"Apply the custom From/To range \x2014 re-lists the sessions active within it.");
             apply.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                     if (auto self = weak.get())
