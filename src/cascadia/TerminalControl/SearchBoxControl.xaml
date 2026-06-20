@@ -180,7 +180,9 @@
           shadow (was the stock FlyoutPresenter look). RequestedTheme="Dark" forces the whole box to
           render dark-themed (light text + glyphs) like the always-dark overlays, regardless of the
           app theme — the existing Dark ThemeDictionary entries above then drive the buttons.  -->
-    <StackPanel Margin="8"
+    <!--  Agentmaster: top margin 4 (not the uniform 8) so the box lines up with the per-tab badge,
+          which sits 4px from the top of the pane.  -->
+    <StackPanel Margin="8,4,8,8"
                 Padding="6,3"
                 Background="#CC202020"
                 BorderBrush="#40FFFFFF"
