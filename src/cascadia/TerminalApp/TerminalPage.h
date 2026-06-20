@@ -529,13 +529,18 @@ namespace winrt::TerminalApp::implementation
         std::atomic<uint64_t> _sessionsSearchGen{ 0 }; // bumps per query — a stale slow search self-cancels
         std::atomic<bool> _sessionsIndexing{ false }; // a background gather/index pass is running
         std::shared_ptr<ThrottledFunc<>> _sessionsSearchThrottled{ nullptr }; // keystroke debounce
-        // One-entry detail SUMMARY cache, keyed by (id, transcript mtime) — the archive detail's
-        // pattern: the whole-file analyze + box render happen off-thread once, re-shows hit the
-        // cache. The text carries kSummarySepMark sentinel lines (rendered as full-width rules).
-        std::wstring _sessionsDetailTiId;
-        int64_t _sessionsDetailTiMtime{ 0 };
-        std::wstring _sessionsDetailSummary;
-        bool _sessionsDetailPending{ false };
+        // Detail SUMMARY cache — keyed by id, validated by transcript mtime. The whole-file analyze
+        // + box render happen off-thread once per (id, mtime); re-shows AND background PREFETCHES of
+        // adjacent rows hit the cache for an instant, spinner-free render. A MULTI-entry map (was a
+        // single entry) so Up/Down/click can warm neighbors ahead of navigation. The text carries
+        // kSummarySepMark sentinel lines (rendered as full-width rules). UI-thread access only.
+        struct _SessionsSummaryEntry
+        {
+            int64_t mtime{ 0 };
+            std::wstring text;
+        };
+        std::unordered_map<std::wstring, _SessionsSummaryEntry> _sessionsSummaryCache;
+        std::unordered_set<std::wstring> _sessionsSummaryLoading; // ids with an analyze in flight — dedupes a foreground select racing its own prefetch
         // Agentmaster: when set, a launched/restored/forked Claude tab is created WITHOUT focus (a
         // BACKGROUND tab) and the Sessions page is kept open — the Sessions-page right-click "bulk
         // open" path. _InitializeTab skips the SelectedItem switch; _ResumeSessionFromDisk /
@@ -774,7 +779,8 @@ namespace winrt::TerminalApp::implementation
         void _RenderSessionsTable(); // apply the current search result set + sort -> rebuild the table
         void _ShowSessionsDetail(const std::wstring& sessionId); // populate the right pane (metadata + actions + hit snippets + the full session-summary box)
         winrt::fire_and_forget _RunSessionsSearch(); // the two-phase search: fast inline, slow on a background pass (generation-cancelled)
-        winrt::fire_and_forget _LoadSessionsSummary(std::wstring sessionId, std::wstring dir, int64_t mtime); // detail: off-thread whole-file analyze + RenderSessionSummaryBox(full), cached by (id, mtime)
+        winrt::fire_and_forget _LoadSessionsSummary(std::wstring sessionId, std::wstring dir, int64_t mtime); // detail: off-thread whole-file analyze + RenderSessionSummaryBox(full) into _sessionsSummaryCache; on completion re-renders the detail IFF its id is the selected row (clears that row's spinner). Deduped via _sessionsSummaryLoading.
+        void _PrefetchSessionsSummaries(const std::wstring& anchorId, int direction); // warm neighbors' summaries off-thread so navigation lands on a cache hit: +1 = the next 2 rows (Down look-ahead), -1 = the previous 2 (Up), 0 = the upper + lower neighbor (a click). No wrap at the ends; deduped + cheap when warm.
         void _CycleSessionsWindow(); // [1 month] click: 1d -> 3d -> 7d -> 14d -> 1mo -> 3mo -> wrap (clears a custom range)
         void _ApplySessionsRange(); // the hover popup's Apply: parse From/To (YYYY-MM-DD) into a custom range
         int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)

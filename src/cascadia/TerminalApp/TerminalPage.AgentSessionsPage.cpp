@@ -80,6 +80,25 @@ namespace winrt::TerminalApp::implementation
             return t;
         }
 
+        // A "loading…" row for the summary display area: a spinning ProgressRing + a dim label,
+        // shown while the off-thread whole-file analyze runs. The detail pane re-renders when the
+        // load lands, so the rendered box (or nothing, for an empty summary) replaces this.
+        UIElement SessSummaryLoading()
+        {
+            StackPanel p;
+            p.Orientation(Orientation::Horizontal);
+            p.Spacing(8);
+            p.Margin(Thickness{ 0, 10, 0, 0 });
+            p.VerticalAlignment(VerticalAlignment::Center);
+            winrt::Microsoft::UI::Xaml::Controls::ProgressRing ring;
+            ring.IsActive(true);
+            ring.Width(18);
+            ring.Height(18);
+            p.Children().Append(ring);
+            p.Children().Append(SessText(L"Loading summary\x2026", 11, false, 0.6));
+            return p;
+        }
+
         // Render a session-summary box (RenderSessionSummaryBox output, full=true) into `host`: split
         // on '\n'; a lone kSummarySepMark sentinel line becomes a full-width rule (border to border),
         // every other run becomes a monospace, wrapped, selectable TextBlock — mirroring the overlay
@@ -1287,6 +1306,7 @@ namespace winrt::TerminalApp::implementation
                         self->_sessionsSelectedId = id;
                         self->_UpdateSessionsSelectionHighlight(); // recolor only — no table rebuild per click
                         self->_ShowSessionsDetail(id);
+                        self->_PrefetchSessionsSummaries(id, 0); // warm the upper + lower neighbor in the background
                     }
                 });
             });
@@ -1592,15 +1612,21 @@ namespace winrt::TerminalApp::implementation
         // filtered) + Files Read/Created/Edited + any plan-start/plan-end lineage. Off-thread whole-
         // file analyze, cached by (id, transcript mtime). It SUPERSEDES the old flat PROMPTS list —
         // the box's Messages section is the same prompts, deduped over the WHOLE transcript.
-        if (_sessionsDetailTiId == row->id && _sessionsDetailTiMtime == row->lastActivityMs)
+        if (const auto it = _sessionsSummaryCache.find(row->id); it != _sessionsSummaryCache.end() && it->second.mtime == row->lastActivityMs)
         {
-            if (!_sessionsDetailSummary.empty())
+            // Warm cache — a prior view OR a background prefetch already analyzed this transcript;
+            // render instantly, no spinner. (An empty analyze is cached as empty => nothing shown.)
+            if (!it->second.text.empty())
             {
-                SessAppendSummaryBox(_sessionsDetailHost, _sessionsDetailSummary);
+                SessAppendSummaryBox(_sessionsDetailHost, it->second.text);
             }
         }
-        else if (!_sessionsDetailPending)
+        else
         {
+            // Cold: show a loading icon in the summary area and analyze off-thread. The load's
+            // completion re-renders this pane (cache hit => the box replaces the spinner). The call
+            // dedupes against an in-flight prefetch of the same id.
+            _sessionsDetailHost.Children().Append(SessSummaryLoading());
             _LoadSessionsSummary(row->id, row->dir, row->lastActivityMs);
         }
     }
@@ -1613,7 +1639,19 @@ namespace winrt::TerminalApp::implementation
     // <id>` (the page's Resume/Fork buttons do the real, hook-wired launch). Cached by (id, mtime).
     winrt::fire_and_forget TerminalPage::_LoadSessionsSummary(std::wstring sessionId, std::wstring dir, int64_t mtime)
     {
-        _sessionsDetailPending = true;
+        // Dedupe: one analyze per id at a time — a foreground select and a background prefetch can
+        // both target the same row; collapse them so the transcript is read once. The completion
+        // below re-renders the detail IFF this id is the one currently selected, regardless of which
+        // call started the load, so a prefetch finishing after the user lands on it clears its spinner.
+        if (_sessionsSummaryLoading.count(sessionId))
+        {
+            co_return;
+        }
+        if (const auto it = _sessionsSummaryCache.find(sessionId); it != _sessionsSummaryCache.end() && it->second.mtime == mtime)
+        {
+            co_return; // already warm (a prior view or a completed prefetch)
+        }
+        _sessionsSummaryLoading.insert(sessionId);
         auto weakThis{ get_weak() };
         co_await winrt::resume_background();
 
@@ -1641,13 +1679,95 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
-        self->_sessionsDetailPending = false;
-        self->_sessionsDetailTiId = sessionId;
-        self->_sessionsDetailTiMtime = mtime;
-        self->_sessionsDetailSummary = std::move(text);
+        self->_sessionsSummaryLoading.erase(sessionId);
+        self->_sessionsSummaryCache[sessionId] = _SessionsSummaryEntry{ mtime, std::move(text) };
+        // Bound the cache over a long browse (each entry is a rendered box — up to tens of KB): past
+        // a cap, keep only the current selection; neighbors re-prefetch on the next navigation.
+        if (self->_sessionsSummaryCache.size() > 128)
+        {
+            std::optional<_SessionsSummaryEntry> keep;
+            if (const auto sel = self->_sessionsSummaryCache.find(self->_sessionsSelectedId); sel != self->_sessionsSummaryCache.end())
+            {
+                keep = sel->second;
+            }
+            self->_sessionsSummaryCache.clear();
+            if (keep)
+            {
+                self->_sessionsSummaryCache[self->_sessionsSelectedId] = std::move(*keep);
+            }
+        }
+        // Re-render IFF this id is the row the user is looking at — replaces its spinner with the box.
+        // A prefetch that completes for a non-selected row just warms the cache (no UI churn).
         if (self->_sessionsSelectedId == sessionId && self->_sessionsPageVisible.load(std::memory_order_relaxed))
         {
             self->_ShowSessionsDetail(sessionId);
+        }
+    }
+
+    // PREFETCH adjacent rows' summaries into the background cache so navigation lands on a warm cache
+    // (instant render, no spinner) — the "smooth experience" ask. direction +1 = the next two rows (a
+    // Down look-ahead), -1 = the previous two (Up), 0 = the immediate upper + lower neighbor (a click).
+    // No wrap at the ends (a wrapped row isn't "adjacent"); each not-yet-warm target kicks a background
+    // _LoadSessionsSummary, which itself dedupes against an in-flight/cached load. UI thread only.
+    void TerminalPage::_PrefetchSessionsSummaries(const std::wstring& anchorId, int direction)
+    {
+        if (anchorId.empty() || _sessionsVisibleOrder.empty())
+        {
+            return;
+        }
+        const int n = static_cast<int>(_sessionsVisibleOrder.size());
+        int idx = -1;
+        for (int i = 0; i < n; ++i)
+        {
+            if (_sessionsVisibleOrder[i] == anchorId)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0)
+        {
+            return;
+        }
+        // Two rows in the travel direction, or the two neighbors for a click (direction 0).
+        int targets[2];
+        if (direction > 0)
+        {
+            targets[0] = idx + 1;
+            targets[1] = idx + 2;
+        }
+        else if (direction < 0)
+        {
+            targets[0] = idx - 1;
+            targets[1] = idx - 2;
+        }
+        else
+        {
+            targets[0] = idx - 1;
+            targets[1] = idx + 1;
+        }
+        for (const int t : targets)
+        {
+            if (t < 0 || t >= n)
+            {
+                continue; // off the ends
+            }
+            const std::wstring& tid = _sessionsVisibleOrder[t];
+            // Already warm? (cache key = id, validated by lastActivityMs.) Else find the row's dir +
+            // mtime and kick the background analyze (deduped inside _LoadSessionsSummary).
+            for (const auto& r : _sessionsRows)
+            {
+                if (r.id != tid)
+                {
+                    continue;
+                }
+                const auto cit = _sessionsSummaryCache.find(tid);
+                if (cit == _sessionsSummaryCache.end() || cit->second.mtime != r.lastActivityMs)
+                {
+                    _LoadSessionsSummary(r.id, r.dir, r.lastActivityMs);
+                }
+                break;
+            }
         }
     }
 
@@ -1890,6 +2010,9 @@ namespace winrt::TerminalApp::implementation
         _sessionsSelectedId = _sessionsVisibleOrder[next];
         _UpdateSessionsSelectionHighlight();
         _ShowSessionsDetail(_sessionsSelectedId);
+        // PREFETCH in the direction of travel so the FOLLOWING Up/Down lands on a warm cache —
+        // Down warms the two rows below, Up the two above (background, deduped, no wrap at the ends).
+        _PrefetchSessionsSummaries(_sessionsSelectedId, delta > 0 ? 1 : -1);
         // Key-nav scrolls WITHOUT pointer input — a row tip open under the stationary mouse
         // never gets the PointerExited that would close it when its row scrolls away.
         SessCloseTipsIn(_sessionsRowsHost);
