@@ -98,13 +98,12 @@
               dips the dot 1px below slot-center (dead-center reads optically HIGH against the
               title) while the consumed height stays 10px (no header-row growth).  -->
         <!--  Agentmaster (RED FLASH RING): the status dot wrapped so a red ring can flash AROUND it.
-              The wrap Grid is sized to the RING (14px), NOT the 10px dot — an earlier 10px wrap CLIPPED
-              the larger ring to a truncated SQUARE (the tab header clips anything past a child's bounds,
-              as the dot comment above warns). At 14px the clip box == the ring's bounding box, and a
-              circle inscribed in its bounding square is never truncated, so the FULL red circle shows.
-              The ring is a 14px red ellipse drawn FIRST (behind); the 10px dot, centred on top, covers
-              its centre so only a ~2px red ring peeks out AROUND the dot's black stroke — reading
-              outside-in: red ring, then black stroke, then the status-colour fill. The dot stays 10px
+              The wrap Grid is 14px (bigger than the 10px dot) so the red ring is fully CONTAINED — an
+              earlier 10px wrap let the ring overflow and the tab header CLIPPED it to a truncated SQUARE
+              (the edge-clipping the dot comment above warns about). The ring is a 13px red ellipse drawn
+              FIRST (behind), sitting inside the 14px wrap with ~0.5px clearance (no clip); the 10px dot,
+              centred on top, covers its centre so only a ~1.5px red ring peeks out AROUND the dot's black
+              stroke — reading outside-in: red ring, then black stroke, then the status-colour fill. The dot stays 10px
               (a 2px transparent inset within the wrap at rest); the wider 14px slot shifts the title
               ~4px (right margin trimmed 6->4 to keep the dot->title gap). The ring shows only while the
               shared flash timer toggles AgentFlashRingVisible (every 600ms) on an unvisited
@@ -116,8 +115,8 @@
               Margin="0,1,4,-1"
               VerticalAlignment="Center">
             <Ellipse x:Name="HeaderAgentStatusFlashRing"
-                     Width="14"
-                     Height="14"
+                     Width="13"
+                     Height="13"
                      HorizontalAlignment="Center"
                      VerticalAlignment="Center"
                      IsHitTestVisible="False"
