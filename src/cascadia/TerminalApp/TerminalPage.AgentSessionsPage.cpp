@@ -1167,8 +1167,17 @@ namespace winrt::TerminalApp::implementation
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
             SessSetTip(dir, winrt::hstring{ r.dir }); // the full path — the cell end-trims, losing the leaf
-            Grid::SetColumn(dir, 2);
-            g.Children().Append(dir);
+            // Same working-directory-color underline as the title (reusing the row's `underline`
+            // brush) — the Directory cell is literally the folder, so it wears the folder's color too.
+            Border dirWrap;
+            dirWrap.Child(dir);
+            dirWrap.HorizontalAlignment(HorizontalAlignment::Left);
+            dirWrap.VerticalAlignment(VerticalAlignment::Center);
+            dirWrap.BorderBrush(underline);
+            dirWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
+            dirWrap.Padding(Thickness{ 0, 0, 0, 1 });
+            Grid::SetColumn(dirWrap, 2);
+            g.Children().Append(dirWrap);
 
             auto branch = SessText(winrt::hstring{ r.branch }, 11, false, 0.6);
             SessSetTip(branch, winrt::hstring{ r.branch }); // the full branch name — no-op when empty
