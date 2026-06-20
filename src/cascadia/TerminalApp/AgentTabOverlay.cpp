@@ -1591,9 +1591,12 @@ namespace winrt::TerminalApp::implementation
                 // desync the grip from the pointer (the panel jumps to the cap on the first move). Seeding
                 // from ActualWidth/Height makes the grip track the pointer 1:1, so the panel grows smoothly
                 // PAST this tab's content up to the max band (the forced exact size in _ApplySummarySize).
-                // Fall back to the cap only before first layout (ActualWidth/Height == 0).
+                // Fall back to the cap only before first layout (ActualWidth/Height == 0). BOTH dims read
+                // from _summaryRoot (the OUTER box) — that is the element _ApplySummarySize now forces, so
+                // the grip tracks the box edge 1:1 (height used to read the inner scroll viewport, which is
+                // ~one header shorter than the box and would desync the bottom grip).
                 const double aw = self->_summaryRoot ? self->_summaryRoot.ActualWidth() : 0.0;
-                const double ah = self->_summaryScroll ? self->_summaryScroll.ActualHeight() : 0.0;
+                const double ah = self->_summaryRoot ? self->_summaryRoot.ActualHeight() : 0.0;
                 self->_summaryDragStartW = aw > 0.0 ? aw : self->_CurrentSummaryWidthPx();
                 self->_summaryDragStartH = ah > 0.0 ? ah : self->_CurrentSummaryHeightPx();
                 if (const auto el = sender.try_as<UIElement>())
@@ -1788,26 +1791,38 @@ namespace winrt::TerminalApp::implementation
         const double hpx = _CurrentSummaryHeightPx();
         if (_summaryScroll)
         {
-            _summaryScroll.MaxHeight(hpx);
+            _summaryScroll.MaxHeight(hpx); // the at-rest height cap (content-driven below this)
         }
         // NaN is the special value XAML uses for "Auto" sizing (cf. TabManagement::_UpdateTabView).
+        //
+        // Grow PAST this tab's content during a drag by pinning an explicit size on the OUTER panel border
+        // ONLY — a single DEFINITE box the inner content (title / times / scroll) lays out *within*.
+        // CRASH FIX: the previous approach forced the inner ScrollViewer's Height instead. That viewport
+        // has an Auto vertical scrollbar + wrapping content, so a forced height made its scrollbar-reflow
+        // feed back into the panel's measure and never converge — XAML raised a non-continuable "Layout
+        // cycle detected" fail-fast (0xc000027b in Windows.UI.Xaml.dll) on resize. A forced outer box can't
+        // cycle: size flows ONE way (box -> content), and nothing observes _summaryRoot's size. When the
+        // box is forced taller/wider than this tab's content the surplus is just empty space (the drag
+        // preview); on release (!forced) we clear it (NaN == auto) so the panel snaps back to hug content
+        // (still capped by MaxWidth and the scroll's MaxHeight).
         if (forced)
         {
             if (wpx > 0.0)
             {
                 _summaryRoot.Width(wpx); // force the exact width: grow leftward past content, up to the shared max
             }
-            if (_summaryScroll)
+            if (hpx > 0.0)
             {
-                _summaryScroll.Height(hpx); // force the exact viewport height the same way
+                _summaryRoot.Height(hpx); // force the exact height on the OUTER box (never the scroll viewport)
             }
         }
         else
         {
             _summaryRoot.Width(NAN); // auto => fit content (still capped by MaxWidth)
+            _summaryRoot.Height(NAN); // auto => fit content (the scroll's MaxHeight still bounds it)
             if (_summaryScroll)
             {
-                _summaryScroll.Height(NAN); // auto => fit content (still capped by MaxHeight)
+                _summaryScroll.Height(NAN); // clear any stale forced viewport height from the old (cycle-prone) approach
             }
         }
     }
