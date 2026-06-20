@@ -1433,6 +1433,17 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
 > Deploy & run → *Concurrency lock*. (A lib-only compile-check, #6, doesn't relink the running
 > exe and so needs no lock.)
 
+> 🚀 **THE single biggest lever — skip the `.appxsym` symbol package (the wrapper now does, by
+> default).** A binlog `PerformanceSummary` of a normal Debug package build measured
+> `GenerateAppxSymbolPackage` at **~156s of a ~204s build = 77%**: it zips every full Debug PDB
+> (hundreds of MB) into a Microsoft-Store symbol-upload bundle we **never consume** — Agentmaster
+> ships the `.msix` + portable zips via GitHub, not the Store, and `release.yml` only ever uses the
+> `.msix`. The PDBs still emit next to the binaries, so local debugging is unaffected; it is a FIXED
+> ~156s tax paid on every build regardless of how much source changed. `Build-Agentmaster.ps1` now
+> passes `/p:AppxSymbolPackageEnabled=false` by default, dropping the same build to **~20–50s (4–10×,
+> measured)**; a RAW `msbuild` invocation must add the flag itself. Opt back in with
+> `-WithSymbolPackage` only when you genuinely need a Store symbol bundle.
+
 1. **Build on NVMe, not the A400.** `K:` is a DRAM-less SATA SSD; a WT build is tens of
    thousands of tiny files and 32 threads thrash it. Prefer **`Q:` (Kingston Fury
    Renegade, Gen4 NVMe + DRAM, ~546 GB free)** or `C:` (Corsair MP600 PRO).
@@ -1443,8 +1454,8 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
    pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1            # first build
    pwsh -ExecutionPolicy Bypass -File .\tools\Build-Agentmaster.ps1 -NoRestore # inner loop
    ```
-   Raw equivalent:
-   `msbuild OpenConsole.slnx /m /p:Configuration=Debug /p:Platform=x64 /t:Terminal\CascadiaPackage /v:m`
+   Raw equivalent (note the appxsym-skip flag — the wrapper adds it for you):
+   `msbuild OpenConsole.slnx /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false /t:Terminal\CascadiaPackage /v:m`
    64 GB handles unbounded `/m`; if it ever pages, add `-ClMpCount 6`.
 
 3. **Windows Defender exclusions** (Admin, once — 20–40% on cold builds):
@@ -1456,8 +1467,13 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
 
 4. **Iterate incrementally.** The cold build (restore + cppwinrt projection) is the
    expensive one; afterwards `-NoRestore` rebuilds (our edits touch only `TerminalApp`)
-   are quick thanks to MSBuild's up-to-date check. Reference incremental times on this box:
-   first ~236s, code-change rebuilds ~165–290s.
+   are quick thanks to MSBuild's up-to-date check. Reference times on this box, **with the
+   default appxsym-skip**: a typical code-change deploy rebuild is **~20–50s** (a 1-TU change
+   that doesn't touch a hot header validated at **20.5s**); a wide recompile (a hot header like
+   `ProcessInspect.h`, included by dozens of TUs) is bounded by `CL` (~15s) + `Link`/`Lib`
+   (~16s). (Historical, *with* the ~156s symbol-package zip that the wrapper now skips:
+   first ~236s, code-change rebuilds ~165–290s.) The remaining variable cost is **header
+   fan-out** — tightening a hot engine header shrinks the recompile set.
 
 5. **Optional — MSBuildCache** for clean-rebuild / branch-switch cache hits: add
    `-p:MsBuildCacheEnabled=true` (uses file copies, not hardlinks).
@@ -1470,8 +1486,9 @@ re-runs `nuget restore` every call. Per-file `/MP` is already enabled
    ```
    `/p:SolutionDir=` (trailing `\`) is **required** when building a `.vcxproj` directly —
    otherwise `$(SolutionDir)build\rules\*.targets` imports fail (MSB4019). The full exe link
-   is `msbuild OpenConsole.slnx /m /p:Configuration=Debug /p:Platform=x64 /t:Terminal\CascadiaPackage`
-   (~3–3.5 min on this box; SolutionDir is implicit for the `.slnx`).
+   is `msbuild OpenConsole.slnx /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false /t:Terminal\CascadiaPackage`
+   (**~20–50s with the appxsym-skip flag**; without it ~3–3.5 min, dominated by the symbol-package
+   zip — SolutionDir is implicit for the `.slnx`).
 
 ## Deploy & run
 
@@ -1537,8 +1554,8 @@ TOKEN=$(bash tools/am-lock.sh acquire --wait 600 --label "deploy $(git rev-parse
 # 1. close ONLY our dev instance (path filter spares the Store WT — see Gotchas)
 Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" |
   ? { $_.ExecutablePath -like 'K:\source\Agentmaster\*' } | % { Stop-Process -Id $_.ProcessId -Force }
-# 2. build (full exe link)
-pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64
+# 2. build (full exe link; the wrapper skips the ~156s appxsym by default — see Building FAST)
+pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore      # or: msbuild OpenConsole.slnx /t:Terminal\CascadiaPackage /m /p:Configuration=Debug /p:Platform=x64 /p:AppxSymbolPackageEnabled=false
 # 3. relaunch
 Start-Process "shell:appsFolder\AgentmasterDev_56k4f06dsfp9r!App"   # or: agentmasterdev
 ```

@@ -135,9 +135,13 @@ pwsh -ExecutionPolicy Bypass -File ./tools/Build-Agentmaster.ps1 -NoRestore -Con
   | grep -iE 'error C|error MSB|error LNK|fatal error|Build OK|Build FAILED' | grep -ivE 'PRI263|: warning' | tail -40
 bash tools/am-lock.sh release --token "$TOKEN"
 ```
-Expect `Build OK`. A first cold Release build is ~5–10 min; after that it's incremental (~1–4 min),
-so fix-rebuild loops are cheap. `cl /MP` here reveals errors roughly one file at a time — fix, rebuild,
-repeat until green. (Optional belt-and-suspenders: the engine harness — `tests/run-m5-tests.bat`, ~604
+Expect `Build OK`. The wrapper skips the ~156s `.appxsym` symbol-package zip by default (see the
+`build-install` skill §2 — it was 77% of a Debug package build), so a first cold Release build is
+~5–10 min and incremental rebuilds drop to **~30s–2 min** — fix-rebuild loops are cheap. (Skipping
+appxsym is safe for pre-validation: it catches compile/link errors, and the symbol-zip itself never
+fails. NOTE the CI `release.yml` does NOT pass the flag, so it still spends ~156s/arch generating an
+`.appxsym` nobody consumes — a separate, untouched CI-speedup opportunity.) `cl /MP` here reveals
+errors roughly one file at a time — fix, rebuild, repeat until green. (Optional belt-and-suspenders: the engine harness — `tests/run-m5-tests.bat`, ~604
 checks.)
 
 ### B2. Commit anything needed for a clean build
