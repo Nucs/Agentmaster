@@ -102,7 +102,10 @@ namespace winrt::TerminalApp::implementation
 
         void SetDispatch(const winrt::TerminalApp::ShortcutActionDispatch& dispatch);
 
-        void UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs);
+        // Agentmaster: reservedLeading = how many pinned, non-bulk-closable tabs occupy the front of
+        // the strip (the Manager tab => 1, else 0). They are skipped by _RemoveTabs, so they must not
+        // count as closable neighbors when enabling "Close tabs to the left" / "Close other tabs".
+        void UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading = 0);
         void SetActionMap(const Microsoft::Terminal::Settings::Model::IActionMapView& actionMap);
 
         void ThemeColor(const winrt::Microsoft::Terminal::Settings::Model::ThemeColor& focused,
@@ -179,6 +182,7 @@ namespace winrt::TerminalApp::implementation
         // ActivateTabRenamer() so the double-tap / openTabRenamer-action paths are blocked too.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _renameTabMenuItem{};
         bool _renameDisabled{ false };
+        uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs (the Manager tab); fed by UpdateTabViewIndex, read by _EnableMenuItems
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };
         winrt::hstring _keyChord{};

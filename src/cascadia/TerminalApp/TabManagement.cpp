@@ -1488,11 +1488,17 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_UpdateTabIndices()
     {
         const auto size = _tabs.Size();
+        // Agentmaster: the pinned Manager tab (index 0, non-closable) is skipped by every bulk
+        // close (_RemoveTabs), so it must NOT count as a closable neighbor when enabling
+        // "Close tabs to the left" / "Close other tabs". Tell each tab how many such reserved
+        // leading tabs precede the closable set (0 or 1). The Manager is always pinned first, so
+        // checking the front tab is sufficient.
+        const uint32_t reservedLeading = (_managerTab && size > 0 && _tabs.GetAt(0) == _managerTab) ? 1u : 0u;
         for (uint32_t i = 0; i < size; ++i)
         {
             auto tab{ _tabs.GetAt(i) };
             auto tabImpl{ winrt::get_self<Tab>(tab) };
-            tabImpl->UpdateTabViewIndex(i, size);
+            tabImpl->UpdateTabViewIndex(i, size, reservedLeading);
         }
     }
 

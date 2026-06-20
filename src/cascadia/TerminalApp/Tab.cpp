@@ -1908,16 +1908,19 @@ namespace winrt::TerminalApp::implementation
         const auto tabIndex = TabViewIndex();
         const auto numOfTabs = TabViewNumTabs();
 
-        // enabled if there are other tabs
-        _closeOtherTabsMenuItem.IsEnabled(numOfTabs > 1);
+        // Agentmaster: enabled only if there is a CLOSABLE other tab — i.e. one besides this tab
+        // AND besides the reserved leading tabs (the pinned Manager tab, which _RemoveTabs skips).
+        // With the Manager present (_reservedLeadingTabs == 1) a strip of just [Manager, thisTab]
+        // leaves nothing to close, so this stays disabled (was: numOfTabs > 1, which lit up with
+        // only the Manager as the "other" tab).
+        _closeOtherTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs + 1);
 
-        // Agentmaster: enabled if there are tabs on the left (mirror of "close tabs after").
-        // The pinned Manager tab always holds index 0, so from index 1 the only tab to the left
-        // is the Manager, which the page's close path skips — a harmless no-op, same as the
-        // "Move to start" item behaves from the first movable slot.
-        _closeTabsBeforeMenuItem.IsEnabled(tabIndex > 0);
+        // Agentmaster: enabled only if there is a CLOSABLE tab to the left — i.e. a tab past the
+        // reserved leading ones. From index 1 with the Manager at index 0 the only tab to the left
+        // is the Manager (skipped by _RemoveTabs), so this stays disabled.
+        _closeTabsBeforeMenuItem.IsEnabled(tabIndex > _reservedLeadingTabs);
 
-        // enabled if there are other tabs on the right
+        // enabled if there are other tabs on the right (the Manager is never to the right)
         _closeTabsAfterMenuItem.IsEnabled(tabIndex < numOfTabs - 1);
 
         // enabled if not left-most tab
@@ -1958,12 +1961,13 @@ namespace winrt::TerminalApp::implementation
         _renameTabMenuItem.IsEnabled(false);
     }
 
-    void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs)
+    void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading)
     {
         ASSERT_UI_THREAD();
 
         TabViewIndex(idx);
         TabViewNumTabs(numTabs);
+        _reservedLeadingTabs = reservedLeading; // Agentmaster
         _EnableMenuItems();
         _UpdateSwitchToTabKeyChord();
     }
