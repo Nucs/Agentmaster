@@ -149,6 +149,24 @@ namespace Agentmaster
         std::mutex activateMutex;
         std::vector<WindowActivateSink> activateSinks;
         uint64_t nextActivateToken{ 1 };
+
+        // Agentmaster (cross-window settings broadcast): per-window "global settings changed" sinks.
+        // The Settings cog AND the Explorer-Tree / Triage-Board sort toggles all write the GLOBAL
+        // AppSettings (settings.json) from whichever window the user is in. To keep every OPEN window in
+        // sync LIVE (not only on its next launch), the changing window broadcasts the merged settings
+        // through here; each OTHER window's sink hops to its own UI thread and re-applies them (its
+        // _appSettings + the sort toggles + a board/tree re-sort). Same shape + lifetime as activateSinks:
+        // registered at engine init, token-detached in ~TerminalPage (Rule #10), snapshot-under-lock /
+        // invoke-outside-it (each sink marshals into a foreign window's dispatcher).
+        struct SettingsSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(const AppSettings& settings)> fn;
+        };
+        std::mutex settingsMutex;
+        std::vector<SettingsSink> settingsSinks;
+        uint64_t nextSettingsToken{ 1 };
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -203,6 +221,17 @@ namespace Agentmaster
     uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
     void UnregisterWindowActivateHandler(uint64_t token);
     void ActivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    // Agentmaster (cross-window settings broadcast): register THIS window's settings sink (monotonic
+    // token; detach with UnregisterSettingsChangedHandler — removing a stale token is a no-op, the
+    // registry-token pattern). BroadcastSettingsChanged fans the merged AppSettings out to every
+    // registered sink EXCEPT `sourceWindowId`'s (the source window already applied + persisted it), so a
+    // GLOBAL settings change — the cog Save, or the Explorer-Tree / Triage-Board sort toggle — reaches
+    // every OTHER open window LIVE instead of only on its next launch. Each sink marshals onto its own
+    // window's UI thread; snapshot-under-lock / invoke-outside, like ActivateSessionInOtherWindows.
+    uint64_t RegisterSettingsChangedHandler(const std::wstring& windowId, std::function<void(const AppSettings& settings)> handler);
+    void UnregisterSettingsChangedHandler(uint64_t token);
+    void BroadcastSettingsChanged(const AppSettings& settings, const std::wstring& sourceWindowId);
 
     // M10 Increment 3 (recover button). A saved window record that is NOT currently open, paired with
     // its `-s <idx>` (its index in the canonical sorted LoadWindowRecords order) so the Manager can

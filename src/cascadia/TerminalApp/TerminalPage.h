@@ -309,6 +309,11 @@ namespace winrt::TerminalApp::implementation
         // a session hosted HERE hops to this window's UI thread, selects the session's tab, and
         // brings this window to the foreground. Detached in ~TerminalPage (Rule #10).
         uint64_t _windowActivateToken{ 0 };
+        // Agentmaster (cross-window settings broadcast): this window's settings sink on the shared
+        // engine — a GLOBAL settings change in ANOTHER window (the cog Save, or the Explorer-Tree /
+        // Triage-Board sort toggle) hops to this window's UI thread and re-applies it live (the sort
+        // toggles + a board/tree re-sort). Detached in ~TerminalPage (Rule #10).
+        uint64_t _settingsChangedToken{ 0 };
         ::Agentmaster::AppSettings _appSettings{}; // Agentmaster: global settings (the cog); loaded at engine init
         // Agentmaster: sessionId -> its terminal tab, so the Manager can Activate (jump) or
         // Kill a session. Weak so closing a tab the normal way doesn't keep it alive.
@@ -668,6 +673,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ClaudeSessionForTab(const TerminalApp::Tab& tab); // Agentmaster: reverse-lookup _claudeTabs (which session, if any, hosts this tab)
         void _SyncManagerSelectionToTab(const TerminalApp::Tab& tab); // Agentmaster (Linked Lenses): on a tab switch, select that tab's managed session in the Manager lens, so returning to the Manager shows the session you were just in (no-op pre-startup / Manager tab / non-session tab)
         void _BringManagerSelectionIntoView(); // Agentmaster (Linked Lenses): on switching TO the Manager tab, scroll the selected board card / tree row into view — the selection followed tab switches while the Manager was hidden, so it can be off-screen (no-op pre-startup)
+        void _ApplyBroadcastSettings(const ::Agentmaster::AppSettings& settings); // Agentmaster (cross-window settings broadcast): adopt GLOBAL settings changed in another window (cog Save / sort toggle) — update _appSettings + hand the Manager content the new settings (repaints the sort toggles + re-sorts). Runs on this window's UI thread (the engine sink marshals here)
         std::wstring _ClaudeSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which managed session is BOUND to this connection (by tabToken == WT_SESSION) — archive on pane-close + re-point injector on restartConnection
         winrt::Microsoft::Terminal::TerminalConnection::ConptyConnection _BuildAgentConnection(const std::wstring& commandline, const std::wstring& dir, const std::wstring& title, const std::vector<std::pair<std::wstring, std::wstring>>& env, bool inheritCursor = false); // Agentmaster: the shared managed-agent ConPTY builder (commandline + cwd + child env + this window's AM_SESSION stamp) — behind _LaunchClaudeSession / _LaunchCodexSession (fresh pane => inheritCursor false) AND the in-place restart (reuses the pane buffer => inheritCursor true)
         std::wstring _ManagedSessionForConnection(const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn); // Agentmaster: which MANAGED session (Claude OR Codex) owns this connection, matched by connection IDENTITY across _claudeTabs (agent-agnostic; works for a Codex tab with no tabToken yet)

@@ -35,17 +35,23 @@ namespace Agentmaster
         Full // auto-send with no confirmation
     };
 
-    // Agentmaster: Explorer Tree ordering — the sort toggle after the LOCAL/GLOBAL/EXTERNAL scope
-    // toggle. Orders BOTH the directory groups and the rows within each (and the EXTERNAL census).
-    // A GLOBAL app setting (AppSettings::treeSort), persisted to settings.json so the choice is
-    // shared by every window and survives restart.
+    // Agentmaster: session ordering — the basis for BOTH sort toggles. (1) The Explorer Tree's sort
+    // (AppSettings::treeSort) after its LOCAL/GLOBAL/EXTERNAL scope toggle, ordering the directory
+    // groups AND the rows within each (and the EXTERNAL census); it cycles Newest -> Oldest ->
+    // MostActive -> Alpha -> ByPid. (2) The Triage Board's sort (AppSettings::boardSort) after its
+    // LOCAL/GLOBAL toggle, ordering the cards within each state column; it cycles LastActiveAsc ->
+    // MostActive -> Newest -> Oldest -> Alpha (the tree set minus ByPid — host/shell grouping is
+    // meaningless once cards are split across state columns — plus the board's LastActiveAsc default).
+    // Both are GLOBAL app settings, persisted to settings.json so the choice is shared by every window
+    // and survives restart. One ExplorerSort comparator (SortKeyLess) serves both consumers.
     enum class ExplorerSort
     {
         Newest, // most recently created first (conversation ctime, desc); a fresh/never-prompted session floats up
         Oldest, // oldest created first (ctime, asc)
         MostActive, // most recent activity first; a currently-running session ranks at the very top
         Alpha, // A->Z by title (case-insensitive)
-        ByPid // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
+        ByPid, // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
+        LastActiveAsc // LEAST recently active first (last-activity mtime, ascending) — the Triage Board's default: the session that has gone the LONGEST without activity floats to the top of its column (the stalest, deal-with-it-first triage order). The inverse of MostActive. Board-only — the tree never selects it.
     };
 
     // Agentmaster: how the tab/session RENAME box treats Enter / Shift+Enter as a COMMIT (accept +
@@ -323,6 +329,21 @@ namespace Agentmaster
         // How many recent working directories the Launch path-picker's "RECENT" section
         // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
         uint32_t recentDirsLimit{ 10 };
+
+        // --- Tab strip ---
+        // Agentmaster: show the close (x) button on terminal tabs. ON (default) keeps the theme's
+        // showCloseButton policy (Always / Hover / etc.); OFF forces every tab to "Never" — hiding
+        // the X entirely (the pinned Manager tab is always X-less regardless). GLOBAL across windows;
+        // applied live via _updateAllTabCloseButtons on Save + cross-window broadcast. Default true
+        // reproduces prior behavior (theme-driven).
+        bool showTabCloseButton{ true };
+        // Agentmaster: close a tab when it is clicked with the MIDDLE mouse button. ON (default) is the
+        // long-standing Windows Terminal behavior; OFF disables it on BOTH paths — the manual hook used
+        // when the X is hidden (TerminalPage::_OnTabPointerPressed) AND WinUI's native middle-click
+        // close when the X is shown (suppressed in TerminalPage::_OnTabCloseRequested). GLOBAL across
+        // windows; applied live like showTabCloseButton. Default true reproduces prior behavior.
+        bool closeTabOnMiddleClick{ true };
+
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +
         // link state). Default ON; a missing key => true (a no-op default, like the rest).
@@ -360,6 +381,14 @@ namespace Agentmaster
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };
+        // Agentmaster: Triage Board sort order (the toggle after the board's LOCAL/GLOBAL scope toggle)
+        // — orders the cards WITHIN each state column. A SEPARATE global setting from treeSort, so the
+        // board and the tree sort independently and each remembers its own choice. GLOBAL like treeSort:
+        // shared by every window, persisted here, survives restart (the changing window re-sorts live;
+        // others adopt it on next launch). Default LastActiveAsc == longest-since-activity on top (the
+        // stalest-first triage order). The board cycles LastActiveAsc/MostActive/Newest/Oldest/Alpha;
+        // it never selects ByPid (pid grouping is meaningless once cards are split across state columns).
+        ExplorerSort boardSort{ ExplorerSort::LastActiveAsc };
         // Agentmaster: the Archive page's table|detail splitter position — the TABLE's share of
         // the two columns, kept within (0.05, 0.95). Applied as STAR ratios, so the split scales
         // with the window (window-size-relative, not pixels). GLOBAL like treeSort: written by

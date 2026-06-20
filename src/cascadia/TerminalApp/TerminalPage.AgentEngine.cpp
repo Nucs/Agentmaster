@@ -122,6 +122,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowActivateHandler(_windowActivateToken);
         }
+        // Agentmaster (cross-window settings broadcast): drop this window's settings sink too (Rule #10).
+        if (_settingsChangedToken)
+        {
+            ::Agentmaster::UnregisterSettingsChangedHandler(_settingsChangedToken);
+        }
         // Fleet Observer (OBSERVER.md §10/§12): drop THIS window's tab roster from the process-wide
         // observer so a closed window's tabs aren't surveyed/correlated after teardown (Rule #10).
         if (_observer && !_windowId.empty())
@@ -203,6 +208,11 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: publish the GLOBAL tab-rename commit mode to the (process-wide) tab headers.
         // Cross-window, so it lives in one process-static the headers read live, not per-tab state.
         SetTabRenameCommitMode(static_cast<int32_t>(_appSettings.tabRenameCommitMode));
+        // Agentmaster: seed the tab-strip close affordances (show-X / middle-click close) from the
+        // loaded settings now (the initial SetSettings pass ran with default _appSettings). No tabs
+        // exist yet, so this just sets the hook flag + overlay mode; per-tab visibility is then applied
+        // as each tab is created/selected (_UpdatedSelectedTab -> _updateAllTabCloseButtons).
+        _updateAllTabCloseButtons();
 
         // M9: consume the ONE process-wide engine. v1.24 WT is a WindowEmperor — every window
         // lives in a single process — so the SessionRegistry (single source of truth), the
@@ -263,6 +273,24 @@ namespace winrt::TerminalApp::implementation
                     if (auto self = weakThis.get())
                     {
                         self->_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true);
+                    }
+                });
+            });
+        }
+
+        // Cross-window settings broadcast: a GLOBAL settings change in ANOTHER window (the cog Save, or
+        // the Explorer-Tree / Triage-Board sort toggle) reaches here; this sink hops to this window's UI
+        // thread and re-applies it live (this window's _appSettings + the sort toggles + a board/tree
+        // re-sort). The SOURCE window is excluded by BroadcastSettingsChanged (it already applied it), so
+        // this never echoes back. Detached in ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _settingsChangedToken = ::Agentmaster::RegisterSettingsChangedHandler(_windowId, [weakThis, dispatcher](const ::Agentmaster::AppSettings& s) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, s]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_ApplyBroadcastSettings(s);
                     }
                 });
             });
@@ -553,6 +581,9 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) GLOBAL rename-commit mode to every window's tab
                 // headers immediately (process-wide static), not just next launch.
                 SetTabRenameCommitMode(static_cast<int32_t>(s.tabRenameCommitMode));
+                // Apply the (possibly changed) tab-strip close affordances (show-X / middle-click
+                // close) to THIS window's tabs immediately; other windows get them via the broadcast.
+                self->_updateAllTabCloseButtons();
                 // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle
                 // window to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -567,6 +598,12 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::MaterializeSharedHookFiles(::Agentmaster::AgentmasterStateDir(), s);
                 }
                 CATCH_LOG();
+                // Cross-window settings broadcast: live-propagate the merged settings to every OTHER open
+                // window, so the Explorer-Tree / Triage-Board sort (and the cog's globals) sync immediately
+                // instead of only on each window's next launch. The source window already applied it (its
+                // own toggle/cog re-rendered locally + self->_appSettings above), so the broadcast excludes
+                // _windowId; each other window's sink marshals onto its UI thread and calls _ApplyBroadcastSettings.
+                ::Agentmaster::BroadcastSettingsChanged(s, self->_windowId);
             }
         });
 
@@ -695,6 +732,27 @@ namespace winrt::TerminalApp::implementation
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
             {
                 mgr->SelectSession(winrt::hstring{ id });
+            }
+        }
+    }
+
+    // Agentmaster (cross-window settings broadcast): a GLOBAL settings change in ANOTHER window reached
+    // this window's engine sink, which marshaled us onto this UI thread. Adopt the merged settings for
+    // this window's page copy (so future spawns / the cog's next open use the latest globals) and hand
+    // them to the Manager content, which repaints its Explorer-Tree + Triage-Board sort toggles and
+    // re-sorts. A no-op for the content if the Manager tab isn't built yet (the page copy still updates).
+    void TerminalPage::_ApplyBroadcastSettings(const ::Agentmaster::AppSettings& settings)
+    {
+        _appSettings = settings;
+        // Agentmaster: the tab-strip close affordances (show-X / middle-click close) are GLOBAL, so a
+        // change made in another window must re-apply to THIS window's tabs live (the source window
+        // already did so in its Save handler).
+        _updateAllTabCloseButtons();
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->ApplyExternalSettings(settings);
             }
         }
     }

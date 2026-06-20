@@ -421,6 +421,62 @@ namespace Agentmaster
         }
     }
 
+    uint64_t RegisterSettingsChangedHandler(const std::wstring& windowId, std::function<void(const AppSettings&)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.settingsMutex);
+        const auto token = e.nextSettingsToken++;
+        e.settingsSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterSettingsChangedHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.settingsMutex);
+        for (auto it = e.settingsSinks.begin(); it != e.settingsSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.settingsSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void BroadcastSettingsChanged(const AppSettings& settings, const std::wstring& sourceWindowId)
+    {
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the ActivateSessionInOtherWindows pattern): each
+        // sink hops into its own window's dispatcher, so holding the engine lock across foreign-window
+        // marshaling would be a needless ordering hazard. The source window is excluded — it already
+        // applied + persisted the change (and its own toggle/cog re-rendered locally).
+        std::vector<std::function<void(const AppSettings&)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.settingsMutex);
+            sinks.reserve(e.settingsSinks.size());
+            for (const auto& s : e.settingsSinks)
+            {
+                if (s.fn && s.windowId != sourceWindowId)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(settings); // fire-and-forget; each OTHER window re-applies on its own UI thread
+        }
+    }
+
     std::vector<RecoverableWindow> RecoverableWindows()
     {
         auto& e = SharedEngine();

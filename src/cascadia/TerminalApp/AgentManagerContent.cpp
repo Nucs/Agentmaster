@@ -578,6 +578,14 @@ namespace
             if (a.last != b.last)
                 return a.last > b.last; // then most-recent activity first
             break;
+        case ExplorerSort::LastActiveAsc:
+            // The Triage Board's default: LEAST recently active first (ascending mtime) — the inverse of
+            // MostActive. Pure recency, NO running-pins-to-top bias: the goal is "what has gone longest
+            // without activity, surface it first" (a Running card with fresh activity correctly sinks to
+            // the bottom of its column). last==0 (no known activity) sorts to the very top (stalest).
+            if (a.last != b.last)
+                return a.last < b.last;
+            break;
         case ExplorerSort::Alpha:
             break; // name is the primary key — handled by the tiebreak below
         case ExplorerSort::ByPid:
@@ -1215,15 +1223,31 @@ namespace winrt::TerminalApp::implementation
                                   // is active (attached), but a future detached caller (cross-window settings
                                   // push) would otherwise leave the underline/button stale (see _SelectSession).
         }
-        // Reflect the (global, persisted) Explorer Tree sort on its toggle. Safe before the UI is
-        // built (the updater no-ops while _treeSortBtn is null); the tree itself adopts the order on
-        // the next data-driven rebuild. Lets a window pick up the loaded/changed sort, not just the
-        // ctor default.
+        // Reflect the (global, persisted) Explorer Tree + Triage Board sorts on their toggles. Safe
+        // before the UI is built (each updater no-ops while its button is null); the views adopt the
+        // order on the next data-driven rebuild. Lets a window pick up the loaded/changed sorts, not
+        // just the ctor defaults — including a board sort changed in another window (adopted on launch).
         _UpdateTreeSortButton();
+        _UpdateBoardSortButton();
     }
     void AgentManagerContent::SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler)
     {
         _settingsSink = std::move(handler);
+    }
+
+    // Agentmaster (cross-window settings broadcast): a GLOBAL setting changed in ANOTHER window — adopt
+    // the merged settings and re-apply what this window renders live. Runs on THIS window's UI thread
+    // (the engine sink marshals here). We do NOT push these back through _settingsSink (that would loop
+    // / re-persist what the source already saved) and we deliberately skip SetSettings's cwd-box reseed
+    // (it would stomp in-progress typing). Adopt _appSettings wholesale (the broadcast value is the
+    // freshest-disk-merged truth, so future spawns + the cog's next open use it), repaint both sort
+    // toggles, then _Refresh so the board + tree re-sort with the new (global) order immediately.
+    void AgentManagerContent::ApplyExternalSettings(const ::Agentmaster::AppSettings& settings)
+    {
+        _appSettings = settings;
+        _UpdateTreeSortButton();
+        _UpdateBoardSortButton();
+        _Refresh();
     }
 
     // ---- Per-window Manager lens (M10; PERSISTENCE.md §13) ------------------
@@ -1661,6 +1685,21 @@ namespace winrt::TerminalApp::implementation
             });
             header.Children().Append(_boardScopeBtn);
             _UpdateBoardScopeButton();
+            // Agentmaster: the board's SORT toggle, right after the scope toggle (mirroring the Explorer
+            // Tree's scope-then-sort layout). Cycles LEAST ACTIVE -> MOST ACTIVE -> NEWEST -> OLDEST -> A-Z
+            // (the tree's set minus BY PID — host/shell grouping is meaningless once cards split across
+            // state columns — plus the board-only LEAST ACTIVE default). A SEPARATE global setting from
+            // the tree's sort (AppSettings::boardSort), so each remembers its own; persisted + shared by
+            // every window (the changing window re-sorts live; others adopt on next launch — the treeSort
+            // idiom). _CycleBoardSort advances + persists through the settings sink; _UpdateBoardSortButton
+            // paints the label.
+            _boardSortBtn = Button{};
+            _boardSortBtn.FontSize(11);
+            _boardSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            AgentSetTip(_boardSortBtn, L"Sort the cards within each column \x2014 LEAST ACTIVE (longest since activity \x2014 the default) \xB7 MOST ACTIVE (most recent first) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Global across windows; saved.");
+            _boardSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleBoardSort(); });
+            header.Children().Append(_boardSortBtn);
+            _UpdateBoardSortButton();
             // Agentmaster: a "Clear" button right next to LOCAL/GLOBAL — deselect the current card/row
             // (the Flight Plan then shows nothing-selected). Hidden while nothing is selected (kept in
             // sync by _RebuildBoard, like "Show all"); shown once a session/external is selected.
@@ -2777,6 +2816,15 @@ namespace winrt::TerminalApp::implementation
                 }
             }
 
+            // Agentmaster: order the cards WITHIN this state column by the (global, persisted) board
+            // sort — default LastActiveAsc (longest-since-activity first). stable_sort so equal keys keep
+            // their prior on-screen order across refreshes. The board reuses the SAME SortKey/SortKeyLess
+            // comparator as the Explorer Tree, just driven by _appSettings.boardSort (its own setting) and
+            // applied to the flat per-column list (no directory grouping — cards are grouped by STATE here).
+            std::stable_sort(matches.begin(), matches.end(), [&](const SessionInfo* a, const SessionInfo* b) {
+                return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
+            });
+
             auto hdr = StackPanel{};
             hdr.Orientation(Orientation::Horizontal);
             hdr.Spacing(6);
@@ -2924,9 +2972,22 @@ namespace winrt::TerminalApp::implementation
             return _MakeBoardColumn(hdrBtn, colStack, false);
         }
 
+        // Agentmaster: order the External census cards by the same (global) board sort as the managed
+        // columns, so the whole board reads in one consistent order (the rows arrive pid-sorted from the
+        // observer; re-sort a pointer copy here, leaving _externalClaudes untouched). Externals carry no
+        // run-state (MakeSortKey sets active=false), so MostActive/LastActiveAsc rank them by recency only.
+        std::vector<const ::Agentmaster::ExternalClaudeRow*> exts;
+        exts.reserve(_externalClaudes.size());
         for (const auto& ex : _externalClaudes)
         {
-            colStack.Children().Append(_MakeExternalCard(ex));
+            exts.push_back(&ex);
+        }
+        std::stable_sort(exts.begin(), exts.end(), [&](const ::Agentmaster::ExternalClaudeRow* a, const ::Agentmaster::ExternalClaudeRow* b) {
+            return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
+        });
+        for (const auto* ex : exts)
+        {
+            colStack.Children().Append(_MakeExternalCard(*ex));
         }
         return _MakeBoardColumn(hdrBtn, colStack, true, L"External", restoreOffset);
     }
@@ -3291,6 +3352,12 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::LastActiveAsc:
+                    // Board-only mode (the tree never selects it); kept here so the switch stays
+                    // exhaustive. Rank a dir by its LEAST recently active member, ascending.
+                    if (a.bestLast != b.bestLast)
+                        return a.bestLast < b.bestLast;
                     break;
                 case ::Agentmaster::ExplorerSort::ByPid:
                     if (a.minPid != b.minPid)
@@ -3672,6 +3739,12 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
+                    break;
+                case ::Agentmaster::ExplorerSort::LastActiveAsc:
+                    // Board-only mode (the tree never selects it); kept here so the switch stays
+                    // exhaustive. Rank a dir by its LEAST recently active member, ascending.
+                    if (a.bestLast != b.bestLast)
+                        return a.bestLast < b.bestLast;
                     break;
                 case ::Agentmaster::ExplorerSort::ByPid:
                     if (a.minPid != b.minPid)
@@ -4207,6 +4280,58 @@ namespace winrt::TerminalApp::implementation
         {
             const wchar_t* label = (_treeScope == TreeScope::Local) ? L"LOCAL" : L"GLOBAL";
             _boardScopeBtn.Content(winrt::box_value(label));
+        }
+    }
+
+    // Agentmaster: advance the Triage Board sort LEAST ACTIVE -> MOST ACTIVE -> NEWEST -> OLDEST -> A-Z ->
+    // LEAST ACTIVE (it never visits BY PID — pid grouping is meaningless once cards split across the state
+    // columns). A SEPARATE global setting from the tree's sort (AppSettings::boardSort), so the board and
+    // tree remember their own order. Like treeSort it is GLOBAL + persisted: mutate _appSettings.boardSort,
+    // refresh the label, push it through the settings sink (the page persists settings.json), so the choice
+    // survives restart and seeds every other / future window; _Refresh re-sorts THIS window's board now.
+    void AgentManagerContent::_CycleBoardSort()
+    {
+        using ::Agentmaster::ExplorerSort;
+        switch (_appSettings.boardSort)
+        {
+        case ExplorerSort::LastActiveAsc:
+            _appSettings.boardSort = ExplorerSort::MostActive;
+            break;
+        case ExplorerSort::MostActive:
+            _appSettings.boardSort = ExplorerSort::Newest;
+            break;
+        case ExplorerSort::Newest:
+            _appSettings.boardSort = ExplorerSort::Oldest;
+            break;
+        case ExplorerSort::Oldest:
+            _appSettings.boardSort = ExplorerSort::Alpha;
+            break;
+        case ExplorerSort::Alpha:
+        case ExplorerSort::ByPid: // not produced by the board cycle, but treat as "wrap to the default"
+        default:
+            _appSettings.boardSort = ExplorerSort::LastActiveAsc;
+            break;
+        }
+        _UpdateBoardSortButton();
+        if (_settingsSink)
+        {
+            _settingsSink(_appSettings); // persist globally (settings.json) + re-materialize
+        }
+        _Refresh();
+    }
+
+    // Reflect the current (global) board sort on the toggle button's label.
+    void AgentManagerContent::_UpdateBoardSortButton()
+    {
+        if (_boardSortBtn)
+        {
+            using ::Agentmaster::ExplorerSort;
+            const wchar_t* label = (_appSettings.boardSort == ExplorerSort::MostActive) ? L"MOST ACTIVE"
+                                   : (_appSettings.boardSort == ExplorerSort::Newest)   ? L"NEWEST"
+                                   : (_appSettings.boardSort == ExplorerSort::Oldest)   ? L"OLDEST"
+                                   : (_appSettings.boardSort == ExplorerSort::Alpha)    ? L"A\x2013Z"
+                                                                                        : L"LEAST ACTIVE"; // LastActiveAsc (default) + any stray ByPid
+            _boardSortBtn.Content(winrt::box_value(label));
         }
     }
 
@@ -5392,6 +5517,18 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(_setResetHidden);
 
+        // TABS — close affordances on the terminal tab strip (GLOBAL across windows, applied live
+        // on Save via TerminalPage::_updateAllTabCloseButtons + the cross-window broadcast).
+        panel.Children().Append(Text(L"TABS", 11, true, 0.6));
+        _setShowTabCloseButton = ToggleSwitch{};
+        _setShowTabCloseButton.Header(winrt::box_value(L"Show close (\x00D7) button on tabs"));
+        AgentSetTip(_setShowTabCloseButton, L"When off, the close (\x00D7) button is hidden on every tab (you can still close with the tab's right-click menu, the middle-mouse button below, or Ctrl+Shift+W). The pinned Manager tab is always X-less. Default on.");
+        panel.Children().Append(_setShowTabCloseButton);
+        _setCloseTabOnMiddleClick = ToggleSwitch{};
+        _setCloseTabOnMiddleClick.Header(winrt::box_value(L"Close tab with middle-mouse click"));
+        AgentSetTip(_setCloseTabOnMiddleClick, L"When off, middle-clicking a tab no longer closes it \x2014 handy if you keep closing tabs by accident. Default on.");
+        panel.Children().Append(_setCloseTabOnMiddleClick);
+
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
         // the choice file / env, never inside the profile it selects). Read-only display +
@@ -5535,6 +5672,14 @@ namespace winrt::TerminalApp::implementation
         if (_setRecentDirsLimit)
         {
             _setRecentDirsLimit.Text(winrt::hstring{ std::to_wstring(_appSettings.recentDirsLimit) });
+        }
+        if (_setShowTabCloseButton)
+        {
+            _setShowTabCloseButton.IsOn(_appSettings.showTabCloseButton);
+        }
+        if (_setCloseTabOnMiddleClick)
+        {
+            _setCloseTabOnMiddleClick.IsOn(_appSettings.closeTabOnMiddleClick);
         }
         if (_setResetHidden)
         {
@@ -5682,6 +5827,14 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             _appSettings.recentDirsLimit = (any && v > 0) ? v : 10; // empty/zero/garbage -> default
+        }
+        if (_setShowTabCloseButton)
+        {
+            _appSettings.showTabCloseButton = _setShowTabCloseButton.IsOn();
+        }
+        if (_setCloseTabOnMiddleClick)
+        {
+            _appSettings.closeTabOnMiddleClick = _setCloseTabOnMiddleClick.IsOn();
         }
         if (_setAllowPrerelease)
         {

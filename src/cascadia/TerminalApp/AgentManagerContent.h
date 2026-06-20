@@ -81,6 +81,14 @@ namespace winrt::TerminalApp::implementation
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
         void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
+        // Agentmaster (cross-window settings broadcast): adopt GLOBAL settings that were changed in
+        // ANOTHER window (the cog Save, or the Explorer-Tree / Triage-Board sort toggle) and re-apply the
+        // bits THIS window renders live — refresh _appSettings (so future spawns use the latest globals)
+        // + repaint the tree/board sort toggles + re-sort the views. Unlike SetSettings it does NOT
+        // re-seed the Launch cwd box (that would stomp in-progress typing) and it forces an immediate
+        // _Refresh. The engine's settings sink marshals onto this UI thread before calling it; the
+        // SOURCE window is excluded by BroadcastSettingsChanged (it already applied the change itself).
+        void ApplyExternalSettings(const ::Agentmaster::AppSettings& settings);
         // Agentmaster (M10 Increment 3; PERSISTENCE.md §13.5): the "Reopen Windows (N)" recover
         // button's action — reopen saved windows that are NOT currently open (the runtime analog of the
         // WindowEmperor's startup reopen loop). The content computes N itself
@@ -207,6 +215,13 @@ namespace winrt::TerminalApp::implementation
         // up), and rebuilds; _UpdateTreeSortButton refreshes the toggle button's label.
         void _CycleTreeSort();
         void _UpdateTreeSortButton();
+        // Agentmaster: Triage Board sort toggle, after the board's LOCAL/GLOBAL scope toggle, cycling
+        // LEAST ACTIVE -> MOST ACTIVE -> NEWEST -> OLDEST -> A-Z (the tree's set minus BY PID, plus the
+        // board-only LEAST ACTIVE default). A SEPARATE GLOBAL setting from treeSort (AppSettings::boardSort):
+        // _CycleBoardSort advances + persists it through the settings sink (shared by every window, adopted
+        // on relaunch) and re-sorts the board; _UpdateBoardSortButton refreshes the toggle's label.
+        void _CycleBoardSort();
+        void _UpdateBoardSortButton();
 
         void _SelectSession(const std::wstring& id);
         void _ClearSelection(); // Agentmaster: the board header's "Clear" button — deselect the managed OR external selection
@@ -484,6 +499,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr }; // Agentmaster: "[scope: <dir>]" — shown ONLY while a directory is scoped (the old "[all directories]" placeholder is gone; it was display-only)
         winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped
         winrt::Windows::UI::Xaml::Controls::Button _boardScopeBtn{ nullptr }; // Agentmaster: the board's LOCAL/GLOBAL toggle after the "TRIAGE BOARD" title — same state as _treeScopeBtn (External reads GLOBAL)
+        winrt::Windows::UI::Xaml::Controls::Button _boardSortBtn{ nullptr }; // Agentmaster: the board's LEAST ACTIVE/MOST ACTIVE/NEWEST/OLDEST/A-Z sort toggle after the scope toggle (global, persisted; AppSettings::boardSort, separate from _treeSortBtn)
         winrt::Windows::UI::Xaml::Controls::Button _clearSelBtn{ nullptr }; // Agentmaster: the board's "Clear" button next to LOCAL/GLOBAL — deselect the current card/row; hidden while nothing is selected (synced by _RebuildBoard, like _showAllBtn)
         winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL/EXTERNAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
@@ -557,6 +573,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecay{ nullptr }; // Waiting-for-you -> Idle after N minutes (0 = never; default 5 = Claude's server cache lifetime)
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabCloseButton{ nullptr }; // TABS: show the close (x) button on tabs (OFF => force every tab to "Never"); GLOBAL
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session

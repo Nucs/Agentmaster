@@ -162,6 +162,8 @@ namespace Agentmaster
             return L"alpha";
         case ExplorerSort::ByPid:
             return L"pid";
+        case ExplorerSort::LastActiveAsc:
+            return L"lastactive-asc";
         case ExplorerSort::Newest:
         default:
             return L"newest";
@@ -177,6 +179,8 @@ namespace Agentmaster
             return ExplorerSort::Alpha;
         if (s == L"pid")
             return ExplorerSort::ByPid;
+        if (s == L"lastactive-asc")
+            return ExplorerSort::LastActiveAsc;
         return ExplorerSort::Newest;
     }
 
@@ -451,11 +455,14 @@ namespace Agentmaster
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
         o.Set(L"waitingDecayMinutes", json::Value::MkNum(s.waitingDecayMinutes));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
+        o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
+        o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
         o.Set(L"summaryPanelTruncate", json::Value::MkBool(s.summaryPanelTruncate));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
+        o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
@@ -489,11 +496,17 @@ namespace Agentmaster
         // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.
         s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
+        s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
+        s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
+        // Triage Board sort (a separate global from treeSort). Absent => the board's LastActiveAsc
+        // default (longest-since-activity first). A stored "pid" would deserialize fine but the board
+        // never produces it (its cycle skips ByPid), so it can only arrive via a hand-edit.
+        s.boardSort = ExplorerSortFromString(v.StrAt(L"boardSort", L"lastactive-asc"));
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value
             // must not collapse a pane (fall back to the 50/50 default instead).
