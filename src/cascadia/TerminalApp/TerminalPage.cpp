@@ -2334,6 +2334,24 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster: context-menu "Mark Unread" -> flash THIS tab's red attention ring until the user
+        // visits (switches to) it. Resolve the managed session and route to _MarkSessionUnread, which
+        // forces the flash even when this IS the currently-focused tab (the automatic active-tab skip is
+        // bypassed); only a leave-then-return (a switch back) clears it. No-op on a non-session tab (the
+        // item is hidden there anyway — see the flyout Opening handler below).
+        hostingTab.MarkUnreadRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                page->_MarkSessionUnread(sid);
+            }
+        });
+
         // Agentmaster: context-menu "Close > Close tabs to the left" -> close every tab to the left
         // of this one. The mirror of the upstream "Close tabs to the right" (CloseTabsAfter) action,
         // routed through _CloseTabsBefore -> _RemoveTabs so it shares the aggregate confirmation, the
@@ -2381,7 +2399,9 @@ namespace winrt::TerminalApp::implementation
                 auto tab{ weakTab.get() };
                 if (page && tab)
                 {
-                    tab->SetAgentCopyMenuVisible(!page->_ClaudeSessionForTab(*tab).empty());
+                    const bool isSession = !page->_ClaudeSessionForTab(*tab).empty();
+                    tab->SetAgentCopyMenuVisible(isSession);
+                    tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                 }
             });
         }

@@ -131,8 +131,10 @@ namespace winrt::TerminalApp::implementation
         {
             // Archived/closed: stop any flash AND forget the last state, so if this session is later
             // RESTORED its first update starts a fresh track (no phantom Running -> other edge that
-            // would spuriously flash a freshly resumed tab opened in the background).
+            // would spuriously flash a freshly resumed tab opened in the background). A manual Mark
+            // Unread also does not survive archive/close.
             _StopAgentFlash(sessionId);
+            _ClearSessionUnread(sessionId);
             _agentFlashLastState.erase(sessionId);
             return;
         }
@@ -185,22 +187,67 @@ namespace winrt::TerminalApp::implementation
         _ApplyAgentFlashRingForSession(sessionId);
     }
 
-    // Agentmaster (tab status-dot red flash): stop this session flashing + hide its red ring; when no
-    // flashing tabs remain, stop the shared timer. No-op if it wasn't flashing.
+    // Agentmaster (tab status-dot red flash): stop this session's AUTOMATIC flash + hide its red ring;
+    // when no flashing tabs remain (auto OR manual), stop the shared timer. No-op if it wasn't auto-
+    // flashing. Does NOT hide the ring if the session is ALSO manually marked unread — a Mark Unread is
+    // sticky (only a visit/archive clears it, via _ClearSessionUnread).
     void TerminalPage::_StopAgentFlash(const std::wstring& sessionId)
     {
         if (_flashingSessions.erase(sessionId) == 0)
         {
-            return; // wasn't flashing
+            return; // wasn't auto-flashing
         }
-        if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
+        if (!_manualUnreadSessions.count(sessionId))
         {
-            if (const auto tab = it->second.get())
+            if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
             {
-                _SetTabFlashRing(tab, false); // hide the red ring (the dot's own black stroke + fill stay)
+                if (const auto tab = it->second.get())
+                {
+                    _SetTabFlashRing(tab, false); // hide the red ring (the dot's own black stroke + fill stay)
+                }
             }
         }
-        if (_flashingSessions.empty())
+        if (_flashingSessions.empty() && _manualUnreadSessions.empty())
+        {
+            _StopAgentFlashTimer();
+        }
+    }
+
+    // Agentmaster (Mark Unread): the tab context-menu action. Force the red ring to flash on this
+    // session's tab until the user VISITS it (switches to it). Unlike the automatic flash, it fires even
+    // when this session's tab is the CURRENTLY-FOCUSED one (no active-tab skip) — marking the tab you're
+    // on flashes it, and only a leave-then-return (a switch back, via _VisitTabClearFlash) clears it.
+    // Sticky: the automatic state logic (_EvaluateAgentFlash / _StopAgentFlash) never clears a manual mark.
+    void TerminalPage::_MarkSessionUnread(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        _manualUnreadSessions.insert(sessionId); // idempotent
+        _EnsureAgentFlashTimer();
+        _ApplyAgentFlashRingForSession(sessionId); // flash at the current shared phase NOW, even if focused
+    }
+
+    // Agentmaster (Mark Unread): drop a session's manual unread mark + hide its ring UNLESS the automatic
+    // flash is also active for it. Called from _VisitTabClearFlash (a visit) and the archive path.
+    void TerminalPage::_ClearSessionUnread(const std::wstring& sessionId)
+    {
+        if (_manualUnreadSessions.erase(sessionId) == 0)
+        {
+            return; // wasn't marked
+        }
+        if (!_flashingSessions.count(sessionId))
+        {
+            if (const auto it = _claudeTabs.find(sessionId); it != _claudeTabs.end())
+            {
+                if (const auto tab = it->second.get())
+                {
+                    _SetTabFlashRing(tab, false);
+                }
+            }
+        }
+        if (_flashingSessions.empty() && _manualUnreadSessions.empty())
         {
             _StopAgentFlashTimer();
         }
@@ -219,7 +266,8 @@ namespace winrt::TerminalApp::implementation
         const auto id = _ClaudeSessionForTab(tab);
         if (!id.empty())
         {
-            _StopAgentFlash(id);
+            _StopAgentFlash(id); // clear the automatic flash...
+            _ClearSessionUnread(id); // ...AND any manual Mark Unread — a visit clears both (the leave-then-return that ends a marked tab)
         }
     }
 
@@ -268,22 +316,28 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_OnAgentFlashTick()
     {
         _agentFlashPhase = !_agentFlashPhase;
-        for (auto it = _flashingSessions.begin(); it != _flashingSessions.end();)
-        {
-            TerminalApp::Tab tab{ nullptr };
-            if (const auto tabIt = _claudeTabs.find(*it); tabIt != _claudeTabs.end())
+        // Apply the current phase to EVERY flashing tab — the automatic set AND the manual Mark-Unread
+        // set (a session in both is set twice, idempotently). Prune any whose tab has gone away.
+        const auto applyAndPrune = [this](std::unordered_set<std::wstring>& set) {
+            for (auto it = set.begin(); it != set.end();)
             {
-                tab = tabIt->second.get();
+                TerminalApp::Tab tab{ nullptr };
+                if (const auto tabIt = _claudeTabs.find(*it); tabIt != _claudeTabs.end())
+                {
+                    tab = tabIt->second.get();
+                }
+                if (!tab)
+                {
+                    it = set.erase(it); // tab closed / re-homed — drop it
+                    continue;
+                }
+                _SetTabFlashRing(tab, _agentFlashPhase); // ring ON on the red phase, OFF otherwise
+                ++it;
             }
-            if (!tab)
-            {
-                it = _flashingSessions.erase(it); // tab closed / re-homed — drop it
-                continue;
-            }
-            _SetTabFlashRing(tab, _agentFlashPhase); // ring ON on the red phase, OFF otherwise
-            ++it;
-        }
-        if (_flashingSessions.empty())
+        };
+        applyAndPrune(_flashingSessions);
+        applyAndPrune(_manualUnreadSessions);
+        if (_flashingSessions.empty() && _manualUnreadSessions.empty())
         {
             _StopAgentFlashTimer();
         }

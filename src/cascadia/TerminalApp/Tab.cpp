@@ -1779,6 +1779,28 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Mark Unread" (Agentmaster) — flash this tab's red attention ring until the user VISITS
+            // (switches to) the tab. Works even when this IS the focused tab (no active-tab skip): only a
+            // leave-then-return clears it. Built COLLAPSED — the page shows it (SetAgentMarkUnreadVisible
+            // at flyout-open) only on a managed agent-session tab, like the "Copy >" submenu. Raises
+            // MarkUnreadRequested; the page resolves THIS tab's session + drives the flash machinery.
+            Controls::FontIcon markUnreadSymbol;
+            markUnreadSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            markUnreadSymbol.Glyph(L"\xE7C1"); // Flag
+
+            _markUnreadMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->MarkUnreadRequested.raise();
+                }
+            });
+            _markUnreadMenuItem.Text(L"Mark Unread");
+            _markUnreadMenuItem.Icon(markUnreadSymbol);
+            _markUnreadMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+            WUX::Controls::ToolTipService::SetToolTip(_markUnreadMenuItem, box_value(winrt::hstring{ L"Flash this tab's red attention ring until you switch to it" }));
+        }
+
+        {
             // "Duplicate tab"
             Controls::FontIcon duplicateTabSymbol;
             duplicateTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
@@ -1903,6 +1925,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(chooseColorMenuItem);
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
+        contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
@@ -2013,6 +2036,16 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _copySessionSubMenu.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster: show/hide the "Mark Unread" item. Like SetAgentCopyMenuVisible, the page resolves
+    // whether THIS tab hosts a managed agent session and calls this at flyout-open, so the item appears
+    // only on a linked Claude/Codex tab (never a plain shell / the pinned Manager tab).
+    void Tab::SetAgentMarkUnreadVisible(bool visible)
+    {
+        ASSERT_UI_THREAD();
+
+        _markUnreadMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading)

@@ -355,6 +355,11 @@ namespace winrt::TerminalApp::implementation
         // starts flashing mid-cycle joins at the current phase. UI thread only.
         std::unordered_map<std::wstring, ::Agentmaster::SessionState> _agentFlashLastState;
         std::unordered_set<std::wstring> _flashingSessions;
+        // Agentmaster (Mark Unread): sessions MANUALLY marked unread via the tab context menu. Drives the
+        // SAME red ring on the SAME shared timer (a session's tab flashes if it is in EITHER set), but is
+        // STICKY: the automatic state logic never clears it, and it flashes even the currently-FOCUSED tab
+        // — only a VISIT (a switch TO the tab, _VisitTabClearFlash) or archive clears it.
+        std::unordered_set<std::wstring> _manualUnreadSessions;
         winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
         bool _agentFlashPhase{ false };
 
@@ -674,6 +679,8 @@ namespace winrt::TerminalApp::implementation
         void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + show/hide every flashing tab's red RING together (the synchronized blink)
         void _ApplyAgentFlashRingForSession(const std::wstring& sessionId); // show/hide one flashing session's red ring at the CURRENT shared phase (used when it joins mid-flash)
         void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's RED FLASH RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible; the dot's own black stroke + fill stay constant
+        void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes
+        void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive)
         void _SetTabSelectionPill(const TerminalApp::Tab& tab, bool on); // Agentmaster (Linked Lenses): show/hide the "selected/active" accent pill behind a tab's header via Tab.TabStatus(); UI thread
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
