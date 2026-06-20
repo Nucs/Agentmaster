@@ -1206,6 +1206,16 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             return;
         }
 
+        // Agentmaster: never try to resize before the render engine exists. A SizeChanged can reach
+        // a core that was attached (a tab moved to another window) but not yet initialized — a tab
+        // torn out before it was ever focused — in which case GetViewportInCharacters below would
+        // null-deref _renderEngine and AV. Mirrors the existing `!_renderEngine` guard in
+        // ScaleChanged(); the real init for that case is handled in TermControl::_InitializeTerminal.
+        if (!_renderEngine)
+        {
+            return;
+        }
+
         auto cx = gsl::narrow_cast<til::CoordType>(lrint(_panelWidth * _compositionScale));
         auto cy = gsl::narrow_cast<til::CoordType>(lrint(_panelHeight * _compositionScale));
 

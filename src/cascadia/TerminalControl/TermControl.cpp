@@ -1443,7 +1443,32 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         else
         {
-            _core.SizeOrScaleChanged(panelWidth, panelHeight, panelScaleX);
+            // Agentmaster: a reattached control's core is USUALLY already initialized in its prior
+            // window, so we only need to resize it. BUT a tab that was torn out / moved to another
+            // window before it was ever focused (a lazily-started, never-laid-out background tab —
+            // e.g. a restored Claude session) carries a core that was NEVER initialized: it has no
+            // render engine. The plain SizeOrScaleChanged path below then null-derefs _renderEngine
+            // in GetViewportInCharacters and AVs (0xc0000005 in Microsoft.Terminal.Control.dll).
+            // Initialize it here as if freshly created. _core.Initialize is idempotent — it returns
+            // false when the core was already initialized, in which case we fall back to a resize
+            // (the original, unchanged behavior for a normal reattach).
+            if (_core.Initialize(panelWidth, panelHeight, panelScaleX))
+            {
+                _interactivity.Initialize();
+
+                // The connection of a never-focused tab was never started (its claude.exe / shell
+                // hasn't spawned). Start it now that it's finally being shown, guarding against a
+                // double-start (Start() is not re-entrant) and a null connection, exactly like the
+                // Create path above.
+                if (const auto conn = _core.Connection(); conn && conn.State() == TerminalConnection::ConnectionState::NotConnected)
+                {
+                    conn.Start();
+                }
+            }
+            else
+            {
+                _core.SizeOrScaleChanged(panelWidth, panelHeight, panelScaleX);
+            }
         }
 
         _core.EnablePainting();
