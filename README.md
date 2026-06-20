@@ -22,6 +22,8 @@ Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity 
 
 ![The Agentmaster Sessions browser — every on-disk Claude Code session with a scoped/fuzzy search bar and time-range filter on the left, and a detail pane (metadata, conversation, Resume / Fork / Open-New-Session-Here) on the right](doc/agentmaster/img/sessions-browser.png)
 
+![The tab right-click menu's Copy › submenu — copy a session's Session Id, working-dir Path, Branch Name, the real Claude or Codex launch CLI, the full session Summary, or the whole Transcript](doc/agentmaster/img/tab-copy-menu.png)
+
 ## Status
 
 In active use, shipping regular [releases](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the released package, and the standalone engine harness passes 900+ checks.
