@@ -118,6 +118,10 @@ namespace Microsoft.Terminal.Control
 
         void ScrollViewport(Int32 viewTop);
 
+        // Agentmaster (SUMMARY_JUMP.md): jump the view to where the i-th conversation prompt is rendered,
+        // CENTERING it. Returns the buffer row jumped to, or -1 if the prompt isn't on screen.
+        Int32 JumpToConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, UInt32 index);
+
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();
 

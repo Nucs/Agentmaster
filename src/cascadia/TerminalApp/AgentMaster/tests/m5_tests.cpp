@@ -34,6 +34,7 @@
 #include "../Json.h"
 #include "../Persistence.h"
 #include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
+#include "../PromptAnchor.h" // the summary-panel JUMP resolver (SUMMARY_JUMP.md) — pure, benchmarked here
 #include "../ProfileBootstrap.h" // the per-install state PROFILE (choice file / resolution / migrate)
 #include "../Scheduler.h" // DecideAdvance (pure)
 #include "../SessionRegistry.h"
@@ -3832,9 +3833,199 @@ static void TestSummaryTableTrim()
     }
 }
 
+// ---- Summary-panel JUMP resolver (PromptAnchor.h / SUMMARY_JUMP.md) ----
+
+static bool SpanHolds(const std::wstring& hay, const Agentmaster::AnchorMatch& m, const std::wstring& wantSub)
+{
+    if (!m.found || m.offset + m.length > hay.size())
+    {
+        return false;
+    }
+    const auto slice = hay.substr(m.offset, m.length);
+    return Agentmaster::NormalizeForMatch(slice).find(Agentmaster::NormalizeForMatch(wantSub)) != std::wstring::npos;
+}
+
+static void TestPromptAnchor()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"Summary-panel jump resolver (SUMMARY_JUMP.md):\n");
+
+    // Normalize: ASCII-lower, collapse whitespace runs, trim.
+    CHECK(NormalizeForMatch(L"  Fix   The\tBuild \n") == L"fix the build", "normalize: lower+collapse+trim");
+    CHECK(NormalizeForMatch(L"\n\n  ") == L"", "normalize: all-whitespace -> empty");
+
+    // Needle: first non-trivial line, capped to maxLen.
+    CHECK(PickAnchorNeedle(L"\n\n  Run the tests\nsecond line", 64) == L"run the tests", "needle: first non-trivial line");
+    CHECK(PickAnchorNeedle(L"abcdefghij", 4) == L"abcd", "needle: capped to maxLen");
+    CHECK(PickAnchorNeedle(L"   \n  ", 64) == L"", "needle: empty when no content");
+
+    // Basic in-order resolve over a synthetic scrollback ('>' prompt + assistant filler).
+    {
+        const std::wstring hay = L"> fix the build\nassistant: working on it\n> run the tests\nassistant: done\n";
+        auto r = ResolvePromptAnchors(hay, { L"fix the build", L"run the tests" });
+        CHECK(r.size() == 2 && r[0].found && r[1].found, "resolve: both prompts found");
+        CHECK(r[0].offset < r[1].offset, "resolve: in buffer order");
+        CHECK(!r[0].partial && r[0].quality > 0.99, "resolve: full match quality ~1");
+        CHECK(SpanHolds(hay, r[0], L"fix the build") && SpanHolds(hay, r[1], L"run the tests"), "resolve: spans land on the text");
+        CHECK(!r[0].outOfOrder && !r[1].outOfOrder, "resolve: in-order, not flagged");
+    }
+
+    // Whitespace-tolerant: a re-indent / odd transcript whitespace still matches the rendered line
+    // (this is also what makes a SOFT-WRAPPED prompt — continuous in the haystack — resolve).
+    {
+        const std::wstring hay = L"> fix the build now\n";
+        auto m = ResolveOnePromptAnchor(hay, L"fix   the\tbuild now", 0);
+        CHECK(m.found && m.quality > 0.99, "resolve: whitespace differences tolerated");
+    }
+
+    // Render prefix ("> ") is skipped naturally (substring search).
+    {
+        const std::wstring hay = L"  > implement the centering primitive\n";
+        auto m = ResolveOnePromptAnchor(hay, L"implement the centering primitive", 0);
+        CHECK(m.found && !m.partial, "resolve: '> ' render prefix skipped");
+    }
+
+    // Duplicates: the i-th send maps to the i-th surviving occurrence (order-preserving greedy).
+    {
+        const std::wstring hay = L"> deploy now\nout1\n> deploy now\nout2\n";
+        auto r = ResolvePromptAnchors(hay, { L"deploy now", L"deploy now" });
+        CHECK(r[0].found && r[1].found && r[0].offset < r[1].offset, "duplicates: first then second occurrence");
+        CHECK(!r[0].outOfOrder && !r[1].outOfOrder, "duplicates: both in order");
+    }
+
+    // Partial: a truncated/reflowed render resolves at quality < 1 and is flagged partial.
+    {
+        const std::wstring full = L"please refactor the entire authentication subsystem to use tokens";
+        const std::wstring hay = L"> please refactor the entire authentication subsy\nok\n"; // render cut short
+        auto m = ResolveOnePromptAnchor(hay, full, 0);
+        CHECK(m.found && m.partial && m.quality < 1.0 && m.quality > 0.5, "partial: truncated render -> partial match");
+    }
+
+    // Not found: a prompt not on screen resolves to nothing.
+    {
+        const std::wstring hay = L"> something else entirely\n";
+        auto m = ResolveOnePromptAnchor(hay, L"this prompt is absent from the buffer xyzzy", 0);
+        CHECK(!m.found, "not found: absent prompt -> no match");
+    }
+
+    // Out-of-order fallback: no in-order candidate -> last global occurrence, flagged outOfOrder.
+    {
+        const std::wstring hay = L"> beta task here\n> alpha task here\n";
+        auto r = ResolvePromptAnchors(hay, { L"alpha task here", L"beta task here" });
+        CHECK(r[0].found, "outOfOrder: first prompt still found");
+        CHECK(r[1].found && r[1].outOfOrder, "outOfOrder: second prompt falls back, flagged");
+    }
+
+    // Cheap validate: true at the resolved offset, false at a bogus one / past end.
+    {
+        const std::wstring hay = L"> fix the build\nout\n";
+        auto m = ResolveOnePromptAnchor(hay, L"fix the build", 0);
+        CHECK(m.found && ValidatePromptAnchor(hay, L"fix the build", m.offset), "validate: true at resolved offset");
+        CHECK(!ValidatePromptAnchor(hay, L"fix the build", m.offset + 8), "validate: false at a wrong offset");
+        CHECK(!ValidatePromptAnchor(hay, L"fix the build", hay.size() + 100), "validate: false past end");
+    }
+}
+
+// Build a synthetic Claude scrollback: `rows` lines of filler with `prompts` "> <prompt>" lines
+// evenly spaced. `present`==false makes each summary message carry an absent suffix (the pathological
+// all-miss case: every needle forces a full backoff + global rfind scan).
+static std::wstring BuildBenchHaystack(int rows, int prompts, std::vector<std::wstring>& outMsgs, bool present)
+{
+    std::wstring hay;
+    hay.reserve(static_cast<size_t>(rows) * 64);
+    outMsgs.clear();
+    uint64_t lcg = 0x9E3779B97F4A7C15ull;
+    auto rnd = [&]() { lcg = lcg * 6364136223846793005ull + 1442695040888963407ull; return static_cast<uint32_t>(lcg >> 33); };
+    const int step = (std::max)(1, rows / (std::max)(1, prompts));
+    int made = 0;
+    for (int i = 0; i < rows; ++i)
+    {
+        if (i % step == 0 && made < prompts)
+        {
+            const std::wstring p = L"benchmark prompt number " + std::to_wstring(made) + L" do the thing carefully and well";
+            hay += L"> " + p + L"\n";
+            // present: the exact text. miss: a prompt whose LEADING chars are absent (e.g. it scrolled
+            // off the top) -> the true not-found path the membership pre-check short-circuits.
+            outMsgs.push_back(present ? p : (L"zzqx-absent-" + std::to_wstring(rnd()) + L" " + p));
+            ++made;
+        }
+        else
+        {
+            hay += L"assistant output line filler tokens ";
+            hay += std::to_wstring(rnd());
+            hay += L" lorem ipsum dolor sit amet consectetur adipiscing\n";
+        }
+    }
+    while (made < prompts)
+    {
+        const std::wstring p = L"benchmark prompt number " + std::to_wstring(made) + L" do the thing carefully and well";
+        hay += L"> " + p + L"\n";
+        outMsgs.push_back(present ? p : (L"zzqx-absent " + p));
+        ++made;
+    }
+    return hay;
+}
+
+static volatile size_t g_benchSink = 0;
+
+template<class F>
+static double TimeMsAvg(int iters, F&& fn)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i)
+    {
+        fn();
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(t1 - t0).count() / (std::max)(1, iters);
+}
+
+static void BenchPromptAnchor()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"\n--- PromptAnchor benchmark (resolve = O(haystack); gated + off-thread in prod) ---\n");
+    struct Case { const wchar_t* name; int rows; int prompts; int iters; };
+    const Case cases[] = {
+        { L"small  ~1k rows ", 1000, 20, 200 },
+        { L"medium ~10k rows", 10000, 50, 40 },
+        { L"large  ~50k rows", 50000, 200, 6 },
+    };
+    for (const auto& c : cases)
+    {
+        std::vector<std::wstring> msgsPresent, msgsMiss;
+        const auto hay = BuildBenchHaystack(c.rows, c.prompts, msgsPresent, true);
+        BuildBenchHaystack(c.rows, c.prompts, msgsMiss, false);
+        const double mb = static_cast<double>(hay.size()) * sizeof(wchar_t) / (1024.0 * 1024.0);
+
+        // Correctness sanity inside the bench: every present prompt resolves cleanly.
+        const auto rr = ResolvePromptAnchors(hay, msgsPresent);
+        int hit = 0;
+        for (const auto& m : rr)
+        {
+            if (m.found && !m.partial && !m.outOfOrder)
+            {
+                ++hit;
+            }
+        }
+        CHECK(hit == c.prompts, "bench: all present prompts resolve cleanly");
+
+        const double tPresent = TimeMsAvg(c.iters, [&] { const auto r = ResolvePromptAnchors(hay, msgsPresent); g_benchSink += r.size() + (r.empty() ? 0 : r[0].offset); });
+        const double tMiss = TimeMsAvg(c.iters, [&] { const auto r = ResolvePromptAnchors(hay, msgsMiss); g_benchSink += r.size(); });
+        const double tNorm = TimeMsAvg(c.iters, [&] { const auto n = NormalizeForMatch(hay); g_benchSink += n.size(); });
+        const int vIters = 200000;
+        const double tValTotal = TimeMsAvg(1, [&] { for (int i = 0; i < vIters; ++i) { g_benchSink += ValidatePromptAnchor(hay, msgsPresent[0], rr[0].offset) ? 1u : 0u; } });
+
+        std::wprintf(L"  %s : haystack=%6.2f MB, prompts=%3d\n", c.name, mb, c.prompts);
+        std::wprintf(L"      resolve(present)=%8.3f ms   resolve(all-miss)=%8.3f ms   normalize-only=%8.3f ms\n", tPresent, tMiss, tNorm);
+        std::wprintf(L"      validate-one    =%8.4f us   (epoch-unchanged fast path = 0)\n", (tValTotal / vIters) * 1000.0);
+    }
+    std::wprintf(L"  [sink %zu]\n", static_cast<size_t>(g_benchSink));
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
+    TestPromptAnchor();
     TestSummaryTableTrim();
     TestStateMachine();
     TestOrderedStateMachine();
@@ -3864,6 +4055,8 @@ int wmain()
     TestProcessInspectLive();
     TestBringToFrontHeuristics();
     TestBridgeRoundTrip();
+
+    BenchPromptAnchor();
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures == 0 ? 0 : 1;

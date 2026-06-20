@@ -1972,6 +1972,38 @@ namespace winrt::TerminalApp::implementation
     // Render the rendered-text box into the StackPanel: contiguous text lines become one monospace,
     // wrapped, selectable TextBlock; each separator sentinel line (kSepMark) becomes a full-width
     // Border rule (HorizontalAlignment::Stretch => border-to-border, re-fills as the pane resizes).
+    // Agentmaster (SUMMARY_JUMP.md): a rendered Messages line is " <n>. <msg>" (RenderSummaryBox emits
+    // exactly one leading space + the 1-based number + ". "). Parse that number to the 0-based prompt
+    // index, or -1 if the line isn't a numbered message (files use "* ", tasks use "Tasks:", etc., so the
+    // " <digits>. " shape is unique to messages). Tolerates >=1 leading spaces; bails without ". ".
+    static int ParseSummaryMsgIndex(const std::wstring& line)
+    {
+        size_t i = 0;
+        while (i < line.size() && line[i] == L' ')
+        {
+            ++i;
+        }
+        const size_t ds = i;
+        while (i < line.size() && line[i] >= L'0' && line[i] <= L'9')
+        {
+            ++i;
+        }
+        if (i == ds || i + 1 >= line.size() || line[i] != L'.' || line[i + 1] != L' ')
+        {
+            return -1;
+        }
+        int n = 0;
+        for (size_t k = ds; k < i; ++k)
+        {
+            n = n * 10 + (line[k] - L'0');
+            if (n > 1'000'000)
+            {
+                return -1; // absurd; not a real index
+            }
+        }
+        return n >= 1 ? n - 1 : -1; // 1-based render -> 0-based prompt index
+    }
+
     void AgentTabOverlay::_SetSummaryContent(const std::wstring& text)
     {
         if (!_summaryStack)
@@ -1999,6 +2031,64 @@ namespace winrt::TerminalApp::implementation
             _summaryStack.Children().Append(tb);
             seg.clear();
         };
+        // Agentmaster (SUMMARY_JUMP.md): a numbered message renders as a 2-column Grid — a JUMP button
+        // (col 0, auto) + the wrapping message text (col 1, *) — so the text still wraps within the panel
+        // while the button stays put. The button asks the page to center the session's terminal view on
+        // where this prompt is rendered (a chime confirms a hit).
+        const auto makeJumpRow = [this](const std::wstring& lineStr, int idx) -> winrt::Windows::UI::Xaml::UIElement {
+            Grid g{};
+            ColumnDefinition c0{};
+            c0.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition c1{};
+            c1.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            g.ColumnDefinitions().Append(c0);
+            g.ColumnDefinitions().Append(c1);
+
+            Button jb{};
+            jb.Background(Fill(0, 0, 0, 0));
+            jb.BorderThickness(ThicknessHelper::FromUniformLength(0));
+            jb.Padding(ThicknessHelper::FromLengths(0, 0, 4, 0));
+            jb.Margin(ThicknessHelper::FromLengths(0, 0, 0, 0));
+            jb.VerticalAlignment(VerticalAlignment::Top);
+            jb.Opacity(0.7);
+            FontIcon ji{};
+            ji.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // a text font carrying U+25B8 (the icon font would tofu it)
+            ji.Glyph(L"\x25B8"); // ▸ — "go to / jump"
+            ji.FontSize(10);
+            jb.Content(ji);
+            ToolTipService::SetToolTip(jb, winrt::box_value(winrt::hstring{ L"Jump to where this prompt is on screen" }));
+            const auto weak = get_weak();
+            jb.Click([weak, idx](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
+                if (const auto self = weak.get())
+                {
+                    if (self->_onJumpToPrompt && idx >= 0 && idx < static_cast<int>(self->_summaryUserMsgs.size()))
+                    {
+                        const int row = self->_onJumpToPrompt(self->_summaryUserMsgs, idx);
+                        if (row >= 0)
+                        {
+                            ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
+                        }
+                    }
+                }
+            });
+            Grid::SetColumn(jb, 0);
+            g.Children().Append(jb);
+
+            TextBlock tb{};
+            tb.FontFamily(FontFamily{ L"Cascadia Mono" });
+            tb.FontSize(11);
+            tb.TextWrapping(TextWrapping::Wrap);
+            tb.IsTextSelectionEnabled(true);
+            tb.Foreground(Fill(0xFF, 0xDC, 0xDC, 0xDC));
+            tb.Text(winrt::hstring{ lineStr });
+            if (_summaryContextMenu)
+            {
+                tb.ContextFlyout(_summaryContextMenu);
+            }
+            Grid::SetColumn(tb, 1);
+            g.Children().Append(tb);
+            return g;
+        };
         size_t i = 0;
         while (i <= text.size())
         {
@@ -2014,6 +2104,11 @@ namespace winrt::TerminalApp::implementation
                 rule.Background(Fill(0x40, 0xFF, 0xFF, 0xFF));
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 _summaryStack.Children().Append(rule);
+            }
+            else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && mi >= 0 && mi < static_cast<int>(_summaryUserMsgs.size()))
+            {
+                flushSeg(); // close the run above this numbered message; render it with a jump button
+                _summaryStack.Children().Append(makeJumpRow(lineStr, mi));
             }
             else
             {
@@ -2035,6 +2130,11 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
     {
         _onToggleSummary = std::move(handler);
+    }
+
+    void AgentTabOverlay::SetJumpHandler(std::function<int(const std::vector<std::wstring>&, int)> handler)
+    {
+        _onJumpToPrompt = std::move(handler);
     }
 
     void AgentTabOverlay::SetSummaryEnabled(bool on)
@@ -2263,6 +2363,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         std::wstring text;
+        std::vector<std::wstring> userMsgs; // Agentmaster (SUMMARY_JUMP.md): the raw prompts, aligned with the rendered " N. " lines
         int64_t mtime = prevMtime;
         int64_t createdMs = 0, lastUserMs = 0, lastActivityMs = 0; // times-line instants (computed on reload)
         bool timesComputed = false;
@@ -2294,6 +2395,7 @@ namespace winrt::TerminalApp::implementation
                 else
                 {
                     const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                    userMsgs = a.userMsgs; // the prompts, in order — aligns with the rendered " N. " jump rows
                     createdMs = IsoToUnixMs(a.firstTs);
                     lastUserMs = IsoToUnixMs(a.lastUserTs);
                     lastActivityMs = IsoToUnixMs(a.lastTs);
@@ -2317,9 +2419,13 @@ namespace winrt::TerminalApp::implementation
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
-            disp.TryEnqueue([weak = get_weak(), text, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed]() {
+            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed]() {
                 if (auto self = weak.get())
                 {
+                    if (timesComputed)
+                    {
+                        self->_summaryUserMsgs = userMsgs; // set BEFORE _SetSummaryContent so jump rows resolve the right prompt
+                    }
                     if (!text.empty())
                     {
                         self->_SetSummaryContent(text); // text runs -> TextBlocks, sentinels -> full-width rules

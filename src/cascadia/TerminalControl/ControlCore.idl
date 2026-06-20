@@ -159,6 +159,11 @@ namespace Microsoft.Terminal.Control
         SearchResults Search(SearchRequest request);
         void ClearSearch();
 
+        // Agentmaster (SUMMARY_JUMP.md): resolve the i-th conversation prompt to a buffer ROW for the
+        // summary-panel jump. Read-only; returns -1 if the prompt isn't on screen. Resolves the whole
+        // list greedily (order-preserving) so duplicate prompt texts map to the right occurrence.
+        Int32 ResolveConversationPromptRow(Windows.Foundation.Collections.IVector<String> messages, UInt32 index);
+
         Microsoft.Terminal.Core.Color ForegroundColor { get; };
         Microsoft.Terminal.Core.Color BackgroundColor { get; };
 

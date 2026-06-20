@@ -12,6 +12,7 @@
 #include <unicode.hpp>
 
 #include "EventArgs.h"
+#include "../TerminalApp/AgentMaster/PromptAnchor.h" // Agentmaster (SUMMARY_JUMP.md): pure header-only jump resolver
 #include "../../renderer/atlas/AtlasEngine.h"
 #include "../../renderer/base/renderer.hpp"
 #include "../../renderer/uia/UiaRenderer.hpp"
@@ -751,6 +752,69 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         {
             (*shared->outputIdle)();
         }
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md): resolve the i-th conversation prompt to a buffer row, or -1 if it
+    // isn't on screen. Read-only: it linearizes a RECENT window of the buffer (rows concatenated; a hard
+    // line-break adds one '\n', a soft wrap adds nothing — so a wrapped prompt stays continuous, matching
+    // TextBuffer::SearchText's own haystack), runs the pure PromptAnchor resolver over the whole prompt
+    // list (order-preserving greedy, so duplicate texts map to the right occurrence), then maps the
+    // resolved char offset back to an absolute buffer row. TermControl centers the view on it.
+    int32_t ControlCore::ResolveConversationPromptRow(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index)
+    {
+        if (!messages || index >= messages.Size())
+        {
+            return -1;
+        }
+        std::vector<std::wstring> msgs;
+        msgs.reserve(messages.Size());
+        for (const auto& m : messages)
+        {
+            msgs.emplace_back(m.c_str(), m.size());
+        }
+
+        const auto lock = _terminal->LockForReading();
+        const auto& tb = _terminal->GetTextBuffer();
+        const auto width = (std::max)(1, tb.GetSize().Width());
+        const auto lastRow = tb.GetLastNonSpaceCharacter().y;
+        if (lastRow < 0)
+        {
+            return -1;
+        }
+
+        // Cap to a recent window so the cost is bounded regardless of total scrollback depth
+        // (kAnchorRecentWindowChars; SUMMARY_JUMP.md §4). A prompt older than this has scrolled out of
+        // practical reach anyway; the greedy resolver's cursor handles the missing-early-prompts case.
+        const auto rowsCap = static_cast<til::CoordType>(::Agentmaster::kAnchorRecentWindowChars / static_cast<size_t>(width));
+        const auto startRow = (std::max)(static_cast<til::CoordType>(0), static_cast<til::CoordType>(lastRow + 1 - rowsCap));
+
+        std::wstring haystack;
+        haystack.reserve(static_cast<size_t>(lastRow - startRow + 1) * static_cast<size_t>(width));
+        std::vector<size_t> rowStartOffsets; // haystack offset where each appended row begins
+        std::vector<int> rowAbs; // absolute buffer row for each appended row
+        rowStartOffsets.reserve(static_cast<size_t>(lastRow - startRow + 1));
+        rowAbs.reserve(rowStartOffsets.capacity());
+        for (til::CoordType y = startRow; y <= lastRow; ++y)
+        {
+            rowStartOffsets.push_back(haystack.size());
+            rowAbs.push_back(static_cast<int>(y));
+            const auto& row = tb.GetRowByOffset(y);
+            haystack.append(row.GetText());
+            if (!row.WasWrapForced())
+            {
+                haystack.push_back(L'\n'); // a hard line-break; a soft wrap leaves the text continuous
+            }
+        }
+
+        const auto results = ::Agentmaster::ResolvePromptAnchors(haystack, msgs);
+        if (index >= results.size() || !results[index].found)
+        {
+            return -1;
+        }
+        const auto off = results[index].offset;
+        const auto it = std::upper_bound(rowStartOffsets.begin(), rowStartOffsets.end(), off);
+        const size_t ri = (it == rowStartOffsets.begin()) ? 0 : static_cast<size_t>((it - rowStartOffsets.begin()) - 1);
+        return rowAbs[ri];
     }
 
     void ControlCore::AdjustOpacity(const float adjustment)

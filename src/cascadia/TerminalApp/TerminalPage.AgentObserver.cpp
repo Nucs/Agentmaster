@@ -597,6 +597,14 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             });
+            // Agentmaster (SUMMARY_JUMP.md): a numbered prompt's jump button -> center this session's
+            // terminal view on where the prompt is rendered. The overlay has no control reference, so it
+            // hands us the session's prompt list + the clicked index; we resolve the tab's TermControl by
+            // sessionId at click time (robust to a pane restart) and call JumpToConversationPrompt.
+            overlay->SetJumpHandler([weakThis, sessionId](const std::vector<std::wstring>& msgs, int index) -> int {
+                auto self = weakThis.get();
+                return self ? self->_JumpToPromptInSession(sessionId, msgs, index) : -1;
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
@@ -618,6 +626,66 @@ namespace winrt::TerminalApp::implementation
             _claudeOverlays[sessionId] = overlay; // replaces any prior overlay for this id
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[overlay] " + sessionId + L" attached\n");
         }
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md): center the terminal view of `sessionId`'s tab on where the i-th
+    // conversation prompt is rendered. Resolves the tab's TermControl by sessionId (live, so a pane
+    // restart can't strand a captured stale control), hands it the prompt list, and lets
+    // TermControl::JumpToConversationPrompt do the resolve + center. Returns the buffer row, or -1 (no
+    // tab / no control / prompt not on screen). UI thread.
+    int TerminalPage::_JumpToPromptInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs, int index)
+    {
+        if (index < 0 || msgs.empty())
+        {
+            return -1;
+        }
+        const auto it = _claudeTabs.find(sessionId);
+        if (it == _claudeTabs.end())
+        {
+            return -1;
+        }
+        const auto tab = it->second.get();
+        if (!tab)
+        {
+            return -1;
+        }
+        const auto tabImpl = _GetTabImpl(tab);
+        if (!tabImpl)
+        {
+            return -1;
+        }
+        Microsoft::Terminal::Control::TermControl control{ nullptr };
+        if (const auto rootPane = tabImpl->GetRootPane())
+        {
+            rootPane->WalkTree([&](auto&& pane) {
+                if (control)
+                {
+                    return;
+                }
+                if (const auto content = pane->GetContent())
+                {
+                    if (const auto term = content.try_as<TerminalApp::TerminalPaneContent>())
+                    {
+                        if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(term))
+                        {
+                            control = impl->GetTermControl();
+                        }
+                    }
+                }
+            });
+        }
+        if (!control)
+        {
+            return -1;
+        }
+        std::vector<winrt::hstring> hv;
+        hv.reserve(msgs.size());
+        for (const auto& m : msgs)
+        {
+            hv.emplace_back(m);
+        }
+        const auto vec = winrt::single_threaded_vector<winrt::hstring>(std::move(hv));
+        return control.JumpToConversationPrompt(vec, static_cast<uint32_t>(index));
     }
 
     // Agentmaster (TAB_OVERLAY.md summary panel): the per-tab pencil button toggles the summary panel's

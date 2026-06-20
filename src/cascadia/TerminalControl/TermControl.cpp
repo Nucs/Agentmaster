@@ -2774,6 +2774,23 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         ScrollBar().Value(viewTop);
     }
 
+    // Agentmaster (SUMMARY_JUMP.md): jump the view to the i-th conversation prompt, centered. ControlCore
+    // resolves the prompt text to a buffer row (read-only, greedy over the whole list for duplicates); we
+    // center it by driving the scrollbar (the same UI-thread-safe path as ScrollViewport). The scrollbar
+    // clamps a near-top/near-bottom target, so rows in the last half-screen land as close to center as the
+    // buffer allows. Returns the row jumped to, or -1 if the prompt isn't on screen.
+    int32_t TermControl::JumpToConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index)
+    {
+        const auto row = _core.ResolveConversationPromptRow(messages, index);
+        if (row < 0)
+        {
+            return -1;
+        }
+        const auto viewTop = (std::max)(0, row - _core.ViewHeight() / 2);
+        ScrollBar().Value(static_cast<double>(viewTop));
+        return row;
+    }
+
     int TermControl::ScrollOffset() const
     {
         return _core.ScrollOffset();

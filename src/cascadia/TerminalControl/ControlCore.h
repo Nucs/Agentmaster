@@ -227,6 +227,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         const std::vector<til::point_span>& SearchResultRows() const noexcept;
         void ClearSearch();
 
+        // Agentmaster (SUMMARY_JUMP.md): resolve the i-th conversation prompt to a buffer row (-1 if not
+        // on screen). Read-only; linearizes a recent window of the buffer and runs the pure PromptAnchor
+        // resolver. TermControl::JumpToConversationPrompt centers the view on the returned row.
+        int32_t ResolveConversationPromptRow(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index);
+
         void LeftClickOnTerminal(const til::point terminalPosition,
                                  const int numberOfClicks,
                                  const bool altEnabled,

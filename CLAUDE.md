@@ -62,6 +62,7 @@ Fleet Observer (pull correlation + activity): [`doc/agentmaster/OBSERVER.md`](do
 Sessions browser + the `~/.claude` storage map: [`doc/agentmaster/SESSIONS.md`](doc/agentmaster/SESSIONS.md).
 Observer-owned session state (the PULL state engine — design, pre-implementation): [`doc/agentmaster/STATE.md`](doc/agentmaster/STATE.md).
 Commandline introspection (the `agentmaster <verb>` CLI): [`doc/agentmaster/CLI.md`](doc/agentmaster/CLI.md).
+Summary-panel JUMP (transcript→buffer resolve + center the view on a prompt): [`doc/agentmaster/SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md).
 
 ## Status
 
@@ -479,6 +480,26 @@ pre-release versions" toggle (NOT startup-gated, available on any build). State 
 `settings.json`: `allowUpdatePrerelease` (round-trips through the cog form) + `updateSkippedVersion` /
 `updatePostponedUntilUnixMs` (written by a freshest-disk JSON RMW outside the form — so the EXE can
 write them without linking the engine — and preserved from disk on a cog Save, the summary-panel idiom).
+
+**Summary-panel JUMP ([`SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md)) — core complete, tested +
+benchmarked + optimized; full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime
+verification pending a deploy.** Each numbered prompt in the per-tab summary panel now carries a **▸ jump
+button** that scrolls the session's terminal view to **center on where that prompt is rendered**. The brain
+is a **pure, header-only resolver** (`AgentMaster/PromptAnchor.h`) that bridges the transcript↔buffer
+coordinate gap: it linearizes the live ConPTY buffer (soft-wrap-continuous, like `TextBuffer::SearchText`'s
+own haystack), then fuzzily matches each prompt with **whitespace tolerance**, **needle backoff**, a
+**partial "match as much as possible" quality score**, and an **order-preserving greedy assignment** so a
+**duplicate prompt** maps to the right on-screen occurrence (out-of-order falls back to the most-recent,
+flagged). The chain: overlay ▸ button → `TerminalPage::_JumpToPromptInSession` (resolves the tab's control
+live) → `TermControl::JumpToConversationPrompt` → `ControlCore::ResolveConversationPromptRow` (read-only:
+linearize a recent window → `ResolvePromptAnchors` → offset→row) → center via the scrollbar. **Performance
+(benchmarked in the 1005-check engine harness):** steady state **0** (resolves only on click); per-click
+**~9 ms** at a realistic ~2 MB scrollback (parity with Ctrl+Shift+F, under the read-lock), `validate`
+fast-path ~3.5 µs. Optimizations: index-written normalization (~37% off the common case), a true-absence
+membership pre-check (~8× on a scrolled-off prompt), and a recent-window haystack cap
+(`kAnchorRecentWindowChars`) bounding cost regardless of scrollback depth. Deferred (non-blocking): a flash
+highlight on landing, a mutation-id epoch cache (repeat clicks → O(1)), "end of turn" jumps (neighbor-
+derived), Codex prompts, and a context-sensitive Ctrl+F reusing the same resolve+center path.
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -1252,7 +1273,13 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     index, the raw presence read, and the shared prompt-noise + title-precedence rules),
     `SessionSearch.{h,cpp}` (the two-phase search: pure regex/match/snippet primitives + the
     history.jsonl accelerator + the rg-prefiltered, scope-attributed content scan with in-process
-    fallback), `Json.h`, `Persistence.{h,cpp}`,
+    fallback),
+    `PromptAnchor.h` (header-only, pure — the **summary-panel JUMP resolver**, SUMMARY_JUMP.md:
+    given the linearized terminal buffer + the conversation's prompts, resolves each to a buffer
+    location with whitespace-tolerant fuzzy matching, backoff, partial "match as much as possible"
+    scoring, and an order-preserving greedy assignment for duplicate prompts; header-only so both
+    the overlay path AND `ControlCore` (a separate DLL) share it. Unit-tested + benchmarked in
+    `tests/`), `Json.h`, `Persistence.{h,cpp}`,
     `ProfileBootstrap.h` (header-only, pure Win32 — the per-install state PROFILE: resolution
     [env > portable marker > saved choice > per-identity default], the `.agentmaster.profiles`
     choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,

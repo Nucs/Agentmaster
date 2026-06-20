@@ -120,6 +120,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 #pragma endregion
 
         void ScrollViewport(int viewTop);
+        int32_t JumpToConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index); // Agentmaster (SUMMARY_JUMP.md)
 
         void AdjustFontSize(float fontSizeDelta);
         void ResetFontSize();

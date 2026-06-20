@@ -121,6 +121,13 @@ namespace winrt::TerminalApp::implementation
         // the live broadcast to every linked overlay in the window. Set by _AttachClaudeOverlay.
         void SetSummaryResizeHandler(std::function<void(double, double)> handler);
 
+        // Agentmaster (SUMMARY_JUMP.md): a numbered prompt in the summary panel carries a JUMP button that
+        // scrolls the session's terminal view to where that prompt is rendered. The overlay can't reach the
+        // TermControl, so it calls this page-wired handler with the session's prompt list + the 0-based
+        // index; the page resolves the tab's control and calls TermControl::JumpToConversationPrompt,
+        // returning the buffer row jumped to (or -1 if not on screen). Set by _AttachClaudeOverlay.
+        void SetJumpHandler(std::function<int(const std::vector<std::wstring>&, int)> handler);
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
@@ -211,5 +218,12 @@ namespace winrt::TerminalApp::implementation
         double _summaryDragStartW{ 0.0 }; // panel width px at press
         double _summaryDragStartH{ 0.0 }; // scroll viewport height px at press
         std::function<void(double, double)> _onResizeSummary; // grip release -> page (persist the fractions globally + broadcast)
+
+        // Agentmaster (SUMMARY_JUMP.md): the raw user prompts of the loaded summary, in order, so a
+        // numbered message's JUMP button resolves to the right prompt (index N-1). Refreshed by
+        // _LoadSummaryAsync alongside the rendered text; aligned with the " N. " lines _SetSummaryContent
+        // renders. Empty for Codex / no transcript (no jump buttons then).
+        std::vector<std::wstring> _summaryUserMsgs;
+        std::function<int(const std::vector<std::wstring>&, int)> _onJumpToPrompt; // jump button -> page (resolve control + center the view); returns the row or -1
     };
 }
