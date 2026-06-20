@@ -2090,6 +2090,11 @@ namespace winrt::TerminalApp::implementation
             return g;
         };
         size_t i = 0;
+        // RenderSummaryBox numbers the messages strictly sequentially (1..N, one per prompt). Only treat a
+        // line as a real message-START when its number is the NEXT expected one — so in wrap-ON mode a
+        // multi-line prompt's continuation line that merely LOOKS like "2. foo" isn't mis-detected as a
+        // numbered message (and mis-mapped to the wrong prompt). expectedMsg is the next 0-based index.
+        int expectedMsg = 0;
         while (i <= text.size())
         {
             const size_t nl = text.find(L'\n', i);
@@ -2105,10 +2110,11 @@ namespace winrt::TerminalApp::implementation
                 rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
                 _summaryStack.Children().Append(rule);
             }
-            else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && mi >= 0 && mi < static_cast<int>(_summaryUserMsgs.size()))
+            else if (const int mi = ParseSummaryMsgIndex(lineStr); _onJumpToPrompt && mi == expectedMsg && mi < static_cast<int>(_summaryUserMsgs.size()))
             {
                 flushSeg(); // close the run above this numbered message; render it with a jump button
                 _summaryStack.Children().Append(makeJumpRow(lineStr, mi));
+                ++expectedMsg; // the next message-start must be the following number
             }
             else
             {

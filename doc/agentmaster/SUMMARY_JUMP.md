@@ -53,6 +53,10 @@ AgentTabOverlay (summary panel UI)                     TerminalApp
 - **Overlay UI** (`AgentTabOverlay.cpp`) — `_SetSummaryContent` renders each ` N. <prompt>` line as a
   2-column Grid (▸ button + wrapping text); `_LoadSummaryAsync` stashes the raw prompts (`_summaryUserMsgs`,
   aligned with the numbering) so the button resolves the right prompt; a hit plays the confirmation chime.
+  Message-start detection is **sequence-number-guarded** (the renderer numbers prompts strictly 1..N, so a
+  line is a real message only when its number is the next expected one) — so in **wrap-ON** mode a
+  multi-line prompt's continuation line that merely looks like `2. foo` is not mis-detected as a numbered
+  message and mis-mapped to the wrong prompt.
 
 ## 3. The resolver (PromptAnchor.h)
 
