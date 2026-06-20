@@ -121,6 +121,9 @@ namespace Microsoft.Terminal.Control
         // Agentmaster (SUMMARY_JUMP.md): jump the view to where the i-th conversation prompt is rendered,
         // CENTERING it. Returns the buffer row jumped to, or -1 if the prompt isn't on screen.
         Int32 JumpToConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, UInt32 index);
+        // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 if not on screen) — drives summary-panel icon
+        // eligibility dimming. Read-only (no scroll).
+        Windows.Foundation.Collections.IVector<Int32> ResolveConversationPromptRows(Windows.Foundation.Collections.IVector<String> messages);
 
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();

@@ -1747,6 +1747,7 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weak.get())
             {
                 self->_UpdateTimesLine();
+                self->_RefreshJumpEligibility(); // the gated interval (5 s, visible-only): re-dim stale icons
             }
             else if (const auto t = sender.try_as<DispatcherTimer>())
             {
@@ -2011,6 +2012,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _summaryStack.Children().Clear();
+        _jumpButtons.clear(); // rebuilt below; stale Button refs from the prior render are dropped
         std::wstring seg; // accumulated contiguous text lines
         const auto flushSeg = [&]() {
             if (seg.empty())
@@ -2068,9 +2070,11 @@ namespace winrt::TerminalApp::implementation
                         {
                             ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
                         }
+                        self->_RefreshJumpEligibility(); // a click makes the others eligible to re-check
                     }
                 }
             });
+            _jumpButtons.emplace_back(idx, jb); // register for eligibility dimming
             Grid::SetColumn(jb, 0);
             g.Children().Append(jb);
 
@@ -2131,6 +2135,7 @@ namespace winrt::TerminalApp::implementation
             i = nl + 1;
         }
         flushSeg();
+        _RefreshJumpEligibility(); // dim the jump buttons whose prompt isn't currently on screen
     }
 
     void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
@@ -2141,6 +2146,34 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetJumpHandler(std::function<int(const std::vector<std::wstring>&, int)> handler)
     {
         _onJumpToPrompt = std::move(handler);
+    }
+
+    void AgentTabOverlay::SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler)
+    {
+        _onResolveEligibility = std::move(handler);
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md): resolve every numbered prompt against the live buffer in one pass and
+    // DIM the jump buttons whose prompt currently won't resolve (scrolled off / not rendered), so the dead
+    // icons are visually distinct from the working ones. Called on (re)build, on the 5 s times-line tick
+    // (visible-only), and after a click. Bounded + opt-in (only when the summary panel is shown), so the
+    // cost is a single linearize+resolve at most every few seconds per visible panel.
+    void AgentTabOverlay::_RefreshJumpEligibility()
+    {
+        if (!_onResolveEligibility || _jumpButtons.empty() || _summaryUserMsgs.empty())
+        {
+            return;
+        }
+        const auto rows = _onResolveEligibility(_summaryUserMsgs);
+        for (const auto& [idx, btn] : _jumpButtons)
+        {
+            if (!btn)
+            {
+                continue;
+            }
+            const bool ok = idx >= 0 && idx < static_cast<int>(rows.size()) && rows[idx] >= 0;
+            btn.Opacity(ok ? 0.75 : 0.2); // match: normal; no-match: clearly dim (still clickable -> re-checks)
+        }
     }
 
     void AgentTabOverlay::SetSummaryEnabled(bool on)

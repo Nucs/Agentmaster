@@ -163,6 +163,9 @@ namespace Microsoft.Terminal.Control
         // summary-panel jump. Read-only; returns -1 if the prompt isn't on screen. Resolves the whole
         // list greedily (order-preserving) so duplicate prompt texts map to the right occurrence.
         Int32 ResolveConversationPromptRow(Windows.Foundation.Collections.IVector<String> messages, UInt32 index);
+        // Agentmaster (SUMMARY_JUMP.md): resolve ALL prompts in one pass -> a row per prompt (-1 if not on
+        // screen). Drives the summary panel's per-icon "eligibility" dimming with a single linearize+resolve.
+        Windows.Foundation.Collections.IVector<Int32> ResolveConversationPromptRows(Windows.Foundation.Collections.IVector<String> messages);
 
         Microsoft.Terminal.Core.Color ForegroundColor { get; };
         Microsoft.Terminal.Core.Color BackgroundColor { get; };

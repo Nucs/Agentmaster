@@ -605,6 +605,13 @@ namespace winrt::TerminalApp::implementation
                 auto self = weakThis.get();
                 return self ? self->_JumpToPromptInSession(sessionId, msgs, index) : -1;
             });
+            // Agentmaster (SUMMARY_JUMP.md): per-icon eligibility — resolve every prompt to a row (-1 ==
+            // not on screen) so the overlay can dim the jump buttons that currently won't work. One
+            // linearize+resolve; the overlay calls it on (re)build, on a 5 s tick, and after a click.
+            overlay->SetEligibilityHandler([weakThis, sessionId](const std::vector<std::wstring>& msgs) -> std::vector<int> {
+                auto self = weakThis.get();
+                return self ? self->_JumpEligibilityInSession(sessionId, msgs) : std::vector<int>{};
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
@@ -633,26 +640,24 @@ namespace winrt::TerminalApp::implementation
     // restart can't strand a captured stale control), hands it the prompt list, and lets
     // TermControl::JumpToConversationPrompt do the resolve + center. Returns the buffer row, or -1 (no
     // tab / no control / prompt not on screen). UI thread.
-    int TerminalPage::_JumpToPromptInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs, int index)
+    // Agentmaster (SUMMARY_JUMP.md): the live TermControl hosting a managed session's tab (or null). Walks
+    // the tab's pane tree at call time, so a pane restart can't strand a captured stale control.
+    Microsoft::Terminal::Control::TermControl TerminalPage::_ControlForSession(const std::wstring& sessionId)
     {
-        if (index < 0 || msgs.empty())
-        {
-            return -1;
-        }
         const auto it = _claudeTabs.find(sessionId);
         if (it == _claudeTabs.end())
         {
-            return -1;
+            return nullptr;
         }
         const auto tab = it->second.get();
         if (!tab)
         {
-            return -1;
+            return nullptr;
         }
         const auto tabImpl = _GetTabImpl(tab);
         if (!tabImpl)
         {
-            return -1;
+            return nullptr;
         }
         Microsoft::Terminal::Control::TermControl control{ nullptr };
         if (const auto rootPane = tabImpl->GetRootPane())
@@ -674,18 +679,55 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
-        if (!control)
-        {
-            return -1;
-        }
+        return control;
+    }
+
+    static winrt::Windows::Foundation::Collections::IVector<winrt::hstring> _PromptsToVector(const std::vector<std::wstring>& msgs)
+    {
         std::vector<winrt::hstring> hv;
         hv.reserve(msgs.size());
         for (const auto& m : msgs)
         {
             hv.emplace_back(m);
         }
-        const auto vec = winrt::single_threaded_vector<winrt::hstring>(std::move(hv));
-        return control.JumpToConversationPrompt(vec, static_cast<uint32_t>(index));
+        return winrt::single_threaded_vector<winrt::hstring>(std::move(hv));
+    }
+
+    int TerminalPage::_JumpToPromptInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs, int index)
+    {
+        if (index < 0 || msgs.empty())
+        {
+            return -1;
+        }
+        const auto control = _ControlForSession(sessionId);
+        if (!control)
+        {
+            return -1;
+        }
+        return control.JumpToConversationPrompt(_PromptsToVector(msgs), static_cast<uint32_t>(index));
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md): a row per prompt (>=0 == resolvable/on-screen, -1 == not) for the
+    // summary panel's per-icon eligibility dimming. ONE linearize+resolve in ControlCore. Empty on no control.
+    std::vector<int> TerminalPage::_JumpEligibilityInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs)
+    {
+        std::vector<int> rows;
+        if (msgs.empty())
+        {
+            return rows;
+        }
+        const auto control = _ControlForSession(sessionId);
+        if (!control)
+        {
+            return rows;
+        }
+        const auto resolved = control.ResolveConversationPromptRows(_PromptsToVector(msgs));
+        rows.reserve(resolved.Size());
+        for (const auto r : resolved)
+        {
+            rows.push_back(r);
+        }
+        return rows;
     }
 
     // Agentmaster (TAB_OVERLAY.md summary panel): the per-tab pencil button toggles the summary panel's

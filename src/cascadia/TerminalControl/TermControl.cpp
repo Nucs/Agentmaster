@@ -2791,6 +2791,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return row;
     }
 
+    // Agentmaster (SUMMARY_JUMP.md): read-only batch resolve (a row per prompt, -1 if not on screen) for
+    // the summary panel's per-icon eligibility dimming. No scroll.
+    winrt::Windows::Foundation::Collections::IVector<int32_t> TermControl::ResolveConversationPromptRows(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages)
+    {
+        return _core.ResolveConversationPromptRows(messages);
+    }
+
     int TermControl::ScrollOffset() const
     {
         return _core.ScrollOffset();

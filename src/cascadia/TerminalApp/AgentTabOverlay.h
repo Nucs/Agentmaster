@@ -128,6 +128,11 @@ namespace winrt::TerminalApp::implementation
         // returning the buffer row jumped to (or -1 if not on screen). Set by _AttachClaudeOverlay.
         void SetJumpHandler(std::function<int(const std::vector<std::wstring>&, int)> handler);
 
+        // Agentmaster (SUMMARY_JUMP.md): per-icon eligibility. The page resolves every prompt to a buffer
+        // row (-1 == not on screen); the overlay dims the jump buttons whose prompt currently won't
+        // resolve. Set by _AttachClaudeOverlay.
+        void SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler);
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
@@ -225,5 +230,10 @@ namespace winrt::TerminalApp::implementation
         // renders. Empty for Codex / no transcript (no jump buttons then).
         std::vector<std::wstring> _summaryUserMsgs;
         std::function<int(const std::vector<std::wstring>&, int)> _onJumpToPrompt; // jump button -> page (resolve control + center the view); returns the row or -1
+        std::function<std::vector<int>(const std::vector<std::wstring>&)> _onResolveEligibility; // -> page: a row per prompt (-1 == not on screen), for icon dimming
+        // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
+        // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
+        std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;
+        void _RefreshJumpEligibility(); // resolve all prompts -> set each jump button's opacity (match vs dim); SUMMARY_JUMP.md
     };
 }

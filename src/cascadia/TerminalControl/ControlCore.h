@@ -231,6 +231,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // on screen). Read-only; linearizes a recent window of the buffer and runs the pure PromptAnchor
         // resolver. TermControl::JumpToConversationPrompt centers the view on the returned row.
         int32_t ResolveConversationPromptRow(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index);
+        // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 if not on screen) in ONE linearize+resolve —
+        // drives the summary panel's per-icon eligibility dimming.
+        winrt::Windows::Foundation::Collections::IVector<int32_t> ResolveConversationPromptRows(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages);
 
         void LeftClickOnTerminal(const til::point terminalPosition,
                                  const int numberOfClicks,

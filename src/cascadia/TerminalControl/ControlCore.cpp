@@ -760,11 +760,12 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // TextBuffer::SearchText's own haystack), runs the pure PromptAnchor resolver over the whole prompt
     // list (order-preserving greedy, so duplicate texts map to the right occurrence), then maps the
     // resolved char offset back to an absolute buffer row. TermControl centers the view on it.
-    int32_t ControlCore::ResolveConversationPromptRow(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index)
+    Windows::Foundation::Collections::IVector<int32_t> ControlCore::ResolveConversationPromptRows(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages)
     {
-        if (!messages || index >= messages.Size())
+        std::vector<int32_t> rows;
+        if (!messages || messages.Size() == 0)
         {
-            return -1;
+            return winrt::single_threaded_vector<int32_t>(std::move(rows));
         }
         std::vector<std::wstring> msgs;
         msgs.reserve(messages.Size());
@@ -772,6 +773,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         {
             msgs.emplace_back(m.c_str(), m.size());
         }
+        rows.assign(msgs.size(), -1);
 
         const auto lock = _terminal->LockForReading();
         const auto& tb = _terminal->GetTextBuffer();
@@ -779,7 +781,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         const auto lastRow = tb.GetLastNonSpaceCharacter().y;
         if (lastRow < 0)
         {
-            return -1;
+            return winrt::single_threaded_vector<int32_t>(std::move(rows));
         }
 
         // Cap to a recent window so the cost is bounded regardless of total scrollback depth
@@ -807,14 +809,24 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
 
         const auto results = ::Agentmaster::ResolvePromptAnchors(haystack, msgs);
-        if (index >= results.size() || !results[index].found)
+        for (size_t k = 0; k < results.size() && k < rows.size(); ++k)
         {
-            return -1;
+            if (!results[k].found)
+            {
+                continue;
+            }
+            const auto off = results[k].offset;
+            const auto it = std::upper_bound(rowStartOffsets.begin(), rowStartOffsets.end(), off);
+            const size_t ri = (it == rowStartOffsets.begin()) ? 0 : static_cast<size_t>((it - rowStartOffsets.begin()) - 1);
+            rows[k] = rowAbs[ri];
         }
-        const auto off = results[index].offset;
-        const auto it = std::upper_bound(rowStartOffsets.begin(), rowStartOffsets.end(), off);
-        const size_t ri = (it == rowStartOffsets.begin()) ? 0 : static_cast<size_t>((it - rowStartOffsets.begin()) - 1);
-        return rowAbs[ri];
+        return winrt::single_threaded_vector<int32_t>(std::move(rows));
+    }
+
+    int32_t ControlCore::ResolveConversationPromptRow(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index)
+    {
+        const auto rows = ResolveConversationPromptRows(messages);
+        return index < rows.Size() ? rows.GetAt(index) : -1;
     }
 
     void ControlCore::AdjustOpacity(const float adjustment)

@@ -117,10 +117,28 @@ parity with the existing Ctrl+Shift+F search which also scans under lock on the 
 Not done (deliberately): a single-pass multi-pattern matcher (Aho-Corasick) for the all-miss case — the
 window cap already bounds it to ~16 ms, and the extra build cost would regress the common *present* path.
 
+## 4a. Icon eligibility (dimming dead jumps)
+
+Many summary prompts won't resolve at a given moment (scrolled off the recent window, never rendered, or
+mixed-bidi). Those jump buttons are **dimmed** (opacity 0.2) while resolvable ones stay normal (0.75), so
+the working icons are obvious. The state is computed by a **single batch resolve** —
+`ControlCore::ResolveConversationPromptRows` → a row (or -1) per prompt in one linearize+resolve — surfaced
+to the overlay through `TermControl::ResolveConversationPromptRows` and `TerminalPage::_JumpEligibilityInSession`.
+
+Refresh is gated to stay cheap (the user's "don't hurt performance"):
+- **On (re)build** of the panel — which only happens when the transcript grew (the existing mtime gate), so
+  it tracks buffer changes during active sessions for free.
+- **On a 5 s tick** — reusing `_summaryTimer`, which is **stopped while the panel is hidden**, so idle/hidden
+  cost is 0; a visible panel pays at most one bounded resolve per 5 s.
+- **After a click** — a jump makes the other icons re-check immediately (the buffer/viewport just moved).
+
+(A mutation-id epoch gate could make an idle *visible* panel free too — noted as a future optimization.)
+
 ## 5. Edge behavior
 
 - **Not on screen** → `-1`, no scroll (no chime). The transcript still has the prompt; a "open transcript
-  here" fallback is a future nicety.
+  here" fallback is a future nicety. **The icon is also DIMMED** (opacity 0.2 vs 0.75) so a prompt that
+  currently won't jump is visually distinct — see *icon eligibility* below.
 - **RTL (Hebrew / Arabic)** — a terminal renders an RTL line in **visual order (character-reversed)** while
   the transcript stores it **logical**, so an RTL prompt appears reversed in the buffer and a logical-order
   search misses. The resolver detects an RTL prompt (`ContainsRtl`) and **also tries the character-reversal**
