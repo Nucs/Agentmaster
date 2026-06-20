@@ -2513,6 +2513,11 @@ namespace winrt::TerminalApp::implementation
         }
         bar.Background(Fill(0x01, 0x80, 0x80, 0x80)); // ~invisible, yet hit-testable
         bar.Child(grip);
+        // Agentmaster: the grab bar is draggable but easy to miss (it is near-invisible at rest);
+        // name what it resizes so the affordance is discoverable beyond the hover cursor change.
+        AgentSetTip(bar, vertical ?
+                             winrt::hstring{ L"Drag to resize \x2014 the Explorer Tree and the Flight Plan share this divider." } :
+                             winrt::hstring{ L"Drag to resize \x2014 the Triage Board and the panels below it share this divider." });
 
         const auto cursorType = vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth;
 
