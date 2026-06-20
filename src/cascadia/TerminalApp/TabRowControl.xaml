@@ -73,7 +73,7 @@
                         Background="Transparent"
                         BorderThickness="0"
                         Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                        ToolTipService.ToolTip="Go to Agent Manager"
+                        ToolTipService.ToolTip="Go to the Agent Manager &#x2014; jump back to the pinned Manager tab (shown here only when it has scrolled out of view)."
                         Visibility="Collapsed">
                     <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
                               FontSize="14"
@@ -94,7 +94,7 @@
                         Background="Transparent"
                         BorderThickness="0"
                         Foreground="{ThemeResource SystemControlForegroundBaseMediumBrush}"
-                        ToolTipService.ToolTip="Jump back to the selected session"
+                        ToolTipService.ToolTip="Jump back to the selected session &#x2014; return to the tab of the session highlighted in the Manager (shown while the Manager tab is active)."
                         Visibility="Collapsed">
                     <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
                               FontSize="14"

@@ -47,6 +47,7 @@
                           Margin="3,0,8,0"
                           IsActive="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
                           IsIndeterminate="{x:Bind TabStatus.IsProgressRingIndeterminate, Mode=OneWay}"
+                          ToolTipService.ToolTip="A task in this tab is reporting progress."
                           Visibility="{x:Bind TabStatus.IsProgressRingActive, Mode=OneWay}"
                           Value="{x:Bind TabStatus.ProgressValue, Mode=OneWay}" />
         <FontIcon x:Name="HeaderBellIndicator"
@@ -54,30 +55,35 @@
                   FontFamily="{ThemeResource SymbolThemeFontFamily}"
                   FontSize="12"
                   Glyph="&#xEA8F;"
+                  ToolTipService.ToolTip="This tab rang the bell &#x2014; activity happened while it was in the background."
                   Visibility="{x:Bind TabStatus.BellIndicator, Mode=OneWay}" />
         <FontIcon x:Name="HeaderZoomIcon"
                   Margin="0,0,8,0"
                   FontFamily="{ThemeResource SymbolThemeFontFamily}"
                   FontSize="12"
                   Glyph="&#xE8A3;"
+                  ToolTipService.ToolTip="A pane in this tab is zoomed to fill the tab."
                   Visibility="{x:Bind TabStatus.IsPaneZoomed, Mode=OneWay}" />
         <FontIcon x:Name="HeaderLockIcon"
                   Margin="0,0,8,0"
                   FontFamily="{ThemeResource SymbolThemeFontFamily}"
                   FontSize="12"
                   Glyph="&#xE72E;"
+                  ToolTipService.ToolTip="This tab is read-only &#x2014; keyboard input is blocked until read-only mode is turned off."
                   Visibility="{x:Bind TabStatus.IsReadOnlyActive, Mode=OneWay}" />
         <FontIcon x:Name="HeaderClosedIcon"
                   Margin="0,0,8,0"
                   FontFamily="{ThemeResource SymbolThemeFontFamily}"
                   FontSize="12"
                   Glyph="&#xEA39;"
+                  ToolTipService.ToolTip="The process in this tab has exited; the tab stays open so you can read its output."
                   Visibility="{x:Bind TabStatus.IsConnectionClosed, Mode=OneWay}" />
         <FontIcon x:Name="HeaderBroadcastIcon"
                   Margin="0,0,8,0"
                   FontFamily="{ThemeResource SymbolThemeFontFamily}"
                   FontSize="12"
                   Glyph="&#xEC05;"
+                  ToolTipService.ToolTip="Input is being broadcast to every pane in this tab &#x2014; what you type goes to all of them."
                   Visibility="{x:Bind TabStatus.IsInputBroadcastActive, Mode=OneWay}" />
         <!--  Agentmaster: the tab-strip status dot. Sits between the TabViewItem icon (outside this
               control) and the title, so the header reads "[icon] (dot) (title)" — state-colored for a
