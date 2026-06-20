@@ -64,13 +64,25 @@
                         Disable the EntranceThemeTransition for our muxc:TabView, which would slowly slide in the tabs
                         while the window opens. The difference is especially noticeable if window fade-in transitions are
                         disabled system-wide. On my system this shaves off about 10% of the startup cost and looks better.
+
+                        Agentmaster: also drop the AddDeleteThemeTransition and ContentThemeTransition from the inner
+                        TabViewListView (the ListView that drives drag-reorder). They animate a tab container being
+                        removed and re-added (and its content re-templated) as a drag pulls the tab out of its slot and
+                        drops it into the new one. On a FAST drag the delete fade-out is still in flight when the
+                        container is recycled for the re-insert, so the container ends up detached / zero-size and the
+                        tab visually vanishes ("we lose the tab") — microsoft-ui-xaml#2455. Both that issue and our own
+                        NoAnimationsPlease style below agree AddDelete is the culprit; we drop Content too (the other
+                        name in #2455's fix) and keep only ReorderThemeTransition, which animates the *sibling* tabs
+                        sliding to make room and never touches the dragged container's lifetime — so reorder still looks
+                        smooth and the entrance animation stays suppressed.
                     -->
                     <Style TargetType="primitives:TabViewListView">
                         <Setter Property="ItemContainerTransitions">
                             <Setter.Value>
                                 <TransitionCollection>
-                                    <AddDeleteThemeTransition />
-                                    <ContentThemeTransition />
+                                    <!--  (removed transitions left for reference — they lose the tab on a fast drag, microsoft-ui-xaml#2455)  -->
+                                    <!--<AddDeleteThemeTransition />-->
+                                    <!--<ContentThemeTransition />-->
                                     <ReorderThemeTransition />
                                 </TransitionCollection>
                             </Setter.Value>
