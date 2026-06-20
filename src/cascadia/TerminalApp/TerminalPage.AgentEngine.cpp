@@ -63,6 +63,37 @@ namespace winrt
     using VirtualKeyModifiers = Windows::System::VirtualKeyModifiers;
 }
 
+// Agentmaster: depth-first walk for the TabView's internal horizontal ScrollViewer — the template
+// part named "ScrollViewer" inside its TabViewListView (see Microsoft.UI.Xaml 2.8 Generic.xaml: the
+// TabScrollViewerStyle hosts the `<`/`>` ScrollDecrease/IncreaseButtons around it). That ScrollViewer
+// is what scrolls the tab strip, so its HorizontalOffset tells us when tab 0 (the pinned Manager tab)
+// has scrolled off the left edge. Each TabViewItem's content is just an empty Border (Tab.cpp), so the
+// strip subtree contains exactly one ScrollViewer and the first found in document order is correct.
+static winrt::WUX::Controls::ScrollViewer _FindTabStripScrollViewer(const winrt::WUX::DependencyObject& root)
+{
+    if (!root)
+    {
+        return nullptr;
+    }
+    const auto count = winrt::WUX::Media::VisualTreeHelper::GetChildrenCount(root);
+    for (int32_t i = 0; i < count; ++i)
+    {
+        const auto child = winrt::WUX::Media::VisualTreeHelper::GetChild(root, i);
+        if (const auto sv = child.try_as<winrt::WUX::Controls::ScrollViewer>())
+        {
+            if (const auto fe = child.try_as<winrt::WUX::FrameworkElement>(); fe && fe.Name() == L"ScrollViewer")
+            {
+                return sv;
+            }
+        }
+        if (auto found = _FindTabStripScrollViewer(child))
+        {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
 namespace winrt::TerminalApp::implementation
 {
     // Agentmaster (M9): the engine is a process singleton shared by every window. When this
@@ -190,6 +221,105 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             CATCH_LOG();
+        }
+    }
+
+    // Agentmaster: lazily bind to the TabView's internal horizontal ScrollViewer. It isn't realized
+    // until the strip's template is applied (and at least one tab exists), so the first attempts
+    // (from _OnFirstLayout) may find nothing — later callers (_OnTabItemsChanged, every
+    // _UpdateManagerHomeButton) retry until it's there. Once bound we watch ViewChanged (the user
+    // scrolled — buttons, wheel or drag) and SizeChanged (the strip resized, so overflow appeared or
+    // vanished) to re-evaluate the Home button. The guard makes repeat calls cheap no-ops.
+    void TerminalPage::_EnsureTabStripScrollViewer()
+    {
+        if (_tabStripScrollViewer || !_tabView)
+        {
+            return;
+        }
+
+        auto sv = _FindTabStripScrollViewer(_tabView.as<winrt::WUX::DependencyObject>());
+        if (!sv)
+        {
+            return; // template not realized yet — a later call will retry
+        }
+
+        _tabStripScrollViewer = sv;
+        _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+            if (auto page = weakThis.get())
+            {
+                page->_UpdateManagerHomeButton();
+            }
+        });
+        _tabStripSizeChangedRevoker = sv.SizeChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+            if (auto page = weakThis.get())
+            {
+                page->_UpdateManagerHomeButton();
+            }
+        });
+    }
+
+    // Agentmaster: show the tab-strip "Home" button exactly when the pinned Manager tab (tab 0) has
+    // scrolled off the left edge of the strip — so the user can jump back to it. The Manager tab sits
+    // at content-x [~0, width); once the ScrollViewer's horizontal offset passes that width it is fully
+    // off-screen (a few-px sliver hides under the `<` arrow). We cache the width while the tab is
+    // realized because the ItemsStackPanel virtualizes the container away once it's scrolled off, so a
+    // live ActualWidth read then returns 0. Gated on real overflow (ScrollableWidth > 0), so with few
+    // tabs (no `<`/`>` arrows) the button is always hidden.
+    void TerminalPage::_UpdateManagerHomeButton()
+    {
+        if (!_managerHomeButton)
+        {
+            return;
+        }
+        _EnsureTabStripScrollViewer();
+
+        auto showHome = false;
+        if (_managerTab && _tabStripScrollViewer)
+        {
+            const auto& sv = _tabStripScrollViewer;
+            if (sv.ScrollableWidth() > 0.5) // there's horizontal overflow (the scroll arrows are showing)
+            {
+                if (const auto tvi = _managerTab.TabViewItem())
+                {
+                    if (const auto w = tvi.ActualWidth(); w > 1.0)
+                    {
+                        _managerTabWidthCache = w;
+                    }
+                }
+                if (_managerTabWidthCache > 1.0)
+                {
+                    showHome = sv.HorizontalOffset() >= (_managerTabWidthCache - 1.0);
+                }
+            }
+        }
+
+        // ViewChanged fires continuously while dragging the strip; only touch the property (and so the
+        // layout) when the state actually flips.
+        const auto desired = showHome ? WUX::Visibility::Visible : WUX::Visibility::Collapsed;
+        if (_managerHomeButton.Visibility() != desired)
+        {
+            _managerHomeButton.Visibility(desired);
+        }
+    }
+
+    // Agentmaster: the Home button's action — jump back to the pinned Manager tab and scroll the strip
+    // fully left so it's revealed (the ViewChanged that follows re-hides the button). Selecting the tab
+    // also gives it focus, which is the "jump to Agent Manager" the user asked for.
+    void TerminalPage::_OnManagerHomeButtonClick(const IInspectable& /*sender*/, const winrt::WUX::RoutedEventArgs& /*args*/)
+    {
+        if (!_managerTab)
+        {
+            return;
+        }
+
+        uint32_t idx = 0;
+        if (_tabs.IndexOf(_managerTab, idx))
+        {
+            _SelectTab(idx);
+        }
+        if (_tabStripScrollViewer)
+        {
+            _tabStripScrollViewer.ChangeView(0.0, nullptr, nullptr, true);
         }
     }
 

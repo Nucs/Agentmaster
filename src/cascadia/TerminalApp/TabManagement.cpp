@@ -1264,6 +1264,11 @@ namespace winrt::TerminalApp::implementation
             p.Visibility(Visibility::Collapsed);
         }
         _UpdateTabView();
+
+        // Agentmaster: adding/removing tabs can make the strip overflow (the `<`/`>` arrows appear) or
+        // stop overflowing (offset snaps back to 0) — re-evaluate the Manager "Home" button. This is
+        // also a retry point for binding the internal scroller if it wasn't realized at first layout.
+        _UpdateManagerHomeButton();
     }
 
     void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)

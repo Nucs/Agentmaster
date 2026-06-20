@@ -349,6 +349,15 @@ namespace winrt::TerminalApp::implementation
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
 
+        // Agentmaster: the tab-strip "Home" button — hidden by default, surfaced by
+        // _UpdateManagerHomeButton when the pinned Manager tab scrolls out of view; a click jumps back
+        // to it. It lives in the TabStripHeader, immediately left of the `<` scroll arrow.
+        _managerHomeButton = tabRowImpl->ManagerHomeButton();
+        if (_managerHomeButton)
+        {
+            _managerHomeButton.Click({ get_weak(), &TerminalPage::_OnManagerHomeButtonClick });
+        }
+
         if (_settings.GlobalSettings().ShowTabsInTitlebar())
         {
             // Remove the TabView from the page. We'll hang on to it, we need to
@@ -721,6 +730,11 @@ namespace winrt::TerminalApp::implementation
             }
 
             _CompleteInitialization();
+
+            // Agentmaster: the tab strip is laid out now — bind the Home button to the TabView's
+            // horizontal scroller and set its initial (hidden) state. Later scroll/resize/tab changes
+            // keep it in sync (ScrollViewer ViewChanged/SizeChanged + _OnTabItemsChanged).
+            _UpdateManagerHomeButton();
         }
     }
 

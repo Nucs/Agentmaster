@@ -261,6 +261,17 @@ namespace winrt::TerminalApp::implementation
         Microsoft::UI::Xaml::Controls::SplitButton _newTabButton{ nullptr };
         winrt::TerminalApp::ColorPickupFlyout _tabColorPicker{ nullptr };
 
+        // Agentmaster: the tab-strip "Home" button (lives in the TabStripHeader, immediately left of
+        // the `<` scroll arrow) that appears when the pinned Manager tab scrolls out of view; the
+        // TabView's internal horizontal ScrollViewer it keys off (found lazily once the strip is
+        // templated); and the last-known Manager tab width (cached because the container virtualizes
+        // away once scrolled off, so its live ActualWidth reads 0). See _UpdateManagerHomeButton.
+        Windows::UI::Xaml::Controls::Button _managerHomeButton{ nullptr };
+        Windows::UI::Xaml::Controls::ScrollViewer _tabStripScrollViewer{ nullptr };
+        double _managerTabWidthCache{ 0.0 };
+        Windows::UI::Xaml::Controls::ScrollViewer::ViewChanged_revoker _tabStripViewChangedRevoker;
+        Windows::UI::Xaml::FrameworkElement::SizeChanged_revoker _tabStripSizeChangedRevoker;
+
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
 
         Windows::Foundation::Collections::IObservableVector<TerminalApp::Tab> _tabs;
@@ -943,6 +954,15 @@ namespace winrt::TerminalApp::implementation
         void _OnTabItemsChanged(const IInspectable& sender, const Windows::Foundation::Collections::IVectorChangedEventArgs& eventArgs);
         void _OnTabCloseRequested(const IInspectable& sender, const Microsoft::UI::Xaml::Controls::TabViewTabCloseRequestedEventArgs& eventArgs);
         void _OnFirstLayout(const IInspectable& sender, const IInspectable& eventArgs);
+
+        // Agentmaster: the tab-strip "Home" button — surface it when the pinned Manager tab scrolls
+        // out of view, and jump back to the Manager tab on click. _EnsureTabStripScrollViewer binds
+        // (lazily) to the TabView's internal horizontal scroller so _UpdateManagerHomeButton can watch
+        // its offset. (Defined in TerminalPage.AgentEngine.cpp.)
+        void _OnManagerHomeButtonClick(const IInspectable& sender, const Windows::UI::Xaml::RoutedEventArgs& args);
+        void _EnsureTabStripScrollViewer();
+        void _UpdateManagerHomeButton();
+
         void _UpdatedSelectedTab(const winrt::TerminalApp::Tab& tab);
         void _UpdateBackground(const winrt::Microsoft::Terminal::Settings::Model::Profile& profile);
 
