@@ -1864,7 +1864,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         {
             if (passthroughCtrlF && !GetTSFHandle().HasActiveComposition())
             {
-                _TrySendKeyEvent(vkey, scanCode, modifiers, keyDown);
+                // Deliver a COMPLETE Ctrl+F (down + up) to the app now: opening the search box steals
+                // focus on this keydown, so the natural key-up is eaten by the ContainsFocus() guard at
+                // the top of this method, and an app in win32-input mode (e.g. claude's TUI) would
+                // otherwise see a press with no release. In cooked mode the up is a no-op, so this is
+                // just the ^F byte.
+                _TrySendKeyEvent(vkey, scanCode, modifiers, true);
+                _TrySendKeyEvent(vkey, scanCode, modifiers, false);
             }
             return true;
         }
