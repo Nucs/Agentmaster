@@ -763,12 +763,15 @@ int NonClientIslandWindow::_GetResizeHandleHeight() const noexcept
         return originalRet;
     }
 
-    // At this point, we know that the cursor is inside the client area so it
-    // has to be either the little border at the top of our custom title bar,
-    // the drag bar or something else in the XAML island. But the XAML Island
-    // handles WM_NCHITTEST on its own so actually it cannot be the XAML
-    // Island. Then it must be the drag bar or the little border at the top
-    // which the user can use to move or resize the window.
+    // At this point, we know that the cursor is inside the client area. Upstream
+    // assumed this could only be the little top border or the drag bar — because
+    // "the XAML Island handles WM_NCHITTEST on its own". That assumption only holds
+    // while the XAML content under the cursor is HIT-TESTABLE. Any content with a
+    // null/transparent Background is NOT, so the island returns HTTRANSPARENT and
+    // the click falls through to here — and the old code then returned HTCAPTION
+    // for it. That is why a click on a transparent spot of a pane (e.g. the
+    // Agentmaster Manager tab, or the gaps around a TextBlock) would DRAG the
+    // window, and a right-click there would open the system/caption menu.
 
     RECT rcWindow;
     winrt::check_bool(::GetWindowRect(_window.get(), &rcWindow));
@@ -782,6 +785,24 @@ int NonClientIslandWindow::_GetResizeHandleHeight() const noexcept
         // However, if we're the quake window, then just return HTCAPTION so we
         // don't get a resize handle on the top.
         return IsQuakeWindow() ? HTCAPTION : HTTOP;
+    }
+
+    // Agentmaster: the caption / window-drag region is the TITLEBAR ONLY. Below the
+    // titlebar is content (panes), so a click there that fell through transparent
+    // XAML must be HTCLIENT — inert — instead of HTCAPTION, which would otherwise let
+    // any pane whose content isn't opaque drag the window or pop the system menu.
+    // This makes the drag region match what the user actually sees as the title bar,
+    // and it is defense-in-depth: it holds no matter what background (or none) a
+    // pane's content sets, so we don't have to chase an opaque Background onto every
+    // element. Real titlebar dragging is unaffected — it is served by the drag-bar
+    // input-sink child window and by the HTCAPTION below for the band itself; the
+    // resize borders were handled above and by DefWindowProc.
+    const auto titlebarBottom = rcWindow.top +
+                                _GetTopBorderHeight() +
+                                (_titlebar ? gsl::narrow_cast<long>(_titlebar.ActualHeight() * GetCurrentDpiScale()) : 0);
+    if (ptMouse.y >= titlebarBottom)
+    {
+        return HTCLIENT;
     }
 
     return HTCAPTION;
