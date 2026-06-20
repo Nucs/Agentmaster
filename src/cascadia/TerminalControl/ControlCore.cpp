@@ -1758,7 +1758,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         WI_SetFlagIf(flags, SearchFlag::RegularExpression, request.RegularExpression);
         const auto searchInvalidated = _searcher.IsStale(*_terminal.get(), request.Text, flags);
 
-        if (searchInvalidated || request.ExecuteSearch)
+        // Agentmaster: the search box's "Highlight all matches" checkbox toggles whether every match is
+        // painted or only the current/focused one. It can change WITHOUT the needle/flags changing, so
+        // track the last-applied mode and force a re-apply of the highlights when it flips.
+        const auto highlightModeChanged = request.HighlightAllMatches != _searchHighlightAll;
+        _searchHighlightAll = request.HighlightAllMatches;
+
+        if (searchInvalidated || request.ExecuteSearch || highlightModeChanged)
         {
             std::vector<til::point_span> oldResults;
 
@@ -1766,7 +1772,6 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             {
                 oldResults = _searcher.ExtractResults();
                 _searcher.Reset(*_terminal.get(), request.Text, flags, !request.GoForward);
-                _terminal->SetSearchHighlights(_searcher.Results());
             }
 
             if (request.ExecuteSearch)
@@ -1774,7 +1779,30 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 _searcher.FindNext(!request.GoForward);
             }
 
-            _terminal->SetSearchHighlightFocused(gsl::narrow<size_t>(std::max<ptrdiff_t>(0, _searcher.CurrentMatch())));
+            // Agentmaster: _searcher always holds the FULL result set (so the n/m counter, navigation,
+            // and scrollbar pips are unaffected); only the painted highlight set differs by mode.
+            if (request.HighlightAllMatches)
+            {
+                _terminal->SetSearchHighlights(_searcher.Results());
+                _terminal->SetSearchHighlightFocused(gsl::narrow<size_t>(std::max<ptrdiff_t>(0, _searcher.CurrentMatch())));
+            }
+            else
+            {
+                // Paint ONLY the current/focused match. Mark every match region "old" so a match we
+                // navigate off — or the whole set when Highlight-All is switched off — is erased on the
+                // next paint (TriggerSearchHighlight invalidates old + new regions).
+                const auto& all = _searcher.Results();
+                oldResults.insert(oldResults.end(), all.begin(), all.end());
+
+                std::vector<til::point_span> single;
+                if (const auto* current = _searcher.GetCurrent())
+                {
+                    single.push_back(*current);
+                }
+                _terminal->SetSearchHighlights(single);
+                _terminal->SetSearchHighlightFocused(0);
+            }
+
             _renderer->TriggerSearchHighlight(oldResults);
         }
 

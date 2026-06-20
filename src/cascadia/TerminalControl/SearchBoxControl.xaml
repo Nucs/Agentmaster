@@ -266,6 +266,24 @@
             <PathIcon Data="M 11.7716,12.7647 V 14.2481 H 11.06066 V 12.8194 C 10.08996,12.8194 9.30156,12.62344 8.69546,12.23151 V 11.04201 C 8.95978,11.27443 9.31981,11.4704 9.77556,11.6299 10.23585,11.78485 10.66423,11.86232 11.06076,11.86232 V 8.36232 C 10.05816,7.87925 9.40876,7.43491 9.11256,7.02932 8.81634,6.61916 8.66822,6.13609 8.66822,5.58012 8.66822,4.91931 8.89381,4.34962 9.34498,3.87112 9.79615,3.38805 10.36808,3.09866 11.06078,3.00296 V 1.77246 H 11.77172 V 2.97556 C 12.66495,3.002904 13.28242,3.13051 13.62422,3.35837 V 4.52047 C 13.15938,4.15589 12.54182,3.95992 11.77172,3.93258 V 7.54198 C 12.71964,7.99315 13.36682,8.43065 13.71312,8.85448 14.06403,9.27375 14.23949,9.75227 14.23949,10.28998 14.23949,10.93712 14.02074,11.48168 13.58324,11.92378 13.1503,12.36128 12.54644,12.64155 11.77174,12.7646 Z M 11.06066,7.1592 V 3.9737 C 10.67785,4.051174 10.37479,4.22207 10.15148,4.4864 9.92817,4.74617 9.81652,5.0629 9.81652,5.4366 9.81652,5.82853 9.90767,6.14982 10.08996,6.40047 10.27225,6.65112 10.59582,6.90405 11.06066,7.15926 Z M 11.7716,8.7178 V 11.8076 C 12.65116,11.61619 13.0909,11.14224 13.0909,10.3857 13.0909,9.75679 12.65112,9.2008 11.7716,8.7177 Z M 8.0089,8.5538 H 6.9835 L 4.714,4.3224 H 4.672984 L 2.560684,8.5538 H 1.555784 L 4.440584,2.8526 H 4.884924 Z " />
         </ToggleButton>
 
+        <!--  Agentmaster: toggle whether ALL matches are highlighted (checked = default) or only the
+              current/focused match (unchecked). Same toggle idiom as Case/Regex; re-highlights without
+              moving the current match.  -->
+        <ToggleButton x:Name="HighlightAllButton"
+                      Width="28"
+                      Height="28"
+                      Margin="4,0"
+                      Padding="0"
+                      AutomationProperties.Name="Highlight all matches"
+                      BackgroundSizing="OuterBorderEdge"
+                      Click="HighlightAllButtonClicked"
+                      IsChecked="True"
+                      ToolTipService.ToolTip="Highlight all matches">
+            <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                      Glyph="&#xEE56;"
+                      Style="{ThemeResource FontIconStyle}" />
+        </ToggleButton>
+
         <Button x:Name="CloseButton"
                 x:Uid="SearchBox_Close"
                 Width="28"

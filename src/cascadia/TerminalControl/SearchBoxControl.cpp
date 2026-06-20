@@ -30,6 +30,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         _focusableElements.insert(CloseButton());
         _focusableElements.insert(CaseSensitivityButton());
         _focusableElements.insert(RegexButton());
+        _focusableElements.insert(HighlightAllButton());
         _focusableElements.insert(GoForwardButton());
         _focusableElements.insert(GoBackwardButton());
 
@@ -435,6 +436,21 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     }
 
     void SearchBoxControl::RegexButtonClicked(winrt::Windows::Foundation::IInspectable const& /*sender*/, winrt::Windows::UI::Xaml::RoutedEventArgs const& /*e*/)
+    {
+        SearchChanged.raise(Text(), GoForward(), CaseSensitive(), RegularExpression());
+    }
+
+    // Agentmaster: read the "Highlight all matches" toggle (checked => paint every match; unchecked =>
+    // only the current/focused one). Read by TermControl when it builds a SearchRequest.
+    bool SearchBoxControl::HighlightAllMatches()
+    {
+        return HighlightAllButton().IsChecked().GetBoolean();
+    }
+
+    // Agentmaster: toggling Highlight-All re-applies the highlights WITHOUT moving the current match, so
+    // raise SearchChanged (ExecuteSearch=false) like the Case/Regex toggles — ControlCore::Search sees
+    // the mode flip and repaints.
+    void SearchBoxControl::HighlightAllButtonClicked(winrt::Windows::Foundation::IInspectable const& /*sender*/, winrt::Windows::UI::Xaml::RoutedEventArgs const& /*e*/)
     {
         SearchChanged.raise(Text(), GoForward(), CaseSensitive(), RegularExpression());
     }

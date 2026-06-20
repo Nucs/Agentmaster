@@ -55,6 +55,7 @@ namespace Microsoft.Terminal.Control
         Boolean GoForward;
         Boolean CaseSensitive;
         Boolean RegularExpression;
+        Boolean HighlightAllMatches; // Agentmaster: paint every match (true) or only the current/focused one (false)
         Boolean ExecuteSearch;
         Boolean ScrollIntoView;
         Int32 ScrollOffset;
