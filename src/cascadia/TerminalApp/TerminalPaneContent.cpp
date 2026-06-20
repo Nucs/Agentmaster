@@ -67,6 +67,11 @@ namespace winrt::TerminalApp::implementation
             winrt::Windows::UI::Xaml::Controls::Border badge{};
             badge.HorizontalAlignment(HorizontalAlignment::Right);
             badge.Visibility(Visibility::Collapsed);
+            // Agentmaster: when the badge resizes (its status/model/branch text changes), feed its width
+            // to the TermControl so the search box (Ctrl+Shift+F) can sit just left of it. The
+            // { get_weak(), &member } form is weak-safe — the grid can outlive this content in the XAML
+            // tree (same idiom as _setupControlEvents).
+            badge.SizeChanged({ get_weak(), &TerminalPaneContent::_OnBadgeSizeChanged });
 
             winrt::Windows::UI::Xaml::Controls::Border summary{};
             summary.HorizontalAlignment(HorizontalAlignment::Right);
@@ -118,6 +123,27 @@ namespace winrt::TerminalApp::implementation
         {
             _agentOverlaySlot.Child(overlay);
             _agentOverlaySlot.Visibility(overlay ? Visibility::Visible : Visibility::Collapsed);
+            // Agentmaster: a collapsed badge fires no SizeChanged, so reset the search box inset here
+            // (when the badge is installed, its SizeChanged pushes the real width once laid out).
+            if (!overlay)
+            {
+                _UpdateSearchBoxInset(0.0);
+            }
+        }
+    }
+    void TerminalPaneContent::_OnBadgeSizeChanged(const winrt::Windows::Foundation::IInspectable& /*sender*/, const winrt::Windows::UI::Xaml::SizeChangedEventArgs& e)
+    {
+        _UpdateSearchBoxInset(e.NewSize().Width);
+    }
+    void TerminalPaneContent::_UpdateSearchBoxInset(double badgeWidth)
+    {
+        if (_control)
+        {
+            // Sit the search box just left of the badge with a small gap; 0 when there's no badge, so a
+            // non-agent tab's box keeps its default top-right edge position. The +12 absorbs the gap plus
+            // the slight offset between the badge stack's right margin and the box's scrollbar inset.
+            const double inset = badgeWidth > 1.0 ? badgeWidth + 12.0 : 0.0;
+            _control.SetSearchBoxRightInset(inset);
         }
     }
     void TerminalPaneContent::SetAgentSummaryOverlay(const winrt::Windows::UI::Xaml::FrameworkElement& overlay)

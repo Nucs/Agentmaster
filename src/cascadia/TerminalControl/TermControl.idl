@@ -121,6 +121,11 @@ namespace Microsoft.Terminal.Control
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();
 
+        // Agentmaster: shift the (top-right) search box left by this many pixels so it can sit to the
+        // LEFT of the per-tab overlay badge. The app measures the badge width and feeds it here; 0
+        // restores the default top-right edge position (a non-agent tab never moves it).
+        void SetSearchBoxRightInset(Double rightInsetPx);
+
         void SearchMatch(Boolean goForward);
 
         void AdjustFontSize(Single fontSizeDelta);

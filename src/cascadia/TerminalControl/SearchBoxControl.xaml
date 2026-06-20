@@ -175,16 +175,21 @@
         <RectangleGeometry Rect="{x:Bind ContentClipRect, Mode=OneWay}" />
     </UserControl.Clip>
 
+    <!--  Agentmaster: restyled to match the per-tab overlay/badge HUD — dark translucent fill
+          (#CC202020), a subtle #40FFFFFF hairline border, 4px corners, compact padding, and no drop
+          shadow (was the stock FlyoutPresenter look). RequestedTheme="Dark" forces the whole box to
+          render dark-themed (light text + glyphs) like the always-dark overlays, regardless of the
+          app theme — the existing Dark ThemeDictionary entries above then drive the buttons.  -->
     <StackPanel Margin="8"
-                Padding="4,8"
-                Background="{ThemeResource FlyoutPresenterBackground}"
-                BorderBrush="{ThemeResource FlyoutBorderThemeBrush}"
-                BorderThickness="{ThemeResource FlyoutBorderThemeThickness}"
-                CornerRadius="{ThemeResource OverlayCornerRadius}"
+                Padding="6,3"
+                Background="#CC202020"
+                BorderBrush="#40FFFFFF"
+                BorderThickness="1"
+                CornerRadius="4"
                 Orientation="Horizontal"
                 PointerPressed="SearchBoxPointerPressedHandler"
                 PointerReleased="SearchBoxPointerReleasedHandler"
-                Shadow="{StaticResource SharedShadow}"
+                RequestedTheme="Dark"
                 Translation="0,0,16">
         <StackPanel.RenderTransform>
             <TranslateTransform x:Name="Transform" />
@@ -206,15 +211,15 @@
 
         <TextBlock x:Name="StatusBox"
                    x:Uid="SearchBox_StatusBox"
-                   Margin="5"
+                   Margin="4"
                    HorizontalAlignment="Left"
                    VerticalAlignment="Center"
-                   FontSize="15" />
+                   FontSize="12" />
 
         <ToggleButton x:Name="GoBackwardButton"
                       x:Uid="SearchBox_SearchBackwards"
-                      Width="32"
-                      Height="32"
+                      Width="28"
+                      Height="28"
                       Margin="4,0"
                       Padding="0"
                       BackgroundSizing="OuterBorderEdge"
@@ -226,8 +231,8 @@
         </ToggleButton>
         <ToggleButton x:Name="GoForwardButton"
                       x:Uid="SearchBox_SearchForwards"
-                      Width="32"
-                      Height="32"
+                      Width="28"
+                      Height="28"
                       Margin="4,0"
                       Padding="0"
                       BackgroundSizing="OuterBorderEdge"
@@ -239,8 +244,8 @@
 
         <ToggleButton x:Name="CaseSensitivityButton"
                       x:Uid="SearchBox_CaseSensitivity"
-                      Width="32"
-                      Height="32"
+                      Width="28"
+                      Height="28"
                       Margin="4,0"
                       Padding="0"
                       BackgroundSizing="OuterBorderEdge"
@@ -250,8 +255,8 @@
 
         <ToggleButton x:Name="RegexButton"
                       x:Uid="SearchBox_RegularExpression"
-                      Width="32"
-                      Height="32"
+                      Width="28"
+                      Height="28"
                       Margin="4,0"
                       Padding="0"
                       BackgroundSizing="OuterBorderEdge"
@@ -261,8 +266,8 @@
 
         <Button x:Name="CloseButton"
                 x:Uid="SearchBox_Close"
-                Width="32"
-                Height="32"
+                Width="28"
+                Height="28"
                 Margin="4,0"
                 Padding="0"
                 BackgroundSizing="OuterBorderEdge"

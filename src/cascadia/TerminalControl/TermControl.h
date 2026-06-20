@@ -139,6 +139,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                                              Control::RendererWarningArgs args);
 
         void CreateSearchBoxControl();
+        void SetSearchBoxRightInset(double rightInsetPx); // Agentmaster: shift the search box left of the per-tab overlay badge
 
         void SearchMatch(const bool goForward);
 
@@ -319,6 +320,8 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         bool _isBackgroundLight{ false };
         bool _detached{ false };
         til::CoordType _searchScrollOffset = 0;
+        double _searchBoxRightInset = 0; // Agentmaster: right margin applied to the search box so it sits left of the per-tab overlay badge
+        void _applySearchBoxInset(); // Agentmaster: (re)apply _searchBoxRightInset to the (lazily-created) search box
 
         Windows::Foundation::Collections::IObservableVector<Windows::UI::Xaml::Controls::ICommandBarElement> _originalPrimaryElements{ nullptr };
         Windows::Foundation::Collections::IObservableVector<Windows::UI::Xaml::Controls::ICommandBarElement> _originalSecondaryElements{ nullptr };

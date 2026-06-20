@@ -135,6 +135,11 @@ namespace winrt::TerminalApp::implementation
         void _setupControlEvents();
         void _removeControlEvents();
 
+        // Agentmaster: push the per-tab overlay badge's measured width to the TermControl so its search
+        // box (Ctrl+Shift+F) sits just left of the badge; 0 (no badge) leaves it at the top-right edge.
+        void _OnBadgeSizeChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::SizeChangedEventArgs& e);
+        void _UpdateSearchBoxInset(double badgeWidth);
+
         safe_void_coroutine _controlConnectionStateChangedHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& /*args*/);
         void _controlWarningBellHandler(const winrt::Windows::Foundation::IInspectable& sender,
                                         const winrt::Windows::Foundation::IInspectable& e);

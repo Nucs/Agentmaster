@@ -680,6 +680,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 // get at its private implementation
                 _searchBox.copy_from(winrt::get_self<implementation::SearchBoxControl>(searchBox));
 
+                // Agentmaster: the box is created lazily, so (re)apply any pending right-inset now that
+                // it exists (it may have been pushed by the app before the box was ever opened).
+                _applySearchBoxInset();
+
                 // If a text is selected inside terminal, use it to populate the search box.
                 // If the search box already contains a value, it will be overridden.
                 if (_core.HasSelection())
@@ -703,6 +707,26 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                     }
                 });
             }
+        }
+    }
+
+    // Agentmaster: shift the (top-right anchored) search box left by `rightInsetPx` pixels so it can
+    // sit to the LEFT of the per-tab overlay badge. The app measures the badge width and feeds it
+    // here; 0 restores the default top-right edge. Stored so it survives the box's lazy (re)creation.
+    void TermControl::SetSearchBoxRightInset(double rightInsetPx)
+    {
+        _searchBoxRightInset = rightInsetPx;
+        _applySearchBoxInset();
+    }
+
+    void TermControl::_applySearchBoxInset()
+    {
+        if (_searchBox)
+        {
+            // A right margin on the right-aligned box pushes it left; the slide-in animation rides the
+            // inner StackPanel's own transform, so an outer margin doesn't disturb it.
+            const winrt::Windows::UI::Xaml::Thickness margin{ 0.0, 0.0, _searchBoxRightInset, 0.0 };
+            _searchBox.as<winrt::Windows::UI::Xaml::FrameworkElement>().Margin(margin);
         }
     }
 
