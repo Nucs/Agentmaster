@@ -917,6 +917,23 @@ namespace winrt::TerminalApp::implementation
         self->_sessionsIndexing.store(false);
         self->_sessionsRows = std::move(rows);
         self->_sessionsEntries = std::move(entries);
+        // A session OPEN in any Agentmaster window (live in the process-wide registry) shows its
+        // REAL tab title — SessionInfo.title, the ONE value Explorer name / tab / persistence all
+        // share (Rule #11) — instead of the transcript-derived PickDisplayTitle: an in-app rename
+        // is reflected here, and a same-dir clash reads its tab name. Baked into the stored rows
+        // (here, on the UI thread — the registry is a `this` member, off-limits to the background
+        // gather) so display, sort, the detail pane, AND fork-naming all agree on it. An on-disk
+        // (archived / never-opened) session keeps its derived title. Registry Get is mutex-guarded.
+        if (self->_sessionRegistry)
+        {
+            for (auto& r : self->_sessionsRows)
+            {
+                if (const auto reg = self->_sessionRegistry->Get(r.id); reg && reg->live && !reg->title.empty())
+                {
+                    r.title = reg->title;
+                }
+            }
+        }
         self->_RunSessionsSearch(); // re-applies the current query (incl. the empty one) + renders
     }
 
