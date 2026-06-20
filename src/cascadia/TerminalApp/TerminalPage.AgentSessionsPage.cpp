@@ -449,6 +449,11 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
+            // Cancel any pending hover-intent close (re-entered the button, or arrived from the popup).
+            if (_sessRangeCloseTimer)
+            {
+                _sessRangeCloseTimer.Stop();
+            }
             // Anchor the popup under the window button's CURRENT position (root-relative). The header
             // cluster moved from the right edge to just after the title, so a fixed offset no longer
             // points at the button — read its live top-left within the host instead.
@@ -456,6 +461,17 @@ namespace winrt::TerminalApp::implementation
             _sessRangePopup.HorizontalOffset(pt.X);
             _sessRangePopup.VerticalOffset(pt.Y + _sessWindowBtn.ActualHeight() + 4);
             _sessRangePopup.IsOpen(true);
+        });
+        // Leaving the button schedules a close (it doesn't close immediately): there's a 4px gap
+        // between the button and the popup, so an immediate close would dismiss it before the pointer
+        // could cross into the card. The popup's PointerEntered cancels this; if the pointer never
+        // arrives (the user just moved away from the button), the timer fires and dismisses it — the
+        // fix for "the panel stays open after leaving the button without entering it".
+        _sessWindowBtn.PointerExited([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+            if (_sessRangeCloseTimer)
+            {
+                _sessRangeCloseTimer.Start(); // a DispatcherTimer restarts its interval on Start()
+            }
         });
         bar.Children().Append(_sessWindowBtn);
 
@@ -540,10 +556,39 @@ namespace winrt::TerminalApp::implementation
             });
             actions.Children().Append(clear);
             card.Children().Append(actions);
-            card.PointerExited([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-                if (_sessRangePopup)
+            // Entering the popup cancels the pending close that leaving the button scheduled — the
+            // pointer made it across the gap, so keep the card open.
+            card.PointerEntered([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+                if (_sessRangeCloseTimer)
                 {
-                    _sessRangePopup.IsOpen(false); // leave the card -> dismiss (Apply/Preset close it too)
+                    _sessRangeCloseTimer.Stop();
+                }
+            });
+            card.PointerExited([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+                // Leave the card -> schedule a close (Apply/Preset close it outright). Deferred (not an
+                // immediate IsOpen(false)) so sliding back up onto the button re-cancels it via the
+                // button's PointerEntered, the symmetric twin of the button-exit path above.
+                if (_sessRangeCloseTimer)
+                {
+                    _sessRangeCloseTimer.Start();
+                }
+            });
+
+            // The shared hover-intent close timer: a short grace period that bridges the button<->popup
+            // gap. Started by either PointerExited, cancelled by either PointerEntered; one tick closes.
+            _sessRangeCloseTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+            _sessRangeCloseTimer.Interval(std::chrono::milliseconds{ 250 });
+            _sessRangeCloseTimer.Tick([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_sessRangeCloseTimer)
+                    {
+                        self->_sessRangeCloseTimer.Stop();
+                    }
+                    if (self->_sessRangePopup)
+                    {
+                        self->_sessRangePopup.IsOpen(false);
+                    }
                 }
             });
 

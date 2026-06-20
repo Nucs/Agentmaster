@@ -510,6 +510,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
         winrt::Windows::UI::Xaml::Controls::Button _sessRefreshBtn{ nullptr }; // ↻ — re-enumerate the window + load-or-refresh each sidecar index (pick up new/updated sessions)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sessRangePopup{ nullptr }; // hover: From/To range picker (answer Q4 — text boxes)
+        winrt::Windows::UI::Xaml::DispatcherTimer _sessRangeCloseTimer{ nullptr }; // hover-intent: button-exit schedules a close; entering the popup cancels it (bridges the button->popup gap)
         winrt::Windows::UI::Xaml::Controls::TextBox _sessFromBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _sessToBox{ nullptr };
         int _sessionsWindowPreset{ 4 }; // index into {1d,3d,7d,14d,1mo,3mo}; default 1 month
