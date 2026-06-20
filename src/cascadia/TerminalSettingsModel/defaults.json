@@ -733,6 +733,7 @@
         { "keys": "ctrl+shift+,", "id": "Terminal.OpenSettingsFile" },
         { "keys": "ctrl+alt+,", "id": "Terminal.OpenDefaultSettingsFile" },
         { "keys": "ctrl+shift+f", "id": "Terminal.FindText" },
+        { "keys": "ctrl+f", "id": "Terminal.FindText" },
         { "keys": "ctrl+shift+p", "id": "Terminal.ToggleCommandPalette" },
         { "keys": "win+sc(41)", "id": "Terminal.QuakeMode" },
         { "keys": "alt+space", "id": "Terminal.OpenSystemMenu" },

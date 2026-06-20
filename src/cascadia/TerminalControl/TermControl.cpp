@@ -1818,10 +1818,26 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // keybindings on the keyUp, then we'll still send the keydown to the
         // connected terminal application, and something like ctrl+shift+T will
         // emit a ^T to the pipe.
+        // Agentmaster: Ctrl+F is bound to `find` (opens the search box) but is ALSO passed through to the
+        // connected app, so a plain ^F still reaches e.g. claude's TUI or a shell (readline forward-char)
+        // instead of being swallowed by the search binding. The find binding consumes the key (early
+        // return below), so we forward ^F explicitly here. Plain chord only — Ctrl+Shift+F is unaffected;
+        // skipped mid-IME-composition (mirrors the HasActiveComposition guard a few lines down).
+        const auto passthroughCtrlF = keyDown &&
+                                      vkey == 'F' &&
+                                      modifiers.IsCtrlPressed() &&
+                                      !modifiers.IsAltPressed() &&
+                                      !modifiers.IsShiftPressed() &&
+                                      !modifiers.IsWinPressed();
+
         if (!modifiers.IsAltGrPressed() &&
             keyDown &&
             _TryHandleKeyBinding(vkey, scanCode, modifiers))
         {
+            if (passthroughCtrlF && !GetTSFHandle().HasActiveComposition())
+            {
+                _TrySendKeyEvent(vkey, scanCode, modifiers, keyDown);
+            }
             return true;
         }
 
