@@ -51,7 +51,8 @@
             <Button x:Name="AddNewButton"
                     Margin="0"
                     Click="AddNew_Click"
-                    Style="{StaticResource BrowseButtonStyle}">
+                    Style="{StaticResource BrowseButtonStyle}"
+                    ToolTipService.ToolTip="Create a new color scheme that you can then customize and apply to profiles.">
                 <StackPanel Orientation="Horizontal">
                     <FontIcon FontSize="{StaticResource StandardIconSize}"
                               Glyph="&#xE710;" />

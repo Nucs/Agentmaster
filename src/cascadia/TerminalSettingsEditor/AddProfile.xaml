@@ -25,7 +25,8 @@
         <Border MaxWidth="{StaticResource StandardControlMaxWidth}">
             <Button x:Name="AddNewButton"
                     Click="AddNewClick"
-                    Style="{StaticResource AccentButtonStyle}">
+                    Style="{StaticResource AccentButtonStyle}"
+                    ToolTipService.ToolTip="Create a new empty profile with default settings.">
                 <Button.Content>
                     <StackPanel Orientation="Horizontal">
                         <FontIcon FontSize="{StaticResource StandardIconSize}"
@@ -44,7 +45,8 @@
                           ItemsSource="{x:Bind State.Settings.AllProfiles, Mode=OneWay}"
                           SelectedIndex="0"
                           SelectionChanged="ProfilesSelectionChanged"
-                          Style="{StaticResource ComboBoxSettingStyle}">
+                          Style="{StaticResource ComboBoxSettingStyle}"
+                          ToolTipService.ToolTip="Choose an existing profile to copy settings from.">
                     <ComboBox.ItemTemplate>
                         <DataTemplate x:DataType="model:Profile">
                             <Grid HorizontalAlignment="Stretch"
@@ -75,7 +77,8 @@
                         Margin="{StaticResource StandardControlMargin}"
                         Click="DuplicateClick"
                         IsEnabled="{x:Bind IsProfileSelected, Mode=OneWay}"
-                        Style="{StaticResource AccentButtonStyle}">
+                        Style="{StaticResource AccentButtonStyle}"
+                        ToolTipService.ToolTip="Create a new profile that copies all settings from the profile selected above.">
                     <Button.Content>
                         <StackPanel Orientation="Horizontal">
                             <FontIcon FontSize="{StaticResource StandardIconSize}"

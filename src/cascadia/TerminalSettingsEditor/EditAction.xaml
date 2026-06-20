@@ -726,7 +726,8 @@
                       SelectionMode="None">
                 <ListView.Footer>
                     <Button Margin="0,4,0,0"
-                            Click="{x:Bind ViewModel.AddKeybinding_Click}">
+                            Click="{x:Bind ViewModel.AddKeybinding_Click}"
+                            ToolTipService.ToolTip="Add another key chord that triggers this action.">
                         <TextBlock x:Uid="Actions_AddKeyChord" />
                     </Button>
                 </ListView.Footer>
@@ -751,7 +752,8 @@
             <Button Grid.Row="7"
                     Grid.Column="0"
                     IsEnabled="{x:Bind ViewModel.IsUserAction, Mode=OneWay}"
-                    Style="{StaticResource DeleteButtonStyle}">
+                    Style="{StaticResource DeleteButtonStyle}"
+                    ToolTipService.ToolTip="Permanently delete this command. Only available for custom commands you added.">
                 <Button.Content>
                     <StackPanel Orientation="Horizontal">
                         <FontIcon FontSize="{StaticResource StandardIconSize}"

@@ -208,7 +208,8 @@
             <!--  Add New Button  -->
             <Button x:Name="AddNewButton"
                     Margin="0,12,0,0"
-                    Click="{x:Bind ViewModel.AddNewCommand}">
+                    Click="{x:Bind ViewModel.AddNewCommand}"
+                    ToolTipService.ToolTip="Add a new command &#x2014; create a custom action you can bind to a key chord.">
                 <Button.Content>
                     <StackPanel Orientation="Horizontal">
                         <FontIcon FontSize="{StaticResource StandardIconSize}"

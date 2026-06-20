@@ -181,18 +181,22 @@
 
             <Button x:Name="AppearanceNavigator"
                     Click="Appearance_Click"
-                    Style="{StaticResource NavigatorButtonStyle}" />
+                    Style="{StaticResource NavigatorButtonStyle}"
+                    ToolTipService.ToolTip="Appearance &#x2014; open this profile&#x2019;s color scheme, font, cursor, and background settings." />
             <Button x:Name="TerminalNavigator"
                     Click="Terminal_Click"
-                    Style="{StaticResource NavigatorButtonStyle}" />
+                    Style="{StaticResource NavigatorButtonStyle}"
+                    ToolTipService.ToolTip="Terminal &#x2014; open this profile&#x2019;s shell behavior settings (title, VT input, answerback, and more)." />
             <Button x:Name="AdvancedNavigator"
                     Click="Advanced_Click"
-                    Style="{StaticResource NavigatorButtonStyle}" />
+                    Style="{StaticResource NavigatorButtonStyle}"
+                    ToolTipService.ToolTip="Advanced &#x2014; open this profile&#x2019;s advanced settings (antialiasing, history, bell, scrollback, and more)." />
             <!--  Delete Button  -->
             <Border MaxWidth="{StaticResource StandardControlMaxWidth}">
                 <Button x:Name="DeleteButton"
                         Margin="{StaticResource StandardControlMargin}"
                         Style="{StaticResource DeleteButtonStyle}"
+                        ToolTipService.ToolTip="Delete this profile &#x2014; removes it from your settings after you confirm."
                         Visibility="{x:Bind Profile.CanDeleteProfile}">
                     <Button.Content>
                         <StackPanel Orientation="Horizontal">

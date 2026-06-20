@@ -344,7 +344,8 @@
                                     HorizontalAlignment="Stretch"
                                     HorizontalContentAlignment="Stretch"
                                     Click="MoveMultiple_Click"
-                                    IsEnabled="False">
+                                    IsEnabled="False"
+                                    ToolTipService.ToolTip="Move the selected entries into a folder. Select one or more entries in the list to enable this.">
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
@@ -367,7 +368,8 @@
                                     HorizontalContentAlignment="Stretch"
                                     Click="DeleteMultiple_Click"
                                     IsEnabled="False"
-                                    Style="{StaticResource DeleteButtonStyle}">
+                                    Style="{StaticResource DeleteButtonStyle}"
+                                    ToolTipService.ToolTip="Delete the selected entries from the new tab menu. Select one or more entries in the list to enable this.">
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
@@ -472,7 +474,8 @@
                             <ComboBox x:Name="AddProfileComboBox"
                                       MinWidth="{StaticResource StandardBoxMinWidth}"
                                       ItemsSource="{x:Bind ViewModel.AvailableProfiles, Mode=OneWay}"
-                                      SelectedItem="{x:Bind ViewModel.SelectedProfile, Mode=TwoWay}">
+                                      SelectedItem="{x:Bind ViewModel.SelectedProfile, Mode=TwoWay}"
+                                      ToolTipService.ToolTip="Choose the profile to add as a new entry in the menu.">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate x:DataType="model:Profile">
                                         <Grid HorizontalAlignment="Stretch"
@@ -569,7 +572,8 @@
                             <TextBox x:Uid="NewTabMenu_AddMatchProfiles_Commandline"
                                      Text="{x:Bind ViewModel.ProfileMatcherCommandline, Mode=TwoWay}" />
                             <Button x:Name="AddMatchProfilesButton"
-                                    Click="AddMatchProfilesButton_Clicked">
+                                    Click="AddMatchProfilesButton_Clicked"
+                                    ToolTipService.ToolTip="Add an entry that matches profiles by name, source, or command line using the fields above.">
                                 <Button.Content>
                                     <StackPanel Orientation="Horizontal">
                                         <FontIcon FontSize="{StaticResource StandardIconSize}"

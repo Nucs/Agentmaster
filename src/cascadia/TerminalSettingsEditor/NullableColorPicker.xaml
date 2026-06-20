@@ -107,7 +107,8 @@
             <StackPanel Spacing="4">
                 <ToggleButton AutomationProperties.Name="{x:Bind NullColorButtonLabel}"
                               Click="NullColorButton_Clicked"
-                              IsChecked="{x:Bind IsNull(CurrentColor), Mode=OneWay}">
+                              IsChecked="{x:Bind IsNull(CurrentColor), Mode=OneWay}"
+                              ToolTipService.ToolTip="Use no custom color &#x2014; clears the selection and falls back to the default.">
                     <Grid ColumnSpacing="4">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />

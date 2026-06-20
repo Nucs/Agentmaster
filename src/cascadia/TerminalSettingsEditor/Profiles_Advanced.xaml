@@ -187,7 +187,8 @@
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
                     <Button x:Name="AddBellSoundButton"
-                            Click="BellSoundAdd_Click">
+                            Click="BellSoundAdd_Click"
+                            ToolTipService.ToolTip="Add a bell sound &#x2014; browse for an audio file to play when the terminal bell rings.">
                         <StackPanel Orientation="Horizontal">
                             <FontIcon FontSize="{StaticResource StandardIconSize}"
                                       Glyph="&#xE948;" />

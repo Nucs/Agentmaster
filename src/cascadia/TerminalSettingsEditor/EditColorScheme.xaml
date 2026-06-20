@@ -481,7 +481,8 @@
             </Grid.ColumnDefinitions>
             <Button x:Name="DeleteButton"
                     Grid.Column="0"
-                    Style="{StaticResource DeleteButtonStyle}">
+                    Style="{StaticResource DeleteButtonStyle}"
+                    ToolTipService.ToolTip="Permanently delete this color scheme.">
                 <Button.Content>
                     <StackPanel Orientation="Horizontal">
                         <FontIcon FontSize="{StaticResource StandardIconSize}"
