@@ -39,19 +39,18 @@ namespace Agentmaster
     // (AppSettings::treeSort) after its LOCAL/GLOBAL/EXTERNAL scope toggle, ordering the directory
     // groups AND the rows within each (and the EXTERNAL census); it cycles Newest -> Oldest ->
     // MostActive -> Alpha -> ByPid. (2) The Triage Board's sort (AppSettings::boardSort) after its
-    // LOCAL/GLOBAL toggle, ordering the cards within each state column; it cycles LastActiveAsc ->
-    // MostActive -> Newest -> Oldest -> Alpha (the tree set minus ByPid — host/shell grouping is
-    // meaningless once cards are split across state columns — plus the board's LastActiveAsc default).
-    // Both are GLOBAL app settings, persisted to settings.json so the choice is shared by every window
-    // and survives restart. One ExplorerSort comparator (SortKeyLess) serves both consumers.
+    // LOCAL/GLOBAL toggle, ordering the cards within each state column; it cycles MostActive (its
+    // DEFAULT) -> Newest -> Oldest -> Alpha — the tree's set minus ByPid (host/shell grouping is
+    // meaningless once cards are split across state columns). Both are GLOBAL app settings, persisted
+    // to settings.json so the choice is shared by every window and survives restart. One ExplorerSort
+    // comparator (SortKeyLess) serves both consumers.
     enum class ExplorerSort
     {
         Newest, // most recently created first (conversation ctime, desc); a fresh/never-prompted session floats up
         Oldest, // oldest created first (ctime, asc)
         MostActive, // most recent activity first; a currently-running session ranks at the very top
         Alpha, // A->Z by title (case-insensitive)
-        ByPid, // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
-        LastActiveAsc // LEAST recently active first (last-activity mtime, ascending) — the Triage Board's default: the session that has gone the LONGEST without activity floats to the top of its column (the stalest, deal-with-it-first triage order). The inverse of MostActive. Board-only — the tree never selects it.
+        ByPid // group by host window/shell pid (externals: ExternalClaudeRow::hostPid; managed: the claude pid), then by most active within each group
     };
 
     // Agentmaster: how the tab/session RENAME box treats Enter / Shift+Enter as a COMMIT (accept +
@@ -385,10 +384,10 @@ namespace Agentmaster
         // — orders the cards WITHIN each state column. A SEPARATE global setting from treeSort, so the
         // board and the tree sort independently and each remembers its own choice. GLOBAL like treeSort:
         // shared by every window, persisted here, survives restart (the changing window re-sorts live;
-        // others adopt it on next launch). Default LastActiveAsc == longest-since-activity on top (the
-        // stalest-first triage order). The board cycles LastActiveAsc/MostActive/Newest/Oldest/Alpha;
-        // it never selects ByPid (pid grouping is meaningless once cards are split across state columns).
-        ExplorerSort boardSort{ ExplorerSort::LastActiveAsc };
+        // others adopt it on next launch). Default MostActive == most-recently-active first. The board
+        // cycles MostActive/Newest/Oldest/Alpha — the tree's set minus ByPid (pid grouping is meaningless
+        // once cards are split across state columns).
+        ExplorerSort boardSort{ ExplorerSort::MostActive };
         // Agentmaster: the Archive page's table|detail splitter position — the TABLE's share of
         // the two columns, kept within (0.05, 0.95). Applied as STAR ratios, so the split scales
         // with the window (window-size-relative, not pixels). GLOBAL like treeSort: written by

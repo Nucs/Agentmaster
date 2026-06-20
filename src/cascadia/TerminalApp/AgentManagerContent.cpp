@@ -578,14 +578,6 @@ namespace
             if (a.last != b.last)
                 return a.last > b.last; // then most-recent activity first
             break;
-        case ExplorerSort::LastActiveAsc:
-            // The Triage Board's default: LEAST recently active first (ascending mtime) — the inverse of
-            // MostActive. Pure recency, NO running-pins-to-top bias: the goal is "what has gone longest
-            // without activity, surface it first" (a Running card with fresh activity correctly sinks to
-            // the bottom of its column). last==0 (no known activity) sorts to the very top (stalest).
-            if (a.last != b.last)
-                return a.last < b.last;
-            break;
         case ExplorerSort::Alpha:
             break; // name is the primary key — handled by the tiebreak below
         case ExplorerSort::ByPid:
@@ -1686,17 +1678,16 @@ namespace winrt::TerminalApp::implementation
             header.Children().Append(_boardScopeBtn);
             _UpdateBoardScopeButton();
             // Agentmaster: the board's SORT toggle, right after the scope toggle (mirroring the Explorer
-            // Tree's scope-then-sort layout). Cycles LEAST ACTIVE -> MOST ACTIVE -> NEWEST -> OLDEST -> A-Z
-            // (the tree's set minus BY PID — host/shell grouping is meaningless once cards split across
-            // state columns — plus the board-only LEAST ACTIVE default). A SEPARATE global setting from
-            // the tree's sort (AppSettings::boardSort), so each remembers its own; persisted + shared by
-            // every window (the changing window re-sorts live; others adopt on next launch — the treeSort
-            // idiom). _CycleBoardSort advances + persists through the settings sink; _UpdateBoardSortButton
-            // paints the label.
+            // Tree's scope-then-sort layout). Cycles MOST ACTIVE -> NEWEST -> OLDEST -> A-Z (the tree's set
+            // minus BY PID — host/shell grouping is meaningless once cards split across state columns).
+            // Default MOST ACTIVE. A SEPARATE global setting from the tree's sort (AppSettings::boardSort),
+            // so each remembers its own; persisted + shared by every window (the changing window re-sorts
+            // live; others adopt on next launch — the treeSort idiom). _CycleBoardSort advances + persists
+            // through the settings sink; _UpdateBoardSortButton paints the label.
             _boardSortBtn = Button{};
             _boardSortBtn.FontSize(11);
             _boardSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_boardSortBtn, L"Sort the cards within each column \x2014 LEAST ACTIVE (longest since activity \x2014 the default) \xB7 MOST ACTIVE (most recent first) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Global across windows; saved.");
+            AgentSetTip(_boardSortBtn, L"Sort the cards within each column \x2014 MOST ACTIVE (most recent activity first \x2014 the default) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Global across windows; saved.");
             _boardSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleBoardSort(); });
             header.Children().Append(_boardSortBtn);
             _UpdateBoardSortButton();
@@ -2817,7 +2808,7 @@ namespace winrt::TerminalApp::implementation
             }
 
             // Agentmaster: order the cards WITHIN this state column by the (global, persisted) board
-            // sort — default LastActiveAsc (longest-since-activity first). stable_sort so equal keys keep
+            // sort — default MostActive (most-recently-active first). stable_sort so equal keys keep
             // their prior on-screen order across refreshes. The board reuses the SAME SortKey/SortKeyLess
             // comparator as the Explorer Tree, just driven by _appSettings.boardSort (its own setting) and
             // applied to the flat per-column list (no directory grouping — cards are grouped by STATE here).
@@ -2975,7 +2966,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: order the External census cards by the same (global) board sort as the managed
         // columns, so the whole board reads in one consistent order (the rows arrive pid-sorted from the
         // observer; re-sort a pointer copy here, leaving _externalClaudes untouched). Externals carry no
-        // run-state (MakeSortKey sets active=false), so MostActive/LastActiveAsc rank them by recency only.
+        // run-state (MakeSortKey sets active=false), so MostActive ranks them by recency only.
         std::vector<const ::Agentmaster::ExternalClaudeRow*> exts;
         exts.reserve(_externalClaudes.size());
         for (const auto& ex : _externalClaudes)
@@ -3352,12 +3343,6 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
-                    break;
-                case ::Agentmaster::ExplorerSort::LastActiveAsc:
-                    // Board-only mode (the tree never selects it); kept here so the switch stays
-                    // exhaustive. Rank a dir by its LEAST recently active member, ascending.
-                    if (a.bestLast != b.bestLast)
-                        return a.bestLast < b.bestLast;
                     break;
                 case ::Agentmaster::ExplorerSort::ByPid:
                     if (a.minPid != b.minPid)
@@ -3739,12 +3724,6 @@ namespace winrt::TerminalApp::implementation
                 case ::Agentmaster::ExplorerSort::MostActive:
                     if (a.bestLast != b.bestLast)
                         return a.bestLast > b.bestLast;
-                    break;
-                case ::Agentmaster::ExplorerSort::LastActiveAsc:
-                    // Board-only mode (the tree never selects it); kept here so the switch stays
-                    // exhaustive. Rank a dir by its LEAST recently active member, ascending.
-                    if (a.bestLast != b.bestLast)
-                        return a.bestLast < b.bestLast;
                     break;
                 case ::Agentmaster::ExplorerSort::ByPid:
                     if (a.minPid != b.minPid)
@@ -4283,20 +4262,17 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: advance the Triage Board sort LEAST ACTIVE -> MOST ACTIVE -> NEWEST -> OLDEST -> A-Z ->
-    // LEAST ACTIVE (it never visits BY PID — pid grouping is meaningless once cards split across the state
-    // columns). A SEPARATE global setting from the tree's sort (AppSettings::boardSort), so the board and
-    // tree remember their own order. Like treeSort it is GLOBAL + persisted: mutate _appSettings.boardSort,
-    // refresh the label, push it through the settings sink (the page persists settings.json), so the choice
-    // survives restart and seeds every other / future window; _Refresh re-sorts THIS window's board now.
+    // Agentmaster: advance the Triage Board sort MOST ACTIVE -> NEWEST -> OLDEST -> A-Z -> MOST ACTIVE
+    // (it never visits BY PID — pid grouping is meaningless once cards split across the state columns).
+    // A SEPARATE global setting from the tree's sort (AppSettings::boardSort), so the board and tree
+    // remember their own order. Like treeSort it is GLOBAL + persisted: mutate _appSettings.boardSort,
+    // refresh the label, push it through the settings sink (the page persists settings.json), so the
+    // choice survives restart and seeds every other / future window; _Refresh re-sorts THIS window's board now.
     void AgentManagerContent::_CycleBoardSort()
     {
         using ::Agentmaster::ExplorerSort;
         switch (_appSettings.boardSort)
         {
-        case ExplorerSort::LastActiveAsc:
-            _appSettings.boardSort = ExplorerSort::MostActive;
-            break;
         case ExplorerSort::MostActive:
             _appSettings.boardSort = ExplorerSort::Newest;
             break;
@@ -4309,7 +4285,7 @@ namespace winrt::TerminalApp::implementation
         case ExplorerSort::Alpha:
         case ExplorerSort::ByPid: // not produced by the board cycle, but treat as "wrap to the default"
         default:
-            _appSettings.boardSort = ExplorerSort::LastActiveAsc;
+            _appSettings.boardSort = ExplorerSort::MostActive;
             break;
         }
         _UpdateBoardSortButton();
@@ -4326,11 +4302,10 @@ namespace winrt::TerminalApp::implementation
         if (_boardSortBtn)
         {
             using ::Agentmaster::ExplorerSort;
-            const wchar_t* label = (_appSettings.boardSort == ExplorerSort::MostActive) ? L"MOST ACTIVE"
-                                   : (_appSettings.boardSort == ExplorerSort::Newest)   ? L"NEWEST"
-                                   : (_appSettings.boardSort == ExplorerSort::Oldest)   ? L"OLDEST"
-                                   : (_appSettings.boardSort == ExplorerSort::Alpha)    ? L"A\x2013Z"
-                                                                                        : L"LEAST ACTIVE"; // LastActiveAsc (default) + any stray ByPid
+            const wchar_t* label = (_appSettings.boardSort == ExplorerSort::Newest) ? L"NEWEST"
+                                   : (_appSettings.boardSort == ExplorerSort::Oldest) ? L"OLDEST"
+                                   : (_appSettings.boardSort == ExplorerSort::Alpha)  ? L"A\x2013Z"
+                                                                                      : L"MOST ACTIVE"; // MostActive (default) + any stray ByPid
             _boardSortBtn.Content(winrt::box_value(label));
         }
     }

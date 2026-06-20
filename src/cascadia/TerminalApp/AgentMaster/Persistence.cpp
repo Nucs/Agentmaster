@@ -162,8 +162,6 @@ namespace Agentmaster
             return L"alpha";
         case ExplorerSort::ByPid:
             return L"pid";
-        case ExplorerSort::LastActiveAsc:
-            return L"lastactive-asc";
         case ExplorerSort::Newest:
         default:
             return L"newest";
@@ -179,8 +177,6 @@ namespace Agentmaster
             return ExplorerSort::Alpha;
         if (s == L"pid")
             return ExplorerSort::ByPid;
-        if (s == L"lastactive-asc")
-            return ExplorerSort::LastActiveAsc;
         return ExplorerSort::Newest;
     }
 
@@ -503,10 +499,10 @@ namespace Agentmaster
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
-        // Triage Board sort (a separate global from treeSort). Absent => the board's LastActiveAsc
-        // default (longest-since-activity first). A stored "pid" would deserialize fine but the board
-        // never produces it (its cycle skips ByPid), so it can only arrive via a hand-edit.
-        s.boardSort = ExplorerSortFromString(v.StrAt(L"boardSort", L"lastactive-asc"));
+        // Triage Board sort (a separate global from treeSort). Absent => the board's MostActive default
+        // (most-recently-active first). A stored "pid" would deserialize fine but the board never
+        // produces it (its cycle skips ByPid), so it can only arrive via a hand-edit.
+        s.boardSort = ExplorerSortFromString(v.StrAt(L"boardSort", L"active"));
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value
             // must not collapse a pane (fall back to the 50/50 default instead).

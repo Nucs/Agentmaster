@@ -1545,7 +1545,7 @@ static void TestAppSettings()
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
         in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to 5
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
-        in.boardSort = ExplorerSort::Newest; // non-default (default LastActiveAsc) — Triage Board sort
+        in.boardSort = ExplorerSort::Newest; // non-default (default MostActive) — Triage Board sort
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
@@ -1589,20 +1589,20 @@ static void TestAppSettings()
         CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
-        CHECK(out.boardSort == ExplorerSort::LastActiveAsc, "settings boardSort default (LastActiveAsc) on empty");
+        CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
     }
 
     // ExplorerSort token parsing for treeSort/boardSort: each token -> its mode; an unknown token falls
-    // back to Newest. boardSort additionally defaults to LastActiveAsc when the KEY is absent (above).
+    // back to Newest. boardSort additionally defaults to MostActive when the KEY is absent (above).
     {
         const auto a = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"alpha\",\"treeSort\":\"active\"}}");
         CHECK(a.boardSort == ExplorerSort::Alpha, "settings boardSort 'alpha' honored");
         CHECK(a.treeSort == ExplorerSort::MostActive, "settings treeSort 'active' honored");
-        const auto la = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"lastactive-asc\"}}");
-        CHECK(la.boardSort == ExplorerSort::LastActiveAsc, "settings boardSort 'lastactive-asc' honored");
+        const auto act = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"active\"}}");
+        CHECK(act.boardSort == ExplorerSort::MostActive, "settings boardSort 'active' honored");
         const auto bad = DeserializeAppSettings(L"{\"settings\":{\"boardSort\":\"bogus\"}}");
         CHECK(bad.boardSort == ExplorerSort::Newest, "settings boardSort unknown token -> Newest");
     }
