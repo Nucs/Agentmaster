@@ -1111,16 +1111,20 @@ namespace winrt::TerminalApp::implementation
             const auto reg = _sessionRegistry ? _sessionRegistry->Get(r.id) : std::nullopt;
             const bool live = reg && reg->live;
             const auto* pres = presenceFor(r.id);
+            // The per-dir color (the same color the session's tab + the chip wear): its persisted
+            // dir-colors.json entry, else the deterministic auto color. Drives BOTH the live chip
+            // below AND the colored underline under the title, so a row reads its folder identity
+            // the way its terminal tab does.
+            const auto dirHex = ::Agentmaster::GetDirColor(r.dir);
+            const auto dirColor = SessHexToColor(dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(r.dir));
             {
-                auto hex = ::Agentmaster::GetDirColor(r.dir);
-                const auto color = SessHexToColor(hex ? *hex : ::Agentmaster::AutoDirColorHex(r.dir));
                 Border chip;
                 chip.Width(10);
                 chip.Height(10);
                 chip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 5, 5, 5, 5 });
                 chip.VerticalAlignment(VerticalAlignment::Center);
                 chip.HorizontalAlignment(HorizontalAlignment::Center);
-                chip.Background(color ? SolidColorBrush{ *color } : SessBrush(0xFF, 0x60, 0x60, 0x60));
+                chip.Background(dirColor ? SolidColorBrush{ *dirColor } : SessBrush(0xFF, 0x60, 0x60, 0x60));
                 chip.Opacity(live ? 1.0 : 0.35);
                 std::wstring tip = live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
                 tip += L"\nDot color = this session's working-directory color (matches its tab)";
@@ -1139,10 +1143,27 @@ namespace winrt::TerminalApp::implementation
                 g.Children().Append(chip);
             }
 
+            // title — UNDERLINED with the working-directory color (the same persisted dir-colors.json
+            // color the chip + the session's terminal tab wear), so the name carries its folder identity
+            // at a glance. The rule rides a Left-aligned Border that hugs the text — a short title gets a
+            // short underline, a long ellipsized one fills the column — with VerticalAlignment::Center so
+            // it sits under the glyphs, not at the row's bottom edge. The dim for an on-disk row is on the
+            // BRUSH (not the Border) so the title text keeps its own live/archived opacity.
             auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
             SessSetTip(title, winrt::hstring{ r.title + L"\nSession id: " + r.id });
-            Grid::SetColumn(title, 1);
-            g.Children().Append(title);
+            // Full-strength rule for a live row; a translucent one (alpha ~0.6) for an on-disk row,
+            // baked into the brush's alpha — NOT the Border's Opacity, which would also fade the text.
+            const uint8_t ulAlpha = live ? 0xFF : 0x99;
+            auto underline = dirColor ? SessBrush(ulAlpha, dirColor->R, dirColor->G, dirColor->B) : SessBrush(ulAlpha, 0x60, 0x60, 0x60);
+            Border titleWrap;
+            titleWrap.Child(title);
+            titleWrap.HorizontalAlignment(HorizontalAlignment::Left);
+            titleWrap.VerticalAlignment(VerticalAlignment::Center);
+            titleWrap.BorderBrush(underline);
+            titleWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
+            titleWrap.Padding(Thickness{ 0, 0, 0, 1 }); // a hair of gap between the descenders and the rule
+            Grid::SetColumn(titleWrap, 1);
+            g.Children().Append(titleWrap);
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
             SessSetTip(dir, winrt::hstring{ r.dir }); // the full path — the cell end-trims, losing the leaf
