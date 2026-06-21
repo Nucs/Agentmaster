@@ -207,14 +207,20 @@ namespace Agentmaster
     // adopted session driven by the transcript tail); or the conversation transcript advanced past the
     // send (`convLastActivityUnixMs`, the no-hook fast-turn fallback). Otherwise the most-recently-sent
     // un-acknowledged Flight prompt is watched: Waiting until kEnterRetryIntervalMs elapses, then Retry
-    // (until kEnterRetryMax presses), then GiveUp. Only LIVE, non-external (injector-bound) sessions are
-    // driven — an observe-only / archived session has no stdin to write to.
-    inline EnterRetryPlan DecideEnterRetry(const SessionInfo& s, int64_t nowUnixMs)
+    // (until kEnterRetryMax presses), then GiveUp.
+    //
+    // `controllable` == "we hold a bound stdin injector for this session, so a re-pressed Enter can
+    // actually reach it". The caller passes SessionRegistry::HasInjector(s.id). This is CONTROLLABILITY
+    // (do we have stdin?), NOT provenance (s.external = did we launch it): an ADOPTED session — typed
+    // into a `+` tab, external=true — is bound an injector on adoption and IS drivable, so it must NOT
+    // be excluded the way an observe-only external (no injector) is. Gating on s.external here used to
+    // wrongly skip adopted sessions (Agentmaster: the autopilot-on-adopted bug).
+    inline EnterRetryPlan DecideEnterRetry(const SessionInfo& s, int64_t nowUnixMs, bool controllable = true)
     {
         EnterRetryPlan plan;
-        if (!s.live || s.external)
+        if (!s.live || !controllable)
         {
-            return plan; // observe-only / archived — no bound injector to re-press Enter on
+            return plan; // observe-only (no injector) / archived — no bound stdin to re-press Enter on
         }
         if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
         {

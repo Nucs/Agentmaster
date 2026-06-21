@@ -149,7 +149,7 @@ namespace Agentmaster
                 done.push_back(id);
                 continue;
             }
-            const auto plan = DecideEnterRetry(*s, now);
+            const auto plan = DecideEnterRetry(*s, now, _registry->HasInjector(id));
             if (plan.action == EnterRetryAction::None)
             {
                 done.push_back(id); // the turn started (or nothing awaits pickup) — stop watching
@@ -351,7 +351,7 @@ namespace Agentmaster
         // manual Send-now with autopilot Off must still submit reliably) and of the early returns
         // below, so it sits first. The worker sweep drains the watch as turns start / give up.
         {
-            const auto rp = DecideEnterRetry(s, NowMs());
+            const auto rp = DecideEnterRetry(s, NowMs(), _registry->HasInjector(s.id));
             if (rp.action == EnterRetryAction::Waiting || rp.action == EnterRetryAction::Retry)
             {
                 bool added = false;
@@ -379,13 +379,21 @@ namespace Agentmaster
         // or you just enabled autopilot / added a prompt) should START consuming. Without this
         // a resumed-Idle session would wait forever — it never emits a Stop to trigger an
         // advance. DecideAdvance + the pickup guard keep it to one prompt per turn, and
-        // RequestAdvance dedups the burst. External/observe-only sessions are skipped: they have
-        // no injector to write to until adopted (and would just churn the deferred-send path).
-        // ARCHIVED sessions (!live) are skipped too: they have no live claude/injector — an
-        // archived plan with autopilot on must not churn the deferred-send path (it loads from
-        // disk Idle, possibly with mode=Full + Pending prompts) until the user restores it.
-        if (s.live && !s.external && s.autopilot.mode != AutopilotMode::Off &&
-            (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput))
+        // RequestAdvance dedups the burst.
+        //
+        // The gate is CONTROLLABILITY (HasInjector — do we hold this session's stdin?), NOT
+        // provenance (s.external — did we launch it?). The two diverge for an ADOPTED session:
+        // a claude typed into a `+` tab is external=true yet, once adopted, is bound an injector
+        // and is fully drivable. Gating on !s.external used to skip every adopted session here,
+        // so toggling Autopilot Off→back (a UI Update that fires no hook, hence no Stop-seam
+        // advance) never started consuming its queue — the "switching autopilot off and back,
+        // pending messages are not sent" bug. An observe-only external (no injector) and an
+        // ARCHIVED session (!live, loads from disk Idle possibly with mode=Full + Pending) both
+        // lack an injector, so HasInjector is false and they are still correctly skipped — no
+        // churn on the deferred-send path until the user restores/adopts them.
+        if (s.live && s.autopilot.mode != AutopilotMode::Off &&
+            (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
+            _registry->HasInjector(s.id))
         {
             bool hasPending = false;
             for (const auto& p : s.queue)

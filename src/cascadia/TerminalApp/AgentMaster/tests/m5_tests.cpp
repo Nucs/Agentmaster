@@ -1246,10 +1246,19 @@ static void TestEnterRetry()
         CHECK(r.action == EnterRetryAction::GiveUp && r.attempt == kEnterRetryMax, "max retries -> give up");
     }
     {
-        // Observe-only external session -> no injector to drive, never retry.
+        // Not controllable (no bound injector) -> nothing to re-press Enter on, never retry. This is
+        // the observe-only case: an external census claude we hold no stdin for.
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
         s.external = true;
-        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "external -> none");
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs, /*controllable*/ false).action == EnterRetryAction::None, "uncontrollable -> none");
+    }
+    {
+        // Agentmaster (autopilot-on-adopted): an ADOPTED external (external=true) that IS controllable
+        // (an injector was bound on adoption) MUST be driven — provenance != controllability. The pure
+        // decider keys on `controllable`, not s.external, so an adopted session retries like a launched one.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.external = true;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs, /*controllable*/ true).action == EnterRetryAction::Retry, "adopted + controllable -> retry");
     }
     {
         // Archived (!live) session -> no live claude, never retry.
@@ -1283,6 +1292,84 @@ static void TestEnterRetry()
         const auto r = DecideEnterRetry(s, T + 2000 + kEnterRetryIntervalMs);
         CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp2", "latest send is the watched one");
     }
+}
+
+// Agentmaster — Scheduler INTEGRATION (the threaded change-driven advance, wired exactly like
+// Engine.cpp). The pure DecideAdvance above never exercised the OnObserved -> RequestAdvance ->
+// worker -> Inject chain, which is precisely where the "toggle Autopilot Off and back -> pending
+// not sent" bug lived: OnObserved gated the change-driven advance on !s.external (provenance)
+// instead of HasInjector (controllability), so an ADOPTED session (external=true but injector-bound)
+// was never driven. This test drives the real Scheduler thread and polls for the injected result.
+static void TestSchedulerIntegration()
+{
+    std::wprintf(L"Autopilot Scheduler integration (toggle Off->Full; controllability != provenance):\n");
+
+    // Wire a registry + scheduler like Engine.cpp (advance handler + OnObserved observer), seed a
+    // live Waiting session with one Pending Flight prompt (throttleMs 0 so the worker injects at
+    // once), optionally bind an injector, then toggle Autopilot Off->Full via the registry exactly
+    // as AgentManagerContent::_OnAutopilotChanged does. Returns true iff the prompt reached Sent
+    // within the poll budget. Each case gets its OWN registry+scheduler so they can't cross-talk.
+    auto runToggleCase = [](bool external, bool bindInjector) -> bool {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+
+        const std::wstring id = L"sess";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput; // turn already complete; no future Stop hook fires
+            s.live = true;
+            s.external = external;
+            s.autopilot.mode = AutopilotMode::Off;
+            s.autopilot.throttleMs = 0; // inject immediately (no 500ms throttle) -> a short poll suffices
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"the pending prompt";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Flight;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        if (bindInjector)
+        {
+            reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+        }
+
+        // Toggle Off->Full (the user re-enabling Autopilot) — the exact _OnAutopilotChanged write.
+        reg->Update(id, [](SessionInfo& s) {
+            s.autopilot.mode = AutopilotMode::Full;
+            s.autopilot.autoSendsThisRun = 0;
+            s.pendingConfirmPromptId.clear();
+        });
+
+        // Poll up to ~2s for the worker to pick up + inject (deterministic outcome, bounded wait).
+        bool sent = false;
+        for (int i = 0; i < 200 && !sent; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sent = snap && !snap->queue.empty() && snap->queue[0].status == PromptStatus::Sent;
+            if (!sent)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+        // A real send marks Sent AND delivers to the injector (when one is bound).
+        return sent && (!bindInjector || injected.load() > 0);
+    };
+
+    // Manager-Launched (external=false, injector bound): always worked — the regression baseline.
+    CHECK(runToggleCase(/*external*/ false, /*injector*/ true), "launched: toggle Off->Full sends pending");
+    // Adopted (external=true, injector bound): THE fix — provenance != controllability, must send.
+    CHECK(runToggleCase(/*external*/ true, /*injector*/ true), "adopted: toggle Off->Full sends pending");
+    // Observe-only external (external=true, NO injector): must NOT send (nothing to drive, no churn).
+    CHECK(!runToggleCase(/*external*/ true, /*injector*/ false), "observe-only: toggle does not send (no injector)");
 }
 
 static void TestPersistence()
@@ -4120,6 +4207,7 @@ int wmain()
     TestProfileBootstrap();
     TestScheduler();
     TestEnterRetry();
+    TestSchedulerIntegration();
     TestTranscriptScan();
     TestBlockedAndInterruptedStates();
     TestPersistence();
