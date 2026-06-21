@@ -2311,6 +2311,31 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Agentmaster: context-window usage % — how full the conversation's context is. The token
+        // count is the newest assistant usage block (filled by the SessionScanner); the denominator
+        // (200K / 1M) is auto-detected by ContextWindowTokens. Color-coded by fill: green (<50%) ->
+        // amber (50–79%) -> red (>=80%) so a card nearing auto-compact stands out. Shown only once a
+        // turn has produced usage (contextTokens > 0).
+        if (s.contextTokens > 0)
+        {
+            const int64_t window = ::Agentmaster::ContextWindowTokens(s.model, s.contextTokens);
+            int pct = static_cast<int>((s.contextTokens * 100 + window / 2) / window); // rounded
+            if (pct > 100)
+            {
+                pct = 100;
+            }
+            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::to_hstring(pct) + L"%", 11, false, 0.9);
+            const Color ctxColor = pct >= 80 ? Color{ 0xFF, 0xE0, 0x6C, 0x6C } : // red
+                                       (pct >= 50 ? Color{ 0xFF, 0xE0, 0xB0, 0x4C } : // amber
+                                            Color{ 0xFF, 0x6C, 0xC0, 0x6C }); // green
+            ctxText.Foreground(SolidColorBrush{ ctxColor });
+            const auto tip = std::wstring{ L"Context used: " } + std::to_wstring(s.contextTokens) +
+                             L" of " + std::to_wstring(window) + L" tokens (" + std::to_wstring(pct) +
+                             L"%). The window (200K / 1M) is auto-detected from the model.";
+            AgentSetTip(ctxText, winrt::hstring{ tip });
+            stack.Children().Append(ctxText);
+        }
+
         // autopilot badge ⚙ sent/total
         if (!s.queue.empty())
         {

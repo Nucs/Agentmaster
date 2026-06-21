@@ -177,6 +177,16 @@ namespace Agentmaster
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
+                // Context occupancy from message.usage (≈ the size of the request that produced this
+                // message). cache_read carries the whole conversation forward, so this single block is
+                // the current context size; the newest assistant line wins downstream.
+                if (const auto* usage = msg->Find(L"usage"); usage && usage->type == json::Value::Type::Obj)
+                {
+                    ev.tokens = usage->I64At(L"input_tokens") +
+                                usage->I64At(L"cache_creation_input_tokens") +
+                                usage->I64At(L"cache_read_input_tokens") +
+                                usage->I64At(L"output_tokens");
+                }
                 out.events.push_back(std::move(ev));
             }
             else if (type == L"user")
@@ -762,6 +772,15 @@ namespace Agentmaster
                     // must not trigger the persist / UI / scheduler cascade on every line.
                     const std::wstring text = ev.text;
                     _registry->UpdateQuiet(s.id, [&text](SessionInfo& ss) { ss.lastAssistantText = text; });
+                }
+                // Context occupancy: the newest assistant usage wins. Mirror QUIETLY (like
+                // lastAssistantText) — the board recomputes the % on its next rebuild (a turn in
+                // progress already polls fast), so this must not drive its own notify cascade.
+                if (ev.tokens > 0 && ev.tokens != st.contextTokens)
+                {
+                    st.contextTokens = ev.tokens;
+                    const int64_t tok = ev.tokens;
+                    _registry->UpdateQuiet(s.id, [tok](SessionInfo& ss) { ss.contextTokens = tok; });
                 }
             }
             else if (ev.kind == TranscriptEvent::Kind::ToolResult)

@@ -70,6 +70,11 @@ namespace Agentmaster
         // on the user — AskUserQuestion), else "". Lets the scanner tell a session that is BLOCKED
         // waiting for the user to answer (-> NeedsApproval) from one genuinely working (a long Bash).
         std::wstring toolName;
+        // Assistant only: this message's context occupancy = message.usage
+        // input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens
+        // (≈ the size of the request that produced it). 0 when no usage block. The NEWEST assistant
+        // line wins -> SessionInfo.contextTokens -> the board card's context-% adornment.
+        int64_t tokens{};
     };
 
     struct TranscriptParse
@@ -417,6 +422,7 @@ namespace Agentmaster
             // the missed-Stop backstop can't read either from stop_reason alone (HookEvents.h notes).
             std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion) is the latest assistant block; "" once answered / moved on
             bool interrupted{ false }; // the latest user line is a turn-abort marker (Esc) — treat as a turn-ender
+            int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
         };
 
         void _worker() noexcept;
