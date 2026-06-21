@@ -332,7 +332,45 @@ resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initiali
   click a numbered prompt → the terminal centers on that prompt's render; a duplicate prompt jumps to the
   right occurrence; an off-screen prompt no-ops (no chime).
 
-## 7. Follow-ups (non-blocking)
+## 7. Keyboard prompt navigation — alt+up / alt+down (sibling feature)
+
+Jump between sent prompts **without the summary panel**: **alt+up / alt+down** step the focused
+session's terminal view to the **previous / next SENT prompt that is currently OFF-SCREEN**, centering
+it; at the ends (no further off-screen prompt that way) a short **boundary sound** plays
+(`SystemExclamation`, distinct from the jump chime). It reuses this unit's resolve verbatim — only the
+trigger + the selection differ.
+
+- **WT-native action** (rebindable in `settings.json`): two no-arg `ShortcutAction`s,
+  `agentScrollToPrevPrompt` / `agentScrollToNextPrompt` (added in `AllShortcutActions.h` +
+  `ActionAndArgs.cpp`; the enum value, the dispatch event, and the `_Handle…` decl are all
+  X-macro-generated). `defaults.json` binds `alt+up` / `alt+down` to them, **replacing** the upstream
+  `MoveFocusUp` / `MoveFocusDown` pane bindings.
+- **Claude-only, else fall through**: the handler (`_HandleAgentScrollTo{Prev,Next}Prompt`,
+  `TerminalPage.AgentObserver.cpp`) navigates only when the focused tab is a managed **Claude** session
+  (`_FocusedPromptNavSession` — `_ClaudeSessionForTab` + `SessionInfo.kind == Claude`); on any other tab
+  (Codex — no in-buffer prompt resolve in v1, §5; a shell; the Manager tab; an external) it falls back
+  to `_MoveFocus`, preserving the default alt-arrow pane navigation **and** the GH#6129 keychord
+  propagation when there is no pane to move to.
+- **Selection** (`TermControl::ScrollToAdjacentConversationPrompt`): one `ResolveConversationPromptRows`
+  (the §3 batch resolve — order-preserving, duplicate-aware) + the live viewport
+  (`ScrollOffset` / `ViewHeight`). The viewport spans `[viewTop, viewTop+viewH−1]` in absolute buffer
+  rows — the same coordinate space the resolver returns and the scrollbar centers in — and "off-screen"
+  is **strictly** outside it: **up** picks the largest prompt row `< viewTop`, **down** the smallest
+  `> viewBottom`. Center via `ScrollBar().Value(max(0, row − viewH/2))`; return the row, or `−1` (→ the
+  boundary sound). Because the target is centered, the next press finds the next still-off-screen prompt
+  — a prompt the centering brought on screen is, by definition, no longer a target.
+- **Prompts source** (`_ScrollAdjacentPrompt`, off-thread): the transcript's user messages
+  (`AnalyzeSessionTranscript().userMsgs`, the same list the panel numbers), **mtime-cached per session**
+  (`_promptNavCache`) so stepping re-reads the file only when it GREW. A warm cache navigates instantly
+  (off-screen targets are older prompts, so one-turn staleness is harmless) while a background refresh
+  keeps it current; a cold session loads, then navigates. So nav works with the summary panel **off**
+  (the panel's own prompt cache only exists while it is shown).
+- **Cost**: per keypress ≈ one `ResolveConversationPromptRows` (~9 ms at a realistic scrollback, §4) on
+  the UI thread, plus a stat / bounded transcript read off-thread. Steady state **0** (only on keypress).
+- **Status**: lib-compiles green (settings model + `TerminalControlLib` + `TerminalAppLib`); runtime
+  (the visible scroll + the boundary sound) pends the same deploy as the jump (§6).
+
+## 8. Follow-ups (non-blocking)
 
 - **Flash highlight** on the landed match (transient, separate from the user's Ctrl+Shift+F highlight) so
   the jump's target is visually obvious — center-only is v1 to keep the unverifiable surface minimal.

@@ -101,6 +101,9 @@ static constexpr std::string_view OpenScratchpadKey{ "experimental.openScratchpa
 static constexpr std::string_view OpenAboutKey{ "openAbout" };
 static constexpr std::string_view QuickFixKey{ "quickFix" };
 static constexpr std::string_view OpenCWDKey{ "openCWD" };
+// Agentmaster: scroll the view to the nearest OFF-SCREEN sent prompt up/down (alt+up / alt+down).
+static constexpr std::string_view AgentScrollToPrevPromptKey{ "agentScrollToPrevPrompt" };
+static constexpr std::string_view AgentScrollToNextPromptKey{ "agentScrollToNextPrompt" };
 
 static constexpr std::string_view ActionKey{ "action" };
 

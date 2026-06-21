@@ -124,6 +124,10 @@ namespace Microsoft.Terminal.Control
         // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 if not on screen) — drives summary-panel icon
         // eligibility dimming. Read-only (no scroll).
         Windows.Foundation.Collections.IVector<Int32> ResolveConversationPromptRows(Windows.Foundation.Collections.IVector<String> messages);
+        // Agentmaster (alt+up / alt+down prompt nav): scroll to the nearest SENT prompt that is currently
+        // OFF-SCREEN in the given direction (up = above the viewport, down = below), CENTERING it. Returns
+        // the buffer row jumped to, or -1 if there is no off-screen prompt in that direction.
+        Int32 ScrollToAdjacentConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, Boolean up);
 
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();

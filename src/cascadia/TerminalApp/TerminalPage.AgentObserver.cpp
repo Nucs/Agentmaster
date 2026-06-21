@@ -22,8 +22,12 @@
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
+#include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
 #include "AgentMaster/SessionRegistry.h"
+
+#include <mmsystem.h> // PlaySoundW — the prompt-nav boundary sound (alt+up/down at the ends)
+#pragma comment(lib, "winmm.lib")
 
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
@@ -738,6 +742,159 @@ namespace winrt::TerminalApp::implementation
             rows.push_back(r);
         }
         return rows;
+    }
+
+    // Agentmaster (alt+up / alt+down prompt nav): the focused tab's managed CLAUDE sessionId, or empty.
+    // Prompt nav resolves the conversation's SENT prompts from the transcript and finds them in the live
+    // buffer (SUMMARY_JUMP.md), so it applies only to a managed Claude session; a Codex tab (no in-buffer
+    // prompt resolve in v1), a shell, the Manager tab, or an external all return empty, so the action falls
+    // back to WT's default MoveFocus. UI thread.
+    std::wstring TerminalPage::_FocusedPromptNavSession()
+    {
+        const auto focused = _GetFocusedTab();
+        if (!focused)
+        {
+            return {};
+        }
+        const auto sid = _ClaudeSessionForTab(focused);
+        if (sid.empty() || !_sessionRegistry)
+        {
+            return {};
+        }
+        const auto info = _sessionRegistry->Get(sid);
+        if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
+        {
+            return {};
+        }
+        return sid;
+    }
+
+    // Agentmaster (alt+up / alt+down prompt nav): center the view on the nearest SENT prompt that is
+    // currently OFF-SCREEN in the given direction. The prompts are the transcript's user messages
+    // (AnalyzeSessionTranscript.userMsgs — the same list the summary panel numbers + jumps), cached per
+    // session and re-read only when the transcript GREW (mtime), so a warm session navigates instantly.
+    // A warm cache navigates NOW (off-screen targets are older prompts, so one-turn staleness is harmless)
+    // while the background refresh keeps the cache current; a cold session loads first, then navigates.
+    // fire_and_forget: starts on the UI thread, reads the file on a worker, finishes on the UI thread.
+    winrt::fire_and_forget TerminalPage::_ScrollAdjacentPrompt(std::wstring sessionId, bool up)
+    {
+        auto strongThis{ get_strong() }; // keep the page alive across the co_awaits
+
+        // (UI thread) snapshot the cache for this session.
+        std::wstring cachedPath;
+        int64_t cachedMtime = 0;
+        std::vector<std::wstring> prompts;
+        bool hadPrompts = false;
+        if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+        {
+            cachedPath = it->second.path;
+            cachedMtime = it->second.mtime;
+            prompts = it->second.prompts;
+            hadPrompts = !prompts.empty();
+        }
+
+        // Warm cache: navigate immediately with what we have.
+        if (hadPrompts)
+        {
+            _NavigateAdjacentPrompt(sessionId, prompts, up);
+        }
+
+        // (worker) (re)resolve the transcript path + re-analyze only when it grew (mtime-gated).
+        co_await winrt::resume_background();
+
+        std::wstring path = cachedPath.empty() ? ::Agentmaster::ResolveClaudeTranscriptPath(sessionId) : cachedPath;
+        int64_t mtime = cachedMtime;
+        bool refreshed = false;
+        std::vector<std::wstring> fresh;
+        if (!path.empty())
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                ULARGE_INTEGER li{};
+                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                mtime = static_cast<int64_t>(li.QuadPart);
+            }
+            if (!hadPrompts || mtime != cachedMtime)
+            {
+                fresh = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */).userMsgs;
+                refreshed = true;
+            }
+        }
+
+        // (UI thread) store the refresh; on a COLD session, navigate now that prompts exist.
+        co_await wil::resume_foreground(Dispatcher());
+        if (refreshed)
+        {
+            auto& e = _promptNavCache[sessionId];
+            e.path = path;
+            e.mtime = mtime;
+            e.prompts = fresh;
+        }
+        if (!hadPrompts)
+        {
+            _NavigateAdjacentPrompt(sessionId, refreshed ? fresh : prompts, up);
+        }
+    }
+
+    // Agentmaster (alt+up / alt+down prompt nav): the UI-thread half — resolve the session's live control
+    // and scroll it to the nearest off-screen prompt up/down, else play the boundary sound (no prompts /
+    // no control / nothing off-screen that way).
+    void TerminalPage::_NavigateAdjacentPrompt(const std::wstring& sessionId, const std::vector<std::wstring>& prompts, bool up)
+    {
+        if (prompts.empty())
+        {
+            _PlayPromptNavLimitSound();
+            return;
+        }
+        const auto control = _ControlForSession(sessionId);
+        if (!control || control.ConnectionState() == winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected)
+        {
+            _PlayPromptNavLimitSound();
+            return;
+        }
+        if (control.ScrollToAdjacentConversationPrompt(_PromptsToVector(prompts), up) < 0)
+        {
+            _PlayPromptNavLimitSound(); // no further sent prompt off-screen in that direction
+        }
+    }
+
+    // Agentmaster (alt+up / alt+down prompt nav): boundary feedback — distinct from the jump chime
+    // (SystemAsterisk) so "you've hit the end" reads differently. Async; winmm is already in the link.
+    void TerminalPage::_PlayPromptNavLimitSound()
+    {
+        ::PlaySoundW(L"SystemExclamation", nullptr, SND_ALIAS | SND_ASYNC);
+    }
+
+    // Agentmaster (alt+up / alt+down prompt nav): step the focused session's view to the previous / next
+    // SENT prompt that is currently off-screen. On a managed Claude session this overrides WT's default
+    // alt+up/down pane-focus move; on any other tab it falls back to MoveFocus (preserving upstream
+    // behavior + the GH#6129 keychord propagation when no pane is there to move to).
+    void TerminalPage::_HandleAgentScrollToPrevPrompt(const winrt::Windows::Foundation::IInspectable& /*sender*/, const ActionEventArgs& args)
+    {
+        if (const auto sid = _FocusedPromptNavSession(); !sid.empty())
+        {
+            _ScrollAdjacentPrompt(sid, /*up*/ true);
+            args.Handled(true);
+        }
+        else
+        {
+            args.Handled(_MoveFocus(FocusDirection::Up));
+        }
+    }
+
+    void TerminalPage::_HandleAgentScrollToNextPrompt(const winrt::Windows::Foundation::IInspectable& /*sender*/, const ActionEventArgs& args)
+    {
+        if (const auto sid = _FocusedPromptNavSession(); !sid.empty())
+        {
+            _ScrollAdjacentPrompt(sid, /*up*/ false);
+            args.Handled(true);
+        }
+        else
+        {
+            args.Handled(_MoveFocus(FocusDirection::Down));
+        }
     }
 
     // Agentmaster (TAB_OVERLAY.md summary panel): the per-tab pencil button toggles the summary panel's
