@@ -2411,8 +2411,27 @@ namespace winrt::TerminalApp::implementation
         outer.Children().Append(band);
         outer.Children().Append(bodyBorder);
 
+        // Agentmaster: the hover/selection outline is drawn as an OVERLAY ring, NOT on the card
+        // Button's own border. A Button's BorderThickness is part of its layout box, so toggling it
+        // on hover grows the card (every card below shifts) AND insets the title band off its rounded
+        // corners (the content shifts in) — the visible "card jumps when I mouse over it" bug. This
+        // ring is a transparent Border layered in the same Grid cell (drawn ON TOP, IsHitTestVisible
+        // false), so changing its thickness redraws the outline inward over the card edges WITHOUT
+        // resizing the card or moving anything. 0 at rest, 1 on hover, 2 when selected. Its corners
+        // match the card so the outline rounds with the edge. (As a bonus this also stops a SELECTED
+        // card from being 2px larger than its unselected siblings — both are now the same size.)
+        auto ring = Border{};
+        ring.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // matches the card rounding
+        ring.BorderBrush(SolidColorBrush{ accent });
+        ring.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 0, 0, 0, 0 });
+        ring.IsHitTestVisible(false); // a decorative overlay must not eat card clicks/hover
+        ring.HorizontalAlignment(HorizontalAlignment::Stretch);
+        ring.VerticalAlignment(VerticalAlignment::Stretch);
+        const auto ringWeak = winrt::make_weak(ring);
+
         auto grid = Grid{};
         grid.Children().Append(outer);
+        grid.Children().Append(ring); // over the content, under the dots
         grid.Children().Append(dotsBtn);
 
         auto card = Button{};
@@ -2423,29 +2442,27 @@ namespace winrt::TerminalApp::implementation
         card.Margin(Thickness{ 0, 0, 0, 6 });
         card.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // explicit, so the title band's top corners (4,4,0,0) line up with the card rounding
         card.Background(Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
-        // Agentmaster: the state-colored border is visual noise at rest on a busy board — show it
-        // only when the card is SELECTED or HOVERED. The brush stays the state accent (also pushed
-        // onto the Button's PointerOver/Pressed states so a hover shows the accent, not the theme's
-        // gray hover border); only the THICKNESS toggles: 0 at rest, 1 on hover, 2 when selected.
-        card.BorderBrush(SolidColorBrush{ accent });
-        card.Resources().Insert(winrt::box_value(L"ButtonBorderBrushPointerOver"), SolidColorBrush{ accent });
-        card.Resources().Insert(winrt::box_value(L"ButtonBorderBrushPressed"), SolidColorBrush{ accent });
-        card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 0, 0, 0, 0 });
+        // Agentmaster: the state-colored outline lives on the `ring` OVERLAY above, NOT on this
+        // Button's own border — toggling a Button BorderThickness grows the card and nudges the
+        // title band, which is the shift we're avoiding. The card's own border stays a constant 0;
+        // only the overlay ring's thickness toggles (0 rest / 1 hover / 2 selected).
+        card.BorderThickness(Thickness{ 0, 0, 0, 0 });
         if (!selected)
         {
-            // sender == the card; toggle border thickness on hover. Use the sender (never capture
-            // the Button into its OWN handler — a strong self-capture leaks the element via the
-            // delegate). The brush is owned by the template's PointerOver state (accent, above).
-            card.PointerEntered([](const IInspectable& s, const PointerRoutedEventArgs&) {
-                if (const auto c = s.try_as<Control>())
+            // Grow the overlay ring on hover (a selected card keeps its fixed 2). ringWeak is a
+            // weak_ref so the card's handler never strong-captures a child that chains back to the
+            // card (the no-self-capture rule — a strong ring ref would cycle
+            // card -> handler -> ring -> grid -> card and leak the whole tree).
+            card.PointerEntered([ringWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto r = ringWeak.get())
                 {
-                    c.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                    r.BorderThickness(Thickness{ 1, 1, 1, 1 });
                 }
             });
-            card.PointerExited([](const IInspectable& s, const PointerRoutedEventArgs&) {
-                if (const auto c = s.try_as<Control>())
+            card.PointerExited([ringWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto r = ringWeak.get())
                 {
-                    c.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                    r.BorderThickness(Thickness{ 0, 0, 0, 0 });
                 }
             });
         }
