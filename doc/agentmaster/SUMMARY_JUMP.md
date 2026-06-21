@@ -134,6 +134,18 @@ Refresh is gated to stay cheap (the user's "don't hurt performance"):
 
 (A mutation-id epoch gate could make an idle *visible* panel free too — noted as a future optimization.)
 
+**Uninitialized-core safety (regression fix, commit `80856ae92`).** A tab restored on relaunch but never
+activated has a live `ControlCore` whose `TextBuffer` isn't created yet (`Initialize()` is gated on the
+SwapChainPanel's first non-zero layout — it only runs when the tab is first shown). The eligibility refresh
+can fire on such a **background** overlay (the panel is a GLOBAL toggle and a resumed session's transcript
+keeps growing off-screen), so reading the buffer there dereferenced a null `_mainBuffer` → a deterministic
+AV in `TextBuffer::GetSize`. Two layers now prevent it: `ControlCore::ResolveConversationPromptRows` **guards
+on `_initializedTerminal`** (like every other buffer reader) and returns all-`-1` (every icon dims, no buffer
+touch); and `TerminalPage::_JumpEligibilityInSession` additionally **skips a `NotConnected` control** (the
+connection starts on the same first-layout gate, so this avoids even the no-op cross-ABI call for dormant
+restored tabs; only `NotConnected` is skipped, so a `Closed`/ended session — whose scrollback persists — still
+resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initializedTerminal` / `ConnectionState`.
+
 ## 5. Edge behavior
 
 - **Not on screen** → `-1`, no scroll (no chime). The transcript still has the prompt; a "open transcript

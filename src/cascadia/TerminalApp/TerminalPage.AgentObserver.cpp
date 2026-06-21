@@ -721,6 +721,16 @@ namespace winrt::TerminalApp::implementation
         {
             return rows;
         }
+        // Defense-in-depth + efficiency (SUMMARY_JUMP.md §4a): a tab restored on relaunch but never
+        // activated has a live control whose ControlCore has not Initialize()d yet (its TextBuffer is
+        // null) — reading it AVs. ControlCore::ResolveConversationPromptRows guards this internally, but
+        // skip the cross-ABI no-op entirely for a NotConnected control (the connection starts on the same
+        // first-layout gate as Initialize, so NotConnected == not-yet-initialized). Empty => all icons dim.
+        // Only NotConnected is skipped: a Closed (ended) session keeps its scrollback, so jumping still works.
+        if (control.ConnectionState() == winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected)
+        {
+            return rows;
+        }
         const auto resolved = control.ResolveConversationPromptRows(_PromptsToVector(msgs));
         rows.reserve(resolved.Size());
         for (const auto r : resolved)
