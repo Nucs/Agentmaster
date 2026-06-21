@@ -1649,6 +1649,16 @@ namespace winrt::TerminalApp::implementation
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             bar.Children().Append(_sessionsBtn);
 
+            // Agentmaster: "Keep Awake" toggle — prevents the PC (and display) from sleeping while a
+            // long unattended run is in flight, mirroring the user's stay-awake.ps1. It calls
+            // SetThreadExecutionState from this (persistent) UI thread, so ES_CONTINUOUS holds the flag
+            // until released — no timer/loop needed (the per-thread state persists for the thread's life).
+            _keepAwakeBtn = Button{};
+            AgentSetTip(_keepAwakeBtn, L"Keep this PC (and display) awake \x2014 prevents sleep while a long unattended run is in flight. Held until toggled off or the window closes.");
+            _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleKeepAwake(); });
+            bar.Children().Append(_keepAwakeBtn);
+            _UpdateKeepAwakeButton();
+
             Grid::SetRow(bar, 0);
             _root.Children().Append(bar);
         }
@@ -5243,6 +5253,51 @@ namespace winrt::TerminalApp::implementation
                                                   winrt::hstring{ L"Archived (" } + winrt::to_hstring(archived) + L")" :
                                                   winrt::hstring{ L"Archived" }));
         _archivedBtn.IsEnabled(archived > 0);
+    }
+
+    // Agentmaster: keep-awake toggle. SetThreadExecutionState's ES_CONTINUOUS flag is per-thread and
+    // persists for the life of the calling thread (or until reset) — this runs on the window's UI
+    // thread, which lives as long as the window, so no timer/poll loop is needed (unlike stay-awake.ps1,
+    // which loops only because its host PowerShell would otherwise exit). The flag is system-wide while
+    // ANY thread holds it; per-window toggles compose fine (the PC stays awake while any window holds it).
+    void AgentManagerContent::_ToggleKeepAwake()
+    {
+        _keepAwake = !_keepAwake;
+        constexpr DWORD esContinuous = 0x80000000; // ES_CONTINUOUS
+        constexpr DWORD esSystem = 0x00000001; // ES_SYSTEM_REQUIRED
+        constexpr DWORD esDisplay = 0x00000002; // ES_DISPLAY_REQUIRED
+        // Hold: continuous + system + display. Release: continuous alone clears the prior requirements.
+        ::SetThreadExecutionState(_keepAwake ? (esContinuous | esSystem | esDisplay) : esContinuous);
+        _UpdateKeepAwakeButton();
+    }
+
+    void AgentManagerContent::_UpdateKeepAwakeButton()
+    {
+        if (!_keepAwakeBtn)
+        {
+            return;
+        }
+        auto content = StackPanel{};
+        content.Orientation(Orientation::Horizontal);
+        content.Spacing(6);
+        FontIcon icon;
+        icon.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+        icon.Glyph(_keepAwake ? L"\xEC46" : L"\xE708"); // EC46 PowerButton (on) / E708 QuietHours-ish (off)
+        icon.FontSize(14);
+        content.Children().Append(icon);
+        content.Children().Append(Text(_keepAwake ? L"Awake On" : L"Keep Awake", 14, false, 1.0));
+        _keepAwakeBtn.Content(content);
+        // On -> accent-tinted so the held state reads at a glance; off -> revert to the theme default.
+        if (_keepAwake)
+        {
+            _keepAwakeBtn.Background(Fill(0xFF, 0x2E, 0x7D, 0x32)); // green = "holding"
+            _keepAwakeBtn.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
+        }
+        else
+        {
+            _keepAwakeBtn.Background(nullptr);
+            _keepAwakeBtn.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+        }
     }
 
     void AgentManagerContent::_UpdateReopenButton()
