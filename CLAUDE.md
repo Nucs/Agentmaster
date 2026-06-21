@@ -2067,3 +2067,15 @@ build **binlog uploads as an artifact** to diagnose the first run.
 - Keep the diff against upstream minimal where practical (additive files, small touches at
   integration points) so rebasing onto `microsoft/terminal` stays cheap.
 - Build artifacts (`bin/`, `packages/`, `Generated Files/`) are gitignored — never commit them.
+- **The Agent Manager UI is ALWAYS dark, independent of the Windows / Windows Terminal theme.**
+  Every Agentmaster surface root forces `RequestedTheme(ElementTheme::Dark)` — the Manager tab
+  `_root` (`AgentManagerContent`), the full-window Archive / Sessions page hosts, and the settings /
+  claude-missing / path-picker overlays — and paints an **explicit dark fill** (e.g. `_root` uses
+  `#2e2e2e`, NOT an app-theme-resolved brush: `Application.Resources().Lookup("UnfocusedBorderBrush")`
+  resolves against the *app* theme and returns light `#e8e8e8` in light mode, which used to bleed
+  through the Manager pane's widget gaps). Confirm dialogs that **self-host** (`AgentManagerContent`,
+  via `ShowAsync`) follow `_root.ActualTheme()` (Dark); dialogs shown via WT's **shared presenter**
+  (`TerminalWindow::ShowDialog`, which force-themes *every* dialog to the WT setting up its whole
+  ancestor chain) opt into dark by tagging themselves **`agentmaster-dark`** (the Archive/Sessions
+  page + batch-close confirms do). Don't reintroduce an app-theme-dependent brush/lookup on these
+  surfaces, and tag any new presenter-shown Agentmaster dialog `agentmaster-dark`.

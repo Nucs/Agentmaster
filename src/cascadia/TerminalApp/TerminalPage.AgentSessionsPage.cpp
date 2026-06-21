@@ -1984,6 +1984,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         ContentDialog dialog;
+        dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
         dialog.Title(winrt::box_value(L"Open session"));
         dialog.Content(winrt::box_value(
             title.empty() ?

@@ -534,6 +534,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
                 ContentDialog dialog;
+                dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
                 dialog.Title(winrt::box_value(L"Close session?"));
                 // Archive (the safe action) keeps it restorable; Delete (the trash, leftmost) removes it
                 // from Agentmaster but KEEPS the conversation file on disk (it still appears in Sessions).

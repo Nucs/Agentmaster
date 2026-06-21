@@ -2273,6 +2273,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto presenter{ _dialogPresenter.get() })
         {
             winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
             dialog.Title(winrt::box_value(winrt::hstring{ L"Delete permanently?" }));
             dialog.Content(winrt::box_value(winrt::hstring{ (titleStr.empty() ? std::wstring{ L"This session" } : (L"\x201C" + titleStr + L"\x201D")) + L" will be removed from Agentmaster. The conversation file on disk is KEPT \x2014 it still appears in Sessions and can be reopened from there." }));
             dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
@@ -2306,6 +2307,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto presenter{ _dialogPresenter.get() })
         {
             winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
             dialog.Title(winrt::box_value(winrt::hstring{ L"Delete saved window?" }));
             dialog.Content(winrt::box_value(winrt::hstring{ L"This removes the saved window's layout (geometry + tab list) from Agentmaster. The sessions' conversation files on disk are kept and still appear in Sessions." }));
             dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
@@ -2352,6 +2354,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto presenter{ _dialogPresenter.get() })
         {
             winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
             dialog.Title(winrt::box_value(winrt::hstring{ L"Delete " + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" session permanently?" : L" sessions permanently?") }));
             dialog.Content(winrt::box_value(winrt::hstring{ L"They will be removed from Agentmaster. Their conversation files on disk are KEPT \x2014 they still appear in Sessions and can be reopened from there." }));
             dialog.PrimaryButtonText(L"\U0001F5D1 Delete");

@@ -959,6 +959,15 @@ namespace winrt::TerminalApp::implementation
     AgentManagerContent::AgentManagerContent()
     {
         _root = Grid{};
+        // Agentmaster: the Manager pane is ALWAYS dark, regardless of the Windows / Windows Terminal
+        // theme (a hard product requirement). RequestedTheme(Dark) forces every built-in control in
+        // this subtree (buttons, text boxes, scrollbars, combo lists, …) to render dark. Surfaces that
+        // render OUTSIDE this subtree's visual root — the Popup-hosted path picker and the modal
+        // overlay cards — re-assert Dark on themselves, and the confirm ContentDialogs follow
+        // _root.ActualTheme() (now Dark). WT's theme passes only push brush *resources* into panes
+        // (rootPane->UpdateResources) and never set RequestedTheme on pane content, so this sticks
+        // across light/dark theme switches.
+        _root.RequestedTheme(ElementTheme::Dark);
         _dispatcher = DispatcherQueue::GetForCurrentThread();
         _templates = ::Agentmaster::LoadTemplates(); // persisted plan templates (M8)
         _recentDirs = ::Agentmaster::LoadRecentDirs(); // MRU for the Launch path-picker
@@ -974,27 +983,15 @@ namespace winrt::TerminalApp::implementation
         // on left-drag and pops the system/caption menu on right-click, exactly as if you'd grabbed the
         // title bar (the user-reported "the tabs bar moves / its context menu opens" bug).
         //
-        // The brush used to be set only inside `if (res.HasKey(L"UnfocusedBorderBrush"))`, but HasKey
-        // does NOT look through merged/theme dictionaries (where that key lives), so it returned false
-        // and _root was left transparent. Always set a non-null fill: look the themed brush up DIRECTLY
-        // (Lookup DOES traverse the theme dicts — exactly how ScratchpadContent, the reference
-        // IPaneContent, does it), and fall back to an opaque color if that fails, so _root is NEVER
-        // transparent — the same "don't leave it Transparent or it won't hit-test" guard WT uses in
-        // TerminalPage::_updatePaneResources.
-        Brush rootFill{ nullptr };
-        try
-        {
-            auto res = Application::Current().Resources();
-            rootFill = res.Lookup(winrt::box_value(L"UnfocusedBorderBrush")).try_as<Brush>();
-        }
-        catch (...)
-        {
-        }
-        if (!rootFill)
-        {
-            rootFill = Fill(0xFF, 0x2E, 0x2E, 0x2E); // opaque #2e2e2e == TabViewBackground (dark)
-        }
-        _root.Background(rootFill);
+        // The fill is the DARK TabViewBackground (#2e2e2e) UNCONDITIONALLY. We force this pane to dark
+        // (RequestedTheme above), so the gaps must be dark too. This used to look the brush up via
+        // Application.Resources().Lookup(L"UnfocusedBorderBrush"), but that resolves the resource
+        // against the *application* theme — which returns the LIGHT value (#e8e8e8) whenever Windows /
+        // Windows Terminal is in light mode, bleeding a light-gray rectangle through the widget gaps.
+        // App.xaml defines the dark UnfocusedBorderBrush == TabViewBackground == #2e2e2e, so hardcoding
+        // it here is exactly the theme-correct dark value with no light-mode bleed. (Must stay non-null /
+        // opaque for the hit-testing reason above.)
+        _root.Background(Fill(0xFF, 0x2E, 0x2E, 0x2E)); // opaque #2e2e2e == TabViewBackground (dark)
 
         _BuildLayout();
     }
