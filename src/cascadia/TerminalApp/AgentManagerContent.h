@@ -305,6 +305,10 @@ namespace winrt::TerminalApp::implementation
         // closeness (closest first); an empty query keeps the historical MRU order.
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
         winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
+        // Agentmaster: the "Browse…" row pinned to the TOP of the path-picker (the first option) — a
+        // native folder dialog whose pick both fills the box AND joins the recents (_BrowseForLaunchDir).
+        winrt::Windows::UI::Xaml::Controls::Button _MakeBrowseRow();
+        void _BrowseForLaunchDir();
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);

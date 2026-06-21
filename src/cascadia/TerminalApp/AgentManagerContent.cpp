@@ -174,6 +174,48 @@ namespace
         return out;
     }
 
+    // Agentmaster: a native folder picker (IFileOpenDialog in FOS_PICKFOLDERS mode — the modern
+    // folder browser) for the Launch path box's "Browse…" row. Seeds the dialog at `initialDir`
+    // when that's an existing folder, so Browse opens where the box currently points rather than
+    // the last shell location. Returns the chosen folder, or nullopt on cancel.
+    std::optional<std::wstring> PickFolder(HWND owner, const std::wstring& initialDir)
+    {
+        winrt::com_ptr<IFileOpenDialog> dlg;
+        if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.put()))))
+        {
+            return std::nullopt;
+        }
+        dlg->SetTitle(L"Choose a working directory");
+        FILEOPENDIALOGOPTIONS opts{};
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        if (!initialDir.empty())
+        {
+            winrt::com_ptr<IShellItem> start;
+            if (SUCCEEDED(::SHCreateItemFromParsingName(initialDir.c_str(), nullptr, IID_PPV_ARGS(start.put()))) && start)
+            {
+                dlg->SetFolder(start.get()); // open AT this folder (not just a default), since the user already typed a path
+            }
+        }
+        if (FAILED(dlg->Show(owner)))
+        {
+            return std::nullopt; // user canceled
+        }
+        winrt::com_ptr<IShellItem> item;
+        if (FAILED(dlg->GetResult(item.put())))
+        {
+            return std::nullopt;
+        }
+        PWSTR path = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+        {
+            return std::nullopt;
+        }
+        std::wstring out{ path };
+        ::CoTaskMemFree(path);
+        return out;
+    }
+
     // Agentmaster: a small stable palette to color-code the EXTERNAL tree's pid underline by host
     // window/shell — claudes sharing a terminal window/tab carry the same host shell pid, so they get
     // the same color and are easy to spot at a glance (even across cwd groups). Vivid-on-dark, visually
@@ -7673,6 +7715,87 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveRecentDirs(_recentDirs);
     }
 
+    // Agentmaster: the "Browse…" row — the FIRST option in the path-picker dropdown. Visually it
+    // mirrors _MakePathRow (a transparent, focus-neutral row) but its glyph is a folder icon and its
+    // click opens the native folder dialog instead of drilling a typed path. Kept a TextBlock (not a
+    // FontIcon) so its vertical rhythm matches the other rows' TextBlock glyphs; only the FontFamily
+    // is swapped to Segoe Fluent Icons so the folder glyph renders.
+    Button AgentManagerContent::_MakeBrowseRow()
+    {
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(8);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        {
+            auto glyph = Text(L"\xE8B7", 13, false, 0.9); // Segoe Fluent Icons: Folder
+            glyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            row.Children().Append(glyph);
+        }
+        row.Children().Append(Text(L"Browse\x2026", 13, true, 1.0)); // bold: this is the primary "pick a folder" action
+
+        auto btn = Button{};
+        btn.Content(row);
+        btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        btn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        btn.Background(SolidColorBrush{ Colors::Transparent() });
+        btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        btn.Padding(Thickness{ 8, 5, 8, 5 });
+        // Like the path rows: must NOT take focus from the cwd box — a row grabbing focus would let
+        // the box's LostFocus race ahead and tear down the popup (and this button) before the click
+        // registers. Keeping focus on the box also keeps the popup open across picks.
+        btn.IsTabStop(false);
+        btn.AllowFocusOnInteraction(false);
+        AgentSetTip(btn, L"Browse for a working directory \x2014 the pick fills the box and is added to recents.");
+        btn.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForLaunchDir(); });
+        return btn;
+    }
+
+    // Agentmaster: open the native folder dialog for the Launch path box ("Browse…" row). A pick is
+    // dropped into the box AND pushed onto the recent-dirs MRU immediately (so Browse picks are part
+    // of recents even before the session is launched), then the box is re-validated + refocused. The
+    // COM modal is deferred off the click tick (it needs the message pump — the same XAML-Islands rule
+    // the claude.exe Browse and the profile picker both follow).
+    void AgentManagerContent::_BrowseForLaunchDir()
+    {
+        if (!_dispatcher || !_cwdBox)
+        {
+            return;
+        }
+        // Seed the dialog at the box's current path when it points at a real folder (or, for a partial
+        // leaf being typed, that leaf's existing parent), captured before the async hop.
+        std::wstring seed;
+        {
+            const std::wstring norm = NormPath(std::wstring{ _cwdBox.Text() });
+            if (IsDir(norm))
+            {
+                seed = norm;
+            }
+            else if (const auto parent = ParentDir(norm); parent && IsDir(*parent))
+            {
+                seed = *parent;
+            }
+        }
+        _dispatcher.TryEnqueue([this, seed]() {
+            const auto picked = PickFolder(::GetActiveWindow(), seed);
+            if (!picked || picked->empty() || !_cwdBox)
+            {
+                return;
+            }
+            const std::wstring dir = NormPath(*picked);
+            _PushRecentDir(dir); // a Browse pick joins the recents right away (shared MRU with launches)
+            _cwdBox.Text(winrt::hstring{ dir }); // set the launch target (fires TextChanged -> _ValidateLaunchBox)
+            _cwdBox.Select(static_cast<int32_t>(dir.size()), 0); // caret to end
+            _ValidateLaunchBox(); // explicit: a dismissed picker can early-out of the TextChanged path
+            _cwdBox.Focus(FocusState::Programmatic); // keep the box focused (don't strand focus on the dialog)
+            // Refresh the open picker so the just-added recent shows; leave a closed one closed (the
+            // user made a definitive choice via the modal).
+            if (_pathPopup && _pathPopup.IsOpen())
+            {
+                _RebuildPathPicker();
+            }
+        });
+    }
+
     Button AgentManagerContent::_MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText)
     {
         auto row = StackPanel{};
@@ -7710,6 +7833,13 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _pathListHost.Children().Clear();
+
+        // Agentmaster: "Browse…" is always the FIRST option — a native folder dialog whose pick fills
+        // the box and joins the recents. Appended before any section so it sits at the top in every
+        // mode (empty box, fuzzy query, or a rooted path). The empty-state hint below keys off this
+        // baseline so it still shows when Browse is the ONLY row.
+        _pathListHost.Children().Append(_MakeBrowseRow());
+        const uint32_t browseRowCount = _pathListHost.Children().Size();
 
         auto sectionLabel = [](const winrt::hstring& s) {
             auto lbl = Text(s, 11, true, 0.5);
@@ -7864,13 +7994,13 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        if (_pathListHost.Children().Size() == 0)
+        if (_pathListHost.Children().Size() == browseRowCount)
         {
-            // In query mode an empty list means the token matched no recent directory; otherwise
-            // it's the initial empty-box hint.
+            // Only the Browse row is present (no recents / subfolders). In query mode that means the
+            // token matched no recent directory; otherwise it's the initial empty-box hint.
             _pathListHost.Children().Append(Text(queryMode ?
-                L"No recent directory matches — type a full path to browse subfolders." :
-                L"Type a path or pick a recent directory.",
+                L"No recent directory matches — type a full path, or Browse\x2026 above." :
+                L"Type a path, pick a recent directory, or Browse\x2026 above.",
                 12, false, 0.6));
         }
     }
