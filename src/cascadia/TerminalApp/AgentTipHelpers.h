@@ -62,6 +62,12 @@ namespace winrt::TerminalApp::implementation
         }
         winrt::Windows::UI::Xaml::Controls::ToolTip t;
         t.Content(winrt::box_value(tip));
+        // Agentmaster: every surface that uses AgentSetTip (the Manager tab + the Archive / Sessions
+        // pages) is forced dark, but a ToolTip renders in the popup ROOT — it does NOT inherit the
+        // host's RequestedTheme, and ToolTipService theme propagation is unreliable under XAML Islands
+        // (the very reason this helper exists). A ToolTip IS a FrameworkElement, so pin it Dark
+        // directly — themes its chrome + text — so a tip never flashes light over the dark UI.
+        t.RequestedTheme(winrt::Windows::UI::Xaml::ElementTheme::Dark);
         winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, t);
 
         // The open delay = 1/3 of the system tooltip hover time (process-global; read once).

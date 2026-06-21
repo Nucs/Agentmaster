@@ -2077,5 +2077,13 @@ build **binlog uploads as an artifact** to diagnose the first run.
   via `ShowAsync`) follow `_root.ActualTheme()` (Dark); dialogs shown via WT's **shared presenter**
   (`TerminalWindow::ShowDialog`, which force-themes *every* dialog to the WT setting up its whole
   ancestor chain) opt into dark by tagging themselves **`agentmaster-dark`** (the Archive/Sessions
-  page + batch-close confirms do). Don't reintroduce an app-theme-dependent brush/lookup on these
-  surfaces, and tag any new presenter-shown Agentmaster dialog `agentmaster-dark`.
+  page + batch-close confirms do). **Popups** that render in the popup root inherit Dark from their
+  now-dark anchor: `MenuFlyout` context menus (`_MakeSessionMenu` / `_MakeExternalTreeMenu` /
+  `_MakePromptMenu` / the Copy submenu) and `ComboBox` dropdowns follow their **target element's**
+  theme — the SAME mechanism WT uses for all its own flyouts (nothing in the tree sets
+  `MenuFlyoutPresenterStyle`, and WT's per-app theming proves it), so menus/combos under `_root`
+  need no per-flyout theming — and the path-picker `Popup` is explicitly Dark. The one exception is
+  **`ToolTip`s**: `ToolTipService` theme inheritance is unreliable under XAML Islands (the reason
+  `AgentTipHelpers` exists), so `AgentSetTip` pins every tip `RequestedTheme(Dark)`. Don't
+  reintroduce an app-theme-dependent brush/lookup on these surfaces, tag any new presenter-shown
+  Agentmaster dialog `agentmaster-dark`, and keep new tooltips going through `AgentSetTip`.
