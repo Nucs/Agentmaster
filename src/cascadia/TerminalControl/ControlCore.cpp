@@ -775,6 +775,19 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         rows.assign(msgs.size(), -1);
 
+        // Agentmaster: a tab restored on relaunch but NEVER activated has a ControlCore that has not run
+        // Initialize() yet — it's gated on the SwapChainPanel's first non-zero layout, which only fires when
+        // the tab is first shown. So _terminal exists (LockForReading works) but its TextBuffer (_mainBuffer)
+        // does NOT: GetTextBuffer() returns a reference to a null buffer and the very first tb.GetSize() AVs
+        // (0xC0000005 in TextBuffer::GetSize). The summary panel's eligibility timer / panel-rebuild can call
+        // this on such a BACKGROUND overlay (the panel is a GLOBAL toggle and a resumed session's transcript
+        // keeps growing while it's off-screen), so guard exactly like CursorPosition()/the other readers:
+        // nothing is rendered yet, so every prompt is unresolved (-1 => its jump button dims, no jump).
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return winrt::single_threaded_vector<int32_t>(std::move(rows));
+        }
+
         const auto lock = _terminal->LockForReading();
         const auto& tb = _terminal->GetTextBuffer();
         const auto width = (std::max)(1, tb.GetSize().Width());
