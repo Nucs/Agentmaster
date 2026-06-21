@@ -1130,8 +1130,13 @@ What works, by area:
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
-  commit key — click-away-or-Shift+Enter vs Enter), `waitingDecayMinutes` (how long a `WaitingForInput`
-  session waits before decaying to `Idle`), and `recentDirsLimit` (the path-picker MRU size, default 10).
+  commit key — click-away-or-Shift+Enter vs Enter), `waitingDecayMinutes` (the **Waiting-for-you "unread"
+  timeout** — a `WaitingForInput` card demotes to `Idle` only once this timeout elapses **AND** the user
+  has **read** it [visited its tab since the last turn]; an unread or manually **Mark-Unread**-ed card keeps
+  waiting past the timeout — `ShouldDecayWaitingToIdle`; cog control = a **1m–3d slider + a "Never" toggle**,
+  default **60 = 1h**, split from the old 5-min-cache conflation), `serverCacheMinutes` (Claude's server-side
+  prompt-cache lifetime, default **5**, drives ONLY the Triage-Board card's **⚡ "still cached"** hint shown to
+  the right of `⚙ sent/total`), and `recentDirsLimit` (the path-picker MRU size, default 10).
   A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
   deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored

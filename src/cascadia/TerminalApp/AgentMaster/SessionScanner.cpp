@@ -807,42 +807,30 @@ namespace Agentmaster
         return consumedTurnEvent;
     }
 
-    // Agentmaster (cache-aware Waiting decay): a session in WaitingForInput is the Triage Board's
-    // "answer me NOW" signal — and it is only genuinely hot while Claude's SERVER-SIDE prompt cache
-    // is warm (~5 minutes after the last turn; past that, answering costs a full cache re-read
-    // either way). After the configured window with no activity, demote it to Idle so the
-    // Waiting-for-you column shows only sessions worth answering right now (the card moves to
-    // "Idle / Done"). Like the synthesized missed-Stop above, this is a deliberate TIME-derived
-    // transition layered on the hook-derived machine (Rule #7-adjacent — never screen-scraped):
-    // the mutator RE-CHECKS state + age UNDER the registry lock, so a hook landing between our
-    // snapshot and the update wins (a fresh Stop re-arms the full window; a prompt/turn flips the
-    // state and the condition no-ops). Autopilot semantics are unchanged: DecideAdvance treats
-    // Idle as ready exactly like WaitingForInput (Rule #1), so a queued plan still advances.
+    // Agentmaster (Waiting-for-you "unread" model): a session in WaitingForInput is the Triage Board's
+    // "answer me" inbox. It demotes to Idle (the card moves to "Idle / Done") only once the timeout has
+    // elapsed AND the user has READ it (visited its tab since the last turn) — so it persists for the
+    // FULL timeout regardless of reading, and past the timeout it keeps waiting while still unread; a
+    // manual "Mark Unread" never time-decays at all. The pure gate ShouldDecayWaitingToIdle decides;
+    // PresenceIsBusy is folded in so a long Task/Agent subagent (busy heartbeat, quiescent parent
+    // transcript — the recon-subagent promotion's target) is never raced to Idle. Like the synthesized
+    // missed-Stop above, this is a deliberate TIME-derived transition layered on the hook-derived machine
+    // (Rule #7-adjacent — never screen-scraped): the mutator RE-CHECKS the full gate UNDER the registry
+    // lock, so a hook / a visit (read stamp) landing between our snapshot and the update wins. Autopilot
+    // semantics are unchanged: DecideAdvance treats Idle as ready exactly like WaitingForInput (Rule #1).
     void SessionScanner::_maybeDecayWaiting(const SessionInfo& s, int64_t nowMs)
     {
         const uint32_t minutes = _waitingDecayMinutes.load();
-        if (minutes == 0 || s.state != SessionState::WaitingForInput || s.lastActivityUnixMs <= 0)
-        {
-            return; // disabled / not waiting / no timestamp to age against (never decay on 0)
-        }
-        // Agentmaster: never decay a session claude itself reports BUSY — a long Task/Agent subagent
-        // run keeps the heartbeat "busy" while the main transcript is quiescent, and a WaitingForInput
-        // card with a live "busy" heartbeat is the recon-subagent promotion's target (don't race it to
-        // Idle first). Rule #13 fact, consumed here as a decay input. (Subagent side-file activity is
-        // already handled upstream by the recon-subagent promotion / the quiescence fold.)
-        if (PresenceIsBusy(s.presenceStatus))
+        const bool busy = PresenceIsBusy(s.presenceStatus);
+        if (!ShouldDecayWaitingToIdle(s.state, s.lastActivityUnixMs, s.readUnixMs, s.manualUnread, busy, minutes, nowMs))
         {
             return;
         }
-        const int64_t decayMs = static_cast<int64_t>(minutes) * 60000;
-        if (nowMs - s.lastActivityUnixMs < decayMs)
-        {
-            return; // still inside the cache window
-        }
         bool decayed = false;
         _registry->Update(s.id, [&](SessionInfo& live) {
-            if (live.state == SessionState::WaitingForInput && live.lastActivityUnixMs > 0 &&
-                nowMs - live.lastActivityUnixMs >= decayMs)
+            // Re-check the full gate under the lock against the LIVE record (a visit may have just
+            // stamped readUnixMs / cleared manualUnread, or a fresh turn may have moved the state).
+            if (ShouldDecayWaitingToIdle(live.state, live.lastActivityUnixMs, live.readUnixMs, live.manualUnread, PresenceIsBusy(live.presenceStatus), minutes, nowMs))
             {
                 live.state = SessionState::Idle;
                 decayed = true;
@@ -851,8 +839,8 @@ namespace Agentmaster
         if (decayed)
         {
             AppendStateLog(L"scanner.log",
-                           L"[decay-waiting] " + s.id + L" waited " + std::to_wstring((nowMs - s.lastActivityUnixMs) / 60000) +
-                               L"m (>= " + std::to_wstring(minutes) + L"m cache window) -> Idle\n");
+                           L"[decay-waiting] " + s.id + L" read + waited " + std::to_wstring((nowMs - s.lastActivityUnixMs) / 60000) +
+                               L"m (>= " + std::to_wstring(minutes) + L"m) -> Idle\n");
         }
     }
 

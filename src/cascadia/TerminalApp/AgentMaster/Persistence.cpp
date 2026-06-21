@@ -450,6 +450,7 @@ namespace Agentmaster
         o.Set(L"tabRenameCommitMode", json::Value::MkStr(ToString(s.tabRenameCommitMode)));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
         o.Set(L"waitingDecayMinutes", json::Value::MkNum(s.waitingDecayMinutes));
+        o.Set(L"serverCacheMinutes", json::Value::MkNum(s.serverCacheMinutes));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
@@ -491,7 +492,8 @@ namespace Agentmaster
         s.tabRenameCommitMode = TabRenameCommitModeFromString(v.StrAt(L"tabRenameCommitMode", L"shiftEnter"));
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
         // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.
-        s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 5);
+        s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 60);
+        s.serverCacheMinutes = v.U32At(L"serverCacheMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)

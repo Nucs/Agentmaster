@@ -254,6 +254,37 @@ namespace
             .count();
     }
 
+    // Agentmaster (Waiting-for-you "unread" model): render a minutes count as a compact "Xd Yh Zm"
+    // for the Settings cog's Waiting-for-you timeout slider header (e.g. 60 -> "1h", 90 -> "1h 30m",
+    // 4320 -> "3d"). 0 reads as "never" (the slider is disabled then; the "Never" toggle owns 0).
+    std::wstring FormatMinutesFriendly(uint32_t m)
+    {
+        if (m == 0)
+        {
+            return L"never";
+        }
+        const uint32_t d = m / 1440;
+        m %= 1440;
+        const uint32_t h = m / 60;
+        const uint32_t mi = m % 60;
+        std::wstring out;
+        const auto add = [&](uint32_t v, const wchar_t* u) {
+            if (v)
+            {
+                if (!out.empty())
+                {
+                    out += L' ';
+                }
+                out += std::to_wstring(v);
+                out += u;
+            }
+        };
+        add(d, L"d");
+        add(h, L"h");
+        add(mi, L"m");
+        return out;
+    }
+
     // Agentmaster: format a duration (ms) as a consolidated span. Units descend month / day / hour /
     // minute / second; month(=30d) and minute SHARE the letter 'm', disambiguated by position (the
     // sequence is always largest->smallest), per the requested format: "1m4d6h" (1 month 4 days 6
@@ -1043,6 +1074,25 @@ namespace winrt::TerminalApp::implementation
         _root.Background(Fill(0xFF, 0x2E, 0x2E, 0x2E)); // opaque #2e2e2e == TabViewBackground (dark)
 
         _BuildLayout();
+
+        // Agentmaster (Waiting-for-you "unread" model): a low-frequency board refresh so TIME-derived
+        // adornments stay current without a hook event — the card's ⚡ "still cached" hint (a few-minute
+        // window) and the "-2h30m" timing text. _Refresh() recomputes them from the live snapshot; it is
+        // idempotent and already runs on every registry event, so this only covers quiet periods. Weak
+        // self so a closed window never leaks a ticking timer.
+        _cardRefreshTimer = DispatcherTimer{};
+        _cardRefreshTimer.Interval(std::chrono::seconds(30));
+        _cardRefreshTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+            if (auto self = weak.get())
+            {
+                self->_Refresh();
+            }
+            else if (const auto t = sender.try_as<DispatcherTimer>())
+            {
+                t.Stop();
+            }
+        });
+        _cardRefreshTimer.Start();
     }
 
     // Agentmaster (M9): the registry is a process singleton shared by every window. Detach this
@@ -1055,6 +1105,10 @@ namespace winrt::TerminalApp::implementation
         if (_registry && _observerToken)
         {
             _registry->RemoveObserver(_observerToken);
+        }
+        if (_cardRefreshTimer)
+        {
+            _cardRefreshTimer.Stop(); // UI thread; stop the periodic ⚡/timing refresh
         }
     }
 
@@ -2347,25 +2401,55 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // autopilot badge ⚙ sent/total
-        if (!s.queue.empty())
+        // autopilot badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
+        // right of ⚙ N/M). The ⚙ badge shows only when there's a queue; the ⚡ shows whenever the
+        // session is still inside Claude's server-side prompt-cache window (serverCacheMinutes).
         {
-            int sent = 0;
-            for (const auto& p : s.queue)
+            auto metaRow = StackPanel{};
+            metaRow.Orientation(Orientation::Horizontal);
+            metaRow.Spacing(8);
+
+            if (!s.queue.empty())
             {
-                if (p.status == PromptStatus::Sent)
+                int sent = 0;
+                for (const auto& p : s.queue)
                 {
-                    ++sent;
+                    if (p.status == PromptStatus::Sent)
+                    {
+                        ++sent;
+                    }
+                }
+                const auto badge = winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size()));
+                auto bt = Text(badge, 11, false, 0.8);
+                if (s.autopilot.mode != AutopilotMode::Off)
+                {
+                    bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
+                }
+                AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.", kCardTipDelay);
+                metaRow.Children().Append(bt);
+            }
+
+            // Agentmaster (Waiting-for-you "unread" model): a ⚡ "still server-cached" hint. Claude's
+            // server-side prompt cache stays warm for ~serverCacheMinutes after the last turn, so a
+            // follow-up within the window reuses the cached prefix (cheaper & faster). Purely cosmetic;
+            // shown only while the card is inside that window. The board's periodic refresh (a 30s
+            // timer + every registry event) clears it once the window lapses.
+            {
+                const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
+                const int64_t effLast = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+                if (s.live && effLast > 0 && (NowMs() - effLast) < static_cast<int64_t>(cacheMin) * 60000)
+                {
+                    auto cacheGlyph = Text(L"\x26A1", 11, false, 0.95); // ⚡ warm cache
+                    cacheGlyph.Foreground(Fill(0xFF, 0xFF, 0xC1, 0x07)); // amber
+                    AgentSetTip(cacheGlyph, winrt::hstring{ L"Still server-cached \x2014 Claude's prompt cache stays warm for ~" } + winrt::to_hstring(static_cast<int>(cacheMin)) + L" min after the last turn, so a follow-up now reuses the cached context (cheaper & faster).", kCardTipDelay);
+                    metaRow.Children().Append(cacheGlyph);
                 }
             }
-            const auto badge = winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size()));
-            auto bt = Text(badge, 11, false, 0.8);
-            if (s.autopilot.mode != AutopilotMode::Off)
+
+            if (metaRow.Children().Size() > 0)
             {
-                bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
+                stack.Children().Append(metaRow);
             }
-            AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.", kCardTipDelay);
-            stack.Children().Append(bt);
         }
 
         // Agentmaster: a hover-revealed "\x22EF" more-button in the card's top-right corner — a
@@ -5550,13 +5634,40 @@ namespace winrt::TerminalApp::implementation
         _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Enter"));
         AgentSetTip(_setRenameCommit, L"Which key commits a tab rename: Shift+Enter (default) or Enter. The other inserts a line break (titles can be multi-line); clicking away always commits.");
         panel.Children().Append(_setRenameCommit);
-        _setWaitingDecay = TextBox{};
-        _setWaitingDecay.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after (minutes)"));
-        // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn — past that the
-        // session is no longer "hot", so the Triage Board demotes it out of Waiting-for-you.
-        _setWaitingDecay.PlaceholderText(L"5 \x2014 Claude's server cache lifetime; 0 = never");
-        AgentSetTip(_setWaitingDecay, L"How long a Waiting-for-you session sits before the board demotes it to Idle \x2014 default 5 (Claude's ~5-minute server cache lifetime). 0 = never decay.");
-        panel.Children().Append(_setWaitingDecay);
+        // Agentmaster (Waiting-for-you "unread" model): the Waiting-for-you -> Idle timeout. A "Never"
+        // toggle (stay Waiting until read), else a slider 1m .. 3d (default 1h). This is the "unread
+        // inbox" lifetime; it was split from Claude's ~5-min server cache, which is now the separate
+        // "Server-side cache lifetime" below (driving only the card's ⚡ hint).
+        _setWaitingNever = ToggleSwitch{};
+        _setWaitingNever.Header(winrt::box_value(L"Never decay Waiting-for-you (keep until read)"));
+        AgentSetTip(_setWaitingNever, L"When on, a Waiting-for-you session never auto-demotes to Idle by time \x2014 it stays until you read (visit) its tab. When off, it decays after the timeout below (and only once you've read it).");
+        _setWaitingNever.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (_setWaitingDecaySlider && _setWaitingNever)
+            {
+                _setWaitingDecaySlider.IsEnabled(!_setWaitingNever.IsOn());
+            }
+        });
+        panel.Children().Append(_setWaitingNever);
+
+        _setWaitingDecaySlider = Slider{};
+        _setWaitingDecaySlider.Minimum(1); // 1 minute
+        _setWaitingDecaySlider.Maximum(4320); // 3 days
+        _setWaitingDecaySlider.StepFrequency(1);
+        _setWaitingDecaySlider.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after"));
+        AgentSetTip(_setWaitingDecaySlider, L"How long a Waiting-for-you session waits before it may demote to Idle \x2014 1 minute \x2026 3 days. It only demotes once you've READ it (an unread session keeps waiting past the timeout). Use the toggle above for \x201Cnever\x201D.");
+        _setWaitingDecaySlider.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
+            if (_setWaitingDecaySlider)
+            {
+                _setWaitingDecaySlider.Header(winrt::box_value(winrt::hstring{ L"Waiting-for-you \x2192 Idle after: " } + winrt::hstring{ FormatMinutesFriendly(static_cast<uint32_t>(_setWaitingDecaySlider.Value())) }));
+            }
+        });
+        panel.Children().Append(_setWaitingDecaySlider);
+
+        _setServerCache = TextBox{};
+        _setServerCache.Header(winrt::box_value(L"Server-side cache lifetime (minutes)"));
+        _setServerCache.PlaceholderText(L"5");
+        AgentSetTip(_setServerCache, L"How long after a turn Claude's server-side prompt cache stays warm \x2014 drives the card's \x26A1 \x201Cstill cached\x201D hint (a follow-up within the window is cheaper & faster). Default 5.");
+        panel.Children().Append(_setServerCache);
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
@@ -5741,9 +5852,26 @@ namespace winrt::TerminalApp::implementation
                                            _appSettings.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter ? 1 :
                                                                                                                             0);
         }
-        if (_setWaitingDecay)
+        if (_setWaitingDecaySlider && _setWaitingNever)
         {
-            _setWaitingDecay.Text(winrt::hstring{ std::to_wstring(_appSettings.waitingDecayMinutes) });
+            const bool never = (_appSettings.waitingDecayMinutes == 0);
+            _setWaitingNever.IsOn(never);
+            uint32_t m = _appSettings.waitingDecayMinutes;
+            if (m < 1)
+            {
+                m = 60; // a sane slider position when "never" is on (toggling off then lands on 1h)
+            }
+            if (m > 4320)
+            {
+                m = 4320;
+            }
+            _setWaitingDecaySlider.Value(static_cast<double>(m));
+            _setWaitingDecaySlider.IsEnabled(!never);
+            _setWaitingDecaySlider.Header(winrt::box_value(winrt::hstring{ L"Waiting-for-you \x2192 Idle after: " } + winrt::hstring{ FormatMinutesFriendly(m) }));
+        }
+        if (_setServerCache)
+        {
+            _setServerCache.Text(winrt::hstring{ std::to_wstring(_appSettings.serverCacheMinutes) });
         }
         if (_setLaunchDir)
         {
@@ -5876,9 +6004,30 @@ namespace winrt::TerminalApp::implementation
                                                idx == 0 ? TabRenameCommitMode::ClickAwayOnly :
                                                           TabRenameCommitMode::ClickAwayOrShiftEnter;
         }
-        if (_setWaitingDecay)
+        if (_setWaitingDecaySlider && _setWaitingNever)
         {
-            const std::wstring t{ _setWaitingDecay.Text() };
+            // "Never" => 0 (never time-decay; stay Waiting until read). Else the slider's 1..4320 minutes.
+            if (_setWaitingNever.IsOn())
+            {
+                _appSettings.waitingDecayMinutes = 0;
+            }
+            else
+            {
+                uint32_t v = static_cast<uint32_t>(_setWaitingDecaySlider.Value());
+                if (v < 1)
+                {
+                    v = 1;
+                }
+                if (v > 4320)
+                {
+                    v = 4320;
+                }
+                _appSettings.waitingDecayMinutes = v;
+            }
+        }
+        if (_setServerCache)
+        {
+            const std::wstring t{ _setServerCache.Text() };
             uint32_t v = 0;
             bool any = false;
             for (const wchar_t c : t)
@@ -5889,9 +6038,7 @@ namespace winrt::TerminalApp::implementation
                     any = true;
                 }
             }
-            // Unlike maxAutoSends, an explicit 0 is MEANINGFUL here (= never decay); only an
-            // empty/garbage box falls back to the 5-minute default (the cache lifetime).
-            _appSettings.waitingDecayMinutes = any ? v : 5;
+            _appSettings.serverCacheMinutes = (any && v > 0) ? v : 5; // blank/0 -> 5 (the cosmetic default)
         }
         if (_setLaunchDir)
         {

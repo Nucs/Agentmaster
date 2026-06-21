@@ -1690,7 +1690,8 @@ static void TestAppSettings()
         in.summaryPanelTruncate = false; // non-default (default true = truncate long messages)
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
-        in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to 5
+        in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to the default
+        in.serverCacheMinutes = 17; // non-default (default 5) — the ⚡ "still cached" window
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
         in.boardSort = ExplorerSort::Newest; // non-default (default MostActive) — Triage Board sort
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
@@ -1714,6 +1715,7 @@ static void TestAppSettings()
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
         CHECK(out.waitingDecayMinutes == 0u, "settings waitingDecayMinutes stored 0 (= never) round-trips as 0");
+        CHECK(out.serverCacheMinutes == 17u, "settings serverCacheMinutes round-trip");
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
         CHECK(out.boardSort == ExplorerSort::Newest, "settings boardSort round-trip");
         CHECK(out.hiddenSessionIds.size() == 2 &&
@@ -1733,7 +1735,8 @@ static void TestAppSettings()
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
-        CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
+        CHECK(out.waitingDecayMinutes == 60u, "settings waitingDecayMinutes default 60 (1h Waiting-for-you timeout) on empty");
+        CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
@@ -2231,6 +2234,37 @@ static void TestBlockedAndInterruptedStates()
     // only the cleared-tail no-op turn (above), and only past the long floor, releases for Running.
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: Running + idle + PENDING tool_use tail (mid-tool / API-retry backoff) -> NOT released (would flap against recon-run)");
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleRunningQuiescenceMs * 100), "presence-idle: a Running pending tool_use stays held no matter how long quiet (a long Bash/build or multi-minute API retry is still the same turn)");
+
+    // --- Waiting-for-you "unread" decay gate (ShouldDecayWaitingToIdle) ---
+    // A WaitingForInput card demotes to Idle ONLY once the timeout has elapsed AND it has been READ
+    // (readUnixMs >= lastActivity). It waits the FULL timeout regardless of reading, and past the
+    // timeout it keeps waiting while still unread. A manual Mark Unread (or a busy heartbeat) never
+    // time-decays; 0 minutes == never. Signature: (state, lastActivityMs, readUnixMs, manualUnread,
+    // presenceBusy, minutes, nowMs).
+    {
+        using S = SessionState;
+        constexpr uint32_t kMin = 60; // 1h timeout
+        constexpr int64_t kTimeout = 60LL * 60000; // 3,600,000 ms
+        constexpr int64_t last = 1'000'000; // last activity anchor
+        constexpr int64_t pastNow = last + kTimeout; // exactly at the timeout edge
+        constexpr int64_t withinNow = last + kTimeout - 1; // 1ms inside the window
+        // within the timeout: ALWAYS waits, even when already read
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, false, kMin, withinNow), "decay-waiting: within the timeout -> waits the full window (even when read)");
+        // past the timeout + read -> decays
+        CHECK(ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, false, kMin, pastNow), "decay-waiting: past timeout + read (readUnixMs == lastActivity) -> Idle");
+        CHECK(ShouldDecayWaitingToIdle(S::WaitingForInput, last, last + 5, false, false, kMin, pastNow + 1000), "decay-waiting: past timeout + read AFTER the activity -> Idle");
+        // past the timeout but UNREAD -> keeps waiting until read
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last - 1, false, false, kMin, pastNow), "decay-waiting: past timeout but UNREAD (readUnixMs < lastActivity) -> keep waiting until read");
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, 0, false, false, kMin, pastNow + 999999), "decay-waiting: never read (readUnixMs 0) -> never decays however long");
+        // manual Mark Unread is sticky — never time-decays even past timeout + read
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, true, false, kMin, pastNow), "decay-waiting: manualUnread sticky -> never time-decays");
+        // a busy heartbeat (a long Task/Agent subagent) holds it out of Idle
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, true, kMin, pastNow), "decay-waiting: presence 'busy' (subagent) -> never raced to Idle");
+        // 0 minutes == never; wrong state / no anchor are no-ops
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, false, 0, pastNow), "decay-waiting: 0 minutes == never decay");
+        CHECK(!ShouldDecayWaitingToIdle(S::Running, last, last, false, false, kMin, pastNow), "decay-waiting: not WaitingForInput -> no-op");
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, 0, last, false, false, kMin, pastNow), "decay-waiting: no activity anchor (lastActivity 0) -> no-op");
+    }
 
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {

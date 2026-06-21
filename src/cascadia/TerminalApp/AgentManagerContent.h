@@ -431,6 +431,10 @@ namespace winrt::TerminalApp::implementation
         // uint64_t to avoid including SessionRegistry.h in this header.)
         uint64_t _observerToken{ 0 };
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
+        // Agentmaster (Waiting-for-you "unread" model): a 30s timer that re-runs _Refresh() so the
+        // TIME-derived card adornments (the ⚡ "still cached" hint + the "ago" timing) stay current in
+        // quiet periods with no registry events. Stopped in the destructor.
+        winrt::Windows::UI::Xaml::DispatcherTimer _cardRefreshTimer{ nullptr };
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;
@@ -574,7 +578,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
-        winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecay{ nullptr }; // Waiting-for-you -> Idle after N minutes (0 = never; default 5 = Claude's server cache lifetime)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
+        winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..4320 minutes (1m..3d); the "Never" toggle above owns 0
+        winrt::Windows::UI::Xaml::Controls::TextBox _setServerCache{ nullptr }; // Claude's server-side prompt-cache lifetime in minutes (drives the card's ⚡ "still cached" hint); default 5
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabCloseButton{ nullptr }; // TABS: show the close (x) button on tabs (OFF => force every tab to "Never"); GLOBAL

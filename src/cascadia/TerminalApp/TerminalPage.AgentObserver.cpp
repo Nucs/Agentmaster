@@ -143,6 +143,15 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // Agentmaster (Waiting-for-you "unread" model): if this hosted session's tab is the one you're
+        // looking at (the window's focused tab), it counts as READ — so a turn that completes while you
+        // sit in the tab is read immediately (and may decay after the timeout, rather than waiting for a
+        // switch-away-and-back). Stamped on every update for the focused tab; cheap + quiet + monotonic.
+        if (tab == _GetFocusedTab())
+        {
+            _MarkSessionRead(sessionId);
+        }
+
         const auto prevIt = _agentFlashLastState.find(sessionId);
         const bool hadPrev = (prevIt != _agentFlashLastState.end());
         const auto prev = hadPrev ? prevIt->second : SessionState::Idle;
@@ -231,6 +240,20 @@ namespace winrt::TerminalApp::implementation
         _manualUnreadSessions.insert(sessionId); // idempotent
         _EnsureAgentFlashTimer();
         _ApplyAgentFlashRingForSession(sessionId); // flash at the current shared phase NOW, even if focused
+        // Agentmaster (Waiting-for-you "unread" model): the manual mark is also an ENGINE fact, so the
+        // Triage Board (in EVERY window) reads it — set the sticky manualUnread flag (the time-decay
+        // never demotes it) and PROMOTE an at-rest session into Waiting-for-you (the user asked to be
+        // reminded). Notifying Update so the card moves columns immediately.
+        if (_sessionRegistry)
+        {
+            _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
+                s.manualUnread = true;
+                if (s.state == ::Agentmaster::SessionState::Idle || s.state == ::Agentmaster::SessionState::Done)
+                {
+                    s.state = ::Agentmaster::SessionState::WaitingForInput;
+                }
+            });
+        }
     }
 
     // Agentmaster (Mark Unread): drop a session's manual unread mark + hide its ring UNLESS the automatic
@@ -240,6 +263,14 @@ namespace winrt::TerminalApp::implementation
         if (_manualUnreadSessions.erase(sessionId) == 0)
         {
             return; // wasn't marked
+        }
+        // Agentmaster (Waiting-for-you "unread" model): drop the engine's sticky manualUnread too, so a
+        // promoted/held WaitingForInput card is free to time-decay again (the SessionScanner does the
+        // visible demote on its next tick, gated on read-state). Quiet: clearing the flag alone changes
+        // nothing the board shows until the decay actually fires.
+        if (_sessionRegistry)
+        {
+            _sessionRegistry->UpdateQuiet(sessionId, [](::Agentmaster::SessionInfo& s) { s.manualUnread = false; });
         }
         if (!_flashingSessions.count(sessionId))
         {
@@ -270,9 +301,31 @@ namespace winrt::TerminalApp::implementation
         const auto id = _ClaudeSessionForTab(tab);
         if (!id.empty())
         {
+            _MarkSessionRead(id); // Agentmaster (unread model): visiting the tab = reading it (stamp readUnixMs, so a past-timeout Waiting-for-you card may now decay)
             _StopAgentFlash(id); // clear the automatic flash...
             _ClearSessionUnread(id); // ...AND any manual Mark Unread — a visit clears both (the leave-then-return that ends a marked tab)
         }
+    }
+
+    // Agentmaster (Waiting-for-you "unread" model): stamp this session READ now. The engine gate
+    // (ShouldDecayWaitingToIdle) then permits a past-timeout WaitingForInput card to demote to Idle —
+    // an unread session keeps waiting until this lands. Quiet (no observer churn): the visible demote
+    // is the SessionScanner's own notifying state change. Monotonic (never moves readUnixMs backward).
+    void TerminalPage::_MarkSessionRead(const std::wstring& sessionId)
+    {
+        if (sessionId.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+        _sessionRegistry->UpdateQuiet(sessionId, [now](::Agentmaster::SessionInfo& s) {
+            if (s.readUnixMs < now)
+            {
+                s.readUnixMs = now;
+            }
+        });
     }
 
     // Agentmaster (tab status-dot red flash): lazily build the ONE shared per-window flash timer and

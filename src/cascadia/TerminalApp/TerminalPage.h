@@ -586,6 +586,10 @@ namespace winrt::TerminalApp::implementation
         // open" path. _InitializeTab skips the SelectedItem switch; _ResumeSessionFromDisk /
         // _ForkSessionFromDisk skip _HideSessionsPage. Set around ONE open, reset right after.
         bool _openClaudeTabInBackground{ false };
+        // Agentmaster (native-exe-only policy): true while the page-level "Claude not found" dialog
+        // (_PromptClaudeMissing) is up, so a burst of not-found gates — e.g. a bulk Restore looping over
+        // checked Claude sessions — collapses to a SINGLE dialog instead of stacking one per session.
+        bool _claudeMissingPromptShowing{ false };
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
@@ -718,8 +722,9 @@ namespace winrt::TerminalApp::implementation
         void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + show/hide every flashing tab's red RING together (the synchronized blink)
         void _ApplyAgentFlashRingForSession(const std::wstring& sessionId); // show/hide one flashing session's red ring at the CURRENT shared phase (used when it joins mid-flash)
         void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's RED FLASH RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible; the dot's own black stroke + fill stay constant
-        void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes
-        void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive)
+        void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes; ALSO sets the engine manualUnread + promotes Idle/Done -> WaitingForInput (board state, every window)
+        void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive); ALSO clears the engine manualUnread
+        void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab)
         void _SetTabSelectionPill(const TerminalApp::Tab& tab, bool on); // Agentmaster (Linked Lenses): show/hide the "selected/active" accent pill behind a tab's header via Tab.TabStatus(); UI thread
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
@@ -727,6 +732,7 @@ namespace winrt::TerminalApp::implementation
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork); // Agentmaster (Fleet Observer): bring an EXTERNAL claude's conversation under management (fork==true => --fork-session into a NEW transcript [safe on a live external]; else --resume the same; fresh if none)
+        winrt::fire_and_forget _PromptClaudeMissing(); // Agentmaster (native-exe-only policy): the page-level "Claude Code (native) not found" notice — shown by the launch choke points (Restore/Resume/Fork/Adopt/Spawn) when EnsureClaudeAvailable() is false and the Manager tab's rich modal can't render (full-window page / tab / CLI). Idempotent via _claudeMissingPromptShowing (collapses a bulk loop to one dialog); no Re-check by design — the next attempt re-resolves.
         // Agentmaster (Codex managed-session support): launch / restore a codex.exe on a ConPTY as a
         // MANAGED tab, on the same path as Claude. Codex can't pin a session id (no --session-id), so
         // OUR minted id is the durable handle and the real rollout uuid (SessionInfo.codexSessionId,
