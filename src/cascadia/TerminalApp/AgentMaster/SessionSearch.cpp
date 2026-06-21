@@ -467,14 +467,17 @@ namespace Agentmaster
         {
             const auto& st = e.stats;
             // Fold each haystack ONCE per entry; every term tries them all (AND across terms,
-            // OR across fields — neighbor terms may hit different fields).
-            const std::wstring baseline[] = {
-                // Baseline (both message scopes OFF — and always useful): title + directory.
+            // OR across fields — neighbor terms may hit different fields). cwd is the ALWAYS-ON
+            // directory baseline; the TITLE fields are gated on q.scopeTitle (default ON) and
+            // include the runtime liveTitle overlay (an OPEN session's real tab title, so a
+            // renamed session is findable by the name the page shows).
+            const std::wstring cwdLower = FoldLower(st.cwd);
+            const std::wstring titleHay[] = {
                 FoldLower(st.customTitle),
                 FoldLower(st.aiTitle),
                 FoldLower(st.summary),
                 FoldLower(st.firstUserPrompt),
-                FoldLower(st.cwd),
+                FoldLower(e.liveTitle),
             };
             const std::wstring idLower = FoldLower(e.sessionId);
             const std::wstring forkLower = FoldLower(st.forkedFromId);
@@ -486,13 +489,20 @@ namespace Agentmaster
                 // fork-parent id (so a parent's guid surfaces the forks too). The text haystacks
                 // below still apply (additive).
                 bool hit = t.isGuid && (t.textLower == idLower || (!forkLower.empty() && t.textLower == forkLower));
-                for (const auto& h : baseline)
+                if (!hit)
                 {
-                    if (hit)
+                    hit = MatchesQueryText(cwdLower, t.textLower, fz); // cwd: always a match target
+                }
+                if (!hit && q.scopeTitle)
+                {
+                    for (const auto& h : titleHay)
                     {
-                        break;
+                        if (MatchesQueryText(h, t.textLower, fz))
+                        {
+                            hit = true;
+                            break;
+                        }
                     }
-                    hit = MatchesQueryText(h, t.textLower, fz);
                 }
                 if (!hit && (q.scopeDirs || q.scopeFiles))
                 {

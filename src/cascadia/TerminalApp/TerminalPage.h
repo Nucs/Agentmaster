@@ -342,6 +342,16 @@ namespace winrt::TerminalApp::implementation
         // for yet (never prompted). Keyed by WT_SESSION (there is no sessionId). Replaced by the real
         // _claudeOverlays entry once the session resolves; pruned when the tab leaves this window's roster.
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _pendingOverlays;
+        // Agentmaster (alt+up/down prompt nav): per-session cache of the transcript's sent prompts + the
+        // (path, mtime) they were read at, so stepping between off-screen prompts re-reads the transcript
+        // only when it GREW. Populated off-thread by _ScrollAdjacentPrompt; touched UI-thread only.
+        struct PromptNavCache
+        {
+            std::wstring path;
+            int64_t mtime{ 0 };
+            std::vector<std::wstring> prompts;
+        };
+        std::unordered_map<std::wstring, PromptNavCache> _promptNavCache;
 
         // Agentmaster (tab status-dot RED FLASH): when a hosted session goes from Running to a "now it's
         // on you / at rest" state — Idle / WaitingForInput / NeedsApproval (NOT Done or Error) — while
@@ -523,6 +533,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeAgentBtn{ nullptr }; // 🤖 search agent + tools
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeDirsBtn{ nullptr }; // 📁 dirs accessed
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeFilesBtn{ nullptr }; // 📄 files accessed
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeTitleBtn{ nullptr }; // 🏷 match session title (incl. an open session's live tab title); default ON
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessFuzzyBtn{ nullptr }; // (F) fuzzy
         winrt::Windows::UI::Xaml::Controls::CheckBox _sessOpenOnlyBtn{ nullptr }; // "Open" — filter the list to sessions live in any Agentmaster window (registry live)
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
@@ -670,6 +681,10 @@ namespace winrt::TerminalApp::implementation
         int _JumpToPromptInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs, int index); // Agentmaster (SUMMARY_JUMP.md): center the session tab's view on the i-th prompt; returns the row or -1
         std::vector<int> _JumpEligibilityInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs); // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 == not on screen) for icon dimming
         winrt::Microsoft::Terminal::Control::TermControl _ControlForSession(const std::wstring& sessionId); // Agentmaster (SUMMARY_JUMP.md): the live control hosting a session's tab, or null
+        std::wstring _FocusedPromptNavSession(); // Agentmaster (alt+up/down): the focused tab's managed CLAUDE sessionId, or empty (=> the handler falls back to MoveFocus)
+        winrt::fire_and_forget _ScrollAdjacentPrompt(std::wstring sessionId, bool up); // Agentmaster (alt+up/down): center the view on the nearest OFF-SCREEN sent prompt up/down; mtime-cached transcript read; boundary sound at the ends
+        void _NavigateAdjacentPrompt(const std::wstring& sessionId, const std::vector<std::wstring>& prompts, bool up); // Agentmaster (alt+up/down): the UI-thread half of _ScrollAdjacentPrompt (resolve control + scroll, else sound)
+        void _PlayPromptNavLimitSound(); // Agentmaster (alt+up/down): boundary feedback when there is no further off-screen prompt
         void _ToggleSummaryPanel(); // Agentmaster (TAB_OVERLAY.md): pencil button -> flip the GLOBAL AppSettings.showSummaryPanel (RMW settings.json) + apply live to every linked overlay in this window
         void _ToggleSummaryWrap(); // Agentmaster (TAB_OVERLAY.md): wrap-line toggle (panel times bar) -> flip the GLOBAL AppSettings.summaryPanelWrapNewlines (RMW settings.json) + apply live to every linked overlay in this window
         void _ToggleSummaryTruncate(); // Agentmaster (TAB_OVERLAY.md): truncate toggle (panel times bar) -> flip the GLOBAL AppSettings.summaryPanelTruncate (RMW settings.json) + apply live to every linked overlay in this window

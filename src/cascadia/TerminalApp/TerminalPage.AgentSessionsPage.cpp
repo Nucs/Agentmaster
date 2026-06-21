@@ -4,11 +4,13 @@
 // Agentmaster — the full-window Sessions page (SESSIONS.md): a browser over EVERY on-disk
 // Claude Code session in a selectable time window (default 1 month), opened by the Manager's
 // "Sessions" button (right after Archived). Duplicates the Archive page's structure with a
-// SEARCH BAR at the top: [ search for sessions ] (👤)(🤖)(📁)(📄)(F) [1 month] —
+// SEARCH BAR at the top: [ search for sessions ] (👤)(🤖)(📁)(📄)(🏷)(F) [☐ Open] [1 month] —
 //   👤 = also search user (typed) messages      🤖 = also search agent + tools text
 //   📁 = match directories accessed             📄 = match files accessed
-//   (F) = fuzzy   ·   both message scopes OFF ⇒ title + directory only (§1a)
-//   Defaults: 📁+📄 ON (fast-phase-only — in-memory, no IO); 👤/🤖/(F) OFF (either message
+//   🏷 = match the session title (incl. an open session's live tab title)
+//   (F) = fuzzy   ·   ☐ Open = show only sessions open in a window right now (a ROW filter)
+//   With 🏷 off and both message scopes off, terms match the working directory (+ 📁/📄) only (§1a).
+//   Defaults: 📁+📄+🏷 ON (fast-phase-only — in-memory, no IO); 👤/🤖/(F)/Open OFF (either message
 //   scope flips on the SLOW rg+transcript content scan; fuzzy is a noisy default).
 //   [1 month] cycles 1d/3d/7d/14d/1mo/3mo on click; HOVER opens a From/To range popup (Q4).
 // Query grammar (ParseSessionQuery, SessionSearch.h): whitespace-split terms AND-match;
@@ -447,6 +449,14 @@ namespace winrt::TerminalApp::implementation
         _sessScopeFilesBtn.IsChecked(true);
         _sessScopeFilesBtn.Click(onToggle);
         bar.Children().Append(_sessScopeFilesBtn);
+        // 🏷 — match the session TITLE: its conversation title (custom / AI / first prompt) AND the
+        // live tab title of an OPEN session (the liveTitle overlay), so a renamed session is found
+        // by the name shown. Fast-phase-only (in-memory, no transcript IO). DEFAULT ON — titles were
+        // always matched before, so this keeps current results; uncheck to leave titles out.
+        _sessScopeTitleBtn = SessToggle(L"\U0001F3F7", L"Match the session title \x2014 its conversation title and the live tab name of an open session. On by default; uncheck to leave titles out of the search.");
+        _sessScopeTitleBtn.IsChecked(true);
+        _sessScopeTitleBtn.Click(onToggle);
+        bar.Children().Append(_sessScopeTitleBtn);
         _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy matching \x2014 the query's characters must appear in order, with gaps allowed (\"agmst\" matches \"agentmaster\").");
         _sessFuzzyBtn.Click(onToggle);
         bar.Children().Append(_sessFuzzyBtn);
@@ -938,15 +948,25 @@ namespace winrt::TerminalApp::implementation
         // share (Rule #11) — instead of the transcript-derived PickDisplayTitle: an in-app rename
         // is reflected here, and a same-dir clash reads its tab name. Baked into the stored rows
         // (here, on the UI thread — the registry is a `this` member, off-limits to the background
-        // gather) so display, sort, the detail pane, AND fork-naming all agree on it. An on-disk
-        // (archived / never-opened) session keeps its derived title. Registry Get is mutex-guarded.
+        // gather) so display, sort, the detail pane, AND fork-naming all agree on it. The SAME real
+        // title is mirrored onto the matching index entry's liveTitle overlay so the 🏷 title search
+        // finds an open session by the name shown (rows ↔ entries are built 1:1; the id guard keeps
+        // it safe either way). An on-disk (archived / never-opened) session keeps its derived title.
+        // Registry Get is mutex-guarded.
         if (self->_sessionRegistry)
         {
-            for (auto& r : self->_sessionsRows)
+            for (size_t i = 0; i < self->_sessionsRows.size(); ++i)
             {
-                if (const auto reg = self->_sessionRegistry->Get(r.id); reg && reg->live && !reg->title.empty())
+                auto& r = self->_sessionsRows[i];
+                const auto reg = self->_sessionRegistry->Get(r.id);
+                if (!(reg && reg->live && !reg->title.empty()))
                 {
-                    r.title = reg->title;
+                    continue;
+                }
+                r.title = reg->title;
+                if (i < self->_sessionsEntries.size() && self->_sessionsEntries[i].sessionId == r.id)
+                {
+                    self->_sessionsEntries[i].liveTitle = reg->title; // make the live tab title searchable (🏷)
                 }
             }
         }
@@ -961,6 +981,8 @@ namespace winrt::TerminalApp::implementation
 
         ::Agentmaster::SessionQuery q;
         q.text = _sessionsQueryText;
+        // scopeTitle defaults ON (SessionQuery default true): a null button can't silently drop it.
+        q.scopeTitle = !_sessScopeTitleBtn || (_sessScopeTitleBtn.IsChecked() && _sessScopeTitleBtn.IsChecked().Value());
         q.scopeUser = _sessScopeUserBtn && _sessScopeUserBtn.IsChecked() && _sessScopeUserBtn.IsChecked().Value();
         q.scopeAgent = _sessScopeAgentBtn && _sessScopeAgentBtn.IsChecked() && _sessScopeAgentBtn.IsChecked().Value();
         q.scopeDirs = _sessScopeDirsBtn && _sessScopeDirsBtn.IsChecked() && _sessScopeDirsBtn.IsChecked().Value();

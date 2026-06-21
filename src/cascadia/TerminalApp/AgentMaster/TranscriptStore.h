@@ -237,6 +237,13 @@ namespace Agentmaster
         int64_t mtimeMs{};
         int64_t birthMs{};
         TranscriptStats stats;
+        // Runtime overlay — NOT persisted to the sidecar (the load/store above is explicit
+        // field-by-field, so this stays empty across them). The Sessions page sets it, after a
+        // gather, to the REAL tab title of a session OPEN in an Agentmaster window (the registry
+        // title — Rule #11). SearchIndexFast folds it into the title haystack under
+        // SessionQuery::scopeTitle, so a renamed open session is findable by the name shown. Empty
+        // for on-disk / archived sessions (their title precedence already lives in `stats`).
+        std::wstring liveTitle;
     };
     SessionIndexEntry LoadOrRefreshSessionIndexIn(const std::wstring& indexDir, const TranscriptRef& ref);
     // Against the live index dir (<AgentmasterStateDir>\sessions-index, created on demand).

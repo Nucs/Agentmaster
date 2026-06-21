@@ -3482,6 +3482,40 @@ static void TestSessionSearch()
         CHECK(!r.empty() && r[0] == L"s-title", "fast: fuzzy subsequence over the title");
     }
 
+    // --- SearchIndexFast: the 🏷 title scope gates title matching; liveTitle overlay is searchable ---
+    {
+        std::vector<SessionIndexEntry> entries(2);
+        entries[0].sessionId = L"s-titled";
+        entries[0].stats.customTitle = L"Refactor the SCHEDULER";
+        entries[0].stats.cwd = L"K:\\source\\gamma";
+        entries[1].sessionId = L"s-live";
+        entries[1].stats.firstUserPrompt = L"do a thing";
+        entries[1].stats.cwd = L"K:\\source\\delta";
+        entries[1].liveTitle = L"My Renamed Tab"; // an OPEN session's real tab title (UI overlay)
+
+        SessionQuery q; // scopeTitle defaults ON
+        q.text = L"scheduler";
+        auto r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-titled", "fast: title matches with scopeTitle ON (default)");
+        q.scopeTitle = false;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: scopeTitle OFF excludes a title-only match");
+
+        q = {}; // DMI restores scopeTitle = true
+        q.text = L"gamma"; // the cwd — must match even with titles off (cwd is the always-on baseline)
+        q.scopeTitle = false;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-titled", "fast: cwd stays matched with scopeTitle OFF");
+
+        q = {};
+        q.text = L"renamed tab"; // present only in the liveTitle overlay
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-live", "fast: liveTitle (open tab name) is searchable under scopeTitle");
+        q.scopeTitle = false;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: liveTitle is gated by scopeTitle too");
+    }
+
     // --- SearchIndexFast: guid -> session-identity terms, quoted-exact, AND semantics ---
     {
         const std::wstring gidA = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
