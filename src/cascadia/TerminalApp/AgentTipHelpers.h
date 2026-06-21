@@ -20,6 +20,7 @@
 
 #include <chrono> // the fast-open timer interval
 #include <memory> // shared_ptr holder for the lazily-created per-hover timer
+#include <optional> // the optional per-call open-delay override
 
 namespace winrt::TerminalApp::implementation
 {
@@ -54,7 +55,9 @@ namespace winrt::TerminalApp::implementation
     //    else would close); both also STOP the open timer.
     // Popup open/close is NOT a tree mutation — safe synchronously in a pointer handler (the
     // XAML-Islands defer rule is about visual-tree changes). No-op on an empty tip.
-    inline void AgentSetTip(const winrt::Windows::UI::Xaml::UIElement& el, const winrt::hstring& tip)
+    inline void AgentSetTip(const winrt::Windows::UI::Xaml::UIElement& el,
+                            const winrt::hstring& tip,
+                            std::optional<std::chrono::milliseconds> openDelayOverride = std::nullopt)
     {
         if (tip.empty())
         {
@@ -70,8 +73,11 @@ namespace winrt::TerminalApp::implementation
         t.RequestedTheme(winrt::Windows::UI::Xaml::ElementTheme::Dark);
         winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(el, t);
 
-        // The open delay = 1/3 of the system tooltip hover time (process-global; read once).
-        static const auto openDelay = []() {
+        // The open delay DEFAULTS to 1/3 of the system tooltip hover time (process-global; read
+        // once), but a caller may OVERRIDE it per element — e.g. the dense Triage-Board cards hold
+        // their tips back (4s) so panning the mouse across the board doesn't flash a tip over every
+        // card. value_or keeps the fast default for every other surface.
+        static const auto defaultOpenDelay = []() {
             unsigned int hoverMs{ 400 };
             if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
             {
@@ -79,6 +85,7 @@ namespace winrt::TerminalApp::implementation
             }
             return std::chrono::milliseconds{ hoverMs / 3 };
         }();
+        const auto openDelay = openDelayOverride.value_or(defaultOpenDelay);
 
         // Lazily-created per-hover one-shot timer, kept in a shared_ptr holder so un-hovered
         // elements (e.g. every cell of a large table) never allocate one. The handlers capture the
@@ -86,7 +93,7 @@ namespace winrt::TerminalApp::implementation
         // `el`, so there is no element<->handler reference cycle (which would otherwise leak the
         // element across a board / table rebuild).
         auto timer = std::make_shared<winrt::Windows::UI::Xaml::DispatcherTimer>(nullptr);
-        el.PointerEntered([timer, t](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
+        el.PointerEntered([timer, t, openDelay](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
             if (!*timer)
             {
                 winrt::Windows::UI::Xaml::DispatcherTimer dt;

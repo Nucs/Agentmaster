@@ -62,6 +62,13 @@ using winrt::TerminalApp::implementation::AgentSetTip;
 
 namespace
 {
+    // Agentmaster: Triage-Board cards hold their hover tooltips back to a deliberate 4s (vs the
+    // global ~1/3-system-hover-time fast open used on every other surface), so panning the mouse
+    // across a dense board doesn't flash a tip over every card. Passed as AgentSetTip's optional
+    // open-delay override at each card tip call site (both the managed _MakeCard and the external
+    // census _MakeExternalCard).
+    constexpr std::chrono::milliseconds kCardTipDelay{ 4000 };
+
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
@@ -2311,7 +2318,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: hovering the title band (the card's "top label") shows the FULL title \x2014 the
         // band trims with an ellipsis on a narrow card and OneLine() collapses a multi-line title for
         // the dense card, so the complete name is otherwise unreadable here.
-        AgentSetTip(band, winrt::hstring{ fullTitle });
+        AgentSetTip(band, winrt::hstring{ fullTitle }, kCardTipDelay);
 
         // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
         // from Claude (the implicit default — no pill, visuals unchanged).
@@ -2320,14 +2327,14 @@ namespace winrt::TerminalApp::implementation
             auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             cp.Opacity(0.9);
             cp.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.");
+            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.", kCardTipDelay);
             stack.Children().Append(cp);
         }
         {
             // The working dir reads as plain gray text under the title; name it AND explain the
             // per-directory color (a non-obvious concept) in one tip.
             auto dirText = Text(winrt::hstring{ s.workingDir }, 11, false, 0.6);
-            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.");
+            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.", kCardTipDelay);
             stack.Children().Append(dirText);
         }
 
@@ -2357,7 +2364,7 @@ namespace winrt::TerminalApp::implementation
             {
                 bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
             }
-            AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.");
+            AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.", kCardTipDelay);
             stack.Children().Append(bt);
         }
 
@@ -2394,7 +2401,7 @@ namespace winrt::TerminalApp::implementation
             st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
-        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)");
+        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)", kCardTipDelay);
         dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir)); // a click opens the session menu
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -3049,7 +3056,7 @@ namespace winrt::TerminalApp::implementation
             titleRow.VerticalAlignment(VerticalAlignment::Center);
             auto sd = Text(L"\x25CF", 11, false, 1.0);
             sd.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
-            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
+            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" }, kCardTipDelay);
             titleRow.Children().Append(sd);
             titleRow.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
             stack.Children().Append(titleRow);
@@ -3065,13 +3072,13 @@ namespace winrt::TerminalApp::implementation
             auto p = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             p.Opacity(0.9);
             p.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).");
+            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).", kCardTipDelay);
             stack.Children().Append(p);
         }
         if (!ex.cwd.empty())
         {
             auto cwdText = Text(winrt::hstring{ ex.cwd }, 11, false, 0.55);
-            AgentSetTip(cwdText, L"Working directory of this external session.");
+            AgentSetTip(cwdText, L"Working directory of this external session.", kCardTipDelay);
             stack.Children().Append(cwdText);
         }
 
@@ -3104,7 +3111,7 @@ namespace winrt::TerminalApp::implementation
                 hb += L"  \x00B7  [" + ex.gitBranch + L"]";
             }
             auto hbText = Text(winrt::hstring{ hb }, 10, false, 0.5);
-            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.");
+            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.", kCardTipDelay);
             stack.Children().Append(hbText);
         }
 
@@ -3132,7 +3139,7 @@ namespace winrt::TerminalApp::implementation
             }
             me += (me.empty() ? L"pid " : L"  \x00B7  pid ") + std::to_wstring(ex.pid);
             auto meText = Text(winrt::hstring{ me }, 10, false, 0.5);
-            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.");
+            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.", kCardTipDelay);
             stack.Children().Append(meText);
         }
 
@@ -3181,7 +3188,7 @@ namespace winrt::TerminalApp::implementation
             st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
             dotsBtn.OpacityTransition(st);
         }
-        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)");
+        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)", kCardTipDelay);
         dotsBtn.Flyout(_MakeExternalTreeMenu(ex)); // a click opens the external menu
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -3207,7 +3214,7 @@ namespace winrt::TerminalApp::implementation
         card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
             _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
         });
-        AgentSetTip(card, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.");
+        AgentSetTip(card, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.", kCardTipDelay);
         // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
         // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
         // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
