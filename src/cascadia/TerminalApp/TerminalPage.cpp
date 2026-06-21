@@ -873,6 +873,20 @@ namespace winrt::TerminalApp::implementation
         // interaction). _ScheduleWindowRecordSave gates on Initialized, just set above.
         _ScheduleWindowRecordSave();
 
+        // Agentmaster (discard Manager-only windows): for a window REOPENED from an EMPTY record (it was
+        // saved holding just the Manager tab — a legacy record, since going forward such windows are
+        // discarded), schedule the debounced Manager-only check so it self-heals (self-close, or discard
+        // its record if it is the last window). Such a reopen restores no tabs and runs no startup action
+        // (_OnFirstLayout gates ProcessStartupActions on !_windowRecordClaimed), so it is genuinely
+        // Manager-only with NOTHING pending — safe to evaluate now. A fresh/normal window is deliberately
+        // NOT scheduled here: its default (or restored) tab is still being created async at this point, so
+        // firing the check now could race it; those windows schedule the check from _tabs.VectorChanged
+        // instead — once their tab actually appears, the debounced check sees a settled, non-empty set.
+        if (_windowRecordClaimed && _windowRecord.tabs.empty())
+        {
+            _ScheduleManagerOnlyCheck();
+        }
+
         // GH#632 - It's possible that the user tried to create the terminal
         // with only one tab, with only an elevated profile. If that happens,
         // we'll create _another_ process to host the elevated version of that

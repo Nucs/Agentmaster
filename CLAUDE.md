@@ -1101,6 +1101,20 @@ What works, by area:
   refs, in order — so closing and reopening a window brings the whole workspace back, not just
   geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
   "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
+  **A window that ends up holding ONLY the pinned Manager tab is never kept around or restored.** When a
+  window's last terminal tab is closed / torn out (or it reopens from an empty/legacy record, or its
+  sessions all fail to re-home), a **debounced** check (`_CloseWindowIfManagerOnly`, fed by
+  `_tabs.VectorChanged` + the end of startup so the SETTLED tab set is evaluated — an async shell re-home
+  is never momentarily mistaken for empty) **self-closes it UNLESS it is the last Agentmaster window**;
+  the last window stays open (the app needs one) but **discards its record** so the app never reopens a
+  content-less Manager-only window (it falls back to a fresh default window). The not-last-vs-last
+  decision is race-safe across windows on different threads (`Engine::ReserveManagerOnlyClose` reserves
+  the close under `windowMutex`, counting live windows minus already-reserved ones, so two windows
+  emptying at once can never both close and quit the app). "Not saved / not restorable" is enforced by
+  `_FlushWindowRecord` **deleting** the on-disk record when the window is Manager-only + the discard latch
+  is set (the latch's ONLY writer is the post-startup check — never during restore — so an only-shells
+  reopen that is briefly tab-empty is safe), reinforcing the existing `UnregisterLiveWindow` empty-record
+  deletion + `RecoverableWindows` empty-record filter.
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Fork · Reopen · `⚙` ·
   Pause Autopilot · Archived · **Sessions** — the cog sits *before* Pause Autopilot / Archived; the
   Sessions browser button comes right after Archived) opens a

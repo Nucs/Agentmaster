@@ -139,6 +139,17 @@ namespace Agentmaster
         // record-claim set; the two are touched at disjoint times so there is no re-entrancy).
         std::set<std::wstring> liveWindowIds;
 
+        // Agentmaster (discard Manager-only windows): the windowIds that have RESERVED a Manager-only
+        // self-close (ReserveManagerOnlyClose returned true for them) but haven't finished tearing down
+        // yet. A window that ends up holding ONLY the pinned Manager tab self-closes UNLESS it is the
+        // last Agentmaster window — but several windows can become Manager-only on their own threads at
+        // once, and each one reading liveWindowIds.size()>1 independently would let them ALL close,
+        // quitting the app. The reservation serializes that decision under windowMutex: the effective
+        // remaining-live count subtracts the already-reserved ids, so the last window to ask sees
+        // remaining==1 and STAYS. Cleared in UnregisterLiveWindow (the close completes) — a lingering
+        // reservation only ever makes OTHER windows MORE likely to stay (the conservative direction).
+        std::set<std::wstring> closingWindowIds;
+
         // Agentmaster (cross-window activate; Linked Lenses): per-window "focus this session's tab"
         // sinks. The Manager's Triage Board / Explorer Tree (GLOBAL) show the WHOLE fleet, but a
         // session's tab lives in exactly ONE window (its _claudeTabs) — so Activate (board/tree
@@ -218,6 +229,14 @@ namespace Agentmaster
     void RegisterLiveWindow(const std::wstring& windowId);
     void UnregisterLiveWindow(const std::wstring& windowId);
     std::vector<std::wstring> LiveWindowIds();
+
+    // Agentmaster (discard Manager-only windows): race-safe "may THIS window self-close because it is
+    // now Manager-only?" Returns true (and reserves the close) iff more than one live Agentmaster window
+    // would remain after it goes — counting live windows MINUS those that have already reserved a close
+    // this tick (see closingWindowIds), so two windows that become Manager-only simultaneously on
+    // different threads never both close and leave the app window-less. Returns false for the LAST
+    // window, which then stays open (but discards its record so it isn't restored as Manager-only).
+    bool ReserveManagerOnlyClose(const std::wstring& windowId);
 
     // Agentmaster (cross-window activate): register THIS window's activate sink (returns a
     // monotonic token; detach with UnregisterWindowActivateHandler — removing a stale token is a

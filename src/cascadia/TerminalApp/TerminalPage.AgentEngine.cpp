@@ -522,6 +522,25 @@ namespace winrt::TerminalApp::implementation
                 }
             });
 
+        // Agentmaster (discard Manager-only windows): a debounced self-close check, run after every tab
+        // add/remove + at the end of startup. Debounced (500ms < the 750ms record save) so a window
+        // settling into Manager-only — a user closing/tearing-out its last terminal tab, or an
+        // empty/failed reopen — is evaluated only once its tab set SETTLES (an async shell re-home is
+        // never momentarily mistaken for empty), and so a burst of tab churn collapses to one decision.
+        _managerOnlyCheckThrottled = std::make_shared<ThrottledFunc<>>(
+            DispatcherQueue::GetForCurrentThread(),
+            til::throttled_func_options{
+                .delay = std::chrono::milliseconds{ 500 },
+                .debounce = true,
+                .trailing = true,
+            },
+            [weakThis = get_weak()]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_CloseWindowIfManagerOnly();
+                }
+            });
+
         // Adoption seam, PER WINDOW: a hook for a session we didn't Launch -> try to bind it to
         // its hosting ConPTY so it becomes fully managed (observe + control). The shared
         // registry fans the event out to EVERY window's handler; whichever window hosts the `+`
@@ -591,6 +610,10 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ScheduleWindowRecordSave();
+                // Agentmaster (discard Manager-only windows): a tab add/remove may have left this window
+                // holding only the Manager tab (its last terminal tab closed or torn out) — schedule the
+                // debounced check that self-closes / un-persists such a window once its tab set settles.
+                self->_ScheduleManagerOnlyCheck();
             }
         });
         if (_tabContent)

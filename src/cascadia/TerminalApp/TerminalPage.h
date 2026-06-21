@@ -384,6 +384,17 @@ namespace winrt::TerminalApp::implementation
         std::wstring _windowId;
         ::Agentmaster::WindowRecord _windowRecord{};
         std::shared_ptr<ThrottledFunc<>> _saveWindowRecordThrottled{ nullptr };
+        // Agentmaster (discard Manager-only windows): a debounced check that self-closes (or, for the
+        // last window, simply un-persists) a window that has ended up holding ONLY the pinned Manager
+        // tab. Debounced (not immediate) so a window mid-restore — transiently Manager-only while its
+        // shell tabs are still being re-homed async — is evaluated only once the tab set SETTLES, and so
+        // a burst of tab churn collapses to one decision. _managerOnlyDiscard latches "this window is
+        // Manager-only via settle/user-action, so its record must not persist": set by
+        // _CloseWindowIfManagerOnly, honored by _FlushWindowRecord (delete the record instead of saving),
+        // cleared the moment a real tab returns. NEVER set during restore (the flag's only writer is the
+        // post-startup check), so an only-shells reopen is never mistaken for a discard.
+        std::shared_ptr<ThrottledFunc<>> _managerOnlyCheckThrottled{ nullptr };
+        bool _managerOnlyDiscard{ false };
         // True when _windowRecord was CLAIMED from disk (a real prior layout) vs freshly minted.
         // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
         // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
@@ -771,6 +782,17 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::WindowRecord _CaptureWindowRecord();
         void _ScheduleWindowRecordSave();
         void _FlushWindowRecord();
+        // Agentmaster (discard Manager-only windows): a window that ends up holding nothing but the
+        // pinned Manager tab must not persist as a restorable window, and unless it is the LAST
+        // Agentmaster window it self-closes (every window has a Manager tab, so an empty one is noise).
+        // _IsManagerOnlyWindow is the predicate; _CloseWindowIfManagerOnly is the debounced action
+        // (re-validates, then ReserveManagerOnlyClose -> silent close, or keep-but-discard for the last
+        // window); _ScheduleManagerOnlyCheck runs the debounced check (fed by _tabs.VectorChanged + the
+        // end of startup, so a window settling into Manager-only — by a tab close, a tear-out, or an
+        // empty/failed restore — is caught once it settles).
+        bool _IsManagerOnlyWindow() const;
+        void _CloseWindowIfManagerOnly();
+        void _ScheduleManagerOnlyCheck();
         // Agentmaster (updater; Updater.h): quit the app for an in-app update — the post-confirm half
         // of RequestQuit (flush this window's record, then raise QuitRequested) WITHOUT RequestQuit's
         // "close all tabs?" confirmation. The user already confirmed in the update dialog, and the

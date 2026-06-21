@@ -317,6 +317,9 @@ namespace Agentmaster
 
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.erase(windowId);
+        // Agentmaster (discard Manager-only windows): clear any Manager-only self-close reservation this
+        // window held, so the set never accumulates stale ids across the process lifetime.
+        e.closingWindowIds.erase(windowId);
         // Skip-empty: the LAST window's teardown must NOT clear the manifest, or "open at exit" would
         // always be empty. Leaving the prior snapshot means the next run reopens what was open when the
         // app exited — for a one-by-one close that is the final window; a hard shutdown that kills the
@@ -365,6 +368,34 @@ namespace Agentmaster
         auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.windowMutex);
         return { e.liveWindowIds.begin(), e.liveWindowIds.end() };
+    }
+
+    bool ReserveManagerOnlyClose(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return false;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        // Effective remaining-live = live windows MINUS those already reserved to self-close this tick.
+        // Reserve THIS window's close only while >1 would remain — so concurrent Manager-only windows on
+        // different threads can never all close (each reserves under the lock, and the one that finds
+        // remaining==1 stays). A window that reserved then closes clears its id in UnregisterLiveWindow.
+        size_t remaining = 0;
+        for (const auto& id : e.liveWindowIds)
+        {
+            if (e.closingWindowIds.find(id) == e.closingWindowIds.end())
+            {
+                ++remaining;
+            }
+        }
+        if (remaining > 1)
+        {
+            e.closingWindowIds.insert(windowId);
+            return true;
+        }
+        return false;
     }
 
     uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
