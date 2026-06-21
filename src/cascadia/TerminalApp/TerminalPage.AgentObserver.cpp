@@ -854,9 +854,16 @@ namespace winrt::TerminalApp::implementation
             _PlayPromptNavLimitSound();
             return;
         }
-        if (control.ScrollToAdjacentConversationPrompt(_PromptsToVector(prompts), up) < 0)
+        const int idx = control.ScrollToAdjacentConversationPrompt(_PromptsToVector(prompts), up);
+        if (idx < 0)
         {
             _PlayPromptNavLimitSound(); // no further sent prompt off-screen in that direction
+            return;
+        }
+        // Highlight the message we landed on in this session's summary panel (if the panel is open).
+        if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
+        {
+            it->second->HighlightSummaryMessage(idx);
         }
     }
 

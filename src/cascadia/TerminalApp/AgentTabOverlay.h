@@ -133,6 +133,12 @@ namespace winrt::TerminalApp::implementation
         // resolve. Set by _AttachClaudeOverlay.
         void SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler);
 
+        // Agentmaster (SUMMARY_JUMP.md): highlight the summary row for the message we just jumped to —
+        // via the ▸ button OR alt+up / alt+down nav (the page passes the landed 0-based message index). A
+        // translucent band behind the row; it persists across panel re-renders and moves to the new
+        // target on the next jump. Out-of-range, or the panel not built, == no-op. Call on the UI thread.
+        void HighlightSummaryMessage(int index);
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
@@ -235,5 +241,10 @@ namespace winrt::TerminalApp::implementation
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;
         void _RefreshJumpEligibility(); // resolve all prompts -> set each jump button's opacity (match vs dim); SUMMARY_JUMP.md
+        // The numbered-message ROW containers (the 2-col Grid), paired with their 0-based prompt index, so
+        // HighlightSummaryMessage can paint a band behind the jumped-to row. Rebuilt each _SetSummaryContent.
+        std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Grid>> _summaryMsgRows;
+        int _highlightedMsgIndex{ -1 }; // the last jumped-to message (0-based), re-applied across re-renders; -1 == none
+        void _ApplySummaryHighlight(); // paint the band on _highlightedMsgIndex's row, clear the rest (SUMMARY_JUMP.md)
     };
 }

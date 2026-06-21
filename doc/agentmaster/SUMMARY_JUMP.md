@@ -356,9 +356,17 @@ trigger + the selection differ.
   (`ScrollOffset` / `ViewHeight`). The viewport spans `[viewTop, viewTop+viewH−1]` in absolute buffer
   rows — the same coordinate space the resolver returns and the scrollbar centers in — and "off-screen"
   is **strictly** outside it: **up** picks the largest prompt row `< viewTop`, **down** the smallest
-  `> viewBottom`. Center via `ScrollBar().Value(max(0, row − viewH/2))`; return the row, or `−1` (→ the
-  boundary sound). Because the target is centered, the next press finds the next still-off-screen prompt
-  — a prompt the centering brought on screen is, by definition, no longer a target.
+  `> viewBottom`. Center via `ScrollBar().Value(max(0, row − viewH/2))`; return the landed **message
+  index**, or `−1` (→ the boundary sound). Because the target is centered, the next press finds the next
+  still-off-screen prompt — a prompt the centering brought on screen is, by definition, no longer a target.
+- **Summary highlight**: the message we land on is highlighted in the summary panel — a translucent
+  accent band behind its ` N.` row, brought into view — so the jumped-to prompt is obvious. The **▸
+  button** path highlights the index it already knows; **alt-nav** uses the index
+  `ScrollToAdjacentConversationPrompt` now returns (the page forwards it to the session's overlay via
+  `_claudeOverlays` → `AgentTabOverlay::HighlightSummaryMessage`). The band is painted on the row's Grid
+  (`_summaryMsgRows`), **persists across panel re-renders** (`_highlightedMsgIndex`, re-applied at the
+  end of `_SetSummaryContent`), and moves to the new target on the next jump. (No panel open ⇒ no-op —
+  alt-nav still scrolls the terminal.)
 - **Prompts source** (`_ScrollAdjacentPrompt`, off-thread): the transcript's user messages
   (`AnalyzeSessionTranscript().userMsgs`, the same list the panel numbers), **mtime-cached per session**
   (`_promptNavCache`) so stepping re-reads the file only when it GREW. A warm cache navigates instantly

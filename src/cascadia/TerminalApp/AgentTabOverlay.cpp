@@ -2013,6 +2013,7 @@ namespace winrt::TerminalApp::implementation
         }
         _summaryStack.Children().Clear();
         _jumpButtons.clear(); // rebuilt below; stale Button refs from the prior render are dropped
+        _summaryMsgRows.clear(); // rebuilt below; the highlight (_highlightedMsgIndex) is re-applied after
         std::wstring seg; // accumulated contiguous text lines
         const auto flushSeg = [&]() {
             if (seg.empty())
@@ -2069,6 +2070,7 @@ namespace winrt::TerminalApp::implementation
                         if (row >= 0)
                         {
                             ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
+                            self->HighlightSummaryMessage(idx); // mark the row we jumped to
                         }
                         self->_RefreshJumpEligibility(); // a click makes the others eligible to re-check
                     }
@@ -2091,6 +2093,7 @@ namespace winrt::TerminalApp::implementation
             }
             Grid::SetColumn(tb, 1);
             g.Children().Append(tb);
+            _summaryMsgRows.emplace_back(idx, g); // register the row so HighlightSummaryMessage can band it
             return g;
         };
         size_t i = 0;
@@ -2136,6 +2139,7 @@ namespace winrt::TerminalApp::implementation
         }
         flushSeg();
         _RefreshJumpEligibility(); // dim the jump buttons whose prompt isn't currently on screen
+        _ApplySummaryHighlight(); // re-apply the jumped-to band onto the freshly-rebuilt rows
     }
 
     void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
@@ -2173,6 +2177,41 @@ namespace winrt::TerminalApp::implementation
             }
             const bool ok = idx >= 0 && idx < static_cast<int>(rows.size()) && rows[idx] >= 0;
             btn.Opacity(ok ? 0.75 : 0.2); // match: normal; no-match: clearly dim (still clickable -> re-checks)
+        }
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md): remember the message we jumped to and paint the band on its row.
+    // Called from the ▸ button (idx known directly) and from the page after alt+up / alt+down nav (the
+    // landed 0-based index). The mark moves to the new target on the next jump.
+    void AgentTabOverlay::HighlightSummaryMessage(int index)
+    {
+        _highlightedMsgIndex = index;
+        _ApplySummaryHighlight();
+        // Bring the freshly-targeted row into view within the (scrolling) panel — only on an explicit jump,
+        // not on the rebuild re-apply, so a transcript-growth refresh doesn't keep yanking the panel scroll.
+        for (const auto& [idx, row] : _summaryMsgRows)
+        {
+            if (row && idx == index)
+            {
+                row.StartBringIntoView();
+                break;
+            }
+        }
+    }
+
+    // Paint a translucent accent band behind _highlightedMsgIndex's row; clear every other row. Safe any
+    // time — a no-op when the panel isn't built or the index isn't currently rendered — and re-applied at
+    // the end of each _SetSummaryContent so the mark survives a transcript-growth re-render.
+    void AgentTabOverlay::_ApplySummaryHighlight()
+    {
+        for (const auto& [idx, row] : _summaryMsgRows)
+        {
+            if (!row)
+            {
+                continue;
+            }
+            // accent band (alpha ~0x66) on the target; a fully-transparent fill clears the rest
+            row.Background(idx == _highlightedMsgIndex ? Fill(0x66, 0x3B, 0x82, 0xF6) : Fill(0, 0, 0, 0));
         }
     }
 

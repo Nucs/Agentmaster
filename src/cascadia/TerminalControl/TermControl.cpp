@@ -2803,8 +2803,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // per prompt; the order-preserving greedy handles duplicate texts) plus the live viewport, so the
     // coordinate space is the same one JumpToConversationPrompt centers in (absolute buffer rows ==
     // scrollbar values). The viewport currently spans [viewTop, viewTop + viewH - 1]; "off-screen" means
-    // strictly outside it. Returns the row jumped to, or -1 if there is no off-screen prompt that way
-    // (the caller plays a boundary sound). UI thread.
+    // strictly outside it. Returns the 0-based MESSAGE INDEX navigated to (so the caller can highlight that
+    // row in the summary panel), or -1 if there is no off-screen prompt that way (=> the caller plays a
+    // boundary sound). UI thread.
     int32_t TermControl::ScrollToAdjacentConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, bool up)
     {
         const auto rows = _core.ResolveConversationPromptRows(messages);
@@ -2815,9 +2816,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         const auto viewTop = _core.ScrollOffset();
         const auto viewH = _core.ViewHeight();
         const auto viewBottom = viewTop + viewH - 1;
-        int best = -1;
-        for (const auto r : rows)
+        int best = -1; // the chosen prompt's buffer row
+        int bestIdx = -1; // its 0-based message index (returned for the summary-panel highlight)
+        for (uint32_t k = 0; k < rows.Size(); ++k)
         {
+            const auto r = rows.GetAt(k);
             if (r < 0)
             {
                 continue; // prompt not resolvable / not on screen
@@ -2828,6 +2831,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 if (r < viewTop && r > best)
                 {
                     best = r;
+                    bestIdx = static_cast<int>(k);
                 }
             }
             else
@@ -2836,6 +2840,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
                 if (r > viewBottom && (best < 0 || r < best))
                 {
                     best = r;
+                    bestIdx = static_cast<int>(k);
                 }
             }
         }
@@ -2845,7 +2850,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         const auto targetTop = (std::max)(0, best - viewH / 2);
         ScrollBar().Value(static_cast<double>(targetTop));
-        return best;
+        return bestIdx;
     }
 
     int TermControl::ScrollOffset() const
