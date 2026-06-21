@@ -200,8 +200,19 @@ namespace Agentmaster
 
     // Agentmaster (native-exe-only policy). True iff a native claude.exe was resolved (== the engine
     // may launch/fork/resume) — i.e. SharedEngine().claudeExePath is non-empty. False => "Claude not
-    // detected", and the Manager gates every claude interaction behind the install prompt.
+    // detected", and the Manager gates every claude interaction behind the install prompt. Reads the
+    // value cached at engine init / last RefreshClaudeExe — it does NOT re-scan (use the auto-recover
+    // gate EnsureClaudeAvailable() below for that).
     bool ClaudeAvailable();
+
+    // Agentmaster: the AUTO-RECOVERING gate for every UI launch path. True if a native claude.exe is
+    // already cached; otherwise re-resolves ONCE (honoring the Settings override) and reports whether
+    // one is now present. This is what lets a claude installed WHILE Agentmaster is running clear the
+    // gate on the user's next attempt — no manual Re-check, no restart — so the "Claude not detected"
+    // prompt stops popping and the action just proceeds. The re-scan cost is paid only on the
+    // not-detected path (the cache-hit case is a cheap emptiness check). UI-thread-only, like
+    // RefreshClaudeExe (it is the only other writer of claudeExePath after init).
+    bool EnsureClaudeAvailable();
 
     // Re-resolve the native claude.exe with a (possibly new) explicit override — called when the
     // Settings cog's claude-path override is saved, so a Browse/override takes effect WITHOUT a

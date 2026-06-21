@@ -216,6 +216,26 @@ namespace Agentmaster
         return !SharedEngine().claudeExePath.empty();
     }
 
+    bool EnsureClaudeAvailable()
+    {
+        auto& e = SharedEngine();
+        if (!e.claudeExePath.empty())
+        {
+            return true; // already detected — cheap cache hit, no re-scan
+        }
+        // Cache is empty ("Claude not detected"). The user may have just run `claude install` (or put a
+        // claude.exe on PATH) while the app stayed open, so re-resolve ONCE before we conclude it's
+        // missing — honoring the Settings override exactly like RefreshClaudeExe. If it now resolves,
+        // the caller proceeds and the install prompt never shows; the gate has self-healed. UI-thread-
+        // called (every launch handler is), so this shares RefreshClaudeExe's single-writer contract.
+        e.claudeExePath = ResolveClaudeExe(LoadAppSettings().claudeExePath);
+        if (!e.claudeExePath.empty())
+        {
+            AppendStateLog(L"hooks.log", L"[engine] claude.exe found on re-check: " + e.claudeExePath + L"\n");
+        }
+        return !e.claudeExePath.empty();
+    }
+
     std::wstring RefreshClaudeExe(std::wstring_view overridePath)
     {
         // Re-resolve when the Settings override changes, so a Browse/override takes effect without a

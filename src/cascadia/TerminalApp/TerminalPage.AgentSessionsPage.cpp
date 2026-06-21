@@ -33,6 +33,7 @@
 
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
+#include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
 #include "AgentMaster/Persistence.h" // GetDirColor / AutoDirColorHex (the per-dir color chip)
 #include "AgentMaster/ProcessInspect.h" // AnalyzeSessionTranscript / RenderSessionSummaryBox / FindPlanFileInTranscript / kSummarySepMark (detail summary box)
 #include "AgentMaster/ProcessObserver.h" // Presence()
@@ -1922,6 +1923,15 @@ namespace winrt::TerminalApp::implementation
             }
             return;
         }
+        // Native-exe-only policy gate (auto-recovering): everything past here LAUNCHES a claude (seed an
+        // archived-shaped record, then _RestoreArchivedSession --resume), so gate + prompt here — BEFORE
+        // seeding a phantom record we'd otherwise leave behind. The already-live branch above only jumps
+        // to an existing tab, so it stays ungated.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
+            return;
+        }
         if (!existing)
         {
             ::Agentmaster::SessionInfo s;
@@ -1949,6 +1959,13 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_sessionRegistry || parentId.empty() || dir.empty())
         {
+            return;
+        }
+        // Native-exe-only policy gate (auto-recovering): a fork is a claude launch (--fork-session).
+        // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
             return;
         }
         // Fork the LATEST link of the conversation (the /clear chain tail), not an earlier checkpoint
