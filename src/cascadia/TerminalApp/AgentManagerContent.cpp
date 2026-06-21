@@ -2838,6 +2838,18 @@ namespace winrt::TerminalApp::implementation
                 }
             }
 
+            // Agentmaster: the Error column is SPECIAL — it collapses out of the board entirely when
+            // it holds no cards and reappears in place (between Needs-approval and Idle / Done) the
+            // moment a session errors. Skipping the Append below means the horizontal StackPanel
+            // (_boardHost) reserves NO width — nor its 8px inter-column spacing — for it, so an empty
+            // Error column costs zero board space; and because the columns are appended in fixed order
+            // on every rebuild, it always returns to the SAME slot when it reappears. The other four
+            // states are always shown — they are the steady-state columns of the triage model.
+            if (col.state == SessionState::Error && matches.empty())
+            {
+                continue;
+            }
+
             // Agentmaster: order the cards WITHIN this state column by the (global, persisted) board
             // sort — default MostActive (most-recently-active first). stable_sort so equal keys keep
             // their prior on-screen order across refreshes. The board reuses the SAME SortKey/SortKeyLess
