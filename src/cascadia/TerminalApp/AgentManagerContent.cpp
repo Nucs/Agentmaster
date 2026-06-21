@@ -2535,9 +2535,6 @@ namespace winrt::TerminalApp::implementation
         // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
         card.Tag(winrt::box_value(winrt::hstring{ L"b:" + s.id }));
-        // Discoverability: the card's interactions aren't obvious from its face (the band tip shows the
-        // full title; this explains what clicking does). Don't overwrite the band's own full-title tip.
-        AgentSetTip(card, L"Click to select this session (and aim its Flight Plan) \x2014 double-click to jump to its live tab, or right-click for more actions.");
         _boardCardsById[s.id] = card;
         return card;
     }
