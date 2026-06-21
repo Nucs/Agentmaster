@@ -4044,10 +4044,36 @@ static void BenchPromptAnchor()
     std::wprintf(L"  [sink %zu]\n", static_cast<size_t>(g_benchSink));
 }
 
+static void TestSummaryUserMsgNoise()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"Summary user-message noise filter (only human prompts numbered):\n");
+    const std::wstring bullet(1, static_cast<wchar_t>(0x25CF)); // ● assistant/tool bullet
+    const std::wstring rec(1, static_cast<wchar_t>(0x23FA)); // ⏺
+    const std::wstring branch(1, static_cast<wchar_t>(0x23BF)); // ⎿ tool-result branch
+
+    // Genuine human prompts: NOT noise (stay in the numbered list).
+    CHECK(!SeIsCommandNoise(L"fix the build please"), "real prompt is not noise");
+    CHECK(!SeIsCommandNoise(L"[Image #1] make this the README header"), "image paste is a real user msg");
+    CHECK(!SeIsCommandNoise(L"### Results Output - are they correct?"), "markdown-header prompt kept");
+    CHECK(!SeIsCommandNoise(L"use a " + bullet + L" bullet in the list"), "marker MID-text is not noise (only leading)");
+
+    // Verbatim-pasted Claude-Code TUI output: noise (the reported "assistant message in my summary").
+    CHECK(SeIsCommandNoise(bullet + L" Bug Summary - Launch crash-loop fixed"), "pasted assistant bullet (U+25CF) is noise");
+    CHECK(SeIsCommandNoise(L"  " + bullet + L" Plan: six functions"), "leading whitespace + bullet still noise");
+    CHECK(SeIsCommandNoise(rec + L" recording-marker paste"), "U+23FA marker is noise");
+    CHECK(SeIsCommandNoise(branch + L" Wrote 13 lines to file"), "U+23BF tool-result branch is noise");
+
+    // Pre-existing system-injected noise still caught (regression guard).
+    CHECK(SeIsCommandNoise(L"<system-reminder>do x</system-reminder>"), "system-reminder still noise");
+    CHECK(SeIsCommandNoise(L"<command-name>/clear</command-name>"), "command echo still noise");
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestPromptAnchor();
+    TestSummaryUserMsgNoise();
     TestSummaryTableTrim();
     TestStateMachine();
     TestOrderedStateMachine();

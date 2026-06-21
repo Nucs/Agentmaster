@@ -354,6 +354,13 @@ namespace Agentmaster
     // 686-session corpus scan. Used by both SummaryEscapeMsg collapse paths.
     std::wstring StripSummaryTableRules(const std::wstring& msg);
 
+    // Agentmaster: the summary-only "is this NOT a real human prompt?" filter — keeps system-injected
+    // pseudo-"user" messages (command/bash echoes, task/bash notifications, status+summary blocks,
+    // subagent telemetry, system reminders) AND verbatim-pasted Claude-Code TUI output (a message
+    // starting with the ●/⏺/⎿ marker glyphs) out of the summary's numbered Messages list. Distinct from
+    // IsNoiseUserPrompt (titles / Flight Plan). Exposed for tests. Expects leading whitespace trimmed.
+    bool SeIsCommandNoise(const std::wstring& c);
+
     // Agentmaster: the session-end.js summary BOX rendered to PLAIN TEXT — the SINGLE source of
     // truth shared by the per-tab overlay's summary panel (AgentTabOverlay) AND the Sessions page's
     // detail pane (TerminalPage.AgentSessionsPage), so the two renderings can never drift. Section

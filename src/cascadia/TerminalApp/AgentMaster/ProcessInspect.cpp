@@ -2333,10 +2333,25 @@ namespace Agentmaster
         return args.empty() ? name : (name + L" " + args);
     }
 
-    static bool SeIsCommandNoise(const std::wstring& c)
+    bool SeIsCommandNoise(const std::wstring& c)
     {
         const auto has = [&](const wchar_t* s) { return c.find(s) != std::wstring::npos; };
         const auto starts = [&](const wchar_t* p) { return c.rfind(p, 0) == 0; };
+        // Agentmaster (summary fix): a message PASTED verbatim from Claude Code's own rendered output
+        // begins with a TUI marker glyph that NEVER starts a typed HUMAN prompt — ● U+25CF (the
+        // assistant/tool bullet), ⏺ U+23FA, or ⎿ U+23BF (the tool-result branch). It only appears when the
+        // user pastes assistant/tool output back in, so it is NOT a real user message and must not be
+        // numbered in the summary (the "why does my summary list assistant messages" report). Compared by
+        // CODE POINT, not a literal, so the source stays pure-ASCII regardless of the compiler's /utf-8 flag.
+        // A full-corpus scan (4489 ext-user msgs) found ● dominant; ⏺/⎿ are included defensively.
+        if (const size_t nb = c.find_first_not_of(L" \t\r\n"); nb != std::wstring::npos)
+        {
+            const wchar_t f = c[nb];
+            if (f == 0x25CF || f == 0x23FA || f == 0x23BF)
+            {
+                return true;
+            }
+        }
         return has(L"<command-message>") || has(L"<command-name>") || has(L"<command-args>") || has(L"<local-command-") ||
                has(L"<bash-input>") || has(L"<bash-stdout>") || has(L"<bash-stderr>") ||
                // Agentmaster (summary refinement): system-injected execution noise that arrives as a

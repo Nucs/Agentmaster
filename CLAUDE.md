@@ -1212,11 +1212,13 @@ and Codex (`RenderCodexSummary` — via `SummaryEscapeMsg`'s `wrapNewlines` mode
 `Border` rules (`HorizontalAlignment::Stretch`, re-fills on resize; a fixed run of `─` can't in a
 wrapping block), driven by a sentinel line (`\x1F`) the display turns into a `Border` and the plain-text
 copy turns into a `─` rule. **System-injected "user" messages are filtered** out of the Messages list
-(`SeIsCommandNoise` (file-local in `ProcessInspect.cpp`) — the summary-only filter, distinct from titles/Flight-Plan's
+(`SeIsCommandNoise` (in `ProcessInspect.cpp`, exposed for tests) — the summary-only filter, distinct from titles/Flight-Plan's
 `IsNoiseUserPrompt`): `<command-*>` / `<bash-*>` echoes, `<task-notification>` /
 `<output-file>` / `<status>`+`<summary>`, subagent telemetry `<usage>` / `<subagent_tokens>`, background
-bash `<bash-notification>` / `<shell-id>` / `<persisted-output>`, `<background-task-input>`, and
-`<system-reminder>` — the set chosen after a **full-corpus `jq` scan of all ~4900 on-disk sessions**;
+bash `<bash-notification>` / `<shell-id>` / `<persisted-output>`, `<background-task-input>`,
+`<system-reminder>`, AND a message that begins with a Claude-Code **TUI output marker** (`●` U+25CF /
+`⏺` U+23FA / `⎿` U+23BF — assistant/tool output the user pasted back in, never a typed prompt; matched by
+code point so the source stays pure-ASCII) — the set chosen after a **full-corpus `jq` scan of all ~4900 on-disk sessions**;
 real content (C# generics `<int>` / `<T>`, exceptions, XML-doc `<summary>` / `<remarks>`, C++
 `#include`s, MSBuild/HTML, the user's review/diff templates, own type names, doc placeholders) is
 deliberately **kept** (the `<status>`&&`<summary>` combo guards against filtering C# XML-doc).
