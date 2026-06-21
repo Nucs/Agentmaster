@@ -342,6 +342,13 @@ namespace Agentmaster
         // close when the X is shown (suppressed in TerminalPage::_OnTabCloseRequested). GLOBAL across
         // windows; applied live like showTabCloseButton. Default true reproduces prior behavior.
         bool closeTabOnMiddleClick{ true };
+        // Agentmaster: ALWAYS show the tab-strip "Home" button (the affordance that jumps to the pinned
+        // Manager tab), not only when the Manager tab has scrolled out of view. ON (default) keeps a
+        // persistent Home button in the strip header whenever you're on a non-Manager tab; OFF restores
+        // the scroll-triggered behavior (Home appears only once the Manager tab is scrolled off the left
+        // edge). Either way it hides while the Manager tab itself is active. GLOBAL across windows;
+        // applied live on Save + cross-window broadcast. A missing key => true (checked by default).
+        bool alwaysShowHomeButton{ true };
 
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +

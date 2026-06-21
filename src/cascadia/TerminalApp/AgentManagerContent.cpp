@@ -5588,6 +5588,10 @@ namespace winrt::TerminalApp::implementation
         _setCloseTabOnMiddleClick.Header(winrt::box_value(L"Close tab with middle-mouse click"));
         AgentSetTip(_setCloseTabOnMiddleClick, L"When off, middle-clicking a tab no longer closes it \x2014 handy if you keep closing tabs by accident. Default on.");
         panel.Children().Append(_setCloseTabOnMiddleClick);
+        _setAlwaysShowHomeButton = ToggleSwitch{};
+        _setAlwaysShowHomeButton.Header(winrt::box_value(L"Always display Home button"));
+        AgentSetTip(_setAlwaysShowHomeButton, L"Keep the tab-strip \x201CHome\x201D button (jump to the pinned Agent Manager tab) visible whenever you're on another tab. When off, it appears only once the Manager tab has scrolled out of view. Default on.");
+        panel.Children().Append(_setAlwaysShowHomeButton);
 
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
@@ -5745,6 +5749,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setCloseTabOnMiddleClick.IsOn(_appSettings.closeTabOnMiddleClick);
         }
+        if (_setAlwaysShowHomeButton)
+        {
+            _setAlwaysShowHomeButton.IsOn(_appSettings.alwaysShowHomeButton);
+        }
         if (_setResetHidden)
         {
             // The "cleared" state is per-click feedback; restore the actionable label each open.
@@ -5899,6 +5907,10 @@ namespace winrt::TerminalApp::implementation
         if (_setCloseTabOnMiddleClick)
         {
             _appSettings.closeTabOnMiddleClick = _setCloseTabOnMiddleClick.IsOn();
+        }
+        if (_setAlwaysShowHomeButton)
+        {
+            _appSettings.alwaysShowHomeButton = _setAlwaysShowHomeButton.IsOn();
         }
         if (_setAllowPrerelease)
         {

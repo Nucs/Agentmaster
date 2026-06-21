@@ -291,16 +291,18 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster: recompute the two tab-strip nav buttons. They are inverses and mutually exclusive:
-    //  - Home appears when you are NOT on the Manager tab and it has scrolled off the left edge of the
-    //    strip (jump TO it). The Manager tab is index 0, content-x [~0, width); once the ScrollViewer's
-    //    horizontal offset passes that width it is fully off-screen (a few-px sliver hides under the `<`
-    //    arrow). The width is cached while the tab is realized because the ItemsStackPanel virtualizes
-    //    the container away once it's scrolled off (a live ActualWidth then reads 0). Gated on real
-    //    overflow (ScrollableWidth > 0), so with few tabs (no `<`/`>` arrows) it stays hidden.
+    //  - Home appears when you are NOT on the Manager tab — ALWAYS when the cog's "Always display Home
+    //    button" is on (the default), otherwise only once the Manager tab has scrolled off the left edge
+    //    of the strip (jump TO it). The Manager tab is index 0, content-x [~0, width); once the
+    //    ScrollViewer's horizontal offset passes that width it is fully off-screen (a few-px sliver hides
+    //    under the `<` arrow). The width is cached while the tab is realized because the ItemsStackPanel
+    //    virtualizes the container away once it's scrolled off (a live ActualWidth then reads 0). The
+    //    scroll-triggered path is gated on real overflow (ScrollableWidth > 0), so with few tabs (no
+    //    `<`/`>` arrows) it stays hidden.
     //  - Jump Back appears when you ARE on the Manager tab and a managed session card is selected that
     //    this window hosts as a live tab (jump BACK to it — the session you came from).
     // Called from the strip's ViewChanged/SizeChanged (scroll/resize), tab add/remove, tab switch, the
-    // lens-changed push (selection), and once at first layout.
+    // lens-changed push (selection), a settings change (always-show toggled), and once at first layout.
     void TerminalPage::_UpdateManagerNavButtons()
     {
         _EnsureTabStripScrollViewer();
@@ -309,23 +311,31 @@ namespace winrt::TerminalApp::implementation
         // Jump Back shows only on it.
         const bool onManager = _managerTab && (_GetFocusedTab() == _managerTab);
 
-        // --- Home: the Manager scrolled off the left edge, and we're not already on it. ---
+        // --- Home: always (cog setting), or only when the Manager scrolled off the left edge; never
+        //     while we're already on the Manager tab. ---
         auto showHome = false;
-        if (!onManager && _managerTab && _tabStripScrollViewer)
+        if (!onManager && _managerTab)
         {
-            const auto& sv = _tabStripScrollViewer;
-            if (sv.ScrollableWidth() > 0.5) // there's horizontal overflow (the scroll arrows are showing)
+            if (_appSettings.alwaysShowHomeButton)
             {
-                if (const auto tvi = _managerTab.TabViewItem())
+                showHome = true; // a persistent jump-to-Manager affordance, regardless of scroll/overflow
+            }
+            else if (_tabStripScrollViewer)
+            {
+                const auto& sv = _tabStripScrollViewer;
+                if (sv.ScrollableWidth() > 0.5) // there's horizontal overflow (the scroll arrows are showing)
                 {
-                    if (const auto w = tvi.ActualWidth(); w > 1.0)
+                    if (const auto tvi = _managerTab.TabViewItem())
                     {
-                        _managerTabWidthCache = w;
+                        if (const auto w = tvi.ActualWidth(); w > 1.0)
+                        {
+                            _managerTabWidthCache = w;
+                        }
                     }
-                }
-                if (_managerTabWidthCache > 1.0)
-                {
-                    showHome = sv.HorizontalOffset() >= (_managerTabWidthCache - 1.0);
+                    if (_managerTabWidthCache > 1.0)
+                    {
+                        showHome = sv.HorizontalOffset() >= (_managerTabWidthCache - 1.0);
+                    }
                 }
             }
         }
@@ -784,6 +794,9 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) tab-strip close affordances (show-X / middle-click
                 // close) to THIS window's tabs immediately; other windows get them via the broadcast.
                 self->_updateAllTabCloseButtons();
+                // Apply the (possibly changed) "Always display Home button" setting to THIS window's
+                // tab-strip nav buttons immediately; other windows get it via the broadcast.
+                self->_UpdateManagerNavButtons();
                 // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle
                 // window to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -951,6 +964,8 @@ namespace winrt::TerminalApp::implementation
         // change made in another window must re-apply to THIS window's tabs live (the source window
         // already did so in its Save handler).
         _updateAllTabCloseButtons();
+        // Agentmaster: "Always display Home button" is GLOBAL too — re-evaluate this window's nav buttons.
+        _UpdateManagerNavButtons();
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
