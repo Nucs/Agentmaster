@@ -16,7 +16,7 @@
 > unprompted-`claude` / `codex` — that flips in place as activity changes, **not** "no badge" as §8
 > originally said); its **row 1** now reads `status · actions · autopilot · queue`, with **link state
 > surfaced only when *not* linked** (a linked tab's badge already implies the link), over a dim **second
-> `<workdir>/<branch>` row**; the always-shown row-1 **action cluster** is a **folder Open-Path + a copy
+> `<workdir>/<branch>` row** and a **third `⏳ <next queued prompt, ≤300 chars>` row** (§13i); the always-shown row-1 **action cluster** is a **folder Open-Path + a copy
 > menu** (Session Id / Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a
 > chime) **+ a pencil** that toggles a **second overlay, the SUMMARY PANEL**. The Observer's `model ·
 > effort · kind` enrichment feeds the Manager cards / summary panel / observe badge (no longer the
@@ -363,3 +363,17 @@ external claude, `unlinked` otherwise; a **linked** badge shows *nothing* there,
 presence on a managed tab already implies the link. `model · effort` is **not** on this strip — it lives
 on the Manager cards / summary panel / observe badge (§13b). **Row 2** is the dim `<workdir folder>/<branch>`
 label alone (§13c). (Supersedes the §2 / §3a / §4 design-seed sketches, which showed a `⛓ linked` mark.)
+
+### 13i. Row 3 — the next-queued-prompt preview
+A **third** badge line previews **what the queue will send next**, complementing row 1's `⏳N` count
+(which says *how many* are queued): `⏳ <first line of the next prompt, ≤300 chars>`. The "next prompt" is
+the **first `Pending` prompt** in `SessionInfo.queue` — the same item `Scheduler::DecideAdvance` would fire
+next (Full auto-send / Semi confirm / Send-now) — so the preview is mode-agnostic: it shows whenever
+something is queued, regardless of Autopilot mode. The text is the prompt **body's first line** (leading
+blank lines skipped, trailing spaces trimmed); a `...` is appended when the first line exceeds **300
+chars** *or* there's more content (further lines) behind it, so `...` always means "there's more than
+shown". Built (`AgentTabOverlay::_promptLine` + the anon-namespace `FirstLinePreview`) only via `_Refresh`
+(a **linked** session), **hidden** when nothing is `Pending` and on observe badges; it **wraps** (so the
+full ≤300-char first line can show) but is `MaxWidth`-capped + right-anchored so a long prompt can't
+balloon the HUD. The hourglass run is goldenrod (matching the row-1 `⏳N`); a hover tooltip names the row
+and reveals the **full** prompt behind the preview.

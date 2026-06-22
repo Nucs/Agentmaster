@@ -166,6 +166,39 @@ namespace
         }
     }
 
+    // Agentmaster (TAB_OVERLAY row 3): a one-line preview of a queued prompt — its FIRST line, capped
+    // at `maxChars` characters. The displayed text content is at most `maxChars` chars; a trailing
+    // "..." is appended when EITHER the first line is longer than the cap (so it was truncated) OR
+    // there is real content after the first line (further lines), so "..." always signals "there is
+    // more than what's shown". Leading blank lines / whitespace are skipped so a prompt that opens
+    // with a newline still previews real text; trailing spaces on the line are trimmed. Returns ""
+    // for an all-whitespace prompt (the caller then hides the row).
+    std::wstring FirstLinePreview(const std::wstring& text, size_t maxChars)
+    {
+        const size_t start = text.find_first_not_of(L" \t\r\n");
+        if (start == std::wstring::npos)
+        {
+            return {}; // nothing but whitespace
+        }
+        const size_t nl = text.find_first_of(L"\r\n", start);
+        std::wstring line = (nl == std::wstring::npos) ? text.substr(start) : text.substr(start, nl - start);
+        while (!line.empty() && (line.back() == L' ' || line.back() == L'\t'))
+        {
+            line.pop_back();
+        }
+        // Is there real (non-whitespace) content beyond the first line? If so, signal it with "..." too.
+        const bool more = (nl != std::wstring::npos) && (text.find_first_not_of(L" \t\r\n", nl) != std::wstring::npos);
+        if (line.size() > maxChars)
+        {
+            line = line.substr(0, maxChars) + L"..."; // surpassed the cap -> truncate + ellipsis
+        }
+        else if (more)
+        {
+            line += L"..."; // first line fits, but there's more below it
+        }
+        return line;
+    }
+
     // A short confirmation chime for a completed row-3 action (copy / open). Async so it never blocks
     // the UI thread; SystemAsterisk is the soft Windows notification sound. Best-effort (silent if the
     // user has system sounds off). winmm is already in the link (TerminalPaneContent's WarningBell).
@@ -802,10 +835,27 @@ namespace winrt::TerminalApp::implementation
         _row2.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0)); // a 1px gap below row 1
         _row2.Children().Append(_subline);
 
+        // Row 3: a preview of the NEXT queued prompt waiting to be sent (hourglass + the prompt's first
+        // line, ≤300 chars). Filled by _Refresh for a LINKED session with a Pending prompt; collapsed
+        // otherwise (and on observe badges, which never run _Refresh). WRAPS (so up to 300 chars can show
+        // without a giant single line) but is width-capped so it can't span the terminal; right-aligned so
+        // the badge stays right-anchored. The default Foreground is the text colour — the hourglass Run
+        // overrides itself to amber in _Refresh.
+        _promptLine = TextBlock{};
+        _promptLine.FontSize(11);
+        _promptLine.Foreground(Fill(0xFF, 0xC8, 0xC8, 0xC8)); // light gray (secondary; the hourglass run is amber)
+        _promptLine.IsTextSelectionEnabled(false);
+        _promptLine.TextWrapping(TextWrapping::Wrap);
+        _promptLine.HorizontalAlignment(HorizontalAlignment::Right);
+        _promptLine.MaxWidth(420);
+        _promptLine.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0)); // a 1px gap below row 2
+        _promptLine.Visibility(Visibility::Collapsed);
+
         _stack = StackPanel{};
         _stack.Orientation(Orientation::Vertical);
         _stack.Children().Append(_row1);
         _stack.Children().Append(_row2);
+        _stack.Children().Append(_promptLine); // row 3: the next-queued-prompt preview
 
         _root = Border{};
         _root.Background(Fill(0xCC, 0x20, 0x20, 0x20)); // dark translucent so it reads on any terminal
@@ -1110,6 +1160,51 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring tip = std::wstring{ L"Working directory \x00B7 git branch\n" } + detail;
                 ToolTipService::SetToolTip(_subline, winrt::box_value(winrt::hstring{ tip }));
                 _subline.Visibility(Visibility::Visible);
+            }
+        }
+
+        // Row 3: a preview of the NEXT queued prompt waiting to be sent — the first Pending prompt (the
+        // same one DecideAdvance would fire next), shown as "<hourglass> <first line, ≤300 chars>". This
+        // is the per-tab echo of row 1's "⏳N" count: the count says HOW MANY are queued, this says WHAT
+        // is next. Hidden when nothing is Pending.
+        if (_promptLine)
+        {
+            const QueuedPrompt* nextPrompt = nullptr;
+            for (const auto& p : s.queue)
+            {
+                if (p.status == PromptStatus::Pending)
+                {
+                    nextPrompt = &p;
+                    break;
+                }
+            }
+            // Prefer the prompt body (what actually gets sent); fall back to its short label.
+            const std::wstring body = nextPrompt ? (!nextPrompt->text.empty() ? nextPrompt->text : nextPrompt->label) : std::wstring{};
+            const std::wstring preview = nextPrompt ? FirstLinePreview(body, 300) : std::wstring{};
+            _promptLine.Inlines().Clear();
+            if (preview.empty())
+            {
+                _promptLine.Visibility(Visibility::Collapsed); // nothing queued (or an empty prompt)
+            }
+            else
+            {
+                Run hg{};
+                hg.Text(winrt::hstring{ std::wstring{ kHourglass } + L" " });
+                hg.Foreground(Fill(0xFF, 0xDA, 0xA5, 0x20)); // goldenrod — "queued / pending", matching the row-1 ⏳N
+                _promptLine.Inlines().Append(hg);
+                Run txt{};
+                txt.Text(winrt::hstring{ preview }); // inherits the TextBlock's light-gray foreground
+                _promptLine.Inlines().Append(txt);
+                // The preview is the FIRST line trimmed to 300 chars; the tooltip names the row and reveals
+                // the FULL prompt behind it (capped so a huge prompt can't make an unwieldy tooltip).
+                std::wstring full = body;
+                if (full.size() > 4000)
+                {
+                    full = full.substr(0, 4000) + L"\x2026"; // …
+                }
+                const std::wstring tip = std::wstring{ L"Next queued prompt \x2014 sent on the next turn-complete (or via Send now).\n\n" } + full;
+                ToolTipService::SetToolTip(_promptLine, winrt::box_value(winrt::hstring{ tip }));
+                _promptLine.Visibility(Visibility::Visible);
             }
         }
 

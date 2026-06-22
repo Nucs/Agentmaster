@@ -35,7 +35,9 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   that makes the tab ⇄ Agentmaster link legible *while you work inside the session*. A **linked**
   Claude session shows the full badge — status (color-matched to the Triage Board) + the Fleet
   Observer's `model · effort · kind`, Autopilot mode (**Manual/Semi/Full**), queued count, and link
-  state **⛓ linked**, plus a dim **second row** `<workdir folder>/<branch>`. Any **other** tab shows a
+  state **⛓ linked**, plus a dim **second row** `<workdir folder>/<branch>` and a dim **third row**
+  `⏳ <next queued prompt>` (the first `Pending` prompt's first line, ≤300 chars + `...`; shown only when
+  something is queued, mode-agnostic). Any **other** tab shows a
   dim **observe badge** `○ <kind> · unlinked` (kind =
   `pwsh` / `cmd` / `claude` *started-but-not-yet-prompted* (§11d) / `codex`) that **flips in place**
   as the tab's activity changes — a `pwsh` tab → `claude` the moment you run it → the full linked
@@ -1214,6 +1216,15 @@ worktree/submodule `.git` FILE + a detached HEAD → short SHA), distinct from a
 first-seen snapshot; and the observer's `ObservedClaude.gitBranch` (fed into `SessionRegistry::ObserveClaude`,
 which does `assign(s.branch, o.gitBranch)`) is now also a **live writer** for `SessionInfo.branch` (the
 round-3 audit's "no live writer" gap), beside the off-thread transcript backfill.
+The linked badge also carries a **third (dim) row** (`AgentTabOverlay::_promptLine`) — a preview of the
+**next queued prompt** waiting to be sent: `⏳ <first line of the first `Pending` prompt, ≤300 chars>`
+(a trailing `...` when that first line surpasses 300 chars OR there's more content behind it, via the
+anon-namespace `FirstLinePreview`). It is the per-tab echo of row 1's `⏳N` count — the count is HOW MANY,
+this is WHAT'S NEXT (the same item `Scheduler::DecideAdvance` fires next) — so it's **mode-agnostic** (shown
+whenever something is `Pending`, regardless of Autopilot). It **wraps** (so the full ≤300-char line can
+show) but is `MaxWidth`-capped + right-anchored so a long prompt can't balloon the HUD; the hourglass run is
+goldenrod (matching the row-1 `⏳N`), a hover tooltip reveals the FULL prompt, and it's **hidden** when
+nothing is queued and on observe badges (built only via `_Refresh`, a linked session).
 The badge also carries an **always-shown action group on row 2** (left of the dir/branch label) — a
 **folder** button (Open Path: the session's working dir via `explorer.exe`, off-thread) + a **copy** menu + a **pencil**. The copy menu
 yields `Session Id` · `Copy Path` (working dir) · `Copy Branch Name` · `Claude Launch CLI` · `Codex

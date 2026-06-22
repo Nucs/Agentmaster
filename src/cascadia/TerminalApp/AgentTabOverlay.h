@@ -183,11 +183,16 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
         winrt::Windows::UI::Xaml::Controls::Border _root{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2
+        winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2 / row 3
         winrt::Windows::UI::Xaml::Controls::StackPanel _row1{ nullptr }; // row 1: a horizontal strip of DISCRETE, individually-tooltipped parts (status · [actions] · Autopilot[button] · queue · link)
         winrt::Windows::UI::Xaml::Controls::StackPanel _row2{ nullptr }; // row 2: the dir/branch label only ("<root workdir folder>/<branch>")
         winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2 label: "<root workdir folder>/<branch>"
         winrt::Windows::UI::Xaml::Controls::StackPanel _actions{ nullptr }; // row 1: folder + copy + pencil buttons — ALWAYS shown, just after the status block
+        // Row 3 (Agentmaster): a preview of the NEXT queued prompt waiting to be sent — the hourglass +
+        // the first line of the first Pending prompt (the one DecideAdvance would fire next), capped at
+        // 300 chars (a longer first line, or any further lines, ends with "..."). Wraps + width-capped so
+        // a long prompt can't balloon the HUD; hidden when nothing is queued (and on observe badges).
+        winrt::Windows::UI::Xaml::Controls::TextBlock _promptLine{ nullptr };
 
         // Summary panel (the 2nd slot): a scrollable box, shown while the global showSummaryPanel is ON.
         // The body is a StackPanel (not one TextBlock) so separators can be full-width Border rules.
