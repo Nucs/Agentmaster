@@ -10,6 +10,8 @@
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
 
+#include <chrono> // Agentmaster (tab tooltip): the fast-open timer interval
+
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Core;
@@ -313,15 +315,48 @@ namespace winrt::TerminalApp::implementation
         _agentToolTipTitle = {};
         _agentToolTipBody = {};
         _agentToolTipSig = {};
-        _UpdateToolTip();
+        if (_agentToolTipOpenTimer)
+        {
+            _agentToolTipOpenTimer.Stop();
+        }
+        if (_agentToolTip)
+        {
+            _agentToolTip.IsOpen(false);
+            _agentToolTip = nullptr; // drop the reused object; re-activation recreates + re-SetToolTip cleanly
+        }
+        _UpdateToolTip(); // revert to the default title + key-chord tooltip (re-attaches the default)
     }
 
-    // Agentmaster (tab tooltip): build the rich tooltip set via SetAgentToolTip — a colored state line
-    // (matching the tab-strip dot), a bold title, then a plain multi-line body — plus the key chord,
-    // like the default. Built fresh each call (XAML elements can't be re-parented); SetAgentToolTip's
-    // signature guard keeps that to actual content changes.
+    // Agentmaster (tab tooltip): (re)build the rich tooltip set via SetAgentToolTip — a colored state
+    // line (matching the tab-strip dot), a bold title, then a plain multi-line body — plus the key chord,
+    // like the default.
+    //
+    // Reuse ONE ToolTip object across refreshes (swap its Content): re-creating it + re-SetToolTip on each
+    // ~2s data refresh would REPLACE — and so visibly CLOSE — an already-open tip while you hover it (the
+    // "disappears after showing" bug, made constant by the seconds ticking in the 'ago' line). Configure
+    // it once: pinned Dark (a ToolTip renders in the popup root and does NOT inherit the host theme, and
+    // ToolTipService theme propagation is unreliable under XAML Islands — see AgentTipHelpers) and placed
+    // BELOW the tab (the default placement would push it up into the titlebar / off the top of the screen).
+    // Opening fast + closing reliably is the _WireAgentToolTipHover recipe.
     void Tab::_UpdateAgentToolTip()
     {
+        if (!_agentToolTip)
+        {
+            _agentToolTip = WUX::Controls::ToolTip{};
+            _agentToolTip.RequestedTheme(WUX::ElementTheme::Dark);
+            _agentToolTip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
+            WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), _agentToolTip);
+        }
+        _WireAgentToolTipHover();
+
+        // Don't rebuild content while the tip is OPEN (you're reading it): the ~2s refresh churns the
+        // seconds in the 'ago' line, and swapping Content under the pointer flickers. The next hover shows
+        // the latest data (≤ one refresh interval stale — negligible for a tooltip).
+        if (_agentToolTip.IsOpen())
+        {
+            return;
+        }
+
         auto textBlock = WUX::Controls::TextBlock{};
         textBlock.TextWrapping(WUX::TextWrapping::Wrap);
         textBlock.MaxWidth(380.0);
@@ -384,9 +419,77 @@ namespace winrt::TerminalApp::implementation
             textBlock.Inlines().Append(run);
         }
 
-        WUX::Controls::ToolTip toolTip{};
-        toolTip.Content(textBlock);
-        WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), toolTip);
+        _agentToolTip.Content(textBlock); // swap content on the REUSED object — never re-SetToolTip an open tip
+    }
+
+    // Agentmaster (tab tooltip): open the agent tooltip FAST on hover and close it reliably on leave.
+    // The framework hover delay is sluggish (and this SDK exposes no ToolTipService.InitialShowDelay), and
+    // the service's auto-dismiss is unreliable under XAML Islands — so we drive it ourselves: a one-shot
+    // DispatcherTimer at ~1/3 the system hover time opens it, and the TabViewItem's own PointerExited
+    // closes it (this is the AgentTipHelpers recipe). Wired ONCE on the TabViewItem — the tooltip CONTENT
+    // changes per refresh, but the handlers operate on the reused _agentToolTip. The handlers no-op unless
+    // a tooltip is currently active, so a tab that reverts to the default tooltip is unaffected.
+    void Tab::_WireAgentToolTipHover()
+    {
+        if (_agentToolTipHoverWired)
+        {
+            return;
+        }
+        const auto tvi = TabViewItem();
+        if (!tvi)
+        {
+            return;
+        }
+        _agentToolTipHoverWired = true;
+        const auto weakThis = get_weak();
+
+        tvi.PointerEntered([weakThis](auto&&, auto&&) {
+            const auto self = weakThis.get();
+            if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
+            {
+                return; // not an agent tab right now -> let the framework handle the default tooltip
+            }
+            if (!self->_agentToolTipOpenTimer)
+            {
+                unsigned int hoverMs{ 400 };
+                if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
+                {
+                    hoverMs = 400;
+                }
+                WUX::DispatcherTimer dt;
+                dt.Interval(std::chrono::milliseconds{ hoverMs / 3 }); // ~1/3 the system hover time
+                const auto weakTick = weakThis;
+                dt.Tick([weakTick](auto&& s, auto&&) {
+                    if (const auto t = s.try_as<WUX::DispatcherTimer>())
+                    {
+                        t.Stop(); // one-shot: open once, then idle until the next hover
+                    }
+                    const auto self2 = weakTick.get();
+                    if (self2 && self2->_agentToolTipActive && self2->_agentToolTip)
+                    {
+                        self2->_agentToolTip.IsOpen(true);
+                    }
+                });
+                self->_agentToolTipOpenTimer = dt;
+            }
+            self->_agentToolTipOpenTimer.Start();
+        });
+
+        tvi.PointerExited([weakThis](auto&&, auto&&) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            if (self->_agentToolTipOpenTimer)
+            {
+                self->_agentToolTipOpenTimer.Stop();
+            }
+            if (self->_agentToolTip)
+            {
+                self->_agentToolTip.IsOpen(false);
+            }
+        });
     }
 
     // Method Description:

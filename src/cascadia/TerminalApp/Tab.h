@@ -215,6 +215,13 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _agentToolTipTitle{};
         winrt::hstring _agentToolTipBody{};
         winrt::hstring _agentToolTipSig{};
+        // The ONE reused ToolTip object (swap its Content; re-creating + re-SetToolTip on each refresh
+        // would replace — and so visibly close — an open tip while hovered). Configured once: pinned Dark
+        // + Placement Bottom. Plus a one-shot fast-open timer (the framework hover delay is sluggish and
+        // this SDK has no ToolTipService.InitialShowDelay) — the AgentTipHelpers recipe, wired once.
+        winrt::Windows::UI::Xaml::Controls::ToolTip _agentToolTip{ nullptr };
+        winrt::Windows::UI::Xaml::DispatcherTimer _agentToolTipOpenTimer{ nullptr };
+        bool _agentToolTipHoverWired{ false };
 
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _themeColor{ nullptr };
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _unfocusedThemeColor{ nullptr };
@@ -305,7 +312,8 @@ namespace winrt::TerminalApp::implementation
         void _EnableMenuItems();
         void _UpdateSwitchToTabKeyChord();
         void _UpdateToolTip();
-        void _UpdateAgentToolTip(); // Agentmaster: render the rich session tooltip (colored state line / bold title / plain body) when one is set
+        void _UpdateAgentToolTip(); // Agentmaster: (re)build the rich session tooltip's content on the reused ToolTip object (colored state line / bold title / plain body); frozen while open
+        void _WireAgentToolTipHover(); // Agentmaster: wire (once) the TabViewItem hover handlers that fast-open / reliably close the agent tooltip (AgentTipHelpers recipe)
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);
