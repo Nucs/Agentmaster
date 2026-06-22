@@ -321,8 +321,31 @@ new id minted by us so hooks/registry correlate from the first event; offered on
 hazard doesn't apply; transcript-gated → fresh; titled via `DeriveForkTitle` (`"<title> (fork)"`,
 then `(fork 2)`/`(fork 3)`/… on a fork-of-a-fork, never stacked `(fork) (fork)`), logged
 `[sessions-page->fork]`), **Open New Session Here**, and a right-click **Hide from list**
-(`_HideSessionFromList` → `AppSettings.hiddenSessionIds`, persisted + filtered out of the browser;
-cleared from the cog's **Reset hidden sessions**); double-click = resume. **Presence
+(`_HideSessionFromList` → `_AddSessionIdToHiddenList` → `AppSettings.hiddenSessionIds`, persisted +
+filtered out of the browser; cleared from the cog's **Reset hidden sessions**); double-click = resume.
+The hidden set is also **auto-populated on Delete permanently** (the `_RemoveSessionRecord` seam calls
+`_AddSessionIdToHiddenList`, so a deleted tab disappears from the Sessions list too, not just the
+Board/Archive — its `.jsonl` is still kept on disk). A search-bar **"Hidden" checkbox**
+(`_sessHiddenBtn`, default OFF, beside "Open") **reveals** the hidden set — shown dimmed, with the row
+menu's **"Unhide"** (`_UnhideSessionFromList`) replacing "Hide from list" — so a deleted/hidden session
+is findable + resumable without clearing the whole set from the cog.
+**Known gaps in this auto-hide change (follow-ups, not yet done; the change is lib-UNCOMPILED + not
+deployed):** (1) **stale delete-path copy** — ≥8 user-facing strings still promise a deleted session
+"still appears in Sessions" (the tab-close + batch-close confirms `TerminalPage.AgentSessions.cpp` /
+`TabManagement.cpp`, the board/tree Delete tooltips + confirm `AgentManagerContent.cpp`, the Archive
+page's row/window/bulk delete confirms `TerminalPage.AgentArchivePage.cpp`), which is now **misleading**
+— it appears only under the "Hidden" filter; these need a "find it again under the Sessions ‘Hidden’
+filter" rewrite, and the confirms want a breadcrumb to that filter (today a delete is silently invisible
+in Board + Archive + Sessions). (2) **`hiddenSessionIds` conflates two intents under one blunt reset** —
+manual "Hide from list" and auto-hide-on-delete share one set, so the cog's **Reset hidden sessions**
+recovers a deleted session AND un-hides every deliberately-hidden one (and vice-versa); the set also
+grows unbounded (a never-prompted delete adds a GUID that maps to no row), and a revealed deleted row is
+visually indistinguishable from a manually-hidden one. (3) **cross-window staleness** — the auto-hide
+updates THIS window's `_appSettings.hiddenSessionIds` + disk; a Sessions page open in ANOTHER window
+keeps its stale in-memory copy until it reloads (no registry-observer live-refresh like the Archive
+page has). (4) This reverses a deliberate "deleted ⇒ still discoverable/resumable in Sessions" safety
+net (Rule #6) by default — intended (the user asked for it), but worth revisiting whether auto-hide
+should be the default or gated on intent. **Presence
 integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
 owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
 process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + the transient
@@ -1007,8 +1030,11 @@ What works, by area:
   **Archive** flips `live=false` + clears the injector + persists + closes the tab, KEEPING the record so
   it lists under Archived (restorable); **Delete permanently** (`_RemoveSessionRecord`) DROPS the registry
   record (+ strips it from saved window records) but **keeps the conversation `.jsonl` on disk** — a
-  deleted session leaves the Board/Archive yet still appears in the **Sessions** browser, resumable from
-  there. The Claude transcript on disk is **never** deleted by either path. Closing a **batch** that holds managed
+  deleted session leaves the Board/Archive AND is **auto-hidden from the Sessions browser**
+  (`_RemoveSessionRecord` calls `_AddSessionIdToHiddenList`, the same `AppSettings.hiddenSessionIds` set the
+  row right-click "Hide from list" uses), so it disappears from that list too by default — but it is **not
+  gone**: its `.jsonl` is kept, so the Sessions page's **"Hidden" reveal filter** (or the cog's **Reset
+  hidden sessions**) brings it back, still resumable. The Claude transcript on disk is **never** deleted by either path. Closing a **batch** that holds managed
   sessions (a window close, or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
   train of per-tab confirms — **🗑 Delete All · Archive All · Cancel All** (Archive All is the safe default —
   each session stays restorable with its Flight Plan; Delete All record-only-drops them, keeping the
@@ -1951,8 +1977,11 @@ build **binlog uploads as an artifact** to diagnose the first run.
    correlate) **only when Claude has a transcript for that id**, else a fresh session (new id,
    same dir + queue, stale archived record dropped). Queues reload with statuses intact. Closing
    a tab confirms **Archive vs Delete**: Archive keeps the record (`live=false`, restorable); **Delete
-   permanently** drops the registry record but **keeps the conversation `.jsonl` on disk** (it still
-   appears in the Sessions browser, resumable from there). The Claude transcript on disk is never
+   permanently** drops the registry record but **keeps the conversation `.jsonl` on disk** AND
+   **auto-hides it from the Sessions browser** (`_RemoveSessionRecord` → `_AddSessionIdToHiddenList`, the
+   same `hiddenSessionIds` set as the row's "Hide from list"), so a deleted session disappears from that
+   list too — recoverable via the Sessions page's **"Hidden" reveal filter** (Unhide) or the cog's Reset.
+   The Claude transcript on disk is never
    deleted by either path. Never decide resume from the
    persisted `SessionState` (it's the live post-restore state) — see Gotchas.
 7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).

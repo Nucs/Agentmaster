@@ -474,6 +474,20 @@ namespace winrt::TerminalApp::implementation
         _sessOpenOnlyBtn.Click(onToggle);
         bar.Children().Append(_sessOpenOnlyBtn);
 
+        // "Hidden" — a row REVEAL filter for the hidden set (AppSettings.hiddenSessionIds): the
+        // sessions you right-clicked "Hide from list" AND the ones auto-hidden when their tab was
+        // deleted. Default OFF: hidden sessions are filtered out of the list (the chokepoint at the
+        // render below). Checked: they are shown again — dimmed, and their right-click menu offers
+        // "Unhide" — so you can find and resume/unhide a deleted-or-hidden session without clearing
+        // the whole set from the Settings cog. In-memory, flips through the same throttle as "Open".
+        _sessHiddenBtn = CheckBox{};
+        _sessHiddenBtn.Content(winrt::box_value(winrt::hstring{ L"Hidden" }));
+        _sessHiddenBtn.MinWidth(0);
+        _sessHiddenBtn.VerticalAlignment(VerticalAlignment::Center);
+        SessSetTip(_sessHiddenBtn, L"Reveal sessions hidden from the list \x2014 the ones you hid, and the ones auto-hidden when their tab was deleted (their files are kept on disk). Off by default.");
+        _sessHiddenBtn.Click(onToggle);
+        bar.Children().Append(_sessHiddenBtn);
+
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
         _sessWindowBtn.Content(winrt::box_value(winrt::hstring{ kSessPresets[_sessionsWindowPreset].label }));
@@ -1148,6 +1162,9 @@ namespace winrt::TerminalApp::implementation
         // resetting from the Settings cog just re-renders (the rows stay in _sessionsRows). A
         // hidden session is untouched on disk — purely a browse-list preference. ---
         const std::unordered_set<std::wstring> hidden(_appSettings.hiddenSessionIds.begin(), _appSettings.hiddenSessionIds.end());
+        // "Hidden" reveal filter: OFF (default) drops hidden ids from the view; ON keeps them (shown
+        // dimmed, with an "Unhide" menu). Either way they're tallied for the "N hidden" note.
+        const bool showHidden = _sessHiddenBtn && _sessHiddenBtn.IsChecked() && _sessHiddenBtn.IsChecked().Value();
         // "Open" filter: when checked, keep only sessions live in the process-wide registry (open in
         // any Agentmaster window — the same `reg->live` the solid chip reflects). Registry Get is
         // mutex-guarded; queried per row only while the filter is on.
@@ -1159,7 +1176,10 @@ namespace winrt::TerminalApp::implementation
             if (!hidden.empty() && hidden.count(r.id))
             {
                 ++hiddenInWindow;
-                continue;
+                if (!showHidden)
+                {
+                    continue; // hidden by the "Hide from list" set — reveal with the "Hidden" filter
+                }
             }
             if (openOnly)
             {
@@ -1353,10 +1373,18 @@ namespace winrt::TerminalApp::implementation
                 }
             }
 
+            // A row is in the hidden set only when the "Hidden" reveal filter is on (else it was
+            // dropped from `view` above). Dim it as a visual cue that it's normally hidden.
+            const bool rHidden = !hidden.empty() && hidden.count(r.id) != 0;
+
             Border rowB;
             rowB.Child(g);
             rowB.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
             rowB.Background(r.id == _sessionsSelectedId ? SessBrush(0x30, 0x60, 0xA0, 0xE0) : SessBrush(0x14, 0xFF, 0xFF, 0xFF));
+            if (rHidden)
+            {
+                rowB.Opacity(0.55); // revealed-but-hidden cue (the "Hidden" filter is on)
+            }
             rowB.Tag(winrt::box_value(winrt::hstring{ r.id }));
             rowB.PointerPressed([this](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
                 const auto b = s.try_as<Border>();
@@ -1503,17 +1531,35 @@ namespace winrt::TerminalApp::implementation
 
                 rowMenu.Items().Append(MenuFlyoutSeparator{});
 
+                // Hide / Unhide — toggles AppSettings.hiddenSessionIds. A revealed hidden row (only
+                // visible while the "Hidden" filter is on) offers Unhide; every other row offers Hide.
                 MenuFlyoutItem hideItem;
-                hideItem.Text(L"Hide from list");
-                SessSetTip(hideItem, L"Hide this session from the list \x2014 it stays on disk and can be brought back from Settings.");
-                hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
-                        if (auto self = weak.get())
-                        {
-                            self->_HideSessionFromList(rid);
-                        }
+                if (rHidden)
+                {
+                    hideItem.Text(L"Unhide");
+                    SessSetTip(hideItem, L"Bring this session back into the list (it was hidden, or auto-hidden when its tab was deleted).");
+                    hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_UnhideSessionFromList(rid);
+                            }
+                        });
                     });
-                });
+                }
+                else
+                {
+                    hideItem.Text(L"Hide from list");
+                    SessSetTip(hideItem, L"Hide this session from the list \x2014 it stays on disk and can be brought back from Settings, or shown again with the \x201CHidden\x201D filter.");
+                    hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_HideSessionFromList(rid);
+                            }
+                        });
+                    });
+                }
                 rowMenu.Items().Append(hideItem);
                 rowB.ContextFlyout(rowMenu);
             }
@@ -1535,7 +1581,8 @@ namespace winrt::TerminalApp::implementation
             }
             if (hiddenInWindow > 0)
             {
-                counts += L" \x00B7 " + std::to_wstring(hiddenInWindow) + L" hidden"; // resettable in Settings
+                // "N hidden" normally; "N hidden (shown)" while the reveal filter includes them.
+                counts += L" \x00B7 " + std::to_wstring(hiddenInWindow) + (showHidden ? L" hidden (shown)" : L" hidden"); // resettable in Settings
             }
             if (_sessionsIndexing.load())
             {
@@ -2115,25 +2162,41 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Row right-click "Hide from list": append this id to AppSettings.hiddenSessionIds via a
-    // freshest-disk read-modify-write (so it sticks across restarts AND doesn't clobber another
-    // field / another window's concurrent write — the splitter/treeSort pattern), refresh THIS
-    // window's in-memory copy, and re-render the table (the render chokepoint filters it out).
-    // Resettable from the Settings cog. The transcript on disk is NEVER touched — a browse-list
-    // preference only. Already-hidden ids are a no-op (no duplicate write).
+    // Append an id to AppSettings.hiddenSessionIds via a freshest-disk read-modify-write (so it
+    // sticks across restarts AND doesn't clobber another field / another window's concurrent write
+    // — the splitter/treeSort pattern) and refresh THIS window's in-memory copy. Idempotent — an
+    // already-hidden id is a no-op (no duplicate write); returns true only when it was newly added.
+    // NO UI side effects: the caller re-renders. Shared by the Sessions-page row right-click "Hide
+    // from list" AND the auto-hide-on-delete seam (_RemoveSessionRecord). The transcript on disk is
+    // NEVER touched — a browse-list preference only.
+    bool TerminalPage::_AddSessionIdToHiddenList(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        auto s = ::Agentmaster::LoadAppSettings();
+        bool changed = false;
+        if (std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId) == s.hiddenSessionIds.end())
+        {
+            s.hiddenSessionIds.push_back(sessionId);
+            ::Agentmaster::SaveAppSettings(s);
+            changed = true;
+        }
+        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
+        return changed;
+    }
+
+    // Row right-click "Hide from list": persist the id (the RMW above) and re-render the table (the
+    // render chokepoint filters it out, unless the "Hidden" reveal filter is on). Resettable from
+    // the Settings cog. Already-hidden ids are a no-op.
     void TerminalPage::_HideSessionFromList(const std::wstring& sessionId)
     {
         if (sessionId.empty())
         {
             return;
         }
-        auto s = ::Agentmaster::LoadAppSettings();
-        if (std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId) == s.hiddenSessionIds.end())
-        {
-            s.hiddenSessionIds.push_back(sessionId);
-            ::Agentmaster::SaveAppSettings(s);
-        }
-        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
+        _AddSessionIdToHiddenList(sessionId);
         // If the hidden row was selected, drop the selection so the detail pane doesn't keep
         // showing a session that's no longer in the list.
         if (_sessionsSelectedId == sessionId)
@@ -2141,6 +2204,27 @@ namespace winrt::TerminalApp::implementation
             _sessionsSelectedId.clear();
             _ShowSessionsDetail(_sessionsSelectedId); // -> "Select a session"
         }
+        _RenderSessionsTable();
+    }
+
+    // Row right-click "Unhide" — the inverse of Hide, offered on a row that is currently in the
+    // hidden set (only reachable while the "Hidden" reveal filter shows it). Drop the id from
+    // AppSettings.hiddenSessionIds (freshest-disk RMW, mirroring Hide) so the session returns to the
+    // list normally, refresh the in-memory copy, and re-render. A no-op if the id wasn't hidden.
+    void TerminalPage::_UnhideSessionFromList(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto s = ::Agentmaster::LoadAppSettings();
+        const auto it = std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId);
+        if (it != s.hiddenSessionIds.end())
+        {
+            s.hiddenSessionIds.erase(it);
+            ::Agentmaster::SaveAppSettings(s);
+        }
+        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
         _RenderSessionsTable();
     }
 

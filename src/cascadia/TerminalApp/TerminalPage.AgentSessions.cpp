@@ -497,6 +497,13 @@ namespace winrt::TerminalApp::implementation
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
         _StripSessionFromSavedWindows(sessionId);
+        // Agentmaster: a permanently-deleted session is ALSO auto-hidden from the Sessions browser —
+        // the SAME AppSettings.hiddenSessionIds set the row right-click "Hide from list" uses — so a
+        // deleted tab disappears from that list too instead of lingering as an on-disk row. It is NOT
+        // gone: the .jsonl on disk is kept (above), so the Sessions page's "Hidden" reveal filter
+        // (or the Settings cog's "Reset hidden sessions") brings it back, still resumable. Idempotent.
+        _AddSessionIdToHiddenList(sessionId);
+        _RenderSessionsTable(); // refresh the Sessions page if it happens to be open (guarded no-op otherwise)
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[delete] " + sessionId + L"\n");
     }
 

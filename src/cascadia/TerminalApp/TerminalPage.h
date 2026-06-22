@@ -547,6 +547,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeTitleBtn{ nullptr }; // 🏷 match session title (incl. an open session's live tab title); default ON
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessFuzzyBtn{ nullptr }; // (F) fuzzy
         winrt::Windows::UI::Xaml::Controls::CheckBox _sessOpenOnlyBtn{ nullptr }; // "Open" — filter the list to sessions live in any Agentmaster window (registry live)
+        winrt::Windows::UI::Xaml::Controls::CheckBox _sessHiddenBtn{ nullptr }; // "Hidden" — REVEAL sessions in AppSettings.hiddenSessionIds (manually-hidden + auto-hidden on delete); default OFF (they are filtered out)
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
         winrt::Windows::UI::Xaml::Controls::Button _sessRefreshBtn{ nullptr }; // ↻ — re-enumerate the window + load-or-refresh each sidecar index (pick up new/updated sessions)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sessRangePopup{ nullptr }; // hover: From/To range picker (answer Q4 — text boxes)
@@ -857,7 +858,9 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ResolveRestoreChainTail(const std::wstring& clickedId, const std::wstring& dirHint, const std::wstring& titleHint); // Agentmaster: follow a /clear+plan-restart continuation chain to its TAIL (TranscriptStore) so resume/restore land where the user LEFT OFF, not the earliest link they recognize by title; upserts a minimal archived-shaped record for an unmanaged tail. Returns clickedId when there is no newer continuation (or for a Codex record).
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends
-        void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": append to AppSettings.hiddenSessionIds (freshest-disk RMW) + drop it from the table (the transcript on disk is untouched)
+        bool _AddSessionIdToHiddenList(const std::wstring& sessionId); // Agentmaster: append an id to AppSettings.hiddenSessionIds (freshest-disk RMW + in-memory copy); idempotent, returns true if newly added. Shared by the row right-click hide AND the auto-hide-on-delete seam. NO UI side effects — the caller refreshes.
+        void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)
+        void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally
         void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
         // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
         // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.
