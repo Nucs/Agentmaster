@@ -294,7 +294,8 @@ namespace winrt::TerminalApp::implementation
     //           <full working dir> · <branch>
     //           ⏳ N queued · ⏸ M held · next: "…"
     //           Autopilot: <mode> · <sent>/<total> sent
-    //           last: "<assistant reply snippet>"
+    //           you: "<user's last message>"
+    //           agent: "<assistant's last reply>"
     //           you replied <ago> · started <ago>
     // Every body line is CONDITIONAL — emitted only when it carries signal — so a quiet running tab
     // stays short while a blocked / queued one expands. All data is on the live SessionInfo (free, no
@@ -444,10 +445,30 @@ namespace winrt::TerminalApp::implementation
             body.push_back(line);
         }
 
-        // last assistant reply — where the conversation left off (the recall cue; scanner-tailed, free)
+        // The conversation's two ends — the strongest recall cue. "you:" = the user's last message =
+        // the most-recently-SENT queue entry (the registry records EVERY message the session got: a
+        // Flight prompt we injected OR a Typed prompt the human entered straight into the terminal, both
+        // status Sent). "agent:" = the scanner-tailed last assistant text. Both free (no transcript read);
+        // each line conditional on having content.
+        {
+            const std::wstring* lastUser = nullptr;
+            int64_t lastUserAt = -1;
+            for (const auto& p : s.queue)
+            {
+                if (p.status == PromptStatus::Sent && p.sentAtUnixMs >= lastUserAt)
+                {
+                    lastUserAt = p.sentAtUnixMs;
+                    lastUser = p.text.empty() ? &p.label : &p.text; // pointer into s.queue (unmodified here)
+                }
+            }
+            if (lastUser && !lastUser->empty())
+            {
+                body.push_back(std::wstring{ L"you: \x201C" } + TtSnippet(*lastUser, 100) + L"\x201D");
+            }
+        }
         if (!s.lastAssistantText.empty())
         {
-            body.push_back(std::wstring{ L"last: \x201C" } + TtSnippet(s.lastAssistantText, 80) + L"\x201D");
+            body.push_back(std::wstring{ L"agent: \x201C" } + TtSnippet(s.lastAssistantText, 100) + L"\x201D");
         }
 
         // timing — when you last spoke + when it started
