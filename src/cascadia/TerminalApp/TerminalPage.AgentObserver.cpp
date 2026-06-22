@@ -297,6 +297,7 @@ namespace winrt::TerminalApp::implementation
     //           you: "<user's last message>"
     //           agent: "<assistant's last reply>"
     //           you replied <ago> · started <ago>
+    //           recap: <Claude Code's idle away_summary — FULL, no char limit; bottom block>
     // Every body line is CONDITIONAL — emitted only when it carries signal — so a quiet running tab
     // stays short while a blocked / queued one expands. All data is on the live SessionInfo (free, no
     // transcript read). Reverts to the default tooltip when the session is gone or archived (!live).
@@ -490,6 +491,17 @@ namespace winrt::TerminalApp::implementation
             {
                 body.push_back(t);
             }
+        }
+
+        // Recap (the bottom block) — Claude Code's idle "what we did / what's next" away_summary, which
+        // the scanner mirrors onto SessionInfo.recap off the transcript tail (free, no IO; already
+        // normalized — the "(disable recaps in /config)" hint stripped). Shown in FULL: NO char limit
+        // (unlike the one-line you:/agent: snippets), so it wraps across as many lines as it needs — the
+        // ConPTY paragraph is the one thing worth the room. A leading blank line sets it apart from the
+        // dense one-liners above; its own newlines (if any) are preserved (the body splits on '\n').
+        if (!s.recap.empty())
+        {
+            body.push_back(std::wstring{ L"\nrecap: " } + s.recap);
         }
 
         impl->SetAgentToolTip(winrt::hstring{ state },
