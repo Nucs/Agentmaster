@@ -1827,6 +1827,24 @@ namespace winrt::TerminalApp::implementation
             _boardSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleBoardSort(); });
             header.Children().Append(_boardSortBtn);
             _UpdateBoardSortButton();
+            // Agentmaster: a refresh button AFTER the sort toggle — the twin of the Explorer Tree's
+            // _treeRefreshBtn. Re-scans + redraws the ENTIRE tab: _Refresh() rebuilds the board, tree
+            // AND flight plan (recomputing the live "ago" timing), and _refreshHandler forces the
+            // Fleet Observer to re-survey NOW (re-enrich the registry + recompute the external census)
+            // instead of waiting for the next tick. Same handler as the tree button by design.
+            _boardRefreshBtn = Button{};
+            _boardRefreshBtn.FontSize(11);
+            _boardRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            _boardRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
+            AgentSetTip(_boardRefreshBtn, L"Refresh now \x2014 re-scan and redraw the whole tab (also re-detects external sessions).");
+            _boardRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _Refresh(); // immediate redraw from current data (board + tree + flight plan; recomputes the "ago" timing)
+                if (_refreshHandler)
+                {
+                    _refreshHandler(); // page: wake the observer + re-probe -> fresh data lands shortly
+                }
+            });
+            header.Children().Append(_boardRefreshBtn);
             // Agentmaster: a "Clear" button right next to LOCAL/GLOBAL — deselect the current card/row
             // (the Flight Plan then shows nothing-selected). Hidden while nothing is selected (kept in
             // sync by _RebuildBoard, like "Show all"); shown once a session/external is selected.
