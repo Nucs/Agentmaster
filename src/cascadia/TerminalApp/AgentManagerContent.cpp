@@ -575,6 +575,26 @@ namespace
         return b;
     }
 
+    // Agentmaster: emphasize the PRIMARY header toggle. The LOCAL/GLOBAL scope button is the one
+    // control in the board/tree header that changes WHAT you are looking at, so it should read
+    // louder than its siblings (sort, refresh, Clear, Show all — all secondary). A filled accent
+    // background + bold white text makes it the "primary" button among the default subtle-chrome
+    // ones. Applied once at construction; the label content still changes later via the
+    // _Update*ScopeButton setters without disturbing this styling. (WinUI's button template
+    // overrides a locally-set Background in its PointerOver/Pressed visual states, so the accent
+    // briefly reverts to the theme hover brush while the pointer is over it — but the bold weight
+    // is NOT part of any visual state, so the emphasis still reads on hover.)
+    void EmphasizeScopeButton(const Button& b)
+    {
+        if (!b)
+        {
+            return;
+        }
+        b.Background(Fill(0xFF, 0x35, 0x6A, 0xB8)); // a deliberate accent blue — distinct from the neutral card/button chrome
+        b.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
+        b.FontWeight(FontWeights::SemiBold());
+    }
+
     // Agentmaster: the dim per-session timing adornment "-created/active/-lastAgo" + an explanatory
     // tooltip. Returns a null TextBlock (falsy) when there is no creation time to show, so callers
     // can `if (auto t = TimingText(...)) row.Children().Append(t);`.
@@ -1807,6 +1827,7 @@ namespace winrt::TerminalApp::implementation
             _boardScopeBtn = Button{};
             _boardScopeBtn.FontSize(11);
             _boardScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            EmphasizeScopeButton(_boardScopeBtn); // Agentmaster: the primary header toggle — louder than sort/refresh/Clear
             AgentSetTip(_boardScopeBtn, L"Which sessions the board shows \x2014 LOCAL (this window) or GLOBAL (all windows). Shares one setting with the Explorer Tree's scope; remembered per window.");
             _boardScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _SetTreeScope(_treeScope == TreeScope::Local ? TreeScope::Global : TreeScope::Local);
@@ -1920,6 +1941,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn = Button{};
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                EmphasizeScopeButton(_treeScopeBtn); // Agentmaster: the primary header toggle — louder than sort/refresh
                 AgentSetTip(_treeScopeBtn, L"Which sessions the tree shows \x2014 LOCAL (this window), GLOBAL (all windows), or EXTERNAL (claudes running outside Agentmaster, observe-only). Right-click an EXTERNAL row to Adopt it, start a session, or bring its window forward.");
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
