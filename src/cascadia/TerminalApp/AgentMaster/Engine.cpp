@@ -14,6 +14,7 @@
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
+#include "SessionStore.h"
 
 #include <windows.h>
 
@@ -85,6 +86,22 @@ namespace Agentmaster
                 });
             }
 
+            // Per-session DURABLE store (SessionStore): mirror the authoritative TITLE — the ONE
+            // value Explorer/tab/persistence share (Rule #11) — to <profile>/session-store/<sid>.json
+            // on every change, so a title known in ANY window persists across windows and OUTLIVES
+            // the live session. The Sessions browser reads it (O(1) by id) for closed/historical rows,
+            // and it is the generalized layer for any future per-session datum. SPARSE by design:
+            // ObserveClaude never sets a title (Rule #13), so only sessions we actually launch / adopt
+            // / rename / restore get a file; the write is deduped (skipped when the stored title is
+            // already equal), so a steady-state enrichment re-notify costs one small read, not a write.
+            // Loading the fleet at startup (each Upsert notifies) backfills the store for free.
+            e->registry->AddObserver([](const SessionInfo& s, HookEvent) {
+                if (!s.id.empty() && !s.title.empty())
+                {
+                    SetStoredSessionTitle(s.id, s.title);
+                }
+            });
+
             // Interval reconciler (M11; the PULL half — the bridge is PUSH). A low-priority
             // worker tails each live session's transcript to recover what a dropped hook missed
             // (a missed Stop strands a session in Running; assistant text is hook-invisible) and
@@ -93,11 +110,11 @@ namespace Agentmaster
             // live; the observer below Wake()s it the instant a session goes live. The liveness
             // CHECK is WinRT (walks tabs), so it is delegated to per-window probes the scanner ticks.
             e->scanner = std::make_shared<SessionScanner>(e->registry);
-            // Cache-aware Waiting decay: seed the WaitingForInput -> Idle window from settings.json
-            // BEFORE the worker starts (the Settings cog re-pushes it on save). Default 5 minutes ==
-            // Claude's server-side prompt-cache lifetime; 0 disables. (A second tiny LoadAppSettings
-            // read happens below for the hook files — both are one small-file read at process init.)
-            e->scanner->SetWaitingDecayMinutes(LoadAppSettings().waitingDecayMinutes);
+            // Waiting-for-you "unread" model: seed the WaitingForInput -> Idle timeout from settings.json
+            // BEFORE the worker starts (the Settings cog re-pushes it on save). Default 60 minutes (1h);
+            // 0 disables (the cog's "Never"). (A second tiny LoadAppSettings read happens below for the
+            // hook files — both are one small-file read at process init.)
+            e->scanner->SetWaitingDecayMinutes(LoadAppSettings().waitingForYouTimeoutMinutes);
             e->scanner->Start();
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
             // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
@@ -216,6 +233,26 @@ namespace Agentmaster
         return !SharedEngine().claudeExePath.empty();
     }
 
+    bool EnsureClaudeAvailable()
+    {
+        auto& e = SharedEngine();
+        if (!e.claudeExePath.empty())
+        {
+            return true; // already detected — cheap cache hit, no re-scan
+        }
+        // Cache is empty ("Claude not detected"). The user may have just run `claude install` (or put a
+        // claude.exe on PATH) while the app stayed open, so re-resolve ONCE before we conclude it's
+        // missing — honoring the Settings override exactly like RefreshClaudeExe. If it now resolves,
+        // the caller proceeds and the install prompt never shows; the gate has self-healed. UI-thread-
+        // called (every launch handler is), so this shares RefreshClaudeExe's single-writer contract.
+        e.claudeExePath = ResolveClaudeExe(LoadAppSettings().claudeExePath);
+        if (!e.claudeExePath.empty())
+        {
+            AppendStateLog(L"hooks.log", L"[engine] claude.exe found on re-check: " + e.claudeExePath + L"\n");
+        }
+        return !e.claudeExePath.empty();
+    }
+
     std::wstring RefreshClaudeExe(std::wstring_view overridePath)
     {
         // Re-resolve when the Settings override changes, so a Browse/override takes effect without a
@@ -317,6 +354,9 @@ namespace Agentmaster
 
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.erase(windowId);
+        // Agentmaster (discard Manager-only windows): clear any Manager-only self-close reservation this
+        // window held, so the set never accumulates stale ids across the process lifetime.
+        e.closingWindowIds.erase(windowId);
         // Skip-empty: the LAST window's teardown must NOT clear the manifest, or "open at exit" would
         // always be empty. Leaving the prior snapshot means the next run reopens what was open when the
         // app exited — for a one-by-one close that is the final window; a hard shutdown that kills the
@@ -365,6 +405,34 @@ namespace Agentmaster
         auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.windowMutex);
         return { e.liveWindowIds.begin(), e.liveWindowIds.end() };
+    }
+
+    bool ReserveManagerOnlyClose(const std::wstring& windowId)
+    {
+        if (windowId.empty())
+        {
+            return false;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.windowMutex);
+        // Effective remaining-live = live windows MINUS those already reserved to self-close this tick.
+        // Reserve THIS window's close only while >1 would remain — so concurrent Manager-only windows on
+        // different threads can never all close (each reserves under the lock, and the one that finds
+        // remaining==1 stays). A window that reserved then closes clears its id in UnregisterLiveWindow.
+        size_t remaining = 0;
+        for (const auto& id : e.liveWindowIds)
+        {
+            if (e.closingWindowIds.find(id) == e.closingWindowIds.end())
+            {
+                ++remaining;
+            }
+        }
+        if (remaining > 1)
+        {
+            e.closingWindowIds.insert(windowId);
+            return true;
+        }
+        return false;
     }
 
     uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)

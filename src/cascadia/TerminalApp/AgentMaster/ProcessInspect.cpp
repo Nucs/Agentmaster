@@ -2637,6 +2637,19 @@ namespace Agentmaster
                 }
             }
 
+            // Agentmaster: the Claude Code idle RECAP (a {"type":"system","subtype":"away_summary"}
+            // line written when the session sits idle >5 min — a one-paragraph "what we did / what's
+            // next"). The LAST one wins (newer recaps supersede); the "(disable recaps in /config)" UI
+            // hint is stripped (NormalizeRecapText). Empty content is ignored so a malformed line never
+            // clears a good recap.
+            if (type == L"system" && obj.StrAt(L"subtype") == L"away_summary")
+            {
+                if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
+                {
+                    out.awaySummary = std::move(r);
+                }
+            }
+
             if (type == L"assistant")
             {
                 const auto* msg = obj.Find(L"message");
@@ -3773,7 +3786,9 @@ namespace Agentmaster
         // Escape a message to ONE line (newlines/tabs -> \n / \t, like session-end.js) + truncate.
         // This detail box is ALWAYS one-line, so it always de-noises embedded tables first (the
         // wrap-off behaviour the overlay panel applies conditionally) — StripSummaryTableRules.
-        std::wstring SummaryEscapeMsg(const std::wstring& mIn)
+        // `maxChars` caps the escaped result (default 240 for the numbered messages); pass 0 for NO
+        // cap — the recap is rendered in FULL.
+        std::wstring SummaryEscapeMsg(const std::wstring& mIn, size_t maxChars = 240)
         {
             const std::wstring m = StripSummaryTableRules(mIn);
             std::wstring esc;
@@ -3788,9 +3803,9 @@ namespace Agentmaster
                 else
                     esc += ch;
             }
-            if (esc.size() > 240)
+            if (maxChars != 0 && esc.size() > maxChars)
             {
-                esc = esc.substr(0, 237) + L"...";
+                esc = esc.substr(0, maxChars - 3) + L"...";
             }
             return esc;
         }
@@ -4100,6 +4115,14 @@ namespace Agentmaster
         if (a.tasksCompleted > 0 || a.tasksPending > 0)
         {
             line(L"Tasks:  " + std::to_wstring(a.tasksCompleted) + L" done / " + std::to_wstring(a.tasksPending) + L" pending");
+        }
+        // Agentmaster: the Claude Code idle RECAP — its own section directly above the Messages list (so
+        // it reads as the "where we are / what's next" header over the prompt history). Shown in BOTH the
+        // displayed panel (full=false) and the copyable Summary (full=true).
+        if (!a.awaySummary.empty())
+        {
+            sep();
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, /*maxChars*/ 0)); // label INLINE; the recap is shown in FULL (no length cap, unlike the numbered messages)
         }
         if (!a.userMsgs.empty())
         {

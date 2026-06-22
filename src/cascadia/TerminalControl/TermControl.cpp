@@ -2798,6 +2798,61 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return _core.ResolveConversationPromptRows(messages);
     }
 
+    // Agentmaster (alt+up / alt+down prompt nav): scroll to the nearest SENT prompt that is currently
+    // OFF-SCREEN in the given direction and CENTER it. Reuses the read-only batch resolve (a buffer row
+    // per prompt; the order-preserving greedy handles duplicate texts) plus the live viewport, so the
+    // coordinate space is the same one JumpToConversationPrompt centers in (absolute buffer rows ==
+    // scrollbar values). The viewport currently spans [viewTop, viewTop + viewH - 1]; "off-screen" means
+    // strictly outside it. Returns the 0-based MESSAGE INDEX navigated to (so the caller can highlight that
+    // row in the summary panel), or -1 if there is no off-screen prompt that way (=> the caller plays a
+    // boundary sound). UI thread.
+    int32_t TermControl::ScrollToAdjacentConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, bool up)
+    {
+        const auto rows = _core.ResolveConversationPromptRows(messages);
+        if (!rows || rows.Size() == 0)
+        {
+            return -1;
+        }
+        const auto viewTop = _core.ScrollOffset();
+        const auto viewH = _core.ViewHeight();
+        const auto viewBottom = viewTop + viewH - 1;
+        int best = -1; // the chosen prompt's buffer row
+        int bestIdx = -1; // its 0-based message index (returned for the summary-panel highlight)
+        for (uint32_t k = 0; k < rows.Size(); ++k)
+        {
+            const auto r = rows.GetAt(k);
+            if (r < 0)
+            {
+                continue; // prompt not resolvable / not on screen
+            }
+            if (up)
+            {
+                // nearest prompt strictly ABOVE the viewport == the largest such row
+                if (r < viewTop && r > best)
+                {
+                    best = r;
+                    bestIdx = static_cast<int>(k);
+                }
+            }
+            else
+            {
+                // nearest prompt strictly BELOW the viewport == the smallest such row
+                if (r > viewBottom && (best < 0 || r < best))
+                {
+                    best = r;
+                    bestIdx = static_cast<int>(k);
+                }
+            }
+        }
+        if (best < 0)
+        {
+            return -1;
+        }
+        const auto targetTop = (std::max)(0, best - viewH / 2);
+        ScrollBar().Value(static_cast<double>(targetTop));
+        return bestIdx;
+    }
+
     int TermControl::ScrollOffset() const
     {
         return _core.ScrollOffset();

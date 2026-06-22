@@ -35,7 +35,9 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   that makes the tab ⇄ Agentmaster link legible *while you work inside the session*. A **linked**
   Claude session shows the full badge — status (color-matched to the Triage Board) + the Fleet
   Observer's `model · effort · kind`, Autopilot mode (**Manual/Semi/Full**), queued count, and link
-  state **⛓ linked**, plus a dim **second row** `<workdir folder>/<branch>`. Any **other** tab shows a
+  state **⛓ linked**, plus a dim **second row** `<workdir folder>/<branch>` and a dim **third row**
+  `⏳ <next queued prompt>` (the first `Pending` prompt's first line, ≤300 chars + `...`; shown only when
+  something is queued, mode-agnostic). Any **other** tab shows a
   dim **observe badge** `○ <kind> · unlinked` (kind =
   `pwsh` / `cmd` / `claude` *started-but-not-yet-prompted* (§11d) / `codex`) that **flips in place**
   as the tab's activity changes — a `pwsh` tab → `claude` the moment you run it → the full linked
@@ -321,8 +323,31 @@ new id minted by us so hooks/registry correlate from the first event; offered on
 hazard doesn't apply; transcript-gated → fresh; titled via `DeriveForkTitle` (`"<title> (fork)"`,
 then `(fork 2)`/`(fork 3)`/… on a fork-of-a-fork, never stacked `(fork) (fork)`), logged
 `[sessions-page->fork]`), **Open New Session Here**, and a right-click **Hide from list**
-(`_HideSessionFromList` → `AppSettings.hiddenSessionIds`, persisted + filtered out of the browser;
-cleared from the cog's **Reset hidden sessions**); double-click = resume. **Presence
+(`_HideSessionFromList` → `_AddSessionIdToHiddenList` → `AppSettings.hiddenSessionIds`, persisted +
+filtered out of the browser; cleared from the cog's **Reset hidden sessions**); double-click = resume.
+The hidden set is also **auto-populated on Delete permanently** (the `_RemoveSessionRecord` seam calls
+`_AddSessionIdToHiddenList`, so a deleted tab disappears from the Sessions list too, not just the
+Board/Archive — its `.jsonl` is still kept on disk). A search-bar **"Hidden" checkbox**
+(`_sessHiddenBtn`, default OFF, beside "Open") **reveals** the hidden set — shown dimmed, with the row
+menu's **"Unhide"** (`_UnhideSessionFromList`) replacing "Hide from list" — so a deleted/hidden session
+is findable + resumable without clearing the whole set from the cog.
+**Known gaps in this auto-hide change (follow-ups, not yet done; the change is lib-UNCOMPILED + not
+deployed):** (1) **stale delete-path copy** — ≥8 user-facing strings still promise a deleted session
+"still appears in Sessions" (the tab-close + batch-close confirms `TerminalPage.AgentSessions.cpp` /
+`TabManagement.cpp`, the board/tree Delete tooltips + confirm `AgentManagerContent.cpp`, the Archive
+page's row/window/bulk delete confirms `TerminalPage.AgentArchivePage.cpp`), which is now **misleading**
+— it appears only under the "Hidden" filter; these need a "find it again under the Sessions ‘Hidden’
+filter" rewrite, and the confirms want a breadcrumb to that filter (today a delete is silently invisible
+in Board + Archive + Sessions). (2) **`hiddenSessionIds` conflates two intents under one blunt reset** —
+manual "Hide from list" and auto-hide-on-delete share one set, so the cog's **Reset hidden sessions**
+recovers a deleted session AND un-hides every deliberately-hidden one (and vice-versa); the set also
+grows unbounded (a never-prompted delete adds a GUID that maps to no row), and a revealed deleted row is
+visually indistinguishable from a manually-hidden one. (3) **cross-window staleness** — the auto-hide
+updates THIS window's `_appSettings.hiddenSessionIds` + disk; a Sessions page open in ANOTHER window
+keeps its stale in-memory copy until it reloads (no registry-observer live-refresh like the Archive
+page has). (4) This reverses a deliberate "deleted ⇒ still discoverable/resumable in Sessions" safety
+net (Rule #6) by default — intended (the user asked for it), but worth revisiting whether auto-hide
+should be the default or gated on intent. **Presence
 integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
 owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
 process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + the transient
@@ -1007,8 +1032,11 @@ What works, by area:
   **Archive** flips `live=false` + clears the injector + persists + closes the tab, KEEPING the record so
   it lists under Archived (restorable); **Delete permanently** (`_RemoveSessionRecord`) DROPS the registry
   record (+ strips it from saved window records) but **keeps the conversation `.jsonl` on disk** — a
-  deleted session leaves the Board/Archive yet still appears in the **Sessions** browser, resumable from
-  there. The Claude transcript on disk is **never** deleted by either path. Closing a **batch** that holds managed
+  deleted session leaves the Board/Archive AND is **auto-hidden from the Sessions browser**
+  (`_RemoveSessionRecord` calls `_AddSessionIdToHiddenList`, the same `AppSettings.hiddenSessionIds` set the
+  row right-click "Hide from list" uses), so it disappears from that list too by default — but it is **not
+  gone**: its `.jsonl` is kept, so the Sessions page's **"Hidden" reveal filter** (or the cog's **Reset
+  hidden sessions**) brings it back, still resumable. The Claude transcript on disk is **never** deleted by either path. Closing a **batch** that holds managed
   sessions (a window close, or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
   train of per-tab confirms — **🗑 Delete All · Archive All · Cancel All** (Archive All is the safe default —
   each session stays restorable with its Flight Plan; Delete All record-only-drops them, keeping the
@@ -1101,6 +1129,20 @@ What works, by area:
   refs, in order — so closing and reopening a window brings the whole workspace back, not just
   geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
   "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
+  **A window that ends up holding ONLY the pinned Manager tab is never kept around or restored.** When a
+  window's last terminal tab is closed / torn out (or it reopens from an empty/legacy record, or its
+  sessions all fail to re-home), a **debounced** check (`_CloseWindowIfManagerOnly`, fed by
+  `_tabs.VectorChanged` + the end of startup so the SETTLED tab set is evaluated — an async shell re-home
+  is never momentarily mistaken for empty) **self-closes it UNLESS it is the last Agentmaster window**;
+  the last window stays open (the app needs one) but **discards its record** so the app never reopens a
+  content-less Manager-only window (it falls back to a fresh default window). The not-last-vs-last
+  decision is race-safe across windows on different threads (`Engine::ReserveManagerOnlyClose` reserves
+  the close under `windowMutex`, counting live windows minus already-reserved ones, so two windows
+  emptying at once can never both close and quit the app). "Not saved / not restorable" is enforced by
+  `_FlushWindowRecord` **deleting** the on-disk record when the window is Manager-only + the discard latch
+  is set (the latch's ONLY writer is the post-startup check — never during restore — so an only-shells
+  reopen that is briefly tab-empty is safe), reinforcing the existing `UnregisterLiveWindow` empty-record
+  deletion + `RecoverableWindows` empty-record filter.
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Fork · Reopen · `⚙` ·
   Pause Autopilot · Archived · **Sessions** — the cog sits *before* Pause Autopilot / Archived; the
   Sessions browser button comes right after Archived) opens a
@@ -1116,8 +1158,15 @@ What works, by area:
   (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
   (tab X / Manager Archive / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
-  commit key — click-away-or-Shift+Enter vs Enter), `waitingDecayMinutes` (how long a `WaitingForInput`
-  session waits before decaying to `Idle`), and `recentDirsLimit` (the path-picker MRU size, default 10).
+  commit key — click-away-or-Shift+Enter vs Enter), `waitingForYouTimeoutMinutes` (the **Waiting-for-you "unread"
+  timeout** — a `WaitingForInput` card demotes to `Idle` only once this timeout elapses **AND** the user
+  has **read** it [visited its tab since the last turn]; an unread or manually **Mark-Unread**-ed card keeps
+  waiting past the timeout — `ShouldDecayWaitingToIdle`; cog control = a **1m–3d slider + a "Never" toggle**,
+  default **60 = 1h**. **Renamed from the legacy `waitingDecayMinutes`** so a pre-existing settings.json's
+  value [tuned for the old 5-min cache window] is **invalidated** → existing installs fall back to the 1h
+  default; the old key is ignored + dropped on next save), `serverCacheMinutes` (Claude's server-side
+  prompt-cache lifetime, default **5**, drives ONLY the Triage-Board card's **⚡ "still cached"** hint shown to
+  the right of `⚙ sent/total`), and `recentDirsLimit` (the path-picker MRU size, default 10).
   A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
   deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored
@@ -1169,6 +1218,15 @@ worktree/submodule `.git` FILE + a detached HEAD → short SHA), distinct from a
 first-seen snapshot; and the observer's `ObservedClaude.gitBranch` (fed into `SessionRegistry::ObserveClaude`,
 which does `assign(s.branch, o.gitBranch)`) is now also a **live writer** for `SessionInfo.branch` (the
 round-3 audit's "no live writer" gap), beside the off-thread transcript backfill.
+The linked badge also carries a **third (dim) row** (`AgentTabOverlay::_promptLine`) — a preview of the
+**next queued prompt** waiting to be sent: `⏳ <first line of the first `Pending` prompt, ≤300 chars>`
+(a trailing `...` when that first line surpasses 300 chars OR there's more content behind it, via the
+anon-namespace `FirstLinePreview`). It is the per-tab echo of row 1's `⏳N` count — the count is HOW MANY,
+this is WHAT'S NEXT (the same item `Scheduler::DecideAdvance` fires next) — so it's **mode-agnostic** (shown
+whenever something is `Pending`, regardless of Autopilot). It **wraps** (so the full ≤300-char line can
+show) but is `MaxWidth`-capped + right-anchored so a long prompt can't balloon the HUD; the hourglass run is
+goldenrod (matching the row-1 `⏳N`), a hover tooltip reveals the FULL prompt, and it's **hidden** when
+nothing is queued and on observe badges (built only via `_Refresh`, a linked session).
 The badge also carries an **always-shown action group on row 2** (left of the dir/branch label) — a
 **folder** button (Open Path: the session's working dir via `explorer.exe`, off-thread) + a **copy** menu + a **pencil**. The copy menu
 yields `Session Id` · `Copy Path` (working dir) · `Copy Branch Name` · `Claude Launch CLI` · `Codex
@@ -1932,8 +1990,11 @@ build **binlog uploads as an artifact** to diagnose the first run.
    correlate) **only when Claude has a transcript for that id**, else a fresh session (new id,
    same dir + queue, stale archived record dropped). Queues reload with statuses intact. Closing
    a tab confirms **Archive vs Delete**: Archive keeps the record (`live=false`, restorable); **Delete
-   permanently** drops the registry record but **keeps the conversation `.jsonl` on disk** (it still
-   appears in the Sessions browser, resumable from there). The Claude transcript on disk is never
+   permanently** drops the registry record but **keeps the conversation `.jsonl` on disk** AND
+   **auto-hides it from the Sessions browser** (`_RemoveSessionRecord` → `_AddSessionIdToHiddenList`, the
+   same `hiddenSessionIds` set as the row's "Hide from list"), so a deleted session disappears from that
+   list too — recoverable via the Sessions page's **"Hidden" reveal filter** (Unhide) or the cog's Reset.
+   The Claude transcript on disk is never
    deleted by either path. Never decide resume from the
    persisted `SessionState` (it's the live post-restore state) — see Gotchas.
 7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).
@@ -2067,3 +2128,23 @@ build **binlog uploads as an artifact** to diagnose the first run.
 - Keep the diff against upstream minimal where practical (additive files, small touches at
   integration points) so rebasing onto `microsoft/terminal` stays cheap.
 - Build artifacts (`bin/`, `packages/`, `Generated Files/`) are gitignored — never commit them.
+- **The Agent Manager UI is ALWAYS dark, independent of the Windows / Windows Terminal theme.**
+  Every Agentmaster surface root forces `RequestedTheme(ElementTheme::Dark)` — the Manager tab
+  `_root` (`AgentManagerContent`), the full-window Archive / Sessions page hosts, and the settings /
+  claude-missing / path-picker overlays — and paints an **explicit dark fill** (e.g. `_root` uses
+  `#2e2e2e`, NOT an app-theme-resolved brush: `Application.Resources().Lookup("UnfocusedBorderBrush")`
+  resolves against the *app* theme and returns light `#e8e8e8` in light mode, which used to bleed
+  through the Manager pane's widget gaps). Confirm dialogs that **self-host** (`AgentManagerContent`,
+  via `ShowAsync`) follow `_root.ActualTheme()` (Dark); dialogs shown via WT's **shared presenter**
+  (`TerminalWindow::ShowDialog`, which force-themes *every* dialog to the WT setting up its whole
+  ancestor chain) opt into dark by tagging themselves **`agentmaster-dark`** (the Archive/Sessions
+  page + batch-close confirms do). **Popups** that render in the popup root inherit Dark from their
+  now-dark anchor: `MenuFlyout` context menus (`_MakeSessionMenu` / `_MakeExternalTreeMenu` /
+  `_MakePromptMenu` / the Copy submenu) and `ComboBox` dropdowns follow their **target element's**
+  theme — the SAME mechanism WT uses for all its own flyouts (nothing in the tree sets
+  `MenuFlyoutPresenterStyle`, and WT's per-app theming proves it), so menus/combos under `_root`
+  need no per-flyout theming — and the path-picker `Popup` is explicitly Dark. The one exception is
+  **`ToolTip`s**: `ToolTipService` theme inheritance is unreliable under XAML Islands (the reason
+  `AgentTipHelpers` exists), so `AgentSetTip` pins every tip `RequestedTheme(Dark)`. Don't
+  reintroduce an app-theme-dependent brush/lookup on these surfaces, tag any new presenter-shown
+  Agentmaster dialog `agentmaster-dark`, and keep new tooltips going through `AgentSetTip`.

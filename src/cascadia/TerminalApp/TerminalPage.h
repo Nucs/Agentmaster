@@ -342,6 +342,16 @@ namespace winrt::TerminalApp::implementation
         // for yet (never prompted). Keyed by WT_SESSION (there is no sessionId). Replaced by the real
         // _claudeOverlays entry once the session resolves; pruned when the tab leaves this window's roster.
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _pendingOverlays;
+        // Agentmaster (alt+up/down prompt nav): per-session cache of the transcript's sent prompts + the
+        // (path, mtime) they were read at, so stepping between off-screen prompts re-reads the transcript
+        // only when it GREW. Populated off-thread by _ScrollAdjacentPrompt; touched UI-thread only.
+        struct PromptNavCache
+        {
+            std::wstring path;
+            int64_t mtime{ 0 };
+            std::vector<std::wstring> prompts;
+        };
+        std::unordered_map<std::wstring, PromptNavCache> _promptNavCache;
 
         // Agentmaster (tab status-dot RED FLASH): when a hosted session goes from Running to a "now it's
         // on you / at rest" state — Idle / WaitingForInput / NeedsApproval (NOT Done or Error) — while
@@ -374,6 +384,17 @@ namespace winrt::TerminalApp::implementation
         std::wstring _windowId;
         ::Agentmaster::WindowRecord _windowRecord{};
         std::shared_ptr<ThrottledFunc<>> _saveWindowRecordThrottled{ nullptr };
+        // Agentmaster (discard Manager-only windows): a debounced check that self-closes (or, for the
+        // last window, simply un-persists) a window that has ended up holding ONLY the pinned Manager
+        // tab. Debounced (not immediate) so a window mid-restore — transiently Manager-only while its
+        // shell tabs are still being re-homed async — is evaluated only once the tab set SETTLES, and so
+        // a burst of tab churn collapses to one decision. _managerOnlyDiscard latches "this window is
+        // Manager-only via settle/user-action, so its record must not persist": set by
+        // _CloseWindowIfManagerOnly, honored by _FlushWindowRecord (delete the record instead of saving),
+        // cleared the moment a real tab returns. NEVER set during restore (the flag's only writer is the
+        // post-startup check), so an only-shells reopen is never mistaken for a discard.
+        std::shared_ptr<ThrottledFunc<>> _managerOnlyCheckThrottled{ nullptr };
+        bool _managerOnlyDiscard{ false };
         // True when _windowRecord was CLAIMED from disk (a real prior layout) vs freshly minted.
         // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
         // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
@@ -523,8 +544,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeAgentBtn{ nullptr }; // 🤖 search agent + tools
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeDirsBtn{ nullptr }; // 📁 dirs accessed
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeFilesBtn{ nullptr }; // 📄 files accessed
+        winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessScopeTitleBtn{ nullptr }; // 🏷 match session title (incl. an open session's live tab title); default ON
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessFuzzyBtn{ nullptr }; // (F) fuzzy
         winrt::Windows::UI::Xaml::Controls::CheckBox _sessOpenOnlyBtn{ nullptr }; // "Open" — filter the list to sessions live in any Agentmaster window (registry live)
+        winrt::Windows::UI::Xaml::Controls::CheckBox _sessHiddenBtn{ nullptr }; // "Hidden" — REVEAL sessions in AppSettings.hiddenSessionIds (manually-hidden + auto-hidden on delete); default OFF (they are filtered out)
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
         winrt::Windows::UI::Xaml::Controls::Button _sessRefreshBtn{ nullptr }; // ↻ — re-enumerate the window + load-or-refresh each sidecar index (pick up new/updated sessions)
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sessRangePopup{ nullptr }; // hover: From/To range picker (answer Q4 — text boxes)
@@ -564,6 +587,10 @@ namespace winrt::TerminalApp::implementation
         // open" path. _InitializeTab skips the SelectedItem switch; _ResumeSessionFromDisk /
         // _ForkSessionFromDisk skip _HideSessionsPage. Set around ONE open, reset right after.
         bool _openClaudeTabInBackground{ false };
+        // Agentmaster (native-exe-only policy): true while the page-level "Claude not found" dialog
+        // (_PromptClaudeMissing) is up, so a burst of not-found gates — e.g. a bulk Restore looping over
+        // checked Claude sessions — collapses to a SINGLE dialog instead of stacking one per session.
+        bool _claudeMissingPromptShowing{ false };
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
@@ -670,6 +697,10 @@ namespace winrt::TerminalApp::implementation
         int _JumpToPromptInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs, int index); // Agentmaster (SUMMARY_JUMP.md): center the session tab's view on the i-th prompt; returns the row or -1
         std::vector<int> _JumpEligibilityInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs); // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 == not on screen) for icon dimming
         winrt::Microsoft::Terminal::Control::TermControl _ControlForSession(const std::wstring& sessionId); // Agentmaster (SUMMARY_JUMP.md): the live control hosting a session's tab, or null
+        std::wstring _FocusedPromptNavSession(); // Agentmaster (alt+up/down): the focused tab's managed CLAUDE sessionId, or empty (=> the handler falls back to MoveFocus)
+        winrt::fire_and_forget _ScrollAdjacentPrompt(std::wstring sessionId, bool up); // Agentmaster (alt+up/down): center the view on the nearest OFF-SCREEN sent prompt up/down; mtime-cached transcript read; boundary sound at the ends
+        void _NavigateAdjacentPrompt(const std::wstring& sessionId, const std::vector<std::wstring>& prompts, bool up); // Agentmaster (alt+up/down): the UI-thread half of _ScrollAdjacentPrompt (resolve control + scroll, else sound)
+        void _PlayPromptNavLimitSound(); // Agentmaster (alt+up/down): boundary feedback when there is no further off-screen prompt
         void _ToggleSummaryPanel(); // Agentmaster (TAB_OVERLAY.md): pencil button -> flip the GLOBAL AppSettings.showSummaryPanel (RMW settings.json) + apply live to every linked overlay in this window
         void _ToggleSummaryWrap(); // Agentmaster (TAB_OVERLAY.md): wrap-line toggle (panel times bar) -> flip the GLOBAL AppSettings.summaryPanelWrapNewlines (RMW settings.json) + apply live to every linked overlay in this window
         void _ToggleSummaryTruncate(); // Agentmaster (TAB_OVERLAY.md): truncate toggle (panel times bar) -> flip the GLOBAL AppSettings.summaryPanelTruncate (RMW settings.json) + apply live to every linked overlay in this window
@@ -677,6 +708,7 @@ namespace winrt::TerminalApp::implementation
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
+        void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + push the rich session hover tooltip (state·age·why / title / kind·model·perm / dir·branch / queue+next / autopilot / last reply / timing) onto a managed session's tab; clears it when the session is gone/archived; UI thread
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
         // RED RING around that tab's status dot (a separate ellipse behind the dot, peeking out around
@@ -692,8 +724,9 @@ namespace winrt::TerminalApp::implementation
         void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + show/hide every flashing tab's red RING together (the synchronized blink)
         void _ApplyAgentFlashRingForSession(const std::wstring& sessionId); // show/hide one flashing session's red ring at the CURRENT shared phase (used when it joins mid-flash)
         void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's RED FLASH RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible; the dot's own black stroke + fill stay constant
-        void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes
-        void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive)
+        void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes; ALSO sets the engine manualUnread + promotes Idle/Done -> WaitingForInput (board state, every window)
+        void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive); ALSO clears the engine manualUnread
+        void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab)
         void _SetTabSelectionPill(const TerminalApp::Tab& tab, bool on); // Agentmaster (Linked Lenses): show/hide the "selected/active" accent pill behind a tab's header via Tab.TabStatus(); UI thread
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
@@ -701,6 +734,7 @@ namespace winrt::TerminalApp::implementation
         void _ArchiveClaudeSession(winrt::hstring sessionId); // Agentmaster: archive (shut down + keep restorable) via the tab-close seam
         void _RestoreArchivedSession(winrt::hstring sessionId); // Agentmaster: re-launch (claude --resume / codex resume) an archived session — kind-aware
         void _AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork); // Agentmaster (Fleet Observer): bring an EXTERNAL claude's conversation under management (fork==true => --fork-session into a NEW transcript [safe on a live external]; else --resume the same; fresh if none)
+        winrt::fire_and_forget _PromptClaudeMissing(); // Agentmaster (native-exe-only policy): the page-level "Claude Code (native) not found" notice — shown by the launch choke points (Restore/Resume/Fork/Adopt/Spawn) when EnsureClaudeAvailable() is false and the Manager tab's rich modal can't render (full-window page / tab / CLI). Idempotent via _claudeMissingPromptShowing (collapses a bulk loop to one dialog); no Re-check by design — the next attempt re-resolves.
         // Agentmaster (Codex managed-session support): launch / restore a codex.exe on a ConPTY as a
         // MANAGED tab, on the same path as Claude. Codex can't pin a session id (no --session-id), so
         // OUR minted id is the durable handle and the real rollout uuid (SessionInfo.codexSessionId,
@@ -756,6 +790,17 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::WindowRecord _CaptureWindowRecord();
         void _ScheduleWindowRecordSave();
         void _FlushWindowRecord();
+        // Agentmaster (discard Manager-only windows): a window that ends up holding nothing but the
+        // pinned Manager tab must not persist as a restorable window, and unless it is the LAST
+        // Agentmaster window it self-closes (every window has a Manager tab, so an empty one is noise).
+        // _IsManagerOnlyWindow is the predicate; _CloseWindowIfManagerOnly is the debounced action
+        // (re-validates, then ReserveManagerOnlyClose -> silent close, or keep-but-discard for the last
+        // window); _ScheduleManagerOnlyCheck runs the debounced check (fed by _tabs.VectorChanged + the
+        // end of startup, so a window settling into Manager-only — by a tab close, a tear-out, or an
+        // empty/failed restore — is caught once it settles).
+        bool _IsManagerOnlyWindow() const;
+        void _CloseWindowIfManagerOnly();
+        void _ScheduleManagerOnlyCheck();
         // Agentmaster (updater; Updater.h): quit the app for an in-app update — the post-confirm half
         // of RequestQuit (flush this window's record, then raise QuitRequested) WITHOUT RequestQuit's
         // "close all tabs?" confirmation. The user already confirmed in the update dialog, and the
@@ -813,7 +858,9 @@ namespace winrt::TerminalApp::implementation
         std::wstring _ResolveRestoreChainTail(const std::wstring& clickedId, const std::wstring& dirHint, const std::wstring& titleHint); // Agentmaster: follow a /clear+plan-restart continuation chain to its TAIL (TranscriptStore) so resume/restore land where the user LEFT OFF, not the earliest link they recognize by title; upserts a minimal archived-shaped record for an unmanaged tail. Returns clickedId when there is no newer continuation (or for a Codex record).
         void _UpdateSessionsSelectionHighlight(); // recolor row highlights for _sessionsSelectedId WITHOUT a rebuild (row-tap + keyboard nav)
         void _MoveSessionsSelection(int delta); // Up/Down keyboard nav over _sessionsVisibleOrder: none selected => Down=first / Up=last; wraps (rotates) at the ends
-        void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": append to AppSettings.hiddenSessionIds (freshest-disk RMW) + drop it from the table (the transcript on disk is untouched)
+        bool _AddSessionIdToHiddenList(const std::wstring& sessionId); // Agentmaster: append an id to AppSettings.hiddenSessionIds (freshest-disk RMW + in-memory copy); idempotent, returns true if newly added. Shared by the row right-click hide AND the auto-hide-on-delete seam. NO UI side effects — the caller refreshes.
+        void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)
+        void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally
         void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
         // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
         // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.

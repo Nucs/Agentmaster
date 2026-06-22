@@ -10,6 +10,8 @@
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
 
+#include <chrono> // Agentmaster (tab tooltip): the fast-open timer interval
+
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Core;
@@ -230,6 +232,14 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void Tab::_UpdateToolTip()
     {
+        // Agentmaster (tab tooltip): when TerminalPage has pushed a rich session tooltip, render that
+        // instead of the default title + key-chord (ClearAgentToolTip reverts to this default path).
+        if (_agentToolTipActive)
+        {
+            _UpdateAgentToolTip();
+            return;
+        }
+
         auto titleRun = WUX::Documents::Run();
         titleRun.Text(_CreateToolTipTitle());
 
@@ -250,6 +260,236 @@ namespace winrt::TerminalApp::implementation
         WUX::Controls::ToolTip toolTip{};
         toolTip.Content(textBlock);
         WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), toolTip);
+    }
+
+    // Agentmaster (tab tooltip): accept a rich, session-aware tooltip from TerminalPage. Stores the
+    // pieces + a content signature; an identical push is a no-op (so the per-change observer reaction,
+    // the bind tail, and the slow per-tick sweep can all re-assert it without churning XAML). Building
+    // the actual ToolTip element is deferred to _UpdateToolTip (a stored XAML element can't be
+    // re-parented into a fresh ToolTip each time). UI thread only.
+    void Tab::SetAgentToolTip(winrt::hstring stateLine, const winrt::Windows::UI::Color& stateColor, winrt::hstring title, winrt::hstring body)
+    {
+        ASSERT_UI_THREAD();
+
+        const std::wstring_view svState{ stateLine };
+        const std::wstring_view svTitle{ title };
+        const std::wstring_view svBody{ body };
+        std::wstring sig;
+        sig.reserve(svState.size() + svTitle.size() + svBody.size() + 16);
+        sig.append(svState);
+        sig.push_back(L'\x1f');
+        sig.append(svTitle);
+        sig.push_back(L'\x1f');
+        sig.append(svBody);
+        sig.push_back(L'\x1f');
+        sig.append(std::to_wstring((static_cast<uint32_t>(stateColor.A) << 24) |
+                                   (static_cast<uint32_t>(stateColor.R) << 16) |
+                                   (static_cast<uint32_t>(stateColor.G) << 8) |
+                                   static_cast<uint32_t>(stateColor.B)));
+        winrt::hstring newSig{ sig };
+        if (_agentToolTipActive && newSig == _agentToolTipSig)
+        {
+            return; // identical content already shown — don't rebuild the XAML
+        }
+
+        _agentToolTipActive = true;
+        _agentToolTipStateLine = std::move(stateLine);
+        _agentToolTipStateColor = stateColor;
+        _agentToolTipTitle = std::move(title);
+        _agentToolTipBody = std::move(body);
+        _agentToolTipSig = std::move(newSig);
+        _UpdateToolTip();
+    }
+
+    // Agentmaster (tab tooltip): revert to the default title + key-chord tooltip (a session went away /
+    // was archived, or the tab is no longer a managed/observed agent tab). No-op if none was set.
+    void Tab::ClearAgentToolTip()
+    {
+        ASSERT_UI_THREAD();
+        if (!_agentToolTipActive)
+        {
+            return;
+        }
+        _agentToolTipActive = false;
+        _agentToolTipStateLine = {};
+        _agentToolTipTitle = {};
+        _agentToolTipBody = {};
+        _agentToolTipSig = {};
+        if (_agentToolTipOpenTimer)
+        {
+            _agentToolTipOpenTimer.Stop();
+        }
+        if (_agentToolTip)
+        {
+            _agentToolTip.IsOpen(false);
+            _agentToolTip = nullptr; // drop the reused object; re-activation recreates + re-SetToolTip cleanly
+        }
+        _UpdateToolTip(); // revert to the default title + key-chord tooltip (re-attaches the default)
+    }
+
+    // Agentmaster (tab tooltip): (re)build the rich tooltip set via SetAgentToolTip — a colored state
+    // line (matching the tab-strip dot), a bold title, then a plain multi-line body — plus the key chord,
+    // like the default.
+    //
+    // Reuse ONE ToolTip object across refreshes (swap its Content): re-creating it + re-SetToolTip on each
+    // ~2s data refresh would REPLACE — and so visibly CLOSE — an already-open tip while you hover it (the
+    // "disappears after showing" bug, made constant by the seconds ticking in the 'ago' line). Configure
+    // it once: pinned Dark (a ToolTip renders in the popup root and does NOT inherit the host theme, and
+    // ToolTipService theme propagation is unreliable under XAML Islands — see AgentTipHelpers) and placed
+    // BELOW the tab (the default placement would push it up into the titlebar / off the top of the screen).
+    // Opening fast + closing reliably is the _WireAgentToolTipHover recipe.
+    void Tab::_UpdateAgentToolTip()
+    {
+        if (!_agentToolTip)
+        {
+            _agentToolTip = WUX::Controls::ToolTip{};
+            _agentToolTip.RequestedTheme(WUX::ElementTheme::Dark);
+            _agentToolTip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
+            WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), _agentToolTip);
+        }
+        _WireAgentToolTipHover();
+
+        // Don't rebuild content while the tip is OPEN (you're reading it): the ~2s refresh churns the
+        // seconds in the 'ago' line, and swapping Content under the pointer flickers. The next hover shows
+        // the latest data (≤ one refresh interval stale — negligible for a tooltip).
+        if (_agentToolTip.IsOpen())
+        {
+            return;
+        }
+
+        auto textBlock = WUX::Controls::TextBlock{};
+        textBlock.TextWrapping(WUX::TextWrapping::Wrap);
+        textBlock.MaxWidth(380.0);
+
+        // Append `text` as one or more Runs, splitting on '\n' into LineBreak-separated lines. When
+        // leadingBreak is set, a LineBreak is emitted before the first line too (to separate a body
+        // block from the line above it).
+        const auto appendLines = [&textBlock](std::wstring_view text, bool leadingBreak) {
+            size_t start = 0;
+            bool first = true;
+            for (;;)
+            {
+                const auto nl = text.find(L'\n', start);
+                const auto piece = text.substr(start, nl == std::wstring_view::npos ? std::wstring_view::npos : nl - start);
+                if (leadingBreak || !first)
+                {
+                    textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+                }
+                auto run = WUX::Documents::Run{};
+                run.Text(winrt::hstring{ piece });
+                textBlock.Inlines().Append(run);
+                first = false;
+                if (nl == std::wstring_view::npos)
+                {
+                    break;
+                }
+                start = nl + 1;
+            }
+        };
+
+        // State line — colored to match the tab-strip status dot.
+        {
+            auto run = WUX::Documents::Run{};
+            run.Text(_agentToolTipStateLine);
+            run.Foreground(WUX::Media::SolidColorBrush{ _agentToolTipStateColor });
+            run.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            textBlock.Inlines().Append(run);
+        }
+        // Title — bold (the full, untruncated session/tab name).
+        if (!_agentToolTipTitle.empty())
+        {
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            auto run = WUX::Documents::Run{};
+            run.Text(_agentToolTipTitle);
+            run.FontWeight(winrt::Windows::UI::Text::FontWeights::Bold());
+            textBlock.Inlines().Append(run);
+        }
+        // Body — plain, multi-line.
+        if (!_agentToolTipBody.empty())
+        {
+            appendLines(std::wstring_view{ _agentToolTipBody }, /*leadingBreak*/ true);
+        }
+        // Key chord (italic), as in the default tooltip.
+        if (!_keyChord.empty())
+        {
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            auto run = WUX::Documents::Run{};
+            run.Text(_keyChord);
+            run.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+            textBlock.Inlines().Append(run);
+        }
+
+        _agentToolTip.Content(textBlock); // swap content on the REUSED object — never re-SetToolTip an open tip
+    }
+
+    // Agentmaster (tab tooltip): open the agent tooltip FAST on hover and close it reliably on leave.
+    // The framework hover delay is sluggish (and this SDK exposes no ToolTipService.InitialShowDelay), and
+    // the service's auto-dismiss is unreliable under XAML Islands — so we drive it ourselves: a one-shot
+    // DispatcherTimer at ~1/3 the system hover time opens it, and the TabViewItem's own PointerExited
+    // closes it (this is the AgentTipHelpers recipe). Wired ONCE on the TabViewItem — the tooltip CONTENT
+    // changes per refresh, but the handlers operate on the reused _agentToolTip. The handlers no-op unless
+    // a tooltip is currently active, so a tab that reverts to the default tooltip is unaffected.
+    void Tab::_WireAgentToolTipHover()
+    {
+        if (_agentToolTipHoverWired)
+        {
+            return;
+        }
+        const auto tvi = TabViewItem();
+        if (!tvi)
+        {
+            return;
+        }
+        _agentToolTipHoverWired = true;
+        const auto weakThis = get_weak();
+
+        tvi.PointerEntered([weakThis](auto&&, auto&&) {
+            const auto self = weakThis.get();
+            if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
+            {
+                return; // not an agent tab right now -> let the framework handle the default tooltip
+            }
+            if (!self->_agentToolTipOpenTimer)
+            {
+                unsigned int hoverMs{ 400 };
+                if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
+                {
+                    hoverMs = 400;
+                }
+                WUX::DispatcherTimer dt;
+                dt.Interval(std::chrono::milliseconds{ hoverMs / 3 }); // ~1/3 the system hover time
+                const auto weakTick = weakThis;
+                dt.Tick([weakTick](auto&& s, auto&&) {
+                    if (const auto t = s.try_as<WUX::DispatcherTimer>())
+                    {
+                        t.Stop(); // one-shot: open once, then idle until the next hover
+                    }
+                    const auto self2 = weakTick.get();
+                    if (self2 && self2->_agentToolTipActive && self2->_agentToolTip)
+                    {
+                        self2->_agentToolTip.IsOpen(true);
+                    }
+                });
+                self->_agentToolTipOpenTimer = dt;
+            }
+            self->_agentToolTipOpenTimer.Start();
+        });
+
+        tvi.PointerExited([weakThis](auto&&, auto&&) {
+            const auto self = weakThis.get();
+            if (!self)
+            {
+                return;
+            }
+            if (self->_agentToolTipOpenTimer)
+            {
+                self->_agentToolTipOpenTimer.Stop();
+            }
+            if (self->_agentToolTip)
+            {
+                self->_agentToolTip.IsOpen(false);
+            }
+        });
     }
 
     // Method Description:

@@ -166,6 +166,39 @@ namespace
         }
     }
 
+    // Agentmaster (TAB_OVERLAY row 3): a one-line preview of a queued prompt — its FIRST line, capped
+    // at `maxChars` characters. The displayed text content is at most `maxChars` chars; a trailing
+    // "..." is appended when EITHER the first line is longer than the cap (so it was truncated) OR
+    // there is real content after the first line (further lines), so "..." always signals "there is
+    // more than what's shown". Leading blank lines / whitespace are skipped so a prompt that opens
+    // with a newline still previews real text; trailing spaces on the line are trimmed. Returns ""
+    // for an all-whitespace prompt (the caller then hides the row).
+    std::wstring FirstLinePreview(const std::wstring& text, size_t maxChars)
+    {
+        const size_t start = text.find_first_not_of(L" \t\r\n");
+        if (start == std::wstring::npos)
+        {
+            return {}; // nothing but whitespace
+        }
+        const size_t nl = text.find_first_of(L"\r\n", start);
+        std::wstring line = (nl == std::wstring::npos) ? text.substr(start) : text.substr(start, nl - start);
+        while (!line.empty() && (line.back() == L' ' || line.back() == L'\t'))
+        {
+            line.pop_back();
+        }
+        // Is there real (non-whitespace) content beyond the first line? If so, signal it with "..." too.
+        const bool more = (nl != std::wstring::npos) && (text.find_first_not_of(L" \t\r\n", nl) != std::wstring::npos);
+        if (line.size() > maxChars)
+        {
+            line = line.substr(0, maxChars) + L"..."; // surpassed the cap -> truncate + ellipsis
+        }
+        else if (more)
+        {
+            line += L"..."; // first line fits, but there's more below it
+        }
+        return line;
+    }
+
     // A short confirmation chime for a completed row-3 action (copy / open). Async so it never blocks
     // the UI thread; SystemAsterisk is the soft Windows notification sound. Best-effort (silent if the
     // user has system sounds off). winmm is already in the link (TerminalPaneContent's WarningBell).
@@ -540,6 +573,16 @@ namespace
         {
             line(L"Tasks:  " + std::to_wstring(a.tasksCompleted) + L" done / " + std::to_wstring(a.tasksPending) + L" pending");
         }
+        // Agentmaster: the Claude Code idle RECAP, rendered as its own section directly BELOW the times
+        // line (panel 1's age/last-user-msg/last-activity bar, drawn above this box) and ABOVE the user
+        // messages — the "where we are / what's next" header over the prompt history. Honors the wrap /
+        // truncate toggles like a message body. Present in the displayed panel (full=false) and the
+        // copyable Summary (full=true).
+        if (!a.awaySummary.empty())
+        {
+            sep();
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, /*truncate*/ false)); // label INLINE; the recap is ALWAYS shown in FULL (never capped by the truncate toggle — only the numbered messages honor it)
+        }
         if (!a.userMsgs.empty())
         {
             sep();
@@ -792,10 +835,27 @@ namespace winrt::TerminalApp::implementation
         _row2.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0)); // a 1px gap below row 1
         _row2.Children().Append(_subline);
 
+        // Row 3: a preview of the NEXT queued prompt waiting to be sent (hourglass + the prompt's first
+        // line, ≤300 chars). Filled by _Refresh for a LINKED session with a Pending prompt; collapsed
+        // otherwise (and on observe badges, which never run _Refresh). WRAPS (so up to 300 chars can show
+        // without a giant single line) but is width-capped so it can't span the terminal; right-aligned so
+        // the badge stays right-anchored. The default Foreground is the text colour — the hourglass Run
+        // overrides itself to amber in _Refresh.
+        _promptLine = TextBlock{};
+        _promptLine.FontSize(11);
+        _promptLine.Foreground(Fill(0xFF, 0xC8, 0xC8, 0xC8)); // light gray (secondary; the hourglass run is amber)
+        _promptLine.IsTextSelectionEnabled(false);
+        _promptLine.TextWrapping(TextWrapping::Wrap);
+        _promptLine.HorizontalAlignment(HorizontalAlignment::Right);
+        _promptLine.MaxWidth(420);
+        _promptLine.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0)); // a 1px gap below row 2
+        _promptLine.Visibility(Visibility::Collapsed);
+
         _stack = StackPanel{};
         _stack.Orientation(Orientation::Vertical);
         _stack.Children().Append(_row1);
         _stack.Children().Append(_row2);
+        _stack.Children().Append(_promptLine); // row 3: the next-queued-prompt preview
 
         _root = Border{};
         _root.Background(Fill(0xCC, 0x20, 0x20, 0x20)); // dark translucent so it reads on any terminal
@@ -1103,6 +1163,51 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Row 3: a preview of the NEXT queued prompt waiting to be sent — the first Pending prompt (the
+        // same one DecideAdvance would fire next), shown as "<hourglass> <first line, ≤300 chars>". This
+        // is the per-tab echo of row 1's "⏳N" count: the count says HOW MANY are queued, this says WHAT
+        // is next. Hidden when nothing is Pending.
+        if (_promptLine)
+        {
+            const QueuedPrompt* nextPrompt = nullptr;
+            for (const auto& p : s.queue)
+            {
+                if (p.status == PromptStatus::Pending)
+                {
+                    nextPrompt = &p;
+                    break;
+                }
+            }
+            // Prefer the prompt body (what actually gets sent); fall back to its short label.
+            const std::wstring body = nextPrompt ? (!nextPrompt->text.empty() ? nextPrompt->text : nextPrompt->label) : std::wstring{};
+            const std::wstring preview = nextPrompt ? FirstLinePreview(body, 300) : std::wstring{};
+            _promptLine.Inlines().Clear();
+            if (preview.empty())
+            {
+                _promptLine.Visibility(Visibility::Collapsed); // nothing queued (or an empty prompt)
+            }
+            else
+            {
+                Run hg{};
+                hg.Text(winrt::hstring{ std::wstring{ kHourglass } + L" " });
+                hg.Foreground(Fill(0xFF, 0xDA, 0xA5, 0x20)); // goldenrod — "queued / pending", matching the row-1 ⏳N
+                _promptLine.Inlines().Append(hg);
+                Run txt{};
+                txt.Text(winrt::hstring{ preview }); // inherits the TextBlock's light-gray foreground
+                _promptLine.Inlines().Append(txt);
+                // The preview is the FIRST line trimmed to 300 chars; the tooltip names the row and reveals
+                // the FULL prompt behind it (capped so a huge prompt can't make an unwieldy tooltip).
+                std::wstring full = body;
+                if (full.size() > 4000)
+                {
+                    full = full.substr(0, 4000) + L"\x2026"; // …
+                }
+                const std::wstring tip = std::wstring{ L"Next queued prompt \x2014 sent on the next turn-complete (or via Send now).\n\n" } + full;
+                ToolTipService::SetToolTip(_promptLine, winrt::box_value(winrt::hstring{ tip }));
+                _promptLine.Visibility(Visibility::Visible);
+            }
+        }
+
         // Summary panel (2nd slot): show/hide per the persisted toggle + (re)load when the transcript grew.
         _UpdateSummary(s);
     }
@@ -1203,6 +1308,56 @@ namespace winrt::TerminalApp::implementation
             return b;
         };
 
+        // Agentmaster (SUMMARY_JUMP.md §7): ↑ / ↓ — step the view to the previous / next SENT prompt that
+        // is currently off-screen, and highlight it in the summary panel, exactly like alt+up / alt+down
+        // (the page runs the SAME _ScrollAdjacentPrompt). Placed LEFT of the folder button. Claude only —
+        // Codex has no in-buffer prompt resolve in v1, so the buttons are omitted for a Codex session.
+        const bool promptNavEligible = [&]() {
+            if (_registry && !_sessionId.empty())
+            {
+                if (const auto info = _registry->Get(_sessionId))
+                {
+                    return info->kind == AgentKind::Claude;
+                }
+            }
+            return true; // unknown -> assume Claude (the default kind)
+        }();
+        Button upBtn{ nullptr };
+        Button downBtn{ nullptr };
+        if (promptNavEligible)
+        {
+            upBtn = mkIconBtn(L"\x2191", L"Go to the previous sent prompt that's off-screen (like Alt+Up)"); // ↑
+            downBtn = mkIconBtn(L"\x2193", L"Go to the next sent prompt that's off-screen (like Alt+Down)"); // ↓
+            // Standard Unicode arrows render from a text symbol font, not the icon font (which would tofu
+            // them) — same reason the ▸ summary-jump glyph uses "Segoe UI Symbol".
+            if (auto ic = upBtn.Content().try_as<FontIcon>())
+            {
+                ic.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+            }
+            if (auto ic = downBtn.Content().try_as<FontIcon>())
+            {
+                ic.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+            }
+            upBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_onAdjacentPrompt)
+                    {
+                        self->_onAdjacentPrompt(true); // up
+                    }
+                }
+            });
+            downBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_onAdjacentPrompt)
+                    {
+                        self->_onAdjacentPrompt(false); // down
+                    }
+                }
+            });
+        }
+
         Button folderBtn = mkIconBtn(L"\xE8B7", L"Open the working folder in Explorer"); // Folder
         folderBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
@@ -1276,6 +1431,14 @@ namespace winrt::TerminalApp::implementation
         _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the row-1 status/autopilot parts
         _actions.Spacing(2);
         _actions.Margin(ThicknessHelper::FromLengths(4, 0, 0, 0)); // a small gap after the status block to its left
+        if (upBtn)
+        {
+            _actions.Children().Append(upBtn); // ↑ prev off-screen prompt (left of the folder)
+        }
+        if (downBtn)
+        {
+            _actions.Children().Append(downBtn); // ↓ next off-screen prompt
+        }
         _actions.Children().Append(folderBtn);
         _actions.Children().Append(copyBtn);
         _actions.Children().Append(pencilBtn);
@@ -2013,6 +2176,7 @@ namespace winrt::TerminalApp::implementation
         }
         _summaryStack.Children().Clear();
         _jumpButtons.clear(); // rebuilt below; stale Button refs from the prior render are dropped
+        _summaryMsgRows.clear(); // rebuilt below; the highlight (_highlightedMsgIndex) is re-applied after
         std::wstring seg; // accumulated contiguous text lines
         const auto flushSeg = [&]() {
             if (seg.empty())
@@ -2069,6 +2233,7 @@ namespace winrt::TerminalApp::implementation
                         if (row >= 0)
                         {
                             ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
+                            self->HighlightSummaryMessage(idx); // mark the row we jumped to
                         }
                         self->_RefreshJumpEligibility(); // a click makes the others eligible to re-check
                     }
@@ -2091,6 +2256,7 @@ namespace winrt::TerminalApp::implementation
             }
             Grid::SetColumn(tb, 1);
             g.Children().Append(tb);
+            _summaryMsgRows.emplace_back(idx, g); // register the row so HighlightSummaryMessage can band it
             return g;
         };
         size_t i = 0;
@@ -2136,6 +2302,7 @@ namespace winrt::TerminalApp::implementation
         }
         flushSeg();
         _RefreshJumpEligibility(); // dim the jump buttons whose prompt isn't currently on screen
+        _ApplySummaryHighlight(); // re-apply the jumped-to band onto the freshly-rebuilt rows
     }
 
     void AgentTabOverlay::SetSummaryToggleHandler(std::function<void()> handler)
@@ -2151,6 +2318,11 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler)
     {
         _onResolveEligibility = std::move(handler);
+    }
+
+    void AgentTabOverlay::SetAdjacentPromptHandler(std::function<void(bool)> handler)
+    {
+        _onAdjacentPrompt = std::move(handler);
     }
 
     // Agentmaster (SUMMARY_JUMP.md): resolve every numbered prompt against the live buffer in one pass and
@@ -2173,6 +2345,41 @@ namespace winrt::TerminalApp::implementation
             }
             const bool ok = idx >= 0 && idx < static_cast<int>(rows.size()) && rows[idx] >= 0;
             btn.Opacity(ok ? 0.75 : 0.2); // match: normal; no-match: clearly dim (still clickable -> re-checks)
+        }
+    }
+
+    // Agentmaster (SUMMARY_JUMP.md): remember the message we jumped to and paint the band on its row.
+    // Called from the ▸ button (idx known directly) and from the page after alt+up / alt+down nav (the
+    // landed 0-based index). The mark moves to the new target on the next jump.
+    void AgentTabOverlay::HighlightSummaryMessage(int index)
+    {
+        _highlightedMsgIndex = index;
+        _ApplySummaryHighlight();
+        // Bring the freshly-targeted row into view within the (scrolling) panel — only on an explicit jump,
+        // not on the rebuild re-apply, so a transcript-growth refresh doesn't keep yanking the panel scroll.
+        for (const auto& [idx, row] : _summaryMsgRows)
+        {
+            if (row && idx == index)
+            {
+                row.StartBringIntoView();
+                break;
+            }
+        }
+    }
+
+    // Paint a translucent accent band behind _highlightedMsgIndex's row; clear every other row. Safe any
+    // time — a no-op when the panel isn't built or the index isn't currently rendered — and re-applied at
+    // the end of each _SetSummaryContent so the mark survives a transcript-growth re-render.
+    void AgentTabOverlay::_ApplySummaryHighlight()
+    {
+        for (const auto& [idx, row] : _summaryMsgRows)
+        {
+            if (!row)
+            {
+                continue;
+            }
+            // accent band (alpha ~0x66) on the target; a fully-transparent fill clears the rest
+            row.Background(idx == _highlightedMsgIndex ? Fill(0x66, 0x3B, 0x82, 0xF6) : Fill(0, 0, 0, 0));
         }
     }
 

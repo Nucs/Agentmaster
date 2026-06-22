@@ -406,6 +406,15 @@ namespace winrt::TerminalApp::implementation
                 auto theme{ strong->_settings.GlobalSettings().CurrentTheme() };
                 auto requestedTheme{ theme.RequestedTheme() };
                 auto element{ sender.try_as<winrt::Windows::UI::Xaml::FrameworkElement>() };
+                // Agentmaster: the Agent Manager UI is ALWAYS dark, regardless of the Windows / Windows
+                // Terminal theme. A dialog raised from those surfaces opts in by tagging itself
+                // "agentmaster-dark"; honor it here — the one place dialogs are themed — so the whole
+                // popup chain (dialog content AND its dimming smoke) is dark even when Terminal is set to
+                // a light theme. WT's own dialogs carry no such Tag and keep following the configured theme.
+                if (element && winrt::unbox_value_or<winrt::hstring>(element.Tag(), L"") == L"agentmaster-dark")
+                {
+                    requestedTheme = winrt::Windows::UI::Xaml::ElementTheme::Dark;
+                }
                 while (element)
                 {
                     element.RequestedTheme(requestedTheme);

@@ -1400,29 +1400,35 @@ namespace winrt::TerminalApp::implementation
 
             // Tooltips throughout: every cell either truncates (CharacterEllipsis on Title/Dir/Branch)
             // or abbreviates ("3h", "3/7", "W2") — hover carries the full value / exact moment.
+            // Agentmaster: the data cells are CLICKTHROUGH (IsHitTestVisible(false)) and their per-cell
+            // tooltips are folded into ONE consolidated row tooltip (built below). This fixes both the
+            // per-cell tooltip flicker (each cell opened/closed its own tip as the mouse panned across the
+            // columns) AND unreliable row selection — a hit-test-visible cell fragmented the row's Tapped
+            // target. The checkbox (col 0) stays interactive (it drives bulk select), so only the text
+            // cells go clickthrough, not the whole grid.
             auto title = ArchiveText(r.title.empty() ? winrt::hstring{ L"(untitled)" } : ArchiveOneLine(r.title), 13, true, r.windowOnly ? 0.7 : 0.95);
             title.Margin(Thickness{ 2, 0, 6, 0 });
-            ArchiveSetTip(title, r.title);
+            title.IsHitTestVisible(false);
             Grid::SetColumn(title, 1);
             g.Children().Append(title);
             auto dir = ArchiveText(winrt::hstring{ r.dir }, 12, false, 0.6);
             dir.Margin(Thickness{ 0, 0, 6, 0 });
-            ArchiveSetTip(dir, r.dir); // the full path — the cell end-trims, losing the leaf
+            dir.IsHitTestVisible(false);
             Grid::SetColumn(dir, 2);
             g.Children().Append(dir);
             auto br = ArchiveText(winrt::hstring{ r.branch }, 12, false, 0.55);
             br.HorizontalAlignment(HorizontalAlignment::Center);
-            ArchiveSetTip(br, r.branch);
+            br.IsHitTestVisible(false);
             Grid::SetColumn(br, 3);
             g.Children().Append(br);
             auto cr = ArchiveText(winrt::hstring{ ArchiveAgo(r.createdUnixMs, now) }, 11, false, 0.6);
             cr.HorizontalAlignment(HorizontalAlignment::Center);
-            ArchiveSetTip(cr, ArchiveLocalDateTime(r.createdUnixMs)); // absolute local datetime behind the relative age
+            cr.IsHitTestVisible(false);
             Grid::SetColumn(cr, 4);
             g.Children().Append(cr);
             auto la = ArchiveText(winrt::hstring{ ArchiveAgo(r.lastActivityUnixMs, now) }, 11, false, 0.6);
             la.HorizontalAlignment(HorizontalAlignment::Center);
-            ArchiveSetTip(la, ArchiveLocalDateTime(r.lastActivityUnixMs));
+            la.IsHitTestVisible(false);
             Grid::SetColumn(la, 5);
             g.Children().Append(la);
             {
@@ -1436,10 +1442,7 @@ namespace winrt::TerminalApp::implementation
                                       false,
                                       hasPlan ? 0.6 : 0.3);
                 pl.HorizontalAlignment(HorizontalAlignment::Center);
-                if (hasPlan)
-                {
-                    ArchiveSetTip(pl, std::to_wstring(r.sentCount) + L" of " + std::to_wstring(r.totalCount) + L" prompts sent");
-                }
+                pl.IsHitTestVisible(false);
                 Grid::SetColumn(pl, 6);
                 g.Children().Append(pl);
             }
@@ -1451,10 +1454,9 @@ namespace winrt::TerminalApp::implementation
                 chip.Padding(Thickness{ 5, 1, 5, 1 });
                 chip.HorizontalAlignment(HorizontalAlignment::Center);
                 chip.VerticalAlignment(VerticalAlignment::Center);
+                chip.IsHitTestVisible(false); // clickthrough; the "what W{n} is" text rides the row tooltip
                 auto wt = ArchiveText(winrt::hstring{ L"W" + std::to_wstring(r.windowOrdinal) }, 10, true, 1.0);
                 chip.Child(wt);
-                // What W{n} IS — the chip alone said "W2" and nothing on the page said what that was.
-                ArchiveSetTip(chip, r.windowTip);
                 Grid::SetColumn(chip, 7);
                 g.Children().Append(chip);
             }
@@ -1465,6 +1467,39 @@ namespace winrt::TerminalApp::implementation
             row.Background(r.id == _archiveSelectedId ? ArchiveBrush(0x50, 0x4A, 0x6E, 0xA8) : ArchiveBrush(0x14, 0x80, 0x80, 0x80));
             row.Tag(winrt::box_value(winrt::hstring{ rid })); // id, so _UpdateArchiveSelectionHighlight can recolor without a rebuild
             row.Child(g);
+            // Agentmaster: ONE consolidated row tooltip (replaces the per-cell tips that were removed +
+            // made clickthrough above) — folds in every field the cells used to show, so no information is
+            // lost. It lives on the row Border; the only hit-test-visible child left is the checkbox (which
+            // keeps its own "Select" tip), so hovering the row's text is flicker-free. Hover anywhere on the
+            // row to see the full picture at once.
+            {
+                std::wstring rowTip{ r.title.empty() ? std::wstring{ L"(untitled)" } : r.title };
+                if (!r.dir.empty())
+                {
+                    rowTip += L"\n" + r.dir;
+                }
+                if (!r.branch.empty())
+                {
+                    rowTip += L"\nBranch: " + r.branch;
+                }
+                if (const auto cabs = ArchiveLocalDateTime(r.createdUnixMs); !cabs.empty())
+                {
+                    rowTip += L"\nCreated " + cabs;
+                }
+                if (const auto aabs = ArchiveLocalDateTime(r.lastActivityUnixMs); !aabs.empty())
+                {
+                    rowTip += L"\nLast active " + aabs;
+                }
+                if (r.totalCount > 0)
+                {
+                    rowTip += L"\nPlan: " + std::to_wstring(r.sentCount) + L" of " + std::to_wstring(r.totalCount) + L" prompts sent";
+                }
+                if (r.windowOrdinal > 0 && !r.windowTip.empty())
+                {
+                    rowTip += L"\n" + r.windowTip;
+                }
+                ArchiveSetTip(row, rowTip);
+            }
             // Selecting a row must NOT rebuild the list synchronously here: this Tapped is mid-routing on
             // the row, and clearing _archiveRowsHost would destroy the very element handling the event ->
             // the XAML hit-test AV (the crash the user hit clicking a row). Defer to a clean tick, and only
@@ -2273,6 +2308,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto presenter{ _dialogPresenter.get() })
         {
             winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
             dialog.Title(winrt::box_value(winrt::hstring{ L"Delete permanently?" }));
             dialog.Content(winrt::box_value(winrt::hstring{ (titleStr.empty() ? std::wstring{ L"This session" } : (L"\x201C" + titleStr + L"\x201D")) + L" will be removed from Agentmaster. The conversation file on disk is KEPT \x2014 it still appears in Sessions and can be reopened from there." }));
             dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
@@ -2306,6 +2342,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto presenter{ _dialogPresenter.get() })
         {
             winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
             dialog.Title(winrt::box_value(winrt::hstring{ L"Delete saved window?" }));
             dialog.Content(winrt::box_value(winrt::hstring{ L"This removes the saved window's layout (geometry + tab list) from Agentmaster. The sessions' conversation files on disk are kept and still appear in Sessions." }));
             dialog.PrimaryButtonText(L"\U0001F5D1 Delete");
@@ -2352,6 +2389,7 @@ namespace winrt::TerminalApp::implementation
         if (const auto presenter{ _dialogPresenter.get() })
         {
             winrt::Windows::UI::Xaml::Controls::ContentDialog dialog;
+            dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
             dialog.Title(winrt::box_value(winrt::hstring{ L"Delete " + std::to_wstring(ids.size()) + (ids.size() == 1 ? L" session permanently?" : L" sessions permanently?") }));
             dialog.Content(winrt::box_value(winrt::hstring{ L"They will be removed from Agentmaster. Their conversation files on disk are KEPT \x2014 they still appear in Sessions and can be reopened from there." }));
             dialog.PrimaryButtonText(L"\U0001F5D1 Delete");

@@ -22,9 +22,11 @@
 //   (spaces kept, (F) never applies to it), and a bare whole-GUID token also matches the
 //   session's IDENTITY (id + fork-parent id) — see the grammar block below. (F) fuzzy = a plain
 //   term's non-space characters in order with anything between (`a.*?b.*?c` for rg; a
-//   subsequence scan in-process — identical semantics). Both message scopes OFF ⇒ terms match
-//   title + directory only (§1a); 📁 matches the session cwd + the DIRECTORY part of every
-//   tool-touched path; 📄 matches the LEAF (file name) of every tool-touched path.
+//   subsequence scan in-process — identical semantics). The working DIRECTORY (cwd) is ALWAYS a
+//   match target; 🏷 (default ON) adds the session TITLE (custom/ai/summary/first-prompt + the
+//   runtime liveTitle overlay = an open session's live tab title); 📁 matches the DIRECTORY part
+//   of every tool-touched path; 📄 matches the LEAF (file name) of every tool-touched path. With
+//   🏷 off and both message scopes off, terms match cwd (+ 📁/📄 paths) only (§1a).
 //
 // Plain C++ + Win32, no WinRT (PCH NotUsing; links into the standalone harness). The matchers /
 // regex builder / snippet maker are PURE; only the rg invocation + history scan touch the OS.
@@ -47,6 +49,7 @@ namespace Agentmaster
     struct SessionQuery
     {
         std::wstring text; // raw query — ParseSessionQuery's input; NO terms (empty/whitespace/"") => window-only listing
+        bool scopeTitle{ true }; // 🏷 match the session TITLE (custom/ai/summary/first-prompt + the runtime liveTitle overlay). DEFAULT ON — a SessionQuery left unset reproduces the old always-on title baseline.
         bool scopeUser{}; // 👤 search user (typed) messages
         bool scopeAgent{}; // 🤖 search agent + tools (everything but user messages)
         bool scopeDirs{}; // 📁 match directories: the cwd + dirs of tool-touched paths
@@ -124,11 +127,13 @@ namespace Agentmaster
     std::wstring MakeSnippet(std::wstring_view text, std::wstring_view queryLower, bool fuzzy, size_t maxChars);
 
     // Phase-1 fast match over the sidecar index entries. No terms => every entry (the
-    // window-only listing). EVERY term must match (AND), each against any haystack: the
-    // title fields + cwd always apply (the both-scopes-OFF baseline; the cached first prompt
-    // rides there — the full user scope is the history accelerator + phase 2), 📁/📄 add the
-    // dir/leaf parts of the tool-touched paths, and a GUID term matches the entry's sessionId
-    // or fork-parent id outright. Returns matching sids in input order.
+    // window-only listing). EVERY term must match (AND), each against any haystack: cwd ALWAYS
+    // applies; the title fields (custom/ai/summary/first-prompt + the runtime liveTitle overlay)
+    // apply under q.scopeTitle (DEFAULT ON — the cached first prompt rides there, so the
+    // both-scopes-OFF baseline is title + directory; the full user scope is the history
+    // accelerator + phase 2); 📁/📄 add the dir/leaf parts of the tool-touched paths; and a GUID
+    // term matches the entry's sessionId or fork-parent id outright. Returns matching sids in
+    // input order.
     std::vector<std::wstring> SearchIndexFast(const std::vector<SessionIndexEntry>& entries, const SessionQuery& q);
 
     // ===== OS-touching =======================================================================

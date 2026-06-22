@@ -40,6 +40,7 @@
 #include "../SessionRegistry.h"
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)
 #include "../SessionSearch.h" // the Sessions page's two-phase search (SESSIONS.md §6)
+#include "../SessionStore.h" // the generalized DURABLE per-session key/value store (titles, ...)
 #include "../TranscriptStore.h" // the on-disk Claude-session store API (SESSIONS.md §6)
 
 using namespace Agentmaster;
@@ -1246,10 +1247,19 @@ static void TestEnterRetry()
         CHECK(r.action == EnterRetryAction::GiveUp && r.attempt == kEnterRetryMax, "max retries -> give up");
     }
     {
-        // Observe-only external session -> no injector to drive, never retry.
+        // Not controllable (no bound injector) -> nothing to re-press Enter on, never retry. This is
+        // the observe-only case: an external census claude we hold no stdin for.
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
         s.external = true;
-        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs).action == EnterRetryAction::None, "external -> none");
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs, /*controllable*/ false).action == EnterRetryAction::None, "uncontrollable -> none");
+    }
+    {
+        // Agentmaster (autopilot-on-adopted): an ADOPTED external (external=true) that IS controllable
+        // (an injector was bound on adoption) MUST be driven — provenance != controllability. The pure
+        // decider keys on `controllable`, not s.external, so an adopted session retries like a launched one.
+        auto s = mk(SessionState::WaitingForInput, T, false, 0);
+        s.external = true;
+        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs, /*controllable*/ true).action == EnterRetryAction::Retry, "adopted + controllable -> retry");
     }
     {
         // Archived (!live) session -> no live claude, never retry.
@@ -1283,6 +1293,84 @@ static void TestEnterRetry()
         const auto r = DecideEnterRetry(s, T + 2000 + kEnterRetryIntervalMs);
         CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp2", "latest send is the watched one");
     }
+}
+
+// Agentmaster — Scheduler INTEGRATION (the threaded change-driven advance, wired exactly like
+// Engine.cpp). The pure DecideAdvance above never exercised the OnObserved -> RequestAdvance ->
+// worker -> Inject chain, which is precisely where the "toggle Autopilot Off and back -> pending
+// not sent" bug lived: OnObserved gated the change-driven advance on !s.external (provenance)
+// instead of HasInjector (controllability), so an ADOPTED session (external=true but injector-bound)
+// was never driven. This test drives the real Scheduler thread and polls for the injected result.
+static void TestSchedulerIntegration()
+{
+    std::wprintf(L"Autopilot Scheduler integration (toggle Off->Full; controllability != provenance):\n");
+
+    // Wire a registry + scheduler like Engine.cpp (advance handler + OnObserved observer), seed a
+    // live Waiting session with one Pending Flight prompt (throttleMs 0 so the worker injects at
+    // once), optionally bind an injector, then toggle Autopilot Off->Full via the registry exactly
+    // as AgentManagerContent::_OnAutopilotChanged does. Returns true iff the prompt reached Sent
+    // within the poll budget. Each case gets its OWN registry+scheduler so they can't cross-talk.
+    auto runToggleCase = [](bool external, bool bindInjector) -> bool {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+
+        const std::wstring id = L"sess";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput; // turn already complete; no future Stop hook fires
+            s.live = true;
+            s.external = external;
+            s.autopilot.mode = AutopilotMode::Off;
+            s.autopilot.throttleMs = 0; // inject immediately (no 500ms throttle) -> a short poll suffices
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"the pending prompt";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Flight;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        if (bindInjector)
+        {
+            reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+        }
+
+        // Toggle Off->Full (the user re-enabling Autopilot) — the exact _OnAutopilotChanged write.
+        reg->Update(id, [](SessionInfo& s) {
+            s.autopilot.mode = AutopilotMode::Full;
+            s.autopilot.autoSendsThisRun = 0;
+            s.pendingConfirmPromptId.clear();
+        });
+
+        // Poll up to ~2s for the worker to pick up + inject (deterministic outcome, bounded wait).
+        bool sent = false;
+        for (int i = 0; i < 200 && !sent; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sent = snap && !snap->queue.empty() && snap->queue[0].status == PromptStatus::Sent;
+            if (!sent)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+        // A real send marks Sent AND delivers to the injector (when one is bound).
+        return sent && (!bindInjector || injected.load() > 0);
+    };
+
+    // Manager-Launched (external=false, injector bound): always worked — the regression baseline.
+    CHECK(runToggleCase(/*external*/ false, /*injector*/ true), "launched: toggle Off->Full sends pending");
+    // Adopted (external=true, injector bound): THE fix — provenance != controllability, must send.
+    CHECK(runToggleCase(/*external*/ true, /*injector*/ true), "adopted: toggle Off->Full sends pending");
+    // Observe-only external (external=true, NO injector): must NOT send (nothing to drive, no churn).
+    CHECK(!runToggleCase(/*external*/ true, /*injector*/ false), "observe-only: toggle does not send (no injector)");
 }
 
 static void TestPersistence()
@@ -1603,7 +1691,8 @@ static void TestAppSettings()
         in.summaryPanelTruncate = false; // non-default (default true = truncate long messages)
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
-        in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to 5
+        in.waitingForYouTimeoutMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to the default
+        in.serverCacheMinutes = 17; // non-default (default 5) — the ⚡ "still cached" window
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
         in.boardSort = ExplorerSort::Newest; // non-default (default MostActive) — Triage Board sort
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
@@ -1626,7 +1715,8 @@ static void TestAppSettings()
         CHECK(out.summaryPanelTruncate == false, "settings summaryPanelTruncate round-trip");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
-        CHECK(out.waitingDecayMinutes == 0u, "settings waitingDecayMinutes stored 0 (= never) round-trips as 0");
+        CHECK(out.waitingForYouTimeoutMinutes == 0u, "settings waitingForYouTimeoutMinutes stored 0 (= never) round-trips as 0");
+        CHECK(out.serverCacheMinutes == 17u, "settings serverCacheMinutes round-trip");
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
         CHECK(out.boardSort == ExplorerSort::Newest, "settings boardSort round-trip");
         CHECK(out.hiddenSessionIds.size() == 2 &&
@@ -1646,13 +1736,26 @@ static void TestAppSettings()
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
-        CHECK(out.waitingDecayMinutes == 5u, "settings waitingDecayMinutes default 5 (cache lifetime) on empty");
+        CHECK(out.waitingForYouTimeoutMinutes == 60u, "settings waitingForYouTimeoutMinutes default 60 (1h Waiting-for-you timeout) on empty");
+        CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
+    }
+
+    // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"
+    // because the Waiting-for-you behavior changed (a 5-minute cache window -> a read-gated unread
+    // timeout). A pre-existing settings.json carries the OLD key with a value tuned for the old
+    // behavior (often 5); it must be INVALIDATED — ignored, falling back to the new 60 (1h) default,
+    // NOT carried over as a 5-minute unread timeout. The new key, when present, reads normally.
+    {
+        const auto legacy = DeserializeAppSettings(L"{\"settings\":{\"waitingDecayMinutes\":5}}");
+        CHECK(legacy.waitingForYouTimeoutMinutes == 60u, "settings legacy waitingDecayMinutes key is IGNORED -> 60 (1h) default (rename invalidates the stale value)");
+        const auto fresh = DeserializeAppSettings(L"{\"settings\":{\"waitingForYouTimeoutMinutes\":120}}");
+        CHECK(fresh.waitingForYouTimeoutMinutes == 120u, "settings new waitingForYouTimeoutMinutes key is read");
     }
 
     // ExplorerSort token parsing for treeSort/boardSort: each token -> its mode; an unknown token falls
@@ -1940,6 +2043,29 @@ static void TestTranscriptScan()
         CHECK(r.events.size() == 2 && r.events[1].kind == TranscriptEvent::Kind::UserPrompt && r.events[1].text == L"next please", "order: user prompt second (clears stale end_turn)");
     }
 
+    // away_summary (Claude Code's idle RECAP): a system line is captured into .recap (normalized —
+    // the "(disable recaps in /config)" hint stripped), is NOT a turn event, and never strands the
+    // state machine. The LAST recap in a chunk wins; a recap-less chunk leaves .recap empty so the
+    // scanner can never clear a good recap with a blank.
+    {
+        const std::wstring line = LR"j({"type":"system","subtype":"away_summary","content":"We fixed the build. Next: deploy. (disable recaps in /config)"})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "recap: away_summary is NOT a turn event");
+        CHECK(r.recap == L"We fixed the build. Next: deploy.", "recap: away_summary captured + disable hint stripped");
+    }
+    {
+        const std::wstring chunk =
+            std::wstring{ LR"j({"type":"system","subtype":"away_summary","content":"first recap"})j" } + L"\n" +
+            LR"j({"type":"system","subtype":"turn_duration","content":"ignored"})j" + L"\n" +
+            LR"j({"type":"system","subtype":"away_summary","content":"second recap"})j" + L"\n";
+        const auto r = ParseTranscriptDelta(chunk);
+        CHECK(r.recap == L"second recap", "recap: the LAST away_summary in a chunk wins; a non-away system subtype is ignored");
+    }
+    {
+        const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}})j" L"\n";
+        CHECK(ParseTranscriptDelta(line).recap.empty(), "recap: a recap-less chunk yields an empty .recap (never clears a stored recap)");
+    }
+
     // NoteExternalPrompt: dedups against an existing Sent (the hook already recorded the message),
     // but records a genuinely missed one, tagged Typed/Sent.
     {
@@ -2144,6 +2270,37 @@ static void TestBlockedAndInterruptedStates()
     // only the cleared-tail no-op turn (above), and only past the long floor, releases for Running.
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleRunningQuiescenceMs), "presence-idle: Running + idle + PENDING tool_use tail (mid-tool / API-retry backoff) -> NOT released (would flap against recon-run)");
     CHECK(!ShouldSynthesizeStopFromPresenceIdle(SessionState::Running, L"idle", L"tool_use", false, kScanPresenceIdleRunningQuiescenceMs * 100), "presence-idle: a Running pending tool_use stays held no matter how long quiet (a long Bash/build or multi-minute API retry is still the same turn)");
+
+    // --- Waiting-for-you "unread" decay gate (ShouldDecayWaitingToIdle) ---
+    // A WaitingForInput card demotes to Idle ONLY once the timeout has elapsed AND it has been READ
+    // (readUnixMs >= lastActivity). It waits the FULL timeout regardless of reading, and past the
+    // timeout it keeps waiting while still unread. A manual Mark Unread (or a busy heartbeat) never
+    // time-decays; 0 minutes == never. Signature: (state, lastActivityMs, readUnixMs, manualUnread,
+    // presenceBusy, minutes, nowMs).
+    {
+        using S = SessionState;
+        constexpr uint32_t kMin = 60; // 1h timeout
+        constexpr int64_t kTimeout = 60LL * 60000; // 3,600,000 ms
+        constexpr int64_t last = 1'000'000; // last activity anchor
+        constexpr int64_t pastNow = last + kTimeout; // exactly at the timeout edge
+        constexpr int64_t withinNow = last + kTimeout - 1; // 1ms inside the window
+        // within the timeout: ALWAYS waits, even when already read
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, false, kMin, withinNow), "decay-waiting: within the timeout -> waits the full window (even when read)");
+        // past the timeout + read -> decays
+        CHECK(ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, false, kMin, pastNow), "decay-waiting: past timeout + read (readUnixMs == lastActivity) -> Idle");
+        CHECK(ShouldDecayWaitingToIdle(S::WaitingForInput, last, last + 5, false, false, kMin, pastNow + 1000), "decay-waiting: past timeout + read AFTER the activity -> Idle");
+        // past the timeout but UNREAD -> keeps waiting until read
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last - 1, false, false, kMin, pastNow), "decay-waiting: past timeout but UNREAD (readUnixMs < lastActivity) -> keep waiting until read");
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, 0, false, false, kMin, pastNow + 999999), "decay-waiting: never read (readUnixMs 0) -> never decays however long");
+        // manual Mark Unread is sticky — never time-decays even past timeout + read
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, true, false, kMin, pastNow), "decay-waiting: manualUnread sticky -> never time-decays");
+        // a busy heartbeat (a long Task/Agent subagent) holds it out of Idle
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, true, kMin, pastNow), "decay-waiting: presence 'busy' (subagent) -> never raced to Idle");
+        // 0 minutes == never; wrong state / no anchor are no-ops
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, last, last, false, false, 0, pastNow), "decay-waiting: 0 minutes == never decay");
+        CHECK(!ShouldDecayWaitingToIdle(S::Running, last, last, false, false, kMin, pastNow), "decay-waiting: not WaitingForInput -> no-op");
+        CHECK(!ShouldDecayWaitingToIdle(S::WaitingForInput, 0, last, false, false, kMin, pastNow), "decay-waiting: no activity anchor (lastActivity 0) -> no-op");
+    }
 
     // --- ParseTranscriptDelta now surfaces the interactive tool name + a ToolResult marker ---
     {
@@ -2594,6 +2751,51 @@ static void TestTranscriptResolve()
         std::filesystem::remove_all(std::filesystem::path{ root }, ec);
     }
 
+    // --- SessionStore: the generalized DURABLE per-session key/value store (titles + future data) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring store = std::wstring{ tmp } + L"am_sstore_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec); // a clean slate
+
+        const std::wstring a = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const std::wstring b = L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        // absent -> empty; set -> get (durability across "windows" is just re-reading the same dir).
+        CHECK(GetSessionStoreFieldIn(store, a, L"title").empty(), "store: a missing field reads empty");
+        CHECK(SetSessionStoreFieldIn(store, a, L"title", L"My Renamed Session"), "store: set title ok");
+        CHECK(GetSessionStoreFieldIn(store, a, L"title") == L"My Renamed Session", "store: get returns the set title");
+
+        // generalized: a second arbitrary key on the same session coexists with the first.
+        CHECK(SetSessionStoreFieldIn(store, a, L"note", L"hello"), "store: set a second arbitrary field");
+        const auto recA = LoadSessionStoreIn(store, a);
+        CHECK(recA.size() == 2 && recA.at(L"title") == L"My Renamed Session" && recA.at(L"note") == L"hello", "store: record holds both keys");
+
+        // dedup: setting the same value again still reports success, value unchanged.
+        CHECK(SetSessionStoreFieldIn(store, a, L"title", L"My Renamed Session"), "store: redundant set is a no-op success");
+        CHECK(GetSessionStoreFieldIn(store, a, L"title") == L"My Renamed Session", "store: value stable after a redundant set");
+
+        // an empty value REMOVES a key; removing the last key deletes the file (record empty).
+        CHECK(SetSessionStoreFieldIn(store, a, L"note", L""), "store: empty value removes the key");
+        CHECK(GetSessionStoreFieldIn(store, a, L"note").empty(), "store: a removed key reads empty");
+        CHECK(LoadSessionStoreIn(store, a).size() == 1, "store: only the title remains");
+
+        // a second session is independent (per-session files; O(1) by id).
+        CHECK(SetSessionStoreFieldIn(store, b, L"title", L"Other Session"), "store: set title on a second session");
+
+        // bulk: every session that has the field, in ONE scan (sparse — only titled sessions).
+        const auto all = LoadAllSessionStoreFieldIn(store, L"title");
+        CHECK(all.size() == 2 && all.at(a) == L"My Renamed Session" && all.at(b) == L"Other Session", "store: LoadAll gathers both titles");
+        CHECK(LoadAllSessionStoreFieldIn(store, L"note").empty(), "store: LoadAll for a field no session has is empty");
+
+        // a malformed session id never escapes the store dir; an empty id is inert.
+        CHECK(!SetSessionStoreFieldIn(store, L"..\\evil", L"title", L"x"), "store: a path-bearing id is rejected");
+        CHECK(GetSessionStoreFieldIn(store, L"", L"title").empty(), "store: an empty id reads empty");
+
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+    }
+
     // --- AnalyzeSessionTranscript: a real user prompt that BEGINS WITH A NEWLINE is kept ----------
     // Regression (the empty-summary bug): a pasted prompt (e.g. a terminal-screen capture) frequently
     // starts with a leading "\n". The summary noise filter ported session-end.js's startsWith('\n')
@@ -2662,6 +2864,59 @@ static void TestTranscriptResolve()
         std::error_code ec2;
         std::filesystem::remove(std::filesystem::path{ pAsk }, ec2);
         std::filesystem::remove(std::filesystem::path{ pBash }, ec2);
+    }
+
+    // --- NormalizeRecapText: the one-true recap normalizer (shared by every recap reader) ----------
+    CHECK(NormalizeRecapText(L"Did X. Next: Y. (disable recaps in /config)") == L"Did X. Next: Y.", "NormalizeRecapText: trailing disable hint + the space before it are stripped");
+    CHECK(NormalizeRecapText(L"  spaced recap \n") == L"spaced recap", "NormalizeRecapText: surrounding whitespace/newlines trimmed");
+    CHECK(NormalizeRecapText(L"no hint here") == L"no hint here", "NormalizeRecapText: a recap without the hint is unchanged");
+    CHECK(NormalizeRecapText(L"(disable recaps in /config)") == L"", "NormalizeRecapText: a hint-only body normalizes to empty");
+    CHECK(NormalizeRecapText(L"") == L"", "NormalizeRecapText: empty stays empty");
+
+    // --- AnalyzeSessionTranscript: the idle RECAP (away_summary) is captured into .awaySummary -------
+    // The summary panel / Sessions detail / copyable Summary read SessionSummary.awaySummary. The LAST
+    // away_summary wins (a session that went idle, came back, and went idle again has a fresher recap),
+    // and the "(disable recaps in /config)" UI hint is stripped. A recap is NOT a user message — it must
+    // never leak into the numbered Messages list.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring pRecap = std::wstring{ tmp } + L"am_recap_" + std::to_wstring(::GetCurrentProcessId()) + L".jsonl";
+        MakeJsonl(pRecap,
+                  R"j({"type":"user","userType":"external","message":{"content":"start the work"},"timestamp":"2026-02-01T10:00:00.000Z"})j" "\n"
+                  R"j({"type":"system","subtype":"away_summary","content":"Old recap. (disable recaps in /config)","timestamp":"2026-02-01T10:30:00.000Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":"keep going"},"timestamp":"2026-02-01T11:00:00.000Z"})j" "\n"
+                  R"j({"type":"system","subtype":"away_summary","content":"We did the work; next is to ship it. (disable recaps in /config)","timestamp":"2026-02-01T11:30:00.000Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pRecap, 0);
+        CHECK(a.awaySummary == L"We did the work; next is to ship it.", "AnalyzeSessionTranscript: the LATEST away_summary wins + the disable hint is stripped");
+        CHECK(a.userMsgs.size() == 2, "AnalyzeSessionTranscript: the two recap lines stay OUT of the Messages list (only the 2 typed prompts)");
+
+        // The shared text box renders a "Recap:" section above the Messages, with the label INLINE with
+        // the prose (one line, no wasted break) — "Recap: <text>", not "Recap:\n<text>".
+        const auto box = RenderSessionSummaryBox(a, L"sid-recap", L"K:\\x", pRecap, L"claude --resume sid-recap", L"", L"", L"", /*full*/ true);
+        CHECK(box.find(L"Recap: We did the work; next is to ship it.") != std::wstring::npos, "RenderSessionSummaryBox: the recap label is INLINE with the prose (one line, no break)");
+        CHECK(box.find(L"Recap:") < box.find(L"start the work"), "RenderSessionSummaryBox: the Recap section sits ABOVE the numbered user messages");
+
+        std::error_code ecR;
+        std::filesystem::remove(std::filesystem::path{ pRecap }, ecR);
+    }
+
+    // --- the recap is shown in FULL — never length-capped (unlike the numbered messages, which cap at
+    // 240 chars in this one-line box). A recap far longer than that cap renders whole, no "...".
+    {
+        SessionSummary big;
+        big.found = true;
+        big.userMsgs.push_back(std::wstring(500, L'M')); // a long MESSAGE: still capped at 240 (control)
+        big.awaySummary = std::wstring(800, L'R') + L" RECAP_TAIL_MARKER"; // a long RECAP: shown whole
+        const auto box = RenderSessionSummaryBox(big, L"id", L"K:\\x", L"t.jsonl", L"claude --resume id", L"", L"", L"", /*full*/ false);
+        // Isolate the recap line: from "Recap: " up to the section separator before the Messages.
+        const size_t rp = box.find(L"Recap: ");
+        const size_t sepAfter = rp == std::wstring::npos ? std::wstring::npos : box.find(kSummarySepMark, rp);
+        const std::wstring recapLine = rp == std::wstring::npos ? L"" : box.substr(rp, sepAfter == std::wstring::npos ? std::wstring::npos : sepAfter - rp);
+        CHECK(recapLine.find(L"RECAP_TAIL_MARKER") != std::wstring::npos, "RenderSessionSummaryBox: a long recap (>240) is rendered in FULL (its tail survives)");
+        CHECK(!recapLine.empty() && recapLine.find(L"...") == std::wstring::npos, "RenderSessionSummaryBox: the recap line carries NO '...' truncation");
+        CHECK(box.find(L"MMM...") != std::wstring::npos || box.find(L"...") != std::wstring::npos, "RenderSessionSummaryBox: a long numbered MESSAGE is still capped (control — the cap applies to messages, not the recap)");
     }
 }
 
@@ -3482,6 +3737,40 @@ static void TestSessionSearch()
         CHECK(!r.empty() && r[0] == L"s-title", "fast: fuzzy subsequence over the title");
     }
 
+    // --- SearchIndexFast: the 🏷 title scope gates title matching; liveTitle overlay is searchable ---
+    {
+        std::vector<SessionIndexEntry> entries(2);
+        entries[0].sessionId = L"s-titled";
+        entries[0].stats.customTitle = L"Refactor the SCHEDULER";
+        entries[0].stats.cwd = L"K:\\source\\gamma";
+        entries[1].sessionId = L"s-live";
+        entries[1].stats.firstUserPrompt = L"do a thing";
+        entries[1].stats.cwd = L"K:\\source\\delta";
+        entries[1].liveTitle = L"My Renamed Tab"; // an OPEN session's real tab title (UI overlay)
+
+        SessionQuery q; // scopeTitle defaults ON
+        q.text = L"scheduler";
+        auto r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-titled", "fast: title matches with scopeTitle ON (default)");
+        q.scopeTitle = false;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: scopeTitle OFF excludes a title-only match");
+
+        q = {}; // DMI restores scopeTitle = true
+        q.text = L"gamma"; // the cwd — must match even with titles off (cwd is the always-on baseline)
+        q.scopeTitle = false;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-titled", "fast: cwd stays matched with scopeTitle OFF");
+
+        q = {};
+        q.text = L"renamed tab"; // present only in the liveTitle overlay
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-live", "fast: liveTitle (open tab name) is searchable under scopeTitle");
+        q.scopeTitle = false;
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: liveTitle is gated by scopeTitle too");
+    }
+
     // --- SearchIndexFast: guid -> session-identity terms, quoted-exact, AND semantics ---
     {
         const std::wstring gidA = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -4086,6 +4375,7 @@ int wmain()
     TestProfileBootstrap();
     TestScheduler();
     TestEnterRetry();
+    TestSchedulerIntegration();
     TestTranscriptScan();
     TestBlockedAndInterruptedStates();
     TestPersistence();

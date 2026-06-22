@@ -122,6 +122,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void ScrollViewport(int viewTop);
         int32_t JumpToConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index); // Agentmaster (SUMMARY_JUMP.md)
         winrt::Windows::Foundation::Collections::IVector<int32_t> ResolveConversationPromptRows(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages); // Agentmaster (SUMMARY_JUMP.md): icon eligibility
+        int32_t ScrollToAdjacentConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, bool up); // Agentmaster (alt+up/down): center on the nearest off-screen prompt up/down; returns its 0-based message index (for the summary highlight), or -1
 
         void AdjustFontSize(float fontSizeDelta);
         void ResetFontSize();

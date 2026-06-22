@@ -25,6 +25,7 @@
 // _HandleClosePaneRequested archives a managed session whose pane is explicitly closed.
 #include "AgentMaster/SessionRegistry.h" // _sessionRegistry->Get()
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeConversationExists / AppendStateLog
+#include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 
@@ -357,6 +358,15 @@ namespace winrt::TerminalApp::implementation
                     const std::wstring forkFrom = src->codexSessionId; // the REAL rollout uuid (the fork source)
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->codex-fork] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
                     _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+                    return;
+                }
+                // Native-exe-only policy gate (auto-recovering): a Claude duplicate forks via
+                // _LaunchClaudeSession (a launch). The Codex branch above needs no claude.exe; this one
+                // does, so prompt instead of silently no-op'ing at the launch backstop when Claude isn't
+                // installed (a managed Claude tab can outlive a claude.exe that was since removed).
+                if (!::Agentmaster::EnsureClaudeAvailable())
+                {
+                    _PromptClaudeMissing();
                     return;
                 }
                 const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};

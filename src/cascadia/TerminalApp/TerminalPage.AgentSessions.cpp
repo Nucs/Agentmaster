@@ -86,11 +86,75 @@ namespace winrt::TerminalApp::implementation
         return c;
     }
 
+    // Agentmaster (native-exe-only policy): surface the "Claude Code (native) not found" notice from a
+    // FULL-WINDOW page (Archive / Sessions) or a tab/CLI entry point, where the Manager tab's rich
+    // install modal (_ShowClaudeMissing) can't render. The decision is still the synchronous
+    // EnsureClaudeAvailable() gate at each launch choke point; this is only the user-facing prompt shown
+    // when that returns false. Idempotent: _claudeMissingPromptShowing collapses a burst — e.g. a bulk
+    // Restore that calls the gate once per checked Claude session — to ONE dialog. Buttons-only (XAML-
+    // Islands-safe) + agentmaster-dark, matching the pages' other dialogs. "Get Claude Code" opens the
+    // setup docs; "OK" dismisses. There is no Re-check button by design — EnsureClaudeAvailable()
+    // re-resolves on the NEXT attempt, so once `claude install` finishes the prompt simply stops
+    // appearing and the action proceeds.
+    winrt::fire_and_forget TerminalPage::_PromptClaudeMissing()
+    {
+        if (_claudeMissingPromptShowing)
+        {
+            co_return; // a prompt is already up (or queued this tick) — never stack duplicates
+        }
+        const auto presenter{ _dialogPresenter.get() };
+        if (!presenter)
+        {
+            co_return; // no presenter to show with — the gate already aborted the launch, so just bail
+        }
+        _claudeMissingPromptShowing = true; // set BEFORE the first co_await so a synchronous bulk loop dedupes
+
+        ContentDialog dialog;
+        dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
+        dialog.Title(winrt::box_value(L"Claude Code (native) not found"));
+        dialog.Content(winrt::box_value(winrt::hstring{
+            L"Agentmaster drives the native claude.exe, and none was found on PATH, in "
+            L"%USERPROFILE%\\.local\\bin, or behind an npm claude.cmd. Launching, resuming, forking, and "
+            L"adopting Claude sessions stay disabled until one is available \x2014 a pure-Node `claude` is "
+            L"not supported.\n\nInstall it: open a terminal, run  claude install , then try again \x2014 "
+            L"Agentmaster re-checks automatically, so this notice stops appearing once it's found. You can "
+            L"also point at an existing claude.exe in Settings \x2192 Claude binary." }));
+        dialog.PrimaryButtonText(L"Get Claude Code");
+        dialog.CloseButtonText(L"OK");
+        dialog.DefaultButton(ContentDialogButton::Close);
+
+        const auto weak = get_weak();
+        const auto result = co_await presenter.ShowDialog(dialog);
+        const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
+        if (!strong)
+        {
+            co_return; // window torn down while the dialog was up — the flag dies with the object
+        }
+        strong->_claudeMissingPromptShowing = false; // dialog dismissed — re-arm for the next not-found gate
+        if (result == ContentDialogResult::Primary)
+        {
+            try
+            {
+                winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri{ L"https://code.claude.com/docs/en/setup" });
+            }
+            CATCH_LOG();
+        }
+    }
+
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude"). insertPosition
     // threads tab placement: -1 (the default) keeps the end/NewTabPosition behavior; a tab
     // context-menu "New Session Here" passes clickedIndex+1 so the new tab lands next to it.
     void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
     {
+        // Native-exe-only policy gate (auto-recovering). A page / tab-menu spawn that reaches here did
+        // NOT pass through the Manager's rich modal, so prompt with the page dialog instead of silently
+        // no-op'ing at _LaunchClaudeSession's backstop. (A Manager-tab spawn already gated upstream and
+        // only reaches here when Claude IS present — a cache hit.)
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
+            return;
+        }
         _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition);
     }
 
@@ -109,11 +173,13 @@ namespace winrt::TerminalApp::implementation
             return nullptr;
         }
 
-        // Native-exe-only policy: never spawn without a resolved native claude.exe. The Manager's
-        // Launch/Fork buttons already gate with the install prompt; this is the backstop for the
-        // non-UI entry points (Restore all, window/workspace restore) — they no-op cleanly instead of
-        // spawning a doomed ConPTY (a fork/resume is just a launch variant — all funnel through here).
-        if (!::Agentmaster::ClaudeAvailable())
+        // Native-exe-only policy: never spawn without a resolved native claude.exe. The UI launch paths
+        // already gate with the install prompt; this is the SILENT backstop for the non-UI entry points
+        // (window/workspace restore) — they no-op cleanly (log only, no prompt: a reopen re-homes many
+        // tabs and must never raise N modals) instead of spawning a doomed ConPTY (a fork/resume is just
+        // a launch variant — all funnel through here). EnsureClaudeAvailable re-resolves first, so a
+        // claude installed since startup lets a later restore succeed without a relaunch.
+        if (!::Agentmaster::EnsureClaudeAvailable())
         {
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-blocked] no native claude.exe; refusing to spawn \"" + std::wstring{ title } + L"\"\n");
             return nullptr;
@@ -431,6 +497,13 @@ namespace winrt::TerminalApp::implementation
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
         _StripSessionFromSavedWindows(sessionId);
+        // Agentmaster: a permanently-deleted session is ALSO auto-hidden from the Sessions browser —
+        // the SAME AppSettings.hiddenSessionIds set the row right-click "Hide from list" uses — so a
+        // deleted tab disappears from that list too instead of lingering as an on-disk row. It is NOT
+        // gone: the .jsonl on disk is kept (above), so the Sessions page's "Hidden" reveal filter
+        // (or the Settings cog's "Reset hidden sessions") brings it back, still resumable. Idempotent.
+        _AddSessionIdToHiddenList(sessionId);
+        _RenderSessionsTable(); // refresh the Sessions page if it happens to be open (guarded no-op otherwise)
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[delete] " + sessionId + L"\n");
     }
 
@@ -534,6 +607,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
                 ContentDialog dialog;
+                dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
                 dialog.Title(winrt::box_value(L"Close session?"));
                 // Archive (the safe action) keeps it restorable; Delete (the trash, leftmost) removes it
                 // from Agentmaster but KEEPS the conversation file on disk (it still appears in Sessions).
@@ -664,6 +738,14 @@ namespace winrt::TerminalApp::implementation
         }
         else
         {
+            // Native-exe-only policy gate (auto-recovering) — Claude restore only (Codex above needs no
+            // claude.exe). Covers the Archive page's "Restore here" / bulk Restore / double-click and the
+            // Manager's restore handler; the idempotent prompt collapses a bulk loop to one dialog.
+            if (!::Agentmaster::EnsureClaudeAvailable())
+            {
+                _PromptClaudeMissing();
+                return;
+            }
             _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
         }
     }
@@ -880,6 +962,15 @@ namespace winrt::TerminalApp::implementation
     // found".
     void TerminalPage::_AdoptExternalClaude(uint32_t pid, winrt::hstring cwd, bool fork)
     {
+        // Native-exe-only policy gate (auto-recovering): adopt resumes/forks the external's conversation
+        // into a NEW managed claude (a launch). The Manager's external-row Adopt already gates with the
+        // rich modal upstream, so when Claude is missing this is reached only via non-Manager callers —
+        // prompt with the page dialog rather than no-op'ing at _LaunchClaudeSession's backstop.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
+            return;
+        }
         const std::wstring dir{ cwd };
         const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
         const std::wstring id = ::Agentmaster::ResolveSessionId(dir, start);
@@ -1111,7 +1202,8 @@ namespace winrt::TerminalApp::implementation
         else
         {
             // Native-exe-only policy backstop (mirrors _LaunchClaudeSession): refuse if no claude.exe.
-            if (!::Agentmaster::ClaudeAvailable())
+            // Auto-recovering + silent (a restart is not a fresh user launch — log, don't prompt).
+            if (!::Agentmaster::EnsureClaudeAvailable())
             {
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-blocked] no native claude.exe; " + managedId + L"\n");
                 return true; // handled (refused) — don't fall through to the buggy replay

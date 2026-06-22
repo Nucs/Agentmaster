@@ -449,10 +449,12 @@ namespace Agentmaster
         o.Set(L"confirmBeforeKill", json::Value::MkBool(s.confirmBeforeKill));
         o.Set(L"tabRenameCommitMode", json::Value::MkStr(ToString(s.tabRenameCommitMode)));
         o.Set(L"defaultLaunchDir", json::Value::MkStr(s.defaultLaunchDir));
-        o.Set(L"waitingDecayMinutes", json::Value::MkNum(s.waitingDecayMinutes));
+        o.Set(L"waitingForYouTimeoutMinutes", json::Value::MkNum(s.waitingForYouTimeoutMinutes));
+        o.Set(L"serverCacheMinutes", json::Value::MkNum(s.serverCacheMinutes));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
+        o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
@@ -490,10 +492,15 @@ namespace Agentmaster
         s.tabRenameCommitMode = TabRenameCommitModeFromString(v.StrAt(L"tabRenameCommitMode", L"shiftEnter"));
         s.defaultLaunchDir = v.StrAt(L"defaultLaunchDir");
         // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.
-        s.waitingDecayMinutes = v.U32At(L"waitingDecayMinutes", 5);
+        // RENAMED from "waitingDecayMinutes" on purpose (the Waiting-for-you behavior changed): the
+        // legacy key is intentionally NOT read, so a pre-existing settings.json falls back to the new
+        // 60 (1h) default instead of carrying over a value tuned for the old 5-minute cache window.
+        s.waitingForYouTimeoutMinutes = v.U32At(L"waitingForYouTimeoutMinutes", 60);
+        s.serverCacheMinutes = v.U32At(L"serverCacheMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
+        s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)

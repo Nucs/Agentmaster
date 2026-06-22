@@ -8,7 +8,7 @@ if errorlevel 1 (
 )
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests"
 REM user32 + oleaut32: ProcessInspect's BringClaudeWindowToFront (EnumWindows/ShowWindow/... + UIA BSTR names)
-cl /std:c++20 /EHsc /nologo /W3 /Fe:m5_tests.exe m5_tests.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ole32.lib user32.lib oleaut32.lib
+cl /std:c++20 /EHsc /nologo /W3 /Fe:m5_tests.exe m5_tests.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ole32.lib user32.lib oleaut32.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

@@ -4,11 +4,13 @@
 // Agentmaster — the full-window Sessions page (SESSIONS.md): a browser over EVERY on-disk
 // Claude Code session in a selectable time window (default 1 month), opened by the Manager's
 // "Sessions" button (right after Archived). Duplicates the Archive page's structure with a
-// SEARCH BAR at the top: [ search for sessions ] (👤)(🤖)(📁)(📄)(F) [1 month] —
+// SEARCH BAR at the top: [ search for sessions ] (👤)(🤖)(📁)(📄)(🏷)(F) [☐ Open] [1 month] —
 //   👤 = also search user (typed) messages      🤖 = also search agent + tools text
 //   📁 = match directories accessed             📄 = match files accessed
-//   (F) = fuzzy   ·   both message scopes OFF ⇒ title + directory only (§1a)
-//   Defaults: 📁+📄 ON (fast-phase-only — in-memory, no IO); 👤/🤖/(F) OFF (either message
+//   🏷 = match the session title (incl. an open session's live tab title)
+//   (F) = fuzzy   ·   ☐ Open = show only sessions open in a window right now (a ROW filter)
+//   With 🏷 off and both message scopes off, terms match the working directory (+ 📁/📄) only (§1a).
+//   Defaults: 📁+📄+🏷 ON (fast-phase-only — in-memory, no IO); 👤/🤖/(F)/Open OFF (either message
 //   scope flips on the SLOW rg+transcript content scan; fuzzy is a noisy default).
 //   [1 month] cycles 1d/3d/7d/14d/1mo/3mo on click; HOVER opens a From/To range popup (Q4).
 // Query grammar (ParseSessionQuery, SessionSearch.h): whitespace-split terms AND-match;
@@ -31,11 +33,13 @@
 
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
+#include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
 #include "AgentMaster/Persistence.h" // GetDirColor / AutoDirColorHex (the per-dir color chip)
 #include "AgentMaster/ProcessInspect.h" // AnalyzeSessionTranscript / RenderSessionSummaryBox / FindPlanFileInTranscript / kSummarySepMark (detail summary box)
 #include "AgentMaster/ProcessObserver.h" // Presence()
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionSearch.h" // the two-phase search
+#include "AgentMaster/SessionStore.h" // durable per-session store (LoadAllStoredSessionTitles — the title overlay)
 #include "AgentMaster/TranscriptStore.h" // EnumerateTranscripts / LoadOrRefreshSessionIndex / PickDisplayTitle
 
 using namespace winrt;
@@ -447,6 +451,14 @@ namespace winrt::TerminalApp::implementation
         _sessScopeFilesBtn.IsChecked(true);
         _sessScopeFilesBtn.Click(onToggle);
         bar.Children().Append(_sessScopeFilesBtn);
+        // 🏷 — match the session TITLE: its conversation title (custom / AI / first prompt) AND the
+        // live tab title of an OPEN session (the liveTitle overlay), so a renamed session is found
+        // by the name shown. Fast-phase-only (in-memory, no transcript IO). DEFAULT ON — titles were
+        // always matched before, so this keeps current results; uncheck to leave titles out.
+        _sessScopeTitleBtn = SessToggle(L"\U0001F3F7", L"Match the session title \x2014 its conversation title and the live tab name of an open session. On by default; uncheck to leave titles out of the search.");
+        _sessScopeTitleBtn.IsChecked(true);
+        _sessScopeTitleBtn.Click(onToggle);
+        bar.Children().Append(_sessScopeTitleBtn);
         _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy matching \x2014 the query's characters must appear in order, with gaps allowed (\"agmst\" matches \"agentmaster\").");
         _sessFuzzyBtn.Click(onToggle);
         bar.Children().Append(_sessFuzzyBtn);
@@ -462,6 +474,20 @@ namespace winrt::TerminalApp::implementation
         SessSetTip(_sessOpenOnlyBtn, L"Show only sessions open in an Agentmaster window right now (the solid color chip) \x2014 hides archived / on-disk ones.");
         _sessOpenOnlyBtn.Click(onToggle);
         bar.Children().Append(_sessOpenOnlyBtn);
+
+        // "Hidden" — a row REVEAL filter for the hidden set (AppSettings.hiddenSessionIds): the
+        // sessions you right-clicked "Hide from list" AND the ones auto-hidden when their tab was
+        // deleted. Default OFF: hidden sessions are filtered out of the list (the chokepoint at the
+        // render below). Checked: they are shown again — dimmed, and their right-click menu offers
+        // "Unhide" — so you can find and resume/unhide a deleted-or-hidden session without clearing
+        // the whole set from the Settings cog. In-memory, flips through the same throttle as "Open".
+        _sessHiddenBtn = CheckBox{};
+        _sessHiddenBtn.Content(winrt::box_value(winrt::hstring{ L"Hidden" }));
+        _sessHiddenBtn.MinWidth(0);
+        _sessHiddenBtn.VerticalAlignment(VerticalAlignment::Center);
+        SessSetTip(_sessHiddenBtn, L"Reveal sessions hidden from the list \x2014 the ones you hid, and the ones auto-hidden when their tab was deleted (their files are kept on disk). Off by default.");
+        _sessHiddenBtn.Click(onToggle);
+        bar.Children().Append(_sessHiddenBtn);
 
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
@@ -922,6 +948,30 @@ namespace winrt::TerminalApp::implementation
             rows.push_back(std::move(r));
             entries.push_back(std::move(e));
         }
+
+        // Durable-title overlay (SessionStore): a session we have a STORED title for — set in any
+        // window when we launched / renamed / restored it (Rule #11), and kept across windows + runs
+        // even after it closed — shows that title instead of the transcript-derived one, and folds it
+        // into the search haystack (liveTitle) so a historical session is findable by the name we gave
+        // it. ONE sparse dir scan (only titled sessions have a file); fine off-thread. The registry-
+        // LIVE override below (UI thread) still wins for sessions open right now (the freshest tab
+        // title). rows[i] <-> entries[i] are built 1:1 above.
+        const auto storedTitles = ::Agentmaster::LoadAllStoredSessionTitles();
+        if (!storedTitles.empty())
+        {
+            for (size_t i = 0; i < rows.size(); ++i)
+            {
+                const auto it = storedTitles.find(rows[i].id);
+                if (it != storedTitles.end() && !it->second.empty())
+                {
+                    rows[i].title = it->second;
+                    if (i < entries.size())
+                    {
+                        entries[i].liveTitle = it->second;
+                    }
+                }
+            }
+        }
         (void)now;
 
         co_await winrt::resume_foreground(Dispatcher());
@@ -938,15 +988,25 @@ namespace winrt::TerminalApp::implementation
         // share (Rule #11) — instead of the transcript-derived PickDisplayTitle: an in-app rename
         // is reflected here, and a same-dir clash reads its tab name. Baked into the stored rows
         // (here, on the UI thread — the registry is a `this` member, off-limits to the background
-        // gather) so display, sort, the detail pane, AND fork-naming all agree on it. An on-disk
-        // (archived / never-opened) session keeps its derived title. Registry Get is mutex-guarded.
+        // gather) so display, sort, the detail pane, AND fork-naming all agree on it. The SAME real
+        // title is mirrored onto the matching index entry's liveTitle overlay so the 🏷 title search
+        // finds an open session by the name shown (rows ↔ entries are built 1:1; the id guard keeps
+        // it safe either way). An on-disk (archived / never-opened) session keeps its derived title.
+        // Registry Get is mutex-guarded.
         if (self->_sessionRegistry)
         {
-            for (auto& r : self->_sessionsRows)
+            for (size_t i = 0; i < self->_sessionsRows.size(); ++i)
             {
-                if (const auto reg = self->_sessionRegistry->Get(r.id); reg && reg->live && !reg->title.empty())
+                auto& r = self->_sessionsRows[i];
+                const auto reg = self->_sessionRegistry->Get(r.id);
+                if (!(reg && reg->live && !reg->title.empty()))
                 {
-                    r.title = reg->title;
+                    continue;
+                }
+                r.title = reg->title;
+                if (i < self->_sessionsEntries.size() && self->_sessionsEntries[i].sessionId == r.id)
+                {
+                    self->_sessionsEntries[i].liveTitle = reg->title; // make the live tab title searchable (🏷)
                 }
             }
         }
@@ -961,6 +1021,8 @@ namespace winrt::TerminalApp::implementation
 
         ::Agentmaster::SessionQuery q;
         q.text = _sessionsQueryText;
+        // scopeTitle defaults ON (SessionQuery default true): a null button can't silently drop it.
+        q.scopeTitle = !_sessScopeTitleBtn || (_sessScopeTitleBtn.IsChecked() && _sessScopeTitleBtn.IsChecked().Value());
         q.scopeUser = _sessScopeUserBtn && _sessScopeUserBtn.IsChecked() && _sessScopeUserBtn.IsChecked().Value();
         q.scopeAgent = _sessScopeAgentBtn && _sessScopeAgentBtn.IsChecked() && _sessScopeAgentBtn.IsChecked().Value();
         q.scopeDirs = _sessScopeDirsBtn && _sessScopeDirsBtn.IsChecked() && _sessScopeDirsBtn.IsChecked().Value();
@@ -1125,6 +1187,9 @@ namespace winrt::TerminalApp::implementation
         // resetting from the Settings cog just re-renders (the rows stay in _sessionsRows). A
         // hidden session is untouched on disk — purely a browse-list preference. ---
         const std::unordered_set<std::wstring> hidden(_appSettings.hiddenSessionIds.begin(), _appSettings.hiddenSessionIds.end());
+        // "Hidden" reveal filter: OFF (default) drops hidden ids from the view; ON keeps them (shown
+        // dimmed, with an "Unhide" menu). Either way they're tallied for the "N hidden" note.
+        const bool showHidden = _sessHiddenBtn && _sessHiddenBtn.IsChecked() && _sessHiddenBtn.IsChecked().Value();
         // "Open" filter: when checked, keep only sessions live in the process-wide registry (open in
         // any Agentmaster window — the same `reg->live` the solid chip reflects). Registry Get is
         // mutex-guarded; queried per row only while the filter is on.
@@ -1136,7 +1201,10 @@ namespace winrt::TerminalApp::implementation
             if (!hidden.empty() && hidden.count(r.id))
             {
                 ++hiddenInWindow;
-                continue;
+                if (!showHidden)
+                {
+                    continue; // hidden by the "Hide from list" set — reveal with the "Hidden" filter
+                }
             }
             if (openOnly)
             {
@@ -1235,19 +1303,14 @@ namespace winrt::TerminalApp::implementation
                 chip.HorizontalAlignment(HorizontalAlignment::Center);
                 chip.Background(dirColor ? SolidColorBrush{ *dirColor } : SessBrush(0xFF, 0x60, 0x60, 0x60));
                 chip.Opacity(live ? 1.0 : 0.35);
-                std::wstring tip = live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
-                tip += L"\nDot color = this session's working-directory color (matches its tab)";
+                // Agentmaster: the chip's status / presence / fork text now rides the ONE consolidated
+                // row tooltip (built below) instead of a per-cell tip — the chip is decorative and made
+                // clickthrough (g.IsHitTestVisible(false)). Keep ONLY the visual presence ring here.
                 if (pres)
                 {
-                    tip += L"\nClaude is " + pres->status; // its own busy / idle / waiting heartbeat
-                    chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60));
+                    chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60)); // claude's busy/idle/waiting heartbeat ring
                     chip.BorderThickness(Thickness{ 1.5, 1.5, 1.5, 1.5 });
                 }
-                if (r.fork)
-                {
-                    tip += L"\nFork of " + r.forkedFromId.substr(0, 8);
-                }
-                SessSetTip(chip, winrt::hstring{ tip });
                 Grid::SetColumn(chip, 0);
                 g.Children().Append(chip);
             }
@@ -1259,7 +1322,6 @@ namespace winrt::TerminalApp::implementation
             // it sits under the glyphs, not at the row's bottom edge. The dim for an on-disk row is on the
             // BRUSH (not the Border) so the title text keeps its own live/archived opacity.
             auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
-            SessSetTip(title, winrt::hstring{ r.title + L"\nSession id: " + r.id });
             // Full-strength rule for a live row; a translucent one (alpha ~0.6) for an on-disk row,
             // baked into the brush's alpha — NOT the Border's Opacity, which would also fade the text.
             const uint8_t ulAlpha = live ? 0xFF : 0x99;
@@ -1275,7 +1337,6 @@ namespace winrt::TerminalApp::implementation
             g.Children().Append(titleWrap);
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
-            SessSetTip(dir, winrt::hstring{ r.dir }); // the full path — the cell end-trims, losing the leaf
             // Same working-directory-color underline as the title (reusing the row's `underline`
             // brush) — the Directory cell is literally the folder, so it wears the folder's color too.
             Border dirWrap;
@@ -1289,32 +1350,22 @@ namespace winrt::TerminalApp::implementation
             g.Children().Append(dirWrap);
 
             auto branch = SessText(winrt::hstring{ r.branch }, 11, false, 0.6);
-            SessSetTip(branch, winrt::hstring{ r.branch }); // the full branch name — no-op when empty
             Grid::SetColumn(branch, 3);
             g.Children().Append(branch);
 
             auto created = SessText(winrt::hstring{ SessAgo(r.createdMs, now) }, 11, false, 0.6);
             created.HorizontalAlignment(HorizontalAlignment::Center);
-            if (const auto abs = SessLocalDateTime(r.createdMs); !abs.empty())
-            {
-                SessSetTip(created, winrt::hstring{ L"Created " + abs }); // the exact moment behind the relative age
-            }
             Grid::SetColumn(created, 4);
             g.Children().Append(created);
 
             auto active = SessText(winrt::hstring{ SessAgo(r.lastActivityMs, now) }, 11, false, 0.75);
             active.HorizontalAlignment(HorizontalAlignment::Center);
-            if (const auto abs = SessLocalDateTime(r.lastActivityMs); !abs.empty())
-            {
-                SessSetTip(active, winrt::hstring{ L"Last active " + abs });
-            }
             Grid::SetColumn(active, 5);
             g.Children().Append(active);
 
             const std::wstring weight = std::to_wstring(r.msgs) + L"\x00B7" + std::to_wstring(r.tools);
             auto w = SessText(winrt::hstring{ weight }, 11, false, 0.6);
             w.HorizontalAlignment(HorizontalAlignment::Center);
-            SessSetTip(w, winrt::hstring{ std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB" });
             Grid::SetColumn(w, 6);
             g.Children().Append(w);
 
@@ -1330,11 +1381,62 @@ namespace winrt::TerminalApp::implementation
                 }
             }
 
+            // A row is in the hidden set only when the "Hidden" reveal filter is on (else it was
+            // dropped from `view` above). Dim it as a visual cue that it's normally hidden.
+            const bool rHidden = !hidden.empty() && hidden.count(r.id) != 0;
+
+            // Agentmaster: make the row's whole content grid CLICKTHROUGH so the row Border is ONE clean
+            // click target and ONE tooltip surface. This fixes both (a) the per-cell tooltip flicker —
+            // each cell used to open/close its own tip as the mouse panned across the columns — and (b)
+            // unreliable row selection, where a hit-test-visible cell fragmented the row's click target.
+            // The content carries no interactive child (no checkbox here, unlike the Archive page), so the
+            // entire grid can go hit-test-transparent in one shot; rowB still gets the click + context menu.
+            g.IsHitTestVisible(false);
+
             Border rowB;
             rowB.Child(g);
             rowB.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
             rowB.Background(r.id == _sessionsSelectedId ? SessBrush(0x30, 0x60, 0xA0, 0xE0) : SessBrush(0x14, 0xFF, 0xFF, 0xFF));
+            if (rHidden)
+            {
+                rowB.Opacity(0.55); // revealed-but-hidden cue (the "Hidden" filter is on)
+            }
             rowB.Tag(winrt::box_value(winrt::hstring{ r.id }));
+            // ONE consolidated row tooltip — folds in every field the per-cell tips used to show (identity,
+            // full path, branch, exact created / last-active moments, the msgs/tools/size weight, and the
+            // live/archived/on-disk + presence status), so no information is lost. Because it lives on the
+            // single (child-free, clickthrough-content) row Border, hovering anywhere on the row shows the
+            // full picture at once and never flickers.
+            {
+                std::wstring rowTip{ r.title };
+                if (r.fork)
+                {
+                    rowTip += L"\n\x2442 fork of " + r.forkedFromId.substr(0, 8);
+                }
+                rowTip += L"\nSession id: " + r.id;
+                rowTip += L"\n" + r.dir;
+                if (!r.branch.empty())
+                {
+                    rowTip += L"\nBranch: " + r.branch;
+                }
+                if (const auto cabs = SessLocalDateTime(r.createdMs); !cabs.empty())
+                {
+                    rowTip += L"\nCreated " + cabs;
+                }
+                if (const auto aabs = SessLocalDateTime(r.lastActivityMs); !aabs.empty())
+                {
+                    rowTip += L"\nLast active " + aabs;
+                }
+                rowTip += L"\n" + std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB";
+                rowTip += L"\n";
+                rowTip += live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
+                rowTip += L"\nDot color = working-directory color (matches its tab)";
+                if (pres)
+                {
+                    rowTip += L"\nClaude is " + pres->status;
+                }
+                SessSetTip(rowB, winrt::hstring{ rowTip });
+            }
             rowB.PointerPressed([this](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
                 const auto b = s.try_as<Border>();
                 if (!b)
@@ -1480,17 +1582,35 @@ namespace winrt::TerminalApp::implementation
 
                 rowMenu.Items().Append(MenuFlyoutSeparator{});
 
+                // Hide / Unhide — toggles AppSettings.hiddenSessionIds. A revealed hidden row (only
+                // visible while the "Hidden" filter is on) offers Unhide; every other row offers Hide.
                 MenuFlyoutItem hideItem;
-                hideItem.Text(L"Hide from list");
-                SessSetTip(hideItem, L"Hide this session from the list \x2014 it stays on disk and can be brought back from Settings.");
-                hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
-                        if (auto self = weak.get())
-                        {
-                            self->_HideSessionFromList(rid);
-                        }
+                if (rHidden)
+                {
+                    hideItem.Text(L"Unhide");
+                    SessSetTip(hideItem, L"Bring this session back into the list (it was hidden, or auto-hidden when its tab was deleted).");
+                    hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_UnhideSessionFromList(rid);
+                            }
+                        });
                     });
-                });
+                }
+                else
+                {
+                    hideItem.Text(L"Hide from list");
+                    SessSetTip(hideItem, L"Hide this session from the list \x2014 it stays on disk and can be brought back from Settings, or shown again with the \x201CHidden\x201D filter.");
+                    hideItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_HideSessionFromList(rid);
+                            }
+                        });
+                    });
+                }
                 rowMenu.Items().Append(hideItem);
                 rowB.ContextFlyout(rowMenu);
             }
@@ -1512,7 +1632,8 @@ namespace winrt::TerminalApp::implementation
             }
             if (hiddenInWindow > 0)
             {
-                counts += L" \x00B7 " + std::to_wstring(hiddenInWindow) + L" hidden"; // resettable in Settings
+                // "N hidden" normally; "N hidden (shown)" while the reveal filter includes them.
+                counts += L" \x00B7 " + std::to_wstring(hiddenInWindow) + (showHidden ? L" hidden (shown)" : L" hidden"); // resettable in Settings
             }
             if (_sessionsIndexing.load())
             {
@@ -1900,6 +2021,15 @@ namespace winrt::TerminalApp::implementation
             }
             return;
         }
+        // Native-exe-only policy gate (auto-recovering): everything past here LAUNCHES a claude (seed an
+        // archived-shaped record, then _RestoreArchivedSession --resume), so gate + prompt here — BEFORE
+        // seeding a phantom record we'd otherwise leave behind. The already-live branch above only jumps
+        // to an existing tab, so it stays ungated.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
+            return;
+        }
         if (!existing)
         {
             ::Agentmaster::SessionInfo s;
@@ -1927,6 +2057,13 @@ namespace winrt::TerminalApp::implementation
     {
         if (!_sessionRegistry || parentId.empty() || dir.empty())
         {
+            return;
+        }
+        // Native-exe-only policy gate (auto-recovering): a fork is a claude launch (--fork-session).
+        // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
             return;
         }
         // Fork the LATEST link of the conversation (the /clear chain tail), not an earlier checkpoint
@@ -1984,6 +2121,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         ContentDialog dialog;
+        dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
         dialog.Title(winrt::box_value(L"Open session"));
         dialog.Content(winrt::box_value(
             title.empty() ?
@@ -2075,25 +2213,41 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Row right-click "Hide from list": append this id to AppSettings.hiddenSessionIds via a
-    // freshest-disk read-modify-write (so it sticks across restarts AND doesn't clobber another
-    // field / another window's concurrent write — the splitter/treeSort pattern), refresh THIS
-    // window's in-memory copy, and re-render the table (the render chokepoint filters it out).
-    // Resettable from the Settings cog. The transcript on disk is NEVER touched — a browse-list
-    // preference only. Already-hidden ids are a no-op (no duplicate write).
+    // Append an id to AppSettings.hiddenSessionIds via a freshest-disk read-modify-write (so it
+    // sticks across restarts AND doesn't clobber another field / another window's concurrent write
+    // — the splitter/treeSort pattern) and refresh THIS window's in-memory copy. Idempotent — an
+    // already-hidden id is a no-op (no duplicate write); returns true only when it was newly added.
+    // NO UI side effects: the caller re-renders. Shared by the Sessions-page row right-click "Hide
+    // from list" AND the auto-hide-on-delete seam (_RemoveSessionRecord). The transcript on disk is
+    // NEVER touched — a browse-list preference only.
+    bool TerminalPage::_AddSessionIdToHiddenList(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return false;
+        }
+        auto s = ::Agentmaster::LoadAppSettings();
+        bool changed = false;
+        if (std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId) == s.hiddenSessionIds.end())
+        {
+            s.hiddenSessionIds.push_back(sessionId);
+            ::Agentmaster::SaveAppSettings(s);
+            changed = true;
+        }
+        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
+        return changed;
+    }
+
+    // Row right-click "Hide from list": persist the id (the RMW above) and re-render the table (the
+    // render chokepoint filters it out, unless the "Hidden" reveal filter is on). Resettable from
+    // the Settings cog. Already-hidden ids are a no-op.
     void TerminalPage::_HideSessionFromList(const std::wstring& sessionId)
     {
         if (sessionId.empty())
         {
             return;
         }
-        auto s = ::Agentmaster::LoadAppSettings();
-        if (std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId) == s.hiddenSessionIds.end())
-        {
-            s.hiddenSessionIds.push_back(sessionId);
-            ::Agentmaster::SaveAppSettings(s);
-        }
-        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
+        _AddSessionIdToHiddenList(sessionId);
         // If the hidden row was selected, drop the selection so the detail pane doesn't keep
         // showing a session that's no longer in the list.
         if (_sessionsSelectedId == sessionId)
@@ -2101,6 +2255,27 @@ namespace winrt::TerminalApp::implementation
             _sessionsSelectedId.clear();
             _ShowSessionsDetail(_sessionsSelectedId); // -> "Select a session"
         }
+        _RenderSessionsTable();
+    }
+
+    // Row right-click "Unhide" — the inverse of Hide, offered on a row that is currently in the
+    // hidden set (only reachable while the "Hidden" reveal filter shows it). Drop the id from
+    // AppSettings.hiddenSessionIds (freshest-disk RMW, mirroring Hide) so the session returns to the
+    // list normally, refresh the in-memory copy, and re-render. A no-op if the id wasn't hidden.
+    void TerminalPage::_UnhideSessionFromList(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto s = ::Agentmaster::LoadAppSettings();
+        const auto it = std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId);
+        if (it != s.hiddenSessionIds.end())
+        {
+            s.hiddenSessionIds.erase(it);
+            ::Agentmaster::SaveAppSettings(s);
+        }
+        _appSettings.hiddenSessionIds = s.hiddenSessionIds;
         _RenderSessionsTable();
     }
 

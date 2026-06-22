@@ -81,6 +81,12 @@ namespace Agentmaster
     {
         std::vector<TranscriptEvent> events;
         size_t consumed{ 0 }; // wide-char count up to and INCLUDING the last '\n' (a partial tail is left)
+        // Agentmaster: the Claude Code idle RECAP — the LAST {"type":"system","subtype":"away_summary"}
+        // line seen IN THIS CHUNK, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint
+        // stripped). Empty if this chunk carried no recap. The scanner mirrors a non-empty value onto
+        // SessionInfo.recap (the Triage-Board card tooltip); the agentmaster-cli `show` reader emits it.
+        // NOT a turn event — it never affects the state machine (its presence is orthogonal to events).
+        std::wstring recap;
     };
 
     // PURE + total (never throws): parse a UTF-16 chunk of NEW transcript text into ordered
@@ -357,6 +363,35 @@ namespace Agentmaster
         return subagentActive || presenceBusy;
     }
 
+    // PURE + total: should the reconciler demote a WaitingForInput session to Idle now? (Agentmaster
+    // Waiting-for-you "unread" model — the replacement for the old "decay after the 5-minute cache
+    // window" rule.) A session leaves Waiting-for-you for Idle only when ALL hold:
+    //   * decay is enabled (minutes != 0; 0 == the cog's "Never"),
+    //   * it is actually WaitingForInput,
+    //   * it is NOT manually "Mark Unread"-ed (a manual mark is sticky — only a visit/archive clears it),
+    //   * claude is NOT self-reporting "busy" (a long Task/Agent subagent keeps the heartbeat busy while
+    //     the parent transcript is quiescent — the recon-subagent promotion's target; don't race it to Idle),
+    //   * there IS an activity anchor (lastActivityMs > 0),
+    //   * the timeout has elapsed (now - lastActivityMs >= minutes), AND
+    //   * the session has been READ since that activity (readUnixMs >= lastActivityMs) — an unread,
+    //     past-timeout session keeps waiting-for-you until the user reads (visits) it.
+    // So Waiting-for-you persists for the FULL timeout regardless of reading, and past the timeout it
+    // persists further while still unread; the demote happens at max(timeout, read-time). presenceBusy
+    // is passed in (the caller computes PresenceIsBusy) so this stays a pure, testable predicate.
+    inline bool ShouldDecayWaitingToIdle(SessionState state, int64_t lastActivityMs, int64_t readUnixMs, bool manualUnread, bool presenceBusy, uint32_t minutes, int64_t nowMs) noexcept
+    {
+        if (minutes == 0 || state != SessionState::WaitingForInput || manualUnread || presenceBusy || lastActivityMs <= 0)
+        {
+            return false;
+        }
+        const int64_t timeoutMs = static_cast<int64_t>(minutes) * 60000;
+        if (nowMs - lastActivityMs < timeoutMs)
+        {
+            return false; // still inside the waiting window — always waits the full timeout
+        }
+        return readUnixMs >= lastActivityMs; // past the timeout: decay only once READ, else keep waiting
+    }
+
     // Ticked on the scanner thread on the slow cadence; the probe marshals to ITS OWN UI thread
     // and archives any of its claude tabs whose ConPTY connection has Closed. One per window (M9).
     using LivenessProbe = std::function<void()>;
@@ -391,12 +426,12 @@ namespace Agentmaster
         // transcript-discovery enumeration this used to also start is retired (O7). Name kept for now.
         void ArmDiscovery();
 
-        // Agentmaster (cache-aware Waiting decay): how long a session may sit in WaitingForInput
-        // before the scanner demotes it to Idle (the Triage Board's "Waiting-for-you" column should
-        // only surface sessions still inside Claude's ~5-minute server-side prompt-cache window —
-        // past it, answering costs a full cache re-read either way). 0 == never decay. Seeded from
-        // AppSettings at engine init and re-pushed when the Settings cog saves. Atomic — the cog
-        // writes from a UI thread while the worker reads.
+        // Agentmaster (Waiting-for-you "unread" model): how long a session may sit in WaitingForInput
+        // before the scanner is allowed to demote it to Idle — gated additionally on read-state (see
+        // ShouldDecayWaitingToIdle: it demotes only once the timeout has elapsed AND the session has
+        // been read, and never while manually Mark-Unread-ed). 0 == never decay. Default 60 (1 hour).
+        // Seeded from AppSettings at engine init and re-pushed when the Settings cog saves. Atomic —
+        // the cog writes from a UI thread while the worker reads.
         void SetWaitingDecayMinutes(uint32_t minutes) noexcept
         {
             _waitingDecayMinutes.store(minutes);
@@ -451,8 +486,8 @@ namespace Agentmaster
         // it used to also drive is retired (O7) — the Fleet Observer's PEB correlation subsumes it.
         std::atomic<bool> _discoverArmed{ false };
 
-        // Cache-aware Waiting decay window in minutes (see SetWaitingDecayMinutes). The default
-        // mirrors AppSettings::waitingDecayMinutes so the behavior holds even before the seed lands.
-        std::atomic<uint32_t> _waitingDecayMinutes{ 5 };
+        // Waiting-for-you -> Idle timeout in minutes (see SetWaitingDecayMinutes). The default
+        // mirrors AppSettings::waitingForYouTimeoutMinutes so the behavior holds even before the seed lands.
+        std::atomic<uint32_t> _waitingDecayMinutes{ 60 };
     };
 }

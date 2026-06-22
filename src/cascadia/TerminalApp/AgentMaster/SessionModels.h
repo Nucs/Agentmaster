@@ -207,6 +207,23 @@ namespace Agentmaster
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
         bool lastMessageWasQuestion{ false };
+        // Agentmaster (Waiting-for-you "unread" model): the last time the user READ this session —
+        // i.e. visited (switched to) its terminal tab, or had it as the focused tab while a turn
+        // completed. Transient (NOT persisted), wall-clock ms (NowMs / system_clock), set from the
+        // UI lane (TerminalPage::_VisitTabClearFlash / _EvaluateAgentFlash). A session is "unread for
+        // the current turn" when readUnixMs < lastActivityUnixMs (new activity landed since the last
+        // read). The Waiting-for-you -> Idle decay (SessionScanner::_maybeDecayWaiting /
+        // ShouldDecayWaitingToIdle) fires only once the session has been READ *and* the timeout has
+        // elapsed: an unread, past-timeout session keeps waiting until the user reads it. 0 == never read.
+        int64_t readUnixMs{ 0 };
+        // Agentmaster (Waiting-for-you "unread" model): the context-menu "Mark Unread" — a STICKY
+        // manual mark. While set, the session shows in Waiting-for-you (the mark can PROMOTE an
+        // Idle/Done session there) and the time-decay never demotes it; only a visit (read) or
+        // archive clears it. Transient (NOT persisted), set/cleared from the UI lane
+        // (TerminalPage::_MarkSessionUnread / _ClearSessionUnread), the engine twin of the per-window
+        // red-flash-ring set so the BOARD STATE (in every window) reflects the mark, not just one
+        // window's tab ring.
+        bool manualUnread{ false };
         // Transient (NOT persisted): turn accounting for the ordered state machine — see
         // TurnAccounting above / NextSessionStateOrdered (HookEvents.h). Reset on
         // SessionStart / SessionEnd (a resume must not inherit stale turn identity).
@@ -217,6 +234,15 @@ namespace Agentmaster
         // the registry's QUIET path so streaming text never triggers a persist/UI/scheduler
         // cascade. Empty until the scanner reads a transcript line.
         std::wstring lastAssistantText;
+        // Transient (NOT persisted; Persistence.cpp must not write it): the Claude Code idle RECAP —
+        // the latest {"type":"system","subtype":"away_summary"} body the SessionScanner tailed from this
+        // session's transcript, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint
+        // stripped). Claude Code emits it when a session sits idle >5 min: a one-paragraph "what we did /
+        // what's next". Mirrored via the registry's QUIET path (display-only, no persist/UI/scheduler
+        // cascade). Empty until a recap is seen (recaps off, or never idle). Shown in the Triage-Board
+        // card's hover tooltip; the summary panel / Sessions detail / copy derive their own from
+        // AnalyzeSessionTranscript (SessionSummary.awaySummary), the same data by a different path.
+        std::wstring recap;
         // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
         // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
         std::wstring pendingConfirmPromptId;
@@ -348,14 +374,28 @@ namespace Agentmaster
         // (titles are multi-line). See TabRenameCommitMode.
         TabRenameCommitMode tabRenameCommitMode{ TabRenameCommitMode::ClickAwayOrShiftEnter };
         std::wstring defaultLaunchDir{}; // "" => the Launch cwd box defaults to %USERPROFILE%
-        // Agentmaster: demote a session sitting in WaitingForInput (the Triage Board's
-        // "Waiting-for-you" column) to Idle after this many minutes with no activity. Rationale:
-        // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn, so past that
-        // window the session is no longer "hot" — answering it costs a full cache re-read either
-        // way — and Waiting-for-you should only surface sessions worth answering NOW. Enforced by
-        // the SessionScanner (a time-derived decay layered on the hook-derived machine; the card
-        // moves to the "Idle / Done" column). 0 == never decay. Default 5 == the cache lifetime.
-        uint32_t waitingDecayMinutes{ 5 };
+        // Agentmaster (Waiting-for-you "unread" model): how long a session may sit in the Triage
+        // Board's "Waiting-for-you" column before the time-decay is allowed to demote it to Idle.
+        // The decay is gated on BOTH this timeout AND read-state: a WaitingForInput session demotes
+        // to Idle only once (a) this many minutes have passed with no activity AND (b) the user has
+        // READ it (visited its tab) since the last turn — an unread, past-timeout session keeps
+        // waiting until read; a manually "Mark Unread"-ed session never time-decays at all. Enforced
+        // by the SessionScanner (ShouldDecayWaitingToIdle). 0 == never decay (the cog's "Never"
+        // toggle). Default 60 (1 hour). The OLD conflation of this with Claude's ~5-minute server
+        // cache is split out into serverCacheMinutes (below), which now drives only the card's
+        // "still cached" ⚡ indicator. Range exposed in the cog: 1m .. 3d (1..4320), plus Never.
+        // NOTE: this was renamed from the legacy "waitingDecayMinutes" key DELIBERATELY — the meaning
+        // changed (a 5-minute cache window -> a read-gated unread timeout), so a pre-existing
+        // settings.json (which carried a value tuned for the old behavior, often 5) must NOT carry
+        // over. The new key is absent there, so every existing install falls back to this 60 default;
+        // the orphaned old key is ignored and dropped on the next save (Persistence rebuilds the file).
+        uint32_t waitingForYouTimeoutMinutes{ 60 };
+        // Agentmaster: Claude's SERVER-SIDE prompt-cache lifetime, in minutes (Anthropic caches the
+        // prompt prefix ~5 minutes after the last turn, so a follow-up within the window is cheap).
+        // Drives ONLY the Triage-Board card's "still cached" ⚡ indicator (shown for this many minutes
+        // after a session's last activity) — it no longer gates the Waiting-for-you decay (that is
+        // waitingForYouTimeoutMinutes). Default 5. 0 falls back to 5 (the indicator is a cosmetic hint).
+        uint32_t serverCacheMinutes{ 5 };
         // How many recent working directories the Launch path-picker's "RECENT" section
         // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
         uint32_t recentDirsLimit{ 10 };
@@ -373,6 +413,13 @@ namespace Agentmaster
         // close when the X is shown (suppressed in TerminalPage::_OnTabCloseRequested). GLOBAL across
         // windows; applied live like showTabCloseButton. Default true reproduces prior behavior.
         bool closeTabOnMiddleClick{ true };
+        // Agentmaster: ALWAYS show the tab-strip "Home" button (the affordance that jumps to the pinned
+        // Manager tab), not only when the Manager tab has scrolled out of view. ON (default) keeps a
+        // persistent Home button in the strip header whenever you're on a non-Manager tab; OFF restores
+        // the scroll-triggered behavior (Home appears only once the Manager tab is scrolled off the left
+        // edge). Either way it hides while the Manager tab itself is active. GLOBAL across windows;
+        // applied live on Save + cross-window broadcast. A missing key => true (checked by default).
+        bool alwaysShowHomeButton{ true };
 
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +

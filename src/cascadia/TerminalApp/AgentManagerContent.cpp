@@ -62,6 +62,13 @@ using winrt::TerminalApp::implementation::AgentSetTip;
 
 namespace
 {
+    // Agentmaster: Triage-Board cards hold their hover tooltips back to a deliberate 4s (vs the
+    // global ~1/3-system-hover-time fast open used on every other surface), so panning the mouse
+    // across a dense board doesn't flash a tip over every card. Passed as AgentSetTip's optional
+    // open-delay override at each card tip call site (both the managed _MakeCard and the external
+    // census _MakeExternalCard).
+    constexpr std::chrono::milliseconds kCardTipDelay{ 4000 };
+
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
@@ -174,6 +181,48 @@ namespace
         return out;
     }
 
+    // Agentmaster: a native folder picker (IFileOpenDialog in FOS_PICKFOLDERS mode — the modern
+    // folder browser) for the Launch path box's "Browse…" row. Seeds the dialog at `initialDir`
+    // when that's an existing folder, so Browse opens where the box currently points rather than
+    // the last shell location. Returns the chosen folder, or nullopt on cancel.
+    std::optional<std::wstring> PickFolder(HWND owner, const std::wstring& initialDir)
+    {
+        winrt::com_ptr<IFileOpenDialog> dlg;
+        if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(dlg.put()))))
+        {
+            return std::nullopt;
+        }
+        dlg->SetTitle(L"Choose a working directory");
+        FILEOPENDIALOGOPTIONS opts{};
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        if (!initialDir.empty())
+        {
+            winrt::com_ptr<IShellItem> start;
+            if (SUCCEEDED(::SHCreateItemFromParsingName(initialDir.c_str(), nullptr, IID_PPV_ARGS(start.put()))) && start)
+            {
+                dlg->SetFolder(start.get()); // open AT this folder (not just a default), since the user already typed a path
+            }
+        }
+        if (FAILED(dlg->Show(owner)))
+        {
+            return std::nullopt; // user canceled
+        }
+        winrt::com_ptr<IShellItem> item;
+        if (FAILED(dlg->GetResult(item.put())))
+        {
+            return std::nullopt;
+        }
+        PWSTR path = nullptr;
+        if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || !path)
+        {
+            return std::nullopt;
+        }
+        std::wstring out{ path };
+        ::CoTaskMemFree(path);
+        return out;
+    }
+
     // Agentmaster: a small stable palette to color-code the EXTERNAL tree's pid underline by host
     // window/shell — claudes sharing a terminal window/tab carry the same host shell pid, so they get
     // the same color and are easy to spot at a glance (even across cwd groups). Vivid-on-dark, visually
@@ -203,6 +252,37 @@ namespace
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
+    }
+
+    // Agentmaster (Waiting-for-you "unread" model): render a minutes count as a compact "Xd Yh Zm"
+    // for the Settings cog's Waiting-for-you timeout slider header (e.g. 60 -> "1h", 90 -> "1h 30m",
+    // 4320 -> "3d"). 0 reads as "never" (the slider is disabled then; the "Never" toggle owns 0).
+    std::wstring FormatMinutesFriendly(uint32_t m)
+    {
+        if (m == 0)
+        {
+            return L"never";
+        }
+        const uint32_t d = m / 1440;
+        m %= 1440;
+        const uint32_t h = m / 60;
+        const uint32_t mi = m % 60;
+        std::wstring out;
+        const auto add = [&](uint32_t v, const wchar_t* u) {
+            if (v)
+            {
+                if (!out.empty())
+                {
+                    out += L' ';
+                }
+                out += std::to_wstring(v);
+                out += u;
+            }
+        };
+        add(d, L"d");
+        add(h, L"h");
+        add(mi, L"m");
+        return out;
     }
 
     // Agentmaster: format a duration (ms) as a consolidated span. Units descend month / day / hour /
@@ -495,6 +575,26 @@ namespace
         return b;
     }
 
+    // Agentmaster: emphasize the PRIMARY header toggle. The LOCAL/GLOBAL scope button is the one
+    // control in the board/tree header that changes WHAT you are looking at, so it should read
+    // louder than its siblings (sort, refresh, Clear, Show all — all secondary). A filled accent
+    // background + bold white text makes it the "primary" button among the default subtle-chrome
+    // ones. Applied once at construction; the label content still changes later via the
+    // _Update*ScopeButton setters without disturbing this styling. (WinUI's button template
+    // overrides a locally-set Background in its PointerOver/Pressed visual states, so the accent
+    // briefly reverts to the theme hover brush while the pointer is over it — but the bold weight
+    // is NOT part of any visual state, so the emphasis still reads on hover.)
+    void EmphasizeScopeButton(const Button& b)
+    {
+        if (!b)
+        {
+            return;
+        }
+        b.Background(Fill(0xFF, 0x35, 0x6A, 0xB8)); // a deliberate accent blue — distinct from the neutral card/button chrome
+        b.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
+        b.FontWeight(FontWeights::SemiBold());
+    }
+
     // Agentmaster: the dim per-session timing adornment "-created/active/-lastAgo" + an explanatory
     // tooltip. Returns a null TextBlock (falsy) when there is no creation time to show, so callers
     // can `if (auto t = TimingText(...)) row.Children().Append(t);`.
@@ -508,6 +608,38 @@ namespace
         auto t = Text(winrt::hstring{ s }, 10, false, 0.45);
         AgentSetTip(t, winrt::hstring{ kTimingTooltip });
         return t;
+    }
+
+    // Agentmaster: PointerEntered/PointerExited are BUBBLING routed events, so a hit-test-visible
+    // CHILD of a card/row raises its OWN enter/exit that bubbles up to the parent's hover handler.
+    // Every label inside a card MUST stay hit-testable (that is how its AgentSetTip tooltip opens),
+    // so merely crossing the mouse between two labels makes a child PointerExited bubble to the card
+    // and a naive card.PointerExited then fires — toggling the hover ring + the Linked-Lenses tab
+    // pill OFF, before the next label's bubbled PointerEntered turns them back ON. That on/off churn
+    // is the "highlight flickers as I move over text" bug (the "\x22EF" dots only LOOK steady because
+    // their OpacityTransition smooths the dip; the ring + tab pill snap). This guard returns true
+    // when the pointer is STILL inside `sender`'s own bounds — i.e. the exit bubbled from a child,
+    // not a real leave — so a card/row PointerExited handler can early-out and ignore it, keeping
+    // the labels hit-testable (tooltips intact) instead of making them clickthrough (which kills the
+    // tooltips). A genuine leave samples at/outside an edge => returns false, so it is never missed.
+    // `IInspectable` is fully qualified here on purpose: at this anonymous-namespace file scope the
+    // unqualified name is AMBIGUOUS between the global COM ::IInspectable (from <inspectable.h>) and
+    // winrt::Windows::Foundation::IInspectable (the using-directive). The card/row lambdas below dodge
+    // this only because, inside AgentManagerContent's member functions, the inherited
+    // winrt::implements<...>::IInspectable typedef wins lookup — a free function has no such scope.
+    bool PointerStillWithin(const winrt::Windows::Foundation::IInspectable& sender, const PointerRoutedEventArgs& e)
+    {
+        const auto fe = sender.try_as<FrameworkElement>();
+        if (!fe)
+        {
+            return false;
+        }
+        const auto p = e.GetCurrentPoint(fe).Position();
+        // Treat the outermost ~1px as "left" so a real leave sampled right at the boundary is never
+        // swallowed (which would strand a pill). Every card/row label sits well inside the 8px band/
+        // body padding (the dots ≥4px in), so a child-bubbled exit is always still within this inset.
+        constexpr double kEdge = 1.0;
+        return p.X > kEdge && p.Y > kEdge && p.X < fe.ActualWidth() - kEdge && p.Y < fe.ActualHeight() - kEdge;
     }
 
     // ---- Explorer Tree sort (Agentmaster) ------------------------------------
@@ -959,6 +1091,15 @@ namespace winrt::TerminalApp::implementation
     AgentManagerContent::AgentManagerContent()
     {
         _root = Grid{};
+        // Agentmaster: the Manager pane is ALWAYS dark, regardless of the Windows / Windows Terminal
+        // theme (a hard product requirement). RequestedTheme(Dark) forces every built-in control in
+        // this subtree (buttons, text boxes, scrollbars, combo lists, …) to render dark. Surfaces that
+        // render OUTSIDE this subtree's visual root — the Popup-hosted path picker and the modal
+        // overlay cards — re-assert Dark on themselves, and the confirm ContentDialogs follow
+        // _root.ActualTheme() (now Dark). WT's theme passes only push brush *resources* into panes
+        // (rootPane->UpdateResources) and never set RequestedTheme on pane content, so this sticks
+        // across light/dark theme switches.
+        _root.RequestedTheme(ElementTheme::Dark);
         _dispatcher = DispatcherQueue::GetForCurrentThread();
         _templates = ::Agentmaster::LoadTemplates(); // persisted plan templates (M8)
         _recentDirs = ::Agentmaster::LoadRecentDirs(); // MRU for the Launch path-picker
@@ -974,29 +1115,36 @@ namespace winrt::TerminalApp::implementation
         // on left-drag and pops the system/caption menu on right-click, exactly as if you'd grabbed the
         // title bar (the user-reported "the tabs bar moves / its context menu opens" bug).
         //
-        // The brush used to be set only inside `if (res.HasKey(L"UnfocusedBorderBrush"))`, but HasKey
-        // does NOT look through merged/theme dictionaries (where that key lives), so it returned false
-        // and _root was left transparent. Always set a non-null fill: look the themed brush up DIRECTLY
-        // (Lookup DOES traverse the theme dicts — exactly how ScratchpadContent, the reference
-        // IPaneContent, does it), and fall back to an opaque color if that fails, so _root is NEVER
-        // transparent — the same "don't leave it Transparent or it won't hit-test" guard WT uses in
-        // TerminalPage::_updatePaneResources.
-        Brush rootFill{ nullptr };
-        try
-        {
-            auto res = Application::Current().Resources();
-            rootFill = res.Lookup(winrt::box_value(L"UnfocusedBorderBrush")).try_as<Brush>();
-        }
-        catch (...)
-        {
-        }
-        if (!rootFill)
-        {
-            rootFill = Fill(0xFF, 0x2E, 0x2E, 0x2E); // opaque #2e2e2e == TabViewBackground (dark)
-        }
-        _root.Background(rootFill);
+        // The fill is the DARK TabViewBackground (#2e2e2e) UNCONDITIONALLY. We force this pane to dark
+        // (RequestedTheme above), so the gaps must be dark too. This used to look the brush up via
+        // Application.Resources().Lookup(L"UnfocusedBorderBrush"), but that resolves the resource
+        // against the *application* theme — which returns the LIGHT value (#e8e8e8) whenever Windows /
+        // Windows Terminal is in light mode, bleeding a light-gray rectangle through the widget gaps.
+        // App.xaml defines the dark UnfocusedBorderBrush == TabViewBackground == #2e2e2e, so hardcoding
+        // it here is exactly the theme-correct dark value with no light-mode bleed. (Must stay non-null /
+        // opaque for the hit-testing reason above.)
+        _root.Background(Fill(0xFF, 0x2E, 0x2E, 0x2E)); // opaque #2e2e2e == TabViewBackground (dark)
 
         _BuildLayout();
+
+        // Agentmaster (Waiting-for-you "unread" model): a low-frequency board refresh so TIME-derived
+        // adornments stay current without a hook event — the card's ⚡ "still cached" hint (a few-minute
+        // window) and the "-2h30m" timing text. _Refresh() recomputes them from the live snapshot; it is
+        // idempotent and already runs on every registry event, so this only covers quiet periods. Weak
+        // self so a closed window never leaks a ticking timer.
+        _cardRefreshTimer = DispatcherTimer{};
+        _cardRefreshTimer.Interval(std::chrono::seconds(30));
+        _cardRefreshTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+            if (auto self = weak.get())
+            {
+                self->_Refresh();
+            }
+            else if (const auto t = sender.try_as<DispatcherTimer>())
+            {
+                t.Stop();
+            }
+        });
+        _cardRefreshTimer.Start();
     }
 
     // Agentmaster (M9): the registry is a process singleton shared by every window. Detach this
@@ -1009,6 +1157,14 @@ namespace winrt::TerminalApp::implementation
         if (_registry && _observerToken)
         {
             _registry->RemoveObserver(_observerToken);
+        }
+        if (_cardRefreshTimer)
+        {
+            _cardRefreshTimer.Stop(); // UI thread; stop the periodic ⚡/timing refresh
+        }
+        if (_progressTimer)
+        {
+            _progressTimer.Stop(); // UI thread; stop the Waiting-for-you countdown-bar drainer
         }
     }
 
@@ -1681,6 +1837,7 @@ namespace winrt::TerminalApp::implementation
             _boardScopeBtn = Button{};
             _boardScopeBtn.FontSize(11);
             _boardScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            EmphasizeScopeButton(_boardScopeBtn); // Agentmaster: the primary header toggle — louder than sort/refresh/Clear
             AgentSetTip(_boardScopeBtn, L"Which sessions the board shows \x2014 LOCAL (this window) or GLOBAL (all windows). Shares one setting with the Explorer Tree's scope; remembered per window.");
             _boardScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _SetTreeScope(_treeScope == TreeScope::Local ? TreeScope::Global : TreeScope::Local);
@@ -1701,6 +1858,24 @@ namespace winrt::TerminalApp::implementation
             _boardSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleBoardSort(); });
             header.Children().Append(_boardSortBtn);
             _UpdateBoardSortButton();
+            // Agentmaster: a refresh button AFTER the sort toggle — the twin of the Explorer Tree's
+            // _treeRefreshBtn. Re-scans + redraws the ENTIRE tab: _Refresh() rebuilds the board, tree
+            // AND flight plan (recomputing the live "ago" timing), and _refreshHandler forces the
+            // Fleet Observer to re-survey NOW (re-enrich the registry + recompute the external census)
+            // instead of waiting for the next tick. Same handler as the tree button by design.
+            _boardRefreshBtn = Button{};
+            _boardRefreshBtn.FontSize(11);
+            _boardRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
+            _boardRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
+            AgentSetTip(_boardRefreshBtn, L"Refresh now \x2014 re-scan and redraw the whole tab (also re-detects external sessions).");
+            _boardRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                _Refresh(); // immediate redraw from current data (board + tree + flight plan; recomputes the "ago" timing)
+                if (_refreshHandler)
+                {
+                    _refreshHandler(); // page: wake the observer + re-probe -> fresh data lands shortly
+                }
+            });
+            header.Children().Append(_boardRefreshBtn);
             // Agentmaster: a "Clear" button right next to LOCAL/GLOBAL — deselect the current card/row
             // (the Flight Plan then shows nothing-selected). Hidden while nothing is selected (kept in
             // sync by _RebuildBoard, like "Show all"); shown once a session/external is selected.
@@ -1776,6 +1951,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn = Button{};
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                EmphasizeScopeButton(_treeScopeBtn); // Agentmaster: the primary header toggle — louder than sort/refresh
                 AgentSetTip(_treeScopeBtn, L"Which sessions the tree shows \x2014 LOCAL (this window), GLOBAL (all windows), or EXTERNAL (claudes running outside Agentmaster, observe-only). Right-click an EXTERNAL row to Adopt it, start a session, or bring its window forward.");
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
@@ -2208,6 +2384,7 @@ namespace winrt::TerminalApp::implementation
             sessions = _registry->Snapshot();
         }
         _RebuildBoard(sessions);
+        _SyncProgressTimer(); // Agentmaster: run the 1s countdown-bar drainer iff any Waiting-for-you bar is now tracked
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
         _UpdateArchivedButton(sessions);
@@ -2241,6 +2418,69 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+    }
+
+    // Agentmaster (Waiting-for-you countdown bar): drain every tracked bar to its current fraction.
+    // Cheap — sets ScaleX on a handful of ScaleTransforms (a render-transform write, no layout/rebuild).
+    // Ticked ~1s by _progressTimer. A bar at 0 has expired (a read card decays to Idle on the scanner's
+    // next tick, which rebuilds the board and drops the track); an unread one sits empty until read.
+    void AgentManagerContent::_UpdateCardProgress()
+    {
+        if (_cardProgress.empty())
+        {
+            return;
+        }
+        const int64_t now = NowMs();
+        for (const auto& p : _cardProgress)
+        {
+            if (!p.bar || p.timeoutMs <= 0)
+            {
+                continue;
+            }
+            const auto st = p.bar.RenderTransform().try_as<ScaleTransform>();
+            if (!st)
+            {
+                continue;
+            }
+            double frac = 1.0 - static_cast<double>(now - p.lastActivityUnixMs) / static_cast<double>(p.timeoutMs);
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+            st.ScaleX(frac);
+        }
+    }
+
+    // Agentmaster (Waiting-for-you countdown bar): start the ~1s drainer iff any bar is tracked, else
+    // stop it (no Waiting-for-you cards -> no per-second work). Built lazily; weak self so a closed
+    // window never leaks a ticking timer. Called at the end of each board rebuild (from _Refresh).
+    void AgentManagerContent::_SyncProgressTimer()
+    {
+        if (_cardProgress.empty())
+        {
+            if (_progressTimer)
+            {
+                _progressTimer.Stop();
+            }
+            return;
+        }
+        if (!_progressTimer)
+        {
+            _progressTimer = DispatcherTimer{};
+            _progressTimer.Interval(std::chrono::seconds(1));
+            _progressTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_UpdateCardProgress();
+                }
+                else if (const auto t = sender.try_as<DispatcherTimer>())
+                {
+                    t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+                }
+            });
+        }
+        if (!_progressTimer.IsEnabled())
+        {
+            _progressTimer.Start();
+        }
+        _UpdateCardProgress(); // paint the correct fractions NOW (don't wait up to 1s for the first tick)
     }
 
     Button AgentManagerContent::_MakeCard(const SessionInfo& s)
@@ -2281,8 +2521,18 @@ namespace winrt::TerminalApp::implementation
         band.Child(titleText);
         // Agentmaster: hovering the title band (the card's "top label") shows the FULL title \x2014 the
         // band trims with an ellipsis on a narrow card and OneLine() collapses a multi-line title for
-        // the dense card, so the complete name is otherwise unreadable here.
-        AgentSetTip(band, winrt::hstring{ fullTitle });
+        // the dense card, so the complete name is otherwise unreadable here. When Claude Code has written
+        // an idle RECAP for this session (the >5-min "what we did / what's next" away_summary, mirrored
+        // onto SessionInfo.recap by the scanner), append it below the title \x2014 so a hover tells the
+        // sessions apart at a glance (the whole point of the recap), not just by name. Shown in FULL \x2014
+        // never length-capped (the tooltip wraps / grows as needed).
+        std::wstring bandTip{ fullTitle };
+        if (!s.recap.empty())
+        {
+            bandTip += L"\n\n";
+            bandTip += s.recap;
+        }
+        AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
 
         // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
         // from Claude (the implicit default — no pill, visuals unchanged).
@@ -2291,14 +2541,14 @@ namespace winrt::TerminalApp::implementation
             auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             cp.Opacity(0.9);
             cp.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.");
+            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.", kCardTipDelay);
             stack.Children().Append(cp);
         }
         {
             // The working dir reads as plain gray text under the title; name it AND explain the
             // per-directory color (a non-obvious concept) in one tip.
             auto dirText = Text(winrt::hstring{ s.workingDir }, 11, false, 0.6);
-            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.");
+            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.", kCardTipDelay);
             stack.Children().Append(dirText);
         }
 
@@ -2332,29 +2582,59 @@ namespace winrt::TerminalApp::implementation
             const auto tip = std::wstring{ L"Context used: " } + std::to_wstring(s.contextTokens) +
                              L" of " + std::to_wstring(window) + L" tokens (" + std::to_wstring(pct) +
                              L"%). The window (200K / 1M) is auto-detected from the model.";
-            AgentSetTip(ctxText, winrt::hstring{ tip });
+            AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
             stack.Children().Append(ctxText);
         }
 
-        // autopilot badge ⚙ sent/total
-        if (!s.queue.empty())
+        // autopilot badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
+        // right of ⚙ N/M). The ⚙ badge shows only when there's a queue; the ⚡ shows whenever the
+        // session is still inside Claude's server-side prompt-cache window (serverCacheMinutes).
         {
-            int sent = 0;
-            for (const auto& p : s.queue)
+            auto metaRow = StackPanel{};
+            metaRow.Orientation(Orientation::Horizontal);
+            metaRow.Spacing(8);
+
+            if (!s.queue.empty())
             {
-                if (p.status == PromptStatus::Sent)
+                int sent = 0;
+                for (const auto& p : s.queue)
                 {
-                    ++sent;
+                    if (p.status == PromptStatus::Sent)
+                    {
+                        ++sent;
+                    }
+                }
+                const auto badge = winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size()));
+                auto bt = Text(badge, 11, false, 0.8);
+                if (s.autopilot.mode != AutopilotMode::Off)
+                {
+                    bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
+                }
+                AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.", kCardTipDelay);
+                metaRow.Children().Append(bt);
+            }
+
+            // Agentmaster (Waiting-for-you "unread" model): a ⚡ "still server-cached" hint. Claude's
+            // server-side prompt cache stays warm for ~serverCacheMinutes after the last turn, so a
+            // follow-up within the window reuses the cached prefix (cheaper & faster). Purely cosmetic;
+            // shown only while the card is inside that window. The board's periodic refresh (a 30s
+            // timer + every registry event) clears it once the window lapses.
+            {
+                const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
+                const int64_t effLast = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+                if (s.live && effLast > 0 && (NowMs() - effLast) < static_cast<int64_t>(cacheMin) * 60000)
+                {
+                    auto cacheGlyph = Text(L"\x26A1", 11, false, 0.95); // ⚡ warm cache
+                    cacheGlyph.Foreground(Fill(0xFF, 0xFF, 0xC1, 0x07)); // amber
+                    AgentSetTip(cacheGlyph, winrt::hstring{ L"Still server-cached \x2014 Claude's prompt cache stays warm for ~" } + winrt::to_hstring(static_cast<int>(cacheMin)) + L" min after the last turn, so a follow-up now reuses the cached context (cheaper & faster).", kCardTipDelay);
+                    metaRow.Children().Append(cacheGlyph);
                 }
             }
-            const auto badge = winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size()));
-            auto bt = Text(badge, 11, false, 0.8);
-            if (s.autopilot.mode != AutopilotMode::Off)
+
+            if (metaRow.Children().Size() > 0)
             {
-                bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
+                stack.Children().Append(metaRow);
             }
-            AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.");
-            stack.Children().Append(bt);
         }
 
         // Agentmaster: a hover-revealed "\x22EF" more-button in the card's top-right corner — a
@@ -2390,7 +2670,7 @@ namespace winrt::TerminalApp::implementation
             st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
-        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)");
+        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)", kCardTipDelay);
         dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir)); // a click opens the session menu
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -2407,9 +2687,58 @@ namespace winrt::TerminalApp::implementation
         outer.Children().Append(band);
         outer.Children().Append(bodyBorder);
 
+        // Agentmaster: the hover/selection outline is drawn as an OVERLAY ring, NOT on the card
+        // Button's own border. A Button's BorderThickness is part of its layout box, so toggling it
+        // on hover grows the card (every card below shifts) AND insets the title band off its rounded
+        // corners (the content shifts in) — the visible "card jumps when I mouse over it" bug. This
+        // ring is a transparent Border layered in the same Grid cell (drawn ON TOP, IsHitTestVisible
+        // false), so changing its thickness redraws the outline inward over the card edges WITHOUT
+        // resizing the card or moving anything. 0 at rest, 1 on hover, 2 when selected. Its corners
+        // match the card so the outline rounds with the edge. (As a bonus this also stops a SELECTED
+        // card from being 2px larger than its unselected siblings — both are now the same size.)
+        auto ring = Border{};
+        ring.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // matches the card rounding
+        ring.BorderBrush(SolidColorBrush{ accent });
+        ring.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 0, 0, 0, 0 });
+        ring.IsHitTestVisible(false); // a decorative overlay must not eat card clicks/hover
+        ring.HorizontalAlignment(HorizontalAlignment::Stretch);
+        ring.VerticalAlignment(VerticalAlignment::Stretch);
+        const auto ringWeak = winrt::make_weak(ring);
+
         auto grid = Grid{};
         grid.Children().Append(outer);
+        grid.Children().Append(ring); // over the content, under the dots
         grid.Children().Append(dotsBtn);
+
+        // Agentmaster (Waiting-for-you countdown bar): a 1px goldenrod bar pinned INSIDE the card's
+        // bottom edge that drains from full width (100% of the waiting window) to 0 as the
+        // Waiting-for-you timeout approaches. At empty the wait has expired — a READ card then decays to
+        // Idle / Done (an unread one keeps waiting until read). Shown only for a WaitingForInput card with
+        // a finite timeout that isn't manually held unread (a Mark-Unread / "Never" card never time-decays,
+        // so it has no countdown). Overlaid in the grid OVER the hover/selected ring so it stays visible,
+        // and IsHitTestVisible(false) so the 1px strip never eats a card click. ScaleX (origin LEFT) =
+        // fraction remaining; _progressTimer drains it live in place, and each _RebuildBoard re-seeds it.
+        if (s.state == SessionState::WaitingForInput && !s.manualUnread && _appSettings.waitingForYouTimeoutMinutes > 0 && s.lastActivityUnixMs > 0)
+        {
+            const int64_t timeoutMs = static_cast<int64_t>(_appSettings.waitingForYouTimeoutMinutes) * 60000;
+            double frac = 1.0 - static_cast<double>(NowMs() - s.lastActivityUnixMs) / static_cast<double>(timeoutMs);
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+
+            auto barScale = ScaleTransform{};
+            barScale.ScaleX(frac);
+
+            auto bar = Border{};
+            bar.Height(1);
+            bar.VerticalAlignment(VerticalAlignment::Bottom);
+            bar.HorizontalAlignment(HorizontalAlignment::Stretch);
+            bar.Background(SolidColorBrush{ StateColor(SessionState::WaitingForInput) }); // goldenrod, matching the state
+            bar.RenderTransformOrigin(Point{ 0.0f, 0.0f }); // drain from the RIGHT (the left edge stays pinned)
+            bar.RenderTransform(barScale);
+            bar.IsHitTestVisible(false); // a decorative 1px overlay must never swallow a card click
+            grid.Children().Append(bar);
+
+            _cardProgress.push_back(CardProgress{ bar, s.lastActivityUnixMs, timeoutMs });
+        }
 
         auto card = Button{};
         card.Content(grid);
@@ -2419,29 +2748,31 @@ namespace winrt::TerminalApp::implementation
         card.Margin(Thickness{ 0, 0, 0, 6 });
         card.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // explicit, so the title band's top corners (4,4,0,0) line up with the card rounding
         card.Background(Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
-        // Agentmaster: the state-colored border is visual noise at rest on a busy board — show it
-        // only when the card is SELECTED or HOVERED. The brush stays the state accent (also pushed
-        // onto the Button's PointerOver/Pressed states so a hover shows the accent, not the theme's
-        // gray hover border); only the THICKNESS toggles: 0 at rest, 1 on hover, 2 when selected.
-        card.BorderBrush(SolidColorBrush{ accent });
-        card.Resources().Insert(winrt::box_value(L"ButtonBorderBrushPointerOver"), SolidColorBrush{ accent });
-        card.Resources().Insert(winrt::box_value(L"ButtonBorderBrushPressed"), SolidColorBrush{ accent });
-        card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 0, 0, 0, 0 });
+        // Agentmaster: the state-colored outline lives on the `ring` OVERLAY above, NOT on this
+        // Button's own border — toggling a Button BorderThickness grows the card and nudges the
+        // title band, which is the shift we're avoiding. The card's own border stays a constant 0;
+        // only the overlay ring's thickness toggles (0 rest / 1 hover / 2 selected).
+        card.BorderThickness(Thickness{ 0, 0, 0, 0 });
         if (!selected)
         {
-            // sender == the card; toggle border thickness on hover. Use the sender (never capture
-            // the Button into its OWN handler — a strong self-capture leaks the element via the
-            // delegate). The brush is owned by the template's PointerOver state (accent, above).
-            card.PointerEntered([](const IInspectable& s, const PointerRoutedEventArgs&) {
-                if (const auto c = s.try_as<Control>())
+            // Grow the overlay ring on hover (a selected card keeps its fixed 2). ringWeak is a
+            // weak_ref so the card's handler never strong-captures a child that chains back to the
+            // card (the no-self-capture rule — a strong ring ref would cycle
+            // card -> handler -> ring -> grid -> card and leak the whole tree).
+            card.PointerEntered([ringWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto r = ringWeak.get())
                 {
-                    c.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                    r.BorderThickness(Thickness{ 1, 1, 1, 1 });
                 }
             });
-            card.PointerExited([](const IInspectable& s, const PointerRoutedEventArgs&) {
-                if (const auto c = s.try_as<Control>())
+            card.PointerExited([ringWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                if (PointerStillWithin(sender, e))
                 {
-                    c.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                    return; // a child label's exit bubbled up — the pointer never left the card; don't flicker the ring
+                }
+                if (const auto r = ringWeak.get())
+                {
+                    r.BorderThickness(Thickness{ 0, 0, 0, 0 });
                 }
             });
         }
@@ -2463,7 +2794,11 @@ namespace winrt::TerminalApp::implementation
                 d.Opacity(0.85);
             }
         });
-        card.PointerExited([this, id, dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+        card.PointerExited([this, id, dotsWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerStillWithin(sender, e))
+            {
+                return; // a child label's exit bubbled up — keep the tab pill + dots up (Linked-Lenses anti-flicker)
+            }
             _ReportHover(id, false);
             if (const auto d = dotsWeak.get())
             {
@@ -2514,9 +2849,6 @@ namespace winrt::TerminalApp::implementation
         // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
         card.Tag(winrt::box_value(winrt::hstring{ L"b:" + s.id }));
-        // Discoverability: the card's interactions aren't obvious from its face (the band tip shows the
-        // full title; this explains what clicking does). Don't overwrite the band's own full-title tip.
-        AgentSetTip(card, L"Click to select this session (and aim its Flight Plan) \x2014 double-click to jump to its live tab, or right-click for more actions.");
         _boardCardsById[s.id] = card;
         return card;
     }
@@ -2739,6 +3071,7 @@ namespace winrt::TerminalApp::implementation
 
         _boardHost.Children().Clear();
         _boardCardsById.clear(); // refilled by _MakeCard below (focus-restore map; see _Refresh)
+        _cardProgress.clear(); // Agentmaster: refilled by _MakeCard for each Waiting-for-you countdown bar (drained by _progressTimer)
         if (_boardScope)
         {
             // The label exists only WHILE a directory is scoped (paired with "Show all"); unscoped
@@ -2811,6 +3144,18 @@ namespace winrt::TerminalApp::implementation
                 {
                     matches.push_back(&s);
                 }
+            }
+
+            // Agentmaster: the Error column is SPECIAL — it collapses out of the board entirely when
+            // it holds no cards and reappears in place (between Needs-approval and Idle / Done) the
+            // moment a session errors. Skipping the Append below means the horizontal StackPanel
+            // (_boardHost) reserves NO width — nor its 8px inter-column spacing — for it, so an empty
+            // Error column costs zero board space; and because the columns are appended in fixed order
+            // on every rebuild, it always returns to the SAME slot when it reappears. The other four
+            // states are always shown — they are the steady-state columns of the triage model.
+            if (col.state == SessionState::Error && matches.empty())
+            {
+                continue;
             }
 
             // Agentmaster: order the cards WITHIN this state column by the (global, persisted) board
@@ -3031,7 +3376,7 @@ namespace winrt::TerminalApp::implementation
             titleRow.VerticalAlignment(VerticalAlignment::Center);
             auto sd = Text(L"\x25CF", 11, false, 1.0);
             sd.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
-            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
+            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" }, kCardTipDelay);
             titleRow.Children().Append(sd);
             titleRow.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
             stack.Children().Append(titleRow);
@@ -3047,13 +3392,13 @@ namespace winrt::TerminalApp::implementation
             auto p = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             p.Opacity(0.9);
             p.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).");
+            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).", kCardTipDelay);
             stack.Children().Append(p);
         }
         if (!ex.cwd.empty())
         {
             auto cwdText = Text(winrt::hstring{ ex.cwd }, 11, false, 0.55);
-            AgentSetTip(cwdText, L"Working directory of this external session.");
+            AgentSetTip(cwdText, L"Working directory of this external session.", kCardTipDelay);
             stack.Children().Append(cwdText);
         }
 
@@ -3086,7 +3431,7 @@ namespace winrt::TerminalApp::implementation
                 hb += L"  \x00B7  [" + ex.gitBranch + L"]";
             }
             auto hbText = Text(winrt::hstring{ hb }, 10, false, 0.5);
-            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.");
+            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.", kCardTipDelay);
             stack.Children().Append(hbText);
         }
 
@@ -3114,7 +3459,7 @@ namespace winrt::TerminalApp::implementation
             }
             me += (me.empty() ? L"pid " : L"  \x00B7  pid ") + std::to_wstring(ex.pid);
             auto meText = Text(winrt::hstring{ me }, 10, false, 0.5);
-            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.");
+            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.", kCardTipDelay);
             stack.Children().Append(meText);
         }
 
@@ -3163,7 +3508,7 @@ namespace winrt::TerminalApp::implementation
             st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
             dotsBtn.OpacityTransition(st);
         }
-        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)");
+        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)", kCardTipDelay);
         dotsBtn.Flyout(_MakeExternalTreeMenu(ex)); // a click opens the external menu
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -3189,7 +3534,7 @@ namespace winrt::TerminalApp::implementation
         card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
             _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
         });
-        AgentSetTip(card, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.");
+        AgentSetTip(card, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.", kCardTipDelay);
         // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
         // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
         // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
@@ -3200,7 +3545,11 @@ namespace winrt::TerminalApp::implementation
                 d.Opacity(0.85);
             }
         });
-        card.PointerExited([dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+        card.PointerExited([dotsWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerStillWithin(sender, e))
+            {
+                return; // a child label's exit bubbled up — the pointer is still on the card; keep the dots up
+            }
             if (const auto d = dotsWeak.get())
             {
                 d.Opacity(0.0);
@@ -3627,7 +3976,13 @@ namespace winrt::TerminalApp::implementation
                 // tab while the Manager tab is active (the board-card twin, above). Capture id by value
                 // + `this`, never the Button into its own handler (a self-capture leaks the element).
                 rowBtn.PointerEntered([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, true); });
-                rowBtn.PointerExited([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, false); });
+                rowBtn.PointerExited([this, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                    if (PointerStillWithin(sender, e))
+                    {
+                        return; // a child label's exit bubbled up — don't un-pill the tab as the mouse crosses the row's labels
+                    }
+                    _ReportHover(id, false);
+                });
                 // Single click = select; double click (within the OS threshold) = Activate
                 // (jump to the live tab). A Button swallows DoubleTapped, so we time the
                 // successive clicks ourselves.
@@ -4111,6 +4466,16 @@ namespace winrt::TerminalApp::implementation
                     {
                         return;
                     }
+                    // Native-exe-only policy: Adopt resumes/forks the external's conversation into a NEW
+                    // managed claude (a launch under the hood), so it needs a native claude.exe just like
+                    // the Launch/Fork buttons. Without this gate the launch silently no-ops at the engine
+                    // backstop ([launch-blocked]) and the button "does nothing". EnsureClaudeAvailable
+                    // re-resolves first, so a claude installed since launch clears the gate automatically.
+                    if (!::Agentmaster::EnsureClaudeAvailable())
+                    {
+                        self->_ShowClaudeMissing();
+                        return;
+                    }
                     if (sid.empty())
                     {
                         self->_adoptExternalHandler(pid, winrt::hstring{ cwd }, false); // no transcript -> launch fresh
@@ -4136,17 +4501,23 @@ namespace winrt::TerminalApp::implementation
             openHere.Text(L"Open New Session Here");
             AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
             openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
-                }
-                else if (auto self = weak.get())
-                {
-                    if (self->_spawnHandler)
+                // Spawning a managed Claude session needs a native claude.exe (native-exe-only policy) —
+                // gate with the same re-resolve-then-prompt the Adopt action above uses, so this never
+                // silently no-ops at the engine backstop when Claude isn't installed.
+                auto act = [weak, cwd]() {
+                    auto self = weak.get();
+                    if (!self || !self->_spawnHandler)
                     {
-                        self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                        return;
                     }
-                }
+                    if (!::Agentmaster::EnsureClaudeAvailable())
+                    {
+                        self->_ShowClaudeMissing();
+                        return;
+                    }
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
             });
             menu.Items().Append(openHere);
 
@@ -4502,17 +4873,23 @@ namespace winrt::TerminalApp::implementation
         openHere.Text(L"Open New Session Here");
         AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
         openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (self->_spawnHandler)
+            // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
+            // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
+            // no-op'ing at the engine backstop when Claude isn't installed.
+            auto act = [weak, cwd]() {
+                auto self = weak.get();
+                if (!self || !self->_spawnHandler)
                 {
-                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                    return;
                 }
-            }
+                if (!::Agentmaster::EnsureClaudeAvailable())
+                {
+                    self->_ShowClaudeMissing();
+                    return;
+                }
+                self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
         });
         menu.Items().Append(openHere);
 
@@ -5455,24 +5832,85 @@ namespace winrt::TerminalApp::implementation
         {
             auto row = StackPanel{};
             row.Orientation(Orientation::Horizontal);
-            row.Spacing(10);
+            row.Spacing(8);
+            row.VerticalAlignment(VerticalAlignment::Center);
             _setCheckUpdates = Button{};
             _setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
             AgentSetTip(_setCheckUpdates, L"Check GitHub for a newer Agentmaster release, then choose to update now, postpone (3 / 7 / 30 days), or skip this version.");
             _setCheckUpdates.Click([this](const IInspectable&, const RoutedEventArgs&) { _CheckForUpdates(true); });
-            _setUpdateStatus = TextBlock{};
-            _setUpdateStatus.Opacity(0.9);
-            _setUpdateStatus.FontSize(12);
-            _setUpdateStatus.VerticalAlignment(VerticalAlignment::Center);
-            _setUpdateStatus.TextWrapping(TextWrapping::Wrap);
             row.Children().Append(_setCheckUpdates);
-            row.Children().Append(_setUpdateStatus);
+
+            // "Current version changelog" — opens THIS build's GitHub release page (the changelog fixated
+            // on the installed version). Always shown; the URL is fixed for the process lifetime. Opened
+            // off-thread (a browser launch can stall) like the per-tab overlay's Open-Path.
+            const std::wstring curChangelogUrl =
+                ::Agentmaster::Updater::ReleasePageForTag(::Agentmaster::Updater::VersionToString(::Agentmaster::Updater::CurrentPackageVersion()));
+            _setCurrentChangelog = HyperlinkButton{};
+            _setCurrentChangelog.Content(winrt::box_value(L"Current version changelog"));
+            _setCurrentChangelog.Padding(Thickness{ 4, 2, 4, 2 });
+            _setCurrentChangelog.FontSize(12);
+            AgentSetTip(_setCurrentChangelog, L"Open the GitHub release notes for the version you're running");
+            _setCurrentChangelog.Click([curChangelogUrl](const IInspectable&, const RoutedEventArgs&) {
+                if (!curChangelogUrl.empty())
+                {
+                    std::thread([curChangelogUrl]() { ::ShellExecuteW(nullptr, L"open", curChangelogUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }).detach();
+                }
+            });
+            row.Children().Append(_setCurrentChangelog);
+
+            // "Update's changelog" — opens the AVAILABLE update's release page; revealed only after a
+            // check finds one (_lastUpdateChangelogUrl + Visibility set in _CheckForUpdates' completion).
+            _setUpdateChangelog = HyperlinkButton{};
+            _setUpdateChangelog.Content(winrt::box_value(L"Update's changelog"));
+            _setUpdateChangelog.Padding(Thickness{ 4, 2, 4, 2 });
+            _setUpdateChangelog.FontSize(12);
+            _setUpdateChangelog.Visibility(Visibility::Collapsed);
+            AgentSetTip(_setUpdateChangelog, L"Open the GitHub release notes for the available update");
+            _setUpdateChangelog.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                const std::wstring u = _lastUpdateChangelogUrl;
+                if (!u.empty())
+                {
+                    std::thread([u]() { ::ShellExecuteW(nullptr, L"open", u.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }).detach();
+                }
+            });
+            row.Children().Append(_setUpdateChangelog);
             panel.Children().Append(row);
         }
+        // Status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…") on its OWN row
+        // beneath the action row — kept off the action row so the button + the two changelog links fit
+        // the 460-wide card without clipping (the cog's ScrollViewer scrolls vertically only).
+        _setUpdateStatus = TextBlock{};
+        _setUpdateStatus.Opacity(0.9);
+        _setUpdateStatus.FontSize(12);
+        _setUpdateStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setUpdateStatus);
+
         _setAllowPrerelease = ToggleSwitch{};
         _setAllowPrerelease.Header(winrt::box_value(L"Allow updating to pre-release versions"));
         AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default.");
         panel.Children().Append(_setAllowPrerelease);
+
+        // "Uninstall Agentmaster…" — removes THIS install (the current package family) via the same
+        // embedded am-update.ps1 (-Uninstall). Shown only for packaged installs (gated in _ShowSettings);
+        // per-user, no admin, and the profile data (~/.agentmaster) is kept. Confirms, then quits so the
+        // package isn't in use while it's removed.
+        _setUninstallBtn = Button{};
+        _setUninstallBtn.Content(winrt::box_value(L"Uninstall Agentmaster\x2026"));
+        _setUninstallBtn.Margin(Thickness{ 0, 10, 0, 0 });
+        AgentSetTip(_setUninstallBtn, L"Remove this Agentmaster install. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster closes to finish.");
+        _setUninstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _Confirm(L"Uninstall Agentmaster?",
+                     L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
+                     L"Uninstall",
+                     [this]() {
+                         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
+                         if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
+                         {
+                             _quitForUpdateHandler();
+                         }
+                     });
+        });
+        panel.Children().Append(_setUninstallBtn);
 
         // CLAUDE SESSIONS
         panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
@@ -5558,13 +5996,40 @@ namespace winrt::TerminalApp::implementation
         _setRenameCommit.Items().Append(winrt::box_value(L"Click away + Enter"));
         AgentSetTip(_setRenameCommit, L"Which key commits a tab rename: Shift+Enter (default) or Enter. The other inserts a line break (titles can be multi-line); clicking away always commits.");
         panel.Children().Append(_setRenameCommit);
-        _setWaitingDecay = TextBox{};
-        _setWaitingDecay.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after (minutes)"));
-        // Claude's SERVER-SIDE prompt cache expires ~5 minutes after the last turn — past that the
-        // session is no longer "hot", so the Triage Board demotes it out of Waiting-for-you.
-        _setWaitingDecay.PlaceholderText(L"5 \x2014 Claude's server cache lifetime; 0 = never");
-        AgentSetTip(_setWaitingDecay, L"How long a Waiting-for-you session sits before the board demotes it to Idle \x2014 default 5 (Claude's ~5-minute server cache lifetime). 0 = never decay.");
-        panel.Children().Append(_setWaitingDecay);
+        // Agentmaster (Waiting-for-you "unread" model): the Waiting-for-you -> Idle timeout. A "Never"
+        // toggle (stay Waiting until read), else a slider 1m .. 3d (default 1h). This is the "unread
+        // inbox" lifetime; it was split from Claude's ~5-min server cache, which is now the separate
+        // "Server-side cache lifetime" below (driving only the card's ⚡ hint).
+        _setWaitingNever = ToggleSwitch{};
+        _setWaitingNever.Header(winrt::box_value(L"Never decay Waiting-for-you (keep until read)"));
+        AgentSetTip(_setWaitingNever, L"When on, a Waiting-for-you session never auto-demotes to Idle by time \x2014 it stays until you read (visit) its tab. When off, it decays after the timeout below (and only once you've read it).");
+        _setWaitingNever.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (_setWaitingDecaySlider && _setWaitingNever)
+            {
+                _setWaitingDecaySlider.IsEnabled(!_setWaitingNever.IsOn());
+            }
+        });
+        panel.Children().Append(_setWaitingNever);
+
+        _setWaitingDecaySlider = Slider{};
+        _setWaitingDecaySlider.Minimum(1); // 1 minute
+        _setWaitingDecaySlider.Maximum(4320); // 3 days
+        _setWaitingDecaySlider.StepFrequency(1);
+        _setWaitingDecaySlider.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after"));
+        AgentSetTip(_setWaitingDecaySlider, L"How long a Waiting-for-you session waits before it may demote to Idle \x2014 1 minute \x2026 3 days. It only demotes once you've READ it (an unread session keeps waiting past the timeout). Use the toggle above for \x201Cnever\x201D.");
+        _setWaitingDecaySlider.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
+            if (_setWaitingDecaySlider)
+            {
+                _setWaitingDecaySlider.Header(winrt::box_value(winrt::hstring{ L"Waiting-for-you \x2192 Idle after: " } + winrt::hstring{ FormatMinutesFriendly(static_cast<uint32_t>(_setWaitingDecaySlider.Value())) }));
+            }
+        });
+        panel.Children().Append(_setWaitingDecaySlider);
+
+        _setServerCache = TextBox{};
+        _setServerCache.Header(winrt::box_value(L"Server-side cache lifetime (minutes)"));
+        _setServerCache.PlaceholderText(L"5");
+        AgentSetTip(_setServerCache, L"How long after a turn Claude's server-side prompt cache stays warm \x2014 drives the card's \x26A1 \x201Cstill cached\x201D hint (a follow-up within the window is cheaper & faster). Default 5.");
+        panel.Children().Append(_setServerCache);
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
@@ -5608,6 +6073,10 @@ namespace winrt::TerminalApp::implementation
         _setCloseTabOnMiddleClick.Header(winrt::box_value(L"Close tab with middle-mouse click"));
         AgentSetTip(_setCloseTabOnMiddleClick, L"When off, middle-clicking a tab no longer closes it \x2014 handy if you keep closing tabs by accident. Default on.");
         panel.Children().Append(_setCloseTabOnMiddleClick);
+        _setAlwaysShowHomeButton = ToggleSwitch{};
+        _setAlwaysShowHomeButton.Header(winrt::box_value(L"Always display Home button"));
+        AgentSetTip(_setAlwaysShowHomeButton, L"Keep the tab-strip \x201CHome\x201D button (jump to the pinned Agent Manager tab) visible whenever you're on another tab. When off, it appears only once the Manager tab has scrolled out of view. Default on.");
+        panel.Children().Append(_setAlwaysShowHomeButton);
 
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
@@ -5745,9 +6214,26 @@ namespace winrt::TerminalApp::implementation
                                            _appSettings.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter ? 1 :
                                                                                                                             0);
         }
-        if (_setWaitingDecay)
+        if (_setWaitingDecaySlider && _setWaitingNever)
         {
-            _setWaitingDecay.Text(winrt::hstring{ std::to_wstring(_appSettings.waitingDecayMinutes) });
+            const bool never = (_appSettings.waitingForYouTimeoutMinutes == 0);
+            _setWaitingNever.IsOn(never);
+            uint32_t m = _appSettings.waitingForYouTimeoutMinutes;
+            if (m < 1)
+            {
+                m = 60; // a sane slider position when "never" is on (toggling off then lands on 1h)
+            }
+            if (m > 4320)
+            {
+                m = 4320;
+            }
+            _setWaitingDecaySlider.Value(static_cast<double>(m));
+            _setWaitingDecaySlider.IsEnabled(!never);
+            _setWaitingDecaySlider.Header(winrt::box_value(winrt::hstring{ L"Waiting-for-you \x2192 Idle after: " } + winrt::hstring{ FormatMinutesFriendly(m) }));
+        }
+        if (_setServerCache)
+        {
+            _setServerCache.Text(winrt::hstring{ std::to_wstring(_appSettings.serverCacheMinutes) });
         }
         if (_setLaunchDir)
         {
@@ -5764,6 +6250,10 @@ namespace winrt::TerminalApp::implementation
         if (_setCloseTabOnMiddleClick)
         {
             _setCloseTabOnMiddleClick.IsOn(_appSettings.closeTabOnMiddleClick);
+        }
+        if (_setAlwaysShowHomeButton)
+        {
+            _setAlwaysShowHomeButton.IsOn(_appSettings.alwaysShowHomeButton);
         }
         if (_setResetHidden)
         {
@@ -5789,15 +6279,54 @@ namespace winrt::TerminalApp::implementation
         {
             _setAllowPrerelease.IsOn(_appSettings.allowUpdatePrerelease);
         }
+        if (_setUpdateChangelog)
+        {
+            // Hide "Update's changelog" until THIS open's check confirms an update is available
+            // (the silent check below, or the explicit button, reveals it).
+            _setUpdateChangelog.Visibility(Visibility::Collapsed);
+        }
+        // Updater is RELEASE-channel only (Updater::IsUpdaterChannel). On a dev/unpackaged build the
+        // GitHub release is NOT a self-update (different package + always-"behind" the 0.0.1.0
+        // placeholder), so don't check or offer it: disable the button, hide the changelog links, and
+        // explain. Only the release install checks (silently on open) + shows "vX.Y.Z available!".
+        const bool updaterChannel = ::Agentmaster::Updater::IsUpdaterChannel();
+        if (_setCheckUpdates)
+        {
+            _setCheckUpdates.IsEnabled(updaterChannel);
+        }
+        if (_setUninstallBtn)
+        {
+            // Uninstall removes the CURRENT package family (release OR dev), so it's offered for any
+            // packaged install — independent of the release-only updater channel. An unpackaged build
+            // has nothing registered to remove, so hide it there.
+            _setUninstallBtn.Visibility(::Agentmaster::Updater::IsPackaged() ? Visibility::Visible : Visibility::Collapsed);
+        }
+        if (_setCurrentChangelog)
+        {
+            // The current build's release page only exists for a published version; hide it on dev.
+            _setCurrentChangelog.Visibility(updaterChannel ? Visibility::Visible : Visibility::Collapsed);
+        }
         if (_setUpdateStatus)
         {
-            _setUpdateStatus.Text(L""); // cleared until the silent check (below) finds an update
+            if (updaterChannel)
+            {
+                _setUpdateStatus.Text(L""); // cleared until the silent check (below) finds an update
+            }
+            else
+            {
+                _setUpdateStatus.Text(L"Dev build \x2014 the updater manages the Release install (rebuild to update this one).");
+                _setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x99, 0x99, 0x99) });
+            }
         }
         _settingsOverlay.Visibility(Visibility::Visible);
         // Updater: a silent check on open — if a newer release exists, the label next to "Check for
         // updates" reads "vX.Y.Z available!" in dark green. Quiet on no-update / no-network (the
         // explicit button gives that feedback). Runs off the UI thread (Updater.h uses WinHTTP).
-        _CheckForUpdates(false);
+        // RELEASE channel only — a dev build neither auto-checks nor is offered the release as an update.
+        if (updaterChannel)
+        {
+            _CheckForUpdates(false);
+        }
     }
 
     void AgentManagerContent::_HideSettings()
@@ -5876,9 +6405,30 @@ namespace winrt::TerminalApp::implementation
                                                idx == 0 ? TabRenameCommitMode::ClickAwayOnly :
                                                           TabRenameCommitMode::ClickAwayOrShiftEnter;
         }
-        if (_setWaitingDecay)
+        if (_setWaitingDecaySlider && _setWaitingNever)
         {
-            const std::wstring t{ _setWaitingDecay.Text() };
+            // "Never" => 0 (never time-decay; stay Waiting until read). Else the slider's 1..4320 minutes.
+            if (_setWaitingNever.IsOn())
+            {
+                _appSettings.waitingForYouTimeoutMinutes = 0;
+            }
+            else
+            {
+                uint32_t v = static_cast<uint32_t>(_setWaitingDecaySlider.Value());
+                if (v < 1)
+                {
+                    v = 1;
+                }
+                if (v > 4320)
+                {
+                    v = 4320;
+                }
+                _appSettings.waitingForYouTimeoutMinutes = v;
+            }
+        }
+        if (_setServerCache)
+        {
+            const std::wstring t{ _setServerCache.Text() };
             uint32_t v = 0;
             bool any = false;
             for (const wchar_t c : t)
@@ -5889,9 +6439,7 @@ namespace winrt::TerminalApp::implementation
                     any = true;
                 }
             }
-            // Unlike maxAutoSends, an explicit 0 is MEANINGFUL here (= never decay); only an
-            // empty/garbage box falls back to the 5-minute default (the cache lifetime).
-            _appSettings.waitingDecayMinutes = any ? v : 5;
+            _appSettings.serverCacheMinutes = (any && v > 0) ? v : 5; // blank/0 -> 5 (the cosmetic default)
         }
         if (_setLaunchDir)
         {
@@ -5919,6 +6467,10 @@ namespace winrt::TerminalApp::implementation
         if (_setCloseTabOnMiddleClick)
         {
             _appSettings.closeTabOnMiddleClick = _setCloseTabOnMiddleClick.IsOn();
+        }
+        if (_setAlwaysShowHomeButton)
+        {
+            _appSettings.alwaysShowHomeButton = _setAlwaysShowHomeButton.IsOn();
         }
         if (_setAllowPrerelease)
         {
@@ -5965,6 +6517,14 @@ namespace winrt::TerminalApp::implementation
         // The worker marshals its result back via the dispatcher; with no dispatcher it could never
         // re-enable the button / clear the in-flight flag, so bail before we touch either.
         if (!_dispatcher)
+        {
+            return;
+        }
+        // Release-channel only (Updater::IsUpdaterChannel): a dev/unpackaged build must NOT present a
+        // GitHub release as a self-update — it's a different package and always-"behind" the 0.0.1.0
+        // placeholder. _ShowSettings already disables the button + shows the explanatory note there;
+        // this is the backstop so a stray call never runs the misleading check.
+        if (!::Agentmaster::Updater::IsUpdaterChannel())
         {
             return;
         }
@@ -6036,6 +6596,24 @@ namespace winrt::TerminalApp::implementation
                     else
                     {
                         self->_setUpdateStatus.Text(L""); // silent check: stay quiet unless there IS an update
+                    }
+                }
+                // "Update's changelog" link: reveal it (and remember its release page) when an update is
+                // available — from EITHER the silent on-open check or the explicit button — else hide it.
+                if (info.available)
+                {
+                    self->_lastUpdateChangelogUrl = ::Agentmaster::Updater::ChangelogUrl(info);
+                    if (self->_setUpdateChangelog)
+                    {
+                        self->_setUpdateChangelog.Visibility(Visibility::Visible);
+                    }
+                }
+                else
+                {
+                    self->_lastUpdateChangelogUrl.clear();
+                    if (self->_setUpdateChangelog)
+                    {
+                        self->_setUpdateChangelog.Visibility(Visibility::Collapsed);
                     }
                 }
                 // Interactive only: prompt + apply on a found update (the silent on-open check just labels).
@@ -6822,7 +7400,7 @@ namespace winrt::TerminalApp::implementation
         // Native-exe-only policy: every CLAUDE interaction (new session or resume) needs a native
         // claude.exe. With none detected, show the install/Browse modal instead of launching. (Codex
         // launches above are a separate runtime and are not gated on claude.exe.)
-        if (!::Agentmaster::ClaudeAvailable())
+        if (!::Agentmaster::EnsureClaudeAvailable())
         {
             _ShowClaudeMissing();
             return;
@@ -6917,7 +7495,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         // Native-exe-only policy: a fork is a claude launch -> requires a native claude.exe.
-        if (!::Agentmaster::ClaudeAvailable())
+        if (!::Agentmaster::EnsureClaudeAvailable())
         {
             _ShowClaudeMissing();
             return;
@@ -7756,6 +8334,87 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveRecentDirs(_recentDirs);
     }
 
+    // Agentmaster: the "Browse…" row — the FIRST option in the path-picker dropdown. Visually it
+    // mirrors _MakePathRow (a transparent, focus-neutral row) but its glyph is a folder icon and its
+    // click opens the native folder dialog instead of drilling a typed path. Kept a TextBlock (not a
+    // FontIcon) so its vertical rhythm matches the other rows' TextBlock glyphs; only the FontFamily
+    // is swapped to Segoe Fluent Icons so the folder glyph renders.
+    Button AgentManagerContent::_MakeBrowseRow()
+    {
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(8);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        {
+            auto glyph = Text(L"\xE8B7", 13, false, 0.9); // Segoe Fluent Icons: Folder
+            glyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            row.Children().Append(glyph);
+        }
+        row.Children().Append(Text(L"Browse\x2026", 13, true, 1.0)); // bold: this is the primary "pick a folder" action
+
+        auto btn = Button{};
+        btn.Content(row);
+        btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        btn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        btn.Background(SolidColorBrush{ Colors::Transparent() });
+        btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        btn.Padding(Thickness{ 8, 5, 8, 5 });
+        // Like the path rows: must NOT take focus from the cwd box — a row grabbing focus would let
+        // the box's LostFocus race ahead and tear down the popup (and this button) before the click
+        // registers. Keeping focus on the box also keeps the popup open across picks.
+        btn.IsTabStop(false);
+        btn.AllowFocusOnInteraction(false);
+        AgentSetTip(btn, L"Browse for a working directory \x2014 the pick fills the box and is added to recents.");
+        btn.Click([this](const IInspectable&, const RoutedEventArgs&) { _BrowseForLaunchDir(); });
+        return btn;
+    }
+
+    // Agentmaster: open the native folder dialog for the Launch path box ("Browse…" row). A pick is
+    // dropped into the box AND pushed onto the recent-dirs MRU immediately (so Browse picks are part
+    // of recents even before the session is launched), then the box is re-validated + refocused. The
+    // COM modal is deferred off the click tick (it needs the message pump — the same XAML-Islands rule
+    // the claude.exe Browse and the profile picker both follow).
+    void AgentManagerContent::_BrowseForLaunchDir()
+    {
+        if (!_dispatcher || !_cwdBox)
+        {
+            return;
+        }
+        // Seed the dialog at the box's current path when it points at a real folder (or, for a partial
+        // leaf being typed, that leaf's existing parent), captured before the async hop.
+        std::wstring seed;
+        {
+            const std::wstring norm = NormPath(std::wstring{ _cwdBox.Text() });
+            if (IsDir(norm))
+            {
+                seed = norm;
+            }
+            else if (const auto parent = ParentDir(norm); parent && IsDir(*parent))
+            {
+                seed = *parent;
+            }
+        }
+        _dispatcher.TryEnqueue([this, seed]() {
+            const auto picked = PickFolder(::GetActiveWindow(), seed);
+            if (!picked || picked->empty() || !_cwdBox)
+            {
+                return;
+            }
+            const std::wstring dir = NormPath(*picked);
+            _PushRecentDir(dir); // a Browse pick joins the recents right away (shared MRU with launches)
+            _cwdBox.Text(winrt::hstring{ dir }); // set the launch target (fires TextChanged -> _ValidateLaunchBox)
+            _cwdBox.Select(static_cast<int32_t>(dir.size()), 0); // caret to end
+            _ValidateLaunchBox(); // explicit: a dismissed picker can early-out of the TextChanged path
+            _cwdBox.Focus(FocusState::Programmatic); // keep the box focused (don't strand focus on the dialog)
+            // Refresh the open picker so the just-added recent shows; leave a closed one closed (the
+            // user made a definitive choice via the modal).
+            if (_pathPopup && _pathPopup.IsOpen())
+            {
+                _RebuildPathPicker();
+            }
+        });
+    }
+
     Button AgentManagerContent::_MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText)
     {
         auto row = StackPanel{};
@@ -7793,6 +8452,13 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _pathListHost.Children().Clear();
+
+        // Agentmaster: "Browse…" is always the FIRST option — a native folder dialog whose pick fills
+        // the box and joins the recents. Appended before any section so it sits at the top in every
+        // mode (empty box, fuzzy query, or a rooted path). The empty-state hint below keys off this
+        // baseline so it still shows when Browse is the ONLY row.
+        _pathListHost.Children().Append(_MakeBrowseRow());
+        const uint32_t browseRowCount = _pathListHost.Children().Size();
 
         auto sectionLabel = [](const winrt::hstring& s) {
             auto lbl = Text(s, 11, true, 0.5);
@@ -7947,13 +8613,13 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        if (_pathListHost.Children().Size() == 0)
+        if (_pathListHost.Children().Size() == browseRowCount)
         {
-            // In query mode an empty list means the token matched no recent directory; otherwise
-            // it's the initial empty-box hint.
+            // Only the Browse row is present (no recents / subfolders). In query mode that means the
+            // token matched no recent directory; otherwise it's the initial empty-box hint.
             _pathListHost.Children().Append(Text(queryMode ?
-                L"No recent directory matches — type a full path to browse subfolders." :
-                L"Type a path or pick a recent directory.",
+                L"No recent directory matches — type a full path, or Browse\x2026 above." :
+                L"Type a path, pick a recent directory, or Browse\x2026 above.",
                 12, false, 0.6));
         }
     }

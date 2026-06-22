@@ -305,9 +305,18 @@ namespace winrt::TerminalApp::implementation
         // closeness (closest first); an empty query keeps the historical MRU order.
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
         winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
+        // Agentmaster: the "Browse…" row pinned to the TOP of the path-picker (the first option) — a
+        // native folder dialog whose pick both fills the box AND joins the recents (_BrowseForLaunchDir).
+        winrt::Windows::UI::Xaml::Controls::Button _MakeBrowseRow();
+        void _BrowseForLaunchDir();
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
+        // Agentmaster (Waiting-for-you countdown bar): drain every tracked card's 1px bottom bar in
+        // place (ScaleX = fraction of the waiting window still remaining) and start/stop the 1s timer
+        // that drives it depending on whether any bar is tracked. _RebuildBoard re-seeds the tracks.
+        void _UpdateCardProgress();
+        void _SyncProgressTimer();
         // Agentmaster: assemble one Triage Board column. With `fill` (default) the column fills the
         // board height with a pinned `header` over a vertically-scrolling `cards` list, so a tall
         // column (e.g. a large External census) scrolls within the board instead of clipping past
@@ -432,6 +441,28 @@ namespace winrt::TerminalApp::implementation
         // uint64_t to avoid including SessionRegistry.h in this header.)
         uint64_t _observerToken{ 0 };
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
+        // Agentmaster (Waiting-for-you "unread" model): a 30s timer that re-runs _Refresh() so the
+        // TIME-derived card adornments (the ⚡ "still cached" hint + the "ago" timing) stay current in
+        // quiet periods with no registry events. Stopped in the destructor.
+        winrt::Windows::UI::Xaml::DispatcherTimer _cardRefreshTimer{ nullptr };
+
+        // Agentmaster (Waiting-for-you countdown bar): the live 1px bottom bars to drain. Each holds the
+        // bar's ScaleTransform (ScaleX = fraction of the waiting window still remaining, origin LEFT) +
+        // the countdown anchor + the full duration. Re-seeded by _RebuildBoard (cleared at its top,
+        // pushed by _MakeCard); _progressTimer ticks ~1s and sets each ScaleX in place (no rebuild —
+        // a cheap render-transform write). The timer runs only while >=1 bar is tracked.
+        struct CardProgress
+        {
+            // The bar element (its RenderTransform is a ScaleTransform whose ScaleX = fraction). Stored
+            // as the Border rather than the ScaleTransform so this header needs no winrt Media include
+            // (which collides ::IInspectable with winrt's in this TU); _UpdateCardProgress resolves the
+            // transform in the .cpp where Media is in scope.
+            winrt::Windows::UI::Xaml::Controls::Border bar{ nullptr };
+            int64_t lastActivityUnixMs{ 0 }; // the turn's last activity (the countdown start)
+            int64_t timeoutMs{ 0 }; // waitingForYouTimeoutMinutes * 60000 (the full bar duration)
+        };
+        std::vector<CardProgress> _cardProgress;
+        winrt::Windows::UI::Xaml::DispatcherTimer _progressTimer{ nullptr };
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;
@@ -505,6 +536,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped
         winrt::Windows::UI::Xaml::Controls::Button _boardScopeBtn{ nullptr }; // Agentmaster: the board's LOCAL/GLOBAL toggle after the "TRIAGE BOARD" title — same state as _treeScopeBtn (External reads GLOBAL)
         winrt::Windows::UI::Xaml::Controls::Button _boardSortBtn{ nullptr }; // Agentmaster: the board's MOST ACTIVE/NEWEST/OLDEST/A-Z sort toggle after the scope toggle (global, persisted; AppSettings::boardSort, separate from _treeSortBtn)
+        winrt::Windows::UI::Xaml::Controls::Button _boardRefreshBtn{ nullptr }; // Agentmaster: the board's ↻ refresh button after the sort toggle (re-scan + redraw the whole tab; twin of _treeRefreshBtn)
         winrt::Windows::UI::Xaml::Controls::Button _clearSelBtn{ nullptr }; // Agentmaster: the board's "Clear" button next to LOCAL/GLOBAL — deselect the current card/row; hidden while nothing is selected (synced by _RebuildBoard, like _showAllBtn)
         winrt::Windows::UI::Xaml::Controls::Button _treeScopeBtn{ nullptr }; // Agentmaster: the LOCAL/GLOBAL/EXTERNAL toggle after the "EXPLORER TREE" title
         winrt::Windows::UI::Xaml::Controls::Button _treeSortBtn{ nullptr }; // Agentmaster: the NEWEST/OLDEST/MOST ACTIVE/A-Z sort toggle after the scope toggle (global, persisted)
@@ -577,11 +609,14 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
-        winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecay{ nullptr }; // Waiting-for-you -> Idle after N minutes (0 = never; default 5 = Claude's server cache lifetime)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
+        winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..4320 minutes (1m..3d); the "Never" toggle above owns 0
+        winrt::Windows::UI::Xaml::Controls::TextBox _setServerCache{ nullptr }; // Claude's server-side prompt-cache lifetime in minutes (drives the card's ⚡ "still cached" hint); default 5
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabCloseButton{ nullptr }; // TABS: show the close (x) button on tabs (OFF => force every tab to "Never"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAlwaysShowHomeButton{ nullptr }; // TABS: always show the strip "Home" button (OFF => only when the Manager tab is scrolled off); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
@@ -592,6 +627,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _setCheckUpdates{ nullptr }; // "Check for updates" -> the same prompt the startup check shows
         winrt::Windows::UI::Xaml::Controls::TextBlock _setUpdateStatus{ nullptr }; // status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…")
         bool _interactiveUpdateInFlight{ false }; // guard so a double-click of "Check for updates" can't fire two prompts
+        winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setCurrentChangelog{ nullptr }; // opens THIS build's release page (github .../releases/tag/v<current>)
+        winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setUpdateChangelog{ nullptr }; // opens the AVAILABLE update's release page; shown only after a check found one
+        std::wstring _lastUpdateChangelogUrl; // the available update's release page (drives _setUpdateChangelog's click)
+        winrt::Windows::UI::Xaml::Controls::Button _setUninstallBtn{ nullptr }; // Agentmaster (updater): "Uninstall Agentmaster…" -> remove THIS install (per-user; profile data kept), then quit. Shown only for packaged installs.
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;

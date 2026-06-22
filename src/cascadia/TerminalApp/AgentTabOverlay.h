@@ -133,6 +133,19 @@ namespace winrt::TerminalApp::implementation
         // resolve. Set by _AttachClaudeOverlay.
         void SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler);
 
+        // Agentmaster (SUMMARY_JUMP.md §7): the overlay's row-2 ↑/↓ buttons step to the previous / next
+        // off-screen SENT prompt — same as alt+up / alt+down. The overlay can't reach the control, so it
+        // calls this page-wired handler with the direction (true == up); the page runs the SAME
+        // _ScrollAdjacentPrompt for this session (scroll + the summary highlight + the boundary sound at
+        // the ends). Set by _AttachClaudeOverlay.
+        void SetAdjacentPromptHandler(std::function<void(bool)> handler);
+
+        // Agentmaster (SUMMARY_JUMP.md): highlight the summary row for the message we just jumped to —
+        // via the ▸ button OR alt+up / alt+down nav (the page passes the landed 0-based message index). A
+        // translucent band behind the row; it persists across panel re-renders and moves to the new
+        // target on the next jump. Out-of-range, or the panel not built, == no-op. Call on the UI thread.
+        void HighlightSummaryMessage(int index);
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
@@ -170,11 +183,16 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::System::DispatcherQueue _dispatcher{ nullptr };
 
         winrt::Windows::UI::Xaml::Controls::Border _root{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2
+        winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2 / row 3
         winrt::Windows::UI::Xaml::Controls::StackPanel _row1{ nullptr }; // row 1: a horizontal strip of DISCRETE, individually-tooltipped parts (status · [actions] · Autopilot[button] · queue · link)
         winrt::Windows::UI::Xaml::Controls::StackPanel _row2{ nullptr }; // row 2: the dir/branch label only ("<root workdir folder>/<branch>")
         winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2 label: "<root workdir folder>/<branch>"
         winrt::Windows::UI::Xaml::Controls::StackPanel _actions{ nullptr }; // row 1: folder + copy + pencil buttons — ALWAYS shown, just after the status block
+        // Row 3 (Agentmaster): a preview of the NEXT queued prompt waiting to be sent — the hourglass +
+        // the first line of the first Pending prompt (the one DecideAdvance would fire next), capped at
+        // 300 chars (a longer first line, or any further lines, ends with "..."). Wraps + width-capped so
+        // a long prompt can't balloon the HUD; hidden when nothing is queued (and on observe badges).
+        winrt::Windows::UI::Xaml::Controls::TextBlock _promptLine{ nullptr };
 
         // Summary panel (the 2nd slot): a scrollable box, shown while the global showSummaryPanel is ON.
         // The body is a StackPanel (not one TextBlock) so separators can be full-width Border rules.
@@ -231,9 +249,15 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _summaryUserMsgs;
         std::function<int(const std::vector<std::wstring>&, int)> _onJumpToPrompt; // jump button -> page (resolve control + center the view); returns the row or -1
         std::function<std::vector<int>(const std::vector<std::wstring>&)> _onResolveEligibility; // -> page: a row per prompt (-1 == not on screen), for icon dimming
+        std::function<void(bool)> _onAdjacentPrompt; // row-2 ↑/↓ buttons -> page (_ScrollAdjacentPrompt: scroll to prev/next off-screen prompt + highlight + boundary sound)
         // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;
         void _RefreshJumpEligibility(); // resolve all prompts -> set each jump button's opacity (match vs dim); SUMMARY_JUMP.md
+        // The numbered-message ROW containers (the 2-col Grid), paired with their 0-based prompt index, so
+        // HighlightSummaryMessage can paint a band behind the jumped-to row. Rebuilt each _SetSummaryContent.
+        std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Grid>> _summaryMsgRows;
+        int _highlightedMsgIndex{ -1 }; // the last jumped-to message (0-based), re-applied across re-renders; -1 == none
+        void _ApplySummaryHighlight(); // paint the band on _highlightedMsgIndex's row, clear the rest (SUMMARY_JUMP.md)
     };
 }

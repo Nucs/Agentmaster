@@ -74,6 +74,17 @@ IDI_APPICON_HC_WHITE    ICON                    "..\\..\\..\\res\\terminal\\imag
 
 /////////////////////////////////////////////////////////////////////////////
 //
+// Agentmaster: the in-app updater's PowerShell payload (install / upgrade / uninstall), embedded
+// as a binary resource so it is READ FROM THE BINARY at runtime (Updater.h, via FindResource) and
+// never shipped/read/copied as a loose file on disk. The .ps1 is the real, lintable source; this
+// bakes its bytes verbatim into WindowsTerminal.exe. Both the EXE startup check and the cog
+// (TerminalApp.dll) run inside this process, so loading via the process module reaches it.
+//
+AM_UPDATE_PS1 RCDATA "..\\TerminalApp\\AgentMaster\\am-update.ps1"
+
+
+/////////////////////////////////////////////////////////////////////////////
+//
 // String Table
 //
 

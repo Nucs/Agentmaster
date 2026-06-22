@@ -356,15 +356,114 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         auto rec = _CaptureWindowRecord();
+        const bool managerOnly = rec.tabs.empty(); // capture skips the Manager/Settings tabs -> empty == nothing but Manager
+        // Agentmaster (discard Manager-only windows): a window the user emptied to just the pinned
+        // Manager tab must NOT persist as a restorable window (the self-close requirement). When
+        // _CloseWindowIfManagerOnly latched the discard (it is the ONLY writer of this flag, and never
+        // during restore — so an only-shells reopen that is briefly tab-empty is safe), DELETE the
+        // on-disk record instead of saving it. Keep the in-memory copy current (empty, but its windowId +
+        // lens preserved) so that if a real tab later returns the window re-persists with its lens intact.
+        if (managerOnly && _managerOnlyDiscard)
+        {
+            ::Agentmaster::DeleteWindowRecord(_windowId);
+            _windowRecord = std::move(rec);
+            return;
+        }
+        // A real (terminal) tab is present -> this window persists normally again; clear the latch so a
+        // future flush saves it (and so a stale latch from an earlier empty spell can't suppress it).
+        if (!managerOnly)
+        {
+            _managerOnlyDiscard = false;
+        }
         //  (2) a capture with NEITHER content tabs NOR geometry is an un-laid-out window — keep the
         //      record on disk (the live window's real save follows). A legitimately session-less window
-        //      still has geometry, so an empty-but-positioned window (just the Manager tab) still saves.
-        if (rec.tabs.empty() && !rec.geometry.hasPosition && !rec.geometry.hasSize)
+        //      still has geometry, so an empty-but-positioned window (just the Manager tab) still saves
+        //      here UNLESS the discard latch above fired (a genuinely emptied window deletes its record).
+        if (managerOnly && !rec.geometry.hasPosition && !rec.geometry.hasSize)
         {
             return;
         }
         _windowRecord = std::move(rec);
         ::Agentmaster::SaveWindowRecord(_windowRecord);
+    }
+
+    // Agentmaster (discard Manager-only windows): true iff this window holds nothing but the pinned,
+    // non-closable Manager tab. A Settings tab (or any terminal tab) counts as real content, so the
+    // window is "Manager-only" only when the Manager tab is its sole tab. _managerTab is null on a
+    // window without one (a torn-out / pre-init shell), which is never Manager-only here.
+    bool TerminalPage::_IsManagerOnlyWindow() const
+    {
+        if (!_managerTab)
+        {
+            return false;
+        }
+        for (const auto& tab : _tabs)
+        {
+            if (tab != _managerTab)
+            {
+                return false; // a real tab (terminal / Settings) is present
+            }
+        }
+        return true;
+    }
+
+    // Agentmaster (discard Manager-only windows): the debounced decision. A window that ends up holding
+    // only the pinned Manager tab — by closing/tearing-out its last terminal tab, or by reopening from
+    // an empty/failed record — must not linger as a restorable, content-less window. Unless it is the
+    // LAST Agentmaster window it self-closes SILENTLY (there is nothing to confirm or lose); the last
+    // window stays open (the app needs one) but discards its record so it isn't restored as Manager-only
+    // next launch. Re-validates everything itself (it is reached via a debounce, so the state may have
+    // changed since it was scheduled), and gates on Initialized so a window still re-homing its tabs
+    // during startup is never mistaken for empty.
+    void TerminalPage::_CloseWindowIfManagerOnly()
+    {
+        if (_startupState != StartupState::Initialized || _windowId.empty())
+        {
+            return;
+        }
+        if (!_IsManagerOnlyWindow())
+        {
+            // A real tab is present -> drop any stale discard latch so this window persists normally.
+            _managerOnlyDiscard = false;
+            return;
+        }
+        // Genuinely Manager-only. Latch the discard so the record is deleted (here, and by any later
+        // flush) rather than saved, then decide self-close vs keep-as-last under the engine's race-safe
+        // reservation (two windows emptying at once must never both close and quit the app).
+        _managerOnlyDiscard = true;
+        if (::Agentmaster::ReserveManagerOnlyClose(_windowId))
+        {
+            // Not the last window — self-close. Mirror CloseWindow's deterministic seam MINUS the
+            // confirm dialog (an empty window has nothing to warn about): discard the record, latch the
+            // teardown flush so ~TerminalPage doesn't re-save, archive (a no-op — no sessions here), and
+            // raise the close. UnregisterLiveWindow (in the destructor) then drops the live id + clears
+            // the reservation; the deleted record means it is gone from every recover surface too.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[manager-only] self-close window " + _windowId + L"\n");
+            _FlushWindowRecord();
+            _windowRecordTeardownFlushed = true;
+            _ArchiveWindowSessionsOnTeardown();
+            CloseWindowRequested.raise(*this, nullptr);
+        }
+        else
+        {
+            // The LAST Agentmaster window: keep it open, but discard its on-disk record so the app does
+            // not reopen a Manager-only window next launch (it falls back to a fresh default window). A
+            // real tab returning clears the latch (above) and re-persists the window.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[manager-only] keep last window " + _windowId + L" (record discarded)\n");
+            _FlushWindowRecord();
+        }
+    }
+
+    // Agentmaster (discard Manager-only windows): run the debounced Manager-only check. Fed by every
+    // tab add/remove (_tabs.VectorChanged) and the end of startup, so the window's SETTLED tab set is
+    // evaluated once — coalescing restore churn / a tear-out / a user close into one decision. The
+    // throttle fires on the UI thread; _CloseWindowIfManagerOnly re-validates and gates on Initialized.
+    void TerminalPage::_ScheduleManagerOnlyCheck()
+    {
+        if (_managerOnlyCheckThrottled)
+        {
+            _managerOnlyCheckThrottled->Run();
+        }
     }
 
     // Agentmaster (M10 window-grouped restore; PERSISTENCE.md §13 Phase C): re-home THIS window's
