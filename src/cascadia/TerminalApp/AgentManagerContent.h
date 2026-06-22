@@ -312,6 +312,11 @@ namespace winrt::TerminalApp::implementation
 
         // Build one session card for the Triage Board.
         winrt::Windows::UI::Xaml::Controls::Button _MakeCard(const ::Agentmaster::SessionInfo& s);
+        // Agentmaster (Waiting-for-you countdown bar): drain every tracked card's 1px bottom bar in
+        // place (ScaleX = fraction of the waiting window still remaining) and start/stop the 1s timer
+        // that drives it depending on whether any bar is tracked. _RebuildBoard re-seeds the tracks.
+        void _UpdateCardProgress();
+        void _SyncProgressTimer();
         // Agentmaster: assemble one Triage Board column. With `fill` (default) the column fills the
         // board height with a pinned `header` over a vertically-scrolling `cards` list, so a tall
         // column (e.g. a large External census) scrolls within the board instead of clipping past
@@ -435,6 +440,24 @@ namespace winrt::TerminalApp::implementation
         // TIME-derived card adornments (the ⚡ "still cached" hint + the "ago" timing) stay current in
         // quiet periods with no registry events. Stopped in the destructor.
         winrt::Windows::UI::Xaml::DispatcherTimer _cardRefreshTimer{ nullptr };
+
+        // Agentmaster (Waiting-for-you countdown bar): the live 1px bottom bars to drain. Each holds the
+        // bar's ScaleTransform (ScaleX = fraction of the waiting window still remaining, origin LEFT) +
+        // the countdown anchor + the full duration. Re-seeded by _RebuildBoard (cleared at its top,
+        // pushed by _MakeCard); _progressTimer ticks ~1s and sets each ScaleX in place (no rebuild —
+        // a cheap render-transform write). The timer runs only while >=1 bar is tracked.
+        struct CardProgress
+        {
+            // The bar element (its RenderTransform is a ScaleTransform whose ScaleX = fraction). Stored
+            // as the Border rather than the ScaleTransform so this header needs no winrt Media include
+            // (which collides ::IInspectable with winrt's in this TU); _UpdateCardProgress resolves the
+            // transform in the .cpp where Media is in scope.
+            winrt::Windows::UI::Xaml::Controls::Border bar{ nullptr };
+            int64_t lastActivityUnixMs{ 0 }; // the turn's last activity (the countdown start)
+            int64_t timeoutMs{ 0 }; // waitingDecayMinutes * 60000 (the full bar duration)
+        };
+        std::vector<CardProgress> _cardProgress;
+        winrt::Windows::UI::Xaml::DispatcherTimer _progressTimer{ nullptr };
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;

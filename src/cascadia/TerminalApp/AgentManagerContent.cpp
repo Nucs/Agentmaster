@@ -1142,6 +1142,10 @@ namespace winrt::TerminalApp::implementation
         {
             _cardRefreshTimer.Stop(); // UI thread; stop the periodic ⚡/timing refresh
         }
+        if (_progressTimer)
+        {
+            _progressTimer.Stop(); // UI thread; stop the Waiting-for-you countdown-bar drainer
+        }
     }
 
     void AgentManagerContent::SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry)
@@ -2330,6 +2334,7 @@ namespace winrt::TerminalApp::implementation
             sessions = _registry->Snapshot();
         }
         _RebuildBoard(sessions);
+        _SyncProgressTimer(); // Agentmaster: run the 1s countdown-bar drainer iff any Waiting-for-you bar is now tracked
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
         _UpdateArchivedButton(sessions);
@@ -2363,6 +2368,69 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+    }
+
+    // Agentmaster (Waiting-for-you countdown bar): drain every tracked bar to its current fraction.
+    // Cheap — sets ScaleX on a handful of ScaleTransforms (a render-transform write, no layout/rebuild).
+    // Ticked ~1s by _progressTimer. A bar at 0 has expired (a read card decays to Idle on the scanner's
+    // next tick, which rebuilds the board and drops the track); an unread one sits empty until read.
+    void AgentManagerContent::_UpdateCardProgress()
+    {
+        if (_cardProgress.empty())
+        {
+            return;
+        }
+        const int64_t now = NowMs();
+        for (const auto& p : _cardProgress)
+        {
+            if (!p.bar || p.timeoutMs <= 0)
+            {
+                continue;
+            }
+            const auto st = p.bar.RenderTransform().try_as<ScaleTransform>();
+            if (!st)
+            {
+                continue;
+            }
+            double frac = 1.0 - static_cast<double>(now - p.lastActivityUnixMs) / static_cast<double>(p.timeoutMs);
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+            st.ScaleX(frac);
+        }
+    }
+
+    // Agentmaster (Waiting-for-you countdown bar): start the ~1s drainer iff any bar is tracked, else
+    // stop it (no Waiting-for-you cards -> no per-second work). Built lazily; weak self so a closed
+    // window never leaks a ticking timer. Called at the end of each board rebuild (from _Refresh).
+    void AgentManagerContent::_SyncProgressTimer()
+    {
+        if (_cardProgress.empty())
+        {
+            if (_progressTimer)
+            {
+                _progressTimer.Stop();
+            }
+            return;
+        }
+        if (!_progressTimer)
+        {
+            _progressTimer = DispatcherTimer{};
+            _progressTimer.Interval(std::chrono::seconds(1));
+            _progressTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_UpdateCardProgress();
+                }
+                else if (const auto t = sender.try_as<DispatcherTimer>())
+                {
+                    t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+                }
+            });
+        }
+        if (!_progressTimer.IsEnabled())
+        {
+            _progressTimer.Start();
+        }
+        _UpdateCardProgress(); // paint the correct fractions NOW (don't wait up to 1s for the first tick)
     }
 
     Button AgentManagerContent::_MakeCard(const SessionInfo& s)
@@ -2573,6 +2641,36 @@ namespace winrt::TerminalApp::implementation
         grid.Children().Append(outer);
         grid.Children().Append(ring); // over the content, under the dots
         grid.Children().Append(dotsBtn);
+
+        // Agentmaster (Waiting-for-you countdown bar): a 1px goldenrod bar pinned INSIDE the card's
+        // bottom edge that drains from full width (100% of the waiting window) to 0 as the
+        // Waiting-for-you timeout approaches. At empty the wait has expired — a READ card then decays to
+        // Idle / Done (an unread one keeps waiting until read). Shown only for a WaitingForInput card with
+        // a finite timeout that isn't manually held unread (a Mark-Unread / "Never" card never time-decays,
+        // so it has no countdown). Overlaid in the grid OVER the hover/selected ring so it stays visible,
+        // and IsHitTestVisible(false) so the 1px strip never eats a card click. ScaleX (origin LEFT) =
+        // fraction remaining; _progressTimer drains it live in place, and each _RebuildBoard re-seeds it.
+        if (s.state == SessionState::WaitingForInput && !s.manualUnread && _appSettings.waitingDecayMinutes > 0 && s.lastActivityUnixMs > 0)
+        {
+            const int64_t timeoutMs = static_cast<int64_t>(_appSettings.waitingDecayMinutes) * 60000;
+            double frac = 1.0 - static_cast<double>(NowMs() - s.lastActivityUnixMs) / static_cast<double>(timeoutMs);
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+
+            auto barScale = ScaleTransform{};
+            barScale.ScaleX(frac);
+
+            auto bar = Border{};
+            bar.Height(1);
+            bar.VerticalAlignment(VerticalAlignment::Bottom);
+            bar.HorizontalAlignment(HorizontalAlignment::Stretch);
+            bar.Background(SolidColorBrush{ StateColor(SessionState::WaitingForInput) }); // goldenrod, matching the state
+            bar.RenderTransformOrigin(Point{ 0.0f, 0.0f }); // drain from the RIGHT (the left edge stays pinned)
+            bar.RenderTransform(barScale);
+            bar.IsHitTestVisible(false); // a decorative 1px overlay must never swallow a card click
+            grid.Children().Append(bar);
+
+            _cardProgress.push_back(CardProgress{ bar, s.lastActivityUnixMs, timeoutMs });
+        }
 
         auto card = Button{};
         card.Content(grid);
@@ -2905,6 +3003,7 @@ namespace winrt::TerminalApp::implementation
 
         _boardHost.Children().Clear();
         _boardCardsById.clear(); // refilled by _MakeCard below (focus-restore map; see _Refresh)
+        _cardProgress.clear(); // Agentmaster: refilled by _MakeCard for each Waiting-for-you countdown bar (drained by _progressTimer)
         if (_boardScope)
         {
             // The label exists only WHILE a directory is scoped (paired with "Show all"); unscoped
