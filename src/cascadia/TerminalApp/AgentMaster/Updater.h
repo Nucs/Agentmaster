@@ -60,6 +60,7 @@ namespace Agentmaster::Updater
     inline constexpr const wchar_t* kRepo = L"Nucs/Agentmaster";
     inline constexpr const wchar_t* kApiHost = L"api.github.com";
     inline constexpr const wchar_t* kReleaseAumid = L"Agentmaster_56k4f06dsfp9r!App";
+    inline constexpr const wchar_t* kReleaseFamily = L"Agentmaster_56k4f06dsfp9r";
     inline constexpr const wchar_t* kReleasesPage = L"https://github.com/Nucs/Agentmaster/releases";
 
     // ============================ version ============================
@@ -743,6 +744,7 @@ $BundleUrl = '{{BUNDLE_URL}}'
 $CerUrl    = '{{CER_URL}}'
 $Version   = '{{VERSION}}'
 $Aumid     = '{{AUMID}}'
+$Family    = '{{FAMILY}}'
 $WaitPid   = '{{WAIT_PID}}'
 $Dir       = Join-Path $env:TEMP 'Agentmaster-update'
 
@@ -795,16 +797,56 @@ try {
   }
 
   Step "Installing $Version"
+  function Add-Bundle($deps) {
+    if ($deps) {
+      Add-AppxPackage -Path $bundle -DependencyPath $deps -ForceUpdateFromAnyVersion -ForceApplicationShutdown -ErrorAction Stop
+    } else {
+      Add-AppxPackage -Path $bundle -ForceUpdateFromAnyVersion -ForceApplicationShutdown -ErrorAction Stop
+    }
+  }
   try {
-    Add-AppxPackage -Path $bundle -ForceUpdateFromAnyVersion -ForceApplicationShutdown -ErrorAction Stop
+    Add-Bundle $null
   } catch {
     $msg = $_.Exception.Message
+
+    # (a) Missing framework dependency (VCLibs) -> fetch it and retry.
     if ($msg -match '0x80073CF3' -or $msg -match 'dependency') {
+      Warn 'resolving the framework dependency (VCLibs)...'
       $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'AMD64' { 'x64' } default { 'x64' } }
       $vc = Join-Path $Dir "Microsoft.VCLibs.$arch.14.00.Desktop.appx"
-      Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vc -UseBasicParsing
-      Add-AppxPackage -Path $bundle -DependencyPath $vc -ForceUpdateFromAnyVersion -ForceApplicationShutdown -ErrorAction Stop
-    } else { throw }
+      if (-not (Test-Path $vc)) {
+        Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vc -UseBasicParsing
+      }
+      Add-Bundle $vc
+    }
+    # (b) A conflicting EXISTING install blocks deployment with 0x80073CFB -- typically a registered
+    # "loose layout" / unpackaged dev install of the same identity, which a packaged build cannot
+    # replace in place ("A packaged version cannot replace this"). Remove it, then retry. Per-user
+    # removal needs no admin, and Agentmaster's data (e.g. %USERPROFILE%\.agentmaster) lives OUTSIDE
+    # the package, so it survives. Mirrors Install-Agentmaster.ps1's Remove-BlockingInstall.
+    elseif ($msg -match '0x80073CFB' -or $msg -match 'already installed' -or
+            $msg -match 'cannot replace' -or $msg -match 'unpackaged') {
+      $blocker = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq $Family } | Select-Object -First 1
+      if (-not $blocker) {
+        throw "A conflicting Agentmaster install is blocking the update but could not be found to remove automatically. Remove it manually and re-run the update:  Get-AppxPackage Agentmaster | Remove-AppxPackage"
+      }
+      $kind = if ($blocker.IsDevelopmentMode) { 'a registered (unpackaged) layout' } else { 'a packaged install' }
+      Warn "removing a conflicting existing install ($kind, version $($blocker.Version)); your data is kept"
+      # Close any still-running instances of the blocker so its registration releases cleanly. Filter
+      # strictly by the blocker's own InstallLocation so the Store Windows Terminal and the Dev install
+      # (a different identity/path) are never touched.
+      if ($blocker.InstallLocation) {
+        try {
+          Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($blocker.InstallLocation, [StringComparison]::OrdinalIgnoreCase) } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        } catch {}
+      }
+      Remove-AppxPackage -Package $blocker.PackageFullName -ErrorAction Stop
+      Ok ("removed " + $blocker.PackageFullName)
+      Add-Bundle $null   # retry on a clean slate
+    }
+    else { throw }
   }
   Ok 'installed'
 
@@ -852,6 +894,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0am-update.ps1"
         detail::ReplaceAll(ps1, L"{{CER_URL}}", info.cerUrl);
         detail::ReplaceAll(ps1, L"{{VERSION}}", DisplayVersion(info));
         detail::ReplaceAll(ps1, L"{{AUMID}}", kReleaseAumid);
+        detail::ReplaceAll(ps1, L"{{FAMILY}}", kReleaseFamily);
         detail::ReplaceAll(ps1, L"{{WAIT_PID}}", std::to_wstring(::GetCurrentProcessId()));
 
         const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
