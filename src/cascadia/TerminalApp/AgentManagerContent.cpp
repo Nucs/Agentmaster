@@ -5628,6 +5628,28 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default.");
         panel.Children().Append(_setAllowPrerelease);
 
+        // "Uninstall Agentmaster…" — removes THIS install (the current package family) via the same
+        // embedded am-update.ps1 (-Uninstall). Shown only for packaged installs (gated in _ShowSettings);
+        // per-user, no admin, and the profile data (~/.agentmaster) is kept. Confirms, then quits so the
+        // package isn't in use while it's removed.
+        _setUninstallBtn = Button{};
+        _setUninstallBtn.Content(winrt::box_value(L"Uninstall Agentmaster\x2026"));
+        _setUninstallBtn.Margin(Thickness{ 0, 10, 0, 0 });
+        AgentSetTip(_setUninstallBtn, L"Remove this Agentmaster install. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster closes to finish.");
+        _setUninstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _Confirm(L"Uninstall Agentmaster?",
+                     L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
+                     L"Uninstall",
+                     [this]() {
+                         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
+                         if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
+                         {
+                             _quitForUpdateHandler();
+                         }
+                     });
+        });
+        panel.Children().Append(_setUninstallBtn);
+
         // CLAUDE SESSIONS
         panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
         _setSkipPermissions = ToggleSwitch{};
@@ -6009,6 +6031,13 @@ namespace winrt::TerminalApp::implementation
         if (_setCheckUpdates)
         {
             _setCheckUpdates.IsEnabled(updaterChannel);
+        }
+        if (_setUninstallBtn)
+        {
+            // Uninstall removes the CURRENT package family (release OR dev), so it's offered for any
+            // packaged install — independent of the release-only updater channel. An unpackaged build
+            // has nothing registered to remove, so hide it there.
+            _setUninstallBtn.Visibility(::Agentmaster::Updater::IsPackaged() ? Visibility::Visible : Visibility::Collapsed);
         }
         if (_setCurrentChangelog)
         {

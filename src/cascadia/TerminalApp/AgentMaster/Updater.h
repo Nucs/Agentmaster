@@ -4,10 +4,15 @@
 // Agentmaster — the in-app auto-updater (header-only, plain Win32; no WinRT, no engine-lib deps,
 // exactly like ProfileBootstrap.h). It checks the GitHub Releases of Nucs/Agentmaster for a newer
 // version, prompts the user (Update now / Postpone [3·7·30 days / skip this version] / Not now)
-// with a Win32 TaskDialog, and — on Update — writes an EMBEDDED installer script (am-update.cmd +
-// am-update.ps1, baked into THIS header) into the active profile dir and launches it detached to
-// download + cert-trust + Add-AppxPackage the new .msixbundle and relaunch. The install script is
-// BAKED IN here, never fetched from GitHub.
+// with a Win32 TaskDialog, and — on Update — materializes the installer script into the active
+// profile dir (am-update.ps1 + a tiny am-update.cmd launcher) and runs it detached to download +
+// cert-trust + Add-AppxPackage the new .msixbundle and relaunch. The script (am-update.ps1) is the
+// REAL file at src/cascadia/TerminalApp/AgentMaster/am-update.ps1, compiled into WindowsTerminal.exe
+// as the AM_UPDATE_PS1 RT_RCDATA resource and READ FROM THE BINARY here (FindResource/LoadResource)
+// — never fetched from GitHub, and never read/copied/opened as a loose file on disk. The same script
+// also performs an UNINSTALL (LaunchUninstaller -> am-update.ps1 -Uninstall). It mirrors
+// tools\Install-Agentmaster.ps1's install core + recovery (VCLibs dependency; removing a conflicting
+// "already installed"/unpackaged registration that blocks deployment, 0x80073CFB).
 //
 // Included by BOTH the WindowsTerminal EXE (the startup pre-restoration check — it asks BEFORE the
 // "Reopen your N windows?" prompt) AND TerminalApp.dll's Settings cog ("Check for updates" button +
@@ -300,6 +305,44 @@ namespace Agentmaster::Updater
                 return {};
             }
         }
+
+        // Read an embedded RT_RCDATA resource (UTF-8 bytes) into a wide string. The installer payload
+        // (am-update.ps1) is baked into WindowsTerminal.exe as the AM_UPDATE_PS1 resource — the REAL
+        // .ps1 file, compiled in, so it is read from the binary at runtime and never shipped/opened as
+        // a loose file. Both callers (the EXE startup check AND the DLL-hosted cog) run inside the
+        // WindowsTerminal.exe process, so the process module (GetModuleHandleW(nullptr)) carries it;
+        // we also fall back to the module this inline code is linked into, for robustness.
+        inline std::wstring LoadResourceTextUtf8(const wchar_t* resName)
+        {
+            const auto readFrom = [resName](HMODULE mod) -> std::wstring {
+                if (!mod)
+                {
+                    return {};
+                }
+                const HRSRC res = ::FindResourceW(mod, resName, RT_RCDATA);
+                if (!res)
+                {
+                    return {};
+                }
+                const HGLOBAL loaded = ::LoadResource(mod, res);
+                const DWORD sz = ::SizeofResource(mod, res);
+                const void* ptr = loaded ? ::LockResource(loaded) : nullptr;
+                if (!ptr || sz == 0)
+                {
+                    return {};
+                }
+                return Utf8ToWide(std::string_view{ reinterpret_cast<const char*>(ptr), sz });
+            };
+            if (std::wstring s = readFrom(::GetModuleHandleW(nullptr)); !s.empty())
+            {
+                return s;
+            }
+            HMODULE self{};
+            ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                 reinterpret_cast<LPCWSTR>(&LoadResourceTextUtf8),
+                                 &self);
+            return readFrom(self);
+        }
     }
 
     // Epoch milliseconds (FILETIME is 100ns since 1601; Unix epoch is +11644473600s).
@@ -329,6 +372,7 @@ namespace Agentmaster::Updater
         Version latest;
         bool isPrerelease{ false };
         std::wstring bundleUrl; // .msixbundle browser_download_url
+        std::wstring bundleSha256; // the bundle asset's "sha256:<hex>" digest (when GitHub provides it) — verified by am-update.ps1
         std::wstring cerUrl; // .cer browser_download_url
         std::wstring notes; // release body (markdown; parsed + available — the prompt now LINKS to the release page rather than showing it inline)
         std::wstring htmlUrl; // release page (changelog) — .../releases/tag/<tag>; "What's new" / "Update's changelog" open this
@@ -485,6 +529,7 @@ namespace Agentmaster::Updater
                 if (detail::EndsWithNoCase(name, L".msixbundle"))
                 {
                     info.bundleUrl = url;
+                    info.bundleSha256 = a.StrAt(L"digest"); // "sha256:<hex>" when present (newer GitHub API), else "" -> no verify
                 }
                 else if (detail::EndsWithNoCase(name, L".cer"))
                 {
@@ -732,170 +777,68 @@ namespace Agentmaster::Updater
 
     // ============================ the embedded installer ============================
 
-    // The installer PowerShell — BAKED IN here (never fetched from GitHub). Given direct asset URLs
-    // (the app already resolved them via the API), it downloads the .msixbundle + .cer, trusts the
-    // self-signed cert (elevating only if it isn't already trusted), Add-AppxPackages the bundle
-    // (with the VCLibs-dependency fallback), and relaunches. {{TOKENS}} are substituted below.
+    // The installer PowerShell — the REAL am-update.ps1 file (src/cascadia/TerminalApp/AgentMaster/),
+    // compiled into WindowsTerminal.exe as the AM_UPDATE_PS1 RT_RCDATA resource and read from the
+    // binary here. It is NEVER fetched from GitHub, and never read/copied/opened as a loose file on
+    // disk. It mirrors tools\Install-Agentmaster.ps1's install core + recovery (VCLibs dependency,
+    // conflicting-install removal) and adds the in-app specifics (wait-for-app, relaunch, -Uninstall).
+    // The dynamic values (bundle/cer URL, version, sha256, family, wait-pid) are passed as real
+    // PARAMETERS by the generated .cmd — no string substitution into the script body.
     inline std::wstring InstallerPs1()
     {
-        return LR"PSUPD(# Agentmaster in-app updater (generated; baked into the app, not fetched from GitHub).
-$ErrorActionPreference = 'Stop'
-$BundleUrl = '{{BUNDLE_URL}}'
-$CerUrl    = '{{CER_URL}}'
-$Version   = '{{VERSION}}'
-$Aumid     = '{{AUMID}}'
-$Family    = '{{FAMILY}}'
-$WaitPid   = '{{WAIT_PID}}'
-$Dir       = Join-Path $env:TEMP 'Agentmaster-update'
-
-function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
-function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
-
-try {
-  Write-Host ''
-  Write-Host "Agentmaster updater - installing $Version" -ForegroundColor White
-  Write-Host ''
-
-  try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
-  if ($PSVersionTable.PSVersion.Major -ge 7) { Import-Module Appx -UseWindowsPowerShell -WarningAction SilentlyContinue -ErrorAction SilentlyContinue }
-
-  New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-  $bundle = Join-Path $Dir ([IO.Path]::GetFileName(([Uri]$BundleUrl).AbsolutePath))
-  $cer    = Join-Path $Dir 'Agentmaster.cer'
-
-  Step 'Downloading the update'
-  $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
-  try {
-    Invoke-WebRequest -Uri $CerUrl    -OutFile $cer    -UseBasicParsing -Headers @{ 'User-Agent' = 'Agentmaster-Updater' }
-    Invoke-WebRequest -Uri $BundleUrl -OutFile $bundle -UseBasicParsing -Headers @{ 'User-Agent' = 'Agentmaster-Updater' }
-  } finally { $ProgressPreference = $old }
-  Ok 'downloaded'
-
-  Step 'Trusting the signing certificate (one-time; may prompt for administrator)'
-  $cert  = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 ((Resolve-Path -LiteralPath $cer).Path)
-  $thumb = $cert.Thumbprint
-  if (Test-Path "Cert:\LocalMachine\TrustedPeople\$thumb") {
-    Ok 'already trusted'
-  } else {
-    $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if ($isAdmin) {
-      Import-Certificate -FilePath ((Resolve-Path -LiteralPath $cer).Path) -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
-    } else {
-      $p = ((Resolve-Path -LiteralPath $cer).Path).Replace("'","''")
-      $inner = "try { Import-Certificate -FilePath '$p' -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -ErrorAction Stop | Out-Null; exit 0 } catch { exit 7 }"
-      $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
-      $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$enc
-      if ($proc.ExitCode -ne 0) { throw 'Administrator elevation was cancelled or failed; the signing certificate must be trusted to install the update.' }
-    }
-    Ok 'trusted'
-  }
-
-  if ($WaitPid -match '^\d+$' -and [int]$WaitPid -gt 0) {
-    Step 'Waiting for Agentmaster to close'
-    try { Wait-Process -Id ([int]$WaitPid) -Timeout 20 -ErrorAction SilentlyContinue } catch {}
-  }
-
-  Step "Installing $Version"
-  function Add-Bundle($deps) {
-    if ($deps) {
-      Add-AppxPackage -Path $bundle -DependencyPath $deps -ForceUpdateFromAnyVersion -ForceApplicationShutdown -ErrorAction Stop
-    } else {
-      Add-AppxPackage -Path $bundle -ForceUpdateFromAnyVersion -ForceApplicationShutdown -ErrorAction Stop
-    }
-  }
-  try {
-    Add-Bundle $null
-  } catch {
-    $msg = $_.Exception.Message
-
-    # (a) Missing framework dependency (VCLibs) -> fetch it and retry.
-    if ($msg -match '0x80073CF3' -or $msg -match 'dependency') {
-      Warn 'resolving the framework dependency (VCLibs)...'
-      $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'AMD64' { 'x64' } default { 'x64' } }
-      $vc = Join-Path $Dir "Microsoft.VCLibs.$arch.14.00.Desktop.appx"
-      if (-not (Test-Path $vc)) {
-        Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.$arch.14.00.Desktop.appx" -OutFile $vc -UseBasicParsing
-      }
-      Add-Bundle $vc
-    }
-    # (b) A conflicting EXISTING install blocks deployment with 0x80073CFB -- typically a registered
-    # "loose layout" / unpackaged dev install of the same identity, which a packaged build cannot
-    # replace in place ("A packaged version cannot replace this"). Remove it, then retry. Per-user
-    # removal needs no admin, and Agentmaster's data (e.g. %USERPROFILE%\.agentmaster) lives OUTSIDE
-    # the package, so it survives. Mirrors Install-Agentmaster.ps1's Remove-BlockingInstall.
-    elseif ($msg -match '0x80073CFB' -or $msg -match 'already installed' -or
-            $msg -match 'cannot replace' -or $msg -match 'unpackaged') {
-      $blocker = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq $Family } | Select-Object -First 1
-      if (-not $blocker) {
-        throw "A conflicting Agentmaster install is blocking the update but could not be found to remove automatically. Remove it manually and re-run the update:  Get-AppxPackage Agentmaster | Remove-AppxPackage"
-      }
-      $kind = if ($blocker.IsDevelopmentMode) { 'a registered (unpackaged) layout' } else { 'a packaged install' }
-      Warn "removing a conflicting existing install ($kind, version $($blocker.Version)); your data is kept"
-      # Close any still-running instances of the blocker so its registration releases cleanly. Filter
-      # strictly by the blocker's own InstallLocation so the Store Windows Terminal and the Dev install
-      # (a different identity/path) are never touched.
-      if ($blocker.InstallLocation) {
-        try {
-          Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($blocker.InstallLocation, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-        } catch {}
-      }
-      Remove-AppxPackage -Package $blocker.PackageFullName -ErrorAction Stop
-      Ok ("removed " + $blocker.PackageFullName)
-      Add-Bundle $null   # retry on a clean slate
-    }
-    else { throw }
-  }
-  Ok 'installed'
-
-  Step 'Relaunching Agentmaster'
-  Start-Process "shell:appsFolder\$Aumid"
-  Write-Host ''
-  Write-Host "Updated to $Version." -ForegroundColor White
-  Start-Sleep -Seconds 2
-}
-catch {
-  Write-Host ''
-  Write-Host "Update failed: $($_.Exception.Message)" -ForegroundColor Red
-  Write-Host 'You can download the latest release manually from:' -ForegroundColor DarkGray
-  Write-Host '    https://github.com/Nucs/Agentmaster/releases' -ForegroundColor DarkGray
-  Write-Host ''
-  Write-Host 'Press Enter to close...' -ForegroundColor DarkGray
-  try { Read-Host | Out-Null } catch {}
-}
-)PSUPD";
+        return detail::LoadResourceTextUtf8(L"AM_UPDATE_PS1");
     }
 
-    // The launched entry point — a tiny .bat/.cmd that runs the .ps1 sitting beside it (%~dp0 is
-    // the script's own folder == the profile dir we write both into). This is "the installer bat
-    // script embedded resource" the design calls for; the heavy lifting (Add-AppxPackage, cert
-    // trust) is the PowerShell payload it invokes.
-    inline std::wstring InstallerCmd()
+    // Quote a value for a generated .cmd line: wrap in double-quotes and double any % (cmd's escape
+    // metacharacter). Our values (URLs / a version / a 64-hex digest / a PFN) never contain a quote.
+    inline std::wstring CmdArg(std::wstring_view v)
     {
-        return LR"CMDUPD(@echo off
-title Agentmaster Update
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0am-update.ps1"
-)CMDUPD";
+        std::wstring out;
+        out.reserve(v.size() + 2);
+        out.push_back(L'"');
+        for (const wchar_t c : v)
+        {
+            if (c == L'%')
+            {
+                out += L"%%";
+            }
+            else
+            {
+                out.push_back(c);
+            }
+        }
+        out.push_back(L'"');
+        return out;
     }
 
-    // Materialize am-update.cmd + am-update.ps1 into stateDir and launch the .cmd DETACHED (it
-    // survives this process exiting). Returns true if launched — the caller MUST then exit / quit
-    // the app so the package isn't in use while it upgrades + relaunches.
+    // Materialize am-update.ps1 (from the embedded resource) + a tiny am-update.cmd launcher into
+    // stateDir and launch the .cmd DETACHED (it survives this process exiting). The .cmd invokes the
+    // .ps1 with the resolved values as parameters. Returns true if launched — the caller MUST then
+    // exit / quit the app so the package isn't in use while it upgrades + relaunches.
     inline bool LaunchInstaller(const std::wstring& stateDir, const UpdateInfo& info)
     {
         if (!info.installable)
         {
             return false;
         }
-        std::wstring ps1 = InstallerPs1();
-        detail::ReplaceAll(ps1, L"{{BUNDLE_URL}}", info.bundleUrl);
-        detail::ReplaceAll(ps1, L"{{CER_URL}}", info.cerUrl);
-        detail::ReplaceAll(ps1, L"{{VERSION}}", DisplayVersion(info));
-        detail::ReplaceAll(ps1, L"{{AUMID}}", kReleaseAumid);
-        detail::ReplaceAll(ps1, L"{{FAMILY}}", kReleaseFamily);
-        detail::ReplaceAll(ps1, L"{{WAIT_PID}}", std::to_wstring(::GetCurrentProcessId()));
+        const std::wstring ps1 = InstallerPs1();
+        if (ps1.empty())
+        {
+            return false; // the AM_UPDATE_PS1 resource is missing (only possible in a broken build)
+        }
+
+        std::wstring cmd = L"@echo off\r\ntitle Agentmaster Update\r\n";
+        cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\"";
+        cmd += L" -BundleUrl " + CmdArg(info.bundleUrl);
+        cmd += L" -CerUrl " + CmdArg(info.cerUrl);
+        cmd += L" -Version " + CmdArg(DisplayVersion(info));
+        if (!info.bundleSha256.empty())
+        {
+            cmd += L" -BundleSha256 " + CmdArg(info.bundleSha256);
+        }
+        cmd += L" -Family " + CmdArg(kReleaseFamily);
+        cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
+        cmd += L"\r\n";
 
         const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
         const std::wstring cmdPath = stateDir + L"\\am-update.cmd";
@@ -906,13 +849,55 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0am-update.ps1"
         catch (...)
         {
         }
-        if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, InstallerCmd()))
+        if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
         {
             return false;
         }
         const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
         return reinterpret_cast<INT_PTR>(h) > 32;
     }
+
+    // Materialize the SAME am-update.ps1 + an am-uninstall.cmd launcher that runs it with -Uninstall,
+    // and launch it DETACHED. Removes THIS install's package (the current package family — release OR
+    // dev), per-user, no admin; profile data (e.g. ~/.agentmaster) lives outside the package and is
+    // kept. Returns true if launched (caller then quits so the package isn't in use); false if this
+    // is an unpackaged build (nothing registered to remove) or the resource is missing.
+    inline bool LaunchUninstaller(const std::wstring& stateDir)
+    {
+        const std::wstring family = Profiles::PackageFamilyName();
+        if (family.empty())
+        {
+            return false; // unpackaged — there is no registered package to uninstall
+        }
+        const std::wstring ps1 = InstallerPs1();
+        if (ps1.empty())
+        {
+            return false;
+        }
+
+        std::wstring cmd = L"@echo off\r\ntitle Agentmaster Uninstall\r\n";
+        cmd += L"powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0am-update.ps1\" -Uninstall";
+        cmd += L" -Family " + CmdArg(family);
+        cmd += L" -WaitPid " + std::to_wstring(::GetCurrentProcessId());
+        cmd += L"\r\n";
+
+        const std::wstring ps1Path = stateDir + L"\\am-update.ps1";
+        const std::wstring cmdPath = stateDir + L"\\am-uninstall.cmd";
+        try
+        {
+            std::filesystem::create_directories(std::filesystem::path{ stateDir });
+        }
+        catch (...)
+        {
+        }
+        if (!detail::WriteFileUtf8(ps1Path, ps1) || !detail::WriteFileUtf8(cmdPath, cmd))
+        {
+            return false;
+        }
+        const HINSTANCE h = ::ShellExecuteW(nullptr, L"open", cmdPath.c_str(), nullptr, stateDir.c_str(), SW_SHOWNORMAL);
+        return reinterpret_cast<INT_PTR>(h) > 32;
+    }
+
 
     // Apply the user's choice. Returns true IFF the installer was launched (UpdateNow + installable)
     // — the caller then exits/quits. Postpone/Skip persist to settings.json; Not now does nothing;

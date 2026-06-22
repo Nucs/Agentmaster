@@ -599,6 +599,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setCurrentChangelog{ nullptr }; // opens THIS build's release page (github .../releases/tag/v<current>)
         winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setUpdateChangelog{ nullptr }; // opens the AVAILABLE update's release page; shown only after a check found one
         std::wstring _lastUpdateChangelogUrl; // the available update's release page (drives _setUpdateChangelog's click)
+        winrt::Windows::UI::Xaml::Controls::Button _setUninstallBtn{ nullptr }; // Agentmaster (updater): "Uninstall Agentmaster…" -> remove THIS install (per-user; profile data kept), then quit. Shown only for packaged installs.
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;
