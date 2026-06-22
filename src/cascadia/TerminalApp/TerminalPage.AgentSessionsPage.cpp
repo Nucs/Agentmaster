@@ -1278,19 +1278,14 @@ namespace winrt::TerminalApp::implementation
                 chip.HorizontalAlignment(HorizontalAlignment::Center);
                 chip.Background(dirColor ? SolidColorBrush{ *dirColor } : SessBrush(0xFF, 0x60, 0x60, 0x60));
                 chip.Opacity(live ? 1.0 : 0.35);
-                std::wstring tip = live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
-                tip += L"\nDot color = this session's working-directory color (matches its tab)";
+                // Agentmaster: the chip's status / presence / fork text now rides the ONE consolidated
+                // row tooltip (built below) instead of a per-cell tip — the chip is decorative and made
+                // clickthrough (g.IsHitTestVisible(false)). Keep ONLY the visual presence ring here.
                 if (pres)
                 {
-                    tip += L"\nClaude is " + pres->status; // its own busy / idle / waiting heartbeat
-                    chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60));
+                    chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60)); // claude's busy/idle/waiting heartbeat ring
                     chip.BorderThickness(Thickness{ 1.5, 1.5, 1.5, 1.5 });
                 }
-                if (r.fork)
-                {
-                    tip += L"\nFork of " + r.forkedFromId.substr(0, 8);
-                }
-                SessSetTip(chip, winrt::hstring{ tip });
                 Grid::SetColumn(chip, 0);
                 g.Children().Append(chip);
             }
@@ -1302,7 +1297,6 @@ namespace winrt::TerminalApp::implementation
             // it sits under the glyphs, not at the row's bottom edge. The dim for an on-disk row is on the
             // BRUSH (not the Border) so the title text keeps its own live/archived opacity.
             auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
-            SessSetTip(title, winrt::hstring{ r.title + L"\nSession id: " + r.id });
             // Full-strength rule for a live row; a translucent one (alpha ~0.6) for an on-disk row,
             // baked into the brush's alpha — NOT the Border's Opacity, which would also fade the text.
             const uint8_t ulAlpha = live ? 0xFF : 0x99;
@@ -1318,7 +1312,6 @@ namespace winrt::TerminalApp::implementation
             g.Children().Append(titleWrap);
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
-            SessSetTip(dir, winrt::hstring{ r.dir }); // the full path — the cell end-trims, losing the leaf
             // Same working-directory-color underline as the title (reusing the row's `underline`
             // brush) — the Directory cell is literally the folder, so it wears the folder's color too.
             Border dirWrap;
@@ -1332,32 +1325,22 @@ namespace winrt::TerminalApp::implementation
             g.Children().Append(dirWrap);
 
             auto branch = SessText(winrt::hstring{ r.branch }, 11, false, 0.6);
-            SessSetTip(branch, winrt::hstring{ r.branch }); // the full branch name — no-op when empty
             Grid::SetColumn(branch, 3);
             g.Children().Append(branch);
 
             auto created = SessText(winrt::hstring{ SessAgo(r.createdMs, now) }, 11, false, 0.6);
             created.HorizontalAlignment(HorizontalAlignment::Center);
-            if (const auto abs = SessLocalDateTime(r.createdMs); !abs.empty())
-            {
-                SessSetTip(created, winrt::hstring{ L"Created " + abs }); // the exact moment behind the relative age
-            }
             Grid::SetColumn(created, 4);
             g.Children().Append(created);
 
             auto active = SessText(winrt::hstring{ SessAgo(r.lastActivityMs, now) }, 11, false, 0.75);
             active.HorizontalAlignment(HorizontalAlignment::Center);
-            if (const auto abs = SessLocalDateTime(r.lastActivityMs); !abs.empty())
-            {
-                SessSetTip(active, winrt::hstring{ L"Last active " + abs });
-            }
             Grid::SetColumn(active, 5);
             g.Children().Append(active);
 
             const std::wstring weight = std::to_wstring(r.msgs) + L"\x00B7" + std::to_wstring(r.tools);
             auto w = SessText(winrt::hstring{ weight }, 11, false, 0.6);
             w.HorizontalAlignment(HorizontalAlignment::Center);
-            SessSetTip(w, winrt::hstring{ std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB" });
             Grid::SetColumn(w, 6);
             g.Children().Append(w);
 
@@ -1377,6 +1360,14 @@ namespace winrt::TerminalApp::implementation
             // dropped from `view` above). Dim it as a visual cue that it's normally hidden.
             const bool rHidden = !hidden.empty() && hidden.count(r.id) != 0;
 
+            // Agentmaster: make the row's whole content grid CLICKTHROUGH so the row Border is ONE clean
+            // click target and ONE tooltip surface. This fixes both (a) the per-cell tooltip flicker —
+            // each cell used to open/close its own tip as the mouse panned across the columns — and (b)
+            // unreliable row selection, where a hit-test-visible cell fragmented the row's click target.
+            // The content carries no interactive child (no checkbox here, unlike the Archive page), so the
+            // entire grid can go hit-test-transparent in one shot; rowB still gets the click + context menu.
+            g.IsHitTestVisible(false);
+
             Border rowB;
             rowB.Child(g);
             rowB.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
@@ -1386,6 +1377,41 @@ namespace winrt::TerminalApp::implementation
                 rowB.Opacity(0.55); // revealed-but-hidden cue (the "Hidden" filter is on)
             }
             rowB.Tag(winrt::box_value(winrt::hstring{ r.id }));
+            // ONE consolidated row tooltip — folds in every field the per-cell tips used to show (identity,
+            // full path, branch, exact created / last-active moments, the msgs/tools/size weight, and the
+            // live/archived/on-disk + presence status), so no information is lost. Because it lives on the
+            // single (child-free, clickthrough-content) row Border, hovering anywhere on the row shows the
+            // full picture at once and never flickers.
+            {
+                std::wstring rowTip{ r.title };
+                if (r.fork)
+                {
+                    rowTip += L"\n\x2442 fork of " + r.forkedFromId.substr(0, 8);
+                }
+                rowTip += L"\nSession id: " + r.id;
+                rowTip += L"\n" + r.dir;
+                if (!r.branch.empty())
+                {
+                    rowTip += L"\nBranch: " + r.branch;
+                }
+                if (const auto cabs = SessLocalDateTime(r.createdMs); !cabs.empty())
+                {
+                    rowTip += L"\nCreated " + cabs;
+                }
+                if (const auto aabs = SessLocalDateTime(r.lastActivityMs); !aabs.empty())
+                {
+                    rowTip += L"\nLast active " + aabs;
+                }
+                rowTip += L"\n" + std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB";
+                rowTip += L"\n";
+                rowTip += live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
+                rowTip += L"\nDot color = working-directory color (matches its tab)";
+                if (pres)
+                {
+                    rowTip += L"\nClaude is " + pres->status;
+                }
+                SessSetTip(rowB, winrt::hstring{ rowTip });
+            }
             rowB.PointerPressed([this](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
                 const auto b = s.try_as<Border>();
                 if (!b)
