@@ -114,10 +114,19 @@ namespace Agentmaster
         // gitBranch, keyed by the resolved conversation id, so the per-external transcript head-read
         // happens once (not every survey — the title doesn't change). Grows only with the distinct
         // external sessions seen this run.
+        //
+        // Agentmaster: the cache also holds the idle RECAP (away_summary) — but unlike title/gitBranch
+        // the recap is NOT a write-once fact (a new one appears each time the session re-idles), so it
+        // is re-read from the transcript TAIL whenever the file mtime advances (recapMtime tracks the
+        // mtime the recap was last read at). This is the external analog of the SessionScanner mirroring
+        // a MANAGED session's recap from its delta cursor — same region (the tail), but mtime-gated here
+        // since the observer keeps no per-session byte cursor. recapMtime 0 == not yet read.
         struct ExtInfo
         {
             std::wstring title;
             std::wstring gitBranch;
+            std::wstring recap; // last away_summary seen in the tail ("empty never clears")
+            int64_t recapMtime{ 0 }; // transcript mtime the recap was last re-read at
         };
         std::unordered_map<std::wstring, ExtInfo> _extInfoCache;
 

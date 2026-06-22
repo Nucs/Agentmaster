@@ -286,6 +286,18 @@ namespace Agentmaster
     TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
 
+    // Agentmaster: the idle RECAP (away_summary) readers. The recap lives in a DIFFERENT region than
+    // the title: ReadTranscriptInfo head-reads the FIRST prompt; a recap is appended near the TAIL when
+    // a session goes idle >5 min. So these read the TAIL — the SAME region the SessionScanner's delta
+    // and the agentmaster-cli `show` reader pull a session's recap from — which is what lets the Fleet
+    // Observer supply the recap for EXTERNAL sessions (no scanner cursor) on one bounded, mtime-gated
+    // read. RecapFromTranscriptChunk is the PURE per-chunk extractor (unit-tested; "last wins", "empty
+    // never clears", tolerates a partial leading line) shared by the tail reader; all recap readers
+    // share NormalizeRecapText so the normalization can never drift. See the .cpp for the full rationale.
+    std::wstring RecapFromTranscriptChunk(std::wstring_view chunk);
+    std::wstring ReadTranscriptRecapTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
+    std::wstring ReadTranscriptRecapTail(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
+
     // Agentmaster (TAB_OVERLAY.md row 3 "Transcript"): read a transcript into a plain-text
     // conversation — ONLY the human + assistant TEXT messages, in order. Tool calls, tool results,
     // thinking, meta/summary/sidechain lines are all dropped (the user asked for "the whole

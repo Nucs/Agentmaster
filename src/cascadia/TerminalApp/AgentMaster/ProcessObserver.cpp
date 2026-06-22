@@ -848,25 +848,43 @@ namespace Agentmaster
             if (!sid.empty())
             {
                 TranscriptTimes(f.cwd, sid, ex.createdUnixMs, ex.lastActivityUnixMs);
-                const auto cached = _extInfoCache.find(sid);
-                if (cached != _extInfoCache.end())
+                auto cached = _extInfoCache.find(sid);
+                if (cached == _extInfoCache.end())
                 {
-                    ex.title = cached->second.title;
-                    ex.gitBranch = cached->second.gitBranch;
-                }
-                else
-                {
-                    // One-time transcript head read (128 KB) for the title + gitBranch. The ONE
-                    // precedence (TranscriptDisplayTitle): the user-SET custom-title > the picker's
-                    // ai-title > legacy summary > the first REAL prompt — the custom title is the
-                    // user's own label, and typically what a renamed hosting tab says too. (A
-                    // retitle past the 128 KB head is missed — best-effort; the Bring-Window-To-Front
-                    // worker re-reads deeper for its tab match.)
+                    // One-time transcript head read (128 KB) for the title + gitBranch — both are
+                    // write-once facts, so they are cached for the session's life. The ONE precedence
+                    // (TranscriptDisplayTitle): the user-SET custom-title > the picker's ai-title >
+                    // legacy summary > the first REAL prompt — the custom title is the user's own label,
+                    // and typically what a renamed hosting tab says too. (A retitle past the 128 KB head
+                    // is missed — best-effort; the Bring-Window-To-Front worker re-reads deeper for its
+                    // tab match.)
                     const auto ti = ReadTranscriptInfo(f.cwd, sid, 131072, 1);
-                    ex.title = TranscriptDisplayTitle(ti);
-                    ex.gitBranch = ti.gitBranch;
-                    _extInfoCache.emplace(sid, ExtInfo{ ex.title, ti.gitBranch });
+                    cached = _extInfoCache.emplace(sid, ExtInfo{ TranscriptDisplayTitle(ti), ti.gitBranch, L"", 0 }).first;
                 }
+                ex.title = cached->second.title;
+                ex.gitBranch = cached->second.gitBranch;
+
+                // Agentmaster (the observer as RECAP PROVIDER for externals): the idle RECAP
+                // (away_summary) is NOT a write-once fact — a fresh one is appended each time the session
+                // re-idles — so unlike title/branch it is re-read whenever the transcript GREW (mtime
+                // advanced). We pull it from the transcript TAIL (ReadTranscriptRecapTail), the SAME
+                // REGION the SessionScanner's byte-cursor delta pulls a MANAGED session's recap from; an
+                // external has no scanner cursor, so the observer is its recap provider. The 128 KB tail
+                // window matches the head read above AND the agentmaster-cli `show` reader's kTailBytes
+                // (same region, same window). mtime-gated: an IDLE external (no growth) costs ONE stat
+                // (TranscriptTimes, above) and ZERO content reads; an empty tail (no away_summary) never
+                // clears a captured recap — the scanner's "empty never clears" rule, here inside
+                // RecapFromTranscriptChunk. ObserveClaude is never used for this (it sets no SessionState,
+                // Rule #13); the recap rides the ExternalClaudeRow as a transient display fact.
+                if (cached->second.recapMtime != ex.lastActivityUnixMs)
+                {
+                    cached->second.recapMtime = ex.lastActivityUnixMs;
+                    if (std::wstring r = ReadTranscriptRecapTail(f.cwd, sid, 131072); !r.empty())
+                    {
+                        cached->second.recap = std::move(r);
+                    }
+                }
+                ex.recap = cached->second.recap;
             }
             externalRows.push_back(std::move(ex));
         }

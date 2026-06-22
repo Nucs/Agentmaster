@@ -217,6 +217,17 @@ namespace Agentmaster
         std::wstring sessionId; // resolved conversation id (EMPTY until the first prompt); enables Adopt + the read-only plan
         std::wstring title; // first human prompt, one line (the display title; recent transcripts carry no summary)
         std::wstring gitBranch; // gitBranch recorded in the transcript, if any
+        // Agentmaster: the Claude Code idle RECAP (away_summary) — the >5-min "what we did / what's
+        // next" synthesis, normalized. The OBSERVER is the recap provider here: a MANAGED session gets
+        // its recap mirrored onto SessionInfo.recap by the SessionScanner's byte-cursor delta, but an
+        // external has NO scanner cursor — so the observer reads it out-of-band from the transcript
+        // TAIL (ProcessInspect::ReadTranscriptRecapTail), the SAME region the scanner pulls from. This
+        // is the external analog of SessionInfo.recap. Re-read only when the transcript mtime advances
+        // (a new recap can only appear on growth), so an idle external costs zero content reads. ""
+        // until/unless an away_summary is in the tail; "empty never clears" a captured recap. Surfaced
+        // read-only on the External card (hover), the EXTERNAL tree row (hover), and the read-only
+        // Flight Plan — mirroring where a managed session shows its recap.
+        std::wstring recap;
         RunningApp host{ RunningApp::WindowsTerminal }; // WindowsTerminal == WT-hosted; Other == cmd / bare console
         std::wstring hostImage; // the host shell leaf for an Other host ("cmd.exe", "pwsh.exe", ...); empty for WT
         std::wstring hostLabel; // resolved host DISPLAY name: "Windows Terminal" / "Agentmaster" / "Agentmaster Dev" / a shell leaf — distinguishes real WT from OUR instances (ResolveExternalHostLabel)

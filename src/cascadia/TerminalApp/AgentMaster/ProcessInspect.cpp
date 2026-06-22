@@ -366,6 +366,48 @@ namespace
         ::CloseHandle(h);
         return bytes;
     }
+
+    // Agentmaster: read the LAST `maxBytes` of a file (the TAIL), mirroring ReadFileHead's share
+    // flags. This is the read for the idle RECAP (away_summary): Claude appends the recap near the
+    // END of the transcript when a session goes idle, so it lives in the TAIL region — the OPPOSITE
+    // end from the first-prompt title ReadFileHead pulls. The read may START mid-line; that leading
+    // partial line just fails json::Parse downstream (JSONL is line-framed, a recap is one whole
+    // line), so no special-casing is needed.
+    std::string ReadFileTail(const std::wstring& path, size_t maxBytes)
+    {
+        const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            return {};
+        }
+        LARGE_INTEGER sz{};
+        ::GetFileSizeEx(h, &sz);
+        const uint64_t total = static_cast<uint64_t>(sz.QuadPart);
+        uint64_t want = (maxBytes != 0 && total > maxBytes) ? maxBytes : total;
+        if (const uint64_t startAt = total - want; startAt != 0)
+        {
+            LARGE_INTEGER li{};
+            li.QuadPart = static_cast<LONGLONG>(startAt);
+            ::SetFilePointerEx(h, li, nullptr, FILE_BEGIN); // seek to the tail window
+        }
+        std::string bytes(static_cast<size_t>(want), '\0');
+        size_t off = 0;
+        while (off < bytes.size())
+        {
+            DWORD got = 0;
+            const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(bytes.size() - off, 1u << 20));
+            if (!::ReadFile(h, bytes.data() + off, chunk, &got, nullptr) || got == 0)
+            {
+                break;
+            }
+            off += got;
+        }
+        bytes.resize(off);
+        ::CloseHandle(h);
+        return bytes;
+    }
 }
 
 namespace Agentmaster
@@ -1465,6 +1507,83 @@ namespace Agentmaster
     TranscriptInfo ReadTranscriptInfo(std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
     {
         return ReadTranscriptInfoIn(ClaudeProjectsDir(), cwd, sessionId, maxBytes, maxPrompts);
+    }
+
+    // Agentmaster: extract the idle RECAP (away_summary) from a chunk of transcript JSONL — the LAST
+    // {"type":"system","subtype":"away_summary"} line's content, normalized (NormalizeRecapText, the
+    // one-true normalizer that strips the "(disable recaps in /config)" UI hint). PURE + total, so it
+    // is unit-testable without file IO (m5_tests). The detection is the SAME trivial check three
+    // readers share — ParseTranscriptDelta (SessionScanner, the managed delta) + AnalyzeSessionTranscript
+    // (the summary box, a full head pass) + this one — and they all share NormalizeRecapText, so the
+    // normalization can never drift; only the REGION each reads differs. The chunk may begin with a
+    // PARTIAL line (a tail read can start mid-line): a partial JSON line fails json::Parse and is
+    // skipped. Returns "" when no away_summary is present, so an empty/garbled tail NEVER clears a
+    // stored recap (the "empty never clears" rule, identical to the other two readers).
+    std::wstring RecapFromTranscriptChunk(std::wstring_view chunk)
+    {
+        std::wstring recap;
+        size_t start = 0;
+        for (size_t i = 0; i <= chunk.size(); ++i)
+        {
+            if (i < chunk.size() && chunk[i] != L'\n')
+            {
+                continue;
+            }
+            std::wstring_view line(chunk.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue; // garbage / a partial leading line — skip
+            }
+            const auto& obj = *parsed;
+            if (obj.StrAt(L"type") == L"system" && obj.StrAt(L"subtype") == L"away_summary")
+            {
+                if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
+                {
+                    recap = std::move(r); // LAST one in the chunk wins (newer recaps supersede)
+                }
+            }
+        }
+        return recap;
+    }
+
+    // Agentmaster: read JUST the idle RECAP out-of-band, from the transcript TAIL. WHY the tail and
+    // not ReadTranscriptInfo's head: the recap is an IDLE summary Claude appends near the END of the
+    // file (>5-min idle), so it lives in the TAIL — the OPPOSITE end from the first-prompt title. This
+    // pulls the recap from the SAME REGION the SessionScanner's byte-cursor delta pulls it from for
+    // MANAGED sessions (SessionScanner.cpp), and the SAME region + window the agentmaster-cli `show`
+    // reader uses (cli/agentcli.cpp: ReadFileTail(kTailBytes) -> ParseTranscriptDelta.recap). That is
+    // what lets the Fleet Observer be the recap provider for EXTERNAL sessions — which have NO scanner
+    // cursor — without a whole-file read: one bounded tail read, only when the transcript grew (the
+    // observer mtime-gates the call). `maxTailBytes` 0 == the whole file. Empty if no recap is in the
+    // tail window / unreadable. Filesystem only.
+    std::wstring ReadTranscriptRecapTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
+    {
+        if (projectsDir.empty() || cwd.empty() || sessionId.empty())
+        {
+            return {};
+        }
+        const std::wstring path = std::wstring{ projectsDir } + L"\\" + EncodeCwdToProjectDir(cwd) + L"\\" + std::wstring{ sessionId } + L".jsonl";
+        const std::string bytes = ReadFileTail(path, maxTailBytes);
+        if (bytes.empty())
+        {
+            return {};
+        }
+        return RecapFromTranscriptChunk(Utf8ToWide(bytes));
+    }
+
+    std::wstring ReadTranscriptRecapTail(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
+    {
+        return ReadTranscriptRecapTailIn(ClaudeProjectsDir(), cwd, sessionId, maxTailBytes);
     }
 
     std::wstring TranscriptDisplayTitle(const TranscriptInfo& info)

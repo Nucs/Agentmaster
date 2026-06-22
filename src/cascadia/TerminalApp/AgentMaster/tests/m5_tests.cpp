@@ -2968,6 +2968,37 @@ static void TestTranscriptResolve()
     CHECK(NormalizeRecapText(L"(disable recaps in /config)") == L"", "NormalizeRecapText: a hint-only body normalizes to empty");
     CHECK(NormalizeRecapText(L"") == L"", "NormalizeRecapText: empty stays empty");
 
+    // --- RecapFromTranscriptChunk: the PURE idle-recap extractor the observer's TAIL reader uses ------
+    // The Fleet Observer reads an EXTERNAL session's recap from the transcript TAIL (the SAME region the
+    // SessionScanner pulls a managed session's recap from — an external has no scanner cursor); this pure
+    // helper does the per-chunk extraction (ReadTranscriptRecapTail = ReadFileTail + this). Tested with no
+    // file IO. Mirrors ParseTranscriptDelta.recap / AnalyzeSessionTranscript semantics (shared
+    // NormalizeRecapText, "last wins", "empty never clears"), PLUS the tail-specific tolerance of a
+    // PARTIAL leading line (a tail read can begin mid-line).
+    {
+        const std::wstring one = LR"j({"type":"system","subtype":"away_summary","content":"Shipped the fix. Next: deploy. (disable recaps in /config)"})j" L"\n";
+        CHECK(RecapFromTranscriptChunk(one) == L"Shipped the fix. Next: deploy.", "RecapFromTranscriptChunk: single away_summary captured + disable hint stripped");
+
+        const std::wstring multi =
+            std::wstring{ LR"j({"type":"system","subtype":"away_summary","content":"older recap"})j" } + L"\n" +
+            LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}})j" + L"\n" +
+            LR"j({"type":"system","subtype":"away_summary","content":"newer recap"})j" + L"\n";
+        CHECK(RecapFromTranscriptChunk(multi) == L"newer recap", "RecapFromTranscriptChunk: the LAST away_summary in the chunk wins (newer supersedes)");
+
+        CHECK(RecapFromTranscriptChunk(LR"j({"type":"assistant","message":{"stop_reason":"end_turn"}})j" L"\n").empty(),
+              "RecapFromTranscriptChunk: a recap-less chunk yields \"\" (so an empty tail never clears a stored recap)");
+
+        // A TAIL read can begin MID-LINE: the leading partial JSON fails json::Parse and is skipped, but
+        // a COMPLETE away_summary after the first newline is still captured.
+        const std::wstring partialLead =
+            std::wstring{ LR"j(xt","text":"...a truncated assistant line from before the tail window..."}]}})j" } + L"\n" +
+            LR"j({"type":"system","subtype":"away_summary","content":"recap after a partial leading line"})j" + L"\n";
+        CHECK(RecapFromTranscriptChunk(partialLead) == L"recap after a partial leading line",
+              "RecapFromTranscriptChunk: a partial leading line (tail starting mid-line) is skipped; a complete recap after it is captured");
+
+        CHECK(RecapFromTranscriptChunk(L"").empty(), "RecapFromTranscriptChunk: empty chunk -> empty");
+    }
+
     // --- AnalyzeSessionTranscript: the idle RECAP (away_summary) is captured into .awaySummary -------
     // The summary panel / Sessions detail / copyable Summary read SessionSummary.awaySummary. The LAST
     // away_summary wins (a session that went idle, came back, and went idle again has a fresher recap),

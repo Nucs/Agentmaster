@@ -3499,7 +3499,17 @@ namespace winrt::TerminalApp::implementation
         card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
             _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
         });
-        AgentSetTip(card, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.", kCardTipDelay);
+        // Agentmaster: when the Fleet Observer has tailed an idle RECAP (away_summary) for this external
+        // — read out-of-band from the SAME transcript-tail region a managed session's recap comes from
+        // (ExternalClaudeRow.recap; see ProcessObserver) — append it below the base hint so a hover tells
+        // the external sessions apart by what they were last doing, exactly like the managed card band
+        // tooltip does with SessionInfo.recap. Shown in FULL (the tooltip wraps); no recap == base hint only.
+        std::wstring cardTip{ L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward." };
+        if (!ex.recap.empty())
+        {
+            cardTip += L"\n\nRecap: " + ex.recap;
+        }
+        AgentSetTip(card, winrt::hstring{ cardTip }, kCardTipDelay);
         // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
         // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
         // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
@@ -3539,7 +3549,8 @@ namespace winrt::TerminalApp::implementation
             if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
                 a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid ||
                 a.kind != b.kind || a.sandbox != b.sandbox || a.approvalMode != b.approvalMode || // Phase C1: a codex row gaining its model/sandbox a tick after first sight triggers one refresh
-                a.codexState != b.codexState) // Phase C2: a Codex turn flip (running<->waiting) repaints the row's state dot
+                a.codexState != b.codexState || // Phase C2: a Codex turn flip (running<->waiting) repaints the row's state dot
+                a.recap != b.recap) // Agentmaster: a fresh idle recap (away_summary) the observer tailed repaints the card/tree tooltip + read-only plan
             {
                 same = false;
             }
@@ -4205,7 +4216,17 @@ namespace winrt::TerminalApp::implementation
                     AgentSetTip(cp, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed).");
                     row.Children().Append(cp);
                 }
-                row.Children().Append(Text(winrt::hstring{ title }, 13, false, 1.0));
+                {
+                    auto titleText = Text(winrt::hstring{ title }, 13, false, 1.0);
+                    // Agentmaster: surface the observer-tailed idle RECAP (away_summary) on hover — the
+                    // external analog of the managed row's recap, read from the SAME transcript-tail
+                    // region (ExternalClaudeRow.recap; see ProcessObserver). Full text (the tooltip wraps).
+                    if (!ex.recap.empty())
+                    {
+                        AgentSetTip(titleText, winrt::hstring{ title } + winrt::hstring{ L"\n\nRecap: " } + winrt::hstring{ ex.recap });
+                    }
+                    row.Children().Append(titleText);
+                }
 
                 // host tag: the foreign host this claude runs in — "Windows Terminal" (real WT) vs
                 // "Agentmaster" / "Agentmaster Dev" (another of our instances) vs cmd / pwsh. Resolved by
@@ -6979,6 +7000,27 @@ namespace winrt::TerminalApp::implementation
         // Observe-only here (we host no ConPTY). Both agents can be adopted from the tree's right-click
         // menu — Adopt offers Fork a copy (safe while the original runs) or Resume the same conversation.
         _planHeaderHost.Children().Append(Text(isCodex ? winrt::hstring{ L"Read-only \x2014 an OpenAI Codex session running outside Agentmaster. Right-click it in the tree and \x201C" L"Adopt\x201D to bring its conversation under management (Fork a copy, or Resume)." } : winrt::hstring{ L"Read-only \x2014 runs outside Agentmaster. Right-click it in the tree and \x201C" L"Adopt\x201D to bring its conversation under management (Fork a copy, or Resume)." }, 11, false, 0.5));
+
+        // Agentmaster: the idle RECAP (away_summary) above the prompts — the same ">5-min what we did /
+        // what's next" synthesis the MANAGED summary box shows, here for an OBSERVE-ONLY external. The
+        // recap rides ExternalClaudeRow.recap, filled by the Fleet Observer from the transcript TAIL —
+        // the SAME region the SessionScanner pulls a managed session's recap from (an external has no
+        // scanner cursor, so the observer is its provider; see ProcessObserver). Looked up live by the
+        // selected id from the cached rows, so it refreshes as the observer re-tails it. Shown in FULL
+        // (wrapping), never length-capped, matching the managed summary box's "Recap:" section.
+        for (const auto& exr : _externalClaudes)
+        {
+            if (exr.sessionId == _selectedExternalSessionId && !exr.recap.empty())
+            {
+                auto recapText = Text(winrt::hstring{ L"Recap: " + exr.recap }, 12, false, 0.85);
+                recapText.TextWrapping(TextWrapping::Wrap);
+                recapText.TextTrimming(TextTrimming::None);
+                recapText.Margin(Thickness{ 0, 6, 0, 0 });
+                AgentSetTip(recapText, L"Claude Code's idle recap (away_summary) \x2014 a >5-min \x201C" L"what we did / what's next\x201D synthesis, read from this session's transcript tail.");
+                _planHeaderHost.Children().Append(recapText);
+                break;
+            }
+        }
 
         if (_selectedExternalSessionId.empty())
         {
