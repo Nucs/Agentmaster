@@ -1690,7 +1690,7 @@ static void TestAppSettings()
         in.summaryPanelTruncate = false; // non-default (default true = truncate long messages)
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
-        in.waitingDecayMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to the default
+        in.waitingForYouTimeoutMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to the default
         in.serverCacheMinutes = 17; // non-default (default 5) — the ⚡ "still cached" window
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
         in.boardSort = ExplorerSort::Newest; // non-default (default MostActive) — Triage Board sort
@@ -1714,7 +1714,7 @@ static void TestAppSettings()
         CHECK(out.summaryPanelTruncate == false, "settings summaryPanelTruncate round-trip");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
-        CHECK(out.waitingDecayMinutes == 0u, "settings waitingDecayMinutes stored 0 (= never) round-trips as 0");
+        CHECK(out.waitingForYouTimeoutMinutes == 0u, "settings waitingForYouTimeoutMinutes stored 0 (= never) round-trips as 0");
         CHECK(out.serverCacheMinutes == 17u, "settings serverCacheMinutes round-trip");
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
         CHECK(out.boardSort == ExplorerSort::Newest, "settings boardSort round-trip");
@@ -1735,7 +1735,7 @@ static void TestAppSettings()
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
-        CHECK(out.waitingDecayMinutes == 60u, "settings waitingDecayMinutes default 60 (1h Waiting-for-you timeout) on empty");
+        CHECK(out.waitingForYouTimeoutMinutes == 60u, "settings waitingForYouTimeoutMinutes default 60 (1h Waiting-for-you timeout) on empty");
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
@@ -1743,6 +1743,18 @@ static void TestAppSettings()
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
+    }
+
+    // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"
+    // because the Waiting-for-you behavior changed (a 5-minute cache window -> a read-gated unread
+    // timeout). A pre-existing settings.json carries the OLD key with a value tuned for the old
+    // behavior (often 5); it must be INVALIDATED — ignored, falling back to the new 60 (1h) default,
+    // NOT carried over as a 5-minute unread timeout. The new key, when present, reads normally.
+    {
+        const auto legacy = DeserializeAppSettings(L"{\"settings\":{\"waitingDecayMinutes\":5}}");
+        CHECK(legacy.waitingForYouTimeoutMinutes == 60u, "settings legacy waitingDecayMinutes key is IGNORED -> 60 (1h) default (rename invalidates the stale value)");
+        const auto fresh = DeserializeAppSettings(L"{\"settings\":{\"waitingForYouTimeoutMinutes\":120}}");
+        CHECK(fresh.waitingForYouTimeoutMinutes == 120u, "settings new waitingForYouTimeoutMinutes key is read");
     }
 
     // ExplorerSort token parsing for treeSort/boardSort: each token -> its mode; an unknown token falls

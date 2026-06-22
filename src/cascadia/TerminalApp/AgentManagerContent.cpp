@@ -2650,9 +2650,9 @@ namespace winrt::TerminalApp::implementation
         // so it has no countdown). Overlaid in the grid OVER the hover/selected ring so it stays visible,
         // and IsHitTestVisible(false) so the 1px strip never eats a card click. ScaleX (origin LEFT) =
         // fraction remaining; _progressTimer drains it live in place, and each _RebuildBoard re-seeds it.
-        if (s.state == SessionState::WaitingForInput && !s.manualUnread && _appSettings.waitingDecayMinutes > 0 && s.lastActivityUnixMs > 0)
+        if (s.state == SessionState::WaitingForInput && !s.manualUnread && _appSettings.waitingForYouTimeoutMinutes > 0 && s.lastActivityUnixMs > 0)
         {
-            const int64_t timeoutMs = static_cast<int64_t>(_appSettings.waitingDecayMinutes) * 60000;
+            const int64_t timeoutMs = static_cast<int64_t>(_appSettings.waitingForYouTimeoutMinutes) * 60000;
             double frac = 1.0 - static_cast<double>(NowMs() - s.lastActivityUnixMs) / static_cast<double>(timeoutMs);
             frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
 
@@ -6103,9 +6103,9 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setWaitingDecaySlider && _setWaitingNever)
         {
-            const bool never = (_appSettings.waitingDecayMinutes == 0);
+            const bool never = (_appSettings.waitingForYouTimeoutMinutes == 0);
             _setWaitingNever.IsOn(never);
-            uint32_t m = _appSettings.waitingDecayMinutes;
+            uint32_t m = _appSettings.waitingForYouTimeoutMinutes;
             if (m < 1)
             {
                 m = 60; // a sane slider position when "never" is on (toggling off then lands on 1h)
@@ -6297,7 +6297,7 @@ namespace winrt::TerminalApp::implementation
             // "Never" => 0 (never time-decay; stay Waiting until read). Else the slider's 1..4320 minutes.
             if (_setWaitingNever.IsOn())
             {
-                _appSettings.waitingDecayMinutes = 0;
+                _appSettings.waitingForYouTimeoutMinutes = 0;
             }
             else
             {
@@ -6310,7 +6310,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     v = 4320;
                 }
-                _appSettings.waitingDecayMinutes = v;
+                _appSettings.waitingForYouTimeoutMinutes = v;
             }
         }
         if (_setServerCache)
