@@ -581,7 +581,7 @@ namespace
         if (!a.awaySummary.empty())
         {
             sep();
-            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, truncate)); // label INLINE with the prose (no wasted line break)
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, /*truncate*/ false)); // label INLINE; the recap is ALWAYS shown in FULL (never capped by the truncate toggle — only the numbered messages honor it)
         }
         if (!a.userMsgs.empty())
         {

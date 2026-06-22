@@ -1447,7 +1447,7 @@ namespace
         {
             OutLn(L"");
             OutLn(L"  RECAP:");
-            OutLn(L"    " + Trunc(js.StrAt(L"recap"), 600));
+            OutLn(L"    " + js.StrAt(L"recap")); // FULL recap — never truncated
         }
 
         // flight plan

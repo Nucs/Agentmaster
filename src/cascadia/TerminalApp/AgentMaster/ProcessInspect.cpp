@@ -3786,7 +3786,9 @@ namespace Agentmaster
         // Escape a message to ONE line (newlines/tabs -> \n / \t, like session-end.js) + truncate.
         // This detail box is ALWAYS one-line, so it always de-noises embedded tables first (the
         // wrap-off behaviour the overlay panel applies conditionally) — StripSummaryTableRules.
-        std::wstring SummaryEscapeMsg(const std::wstring& mIn)
+        // `maxChars` caps the escaped result (default 240 for the numbered messages); pass 0 for NO
+        // cap — the recap is rendered in FULL.
+        std::wstring SummaryEscapeMsg(const std::wstring& mIn, size_t maxChars = 240)
         {
             const std::wstring m = StripSummaryTableRules(mIn);
             std::wstring esc;
@@ -3801,9 +3803,9 @@ namespace Agentmaster
                 else
                     esc += ch;
             }
-            if (esc.size() > 240)
+            if (maxChars != 0 && esc.size() > maxChars)
             {
-                esc = esc.substr(0, 237) + L"...";
+                esc = esc.substr(0, maxChars - 3) + L"...";
             }
             return esc;
         }
@@ -4120,7 +4122,7 @@ namespace Agentmaster
         if (!a.awaySummary.empty())
         {
             sep();
-            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary)); // label INLINE with the prose (no wasted line break)
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, /*maxChars*/ 0)); // label INLINE; the recap is shown in FULL (no length cap, unlike the numbered messages)
         }
         if (!a.userMsgs.empty())
         {
