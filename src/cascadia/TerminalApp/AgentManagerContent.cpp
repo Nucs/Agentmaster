@@ -2371,8 +2371,25 @@ namespace winrt::TerminalApp::implementation
         band.Child(titleText);
         // Agentmaster: hovering the title band (the card's "top label") shows the FULL title \x2014 the
         // band trims with an ellipsis on a narrow card and OneLine() collapses a multi-line title for
-        // the dense card, so the complete name is otherwise unreadable here.
-        AgentSetTip(band, winrt::hstring{ fullTitle }, kCardTipDelay);
+        // the dense card, so the complete name is otherwise unreadable here. When Claude Code has written
+        // an idle RECAP for this session (the >5-min "what we did / what's next" away_summary, mirrored
+        // onto SessionInfo.recap by the scanner), append it below the title \x2014 so a hover tells the
+        // sessions apart at a glance (the whole point of the recap), not just by name. Capped so a long
+        // recap can't make a runaway tip.
+        std::wstring bandTip{ fullTitle };
+        if (!s.recap.empty())
+        {
+            bandTip += L"\n\n";
+            if (s.recap.size() > 600)
+            {
+                bandTip.append(s.recap, 0, 597).append(L"\x2026"); // …
+            }
+            else
+            {
+                bandTip += s.recap;
+            }
+        }
+        AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
 
         // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
         // from Claude (the implicit default — no pill, visuals unchanged).
@@ -4232,6 +4249,16 @@ namespace winrt::TerminalApp::implementation
                     {
                         return;
                     }
+                    // Native-exe-only policy: Adopt resumes/forks the external's conversation into a NEW
+                    // managed claude (a launch under the hood), so it needs a native claude.exe just like
+                    // the Launch/Fork buttons. Without this gate the launch silently no-ops at the engine
+                    // backstop ([launch-blocked]) and the button "does nothing". EnsureClaudeAvailable
+                    // re-resolves first, so a claude installed since launch clears the gate automatically.
+                    if (!::Agentmaster::EnsureClaudeAvailable())
+                    {
+                        self->_ShowClaudeMissing();
+                        return;
+                    }
                     if (sid.empty())
                     {
                         self->_adoptExternalHandler(pid, winrt::hstring{ cwd }, false); // no transcript -> launch fresh
@@ -4257,17 +4284,23 @@ namespace winrt::TerminalApp::implementation
             openHere.Text(L"Open New Session Here");
             AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
             openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-                if (disp)
-                {
-                    disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
-                }
-                else if (auto self = weak.get())
-                {
-                    if (self->_spawnHandler)
+                // Spawning a managed Claude session needs a native claude.exe (native-exe-only policy) —
+                // gate with the same re-resolve-then-prompt the Adopt action above uses, so this never
+                // silently no-ops at the engine backstop when Claude isn't installed.
+                auto act = [weak, cwd]() {
+                    auto self = weak.get();
+                    if (!self || !self->_spawnHandler)
                     {
-                        self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                        return;
                     }
-                }
+                    if (!::Agentmaster::EnsureClaudeAvailable())
+                    {
+                        self->_ShowClaudeMissing();
+                        return;
+                    }
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
             });
             menu.Items().Append(openHere);
 
@@ -4623,17 +4656,23 @@ namespace winrt::TerminalApp::implementation
         openHere.Text(L"Open New Session Here");
         AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
         openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, cwd]() { if (auto self = weak.get()) { if (self->_spawnHandler) { self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (self->_spawnHandler)
+            // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
+            // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
+            // no-op'ing at the engine backstop when Claude isn't installed.
+            auto act = [weak, cwd]() {
+                auto self = weak.get();
+                if (!self || !self->_spawnHandler)
                 {
-                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                    return;
                 }
-            }
+                if (!::Agentmaster::EnsureClaudeAvailable())
+                {
+                    self->_ShowClaudeMissing();
+                    return;
+                }
+                self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
         });
         menu.Items().Append(openHere);
 
@@ -6973,7 +7012,7 @@ namespace winrt::TerminalApp::implementation
         // Native-exe-only policy: every CLAUDE interaction (new session or resume) needs a native
         // claude.exe. With none detected, show the install/Browse modal instead of launching. (Codex
         // launches above are a separate runtime and are not gated on claude.exe.)
-        if (!::Agentmaster::ClaudeAvailable())
+        if (!::Agentmaster::EnsureClaudeAvailable())
         {
             _ShowClaudeMissing();
             return;
@@ -7068,7 +7107,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         // Native-exe-only policy: a fork is a claude launch -> requires a native claude.exe.
-        if (!::Agentmaster::ClaudeAvailable())
+        if (!::Agentmaster::EnsureClaudeAvailable())
         {
             _ShowClaudeMissing();
             return;

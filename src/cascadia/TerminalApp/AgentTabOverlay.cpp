@@ -540,6 +540,17 @@ namespace
         {
             line(L"Tasks:  " + std::to_wstring(a.tasksCompleted) + L" done / " + std::to_wstring(a.tasksPending) + L" pending");
         }
+        // Agentmaster: the Claude Code idle RECAP, rendered as its own section directly BELOW the times
+        // line (panel 1's age/last-user-msg/last-activity bar, drawn above this box) and ABOVE the user
+        // messages — the "where we are / what's next" header over the prompt history. Honors the wrap /
+        // truncate toggles like a message body. Present in the displayed panel (full=false) and the
+        // copyable Summary (full=true).
+        if (!a.awaySummary.empty())
+        {
+            sep();
+            line(L"Recap:");
+            line(SummaryEscapeMsg(a.awaySummary, wrapNewlines, truncate));
+        }
         if (!a.userMsgs.empty())
         {
             sep();

@@ -2030,6 +2030,29 @@ static void TestTranscriptScan()
         CHECK(r.events.size() == 2 && r.events[1].kind == TranscriptEvent::Kind::UserPrompt && r.events[1].text == L"next please", "order: user prompt second (clears stale end_turn)");
     }
 
+    // away_summary (Claude Code's idle RECAP): a system line is captured into .recap (normalized —
+    // the "(disable recaps in /config)" hint stripped), is NOT a turn event, and never strands the
+    // state machine. The LAST recap in a chunk wins; a recap-less chunk leaves .recap empty so the
+    // scanner can never clear a good recap with a blank.
+    {
+        const std::wstring line = LR"j({"type":"system","subtype":"away_summary","content":"We fixed the build. Next: deploy. (disable recaps in /config)"})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "recap: away_summary is NOT a turn event");
+        CHECK(r.recap == L"We fixed the build. Next: deploy.", "recap: away_summary captured + disable hint stripped");
+    }
+    {
+        const std::wstring chunk =
+            std::wstring{ LR"j({"type":"system","subtype":"away_summary","content":"first recap"})j" } + L"\n" +
+            LR"j({"type":"system","subtype":"turn_duration","content":"ignored"})j" + L"\n" +
+            LR"j({"type":"system","subtype":"away_summary","content":"second recap"})j" + L"\n";
+        const auto r = ParseTranscriptDelta(chunk);
+        CHECK(r.recap == L"second recap", "recap: the LAST away_summary in a chunk wins; a non-away system subtype is ignored");
+    }
+    {
+        const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}})j" L"\n";
+        CHECK(ParseTranscriptDelta(line).recap.empty(), "recap: a recap-less chunk yields an empty .recap (never clears a stored recap)");
+    }
+
     // NoteExternalPrompt: dedups against an existing Sent (the hook already recorded the message),
     // but records a genuinely missed one, tagged Typed/Sent.
     {
@@ -2783,6 +2806,41 @@ static void TestTranscriptResolve()
         std::error_code ec2;
         std::filesystem::remove(std::filesystem::path{ pAsk }, ec2);
         std::filesystem::remove(std::filesystem::path{ pBash }, ec2);
+    }
+
+    // --- NormalizeRecapText: the one-true recap normalizer (shared by every recap reader) ----------
+    CHECK(NormalizeRecapText(L"Did X. Next: Y. (disable recaps in /config)") == L"Did X. Next: Y.", "NormalizeRecapText: trailing disable hint + the space before it are stripped");
+    CHECK(NormalizeRecapText(L"  spaced recap \n") == L"spaced recap", "NormalizeRecapText: surrounding whitespace/newlines trimmed");
+    CHECK(NormalizeRecapText(L"no hint here") == L"no hint here", "NormalizeRecapText: a recap without the hint is unchanged");
+    CHECK(NormalizeRecapText(L"(disable recaps in /config)") == L"", "NormalizeRecapText: a hint-only body normalizes to empty");
+    CHECK(NormalizeRecapText(L"") == L"", "NormalizeRecapText: empty stays empty");
+
+    // --- AnalyzeSessionTranscript: the idle RECAP (away_summary) is captured into .awaySummary -------
+    // The summary panel / Sessions detail / copyable Summary read SessionSummary.awaySummary. The LAST
+    // away_summary wins (a session that went idle, came back, and went idle again has a fresher recap),
+    // and the "(disable recaps in /config)" UI hint is stripped. A recap is NOT a user message — it must
+    // never leak into the numbered Messages list.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring pRecap = std::wstring{ tmp } + L"am_recap_" + std::to_wstring(::GetCurrentProcessId()) + L".jsonl";
+        MakeJsonl(pRecap,
+                  R"j({"type":"user","userType":"external","message":{"content":"start the work"},"timestamp":"2026-02-01T10:00:00.000Z"})j" "\n"
+                  R"j({"type":"system","subtype":"away_summary","content":"Old recap. (disable recaps in /config)","timestamp":"2026-02-01T10:30:00.000Z"})j" "\n"
+                  R"j({"type":"user","userType":"external","message":{"content":"keep going"},"timestamp":"2026-02-01T11:00:00.000Z"})j" "\n"
+                  R"j({"type":"system","subtype":"away_summary","content":"We did the work; next is to ship it. (disable recaps in /config)","timestamp":"2026-02-01T11:30:00.000Z"})j" "\n",
+                  1000, 1000);
+        const auto a = AnalyzeSessionTranscript(pRecap, 0);
+        CHECK(a.awaySummary == L"We did the work; next is to ship it.", "AnalyzeSessionTranscript: the LATEST away_summary wins + the disable hint is stripped");
+        CHECK(a.userMsgs.size() == 2, "AnalyzeSessionTranscript: the two recap lines stay OUT of the Messages list (only the 2 typed prompts)");
+
+        // The shared text box renders a "Recap:" section above the Messages.
+        const auto box = RenderSessionSummaryBox(a, L"sid-recap", L"K:\\x", pRecap, L"claude --resume sid-recap", L"", L"", L"", /*full*/ true);
+        CHECK(box.find(L"Recap:") != std::wstring::npos && box.find(L"next is to ship it.") != std::wstring::npos, "RenderSessionSummaryBox: the recap renders as its own section");
+        CHECK(box.find(L"Recap:") < box.find(L"start the work"), "RenderSessionSummaryBox: the Recap section sits ABOVE the numbered user messages");
+
+        std::error_code ecR;
+        std::filesystem::remove(std::filesystem::path{ pRecap }, ecR);
     }
 }
 

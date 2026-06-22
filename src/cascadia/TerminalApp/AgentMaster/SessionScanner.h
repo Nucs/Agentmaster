@@ -76,6 +76,12 @@ namespace Agentmaster
     {
         std::vector<TranscriptEvent> events;
         size_t consumed{ 0 }; // wide-char count up to and INCLUDING the last '\n' (a partial tail is left)
+        // Agentmaster: the Claude Code idle RECAP — the LAST {"type":"system","subtype":"away_summary"}
+        // line seen IN THIS CHUNK, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint
+        // stripped). Empty if this chunk carried no recap. The scanner mirrors a non-empty value onto
+        // SessionInfo.recap (the Triage-Board card tooltip); the agentmaster-cli `show` reader emits it.
+        // NOT a turn event — it never affects the state machine (its presence is orthogonal to events).
+        std::wstring recap;
     };
 
     // PURE + total (never throws): parse a UTF-16 chunk of NEW transcript text into ordered

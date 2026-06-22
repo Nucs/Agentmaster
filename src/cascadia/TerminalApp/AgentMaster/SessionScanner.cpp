@@ -242,6 +242,16 @@ namespace Agentmaster
                     out.events.push_back(std::move(ev));
                 }
             }
+            else if (type == L"system" && obj.StrAt(L"subtype") == L"away_summary")
+            {
+                // Agentmaster: the Claude Code idle RECAP. NOT a turn event (it never touches the state
+                // machine) — captured out-of-band so the scanner can mirror it onto SessionInfo.recap and
+                // the CLI can surface it. Last recap in the chunk wins; an empty body never clears it.
+                if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
+                {
+                    out.recap = std::move(r);
+                }
+            }
         }
         return out;
     }
@@ -743,6 +753,21 @@ namespace Agentmaster
         }
 
         const auto parsed = ParseTranscriptDelta(wide);
+        // Agentmaster: mirror the Claude Code idle RECAP (away_summary) onto the registry record so the
+        // Triage-Board card tooltip can show it. QUIET (display-only, like lastAssistantText below) and
+        // only when THIS chunk carried a recap — away_summary lines are rare, so this is a no-op on
+        // virtually every tick (no lock churn). On a first-sight replay-from-0 the last recap in the file
+        // wins; a live recap lands in its own delta. Never clears an existing recap (empty is ignored).
+        if (!parsed.recap.empty())
+        {
+            const std::wstring recap = parsed.recap;
+            _registry->UpdateQuiet(s.id, [&recap](SessionInfo& ss) {
+                if (ss.recap != recap)
+                {
+                    ss.recap = recap;
+                }
+            });
+        }
         bool consumedTurnEvent = false; // a human prompt / assistant line (NOT a bare tool_result)
         for (const auto& ev : parsed.events)
         {

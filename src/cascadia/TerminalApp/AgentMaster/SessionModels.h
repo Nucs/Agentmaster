@@ -233,6 +233,15 @@ namespace Agentmaster
         // the registry's QUIET path so streaming text never triggers a persist/UI/scheduler
         // cascade. Empty until the scanner reads a transcript line.
         std::wstring lastAssistantText;
+        // Transient (NOT persisted; Persistence.cpp must not write it): the Claude Code idle RECAP —
+        // the latest {"type":"system","subtype":"away_summary"} body the SessionScanner tailed from this
+        // session's transcript, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint
+        // stripped). Claude Code emits it when a session sits idle >5 min: a one-paragraph "what we did /
+        // what's next". Mirrored via the registry's QUIET path (display-only, no persist/UI/scheduler
+        // cascade). Empty until a recap is seen (recaps off, or never idle). Shown in the Triage-Board
+        // card's hover tooltip; the summary panel / Sessions detail / copy derive their own from
+        // AnalyzeSessionTranscript (SessionSummary.awaySummary), the same data by a different path.
+        std::wstring recap;
         // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
         // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
         std::wstring pendingConfirmPromptId;

@@ -2637,6 +2637,19 @@ namespace Agentmaster
                 }
             }
 
+            // Agentmaster: the Claude Code idle RECAP (a {"type":"system","subtype":"away_summary"}
+            // line written when the session sits idle >5 min — a one-paragraph "what we did / what's
+            // next"). The LAST one wins (newer recaps supersede); the "(disable recaps in /config)" UI
+            // hint is stripped (NormalizeRecapText). Empty content is ignored so a malformed line never
+            // clears a good recap.
+            if (type == L"system" && obj.StrAt(L"subtype") == L"away_summary")
+            {
+                if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
+                {
+                    out.awaySummary = std::move(r);
+                }
+            }
+
             if (type == L"assistant")
             {
                 const auto* msg = obj.Find(L"message");
@@ -4100,6 +4113,15 @@ namespace Agentmaster
         if (a.tasksCompleted > 0 || a.tasksPending > 0)
         {
             line(L"Tasks:  " + std::to_wstring(a.tasksCompleted) + L" done / " + std::to_wstring(a.tasksPending) + L" pending");
+        }
+        // Agentmaster: the Claude Code idle RECAP — its own section directly above the Messages list (so
+        // it reads as the "where we are / what's next" header over the prompt history). Shown in BOTH the
+        // displayed panel (full=false) and the copyable Summary (full=true).
+        if (!a.awaySummary.empty())
+        {
+            sep();
+            line(L"Recap:");
+            line(SummaryEscapeMsg(a.awaySummary));
         }
         if (!a.userMsgs.empty())
         {

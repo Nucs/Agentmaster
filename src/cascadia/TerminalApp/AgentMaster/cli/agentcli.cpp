@@ -424,6 +424,7 @@ namespace
         std::wstring presence; // raw heartbeat
         bool turnInFlight{ false };
         std::wstring lastAssistant; // where the conversation left off
+        std::wstring recap; // Claude Code's idle "away_summary" recap (the >5-min "what we did / next")
         std::wstring lastStopReason;
         std::wstring pendingTool; // an unanswered interactive tool (AskUserQuestion) => NeedsApproval
         std::vector<std::wstring> lastTurnTools;
@@ -454,6 +455,7 @@ namespace
             if (!chunk.empty())
             {
                 const auto parsed = ParseTranscriptDelta(chunk);
+                d.recap = parsed.recap; // Claude Code's idle recap (away_summary), normalized; "" if none in the tail
                 for (const auto& ev : parsed.events)
                 {
                     if (ev.kind == TranscriptEvent::Kind::Assistant)
@@ -685,6 +687,10 @@ namespace
         o.Set(L"live", json::Value::MkBool(alive));
         o.Set(L"linkState", json::Value::MkStr(alive ? (s.external ? L"external" : L"linked") : L"archived"));
         o.Set(L"derivedState", json::Value::MkStr(ds.state));
+        if (!ds.recap.empty())
+        {
+            o.Set(L"recap", json::Value::MkStr(ds.recap)); // Claude Code's idle "away_summary" recap (the >5-min "what we did / what's next")
+        }
         if (!ds.presence.empty())
         {
             o.Set(L"presence", json::Value::MkStr(ds.presence));
@@ -871,6 +877,10 @@ namespace
         const std::wstring tpath = lc.sessionId.empty() ? L"" : ResolveClaudeTranscriptPath(lc.sessionId);
         const auto ds = DeriveState(tpath, lc.presence, true, nullptr);
         o.Set(L"derivedState", json::Value::MkStr(ds.state));
+        if (!ds.recap.empty())
+        {
+            o.Set(L"recap", json::Value::MkStr(ds.recap)); // Claude Code's idle "away_summary" recap, if any
+        }
         if (!ds.presence.empty())
         {
             o.Set(L"presence", json::Value::MkStr(ds.presence));
@@ -1430,6 +1440,14 @@ namespace
                 fl += (i ? L", " : L"") + Trunc(files->arr[i].AsStr(), 40);
             }
             OutLn(L"  files:     " + fl + (files->arr.size() > 6 ? L" (+" + std::to_wstring(files->arr.size() - 6) + L" more)" : L""));
+        }
+
+        // recap — Claude Code's idle "away_summary" (the >5-min "what we did / what's next" synthesis)
+        if (js.Find(L"recap"))
+        {
+            OutLn(L"");
+            OutLn(L"  RECAP:");
+            OutLn(L"    " + Trunc(js.StrAt(L"recap"), 600));
         }
 
         // flight plan

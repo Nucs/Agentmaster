@@ -310,6 +310,13 @@ namespace Agentmaster
         std::vector<std::wstring> filesCreated; // Write tool file_path basenames whose result was "File created successfully at:" (NEW files), sorted + unique
         std::vector<std::wstring> filesEdited; // Edit / overwriting-Write tool file_path basenames (existing files), sorted + unique
         std::wstring branch; // first gitBranch seen
+        // Agentmaster: the Claude Code idle RECAP — the LAST {"type":"system","subtype":"away_summary"}
+        // line's content (newer recaps supersede older), normalized via NormalizeRecapText (the trailing
+        // "(disable recaps in /config)" UI hint stripped). Claude Code writes this when a session sits
+        // idle >5 min: a one-paragraph "what we did / what's next" synthesis. Empty when the session has
+        // no recap (recaps off, or never idle). Surfaced in the summary box (overlay panel / Sessions
+        // detail / the copyable Summary) as the "Recap:" section.
+        std::wstring awaySummary;
         std::wstring firstTs; // first entry.timestamp (ISO) — conversation start (age)
         std::wstring lastTs; // last entry.timestamp (ISO) — last activity
         std::wstring lastUserTs; // last real user INTERACTION's entry.timestamp (ISO) — "last user msg" ago: a typed external-user prompt OR the user's answer to an AskUserQuestion (a tool_result on an interactive tool_use), so answering a question advances the clock too
@@ -321,6 +328,37 @@ namespace Agentmaster
         std::wstring planFilePath; // a Write into a /plans/ dir (plan-end's plan file)
         std::vector<std::wstring> planFilesRead; // Reads from a /plans/ dir (full paths)
     };
+
+    // Agentmaster: normalize a Claude Code "away_summary" recap body for display. Claude Code stores
+    // the >5-min idle recap as {"type":"system","subtype":"away_summary","content":"<text> (disable
+    // recaps in /config)"}; this strips that trailing UI hint and surrounding whitespace, leaving the
+    // recap prose. Pure + total — shared by every recap reader (AnalyzeSessionTranscript here,
+    // ParseTranscriptDelta in the scanner, and the agentmaster-cli `show` reader, all of which include
+    // this header) so the one-true normalization can never drift.
+    inline std::wstring NormalizeRecapText(std::wstring_view content)
+    {
+        std::wstring s{ content };
+        const auto rtrim = [](std::wstring& x) {
+            while (!x.empty() && (x.back() == L' ' || x.back() == L'\t' || x.back() == L'\r' || x.back() == L'\n'))
+            {
+                x.pop_back();
+            }
+        };
+        rtrim(s);
+        constexpr std::wstring_view hint = L"(disable recaps in /config)";
+        if (s.size() >= hint.size() && std::wstring_view{ s }.substr(s.size() - hint.size()) == hint)
+        {
+            s.erase(s.size() - hint.size());
+            rtrim(s);
+        }
+        size_t b = 0;
+        while (b < s.size() && (s[b] == L' ' || s[b] == L'\t' || s[b] == L'\r' || s[b] == L'\n'))
+        {
+            ++b;
+        }
+        s.erase(0, b);
+        return s;
+    }
 
     // Port of session-end.js parseTranscript: one forward pass over a Claude transcript .jsonl.
     // `maxBytes` 0 == the whole file. Filesystem only; `found` is false if the file can't be read.
