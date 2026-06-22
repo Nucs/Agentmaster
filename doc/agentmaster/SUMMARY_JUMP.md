@@ -334,17 +334,23 @@ resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initiali
 
 ## 7. Keyboard prompt navigation — alt+up / alt+down (sibling feature)
 
-Jump between sent prompts **without the summary panel**: **alt+up / alt+down** step the focused
-session's terminal view to the **previous / next SENT prompt that is currently OFF-SCREEN**, centering
-it; at the ends (no further off-screen prompt that way) a short **boundary sound** plays
-(`SystemExclamation`, distinct from the jump chime). It reuses this unit's resolve verbatim — only the
-trigger + the selection differ.
+Jump between sent prompts **without the summary panel**: **alt+up / alt+down** — or the **↑ / ↓
+buttons in the per-tab overlay** (left of the Open-folder button) — step the session's terminal view to
+the **previous / next SENT prompt that is currently OFF-SCREEN**, centering it; at the ends (no further
+off-screen prompt that way) a short **boundary sound** plays (`SystemExclamation`, distinct from the
+jump chime). It reuses this unit's resolve verbatim — only the trigger + the selection differ.
 
 - **WT-native action** (rebindable in `settings.json`): two no-arg `ShortcutAction`s,
   `agentScrollToPrevPrompt` / `agentScrollToNextPrompt` (added in `AllShortcutActions.h` +
   `ActionAndArgs.cpp`; the enum value, the dispatch event, and the `_Handle…` decl are all
   X-macro-generated). `defaults.json` binds `alt+up` / `alt+down` to them, **replacing** the upstream
   `MoveFocusUp` / `MoveFocusDown` pane bindings.
+- **Overlay buttons** (the same nav, mouse-reachable): the per-tab link badge's action row carries **↑ /
+  ↓** buttons just left of the Open-folder button (`AgentTabOverlay::_BuildActionsRow`; "Segoe UI Symbol"
+  U+2191/U+2193 to match the ▸ glyph). They call a page-wired handler (`SetAdjacentPromptHandler` →
+  `TerminalPage::_ScrollAdjacentPrompt`) that runs the **identical** path — scroll + highlight + boundary
+  sound — for **that tab's** session (so a click navigates its view even if the tab isn't focused). Shown
+  only for a linked **Claude** session (omitted for Codex — no in-buffer prompt resolve in v1).
 - **Claude-only, else fall through**: the handler (`_HandleAgentScrollTo{Prev,Next}Prompt`,
   `TerminalPage.AgentObserver.cpp`) navigates only when the focused tab is a managed **Claude** session
   (`_FocusedPromptNavSession` — `_ClaudeSessionForTab` + `SessionInfo.kind == Claude`); on any other tab

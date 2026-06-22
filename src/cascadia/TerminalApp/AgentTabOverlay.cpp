@@ -1214,6 +1214,56 @@ namespace winrt::TerminalApp::implementation
             return b;
         };
 
+        // Agentmaster (SUMMARY_JUMP.md §7): ↑ / ↓ — step the view to the previous / next SENT prompt that
+        // is currently off-screen, and highlight it in the summary panel, exactly like alt+up / alt+down
+        // (the page runs the SAME _ScrollAdjacentPrompt). Placed LEFT of the folder button. Claude only —
+        // Codex has no in-buffer prompt resolve in v1, so the buttons are omitted for a Codex session.
+        const bool promptNavEligible = [&]() {
+            if (_registry && !_sessionId.empty())
+            {
+                if (const auto info = _registry->Get(_sessionId))
+                {
+                    return info->kind == AgentKind::Claude;
+                }
+            }
+            return true; // unknown -> assume Claude (the default kind)
+        }();
+        Button upBtn{ nullptr };
+        Button downBtn{ nullptr };
+        if (promptNavEligible)
+        {
+            upBtn = mkIconBtn(L"\x2191", L"Go to the previous sent prompt that's off-screen (like Alt+Up)"); // ↑
+            downBtn = mkIconBtn(L"\x2193", L"Go to the next sent prompt that's off-screen (like Alt+Down)"); // ↓
+            // Standard Unicode arrows render from a text symbol font, not the icon font (which would tofu
+            // them) — same reason the ▸ summary-jump glyph uses "Segoe UI Symbol".
+            if (auto ic = upBtn.Content().try_as<FontIcon>())
+            {
+                ic.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+            }
+            if (auto ic = downBtn.Content().try_as<FontIcon>())
+            {
+                ic.FontFamily(FontFamily{ L"Segoe UI Symbol" });
+            }
+            upBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_onAdjacentPrompt)
+                    {
+                        self->_onAdjacentPrompt(true); // up
+                    }
+                }
+            });
+            downBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_onAdjacentPrompt)
+                    {
+                        self->_onAdjacentPrompt(false); // down
+                    }
+                }
+            });
+        }
+
         Button folderBtn = mkIconBtn(L"\xE8B7", L"Open the working folder in Explorer"); // Folder
         folderBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
@@ -1287,6 +1337,14 @@ namespace winrt::TerminalApp::implementation
         _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the row-1 status/autopilot parts
         _actions.Spacing(2);
         _actions.Margin(ThicknessHelper::FromLengths(4, 0, 0, 0)); // a small gap after the status block to its left
+        if (upBtn)
+        {
+            _actions.Children().Append(upBtn); // ↑ prev off-screen prompt (left of the folder)
+        }
+        if (downBtn)
+        {
+            _actions.Children().Append(downBtn); // ↓ next off-screen prompt
+        }
         _actions.Children().Append(folderBtn);
         _actions.Children().Append(copyBtn);
         _actions.Children().Append(pencilBtn);
@@ -2166,6 +2224,11 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler)
     {
         _onResolveEligibility = std::move(handler);
+    }
+
+    void AgentTabOverlay::SetAdjacentPromptHandler(std::function<void(bool)> handler)
+    {
+        _onAdjacentPrompt = std::move(handler);
     }
 
     // Agentmaster (SUMMARY_JUMP.md): resolve every numbered prompt against the live buffer in one pass and

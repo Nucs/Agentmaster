@@ -133,6 +133,13 @@ namespace winrt::TerminalApp::implementation
         // resolve. Set by _AttachClaudeOverlay.
         void SetEligibilityHandler(std::function<std::vector<int>(const std::vector<std::wstring>&)> handler);
 
+        // Agentmaster (SUMMARY_JUMP.md §7): the overlay's row-2 ↑/↓ buttons step to the previous / next
+        // off-screen SENT prompt — same as alt+up / alt+down. The overlay can't reach the control, so it
+        // calls this page-wired handler with the direction (true == up); the page runs the SAME
+        // _ScrollAdjacentPrompt for this session (scroll + the summary highlight + the boundary sound at
+        // the ends). Set by _AttachClaudeOverlay.
+        void SetAdjacentPromptHandler(std::function<void(bool)> handler);
+
         // Agentmaster (SUMMARY_JUMP.md): highlight the summary row for the message we just jumped to —
         // via the ▸ button OR alt+up / alt+down nav (the page passes the landed 0-based message index). A
         // translucent band behind the row; it persists across panel re-renders and moves to the new
@@ -237,6 +244,7 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _summaryUserMsgs;
         std::function<int(const std::vector<std::wstring>&, int)> _onJumpToPrompt; // jump button -> page (resolve control + center the view); returns the row or -1
         std::function<std::vector<int>(const std::vector<std::wstring>&)> _onResolveEligibility; // -> page: a row per prompt (-1 == not on screen), for icon dimming
+        std::function<void(bool)> _onAdjacentPrompt; // row-2 ↑/↓ buttons -> page (_ScrollAdjacentPrompt: scroll to prev/next off-screen prompt + highlight + boundary sound)
         // The jump buttons of the currently-rendered panel, paired with their 0-based prompt index, so
         // _RefreshJumpEligibility can dim the ones whose prompt no longer resolves. Rebuilt each _SetSummaryContent.
         std::vector<std::pair<int, winrt::Windows::UI::Xaml::Controls::Button>> _jumpButtons;

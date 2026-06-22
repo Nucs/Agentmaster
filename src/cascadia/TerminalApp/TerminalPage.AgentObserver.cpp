@@ -1027,6 +1027,15 @@ namespace winrt::TerminalApp::implementation
                 auto self = weakThis.get();
                 return self ? self->_JumpEligibilityInSession(sessionId, msgs) : std::vector<int>{};
             });
+            // Agentmaster (SUMMARY_JUMP.md §7): the overlay's row-2 ↑/↓ buttons run the SAME nav as
+            // alt+up/down for THIS session — scroll to the prev/next off-screen sent prompt, highlight it,
+            // and play the boundary sound at the ends (_ScrollAdjacentPrompt does all three).
+            overlay->SetAdjacentPromptHandler([weakThis, sessionId](bool up) {
+                if (auto self = weakThis.get())
+                {
+                    self->_ScrollAdjacentPrompt(sessionId, up);
+                }
+            });
         }
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
