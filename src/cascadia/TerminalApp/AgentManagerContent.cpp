@@ -590,6 +590,38 @@ namespace
         return t;
     }
 
+    // Agentmaster: PointerEntered/PointerExited are BUBBLING routed events, so a hit-test-visible
+    // CHILD of a card/row raises its OWN enter/exit that bubbles up to the parent's hover handler.
+    // Every label inside a card MUST stay hit-testable (that is how its AgentSetTip tooltip opens),
+    // so merely crossing the mouse between two labels makes a child PointerExited bubble to the card
+    // and a naive card.PointerExited then fires — toggling the hover ring + the Linked-Lenses tab
+    // pill OFF, before the next label's bubbled PointerEntered turns them back ON. That on/off churn
+    // is the "highlight flickers as I move over text" bug (the "\x22EF" dots only LOOK steady because
+    // their OpacityTransition smooths the dip; the ring + tab pill snap). This guard returns true
+    // when the pointer is STILL inside `sender`'s own bounds — i.e. the exit bubbled from a child,
+    // not a real leave — so a card/row PointerExited handler can early-out and ignore it, keeping
+    // the labels hit-testable (tooltips intact) instead of making them clickthrough (which kills the
+    // tooltips). A genuine leave samples at/outside an edge => returns false, so it is never missed.
+    // `IInspectable` is fully qualified here on purpose: at this anonymous-namespace file scope the
+    // unqualified name is AMBIGUOUS between the global COM ::IInspectable (from <inspectable.h>) and
+    // winrt::Windows::Foundation::IInspectable (the using-directive). The card/row lambdas below dodge
+    // this only because, inside AgentManagerContent's member functions, the inherited
+    // winrt::implements<...>::IInspectable typedef wins lookup — a free function has no such scope.
+    bool PointerStillWithin(const winrt::Windows::Foundation::IInspectable& sender, const PointerRoutedEventArgs& e)
+    {
+        const auto fe = sender.try_as<FrameworkElement>();
+        if (!fe)
+        {
+            return false;
+        }
+        const auto p = e.GetCurrentPoint(fe).Position();
+        // Treat the outermost ~1px as "left" so a real leave sampled right at the boundary is never
+        // swallowed (which would strand a pill). Every card/row label sits well inside the 8px band/
+        // body padding (the dots ≥4px in), so a child-bubbled exit is always still within this inset.
+        constexpr double kEdge = 1.0;
+        return p.X > kEdge && p.Y > kEdge && p.X < fe.ActualWidth() - kEdge && p.Y < fe.ActualHeight() - kEdge;
+    }
+
     // ---- Explorer Tree sort (Agentmaster) ------------------------------------
     // A normalized sort key extracted from EITHER a managed SessionInfo or an observed external row,
     // so one comparator orders LOCAL/GLOBAL (managed sessions) and EXTERNAL (observe-only claudes).
@@ -2567,7 +2599,11 @@ namespace winrt::TerminalApp::implementation
                     r.BorderThickness(Thickness{ 1, 1, 1, 1 });
                 }
             });
-            card.PointerExited([ringWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            card.PointerExited([ringWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                if (PointerStillWithin(sender, e))
+                {
+                    return; // a child label's exit bubbled up — the pointer never left the card; don't flicker the ring
+                }
                 if (const auto r = ringWeak.get())
                 {
                     r.BorderThickness(Thickness{ 0, 0, 0, 0 });
@@ -2592,7 +2628,11 @@ namespace winrt::TerminalApp::implementation
                 d.Opacity(0.85);
             }
         });
-        card.PointerExited([this, id, dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+        card.PointerExited([this, id, dotsWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerStillWithin(sender, e))
+            {
+                return; // a child label's exit bubbled up — keep the tab pill + dots up (Linked-Lenses anti-flicker)
+            }
             _ReportHover(id, false);
             if (const auto d = dotsWeak.get())
             {
@@ -3338,7 +3378,11 @@ namespace winrt::TerminalApp::implementation
                 d.Opacity(0.85);
             }
         });
-        card.PointerExited([dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+        card.PointerExited([dotsWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerStillWithin(sender, e))
+            {
+                return; // a child label's exit bubbled up — the pointer is still on the card; keep the dots up
+            }
             if (const auto d = dotsWeak.get())
             {
                 d.Opacity(0.0);
@@ -3765,7 +3809,13 @@ namespace winrt::TerminalApp::implementation
                 // tab while the Manager tab is active (the board-card twin, above). Capture id by value
                 // + `this`, never the Button into its own handler (a self-capture leaks the element).
                 rowBtn.PointerEntered([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, true); });
-                rowBtn.PointerExited([this, id](const IInspectable&, const PointerRoutedEventArgs&) { _ReportHover(id, false); });
+                rowBtn.PointerExited([this, id](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                    if (PointerStillWithin(sender, e))
+                    {
+                        return; // a child label's exit bubbled up — don't un-pill the tab as the mouse crosses the row's labels
+                    }
+                    _ReportHover(id, false);
+                });
                 // Single click = select; double click (within the OS threshold) = Activate
                 // (jump to the live tab). A Button swallows DoubleTapped, so we time the
                 // successive clicks ourselves.
