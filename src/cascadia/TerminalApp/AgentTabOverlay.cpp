@@ -548,8 +548,7 @@ namespace
         if (!a.awaySummary.empty())
         {
             sep();
-            line(L"Recap:");
-            line(SummaryEscapeMsg(a.awaySummary, wrapNewlines, truncate));
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, truncate)); // label INLINE with the prose (no wasted line break)
         }
         if (!a.userMsgs.empty())
         {

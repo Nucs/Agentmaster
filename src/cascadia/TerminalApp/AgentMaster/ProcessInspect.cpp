@@ -4120,8 +4120,7 @@ namespace Agentmaster
         if (!a.awaySummary.empty())
         {
             sep();
-            line(L"Recap:");
-            line(SummaryEscapeMsg(a.awaySummary));
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary)); // label INLINE with the prose (no wasted line break)
         }
         if (!a.userMsgs.empty())
         {

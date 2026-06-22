@@ -2834,9 +2834,10 @@ static void TestTranscriptResolve()
         CHECK(a.awaySummary == L"We did the work; next is to ship it.", "AnalyzeSessionTranscript: the LATEST away_summary wins + the disable hint is stripped");
         CHECK(a.userMsgs.size() == 2, "AnalyzeSessionTranscript: the two recap lines stay OUT of the Messages list (only the 2 typed prompts)");
 
-        // The shared text box renders a "Recap:" section above the Messages.
+        // The shared text box renders a "Recap:" section above the Messages, with the label INLINE with
+        // the prose (one line, no wasted break) — "Recap: <text>", not "Recap:\n<text>".
         const auto box = RenderSessionSummaryBox(a, L"sid-recap", L"K:\\x", pRecap, L"claude --resume sid-recap", L"", L"", L"", /*full*/ true);
-        CHECK(box.find(L"Recap:") != std::wstring::npos && box.find(L"next is to ship it.") != std::wstring::npos, "RenderSessionSummaryBox: the recap renders as its own section");
+        CHECK(box.find(L"Recap: We did the work; next is to ship it.") != std::wstring::npos, "RenderSessionSummaryBox: the recap label is INLINE with the prose (one line, no break)");
         CHECK(box.find(L"Recap:") < box.find(L"start the work"), "RenderSessionSummaryBox: the Recap section sits ABOVE the numbered user messages");
 
         std::error_code ecR;
