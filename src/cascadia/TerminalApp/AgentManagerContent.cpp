@@ -2474,20 +2474,13 @@ namespace winrt::TerminalApp::implementation
         // the dense card, so the complete name is otherwise unreadable here. When Claude Code has written
         // an idle RECAP for this session (the >5-min "what we did / what's next" away_summary, mirrored
         // onto SessionInfo.recap by the scanner), append it below the title \x2014 so a hover tells the
-        // sessions apart at a glance (the whole point of the recap), not just by name. Capped so a long
-        // recap can't make a runaway tip.
+        // sessions apart at a glance (the whole point of the recap), not just by name. Shown in FULL \x2014
+        // never length-capped (the tooltip wraps / grows as needed).
         std::wstring bandTip{ fullTitle };
         if (!s.recap.empty())
         {
             bandTip += L"\n\n";
-            if (s.recap.size() > 600)
-            {
-                bandTip.append(s.recap, 0, 597).append(L"\x2026"); // …
-            }
-            else
-            {
-                bandTip += s.recap;
-            }
+            bandTip += s.recap;
         }
         AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
 
