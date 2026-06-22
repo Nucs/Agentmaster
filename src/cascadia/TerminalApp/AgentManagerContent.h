@@ -454,7 +454,7 @@ namespace winrt::TerminalApp::implementation
             // transform in the .cpp where Media is in scope.
             winrt::Windows::UI::Xaml::Controls::Border bar{ nullptr };
             int64_t lastActivityUnixMs{ 0 }; // the turn's last activity (the countdown start)
-            int64_t timeoutMs{ 0 }; // waitingDecayMinutes * 60000 (the full bar duration)
+            int64_t timeoutMs{ 0 }; // waitingForYouTimeoutMinutes * 60000 (the full bar duration)
         };
         std::vector<CardProgress> _cardProgress;
         winrt::Windows::UI::Xaml::DispatcherTimer _progressTimer{ nullptr };

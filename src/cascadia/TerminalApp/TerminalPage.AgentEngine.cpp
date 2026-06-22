@@ -820,11 +820,11 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) "Always display Home button" setting to THIS window's
                 // tab-strip nav buttons immediately; other windows get it via the broadcast.
                 self->_UpdateManagerNavButtons();
-                // Cache-aware Waiting decay: push the (possibly changed) WaitingForInput -> Idle
-                // window to the process-wide scanner so it applies immediately, not next launch.
+                // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
+                // timeout to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
                 {
-                    self->_scanner->SetWaitingDecayMinutes(s.waitingDecayMinutes);
+                    self->_scanner->SetWaitingDecayMinutes(s.waitingForYouTimeoutMinutes);
                 }
                 // Re-materialize the shared --settings file so model / co-authored-by /
                 // permission-mode changes also reach an adopted hand-typed `claude` (the PATH

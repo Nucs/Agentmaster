@@ -93,11 +93,11 @@ namespace Agentmaster
             // live; the observer below Wake()s it the instant a session goes live. The liveness
             // CHECK is WinRT (walks tabs), so it is delegated to per-window probes the scanner ticks.
             e->scanner = std::make_shared<SessionScanner>(e->registry);
-            // Cache-aware Waiting decay: seed the WaitingForInput -> Idle window from settings.json
-            // BEFORE the worker starts (the Settings cog re-pushes it on save). Default 5 minutes ==
-            // Claude's server-side prompt-cache lifetime; 0 disables. (A second tiny LoadAppSettings
-            // read happens below for the hook files — both are one small-file read at process init.)
-            e->scanner->SetWaitingDecayMinutes(LoadAppSettings().waitingDecayMinutes);
+            // Waiting-for-you "unread" model: seed the WaitingForInput -> Idle timeout from settings.json
+            // BEFORE the worker starts (the Settings cog re-pushes it on save). Default 60 minutes (1h);
+            // 0 disables (the cog's "Never"). (A second tiny LoadAppSettings read happens below for the
+            // hook files — both are one small-file read at process init.)
+            e->scanner->SetWaitingDecayMinutes(LoadAppSettings().waitingForYouTimeoutMinutes);
             e->scanner->Start();
             // Keep the scanner ticking even with nothing live, so each window's liveness probe — which
             // also drives the Fleet Observer's per-window roster publish — keeps running (a hand-typed
