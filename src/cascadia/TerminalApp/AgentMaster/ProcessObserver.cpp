@@ -869,17 +869,25 @@ namespace Agentmaster
                 // re-idles — so unlike title/branch it is re-read whenever the transcript GREW (mtime
                 // advanced). We pull it from the transcript TAIL (ReadTranscriptRecapTail), the SAME
                 // REGION the SessionScanner's byte-cursor delta pulls a MANAGED session's recap from; an
-                // external has no scanner cursor, so the observer is its recap provider. The 128 KB tail
-                // window matches the head read above AND the agentmaster-cli `show` reader's kTailBytes
-                // (same region, same window). mtime-gated: an IDLE external (no growth) costs ONE stat
-                // (TranscriptTimes, above) and ZERO content reads; an empty tail (no away_summary) never
-                // clears a captured recap — the scanner's "empty never clears" rule, here inside
-                // RecapFromTranscriptChunk. ObserveClaude is never used for this (it sets no SessionState,
-                // Rule #13); the recap rides the ExternalClaudeRow as a transient display fact.
+                // external has no scanner cursor, so the observer is its recap provider. mtime-gated: an
+                // IDLE external (no growth) costs ONE stat (TranscriptTimes, above) and ZERO content reads;
+                // an empty tail (no away_summary) never clears a captured recap — the scanner's "empty
+                // never clears" rule, here inside RecapFromTranscriptChunk. ObserveClaude is never used for
+                // this (it sets no SessionState, Rule #13); the recap rides ExternalClaudeRow as a
+                // transient display fact.
+                //
+                // Window: FIRST sight reads a DEEP tail (4 MiB) to catch a recap written BEFORE we started
+                // watching — a long, multi-recap session can bury its last recap far above EOF (measured
+                // over the live corpus: median last-recap sits ~1 KiB from EOF, but ~9% are >128 KiB deep,
+                // max ~1.4 MiB). Steady-state reads (mtime already seen once) use the shallow 128 KiB tail
+                // — the agentmaster-cli `show` window — because a FRESH recap always lands at the very tail,
+                // so the shallow read catches every NEW one while a buried prior recap stays cached. So the
+                // deep read is one-time-per-external (like the title head read), not per tick.
                 if (cached->second.recapMtime != ex.lastActivityUnixMs)
                 {
+                    const size_t window = (cached->second.recapMtime == 0) ? (4u << 20) : 131072;
                     cached->second.recapMtime = ex.lastActivityUnixMs;
-                    if (std::wstring r = ReadTranscriptRecapTail(f.cwd, sid, 131072); !r.empty())
+                    if (std::wstring r = ReadTranscriptRecapTail(f.cwd, sid, window); !r.empty())
                     {
                         cached->second.recap = std::move(r);
                     }
