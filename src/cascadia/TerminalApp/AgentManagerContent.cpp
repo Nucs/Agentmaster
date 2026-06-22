@@ -5570,20 +5570,59 @@ namespace winrt::TerminalApp::implementation
         {
             auto row = StackPanel{};
             row.Orientation(Orientation::Horizontal);
-            row.Spacing(10);
+            row.Spacing(8);
+            row.VerticalAlignment(VerticalAlignment::Center);
             _setCheckUpdates = Button{};
             _setCheckUpdates.Content(winrt::box_value(L"Check for updates"));
             AgentSetTip(_setCheckUpdates, L"Check GitHub for a newer Agentmaster release, then choose to update now, postpone (3 / 7 / 30 days), or skip this version.");
             _setCheckUpdates.Click([this](const IInspectable&, const RoutedEventArgs&) { _CheckForUpdates(true); });
-            _setUpdateStatus = TextBlock{};
-            _setUpdateStatus.Opacity(0.9);
-            _setUpdateStatus.FontSize(12);
-            _setUpdateStatus.VerticalAlignment(VerticalAlignment::Center);
-            _setUpdateStatus.TextWrapping(TextWrapping::Wrap);
             row.Children().Append(_setCheckUpdates);
-            row.Children().Append(_setUpdateStatus);
+
+            // "Current version changelog" — opens THIS build's GitHub release page (the changelog fixated
+            // on the installed version). Always shown; the URL is fixed for the process lifetime. Opened
+            // off-thread (a browser launch can stall) like the per-tab overlay's Open-Path.
+            const std::wstring curChangelogUrl =
+                ::Agentmaster::Updater::ReleasePageForTag(::Agentmaster::Updater::VersionToString(::Agentmaster::Updater::CurrentPackageVersion()));
+            _setCurrentChangelog = HyperlinkButton{};
+            _setCurrentChangelog.Content(winrt::box_value(L"Current version changelog"));
+            _setCurrentChangelog.Padding(Thickness{ 4, 2, 4, 2 });
+            _setCurrentChangelog.FontSize(12);
+            AgentSetTip(_setCurrentChangelog, L"Open the GitHub release notes for the version you're running");
+            _setCurrentChangelog.Click([curChangelogUrl](const IInspectable&, const RoutedEventArgs&) {
+                if (!curChangelogUrl.empty())
+                {
+                    std::thread([curChangelogUrl]() { ::ShellExecuteW(nullptr, L"open", curChangelogUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }).detach();
+                }
+            });
+            row.Children().Append(_setCurrentChangelog);
+
+            // "Update's changelog" — opens the AVAILABLE update's release page; revealed only after a
+            // check finds one (_lastUpdateChangelogUrl + Visibility set in _CheckForUpdates' completion).
+            _setUpdateChangelog = HyperlinkButton{};
+            _setUpdateChangelog.Content(winrt::box_value(L"Update's changelog"));
+            _setUpdateChangelog.Padding(Thickness{ 4, 2, 4, 2 });
+            _setUpdateChangelog.FontSize(12);
+            _setUpdateChangelog.Visibility(Visibility::Collapsed);
+            AgentSetTip(_setUpdateChangelog, L"Open the GitHub release notes for the available update");
+            _setUpdateChangelog.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                const std::wstring u = _lastUpdateChangelogUrl;
+                if (!u.empty())
+                {
+                    std::thread([u]() { ::ShellExecuteW(nullptr, L"open", u.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }).detach();
+                }
+            });
+            row.Children().Append(_setUpdateChangelog);
             panel.Children().Append(row);
         }
+        // Status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…") on its OWN row
+        // beneath the action row — kept off the action row so the button + the two changelog links fit
+        // the 460-wide card without clipping (the cog's ScrollViewer scrolls vertically only).
+        _setUpdateStatus = TextBlock{};
+        _setUpdateStatus.Opacity(0.9);
+        _setUpdateStatus.FontSize(12);
+        _setUpdateStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setUpdateStatus);
+
         _setAllowPrerelease = ToggleSwitch{};
         _setAllowPrerelease.Header(winrt::box_value(L"Allow updating to pre-release versions"));
         AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default.");
@@ -5960,6 +5999,12 @@ namespace winrt::TerminalApp::implementation
         {
             _setUpdateStatus.Text(L""); // cleared until the silent check (below) finds an update
         }
+        if (_setUpdateChangelog)
+        {
+            // Hide "Update's changelog" until THIS open's check confirms an update is available
+            // (the silent check below, or the explicit button, reveals it).
+            _setUpdateChangelog.Visibility(Visibility::Collapsed);
+        }
         _settingsOverlay.Visibility(Visibility::Visible);
         // Updater: a silent check on open — if a newer release exists, the label next to "Check for
         // updates" reads "vX.Y.Z available!" in dark green. Quiet on no-update / no-network (the
@@ -6226,6 +6271,24 @@ namespace winrt::TerminalApp::implementation
                     else
                     {
                         self->_setUpdateStatus.Text(L""); // silent check: stay quiet unless there IS an update
+                    }
+                }
+                // "Update's changelog" link: reveal it (and remember its release page) when an update is
+                // available — from EITHER the silent on-open check or the explicit button — else hide it.
+                if (info.available)
+                {
+                    self->_lastUpdateChangelogUrl = ::Agentmaster::Updater::ChangelogUrl(info);
+                    if (self->_setUpdateChangelog)
+                    {
+                        self->_setUpdateChangelog.Visibility(Visibility::Visible);
+                    }
+                }
+                else
+                {
+                    self->_lastUpdateChangelogUrl.clear();
+                    if (self->_setUpdateChangelog)
+                    {
+                        self->_setUpdateChangelog.Visibility(Visibility::Collapsed);
                     }
                 }
                 // Interactive only: prompt + apply on a found update (the silent on-open check just labels).

@@ -596,6 +596,9 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _setCheckUpdates{ nullptr }; // "Check for updates" -> the same prompt the startup check shows
         winrt::Windows::UI::Xaml::Controls::TextBlock _setUpdateStatus{ nullptr }; // status label ("vX.Y.Z available!" dark green / "up to date" / "Checking…")
         bool _interactiveUpdateInFlight{ false }; // guard so a double-click of "Check for updates" can't fire two prompts
+        winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setCurrentChangelog{ nullptr }; // opens THIS build's release page (github .../releases/tag/v<current>)
+        winrt::Windows::UI::Xaml::Controls::HyperlinkButton _setUpdateChangelog{ nullptr }; // opens the AVAILABLE update's release page; shown only after a check found one
+        std::wstring _lastUpdateChangelogUrl; // the available update's release page (drives _setUpdateChangelog's click)
         winrt::Windows::UI::Xaml::Controls::TextBox _templateNameBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _templateCombo{ nullptr };
         std::vector<::Agentmaster::PlanTemplate> _templates;

@@ -329,8 +329,8 @@ namespace Agentmaster::Updater
         bool isPrerelease{ false };
         std::wstring bundleUrl; // .msixbundle browser_download_url
         std::wstring cerUrl; // .cer browser_download_url
-        std::wstring notes; // release body (for the "What's new" expander)
-        std::wstring htmlUrl; // release page (the fallback when there's no installable asset)
+        std::wstring notes; // release body (markdown; parsed + available — the prompt now LINKS to the release page rather than showing it inline)
+        std::wstring htmlUrl; // release page (changelog) — .../releases/tag/<tag>; "What's new" / "Update's changelog" open this
     };
 
     // "v0.4.3" — always with a leading v, for display.
@@ -341,6 +341,38 @@ namespace Agentmaster::Updater
             return info.latestTag;
         }
         return L"v" + (info.latestVersionStr.empty() ? VersionToString(info.latest) : info.latestVersionStr);
+    }
+
+    // The GitHub release page for a specific tag (the changelog FIXATED on that release, not the
+    // generic /releases list): https://github.com/<repo>/releases/tag/v<X.Y.Z>. A leading 'v' is
+    // ensured (our tags are vX.Y.Z). Used for the cog's "Current version changelog" link and as the
+    // fallback for an update's page when the API didn't carry an html_url.
+    inline std::wstring ReleasePageForTag(const std::wstring& tag)
+    {
+        std::wstring t = tag;
+        if (!t.empty() && t[0] != L'v' && t[0] != L'V')
+        {
+            t = L"v" + t;
+        }
+        return std::wstring{ L"https://github.com/" } + kRepo + L"/releases/tag/" + t;
+    }
+
+    // The release page (changelog) for an update — the API's html_url (already a .../releases/tag/<tag>
+    // page), else built from the tag.
+    inline std::wstring ChangelogUrl(const UpdateInfo& info)
+    {
+        return !info.htmlUrl.empty() ? info.htmlUrl : ReleasePageForTag(info.latestTag);
+    }
+
+    // TaskDialog hyperlink handler: a clicked <a href="URL"> hands the URL in lParam — open it in the
+    // default browser. Used by ShowUpdatePrompt's "What's new" link (TDF_ENABLE_HYPERLINKS).
+    inline HRESULT CALLBACK UpdatePromptCallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam, LONG_PTR /*ref*/)
+    {
+        if (msg == TDN_HYPERLINK_CLICKED && lParam)
+        {
+            ::ShellExecuteW(nullptr, L"open", reinterpret_cast<PCWSTR>(lParam), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return S_OK;
     }
 
     // A single HTTPS GET; returns the UTF-8 body bytes ("" on any failure), with a short note in
@@ -654,16 +686,16 @@ namespace Agentmaster::Updater
             { ridSkip, L"Skip this version" },
         };
 
-        std::wstring notes = info.notes;
-        if (notes.size() > 1200)
-        {
-            notes = notes.substr(0, 1200) + L"\n\x2026";
-        }
+        // "What's new" OPENS this release's GitHub page (the changelog fixated on the specific
+        // release), rather than dumping notes inline — a TaskDialog hyperlink (TDF_ENABLE_HYPERLINKS)
+        // that UpdatePromptCallback ShellExecutes on click. The URL has no chars that need escaping
+        // inside the <a href="…"> markup (a GitHub release URL).
+        const std::wstring footer = L"<a href=\"" + ChangelogUrl(info) + L"\">What's new \x2192</a>";
 
         TASKDIALOGCONFIG cfg{};
         cfg.cbSize = sizeof(cfg);
         cfg.hwndParent = owner;
-        cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW | TDF_SIZE_TO_CONTENT | TDF_EXPAND_FOOTER_AREA;
+        cfg.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW | TDF_SIZE_TO_CONTENT | TDF_ENABLE_HYPERLINKS;
         cfg.pszWindowTitle = L"Agentmaster";
         cfg.pszMainIcon = TD_INFORMATION_ICON;
         cfg.pszMainInstruction = instruction.c_str();
@@ -674,12 +706,9 @@ namespace Agentmaster::Updater
         cfg.cRadioButtons = ARRAYSIZE(radios);
         cfg.pRadioButtons = radios;
         cfg.nDefaultRadioButton = rid7;
-        if (!notes.empty())
-        {
-            cfg.pszExpandedInformation = notes.c_str();
-            cfg.pszExpandedControlText = L"What's new";
-            cfg.pszCollapsedControlText = L"What's new";
-        }
+        cfg.pszFooter = footer.c_str();
+        cfg.pszFooterIcon = TD_INFORMATION_ICON;
+        cfg.pfCallback = UpdatePromptCallback;
 
         int pressed = 0, radio = rid7;
         if (FAILED(::TaskDialogIndirect(&cfg, &pressed, &radio, nullptr)))
