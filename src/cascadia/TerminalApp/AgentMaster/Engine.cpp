@@ -14,6 +14,7 @@
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
+#include "SessionStore.h"
 
 #include <windows.h>
 
@@ -84,6 +85,22 @@ namespace Agentmaster
                     SaveSessions(reg->Snapshot());
                 });
             }
+
+            // Per-session DURABLE store (SessionStore): mirror the authoritative TITLE — the ONE
+            // value Explorer/tab/persistence share (Rule #11) — to <profile>/session-store/<sid>.json
+            // on every change, so a title known in ANY window persists across windows and OUTLIVES
+            // the live session. The Sessions browser reads it (O(1) by id) for closed/historical rows,
+            // and it is the generalized layer for any future per-session datum. SPARSE by design:
+            // ObserveClaude never sets a title (Rule #13), so only sessions we actually launch / adopt
+            // / rename / restore get a file; the write is deduped (skipped when the stored title is
+            // already equal), so a steady-state enrichment re-notify costs one small read, not a write.
+            // Loading the fleet at startup (each Upsert notifies) backfills the store for free.
+            e->registry->AddObserver([](const SessionInfo& s, HookEvent) {
+                if (!s.id.empty() && !s.title.empty())
+                {
+                    SetStoredSessionTitle(s.id, s.title);
+                }
+            });
 
             // Interval reconciler (M11; the PULL half — the bridge is PUSH). A low-priority
             // worker tails each live session's transcript to recover what a dropped hook missed

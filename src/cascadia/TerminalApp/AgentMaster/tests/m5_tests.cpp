@@ -40,6 +40,7 @@
 #include "../SessionRegistry.h"
 #include "../SessionScanner.h" // ParseTranscriptDelta (pure)
 #include "../SessionSearch.h" // the Sessions page's two-phase search (SESSIONS.md §6)
+#include "../SessionStore.h" // the generalized DURABLE per-session key/value store (titles, ...)
 #include "../TranscriptStore.h" // the on-disk Claude-session store API (SESSIONS.md §6)
 
 using namespace Agentmaster;
@@ -2750,6 +2751,51 @@ static void TestTranscriptResolve()
         std::filesystem::remove_all(std::filesystem::path{ root }, ec);
     }
 
+    // --- SessionStore: the generalized DURABLE per-session key/value store (titles + future data) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring store = std::wstring{ tmp } + L"am_sstore_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec); // a clean slate
+
+        const std::wstring a = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const std::wstring b = L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        // absent -> empty; set -> get (durability across "windows" is just re-reading the same dir).
+        CHECK(GetSessionStoreFieldIn(store, a, L"title").empty(), "store: a missing field reads empty");
+        CHECK(SetSessionStoreFieldIn(store, a, L"title", L"My Renamed Session"), "store: set title ok");
+        CHECK(GetSessionStoreFieldIn(store, a, L"title") == L"My Renamed Session", "store: get returns the set title");
+
+        // generalized: a second arbitrary key on the same session coexists with the first.
+        CHECK(SetSessionStoreFieldIn(store, a, L"note", L"hello"), "store: set a second arbitrary field");
+        const auto recA = LoadSessionStoreIn(store, a);
+        CHECK(recA.size() == 2 && recA.at(L"title") == L"My Renamed Session" && recA.at(L"note") == L"hello", "store: record holds both keys");
+
+        // dedup: setting the same value again still reports success, value unchanged.
+        CHECK(SetSessionStoreFieldIn(store, a, L"title", L"My Renamed Session"), "store: redundant set is a no-op success");
+        CHECK(GetSessionStoreFieldIn(store, a, L"title") == L"My Renamed Session", "store: value stable after a redundant set");
+
+        // an empty value REMOVES a key; removing the last key deletes the file (record empty).
+        CHECK(SetSessionStoreFieldIn(store, a, L"note", L""), "store: empty value removes the key");
+        CHECK(GetSessionStoreFieldIn(store, a, L"note").empty(), "store: a removed key reads empty");
+        CHECK(LoadSessionStoreIn(store, a).size() == 1, "store: only the title remains");
+
+        // a second session is independent (per-session files; O(1) by id).
+        CHECK(SetSessionStoreFieldIn(store, b, L"title", L"Other Session"), "store: set title on a second session");
+
+        // bulk: every session that has the field, in ONE scan (sparse — only titled sessions).
+        const auto all = LoadAllSessionStoreFieldIn(store, L"title");
+        CHECK(all.size() == 2 && all.at(a) == L"My Renamed Session" && all.at(b) == L"Other Session", "store: LoadAll gathers both titles");
+        CHECK(LoadAllSessionStoreFieldIn(store, L"note").empty(), "store: LoadAll for a field no session has is empty");
+
+        // a malformed session id never escapes the store dir; an empty id is inert.
+        CHECK(!SetSessionStoreFieldIn(store, L"..\\evil", L"title", L"x"), "store: a path-bearing id is rejected");
+        CHECK(GetSessionStoreFieldIn(store, L"", L"title").empty(), "store: an empty id reads empty");
+
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+    }
+
     // --- AnalyzeSessionTranscript: a real user prompt that BEGINS WITH A NEWLINE is kept ----------
     // Regression (the empty-summary bug): a pasted prompt (e.g. a terminal-screen capture) frequently
     // starts with a leading "\n". The summary noise filter ported session-end.js's startsWith('\n')
@@ -2854,6 +2900,23 @@ static void TestTranscriptResolve()
 
         std::error_code ecR;
         std::filesystem::remove(std::filesystem::path{ pRecap }, ecR);
+    }
+
+    // --- the recap is shown in FULL — never length-capped (unlike the numbered messages, which cap at
+    // 240 chars in this one-line box). A recap far longer than that cap renders whole, no "...".
+    {
+        SessionSummary big;
+        big.found = true;
+        big.userMsgs.push_back(std::wstring(500, L'M')); // a long MESSAGE: still capped at 240 (control)
+        big.awaySummary = std::wstring(800, L'R') + L" RECAP_TAIL_MARKER"; // a long RECAP: shown whole
+        const auto box = RenderSessionSummaryBox(big, L"id", L"K:\\x", L"t.jsonl", L"claude --resume id", L"", L"", L"", /*full*/ false);
+        // Isolate the recap line: from "Recap: " up to the section separator before the Messages.
+        const size_t rp = box.find(L"Recap: ");
+        const size_t sepAfter = rp == std::wstring::npos ? std::wstring::npos : box.find(kSummarySepMark, rp);
+        const std::wstring recapLine = rp == std::wstring::npos ? L"" : box.substr(rp, sepAfter == std::wstring::npos ? std::wstring::npos : sepAfter - rp);
+        CHECK(recapLine.find(L"RECAP_TAIL_MARKER") != std::wstring::npos, "RenderSessionSummaryBox: a long recap (>240) is rendered in FULL (its tail survives)");
+        CHECK(!recapLine.empty() && recapLine.find(L"...") == std::wstring::npos, "RenderSessionSummaryBox: the recap line carries NO '...' truncation");
+        CHECK(box.find(L"MMM...") != std::wstring::npos || box.find(L"...") != std::wstring::npos, "RenderSessionSummaryBox: a long numbered MESSAGE is still capped (control — the cap applies to messages, not the recap)");
     }
 }
 

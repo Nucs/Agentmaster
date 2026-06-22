@@ -39,6 +39,7 @@
 #include "AgentMaster/ProcessObserver.h" // Presence()
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionSearch.h" // the two-phase search
+#include "AgentMaster/SessionStore.h" // durable per-session store (LoadAllStoredSessionTitles — the title overlay)
 #include "AgentMaster/TranscriptStore.h" // EnumerateTranscripts / LoadOrRefreshSessionIndex / PickDisplayTitle
 
 using namespace winrt;
@@ -946,6 +947,30 @@ namespace winrt::TerminalApp::implementation
             }
             rows.push_back(std::move(r));
             entries.push_back(std::move(e));
+        }
+
+        // Durable-title overlay (SessionStore): a session we have a STORED title for — set in any
+        // window when we launched / renamed / restored it (Rule #11), and kept across windows + runs
+        // even after it closed — shows that title instead of the transcript-derived one, and folds it
+        // into the search haystack (liveTitle) so a historical session is findable by the name we gave
+        // it. ONE sparse dir scan (only titled sessions have a file); fine off-thread. The registry-
+        // LIVE override below (UI thread) still wins for sessions open right now (the freshest tab
+        // title). rows[i] <-> entries[i] are built 1:1 above.
+        const auto storedTitles = ::Agentmaster::LoadAllStoredSessionTitles();
+        if (!storedTitles.empty())
+        {
+            for (size_t i = 0; i < rows.size(); ++i)
+            {
+                const auto it = storedTitles.find(rows[i].id);
+                if (it != storedTitles.end() && !it->second.empty())
+                {
+                    rows[i].title = it->second;
+                    if (i < entries.size())
+                    {
+                        entries[i].liveTitle = it->second;
+                    }
+                }
+            }
         }
         (void)now;
 
