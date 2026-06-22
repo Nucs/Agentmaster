@@ -230,6 +230,14 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void Tab::_UpdateToolTip()
     {
+        // Agentmaster (tab tooltip): when TerminalPage has pushed a rich session tooltip, render that
+        // instead of the default title + key-chord (ClearAgentToolTip reverts to this default path).
+        if (_agentToolTipActive)
+        {
+            _UpdateAgentToolTip();
+            return;
+        }
+
         auto titleRun = WUX::Documents::Run();
         titleRun.Text(_CreateToolTipTitle());
 
@@ -245,6 +253,135 @@ namespace winrt::TerminalApp::implementation
             keyChordRun.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
             textBlock.Inlines().Append(WUX::Documents::LineBreak{});
             textBlock.Inlines().Append(keyChordRun);
+        }
+
+        WUX::Controls::ToolTip toolTip{};
+        toolTip.Content(textBlock);
+        WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), toolTip);
+    }
+
+    // Agentmaster (tab tooltip): accept a rich, session-aware tooltip from TerminalPage. Stores the
+    // pieces + a content signature; an identical push is a no-op (so the per-change observer reaction,
+    // the bind tail, and the slow per-tick sweep can all re-assert it without churning XAML). Building
+    // the actual ToolTip element is deferred to _UpdateToolTip (a stored XAML element can't be
+    // re-parented into a fresh ToolTip each time). UI thread only.
+    void Tab::SetAgentToolTip(winrt::hstring stateLine, const winrt::Windows::UI::Color& stateColor, winrt::hstring title, winrt::hstring body)
+    {
+        ASSERT_UI_THREAD();
+
+        const std::wstring_view svState{ stateLine };
+        const std::wstring_view svTitle{ title };
+        const std::wstring_view svBody{ body };
+        std::wstring sig;
+        sig.reserve(svState.size() + svTitle.size() + svBody.size() + 16);
+        sig.append(svState);
+        sig.push_back(L'\x1f');
+        sig.append(svTitle);
+        sig.push_back(L'\x1f');
+        sig.append(svBody);
+        sig.push_back(L'\x1f');
+        sig.append(std::to_wstring((static_cast<uint32_t>(stateColor.A) << 24) |
+                                   (static_cast<uint32_t>(stateColor.R) << 16) |
+                                   (static_cast<uint32_t>(stateColor.G) << 8) |
+                                   static_cast<uint32_t>(stateColor.B)));
+        winrt::hstring newSig{ sig };
+        if (_agentToolTipActive && newSig == _agentToolTipSig)
+        {
+            return; // identical content already shown — don't rebuild the XAML
+        }
+
+        _agentToolTipActive = true;
+        _agentToolTipStateLine = std::move(stateLine);
+        _agentToolTipStateColor = stateColor;
+        _agentToolTipTitle = std::move(title);
+        _agentToolTipBody = std::move(body);
+        _agentToolTipSig = std::move(newSig);
+        _UpdateToolTip();
+    }
+
+    // Agentmaster (tab tooltip): revert to the default title + key-chord tooltip (a session went away /
+    // was archived, or the tab is no longer a managed/observed agent tab). No-op if none was set.
+    void Tab::ClearAgentToolTip()
+    {
+        ASSERT_UI_THREAD();
+        if (!_agentToolTipActive)
+        {
+            return;
+        }
+        _agentToolTipActive = false;
+        _agentToolTipStateLine = {};
+        _agentToolTipTitle = {};
+        _agentToolTipBody = {};
+        _agentToolTipSig = {};
+        _UpdateToolTip();
+    }
+
+    // Agentmaster (tab tooltip): build the rich tooltip set via SetAgentToolTip — a colored state line
+    // (matching the tab-strip dot), a bold title, then a plain multi-line body — plus the key chord,
+    // like the default. Built fresh each call (XAML elements can't be re-parented); SetAgentToolTip's
+    // signature guard keeps that to actual content changes.
+    void Tab::_UpdateAgentToolTip()
+    {
+        auto textBlock = WUX::Controls::TextBlock{};
+        textBlock.TextWrapping(WUX::TextWrapping::Wrap);
+        textBlock.MaxWidth(380.0);
+
+        // Append `text` as one or more Runs, splitting on '\n' into LineBreak-separated lines. When
+        // leadingBreak is set, a LineBreak is emitted before the first line too (to separate a body
+        // block from the line above it).
+        const auto appendLines = [&textBlock](std::wstring_view text, bool leadingBreak) {
+            size_t start = 0;
+            bool first = true;
+            for (;;)
+            {
+                const auto nl = text.find(L'\n', start);
+                const auto piece = text.substr(start, nl == std::wstring_view::npos ? std::wstring_view::npos : nl - start);
+                if (leadingBreak || !first)
+                {
+                    textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+                }
+                auto run = WUX::Documents::Run{};
+                run.Text(winrt::hstring{ piece });
+                textBlock.Inlines().Append(run);
+                first = false;
+                if (nl == std::wstring_view::npos)
+                {
+                    break;
+                }
+                start = nl + 1;
+            }
+        };
+
+        // State line — colored to match the tab-strip status dot.
+        {
+            auto run = WUX::Documents::Run{};
+            run.Text(_agentToolTipStateLine);
+            run.Foreground(WUX::Media::SolidColorBrush{ _agentToolTipStateColor });
+            run.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            textBlock.Inlines().Append(run);
+        }
+        // Title — bold (the full, untruncated session/tab name).
+        if (!_agentToolTipTitle.empty())
+        {
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            auto run = WUX::Documents::Run{};
+            run.Text(_agentToolTipTitle);
+            run.FontWeight(winrt::Windows::UI::Text::FontWeights::Bold());
+            textBlock.Inlines().Append(run);
+        }
+        // Body — plain, multi-line.
+        if (!_agentToolTipBody.empty())
+        {
+            appendLines(std::wstring_view{ _agentToolTipBody }, /*leadingBreak*/ true);
+        }
+        // Key chord (italic), as in the default tooltip.
+        if (!_keyChord.empty())
+        {
+            textBlock.Inlines().Append(WUX::Documents::LineBreak{});
+            auto run = WUX::Documents::Run{};
+            run.Text(_keyChord);
+            run.FontStyle(winrt::Windows::UI::Text::FontStyle::Italic);
+            textBlock.Inlines().Append(run);
         }
 
         WUX::Controls::ToolTip toolTip{};

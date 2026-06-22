@@ -57,6 +57,171 @@ namespace winrt
     using VirtualKeyModifiers = Windows::System::VirtualKeyModifiers;
 }
 
+// Agentmaster (tab tooltip): file-local string formatting for _UpdateTabAgentToolTip. The page builds
+// the tooltip STRINGS (it owns the SessionInfo + the registry); the Tab renders them (Tab::SetAgentToolTip).
+// These mirror the equivalents in AgentManagerContent / AgentTabOverlay (FormatSpan / StateLabel /
+// ModeLabel), kept TU-local rather than shared — those are file-statics there too.
+namespace
+{
+    // unix-ms "now" (the registry's clock).
+    int64_t TtNowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // A compact span like AgentManagerContent::FormatSpan — months/days/hours/mins, seconds only when
+    // under an hour. Always emits at least the floor unit ("0m" / "0s"). Uses "mo" for month (not the
+    // adornment's position-dependent "m") so a tooltip is self-explanatory.
+    std::wstring TtSpan(int64_t ms, bool allowSeconds)
+    {
+        if (ms < 0)
+        {
+            ms = 0;
+        }
+        int64_t t = ms / 1000;
+        const int64_t months = t / (30LL * 24 * 3600);
+        t %= (30LL * 24 * 3600);
+        const int64_t days = t / (24 * 3600);
+        t %= (24 * 3600);
+        const int64_t hours = t / 3600;
+        t %= 3600;
+        const int64_t mins = t / 60;
+        const int64_t secs = t % 60;
+        const bool showSeconds = allowSeconds && months == 0 && days == 0 && hours == 0;
+        std::wstring out;
+        const auto add = [&out](int64_t v, const wchar_t* unit) {
+            if (v != 0)
+            {
+                out += std::to_wstring(v);
+                out += unit;
+            }
+        };
+        add(months, L"mo");
+        add(days, L"d");
+        add(hours, L"h");
+        add(mins, L"m");
+        if (showSeconds)
+        {
+            add(secs, L"s");
+        }
+        if (out.empty())
+        {
+            out = showSeconds ? L"0s" : L"0m";
+        }
+        return out;
+    }
+
+    const wchar_t* TtStateLabel(::Agentmaster::SessionState s)
+    {
+        using ::Agentmaster::SessionState;
+        switch (s)
+        {
+        case SessionState::Running:
+            return L"running";
+        case SessionState::WaitingForInput:
+            return L"waiting for you";
+        case SessionState::NeedsApproval:
+            return L"needs approval";
+        case SessionState::Error:
+            return L"error";
+        case SessionState::Done:
+            return L"done";
+        case SessionState::Idle:
+        default:
+            return L"idle";
+        }
+    }
+
+    const wchar_t* TtModeLabel(::Agentmaster::AutopilotMode m)
+    {
+        using ::Agentmaster::AutopilotMode;
+        switch (m)
+        {
+        case AutopilotMode::SemiAuto:
+            return L"Semi";
+        case AutopilotMode::Full:
+            return L"Full";
+        case AutopilotMode::Off:
+        default:
+            return L"Off";
+        }
+    }
+
+    // Collapse whitespace runs to single spaces, trim, truncate to maxLen with an ellipsis. For the
+    // queued-prompt / last-reply recall snippets.
+    std::wstring TtSnippet(const std::wstring& in, size_t maxLen)
+    {
+        std::wstring out;
+        out.reserve(in.size());
+        bool prevSpace = false;
+        for (const wchar_t c : in)
+        {
+            const bool ws = (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n');
+            if (ws)
+            {
+                if (!out.empty() && !prevSpace)
+                {
+                    out.push_back(L' ');
+                    prevSpace = true;
+                }
+            }
+            else
+            {
+                out.push_back(c);
+                prevSpace = false;
+            }
+        }
+        while (!out.empty() && out.back() == L' ')
+        {
+            out.pop_back();
+        }
+        if (out.size() > maxLen)
+        {
+            out.resize(maxLen);
+            while (!out.empty() && out.back() == L' ')
+            {
+                out.pop_back();
+            }
+            out += L"\x2026"; // …
+        }
+        return out;
+    }
+
+    // Join non-empty parts with sep.
+    std::wstring TtJoin(const std::vector<std::wstring>& parts, const wchar_t* sep)
+    {
+        std::wstring out;
+        for (const auto& p : parts)
+        {
+            if (p.empty())
+            {
+                continue;
+            }
+            if (!out.empty())
+            {
+                out += sep;
+            }
+            out += p;
+        }
+        return out;
+    }
+
+    // True when the live --permission-mode is the auto-approving bypass mode (worth flagging: this tab
+    // is running unsupervised). Case-insensitive contains "bypass".
+    bool TtPermIsBypass(const std::wstring& mode)
+    {
+        std::wstring m = mode;
+        for (auto& c : m)
+        {
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+        }
+        return m.find(L"bypass") != std::wstring::npos;
+    }
+}
+
 namespace winrt::TerminalApp::implementation
 {
     // Agentmaster (tab status dot): show/recolor (or hide, nullopt) the tab-strip status dot —
@@ -116,7 +281,200 @@ namespace winrt::TerminalApp::implementation
         {
             _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt);
             _EvaluateAgentFlash(sessionId, tab, state, live); // start/stop the unvisited "left Running" red flash
+            _UpdateTabAgentToolTip(tab, sessionId); // refresh the rich hover tooltip (reverts to default when !live)
         }
+    }
+
+    // Agentmaster (tab tooltip): build + push the rich, session-aware hover tooltip onto a MANAGED
+    // session's hosting tab. The header already gives you the color dot + a (truncated) title; this
+    // tooltip EXPANDS that into what disambiguates 10+ tabs and tells you whether a tab needs you:
+    //   line 1  ● <state> · <last-activity ago> · <why> · <⚠ unread>     (colored to match the dot)
+    //   line 2  <full title>                                              (bold)
+    //   body    claude|codex · <model> · <effort> · <⚡ bypass>
+    //           <full working dir> · <branch>
+    //           ⏳ N queued · ⏸ M held · next: "…"
+    //           Autopilot: <mode> · <sent>/<total> sent
+    //           last: "<assistant reply snippet>"
+    //           you replied <ago> · started <ago>
+    // Every body line is CONDITIONAL — emitted only when it carries signal — so a quiet running tab
+    // stays short while a blocked / queued one expands. All data is on the live SessionInfo (free, no
+    // transcript read). Reverts to the default tooltip when the session is gone or archived (!live).
+    // Idempotent on the Tab side (SetAgentToolTip's signature guard), so the per-change + per-tick
+    // callers are cheap. UI thread.
+    void TerminalPage::_UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId)
+    {
+        if (!tab || !_sessionRegistry)
+        {
+            return;
+        }
+        const auto impl = _GetTabImpl(tab);
+        if (!impl)
+        {
+            return;
+        }
+        const auto info = _sessionRegistry->Get(sessionId);
+        if (!info || !info->live)
+        {
+            impl->ClearAgentToolTip(); // archived / gone -> default title+keychord tooltip
+            return;
+        }
+        const auto& s = *info;
+        using ::Agentmaster::AutopilotMode;
+        using ::Agentmaster::PromptStatus;
+        using ::Agentmaster::SessionState;
+        const int64_t now = TtNowMs();
+
+        // ---- state line (colored to match the tab-strip dot) ----
+        std::wstring state = L"\x25CF "; // ●
+        state += TtStateLabel(s.state);
+        const int64_t lastAct = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+        if (lastAct > 0)
+        {
+            state += L"  \x00B7  " + TtSpan(now - lastAct, true);
+        }
+        std::wstring why;
+        if (s.state == SessionState::NeedsApproval)
+        {
+            why = L"approval required";
+        }
+        else if (s.state == SessionState::WaitingForInput && s.lastMessageWasQuestion)
+        {
+            why = L"answer needed";
+        }
+        else if (!s.pendingConfirmPromptId.empty())
+        {
+            why = L"awaiting your confirm";
+        }
+        if (!why.empty())
+        {
+            state += L"  \x00B7  " + why;
+        }
+        if (_flashingSessions.count(sessionId) || _manualUnreadSessions.count(sessionId))
+        {
+            state += L"  \x00B7  \x26A0 unread"; // ⚠ — changed since you were last here
+        }
+
+        // ---- body lines (each conditional) ----
+        std::vector<std::wstring> body;
+
+        // kind · model · effort · permission
+        {
+            std::vector<std::wstring> parts;
+            parts.push_back(s.kind == ::Agentmaster::AgentKind::Codex ? std::wstring{ L"codex" } : std::wstring{ L"claude" });
+            if (!s.model.empty())
+            {
+                parts.push_back(s.model);
+            }
+            if (!s.effort.empty())
+            {
+                parts.push_back(s.effort);
+            }
+            if (TtPermIsBypass(s.permissionMode))
+            {
+                parts.push_back(L"\x26A1 bypass"); // ⚡ auto-approving everything (unsupervised)
+            }
+            else if (!s.permissionMode.empty() && s.permissionMode != L"default")
+            {
+                parts.push_back(s.permissionMode);
+            }
+            body.push_back(TtJoin(parts, L"  \x00B7  "));
+        }
+
+        // working dir · branch — the FULL path (the strongest disambiguator across sibling repos/worktrees)
+        {
+            std::wstring line = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+            if (!s.branch.empty())
+            {
+                if (!line.empty())
+                {
+                    line += L"  \x00B7  ";
+                }
+                line += s.branch;
+            }
+            if (!line.empty())
+            {
+                body.push_back(line);
+            }
+        }
+
+        // queue + next prompt
+        int pending = 0, held = 0, sent = 0;
+        std::wstring nextText;
+        for (const auto& p : s.queue)
+        {
+            if (p.status == PromptStatus::Pending)
+            {
+                if (pending == 0)
+                {
+                    nextText = p.text.empty() ? p.label : p.text;
+                }
+                ++pending;
+            }
+            else if (p.status == PromptStatus::Held)
+            {
+                ++held;
+            }
+            else if (p.status == PromptStatus::Sent)
+            {
+                ++sent;
+            }
+        }
+        if (pending > 0 || held > 0)
+        {
+            std::wstring line = L"\x23F3 " + std::to_wstring(pending) + L" queued"; // ⏳
+            if (held > 0)
+            {
+                line += L"  \x00B7  \x23F8 " + std::to_wstring(held) + L" held"; // ⏸
+            }
+            if (!nextText.empty())
+            {
+                line += L"  \x00B7  next: \x201C" + TtSnippet(nextText, 48) + L"\x201D"; // “ … ”
+            }
+            body.push_back(line);
+        }
+
+        // Autopilot mode + plan progress (only when on, or a plan has already run)
+        if (s.autopilot.mode != AutopilotMode::Off || sent > 0)
+        {
+            std::wstring line = std::wstring{ L"Autopilot: " } + TtModeLabel(s.autopilot.mode);
+            if (!s.queue.empty())
+            {
+                line += L"  \x00B7  " + std::to_wstring(sent) + L"/" + std::to_wstring(s.queue.size()) + L" sent";
+            }
+            body.push_back(line);
+        }
+
+        // last assistant reply — where the conversation left off (the recall cue; scanner-tailed, free)
+        if (!s.lastAssistantText.empty())
+        {
+            body.push_back(std::wstring{ L"last: \x201C" } + TtSnippet(s.lastAssistantText, 80) + L"\x201D");
+        }
+
+        // timing — when you last spoke + when it started
+        {
+            std::wstring t;
+            if (s.turns.lastPromptUnixMs > 0)
+            {
+                t += L"you replied " + TtSpan(now - s.turns.lastPromptUnixMs, false) + L" ago";
+            }
+            if (s.convCreatedUnixMs > 0)
+            {
+                if (!t.empty())
+                {
+                    t += L"  \x00B7  ";
+                }
+                t += L"started " + TtSpan(now - s.convCreatedUnixMs, false) + L" ago";
+            }
+            if (!t.empty())
+            {
+                body.push_back(t);
+            }
+        }
+
+        impl->SetAgentToolTip(winrt::hstring{ state },
+                              AgentStatusColorFor(s.state),
+                              winrt::hstring{ s.title },
+                              winrt::hstring{ TtJoin(body, L"\n") });
     }
 
     // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session goes from
@@ -1040,6 +1398,18 @@ namespace winrt::TerminalApp::implementation
         // is idempotent on the unchanged color. (A tab that becomes managed gets its state-colored
         // dot from the bind tail, which runs after this badge is dropped.)
         _SetTabAgentDot(tab, winrt::Windows::UI::ColorHelper::FromArgb(0x70, 0x80, 0x80, 0x80));
+        // Tab tooltip: the unmanaged/observe twin of the managed session tooltip — "○ <kind> · unlinked"
+        // over the tab's OWN title (kept, so we never regress the default tooltip's title for shell tabs).
+        // Tab-strip chrome like the dot, so set BEFORE the in-terminal HUD gate below. Idempotent on the
+        // Tab side (signature guard), so the per-tick probe re-assert is free.
+        if (const auto impl = _GetTabImpl(tab))
+        {
+            const std::wstring stateLine = std::wstring{ L"\x25CB " } + kind + L"  \x00B7  unlinked"; // ○
+            impl->SetAgentToolTip(winrt::hstring{ stateLine },
+                                  winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xB0, 0xB0, 0xB0),
+                                  impl->Title(),
+                                  winrt::hstring{});
+        }
         if (!_appSettings.showTabOverlay)
         {
             return;
@@ -1311,6 +1681,7 @@ namespace winrt::TerminalApp::implementation
         {
             _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state));
         }
+        _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");
     }
@@ -1349,6 +1720,10 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
+            // Tab tooltip: refresh on the slow sweep cadence so the relative "ago"/timing stays honest
+            // for a quiet (Idle/Waiting) session that emits no registry change between turns. Cheap —
+            // the Tab signature-guards the rebuild, so the XAML changes only when a displayed value does.
+            _UpdateTabAgentToolTip(tab, id);
             // The session's OWN connection WT_SESSION (== its tabToken, kept current by hooks + the
             // observer). When known, judge liveness by THIS session's connection specifically — NOT "any
             // terminal in the tab" — so a Claude pane closed/dead beside a still-live shell sibling (a
@@ -1442,6 +1817,10 @@ namespace winrt::TerminalApp::implementation
                 if (const auto t = deadIt->second.get())
                 {
                     _SetTabAgentDot(t, std::nullopt);
+                    if (const auto ti = _GetTabImpl(t))
+                    {
+                        ti->ClearAgentToolTip(); // revert the dead tab to the default tooltip
+                    }
                 }
             }
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {

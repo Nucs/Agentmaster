@@ -70,6 +70,15 @@ namespace winrt::TerminalApp::implementation
         void ResetTabText();
         void ActivateTabRenamer();
 
+        // Agentmaster (tab tooltip): a rich, session-aware hover tooltip pushed by TerminalPage — its
+        // registry observer (a managed Claude/Codex session) or its activity probe (an unmanaged tab).
+        // While set it REPLACES the default title+keychord tooltip: a `stateLine` colored to match the
+        // tab-strip status dot, a bold `title`, and a plain multi-line `body` (lines separated by '\n').
+        // Idempotent — an identical push is a no-op (no XAML rebuild), so the per-change + per-tick
+        // callers are cheap. ClearAgentToolTip reverts to the default tooltip. UI thread only.
+        void SetAgentToolTip(winrt::hstring stateLine, const winrt::Windows::UI::Color& stateColor, winrt::hstring title, winrt::hstring body);
+        void ClearAgentToolTip();
+
         std::optional<winrt::Windows::UI::Color> GetTabColor();
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
         void SetRuntimeTabColor(const winrt::Windows::UI::Color& color);
@@ -197,6 +206,16 @@ namespace winrt::TerminalApp::implementation
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };
         winrt::hstring _keyChord{};
 
+        // Agentmaster (tab tooltip): the rich, session-aware tooltip pushed by TerminalPage (see
+        // SetAgentToolTip). While _agentToolTipActive, _UpdateToolTip renders these instead of the
+        // default title+keychord; _agentToolTipSig guards rebuilding identical content each tick.
+        bool _agentToolTipActive{ false };
+        winrt::hstring _agentToolTipStateLine{};
+        winrt::Windows::UI::Color _agentToolTipStateColor{};
+        winrt::hstring _agentToolTipTitle{};
+        winrt::hstring _agentToolTipBody{};
+        winrt::hstring _agentToolTipSig{};
+
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _themeColor{ nullptr };
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _unfocusedThemeColor{ nullptr };
         til::color _tabRowColor;
@@ -286,6 +305,7 @@ namespace winrt::TerminalApp::implementation
         void _EnableMenuItems();
         void _UpdateSwitchToTabKeyChord();
         void _UpdateToolTip();
+        void _UpdateAgentToolTip(); // Agentmaster: render the rich session tooltip (colored state line / bold title / plain body) when one is set
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);
