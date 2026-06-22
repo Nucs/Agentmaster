@@ -905,28 +905,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0am-update.ps1"
         }
     }
 
+    // ============================ channel gate ============================
+
+    // True when THIS install is the channel the GitHub releases actually target: the published
+    // RELEASE package (Agentmaster). The updater is gated to it EVERYWHERE — the startup auto-prompt
+    // AND the cog's "Check for updates" + the on-open label — because dev/unpackaged builds:
+    //   * never publish to GitHub (there are no AgentmasterDev releases), and
+    //   * carry the unstamped 0.0.1.0 manifest placeholder, so EVERY release looks "newer", and
+    //   * would install the SEPARATE release family side-by-side (a different package) on "Update",
+    //     not update themselves — a dev build updates by rebuilding.
+    // So a dev cog must NOT present a release as a self-update (the confusing "dev checked an update").
+    // AGENTMASTER_UPDATE_STARTUP forces it on so the full flow can still be exercised from a dev build.
+    // NOTE: a LOCALLY-built RELEASE install is also 0.0.1.0 (only CI stamps the version), so it shows
+    // "available" until it picks up a CI-published build — that's correct: same family, real in-place
+    // update to the published release.
+    inline bool IsUpdaterChannel()
+    {
+        if (!detail::GetEnv(L"AGENTMASTER_UPDATE_STARTUP").empty())
+        {
+            return true;
+        }
+        return IsPackaged() && !Profiles::IsDevPackage();
+    }
+
     // ============================ startup orchestration ============================
 
     // The startup check (WindowEmperor, BEFORE the "Reopen your N windows?" prompt). Reads prefs,
     // gates on identity + postpone + skip, checks GitHub (bounded), prompts, and applies the
     // choice. Returns true IFF the installer was launched — the caller must then exit the process
     // (TerminateProcess, like the single-instance handoff) so the package isn't in use.
-    //
-    // Gated to the published RELEASE install: dev/unpackaged builds never publish to GitHub, so an
-    // auto-nag there would always fire — skip them unless AGENTMASTER_UPDATE_STARTUP is set (so the
-    // full startup path can still be exercised from a dev build). The cog's "Check for updates"
-    // button is NOT gated (it's an explicit manual action, available on any build).
     inline bool RunStartupUpdateCheck(HWND owner)
     {
         try
         {
-            const bool force = !detail::GetEnv(L"AGENTMASTER_UPDATE_STARTUP").empty();
-            if (!force)
+            if (!IsUpdaterChannel())
             {
-                if (!IsPackaged() || Profiles::IsDevPackage())
-                {
-                    return false;
-                }
+                return false; // dev/unpackaged: the updater targets the RELEASE install (see IsUpdaterChannel)
             }
             const std::wstring stateDir = Profiles::ResolveProfileDir();
             const UpdatePrefs prefs = ReadPrefs(stateDir);

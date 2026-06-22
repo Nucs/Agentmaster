@@ -5995,21 +5995,47 @@ namespace winrt::TerminalApp::implementation
         {
             _setAllowPrerelease.IsOn(_appSettings.allowUpdatePrerelease);
         }
-        if (_setUpdateStatus)
-        {
-            _setUpdateStatus.Text(L""); // cleared until the silent check (below) finds an update
-        }
         if (_setUpdateChangelog)
         {
             // Hide "Update's changelog" until THIS open's check confirms an update is available
             // (the silent check below, or the explicit button, reveals it).
             _setUpdateChangelog.Visibility(Visibility::Collapsed);
         }
+        // Updater is RELEASE-channel only (Updater::IsUpdaterChannel). On a dev/unpackaged build the
+        // GitHub release is NOT a self-update (different package + always-"behind" the 0.0.1.0
+        // placeholder), so don't check or offer it: disable the button, hide the changelog links, and
+        // explain. Only the release install checks (silently on open) + shows "vX.Y.Z available!".
+        const bool updaterChannel = ::Agentmaster::Updater::IsUpdaterChannel();
+        if (_setCheckUpdates)
+        {
+            _setCheckUpdates.IsEnabled(updaterChannel);
+        }
+        if (_setCurrentChangelog)
+        {
+            // The current build's release page only exists for a published version; hide it on dev.
+            _setCurrentChangelog.Visibility(updaterChannel ? Visibility::Visible : Visibility::Collapsed);
+        }
+        if (_setUpdateStatus)
+        {
+            if (updaterChannel)
+            {
+                _setUpdateStatus.Text(L""); // cleared until the silent check (below) finds an update
+            }
+            else
+            {
+                _setUpdateStatus.Text(L"Dev build \x2014 the updater manages the Release install (rebuild to update this one).");
+                _setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x99, 0x99, 0x99) });
+            }
+        }
         _settingsOverlay.Visibility(Visibility::Visible);
         // Updater: a silent check on open — if a newer release exists, the label next to "Check for
         // updates" reads "vX.Y.Z available!" in dark green. Quiet on no-update / no-network (the
         // explicit button gives that feedback). Runs off the UI thread (Updater.h uses WinHTTP).
-        _CheckForUpdates(false);
+        // RELEASE channel only — a dev build neither auto-checks nor is offered the release as an update.
+        if (updaterChannel)
+        {
+            _CheckForUpdates(false);
+        }
     }
 
     void AgentManagerContent::_HideSettings()
@@ -6200,6 +6226,14 @@ namespace winrt::TerminalApp::implementation
         // The worker marshals its result back via the dispatcher; with no dispatcher it could never
         // re-enable the button / clear the in-flight flag, so bail before we touch either.
         if (!_dispatcher)
+        {
+            return;
+        }
+        // Release-channel only (Updater::IsUpdaterChannel): a dev/unpackaged build must NOT present a
+        // GitHub release as a self-update — it's a different package and always-"behind" the 0.0.1.0
+        // placeholder. _ShowSettings already disables the button + shows the explanatory note there;
+        // this is the backstop so a stray call never runs the misleading check.
+        if (!::Agentmaster::Updater::IsUpdaterChannel())
         {
             return;
         }
