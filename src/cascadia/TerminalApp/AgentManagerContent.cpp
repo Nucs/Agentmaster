@@ -1266,10 +1266,6 @@ namespace winrt::TerminalApp::implementation
     {
         _archiveHandler = std::move(handler);
     }
-    void AgentManagerContent::SetDeleteHandler(std::function<void(winrt::hstring)> handler)
-    {
-        _deleteHandler = std::move(handler);
-    }
     void AgentManagerContent::SetRestoreHandler(std::function<void(winrt::hstring)> handler)
     {
         _restoreHandler = std::move(handler);
@@ -1315,14 +1311,6 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetReopenWindowsHandler(std::function<void()> handler)
     {
         _reopenWindowsHandler = std::move(handler);
-    }
-    void AgentManagerContent::SetReopenWindowHandler(std::function<void(int)> handler)
-    {
-        _reopenWindowHandler = std::move(handler);
-    }
-    void AgentManagerContent::SetOpenArchiveHandler(std::function<void()> handler)
-    {
-        _openArchiveHandler = std::move(handler);
     }
     void AgentManagerContent::SetOpenSessionsHandler(std::function<void()> handler)
     {
@@ -1841,21 +1829,13 @@ namespace winrt::TerminalApp::implementation
             });
             bar.Children().Append(_pauseBtn);
 
-            // Archived sessions: opens the in-content archive overlay (built at the end of
-            // layout). Closing a session tab archives it (shut down, kept restorable) rather than
-            // discarding it; this is where you bring those back. Label carries a live count.
-            // Placed AFTER the Settings cog (alongside Pause Autopilot).
-            _archivedBtn = Button{};
-            _archivedBtn.Content(winrt::box_value(L"Archived"));
-            AgentSetTip(_archivedBtn, L"Open the Archive \x2014 browse and restore closed sessions and saved windows.");
-            _archivedBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openArchiveHandler) { _openArchiveHandler(); } });
-            bar.Children().Append(_archivedBtn);
-
-            // Agentmaster (Sessions page; SESSIONS.md): the global on-disk Claude-sessions browser —
-            // EVERY session on the machine in a selectable window, searchable. RIGHT AFTER Archived.
+            // Agentmaster (Sessions page; SESSIONS.md / FAVORITES.md): the global on-disk Claude-sessions
+            // browser — EVERY session on the machine in a selectable window, searchable, with the ★
+            // Favorite column + filter. This is the SOLE history view (the separate "Archived" button +
+            // page were removed: closing a session keeps it here, resumable, marked by Favorite).
             _sessionsBtn = Button{};
             _sessionsBtn.Content(winrt::box_value(L"Sessions"));
-            AgentSetTip(_sessionsBtn, L"Browse and search every Claude Code session on this machine \x2014 not just managed ones (last month by default).");
+            AgentSetTip(_sessionsBtn, L"Browse and search every Claude Code session on this machine \x2014 not just managed ones (last month by default). Star the ones you want to keep.");
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             bar.Children().Append(_sessionsBtn);
 
@@ -2391,10 +2371,9 @@ namespace winrt::TerminalApp::implementation
             _root.Children().Append(_pathPopup);
         }
 
-        // Agentmaster (Archive page): the old in-content archive overlay is RETIRED — the Archived
-        // button now opens the full-window Archive page hosted by TerminalPage (over the tab strip,
-        // SetOpenArchiveHandler). _BuildArchiveOverlay() is intentionally NOT called; its methods stay
-        // dormant (every call site is null-guarded on _archiveOverlay / _archiveListHost).
+        // Agentmaster (FAVORITES.md): both the in-content archive overlay AND the full-window Archive
+        // page are GONE — the Sessions browser is the sole history view (closed sessions stay there,
+        // resumable, marked by Favorite). Nothing archive-related is built here anymore.
         _BuildSettingsOverlay(); // modal settings layer, appended last so it renders on top
         _BuildClaudeMissingOverlay(); // native-exe-only gate modal (shown when no claude.exe is detected)
     }
@@ -2441,12 +2420,7 @@ namespace winrt::TerminalApp::implementation
         _SyncProgressTimer(); // Agentmaster: run the 1s countdown-bar drainer iff any Waiting-for-you bar is now tracked
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
-        _UpdateArchivedButton(sessions);
         _UpdateReopenButton();
-        if (_archiveOverlay && _archiveOverlay.Visibility() == Visibility::Visible)
-        {
-            _RebuildArchiveList(); // keep the open archive list current as sessions archive/restore
-        }
 
         // Re-focus the same card/row if a tagged one held focus and still exists post-rebuild (it may
         // have moved columns on a state change, or be gone if archived — then we leave focus be). The
@@ -3172,7 +3146,7 @@ namespace winrt::TerminalApp::implementation
             {
                 if (!s.live)
                 {
-                    continue; // archived (closed) sessions live in the "Archived" overlay, not the board
+                    continue; // closed sessions live in the Sessions browser, not the board (FAVORITES.md)
                 }
                 if (boardLocal && boardLocalIds.find(s.id) == boardLocalIds.end())
                 {
@@ -3704,7 +3678,7 @@ namespace winrt::TerminalApp::implementation
         {
             if (!s.live)
             {
-                continue; // archived sessions are shown in the "Archived" overlay, not the tree
+                continue; // closed sessions are shown in the Sessions browser, not the tree (FAVORITES.md)
             }
             if (std::find_if(dirs.begin(), dirs.end(), [&](const std::wstring& d) { return PathEq(d, s.workingDir); }) == dirs.end())
             {
@@ -4891,10 +4865,13 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(rename);
 
-        MenuFlyoutItem archive;
-        archive.Text(L"Archive\x2026");
-        AgentSetTip(archive, L"Archive this session \x2014 close its tab but keep it restorable from the Archive (the conversation on disk is never deleted).");
-        archive.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+        // Close — shut the session down (FAVORITES.md: the "Close" verb that replaced Archive/Delete).
+        // It keeps the record (always archived) so it stays in Sessions, resumable anytime — the
+        // conversation on disk is never deleted. Routed through _RequestArchive (the archive seam).
+        MenuFlyoutItem closeItem;
+        closeItem.Text(L"Close");
+        AgentSetTip(closeItem, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted).");
+        closeItem.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
                 disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestArchive(id); } });
@@ -4904,31 +4881,7 @@ namespace winrt::TerminalApp::implementation
                 self->_RequestArchive(id);
             }
         });
-        menu.Items().Append(archive);
-
-        // Delete permanently — the trash twin beside Archive. Archive keeps the session restorable; this
-        // DROPS the Agentmaster record (record-only — the conversation file on disk is kept, still in
-        // Sessions). _RequestDelete confirms first (this path has no archive-style consequence dialog).
-        MenuFlyoutItem del;
-        del.Text(L"Delete permanently\x2026");
-        {
-            FontIcon trash;
-            trash.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
-            trash.Glyph(L"\xE74D"); // Delete (trash can)
-            del.Icon(trash);
-        }
-        AgentSetTip(del, L"Permanently remove this session from Agentmaster \x2014 it will NOT be restorable from the Archive. The conversation file on disk is kept (it still appears in Sessions).");
-        del.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestDelete(id); } });
-            }
-            else if (auto self = weak.get())
-            {
-                self->_RequestDelete(id);
-            }
-        });
-        menu.Items().Append(del);
+        menu.Items().Append(closeItem);
 
         // Open New Session Here — the LAST option in every scope (LOCAL/GLOBAL here, EXTERNAL in
         // _MakeExternalTreeMenu): spawn a managed Claude session in THIS row's working dir, a new
@@ -5061,10 +5014,12 @@ namespace winrt::TerminalApp::implementation
             menu.Items().Append(MenuFlyoutSeparator{});
         }
 
-        MenuFlyoutItem archive;
-        archive.Text(L"Archive session\x2026");
-        AgentSetTip(archive, L"Archive this session \x2014 close its tab but keep it restorable from the Archive (the conversation on disk is never deleted).");
-        archive.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
+        // Close — shut the session down (FAVORITES.md: the "Close" verb that replaced Archive/Delete).
+        // Keeps the record (always archived) so it stays in Sessions, resumable anytime.
+        MenuFlyoutItem closeItem;
+        closeItem.Text(L"Close session");
+        AgentSetTip(closeItem, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime (the conversation on disk is never deleted).");
+        closeItem.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
             {
                 disp.TryEnqueue([weak]() { if (auto self = weak.get()) { if (!self->_selectedId.empty()) { self->_RequestArchive(self->_selectedId); } } });
@@ -5077,32 +5032,7 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         });
-        menu.Items().Append(archive);
-
-        // Delete permanently — the trash twin beside Archive (record-only; transcript on disk kept).
-        MenuFlyoutItem del;
-        del.Text(L"Delete session permanently\x2026");
-        {
-            FontIcon trash;
-            trash.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
-            trash.Glyph(L"\xE74D"); // Delete (trash can)
-            del.Icon(trash);
-        }
-        AgentSetTip(del, L"Permanently remove this session from Agentmaster \x2014 it will NOT be restorable from the Archive. The conversation file on disk is kept (it still appears in Sessions).");
-        del.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak]() { if (auto self = weak.get()) { if (!self->_selectedId.empty()) { self->_RequestDelete(self->_selectedId); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (!self->_selectedId.empty())
-                {
-                    self->_RequestDelete(self->_selectedId);
-                }
-            }
-        });
-        menu.Items().Append(del);
+        menu.Items().Append(closeItem);
 
         return menu;
     }
@@ -5223,44 +5153,9 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: permanently REMOVE a session from Agentmaster (record-only). Unlike Archive (which
-    // keeps the session restorable), this drops its registry record + persisted entry + saved-window
-    // refs — but the conversation .jsonl on disk is KEPT (it still appears in the Sessions browser and
-    // can be reopened from there). Confirm here (this path has no archive-style consequence dialog of
-    // its own), then route to the page's _DeleteClaudeSession seam.
-    void AgentManagerContent::_RequestDelete(const std::wstring& id)
-    {
-        if (id.empty())
-        {
-            return;
-        }
-        const std::wstring idCopy = id;
-        std::wstring titleStr;
-        if (_registry)
-        {
-            if (const auto s = _registry->Get(idCopy))
-            {
-                titleStr = s->title;
-            }
-        }
-        const std::wstring body = (titleStr.empty() ? std::wstring{ L"This session" } : (L"\x201C" + titleStr + L"\x201D")) +
-                                  L" will be removed from Agentmaster \x2014 its place in the fleet, its queue, and its saved-window slot. "
-                                  L"The conversation file on disk is KEPT: it still appears in Sessions and can be reopened from there.";
-        auto weak = get_weak();
-        _Confirm(L"Delete permanently?", winrt::hstring{ body }, L"Delete", [weak, idCopy]() {
-            if (auto self = weak.get())
-            {
-                if (self->_deleteHandler)
-                {
-                    self->_deleteHandler(winrt::hstring{ idCopy });
-                }
-            }
-        });
-    }
-
     // A buttons-only confirm (XAML-Islands-safe: a text box inside a ContentDialog gets no
     // keypresses, but buttons work — see the _renameBox note). Runs onYes when the user accepts.
-    // Used for Restore / Restore-all (the archive confirm itself lives at the page level).
+    // Used for the Close confirm (_RequestArchive) and Reopen-windows.
     void AgentManagerContent::_Confirm(const winrt::hstring& title, const winrt::hstring& body, const winrt::hstring& primary, std::function<void()> onYes)
     {
         ContentDialog dialog;
@@ -5358,369 +5253,10 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // ---- Archived-sessions overlay ------------------------------------------
-
-    void AgentManagerContent::_BuildArchiveOverlay()
-    {
-        // A dimmed modal layer (like the settings overlay), built into the main visual tree and
-        // toggled by Visibility. Lists archived (closed) sessions; each can be Restored. The
-        // backdrop tap cancels; the card swallows taps so inside-clicks don't close it.
-        _archiveOverlay = Grid{};
-        _archiveOverlay.Visibility(Visibility::Collapsed);
-        _archiveOverlay.Background(SolidColorBrush{ ColorHelper::FromArgb(0xA0, 0x00, 0x00, 0x00) });
-        Grid::SetRow(_archiveOverlay, 0);
-        Grid::SetRowSpan(_archiveOverlay, 99);
-        Grid::SetColumnSpan(_archiveOverlay, 99);
-        _archiveOverlay.Tapped([this](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs&) {
-            _HideArchive();
-        });
-
-        auto card = Border{};
-        card.Background(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x25, 0x25, 0x25) });
-        card.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x90, 0x80, 0x80, 0x80) });
-        card.BorderThickness(Thickness{ 1, 1, 1, 1 });
-        card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
-        card.Padding(Thickness{ 20, 16, 20, 16 });
-        card.Width(560);
-        card.MaxHeight(620);
-        card.HorizontalAlignment(HorizontalAlignment::Center);
-        card.VerticalAlignment(VerticalAlignment::Center);
-        card.RequestedTheme(ElementTheme::Dark);
-        card.Tapped([](const IInspectable&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& e) {
-            e.Handled(true);
-        });
-
-        auto panel = StackPanel{};
-        panel.Spacing(10);
-
-        auto headerRow = StackPanel{};
-        headerRow.Orientation(Orientation::Horizontal);
-        headerRow.Spacing(12);
-        headerRow.VerticalAlignment(VerticalAlignment::Center);
-        headerRow.Children().Append(Text(L"Archived sessions", 18, true, 1.0));
-        auto restoreAll = Button{};
-        restoreAll.Content(winrt::box_value(L"Restore all"));
-        restoreAll.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnRestoreAll(); });
-        headerRow.Children().Append(restoreAll);
-        panel.Children().Append(headerRow);
-
-        panel.Children().Append(Text(L"These sessions were closed (archived). Restoring re-launches a session and resumes its conversation + Flight Plan (claude --resume). Nothing here is deleted \x2014 the conversation transcript is kept on disk.", 12, false, 0.7));
-
-        _archiveListHost = StackPanel{};
-        _archiveListHost.Spacing(6);
-        _archiveListHost.Margin(Thickness{ 0, 4, 0, 0 });
-        auto scroll = ScrollViewer{};
-        scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-        scroll.MaxHeight(440);
-        scroll.Content(_archiveListHost);
-        panel.Children().Append(scroll);
-
-        auto buttons = StackPanel{};
-        buttons.Orientation(Orientation::Horizontal);
-        buttons.HorizontalAlignment(HorizontalAlignment::Right);
-        buttons.Spacing(8);
-        buttons.Margin(Thickness{ 0, 8, 0, 0 });
-        auto close = Button{};
-        close.Content(winrt::box_value(L"Close"));
-        close.Click([this](const IInspectable&, const RoutedEventArgs&) { _HideArchive(); });
-        buttons.Children().Append(close);
-        panel.Children().Append(buttons);
-
-        card.Child(panel);
-        _archiveOverlay.Children().Append(card);
-        _root.Children().Append(_archiveOverlay);
-    }
-
-    void AgentManagerContent::_ShowArchive()
-    {
-        if (!_archiveOverlay)
-        {
-            return;
-        }
-        _RebuildArchiveList();
-        _archiveOverlay.Visibility(Visibility::Visible);
-    }
-
-    void AgentManagerContent::_HideArchive()
-    {
-        if (_archiveOverlay)
-        {
-            _archiveOverlay.Visibility(Visibility::Collapsed);
-        }
-    }
-
-    void AgentManagerContent::_RebuildArchiveList()
-    {
-        if (!_archiveListHost)
-        {
-            return;
-        }
-        _archiveListHost.Children().Clear();
-
-        std::vector<SessionInfo> sessions;
-        if (_registry)
-        {
-            sessions = _registry->Snapshot();
-        }
-
-        // Saved window records NOT currently open (Engine-tracked, read off disk). Each is reopenable as
-        // a WHOLE — geometry + lens + ALL its tabs re-homed (the window-grouped restore) — distinct from
-        // the per-session Restore (cherry-pick ONE session into the CURRENT window). Read only when the
-        // overlay is shown (this rebuild), never a hot path.
-        std::vector<::Agentmaster::RecoverableWindow> recoverable;
-        try
-        {
-            recoverable = ::Agentmaster::RecoverableWindows();
-        }
-        CATCH_LOG();
-
-        // Find an archived (!live) session by id (linear scan — the archived set is small).
-        const auto findArchived = [&sessions](const std::wstring& id) -> const SessionInfo* {
-            for (const auto& s : sessions)
-            {
-                if (!s.live && s.id == id)
-                {
-                    return &s;
-                }
-            }
-            return nullptr;
-        };
-
-        // One archived-session row: title + dir + prompt count, with a per-session Restore (cherry-pick
-        // into the CURRENT window). Under a window group the label reads "Restore here" so it is visibly
-        // distinct from that group's whole-window "Reopen window".
-        const auto makeSessionRow = [this](const SessionInfo& s, bool groupedInWindow) -> Border {
-            auto infoCol = StackPanel{};
-            infoCol.Spacing(1);
-            infoCol.VerticalAlignment(VerticalAlignment::Center);
-            infoCol.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 14, true, 1.0));
-            infoCol.Children().Append(Text(winrt::hstring{ s.workingDir }, 11, false, 0.6));
-            if (!s.queue.empty())
-            {
-                int sent = 0;
-                for (const auto& p : s.queue)
-                {
-                    if (p.status == PromptStatus::Sent)
-                    {
-                        ++sent;
-                    }
-                }
-                infoCol.Children().Append(Text(winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size())) + L" prompts", 11, false, 0.6));
-            }
-
-            auto restore = Button{};
-            restore.Content(winrt::box_value(groupedInWindow ? winrt::hstring{ L"Restore here" } : winrt::hstring{ L"Restore" }));
-            restore.VerticalAlignment(VerticalAlignment::Center);
-            const auto id = s.id;
-            restore.Click([this, id](const IInspectable&, const RoutedEventArgs&) { _OnRestoreSession(id); });
-
-            auto rowGrid = Grid{};
-            {
-                ColumnDefinition c0;
-                c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-                ColumnDefinition c1;
-                c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-                rowGrid.ColumnDefinitions().Append(c0);
-                rowGrid.ColumnDefinitions().Append(c1);
-            }
-            Grid::SetColumn(infoCol, 0);
-            Grid::SetColumn(restore, 1);
-            rowGrid.Children().Append(infoCol);
-            rowGrid.Children().Append(restore);
-
-            auto border = Border{};
-            border.Background(Fill(0x18, 0x80, 0x80, 0x80));
-            border.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
-            border.Padding(Thickness{ 8, 6, 8, 6 });
-            border.Child(rowGrid);
-            return border;
-        };
-
-        bool any = false;
-        std::unordered_set<std::wstring> grouped;
-
-        // ---- Saved windows: each reopenable as a whole, its archived sessions listed under it ----
-        int ordinal = 0;
-        for (const auto& rw : recoverable)
-        {
-            ++ordinal;
-            std::vector<const SessionInfo*> winSessions; // this window's archived Claude sessions, in tab order
-            int shells = 0; // its non-Claude (pwsh / cmd) tabs — recreated by "Reopen window", not individually restorable
-            for (const auto& t : rw.record.tabs)
-            {
-                if (t.kind == ::Agentmaster::TabKind::Claude)
-                {
-                    if (const auto* hit = t.sessionId.empty() ? nullptr : findArchived(t.sessionId))
-                    {
-                        winSessions.push_back(hit);
-                    }
-                }
-                else if (!t.actionsJson.empty())
-                {
-                    ++shells;
-                }
-            }
-            if (winSessions.empty() && shells == 0)
-            {
-                continue; // this window's tabs are all gone (or its sessions were reopened elsewhere)
-            }
-
-            auto cardPanel = StackPanel{};
-            cardPanel.Spacing(6);
-
-            // Header: composition + the whole-window "Reopen window" (geometry + lens + every tab re-homed).
-            auto header = Grid{};
-            {
-                ColumnDefinition c0;
-                c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-                ColumnDefinition c1;
-                c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-                header.ColumnDefinitions().Append(c0);
-                header.ColumnDefinitions().Append(c1);
-            }
-            auto titleCol = StackPanel{};
-            titleCol.Spacing(1);
-            titleCol.VerticalAlignment(VerticalAlignment::Center);
-            titleCol.Children().Append(Text(winrt::hstring{ L"Saved window " } + winrt::to_hstring(ordinal), 14, true, 0.95));
-            std::wstring comp = std::to_wstring(winSessions.size()) + (winSessions.size() == 1 ? L" session" : L" sessions");
-            if (shells > 0)
-            {
-                comp += L" \x00B7 " + std::to_wstring(shells) + (shells == 1 ? L" shell" : L" shells");
-            }
-            titleCol.Children().Append(Text(winrt::hstring{ comp }, 11, false, 0.6));
-            auto reopenBtn = Button{};
-            reopenBtn.Content(winrt::box_value(L"Reopen window"));
-            reopenBtn.VerticalAlignment(VerticalAlignment::Center);
-            const int idx = rw.index;
-            reopenBtn.Click([this, idx](const IInspectable&, const RoutedEventArgs&) {
-                if (_reopenWindowHandler)
-                {
-                    _reopenWindowHandler(idx);
-                }
-                _HideArchive();
-            });
-            Grid::SetColumn(titleCol, 0);
-            Grid::SetColumn(reopenBtn, 1);
-            header.Children().Append(titleCol);
-            header.Children().Append(reopenBtn);
-            cardPanel.Children().Append(header);
-
-            for (const auto* s : winSessions)
-            {
-                cardPanel.Children().Append(makeSessionRow(*s, true));
-                grouped.insert(s->id);
-            }
-
-            auto group = Border{};
-            group.Background(Fill(0x14, 0x88, 0x99, 0xCC));
-            group.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x40, 0x80, 0x90, 0xC0) });
-            group.BorderThickness(Thickness{ 1, 1, 1, 1 });
-            group.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
-            group.Padding(Thickness{ 10, 8, 10, 8 });
-            group.Child(cardPanel);
-            _archiveListHost.Children().Append(group);
-            any = true;
-        }
-
-        // ---- Loose archived sessions (closed individually, not part of any saved window) ----
-        bool looseHeaderShown = false;
-        for (const auto& s : sessions)
-        {
-            if (s.live || grouped.find(s.id) != grouped.end())
-            {
-                continue;
-            }
-            if (any && !looseHeaderShown)
-            {
-                _archiveListHost.Children().Append(Text(L"Other archived sessions", 12, true, 0.7));
-                looseHeaderShown = true;
-            }
-            _archiveListHost.Children().Append(makeSessionRow(s, false));
-            any = true;
-        }
-
-        if (!any)
-        {
-            _archiveListHost.Children().Append(Text(L"No archived sessions. Closing a session's tab archives it here.", 12, false, 0.6));
-        }
-    }
-
-    void AgentManagerContent::_OnRestoreSession(const std::wstring& id)
-    {
-        if (id.empty() || !_restoreHandler)
-        {
-            return;
-        }
-        std::wstring title;
-        if (_registry)
-        {
-            if (const auto s = _registry->Get(id))
-            {
-                title = s->title;
-            }
-        }
-        const winrt::hstring body = title.empty() ?
-            winrt::hstring{ L"This re-launches the session and resumes its conversation + Flight Plan (claude --resume)." } :
-            winrt::hstring{ L"\x201C" + title + L"\x201D will re-launch and resume its conversation + Flight Plan (claude --resume)." };
-        const auto restore = _restoreHandler;
-        const winrt::hstring hid{ id };
-        _Confirm(L"Restore session?", body, L"Restore", [restore, hid, this]() {
-            restore(hid);
-            _HideArchive();
-        });
-    }
-
-    void AgentManagerContent::_OnRestoreAll()
-    {
-        if (!_restoreHandler || !_registry)
-        {
-            return;
-        }
-        std::vector<std::wstring> ids;
-        for (const auto& s : _registry->Snapshot())
-        {
-            if (!s.live)
-            {
-                ids.push_back(s.id);
-            }
-        }
-        if (ids.empty())
-        {
-            return;
-        }
-        const auto restore = _restoreHandler;
-        _Confirm(L"Restore all archived sessions?",
-                 winrt::hstring{ L"This re-launches and resumes " } + winrt::to_hstring(static_cast<int>(ids.size())) + L" session(s), each with its Flight Plan.",
-                 L"Restore all",
-                 [restore, ids, this]() {
-                     for (const auto& id : ids)
-                     {
-                         restore(winrt::hstring{ id });
-                     }
-                     _HideArchive();
-                 });
-    }
-
-    void AgentManagerContent::_UpdateArchivedButton(const std::vector<SessionInfo>& sessions)
-    {
-        if (!_archivedBtn)
-        {
-            return;
-        }
-        int archived = 0;
-        for (const auto& s : sessions)
-        {
-            if (!s.live)
-            {
-                ++archived;
-            }
-        }
-        _archivedBtn.Content(winrt::box_value(archived > 0 ?
-                                                  winrt::hstring{ L"Archived (" } + winrt::to_hstring(archived) + L")" :
-                                                  winrt::hstring{ L"Archived" }));
-        _archivedBtn.IsEnabled(archived > 0);
-    }
+    // ---- Archived-sessions overlay: REMOVED (FAVORITES.md) ------------------
+    // The in-content archive overlay AND the full-window Archive page are gone — the Sessions
+    // browser is the sole history view. Closing a session keeps it (always archived), resumable
+    // from Sessions and marked by Favorite.
 
     // Agentmaster: keep-awake toggle. SetThreadExecutionState's ES_CONTINUOUS flag is per-thread and
     // persists for the life of the calling thread (or until reset) — this runs on the window's UI
@@ -6048,8 +5584,8 @@ namespace winrt::TerminalApp::implementation
         // BEHAVIOR
         panel.Children().Append(Text(L"BEHAVIOR", 11, true, 0.6));
         _setConfirmKill = ToggleSwitch{};
-        _setConfirmKill.Header(winrt::box_value(L"Confirm before archiving a session"));
-        AgentSetTip(_setConfirmKill, L"When on, closing a session (tab X, the tree's Del, or Archive) first asks Archive vs Delete. Off archives without the prompt. The transcript on disk is never deleted either way.");
+        _setConfirmKill.Header(winrt::box_value(L"Confirm before closing a session"));
+        AgentSetTip(_setConfirmKill, L"When on, closing a session (tab X, the tree's Del, or the Close menu) first asks to confirm. Off closes without the prompt. Closing always keeps the session in Sessions, resumable \x2014 nothing on disk is deleted either way.");
         panel.Children().Append(_setConfirmKill);
         // How the tab/session rename box commits via the keyboard. Clicking away (focus loss) ALWAYS
         // commits; this only governs the Enter / Shift+Enter shortcut. The box is multi-line, so the

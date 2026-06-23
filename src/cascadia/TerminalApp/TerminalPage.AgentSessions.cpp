@@ -377,13 +377,13 @@ namespace winrt::TerminalApp::implementation
         return tab;
     }
 
-    // Agentmaster: on startup, load every persisted session into the registry as ARCHIVED
+    // Agentmaster: on startup, load every persisted session into the registry as CLOSED
     // (live=false) — and do NOT auto-launch any of them. This is the deliberate reversal of the
     // old "close == reopen" auto-relaunch (Correctness Rule #6): the app opens to just the
-    // Manager tab, the prior fleet arrives Archived (restorable as a whole), and the user
-    // re-opens what they want from the Manager's "Archived" button (which resumes via
-    // `claude --resume`, transcript-gated, in _RestoreArchivedSession). No tabs are created
-    // here, so there is nothing to lay out / yield for — the body runs synchronously.
+    // Manager tab, the prior fleet arrives closed (resumable), and the user re-opens what they
+    // want from the Sessions browser (which resumes via `claude --resume`, transcript-gated, in
+    // _RestoreArchivedSession). No tabs are created here, so there is nothing to lay out / yield
+    // for — the body runs synchronously. (FAVORITES.md: there is no separate "Archived" view.)
     winrt::fire_and_forget TerminalPage::_RestoreClaudeSessions()
     {
         if (!_sessionRegistry)
@@ -482,11 +482,11 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
-    // Agentmaster: archive a session (the Manager's Delete / Archive / tree Del / Flight-Plan
-    // "Archive"). In the lifecycle model "Delete" == archive: it routes through the SAME
-    // tab-close seam as clicking the tab's X, so the one consequence confirm + archive
-    // bookkeeping (in _HandleCloseTabRequested -> _ArchiveAndCloseClaudeTab) applies uniformly.
-    // The session record is KEPT (live=false) so it persists and lists under "Archived".
+    // Agentmaster: close a session (the Manager's "Close" / tree Del / Flight-Plan "Close"). It
+    // routes through the SAME tab-close seam as clicking the tab's X, so the one Close confirm +
+    // archive (keep-the-record) bookkeeping (in _HandleCloseTabRequested -> _ArchiveAndCloseClaudeTab)
+    // applies uniformly. The session record is KEPT (live=false) so it persists and lists in the
+    // Sessions browser, resumable (FAVORITES.md: always archive, never delete).
     void TerminalPage::_ArchiveClaudeSession(winrt::hstring sessionId)
     {
         const std::wstring id{ sessionId };
@@ -523,12 +523,15 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (permanent remove — record-only): the shared bookkeeping behind the trash twin of
-    // Archive. Archive keeps the record (live=false, restorable); this DROPS it — Remove from the
-    // registry (fires _notify -> board / tree / Archive-page refresh) + persist, clear this window's
-    // per-session maps, and strip the id from SAVED (non-live) window records so a reopen can't
-    // resurrect it. The conversation .jsonl on disk is deliberately KEPT (it still appears in the
-    // Sessions browser and can be reopened from there).
+    // Agentmaster (FAVORITES.md — INTERNAL record-drop): drop a managed record from the registry +
+    // persist, clear this window's per-session maps, and strip the id from SAVED (non-live) window
+    // records so a reopen can't resurrect it. The conversation .jsonl on disk is deliberately KEPT
+    // (it still appears in the Sessions browser and can be reopened from there). With the "always
+    // archive, never delete" model there is NO user-facing Delete — Close keeps the record (the
+    // Sessions browser is the sole history). This seam survives only for the resume-fresh stale-drop
+    // (a session whose transcript is gone, replaced by a fresh launch — see _RestoreArchivedSession),
+    // so it deliberately does NOT auto-hide the id (hiding a vanished session is pointless, and a
+    // Closed session must stay visible in Sessions).
     void TerminalPage::_RemoveSessionRecord(const std::wstring& sessionId)
     {
         if (sessionId.empty())
@@ -543,14 +546,8 @@ namespace winrt::TerminalApp::implementation
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
         _StripSessionFromSavedWindows(sessionId);
-        // Agentmaster: a permanently-deleted session is ALSO auto-hidden from the Sessions browser —
-        // the SAME AppSettings.hiddenSessionIds set the row right-click "Hide from list" uses — so a
-        // deleted tab disappears from that list too instead of lingering as an on-disk row. It is NOT
-        // gone: the .jsonl on disk is kept (above), so the Sessions page's "Hidden" reveal filter
-        // (or the Settings cog's "Reset hidden sessions") brings it back, still resumable. Idempotent.
-        _AddSessionIdToHiddenList(sessionId);
         _RenderSessionsTable(); // refresh the Sessions page if it happens to be open (guarded no-op otherwise)
-        ::Agentmaster::AppendStateLog(L"hooks.log", L"[delete] " + sessionId + L"\n");
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[remove-record] " + sessionId + L"\n");
     }
 
     // Agentmaster: strip a removed session's tab refs from SAVED (non-live) window records, so reopening
@@ -629,12 +626,11 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: the shared archive seam — confirm the consequence (unless suppressed), do the
-    // archive bookkeeping, then close the tab. KEEPING the registry record (live=false) is what
-    // makes archive reversible: the session persists and lists under the Manager's "Archived"
-    // button for restore. (The old behavior — Remove from the registry + sessions.json — was the
-    // irreversible discard the lifecycle model drops: archive is terminal, nothing is forgotten,
-    // and the Claude transcript on disk is never touched either.)
+    // Agentmaster: the shared CLOSE seam (FAVORITES.md) — confirm (unless suppressed), keep the
+    // record + archive bookkeeping, then close the tab. KEEPING the registry record (live=false) is
+    // what makes Close non-destructive: the session persists and lists in the Sessions browser,
+    // resumable anytime. "Always archive, never delete" — there is no Delete branch here anymore;
+    // the Claude transcript on disk is never touched either.
     winrt::Windows::Foundation::IAsyncAction TerminalPage::_ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm)
     {
         // Consequence confirm (a buttons-only ContentDialog -> XAML-Islands-safe). Gated by the
@@ -655,15 +651,15 @@ namespace winrt::TerminalApp::implementation
                 ContentDialog dialog;
                 dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
                 dialog.Title(winrt::box_value(L"Close session?"));
-                // Archive (the safe action) keeps it restorable; Delete (the trash, leftmost) removes it
-                // from Agentmaster but KEEPS the conversation file on disk (it still appears in Sessions).
+                // FAVORITES.md: Close is the ONE verb — it shuts the session down but KEEPS the record
+                // (always archived), so it stays in the Sessions browser, resumable anytime. Nothing is
+                // deleted; there is no Delete option. (Star it in Sessions to keep it in your favorites.)
                 dialog.Content(winrt::box_value(title.empty() ?
-                                                    winrt::hstring{ L"Archive shuts the session down and keeps it restorable from the Manager’s “Archived” button (with its Flight Plan). Delete removes it from Agentmaster — the conversation file on disk is kept and still appears in Sessions." } :
-                                                    winrt::hstring{ L"“" + title + L"” — Archive shuts it down and keeps it restorable from the Manager’s “Archived” button (with its Flight Plan). Delete removes it from Agentmaster — the conversation file on disk is kept and still appears in Sessions." }));
-                dialog.PrimaryButtonText(L"\U0001F5D1 Delete"); // trash, leftmost (the vision); NOT the default button
-                dialog.SecondaryButtonText(L"Archive");
+                                                    winrt::hstring{ L"Closing shuts the session down. It stays in Sessions — resume it anytime, and star it there to keep it in your favorites." } :
+                                                    winrt::hstring{ L"“" + title + L"” — closing shuts it down. It stays in Sessions — resume it anytime, and star it there to keep it in your favorites." }));
+                dialog.PrimaryButtonText(L"Close");
                 dialog.CloseButtonText(L"Cancel");
-                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel (neither destructive button is the default)
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
 
                 const auto weak = get_weak();
                 const auto result = co_await presenter.ShowDialog(dialog);
@@ -672,21 +668,13 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return;
                 }
-                if (result == ContentDialogResult::Primary)
+                if (result != ContentDialogResult::Primary)
                 {
-                    // Permanent remove (record-only): drop the record + persist + strip saved-window refs,
-                    // then close the tab. The conversation .jsonl on disk is KEPT.
-                    _RemoveSessionRecord(sessionId);
-                    tab.Close();
-                    co_return;
+                    co_return; // Cancel / dismiss -> leave the session Open
                 }
-                if (result != ContentDialogResult::Secondary)
-                {
-                    co_return; // Cancel -> leave the session Open
-                }
-                // Secondary == Archive -> fall through to the archive bookkeeping below.
+                // Primary == Close -> fall through to the archive (keep-the-record) bookkeeping below.
             }
-            // No presenter to confirm with -> archive anyway (it's reversible; don't strand the close).
+            // No presenter to confirm with -> close anyway (it's non-destructive; don't strand the close).
         }
 
         // Archive bookkeeping: KEEP the record, flip it to Archived, unbind stdin, persist, and
@@ -760,11 +748,11 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
     }
 
-    // Agentmaster: re-launch (resume) an archived session from the Manager's "Archived" list.
-    // The record is still in the registry (live=false); _LaunchClaudeSession resumes it
-    // (claude --resume <id>, transcript-gated) with its Flight Plan + autopilot, and flips it
-    // back to live (Open). A missing transcript yields a fresh id; _LaunchClaudeSession then
-    // drops the stale archived record so it doesn't linger in the list.
+    // Agentmaster: re-launch (resume) a closed session from the Sessions browser. The record is
+    // still in the registry (live=false); _LaunchClaudeSession resumes it (claude --resume <id>,
+    // transcript-gated) with its Flight Plan + autopilot, and flips it back to live (Open). A
+    // missing transcript yields a fresh id; _LaunchClaudeSession then drops the stale record so it
+    // doesn't linger. (Name kept for churn; "archived" here just means the !live state.)
     void TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId)
     {
         if (!_sessionRegistry)

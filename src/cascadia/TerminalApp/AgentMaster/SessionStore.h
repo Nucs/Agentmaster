@@ -32,6 +32,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Agentmaster
 {
@@ -41,6 +42,13 @@ namespace Agentmaster
 
     // The TITLE field key (the first consumer). New per-session data adds its own key here.
     inline constexpr const wchar_t* kSessionStoreTitleKey = L"title";
+
+    // The FAVORITE field key (FAVORITES.md). A durable per-session star: the user's "keep/find
+    // this" marker that replaced archiving. Value is "1" when favorited; empty removes the key (and
+    // the file, when it becomes empty), so the store stays sparse — only favorited (or titled)
+    // sessions get a file. Keyed by the session id the Sessions page uses (the Claude conversation
+    // uuid), so a favorite survives Close and applies to never-managed on-disk sessions alike.
+    inline constexpr const wchar_t* kSessionStoreFavoriteKey = L"favorite";
 
     // ===== testable core (explicit store dir) ================================================
 
@@ -73,4 +81,14 @@ namespace Agentmaster
     std::wstring GetStoredSessionTitle(const std::wstring& sessionId);
     bool SetStoredSessionTitle(const std::wstring& sessionId, const std::wstring& title);
     std::unordered_map<std::wstring, std::wstring> LoadAllStoredSessionTitles();
+
+    // ===== typed convenience: the FAVORITE (FAVORITES.md) ===================================
+
+    // Is this session favorited? (== a non-empty stored "favorite" value.)
+    bool IsSessionFavorite(const std::wstring& sessionId);
+    // Toggle the star: on => store "1", off => remove the key (the file is GC'd when it empties).
+    bool SetSessionFavorite(const std::wstring& sessionId, bool favorite);
+    // The set of every favorited session id, in ONE sparse directory scan (only favorited/titled
+    // sessions have a file). The Sessions page reads this off-thread to drive the star + filter.
+    std::unordered_set<std::wstring> LoadAllFavoriteSessions();
 }

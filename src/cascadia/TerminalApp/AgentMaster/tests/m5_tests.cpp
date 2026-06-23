@@ -2927,6 +2927,24 @@ static void TestTranscriptResolve()
         CHECK(!SetSessionStoreFieldIn(store, L"..\\evil", L"title", L"x"), "store: a path-bearing id is rejected");
         CHECK(GetSessionStoreFieldIn(store, L"", L"title").empty(), "store: an empty id reads empty");
 
+        // --- the FAVORITE key (FAVORITES.md): the durable star, the same store + mechanism. ---
+        CHECK(std::wstring{ kSessionStoreFavoriteKey } == L"favorite", "store: the favorite key is \"favorite\"");
+        // not favorited until set; a star coexists with a title on the same session.
+        CHECK(GetSessionStoreFieldIn(store, a, kSessionStoreFavoriteKey).empty(), "store: a session is not favorite by default");
+        CHECK(SetSessionStoreFieldIn(store, a, kSessionStoreFavoriteKey, L"1"), "store: favorite a");
+        const auto recFav = LoadSessionStoreIn(store, a);
+        CHECK(recFav.size() == 2 && recFav.at(L"title") == L"My Renamed Session" && recFav.at(kSessionStoreFavoriteKey) == L"1", "store: favorite coexists with the title");
+        // LoadAll(favorite) gathers ONLY favorited sessions (b has a title but no star).
+        const auto favs = LoadAllSessionStoreFieldIn(store, kSessionStoreFavoriteKey);
+        CHECK(favs.size() == 1 && favs.count(a) == 1 && favs.count(b) == 0, "store: LoadAll favorites returns only the starred session");
+        // un-favorite removes the key (back to title-only) but the second-session star is independent.
+        CHECK(SetSessionStoreFieldIn(store, b, kSessionStoreFavoriteKey, L"1"), "store: favorite b too");
+        CHECK(SetSessionStoreFieldIn(store, a, kSessionStoreFavoriteKey, L""), "store: un-favorite a (empty removes the key)");
+        CHECK(GetSessionStoreFieldIn(store, a, kSessionStoreFavoriteKey).empty(), "store: a is no longer favorite");
+        const auto favs2 = LoadAllSessionStoreFieldIn(store, kSessionStoreFavoriteKey);
+        CHECK(favs2.size() == 1 && favs2.count(b) == 1 && favs2.count(a) == 0, "store: only b remains favorited");
+        CHECK(LoadSessionStoreIn(store, a).size() == 1, "store: un-favorite left the title intact");
+
         std::filesystem::remove_all(std::filesystem::path{ store }, ec);
     }
 

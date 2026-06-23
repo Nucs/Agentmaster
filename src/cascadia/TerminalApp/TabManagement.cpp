@@ -1139,14 +1139,13 @@ namespace winrt::TerminalApp::implementation
 
         const auto weak = get_weak();
 
-        // Agentmaster: a bulk close that includes managed agent sessions asks ONCE for the whole
-        // batch — Delete All / Archive All / Cancel All — instead of silently archiving every
-        // session or walking a train of per-tab confirms. Archive All keeps each session
-        // restorable from the Manager's "Archived" list (with its Flight Plan); Delete All drops
-        // the records (the conversation .jsonl files on disk are KEPT and still appear in the
-        // Sessions browser); Cancel All stops the close entirely. A batch of only plain shell tabs
-        // keeps upstream's single generic confirm (gated on ConfirmOnClose). The resolved decision
-        // is then applied to each tab below WITHOUT re-prompting (skipConfirm).
+        // Agentmaster (FAVORITES.md): a bulk close that includes managed agent sessions asks ONCE for
+        // the whole batch — Close All / Cancel All — instead of silently closing every session or
+        // walking a train of per-tab confirms. Close All keeps each session resumable in the Sessions
+        // browser (with its Flight Plan) — nothing on disk is deleted (always archive, never delete);
+        // Cancel All stops the close entirely. A batch of only plain shell tabs keeps upstream's single
+        // generic confirm (gated on ConfirmOnClose). The decision is then applied to each tab below
+        // WITHOUT re-prompting (skipConfirm).
         size_t managedCount = 0;
         for (const auto& tab : closable)
         {
@@ -1156,7 +1155,6 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        bool deleteAll = false; // false => Archive All (the safe, reversible default)
         if (managedCount > 0)
         {
             if (const auto presenter{ _dialogPresenter.get() })
@@ -1169,17 +1167,19 @@ namespace winrt::TerminalApp::implementation
                     body += std::to_wstring(shellCount);
                     body += (shellCount == 1 ? L" other tab" : L" other tabs");
                 }
-                body += L" will be closed.\n\nArchive All keeps the sessions restorable from the Manager’s “Archived” button (with their Flight Plans). Delete All removes them from Agentmaster — the conversation files on disk are kept and still appear in Sessions. Other tabs are closed either way.";
+                // FAVORITES.md: Close always archives (keep the record); there is no Delete All. The
+                // sessions stay in the Sessions browser, resumable anytime; nothing on disk is deleted.
+                body += L" will be closed.\n\nThe sessions stay in the Sessions browser — resume any of them anytime (their conversation files on disk are kept). Other tabs are closed too.";
 
                 const std::wstring titleStr = L"Close " + std::to_wstring(closable.size()) + (closable.size() == 1 ? L" tab?" : L" tabs?");
 
                 ContentDialog dialog;
+                dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
                 dialog.Title(winrt::box_value(winrt::hstring{ titleStr }));
                 dialog.Content(winrt::box_value(winrt::hstring{ body }));
-                dialog.PrimaryButtonText(L"\U0001F5D1 Delete All"); // trash, leftmost; NOT the default button
-                dialog.SecondaryButtonText(L"Archive All");
+                dialog.PrimaryButtonText(L"Close All");
                 dialog.CloseButtonText(L"Cancel All");
-                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel (neither destructive button is the default)
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel All
 
                 const auto result = co_await presenter.ShowDialog(dialog);
                 const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
@@ -1187,16 +1187,13 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return;
                 }
-                if (result == ContentDialogResult::Primary)
+                if (result != ContentDialogResult::Primary)
                 {
-                    deleteAll = true; // Delete All
+                    co_return; // Cancel All / dismiss -> stop the close
                 }
-                else if (result != ContentDialogResult::Secondary)
-                {
-                    co_return; // Cancel All -> stop the close (Secondary == Archive All falls through)
-                }
+                // Primary == Close All -> fall through to the per-tab close below.
             }
-            // No presenter to confirm with -> archive anyway (reversible; don't strand the close).
+            // No presenter to confirm with -> close anyway (non-destructive; don't strand the close).
         }
         else if (_settings.GlobalSettings().ConfirmOnClose() != ConfirmOnClose::Never)
         {
@@ -1224,18 +1221,9 @@ namespace winrt::TerminalApp::implementation
             const auto sessionId = _ClaudeSessionForTab(tab);
             if (!sessionId.empty())
             {
-                if (deleteAll)
-                {
-                    // Drop the record (the transcript on disk is kept) + close the tab. Mirrors
-                    // _ArchiveAndCloseClaudeTab's Delete branch; the batch dialog already confirmed.
-                    _RemoveSessionRecord(sessionId);
-                    tab.Close();
-                }
-                else
-                {
-                    // Archive bookkeeping + close (skipConfirm: the batch dialog already ran).
-                    co_await _ArchiveAndCloseClaudeTab(tab, sessionId, /*skipConfirm*/ true);
-                }
+                // Always archive (keep the record) + close — FAVORITES.md: there is no Delete All.
+                // skipConfirm: the batch dialog already ran. The session stays resumable in Sessions.
+                co_await _ArchiveAndCloseClaudeTab(tab, sessionId, /*skipConfirm*/ true);
             }
             else
             {

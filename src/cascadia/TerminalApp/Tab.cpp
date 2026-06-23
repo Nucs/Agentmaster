@@ -2041,6 +2041,28 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Favorite" / "Unfavorite" (Agentmaster, FAVORITES.md) — toggle this tab's session star
+            // (the SessionStore "favorite" key), the SAME durable star the Sessions page's ★ column sets.
+            // Built COLLAPSED — the page shows it + sets its label (Favorite vs Unfavorite) only on a
+            // managed agent-session tab (SetAgentFavoriteState at flyout-open), like "Mark Unread".
+            // Raises FavoriteRequested; the page resolves THIS tab's session + flips the star.
+            Controls::FontIcon favoriteSymbol;
+            favoriteSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            favoriteSymbol.Glyph(L"\xE734"); // FavoriteStar
+
+            _favoriteMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->FavoriteRequested.raise();
+                }
+            });
+            _favoriteMenuItem.Text(L"Favorite");
+            _favoriteMenuItem.Icon(favoriteSymbol);
+            _favoriteMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+            WUX::Controls::ToolTipService::SetToolTip(_favoriteMenuItem, box_value(winrt::hstring{ L"Star this session so it's easy to find in Sessions (toggle)" }));
+        }
+
+        {
             // "Duplicate tab"
             Controls::FontIcon duplicateTabSymbol;
             duplicateTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
@@ -2166,6 +2188,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
+        contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
@@ -2286,6 +2309,17 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _markUnreadMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster (FAVORITES.md): show/hide the "Favorite" item AND set its label to match the
+    // session's current star (Favorite when not starred, Unfavorite when starred). Page-driven at
+    // flyout-open — the page owns the SessionStore lookup (IsSessionFavorite) and the toggle.
+    void Tab::SetAgentFavoriteState(bool visible, bool isFavorite)
+    {
+        ASSERT_UI_THREAD();
+
+        _favoriteMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        _favoriteMenuItem.Text(isFavorite ? L"Unfavorite" : L"Favorite");
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading)

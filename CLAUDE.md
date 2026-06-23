@@ -65,6 +65,7 @@ Sessions browser + the `~/.claude` storage map: [`doc/agentmaster/SESSIONS.md`](
 Observer-owned session state (the PULL state engine — design, pre-implementation): [`doc/agentmaster/STATE.md`](doc/agentmaster/STATE.md).
 Commandline introspection (the `agentmaster <verb>` CLI): [`doc/agentmaster/CLI.md`](doc/agentmaster/CLI.md).
 Summary-panel JUMP (transcript→buffer resolve + center the view on a prompt): [`doc/agentmaster/SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md).
+Favorite + Close refactor (Archive removed; Sessions is the sole history view): [`doc/agentmaster/FAVORITES.md`](doc/agentmaster/FAVORITES.md).
 
 ## Status
 
@@ -142,11 +143,10 @@ lazy-start safe — no eager `connection.Start()`); each **Other** ref replays i
 actions (`WindowLayout::FromJson` → one `ProcessStartupActions`) to recreate the shell tab with its
 title + color + cwd. Capture fills the Other ref's `actionsJson` from `BuildStartupActions(Persist)` →
 `WindowLayout::ToJson` in `_CaptureWindowRecord` (so `windows/<id>.json` now carries the pwsh/cmd tabs,
-not just Claude refs). The Manager's **Archived** UI (now the full-window Archive page, C1 UI) is **grouped by window** (`_GatherArchiveRows`
-over `Engine::RecoverableWindows`): each not-currently-open record is a "Saved window" card with a
-per-window **Reopen window** (`_ReopenSavedWindow(idx)` → `agentmaster -w -1 -s <idx>`) over its session
-rows (**Restore here** = cherry-pick one into the current window); sessions in no record fall under
-"Other archived sessions". A clobber guard keeps a not-yet-laid-out window (no tabs AND no geometry, or
+not just Claude refs). Saved windows that aren't currently open reopen WHOLE via the toolbar **"Reopen
+Windows (N)"** button (`Engine::RecoverableWindows` → `_ReopenSavedWindows` → `agentmaster -w -1 -s <idx>`);
+the per-window "Saved window" cards + "Restore here" the removed Archive page once offered are gone
+(FAVORITES.md — a closed session is resumed from the Sessions browser instead). A clobber guard keeps a not-yet-laid-out window (no tabs AND no geometry, or
 pre-Initialized) from overwriting a good record on disk (`_FlushWindowRecord`), and the close-flush
 captures the final state before the gap-#1 teardown clears `_claudeTabs` (`CloseWindow`). A reopened
 (claimed-record) window also **suppresses the default startup tab** — `_OnFirstLayout` gates
@@ -221,8 +221,9 @@ each a focused commit — all zero writes to `~/.codex` (every read is out-of-ba
   an npm `codex.cmd` and die `0x80070002` (the same trap Claude's native-exe policy fixed; Codex is NOT
   exe-only — the observer finds `codex.exe` as a DESCENDANT, so a `.cmd` re-exec is fine, and an empty
   launcher falls back to the bare `codex` token + the surfaced error); immediate managed card,
-  `AM_SESSION` stamp, no `CCMGR_*`). **Restore** — the Archive page's Restore here branches on `kind` (`_RestoreArchivedSession`
-  → `_LaunchCodexSession`, transcript-gated on the rollout existing, else fresh — Rule #6). **Window-restore**
+  `AM_SESSION` stamp, no `CCMGR_*`). **Restore** — the resume seam branches on `kind` (`_RestoreArchivedSession`,
+  now reached from the Sessions page's "Resume here", → `_LaunchCodexSession`, transcript-gated on the
+  rollout existing, else fresh — Rule #6). **Window-restore**
   — `_RestoreWindowTabs` re-homes a Codex tab ref via `_LaunchCodexSession`. **Adopt** — the EXTERNAL menu's
   Adopt brings an external codex's rollout under management via a **Fork-a-copy vs Resume-anyway** choice
   (`_AdoptExternalCodex(pid,cwd,fork)` behind `_ConfirmChoice`): fork = `codex fork <uuid>` into a NEW
@@ -239,51 +240,39 @@ so it shows once. **Lib-compiled green; not yet full-exe deployed** (rides the n
 mutation — a product decision, no per-session `--settings` like Claude); **C4** = bind a stdin injector +
 Autopilot (drive the Codex TUI; launch is PULL-correlated, resume=`codex resume <id>`).
 
-**The Archive UI is now a full-window page; the round-2 audit's 13 fixes are deployed, and a round-3
-audit (10 more fixes) + a three-commit informativeness batch are built + lib-verified on top — they ride
-the next deploy cycle.**
-The **Archived** button opens a **full-window Archive page** (dense sortable + searchable table left;
-detail — metadata + read-only Flight Plan + **Restore here** / **Reopen its window** — right; multi-select
-**bulk Restore**) replacing the old in-content modal, mounted over `TerminalPage`'s Root content rows with
-**every pointer handler deferring** its tree mutation (a synchronous mid-click tree change AVs the
-XAML-Islands hit-test — pinned from two crash dumps, fixed + live-exercised crash-free). A read-only sweep
-of that page, the resume/restore path, and the `WindowRecord` layer then **fixed 13 correctness issues**
-(commit `b5768081e`): quit-all now flushes the window record, a fleet-load **barrier**
-(`Engine::restoreMutex`) stops a reopened window racing its tab re-home against a half-loaded registry, the
-`live=true` revive is gated on a changed pid, `SessionRegistry::Remove` notifies observers, inject-rollback
-covers every send path, and `ProcessAlive` uses a wait-based liveness test. A **round-3 audit** then
-confirmed-in-code and fixed **10 more** (commit `6d463af2a`): `SessionInfo.branch` had **no live writer**
-(the Branch column + the search's branch term were permanently empty) — now **backfilled off-thread** from
-each transcript's first user line (quiet-update + ONE `SaveSessions`); an open page was a **stale
-snapshot** — a registry **observer** (token, detached in `~TerminalPage`) behind an atomic visibility
-mirror + a 400 ms trailing throttle keeps it **live**; the per-keystroke synchronous rebuild +
-transcript-read storm got a **200 ms search debounce** + an **(id, mtime)-validated detail cache**; a
-recoverable window with NO archived sessions was **invisible** here — now a synthetic, checkbox-less
-**"Saved window" row** (sentinel id `window:<guid>`, never collides with a session UUID); the
-gathered-but-never-rendered sent/total counts became a sortable **Plan column**; plus ago-phrasing
-("just now", `mo`/`y` units), full-Unicode lowercasing (`LCMapStringEx`) + a slash-flipped dir term in
-the search haystack, bulk restore in **view order** (was unordered_set hash order), and wider fixed
-columns (the sort arrow was ellipsized off the default sort column). The **informativeness batch** on
-top: hover **tooltips** on every truncating/abbreviating cell — absolute local datetimes behind
-Created/Active, full title/path/branch, and the **W{n} chip tip** ("W2 · 4 tabs (2 claude, 2 shell) ·
-1466×780 @ 14,173", `ArchiveWindowTip`, gather-stamped) (`af7bc5879`); **detail-pane depth**
-(`2e8e45b7f`) — the truncated conversation **id + Copy id / Copy path / Open transcript** (off-thread
-ShellExecute, Explorer `/select` fallback; all read-only — the no-delete design), an **always-on
-Conversation section** (the transcript's human prompts, which the queue's else-fallback used to hide),
-and **"Last assistant reply"** = where the conversation left off (a 64 KB off-thread **tail read**,
-`ArchiveReadFileTail` → `ParseTranscriptDelta`, cached by (id, mtime), empty results cached too); and
-**plan-text search** (`e2522e448`) — a gather-built per-row `searchBlob` (title · dir + slash-flipped
-twin · branch · the **session id** · every queued prompt's label+text; window-only rows index their chip
-tip) with **whitespace-tokenized AND-matching**, so "remember that prompt I queued" — or a UUID pasted
-from `hooks.log` — finds its session. Detail: *C1 UI* + the audit bullets under *Persistence*.
+**Archive is REMOVED — replaced by Favorite + Close; the Sessions browser is the SOLE history view
+([`FAVORITES.md`](doc/agentmaster/FAVORITES.md); commit `b55765138`; lib-compiled green + engine-tested
+1101/1101 + Debug-built + dev-deployed + verified engine-live).** The full-window Archive *page*
+(`TerminalPage.AgentArchivePage.cpp` — deleted), the **Archived (N)** toolbar button, the retired
+in-content archive overlay, and the Archive page's per-window "Reopen window" + synthetic "Saved window"
+rows are ALL gone. A managed tab's lifecycle verbs are now just **Close** and **Favorite**: **Close**
+*always archives* (keeps the `live=false` record so the session stays resumable from Sessions — it NEVER
+deletes; the old 3-way Delete/Archive/Cancel confirm collapsed to **Close/Cancel**, the batch close to
+**Close All/Cancel All**, and every "Delete permanently" UI was removed). **Favorite** (a hollow ☆ /
+filled-yellow ★) is the new "keep/find this" marker, persisted via the **SessionStore `favorite` key**
+(the durable per-session *title* store, reused — survives Close, works for never-managed on-disk sessions,
+one sparse scan; `IsSessionFavorite` / `SetSessionFavorite` / `LoadAllFavoriteSessions`). It surfaces as a
+**leftmost ★ column** + a **`[ ] Favorite` filter** + a row "Favorite/Unfavorite" menu on the Sessions
+page, and a **Favorite/Unfavorite** item on a managed Claude tab's right-click menu (beside Close). The
+removal lost NO capability: the Sessions page's "Resume here" already rehydrated a closed session's Flight
+Plan via `_RestoreArchivedSession` (so it subsumed the Archive page's "Restore here"). **Reopen window is
+unchanged** — the toolbar **"Reopen Windows (N)"** button + the `wt -w -1 -s <idx>` mechanism stay. A
+transcript that's gone (rare — Claude seldom sweeps) simply isn't listed (no broken Resume — "not found
+=> don't show"). `_RemoveSessionRecord` survives only as the internal resume-fresh stale-drop (no longer
+auto-hides). Detail: *C1 UI* + the lifecycle bullet under *Persistence*. (The prior full-window Archive
+page + its round-2/round-3 audits + informativeness batch are HISTORY, superseded by this refactor.)
 
 **The Sessions browser ([`SESSIONS.md`](doc/agentmaster/SESSIONS.md)) is implemented — engine + UI,
 lib-compiled green + engine-tested (the 604-check harness incl. a live-corpus smoke); it rides the
-next deploy cycle.** A **"Sessions"** toolbar button (right after Archived) opens a full-window page
-(the Archive page's structure + its deferred-pointer-handler discipline) listing **EVERY on-disk
+next deploy cycle. It is now the SOLE history view (the Archive page is gone — FAVORITES.md).** A
+**"Sessions"** toolbar button (the toolbar's rightmost, after Pause Autopilot) opens a full-window page
+(the deferred-pointer-handler discipline the Archive page pioneered) listing **EVERY on-disk
 Claude Code session** (`~/.claude/projects/*/<uuid>.jsonl` — not just managed ones) in a selectable
 window: the `[1 month]` button click-cycles 1d/3d/7d/14d/1mo/3mo, hover opens a **From/To range
-popup** (plain text boxes — islands-safe). The search bar `[ search ] (👤)(🤖)(📁)(📄)(F)` runs
+popup** (plain text boxes — islands-safe). It carries a **leftmost ★ favorite column** (hollow ☆ /
+filled-yellow ★, click toggles the durable SessionStore star) + a **`[ ] Favorite` filter** + a row
+"Favorite/Unfavorite" menu (FAVORITES.md). The search bar `[ search ] (👤)(🤖)(📁)(📄)(🏷)(F) [☐ Open]
+[☐ Hidden] [☐ Favorite] [1 month] [↻]` runs
 **two-phase**: FAST = in-memory over per-session **sidecar indexes**
 (`~/.agentmaster/sessions-index/<sid>.json` — `(size,mtime)`-invalidated, **incrementally**
 re-accumulated from the stored byte offset; built by `TranscriptStore`) + the **`history.jsonl`
@@ -338,29 +327,14 @@ with the search text + the scope/Open/Hidden toggles; a dismissible **`✕ filte
 search box (`_sessFilterChip`) shows + clears the active facets (the submenu also has **Clear filters**),
 the count line notes `· filtered`. Pure browse-state — nothing persisted, the transcript untouched (it
 resets on restart, unlike `hiddenSessionIds`).
-The hidden set is also **auto-populated on Delete permanently** (the `_RemoveSessionRecord` seam calls
-`_AddSessionIdToHiddenList`, so a deleted tab disappears from the Sessions list too, not just the
-Board/Archive — its `.jsonl` is still kept on disk). A search-bar **"Hidden" checkbox**
-(`_sessHiddenBtn`, default OFF, beside "Open") **reveals** the hidden set — shown dimmed, with the row
-menu's **"Unhide"** (`_UnhideSessionFromList`) replacing "Hide from list" — so a deleted/hidden session
-is findable + resumable without clearing the whole set from the cog.
-**Known gaps in this auto-hide change (follow-ups, not yet done; the change is lib-UNCOMPILED + not
-deployed):** (1) **stale delete-path copy** — ≥8 user-facing strings still promise a deleted session
-"still appears in Sessions" (the tab-close + batch-close confirms `TerminalPage.AgentSessions.cpp` /
-`TabManagement.cpp`, the board/tree Delete tooltips + confirm `AgentManagerContent.cpp`, the Archive
-page's row/window/bulk delete confirms `TerminalPage.AgentArchivePage.cpp`), which is now **misleading**
-— it appears only under the "Hidden" filter; these need a "find it again under the Sessions ‘Hidden’
-filter" rewrite, and the confirms want a breadcrumb to that filter (today a delete is silently invisible
-in Board + Archive + Sessions). (2) **`hiddenSessionIds` conflates two intents under one blunt reset** —
-manual "Hide from list" and auto-hide-on-delete share one set, so the cog's **Reset hidden sessions**
-recovers a deleted session AND un-hides every deliberately-hidden one (and vice-versa); the set also
-grows unbounded (a never-prompted delete adds a GUID that maps to no row), and a revealed deleted row is
-visually indistinguishable from a manually-hidden one. (3) **cross-window staleness** — the auto-hide
-updates THIS window's `_appSettings.hiddenSessionIds` + disk; a Sessions page open in ANOTHER window
-keeps its stale in-memory copy until it reloads (no registry-observer live-refresh like the Archive
-page has). (4) This reverses a deliberate "deleted ⇒ still discoverable/resumable in Sessions" safety
-net (Rule #6) by default — intended (the user asked for it), but worth revisiting whether auto-hide
-should be the default or gated on intent. **Presence
+"Hide from list" is **manual only** now — the **Delete permanently** path that used to auto-hide a
+session is GONE (FAVORITES.md: Close keeps every session, never deletes), so `_RemoveSessionRecord` no
+longer calls `_AddSessionIdToHiddenList`. A search-bar **"Hidden" checkbox** (`_sessHiddenBtn`, default
+OFF, beside "Open") **reveals** the hidden set — shown dimmed, with the row menu's **"Unhide"**
+(`_UnhideSessionFromList`) replacing "Hide from list" — so a manually-hidden session is findable +
+resumable without clearing the whole set from the cog. (The earlier auto-hide-on-delete change + its
+documented follow-up gaps are MOOT — there is no Delete; the stale "still appears in Sessions" delete-path
+copy went with the removed Delete UI.) **Presence
 integration (§7-Q5's separation):** `TranscriptStore::ReadSessionPresence`
 owns the raw `~/.claude/sessions/<pid>.json` read; the **observer** validates rows against its
 process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + the transient
@@ -789,7 +763,8 @@ What works, by area:
   (jump to the live tab), and **right-click opens the SAME context menu** as the tree session row —
   also surfaced by a **hover-revealed `⋯` more-button** in the card's top-right corner (a
   discoverable twin for users who never right-click)
-  (`_MakeSessionMenu` — **Jump to Tab** / Rename (F2) / Archive… / **Delete permanently…** / Open New
+  (`_MakeSessionMenu` — **Jump to Tab** / Rename (F2) / **Close** (always archives, keeps it resumable in
+  Sessions; FAVORITES.md) / Open New
   Session Here / a **Copy** submenu [Session Id · Path · Branch · Launch CLI · Transcript · Summary, via
   the shared `CopySessionField`]; a board-invoked Rename first
   makes the tree row renderable — un-collapses its dir, widens a LOCAL scope to GLOBAL for a
@@ -820,45 +795,14 @@ What works, by area:
   the tab re-pins its title via the registry observer (`_SyncClaudeTabTitleFromRegistry`, riding
   the tab-dot push — equality-guarded both directions, so the settled case is a no-op; Rule #11).
   The Board/Tree show only
-  **OPEN** (`live`) sessions; closed ones are **ARCHIVED** (shut down, restorable) and opened from the
-  **Archived (N)** toolbar button (the toolbar's rightmost, after the cog) — a **full-window Archive page**
-  (`_BuildArchivePageShell`/`_ShowArchivePage`, mounted over `TerminalPage`'s Root content rows, ← Back to
-  dismiss; it REPLACES the old in-content modal). LEFT = a dense, **sortable + searchable** table of archived
-  sessions (Title · Directory · Branch · Created · Active · **Plan** `sent/total` · a saved-**window** chip),
-  each row a checkbox for **multi-select bulk Restore** (restores in **view order**); a recoverable window
-  with NO archived sessions still appears — a synthetic, checkbox-less **"Saved window" row** (sentinel id
-  `window:<guid>`, tab composition + record-file timing) so every saved window is visible + reopenable from
-  the page; **every truncating/abbreviating cell carries a hover tooltip** (full title/path/branch, absolute
-  local datetime behind the relative ages, "N of M prompts sent", and the **W{n} chip's** what-window-is-this
-  tip — tab composition + geometry + launch mode, `ArchiveWindowTip`, built once per record at gather). The
-  **search box** (200 ms debounced) matches a gather-built per-row **`searchBlob`** — title · dir + a
-  slash-flipped twin (`k:/source` matches `k:\source`) · branch · the **session id** · every queued prompt's
-  label+text — with **whitespace-tokenized AND-matching** (every token must hit, order-free); the **Branch
-  column backfills off-thread** (`_BackfillArchiveBranches`: `SessionInfo.branch` had no live writer — the
-  transcript's first user line carries it; quiet-update all + ONE save, then poke the page). An **open page
-  stays live**: a registry observer (token, detached in `~TerminalPage`) behind an atomic visibility mirror
-  (`_archivePageVisible`) + a 400 ms trailing throttle re-gathers when a session archives/restores/renames
-  anywhere. RIGHT = the selected row's **detail** — metadata, the truncated conversation **id** with
-  **Copy id / Copy path / Open transcript** mini-actions (off-thread ShellExecute, Explorer `/select`
-  fallback — all read-only, the no-delete design), a read-only Flight Plan, an **always-on Conversation
-  section** (the transcript's human prompts — head-read, (id, mtime)-cached), **"Last assistant reply"**
-  (where the conversation left off — 64 KB off-thread tail read via `ParseTranscriptDelta`, (id, mtime)-
-  cached, empty results too), and **Restore here** / **Reopen its window** (resume via `claude --resume`,
-  transcript-gated; Reopen re-resolves the live record index from the stable `windowId` at click time). The
-  two halves are
-  divided by a **draggable splitter** (the Manager-tab `_MakeSplitter` recipe, self-contained in the archive
-  TU: drag state in a `shared_ptr` the handlers capture — no `TerminalPage` members; pointer deltas read
-  relative to `nullptr` so no ancestor element is captured into a delegate cycle; star-width writes are
-  layout-property changes, safe synchronously in pointer handlers — the defer-rule below is about tree
-  mutations). The split is **persisted GLOBALLY and window-size-RELATIVE**: drag release normalizes the
-  columns to `(f, 1-f)` STAR weights (a proportion, so a window resize keeps the ratio) and read-modify-writes
-  `AppSettings::archiveSplitFraction` into `settings.json` (freshest-disk merge of just this field — the
-  `treeSort` pattern — plus the window's in-memory copy, so a later cog Save can't regress it); every window's
-  shell seeds its columns from it at build (sane-band clamped on load, like the Manager layout fractions).
-  XAML-Islands hard
-  rule: every pointer handler **defers** its visual-tree mutation to the dispatcher (a synchronous tree change
-  mid-click AVs the hit-test), so row-select is highlight-only and open/sort/restore/back post to a clean tick. Explorer `Enter`=Activate /
-  `Del`=archive (never injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
+  **OPEN** (`live`) sessions; a **closed** session (Close keeps its `live=false` record — it NEVER deletes;
+  [`FAVORITES.md`](doc/agentmaster/FAVORITES.md)) leaves the Board/Tree and lives in the **Sessions browser**,
+  the SOLE history view now (the full-window Archive page + its **Archived (N)** button + the per-window
+  "Reopen window"/"Saved window" rows were removed). It is resumable there (`_RestoreArchivedSession`,
+  `claude --resume`, transcript-gated — the Sessions page's "Resume here" rehydrates its Flight Plan, so it
+  subsumed the old Archive "Restore here") and markable with the **★ favorite**. Saved windows still reopen
+  whole via the toolbar **"Reopen Windows (N)"** button. Explorer `Enter`=Activate / `Del`=Close (never
+  injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
   EXTERNAL** (this window's sessions · all windows · the Fleet Observer's observe-only externals);
   the **Triage Board header carries a 2-way LOCAL/GLOBAL twin** (`_boardScopeBtn`, same style) over
   the **same ONE state** — `_SetTreeScope` is the single mutator behind both buttons, the board
@@ -937,7 +881,7 @@ What works, by area:
   non-WT host (cmd console / ConEmu / VS Code) is just foregrounded. Window activation only — never
   input into the foreign session, upholding the Rule-#13 invariant). **Open New
   Session Here is offered in EVERY scope** — it is also the **last item** on the LOCAL/GLOBAL
-  session-row menu (`_MakeSessionMenu`, after Jump to Tab / Rename / Archive / Delete permanently), spawning in that session's working
+  session-row menu (`_MakeSessionMenu`, after Jump to Tab / Rename / Close), spawning in that session's working
   dir. With no external selected the
   Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
   **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /
@@ -1035,25 +979,20 @@ What works, by area:
   PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`, dev package
   `…\.agentmaster-dev\`; PROFILES.md); sessions autosave on change. **Lifecycle = Open ⇄ Archived**
   (the transient `SessionInfo::live` flag, never persisted): Open == has a live tab/claude this
-  run (on the Board); Archived == shut down but kept restorable (behind the Archived button).
+  run (on the Board); closed == shut down but kept resumable (in the Sessions browser — FAVORITES.md).
   On startup `_RestoreClaudeSessions()` loads each saved session into the registry as
   **Archived** and does **NOT** auto-launch it (Rule #6) — the app opens to just the Manager
-  tab; the prior fleet comes back from the **Archive page** (per-row **Restore here** or **multi-select bulk Restore**). Closing a session's tab
-  (the X, the tree `Del`, the Manager's Delete/Archive, or the Flight-Plan **Archive** button)
-  all route through the ONE close seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`): a
-  consequence confirm (gated by `confirmBeforeKill`) that offers **Archive · Delete · Cancel** —
-  **Archive** flips `live=false` + clears the injector + persists + closes the tab, KEEPING the record so
-  it lists under Archived (restorable); **Delete permanently** (`_RemoveSessionRecord`) DROPS the registry
-  record (+ strips it from saved window records) but **keeps the conversation `.jsonl` on disk** — a
-  deleted session leaves the Board/Archive AND is **auto-hidden from the Sessions browser**
-  (`_RemoveSessionRecord` calls `_AddSessionIdToHiddenList`, the same `AppSettings.hiddenSessionIds` set the
-  row right-click "Hide from list" uses), so it disappears from that list too by default — but it is **not
-  gone**: its `.jsonl` is kept, so the Sessions page's **"Hidden" reveal filter** (or the cog's **Reset
-  hidden sessions**) brings it back, still resumable. The Claude transcript on disk is **never** deleted by either path. Closing a **batch** that holds managed
+  tab; the prior fleet comes back from the **Sessions browser** (per-row **Resume here**). Closing a
+  session's tab (the X, the tree `Del`, the Manager's **Close**, or the Flight-Plan **Close** item) all
+  route through the ONE close seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`): a **Close**
+  confirm (gated by `confirmBeforeKill`) — Close flips `live=false` + clears the injector + persists +
+  closes the tab, KEEPING the record so the session stays resumable from the Sessions browser. **Close
+  always archives — there is no Delete** ([`FAVORITES.md`](doc/agentmaster/FAVORITES.md): always archive,
+  never delete); the conversation `.jsonl` on disk is **never** touched. Closing a **batch** that holds managed
   sessions (a window close, or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
-  train of per-tab confirms — **🗑 Delete All · Archive All · Cancel All** (Archive All is the safe default —
-  each session stays restorable with its Flight Plan; Delete All record-only-drops them, keeping the
-  `.jsonl`; Cancel All aborts the whole close; a batch of only plain shell tabs skips the dialog). The
+  train of per-tab confirms — **Close All · Cancel All** (Close All keeps each session resumable in the
+  Sessions browser with its Flight Plan — nothing on disk is deleted; Cancel All aborts the whole close; a
+  batch of only plain shell tabs skips the dialog). The
   tab context-menu's **Close ›** submenu also gained **Close tabs to the left** (`_CloseTabsBefore`, the
   left twin of close-to-the-right), and both close-left/right now **skip the pinned Manager tab** (index 0)
   so a bulk close can never kill it. Restore
@@ -1140,8 +1079,9 @@ What works, by area:
   window resumes its Claude **and Codex** sessions (re-launched by `TabKind` — `_LaunchClaudeSession` /
   `_LaunchCodexSession`) and replays its shell tabs (title/color/cwd) from the record's tab
   refs, in order — so closing and reopening a window brings the whole workspace back, not just
-  geometry + lens. The Manager's full-window **Archive page** (C1 UI) groups closed sessions **by window** with a per-window
-  "Reopen window". (Tab `actionsJson` capture, once deferred, is now live in `_CaptureWindowRecord`.)
+  geometry + lens. (Saved windows reopen whole via the toolbar **"Reopen Windows (N)"** button — the
+  Archive page's per-window "Reopen window" is gone, FAVORITES.md.) (Tab `actionsJson` capture, once
+  deferred, is now live in `_CaptureWindowRecord`.)
   **A window that ends up holding ONLY the pinned Manager tab is never kept around or restored.** When a
   window's last terminal tab is closed / torn out (or it reopens from an empty/legacy record, or its
   sessions all fail to re-home), a **debounced** check (`_CloseWindowIfManagerOnly`, fed by
@@ -1157,8 +1097,8 @@ What works, by area:
   reopen that is briefly tab-empty is safe), reinforcing the existing `UnregisterLiveWindow` empty-record
   deletion + `RecoverableWindows` empty-record filter.
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Fork · Reopen · `⚙` ·
-  Pause Autopilot · Archived · **Sessions** — the cog sits *before* Pause Autopilot / Archived; the
-  Sessions browser button comes right after Archived) opens a
+  Pause Autopilot · **Sessions** — the cog sits *before* Pause Autopilot; **Sessions** is the rightmost
+  (the **Archived** button was removed — FAVORITES.md)) opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
@@ -1168,8 +1108,8 @@ What works, by area:
   native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**
   (`claudeExePath`) with **Browse…**, re-resolved live on Save via `RefreshClaudeExe` — plus **Autopilot defaults** stamped
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
-  (`confirmBeforeKill` — relabeled "Confirm before archiving" — routes the archive action
-  (tab X / Manager Archive / tree `Del`) through the confirm dialog;
+  (`confirmBeforeKill` — relabeled "Confirm before closing" — routes the Close action
+  (tab X / Manager **Close** / tree `Del`) through the confirm dialog;
   `defaultLaunchDir` seeds the cwd box — empty ⇒ `%USERPROFILE%`). It also exposes `tabRenameCommitMode` (the rename box's
   commit key — click-away-or-Shift+Enter vs Enter), `waitingForYouTimeoutMinutes` (the **Waiting-for-you "unread"
   timeout** — a `WaitingForInput` card demotes to `Idle` only once this timeout elapses **AND** the user
@@ -1192,9 +1132,9 @@ What works, by area:
   summary panel's wrap-line toggle — same GLOBAL + freshest-disk-RMW idiom via `_ToggleSummaryWrap`,
   preserved on a cog Save in both save paths; default off), **`treeSort`** (the Explorer Tree's
   NEWEST/OLDEST/MOST ACTIVE/A–Z sort — written by the tree's sort toggle via the settings sink, NOT
-  the cog), and **`archiveSplitFraction`** (the Archive page's table|detail split as the table's
-  fraction — written by the splitter's drag release via a read-modify-write of settings.json; star
-  ratios, so it scales with the window), plus **`summaryPanelWidthFraction`/`summaryPanelHeightFraction`**
+  the cog), and **`archiveSplitFraction`** (was the Archive page's table|detail split; **now unused** —
+  the Archive page was removed, FAVORITES.md — the field is kept for back-compat so an old settings.json
+  round-trips unchanged), plus **`summaryPanelWidthFraction`/`summaryPanelHeightFraction`**
   (the summary panel's drag-resized size), **`summaryPanelTruncate`** (its truncate-long-messages toggle),
   and **`hiddenSessionIds`** (the Sessions browser's per-row **Hide from list** set; the cog also carries a
   **Reset hidden sessions** button — `_resetHiddenSessionsHandler` — that clears it). Loaded at engine init, seeded via `SetSettings`,
@@ -1205,8 +1145,8 @@ Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellex
 shared seam left between the release and dev packages; distinct dev iconography; profile
 export/import); feed `pauseOnHumanInput` from a TermControl input tap;
 bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
-**bulk Restore** (the Archive page's "Restore selected") re-opens tabs lazily (a non-foreground restored tab starts its `claude` only
-when first focused — WT's lazy-background-tab behavior; restore one at a time to force start);
+**bulk open** (the Sessions page's background Resume/Fork) re-opens tabs lazily (a non-foreground tab starts its `claude` only
+when first focused — WT's lazy-background-tab behavior; open one at a time to force start);
 a one-time **"Restore your previous layout?"** launch prompt (offers **all archived sessions**;
 decided + **deferred** — it ships *after* the per-window `WindowRecord` capture is wired so it
 restores true per-window layouts, not a flat global list — see `PERSISTENCE.md` §6/§6a);
@@ -1389,18 +1329,18 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     (Session Id · working-dir Path · Branch · Claude/Codex Launch CLI · Transcript · Summary) behind
     BOTH the per-tab overlay's copy menu (`AgentTabOverlay`) AND the Triage Board / Explorer-tree
     session menu's Copy submenu (`AgentManagerContent`), so the two copy menus can never drift apart.
-  - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,ArchivePage,SessionsPage}.cpp`
-    — the TerminalPage-side Agentmaster *implementation* in six same-class TUs (the upstream
-    `TabManagement.cpp` pattern; the original five were split out of `TerminalPage.cpp` as a pure
-    move — **SessionsPage** is new code):
+  - `src/cascadia/TerminalApp/TerminalPage.Agent{Engine,Sessions,Observer,WindowRecord,SessionsPage}.cpp`
+    — the TerminalPage-side Agentmaster *implementation* in five same-class TUs (the upstream
+    `TabManagement.cpp` pattern). (**`TerminalPage.AgentArchivePage.cpp` was DELETED** — the full-window
+    Archive page is gone; FAVORITES.md.)
     **Engine** (`~TerminalPage`, `_InitAgentmasterEngine`, the Manager tab, `_WireAgentManagerContent`),
-    **Sessions** (spawn/launch/restore/archive/adopt-external for **both** Claude and Codex —
+    **Sessions** (spawn/launch/restore/close/adopt-external for **both** Claude and Codex —
     `_LaunchCodexSession`/`_SpawnCodexSession`/`_AdoptExternalCodex` mirror the Claude seams — tab-title
     sync, smart naming + per-dir tab color), **Observer** (the per-tab overlay/badge, bind/reconcile/
     liveness incl. the managed-Codex state reconcile `_ReconcileManagedCodex`, the UI lane
     `_ObserverProbe`), **WindowRecord** (M10 capture/flush/restore + reopen saved windows; Codex tab refs),
-    **ArchivePage** (the full-window Archive page), **SessionsPage** (the full-window Sessions
-    browser — SESSIONS.md). Declarations stay in `TerminalPage.h` (C++ has no partial classes).
+    **SessionsPage** (the full-window Sessions browser — SESSIONS.md — incl. the ★ favorite column +
+    filter + `_ToggleSessionFavorite`, FAVORITES.md). Declarations stay in `TerminalPage.h`.
   - small touches in `TerminalPage.{h,cpp}` (~20 integration seams left in the `.cpp`:
     `_OnFirstLayout` startup, `_MakePane`'s `agentManager` branch, close/quit record-flush +
     teardown-archive, tab-move detach, title/color sync hooks, `_restartPaneConnection` injector
@@ -1973,7 +1913,7 @@ build **binlog uploads as an artifact** to diagnose the first run.
   (`BuildStartupActions`). The two are mutually exclusive (`_ClaudeSessionForTab` non-empty → ref, empty →
   Other), so a managed tab is never ALSO replayed as a RenameTab-bearing shell; on restore a managed tab
   re-pins from `SessionInfo.title`, a shell tab replays its `RenameTab`. **On-disk DISPLAY titles are a
-  SEPARATE concept** — the Sessions browser / Archive page / CLI / external-row enrichment derive one
+  SEPARATE concept** — the Sessions browser / CLI / external-row enrichment derive one
   from the transcript via `PickDisplayTitle` (precedence `customTitle > aiTitle > summary > firstPrompt`);
   it is **display-only** and never written over a managed `SessionInfo.title` (resume/fork-from-disk seed
   a record's title only when the session is UNKNOWN to the registry — `_ResumeSessionFromDisk` /
@@ -1996,20 +1936,16 @@ build **binlog uploads as an artifact** to diagnose the first run.
 4. **Idempotent sends:** mark `Sent` atomically + persist; survive restart without replay.
 5. **Backstops:** stop-on-error, maxAutoSends, global pause/kill, pause-on-human-input.
 6. **Startup ARCHIVES, never auto-launches; restore = resume, not replay (transcript-gated).**
-   On startup, persisted sessions load into the registry as **Archived** (`live=false`) and are
-   **NOT** re-launched — the app opens to just the Manager tab, and the prior fleet is restorable
-   as a whole from the **Archived** button (a deliberate reversal of the old auto-reopen). A
-   user-initiated **Restore** re-launches one: `claude --resume <id>` (same id ⇒ hooks still
-   correlate) **only when Claude has a transcript for that id**, else a fresh session (new id,
-   same dir + queue, stale archived record dropped). Queues reload with statuses intact. Closing
-   a tab confirms **Archive vs Delete**: Archive keeps the record (`live=false`, restorable); **Delete
-   permanently** drops the registry record but **keeps the conversation `.jsonl` on disk** AND
-   **auto-hides it from the Sessions browser** (`_RemoveSessionRecord` → `_AddSessionIdToHiddenList`, the
-   same `hiddenSessionIds` set as the row's "Hide from list"), so a deleted session disappears from that
-   list too — recoverable via the Sessions page's **"Hidden" reveal filter** (Unhide) or the cog's Reset.
-   The Claude transcript on disk is never
-   deleted by either path. Never decide resume from the
-   persisted `SessionState` (it's the live post-restore state) — see Gotchas.
+   On startup, persisted sessions load into the registry as **closed** (`live=false`) and are
+   **NOT** re-launched — the app opens to just the Manager tab, and the prior fleet is resumable
+   from the **Sessions browser** (a deliberate reversal of the old auto-reopen). A user-initiated
+   **Resume** re-launches one: `claude --resume <id>` (same id ⇒ hooks still correlate) **only when
+   Claude has a transcript for that id**, else a fresh session (new id, same dir + queue, stale
+   record dropped). Queues reload with statuses intact. **Close is the only close verb — it always
+   archives** (keeps the `live=false` record so the session stays resumable; it NEVER deletes, and
+   there is no Delete — FAVORITES.md). The Claude transcript on disk is never touched; mark a session
+   you want to keep with the **★ favorite** (SessionStore). Never decide resume from the persisted
+   `SessionState` (it's the live post-restore state) — see Gotchas.
 7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).
 8. **Same directory = same path, filesystem-aware.** Group/scope/match sessions by working
    dir through `PathEq` (case-insensitive on Windows, case-sensitive on POSIX), so
@@ -2143,7 +2079,7 @@ build **binlog uploads as an artifact** to diagnose the first run.
 - Build artifacts (`bin/`, `packages/`, `Generated Files/`) are gitignored — never commit them.
 - **The Agent Manager UI is ALWAYS dark, independent of the Windows / Windows Terminal theme.**
   Every Agentmaster surface root forces `RequestedTheme(ElementTheme::Dark)` — the Manager tab
-  `_root` (`AgentManagerContent`), the full-window Archive / Sessions page hosts, and the settings /
+  `_root` (`AgentManagerContent`), the full-window Sessions page host, and the settings /
   claude-missing / path-picker overlays — and paints an **explicit dark fill** (e.g. `_root` uses
   `#2e2e2e`, NOT an app-theme-resolved brush: `Application.Resources().Lookup("UnfocusedBorderBrush")`
   resolves against the *app* theme and returns light `#e8e8e8` in light mode, which used to bleed

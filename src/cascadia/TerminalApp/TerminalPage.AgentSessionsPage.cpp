@@ -276,8 +276,9 @@ namespace winrt::TerminalApp::implementation
             return cut == std::wstring::npos ? std::wstring{} : projects.substr(0, cut) + L"\\history.jsonl";
         }
 
-        // The page's table columns. 0=color/live chip · 1=Title · 2=Directory · 3=Branch ·
-        // 4=Created · 5=Active · 6=Msgs·Tools · 7=Hits (populated while searching).
+        // The page's table columns (FAVORITES.md adds the leftmost ★ column, shifting the rest +1):
+        // 0=★ favorite · 1=color/live chip · 2=Title · 3=Directory · 4=Branch · 5=Created ·
+        // 6=Active · 7=Msgs·Tools · 8=Hits (populated while searching).
         void SessAddColumns(Grid& g)
         {
             const auto col = [&](double v, GridUnitType t) {
@@ -285,6 +286,7 @@ namespace winrt::TerminalApp::implementation
                 c.Width(GridLengthHelper::FromValueAndType(v, t));
                 g.ColumnDefinitions().Append(c);
             };
+            col(22, GridUnitType::Pixel); // ★ favorite (leftmost; clickable)
             col(26, GridUnitType::Pixel); // chip
             col(2.2, GridUnitType::Star); // title
             col(1.6, GridUnitType::Star); // directory
@@ -621,9 +623,20 @@ namespace winrt::TerminalApp::implementation
         _sessHiddenBtn.Content(winrt::box_value(winrt::hstring{ L"Hidden" }));
         _sessHiddenBtn.MinWidth(0);
         _sessHiddenBtn.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(_sessHiddenBtn, L"Reveal sessions hidden from the list \x2014 the ones you hid, and the ones auto-hidden when their tab was deleted (their files are kept on disk). Off by default.");
+        SessSetTip(_sessHiddenBtn, L"Reveal sessions hidden from the list \x2014 the ones you hid (their files are kept on disk). Off by default.");
         _sessHiddenBtn.Click(onToggle);
         bar.Children().Append(_sessHiddenBtn);
+
+        // "Favorite" (FAVORITES.md) — a row filter: show ONLY favorited sessions (the ★ column /
+        // SessionStore "favorite" key, loaded into _sessionsFavorites). Default OFF; flips through the
+        // same throttle so it composes (AND) with the search text + the Open/Hidden toggles + facets.
+        _sessFavOnlyBtn = CheckBox{};
+        _sessFavOnlyBtn.Content(winrt::box_value(winrt::hstring{ L"Favorite" }));
+        _sessFavOnlyBtn.MinWidth(0);
+        _sessFavOnlyBtn.VerticalAlignment(VerticalAlignment::Center);
+        SessSetTip(_sessFavOnlyBtn, L"Show only favorited sessions (the \x2605 star). Click a row's star on the left to favorite it.");
+        _sessFavOnlyBtn.Click(onToggle);
+        bar.Children().Append(_sessFavOnlyBtn);
 
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
@@ -1108,6 +1121,10 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        // Favorites (FAVORITES.md): the durable star set, the same SessionStore — ONE sparse dir scan
+        // (only favorited/titled sessions have a file). Drives the ★ column + the "Favorite" filter.
+        // Assigned to the member on the foreground resume below (this is the background pass).
+        auto favorites = ::Agentmaster::LoadAllFavoriteSessions();
         (void)now;
 
         co_await winrt::resume_foreground(Dispatcher());
@@ -1119,6 +1136,7 @@ namespace winrt::TerminalApp::implementation
         self->_sessionsIndexing.store(false);
         self->_sessionsRows = std::move(rows);
         self->_sessionsEntries = std::move(entries);
+        self->_sessionsFavorites = std::move(favorites); // FAVORITES.md: the ★ set drives the star column + the Favorite filter
         // A session OPEN in any Agentmaster window (live in the process-wide registry) shows its
         // REAL tab title — SessionInfo.title, the ONE value Explorer name / tab / persistence all
         // share (Rule #11) — instead of the transcript-derived PickDisplayTitle: an in-app rename
@@ -1281,7 +1299,7 @@ namespace winrt::TerminalApp::implementation
             b.Padding(Thickness{ 0, 0, 0, 0 });
             b.MinWidth(0);
             b.MinHeight(0);
-            const bool leftAlign = (col == 1 || col == 2);
+            const bool leftAlign = (col == 2 || col == 3); // Title, Directory (after the ★ shift, FAVORITES.md)
             b.HorizontalAlignment(HorizontalAlignment::Stretch);
             b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(SessText(label + arrow, 11, true, 0.7));
@@ -1300,7 +1318,7 @@ namespace winrt::TerminalApp::implementation
                     else
                     {
                         self->_sessionsSortColumn = col;
-                        self->_sessionsSortAscending = (col == 1 || col == 2 || col == 3); // text asc; time/counts desc
+                        self->_sessionsSortAscending = (col == 2 || col == 3 || col == 4); // Title/Dir/Branch asc; time/counts desc (after the ★ shift)
                     }
                     self->_RenderSessionsTable();
                 });
@@ -1308,14 +1326,15 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(b, col);
             _sessionsHeaderRow.Children().Append(b);
         };
-        addHeader(0, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
-        addHeader(1, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
-        addHeader(2, L"Directory", true, L"The session's working directory. Click to sort.");
-        addHeader(3, L"Branch", true, L"Git branch the session was on. Click to sort.");
-        addHeader(4, L"Created", true, L"When the session was first created. Click to sort.");
-        addHeader(5, L"Active", true, L"When the session was last active. Click to sort.");
-        addHeader(6, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
-        addHeader(7, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, searching ? winrt::hstring{ L"Number of search matches in this session" } : winrt::hstring{ L"" });
+        addHeader(0, L"", false, L"Favorite \x2014 click the star to keep / find a session (the star column).");
+        addHeader(1, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
+        addHeader(2, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
+        addHeader(3, L"Directory", true, L"The session's working directory. Click to sort.");
+        addHeader(4, L"Branch", true, L"Git branch the session was on. Click to sort.");
+        addHeader(5, L"Created", true, L"When the session was first created. Click to sort.");
+        addHeader(6, L"Active", true, L"When the session was last active. Click to sort.");
+        addHeader(7, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
+        addHeader(8, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, searching ? winrt::hstring{ L"Number of search matches in this session" } : winrt::hstring{ L"" });
 
         // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
         // minus the user's "Hide from list" set. This render is the single chokepoint both the
@@ -1330,6 +1349,11 @@ namespace winrt::TerminalApp::implementation
         // any Agentmaster window — the same `reg->live` the solid chip reflects). Registry Get is
         // mutex-guarded; queried per row only while the filter is on.
         const bool openOnly = _sessOpenOnlyBtn && _sessOpenOnlyBtn.IsChecked() && _sessOpenOnlyBtn.IsChecked().Value();
+        // "Favorite" filter (FAVORITES.md): when checked, keep only favorited sessions (the ★ column /
+        // SessionStore "favorite" key, loaded into _sessionsFavorites off-thread). In-memory; composes
+        // AND with the search text + the Open/Hidden toggles + the row-filter facets (this chokepoint).
+        // Favorites obey the time window like any row — there is NO all-time bypass (FAVORITES.md §3).
+        const bool favOnly = _sessFavOnlyBtn && _sessFavOnlyBtn.IsChecked() && _sessFavOnlyBtn.IsChecked().Value();
         // The row right-click "Filter" facets (dir / branch / created-time bucket / fork family) AND
         // with everything above. Computed once; an inactive filter is a no-op (Any() == false).
         const bool rowFilterActive = _sessionsRowFilter.Any();
@@ -1367,6 +1391,10 @@ namespace winrt::TerminalApp::implementation
                     continue; // not open in any window — hidden by the "Open" filter
                 }
             }
+            if (favOnly && _sessionsFavorites.count(r.id) == 0)
+            {
+                continue; // not favorited — hidden by the "Favorite" filter (FAVORITES.md)
+            }
             if (!searching || _sessionsFastIds.count(r.id) || _sessionsHitCounts.count(r.id))
             {
                 view.push_back(&r);
@@ -1382,24 +1410,24 @@ namespace winrt::TerminalApp::implementation
             };
             const auto cmpI = [](int64_t x, int64_t y) { return x < y ? -1 : (x > y ? 1 : 0); };
             int c = 0;
-            switch (sortCol)
+            switch (sortCol) // col indices after the leftmost ★ column shifted everything +1 (FAVORITES.md)
             {
-            case 1:
+            case 2:
                 c = cmpS(a->title, b->title);
                 break;
-            case 2:
+            case 3:
                 c = cmpS(a->dir, b->dir);
                 break;
-            case 3:
+            case 4:
                 c = cmpS(a->branch, b->branch);
                 break;
-            case 4:
+            case 5:
                 c = cmpI(a->createdMs, b->createdMs);
                 break;
-            case 5:
+            case 6:
                 c = cmpI(a->lastActivityMs, b->lastActivityMs);
                 break;
-            case 6:
+            case 7:
                 c = cmpI(a->msgs, b->msgs);
                 break;
             default:
@@ -1447,6 +1475,42 @@ namespace winrt::TerminalApp::implementation
             // the way its terminal tab does.
             const auto dirHex = ::Agentmaster::GetDirColor(r.dir);
             const auto dirColor = SessHexToColor(dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(r.dir));
+
+            // ★ favorite (col 0, FAVORITES.md): hollow ☆ normally, filled yellow ★ when favorited.
+            // This cell stays HIT-TESTABLE (the other cells are made clickthrough below) so a click
+            // toggles the durable star (SessionStore) without selecting the row. A near-invisible
+            // Background makes the whole 22px cell a click target (the splitter-bar trick).
+            {
+                const bool fav = _sessionsFavorites.count(r.id) != 0;
+                auto starGlyph = SessText(winrt::hstring{ fav ? L"\x2605" : L"\x2606" }, 14, false, fav ? 1.0 : 0.45);
+                starGlyph.HorizontalAlignment(HorizontalAlignment::Center);
+                if (fav)
+                {
+                    starGlyph.Foreground(SessBrush(0xFF, 0xF5, 0xC2, 0x42)); // filled yellow
+                }
+                Border starCell;
+                starCell.Background(SessBrush(0x01, 0x80, 0x80, 0x80)); // ~invisible yet hit-testable (full-cell target)
+                starCell.Child(starGlyph);
+                starCell.HorizontalAlignment(HorizontalAlignment::Stretch);
+                starCell.VerticalAlignment(VerticalAlignment::Stretch);
+                SessSetTip(starCell, winrt::hstring{ fav ? L"Favorited \x2014 click to unfavorite" : L"Click to favorite (keep / find this session)" });
+                const std::wstring sid = r.id;
+                starCell.PointerPressed([this, sid](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
+                    e.Handled(true); // toggle only — don't fall through to the row's select handler
+                    if (const auto b = s.try_as<Border>())
+                    {
+                        SessCloseTipsIn(b);
+                    }
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), sid]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_ToggleSessionFavorite(sid);
+                        }
+                    });
+                });
+                Grid::SetColumn(starCell, 0);
+                g.Children().Append(starCell);
+            }
             {
                 Border chip;
                 chip.Width(10);
@@ -1456,15 +1520,16 @@ namespace winrt::TerminalApp::implementation
                 chip.HorizontalAlignment(HorizontalAlignment::Center);
                 chip.Background(dirColor ? SolidColorBrush{ *dirColor } : SessBrush(0xFF, 0x60, 0x60, 0x60));
                 chip.Opacity(live ? 1.0 : 0.35);
-                // Agentmaster: the chip's status / presence / fork text now rides the ONE consolidated
-                // row tooltip (built below) instead of a per-cell tip — the chip is decorative and made
-                // clickthrough (g.IsHitTestVisible(false)). Keep ONLY the visual presence ring here.
+                // The chip's status / presence / fork text rides the ONE consolidated row tooltip
+                // (built below) instead of a per-cell tip — the chip is decorative and made
+                // clickthrough (IsHitTestVisible below). Keep ONLY the visual presence ring here.
+                chip.IsHitTestVisible(false);
                 if (pres)
                 {
                     chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60)); // claude's busy/idle/waiting heartbeat ring
                     chip.BorderThickness(Thickness{ 1.5, 1.5, 1.5, 1.5 });
                 }
-                Grid::SetColumn(chip, 0);
+                Grid::SetColumn(chip, 1);
                 g.Children().Append(chip);
             }
 
@@ -1486,7 +1551,8 @@ namespace winrt::TerminalApp::implementation
             titleWrap.BorderBrush(underline);
             titleWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
             titleWrap.Padding(Thickness{ 0, 0, 0, 1 }); // a hair of gap between the descenders and the rule
-            Grid::SetColumn(titleWrap, 1);
+            titleWrap.IsHitTestVisible(false); // clickthrough -> the row Border is the one click target + tooltip
+            Grid::SetColumn(titleWrap, 2);
             g.Children().Append(titleWrap);
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
@@ -1499,27 +1565,32 @@ namespace winrt::TerminalApp::implementation
             dirWrap.BorderBrush(underline);
             dirWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
             dirWrap.Padding(Thickness{ 0, 0, 0, 1 });
-            Grid::SetColumn(dirWrap, 2);
+            dirWrap.IsHitTestVisible(false);
+            Grid::SetColumn(dirWrap, 3);
             g.Children().Append(dirWrap);
 
             auto branch = SessText(winrt::hstring{ r.branch }, 11, false, 0.6);
-            Grid::SetColumn(branch, 3);
+            branch.IsHitTestVisible(false);
+            Grid::SetColumn(branch, 4);
             g.Children().Append(branch);
 
             auto created = SessText(winrt::hstring{ SessAgo(r.createdMs, now) }, 11, false, 0.6);
             created.HorizontalAlignment(HorizontalAlignment::Center);
-            Grid::SetColumn(created, 4);
+            created.IsHitTestVisible(false);
+            Grid::SetColumn(created, 5);
             g.Children().Append(created);
 
             auto active = SessText(winrt::hstring{ SessAgo(r.lastActivityMs, now) }, 11, false, 0.75);
             active.HorizontalAlignment(HorizontalAlignment::Center);
-            Grid::SetColumn(active, 5);
+            active.IsHitTestVisible(false);
+            Grid::SetColumn(active, 6);
             g.Children().Append(active);
 
             const std::wstring weight = std::to_wstring(r.msgs) + L"\x00B7" + std::to_wstring(r.tools);
             auto w = SessText(winrt::hstring{ weight }, 11, false, 0.6);
             w.HorizontalAlignment(HorizontalAlignment::Center);
-            Grid::SetColumn(w, 6);
+            w.IsHitTestVisible(false);
+            Grid::SetColumn(w, 7);
             g.Children().Append(w);
 
             if (searching)
@@ -1529,7 +1600,8 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto h = SessText(winrt::hstring{ std::to_wstring(hit->second) }, 11, true, 0.9);
                     h.HorizontalAlignment(HorizontalAlignment::Center);
-                    Grid::SetColumn(h, 7);
+                    h.IsHitTestVisible(false);
+                    Grid::SetColumn(h, 8);
                     g.Children().Append(h);
                 }
             }
@@ -1538,13 +1610,13 @@ namespace winrt::TerminalApp::implementation
             // dropped from `view` above). Dim it as a visual cue that it's normally hidden.
             const bool rHidden = !hidden.empty() && hidden.count(r.id) != 0;
 
-            // Agentmaster: make the row's whole content grid CLICKTHROUGH so the row Border is ONE clean
-            // click target and ONE tooltip surface. This fixes both (a) the per-cell tooltip flicker —
-            // each cell used to open/close its own tip as the mouse panned across the columns — and (b)
-            // unreliable row selection, where a hit-test-visible cell fragmented the row's click target.
-            // The content carries no interactive child (no checkbox here, unlike the Archive page), so the
-            // entire grid can go hit-test-transparent in one shot; rowB still gets the click + context menu.
-            g.IsHitTestVisible(false);
+            // Agentmaster: every cell EXCEPT the ★ star is made CLICKTHROUGH (IsHitTestVisible(false)
+            // above), and the content grid `g` itself has no Background (so its gaps pass through), so
+            // the row Border below is the ONE click target + ONE tooltip surface for the whole row —
+            // killing both the per-cell tooltip flicker and fragmented row selection. The ★ cell is the
+            // one interactive child (FAVORITES.md): it keeps its own hit-testing + tip so a click there
+            // toggles the favorite. (Previously the whole grid went clickthrough in one shot, before the
+            // star column added an interactive child.)
 
             Border rowB;
             rowB.Child(g);
@@ -1582,7 +1654,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 rowTip += L"\n" + std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB";
                 rowTip += L"\n";
-                rowTip += live ? L"Open in this app now" : (reg ? L"Archived \x2014 closed but restorable" : L"On disk \x2014 not opened in this app");
+                rowTip += live ? L"Open in this app now" : (reg ? L"Closed \x2014 resume from here" : L"On disk \x2014 not opened in this app");
                 rowTip += L"\nDot color = working-directory color (matches its tab)";
                 if (pres)
                 {
@@ -1801,6 +1873,26 @@ namespace winrt::TerminalApp::implementation
 
                 rowMenu.Items().Append(MenuFlyoutSeparator{});
 
+                // Favorite / Unfavorite (FAVORITES.md) — toggles the durable star (SessionStore), the
+                // SAME toggle as clicking the ★ column or the session tab's right-click menu.
+                {
+                    const bool fav = _sessionsFavorites.count(rid) != 0;
+                    MenuFlyoutItem favItem;
+                    favItem.Text(fav ? L"Unfavorite" : L"Favorite");
+                    SessSetTip(favItem, winrt::hstring{ fav ? L"Remove the star \x2014 stop keeping this session in your favorites." : L"Star this session \x2014 keep it in your favorites (filter with the \x2605 Favorite checkbox)." });
+                    favItem.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_ToggleSessionFavorite(rid);
+                            }
+                        });
+                    });
+                    rowMenu.Items().Append(favItem);
+                }
+
+                rowMenu.Items().Append(MenuFlyoutSeparator{});
+
                 // Hide / Unhide — toggles AppSettings.hiddenSessionIds. A revealed hidden row (only
                 // visible while the "Hidden" filter is on) offers Unhide; every other row offers Hide.
                 MenuFlyoutItem hideItem;
@@ -1848,6 +1940,10 @@ namespace winrt::TerminalApp::implementation
             if (openOnly)
             {
                 counts += L" \x00B7 open only"; // the "Open" filter is active (mirrors the "N hidden" note)
+            }
+            if (favOnly)
+            {
+                counts += L" \x00B7 favorites"; // FAVORITES.md: the "Favorite" filter is active
             }
             if (rowFilterActive)
             {
@@ -2518,6 +2614,30 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveAppSettings(s);
         _appSettings.hiddenSessionIds.clear();
         _RenderSessionsTable(); // no-op if the page was never built (host null)
+    }
+
+    // FAVORITES.md: flip the durable star (SessionStore "favorite" key). The CURRENT state is read
+    // from disk (authoritative), so this is correct whether called from the Sessions page (the ★
+    // column / row menu) or the session tab's right-click menu (where the page — and _sessionsFavorites
+    // — may not even be loaded). The in-memory set is kept in step for an open page, then re-render
+    // (a no-op when the page was never built, so the tab-menu path costs nothing extra).
+    void TerminalPage::_ToggleSessionFavorite(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        const bool nowFav = !::Agentmaster::IsSessionFavorite(sessionId); // flip the on-disk truth
+        ::Agentmaster::SetSessionFavorite(sessionId, nowFav);
+        if (nowFav)
+        {
+            _sessionsFavorites.insert(sessionId);
+        }
+        else
+        {
+            _sessionsFavorites.erase(sessionId);
+        }
+        _RenderSessionsTable(); // refresh the ★ glyph + (if the Favorite filter is on) the visible set
     }
 
     // ===== the Sessions-page row right-click "Filter" facets ================================

@@ -29,6 +29,7 @@
 #include "AgentMaster/Scheduler.h"
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionScanner.h"
+#include "AgentMaster/SessionStore.h" // Agentmaster (FAVORITES.md): IsSessionFavorite for the tab context-menu Favorite item
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -2366,6 +2367,22 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (FAVORITES.md): context-menu "Favorite"/"Unfavorite" -> toggle THIS tab's session
+        // star (the SessionStore "favorite" key), the SAME durable star the Sessions page's ★ column
+        // sets. No-op on a non-session tab (the item is hidden there — see the flyout Opening handler).
+        hostingTab.FavoriteRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                page->_ToggleSessionFavorite(sid);
+            }
+        });
+
         // Agentmaster: context-menu "Close > Close tabs to the left" -> close every tab to the left
         // of this one. The mirror of the upstream "Close tabs to the right" (CloseTabsAfter) action,
         // routed through _CloseTabsBefore -> _RemoveTabs so it shares the aggregate confirmation, the
@@ -2413,9 +2430,11 @@ namespace winrt::TerminalApp::implementation
                 auto tab{ weakTab.get() };
                 if (page && tab)
                 {
-                    const bool isSession = !page->_ClaudeSessionForTab(*tab).empty();
+                    const auto sid = page->_ClaudeSessionForTab(*tab);
+                    const bool isSession = !sid.empty();
                     tab->SetAgentCopyMenuVisible(isSession);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
+                    tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                 }
             });
         }

@@ -424,101 +424,14 @@ namespace winrt::TerminalApp::implementation
         // session. Mirrors upstream's "moved content wins over a persisted layout" in TerminalWindow.
         bool _isContentWindow{ false };
 
-        // Agentmaster (Archive page): the full-window archive surface's state. _archivePageHost is the
-        // collapsed Grid mounted on Root's content rows (1-2, below the tab strip); the rest are its live sub-elements +
-        // selection / multi-select / sort / filter state. _archiveRows is the gathered data (re-gathered
-        // on show + after an action, NOT per keystroke — RecoverableWindows() reads disk), then filtered
-        // + sorted into the table by _RenderArchiveTable.
-        struct _ArchiveRow
-        {
-            std::wstring id;
-            std::wstring title;
-            std::wstring dir;
-            std::wstring branch;
-            int64_t createdUnixMs{ 0 };
-            int64_t lastActivityUnixMs{ 0 };
-            int windowIndex{ -1 };  // RecoverableWindow::index AT GATHER TIME (fallback for "Reopen its window"); -1 = loose
-            std::wstring windowId;  // Agentmaster: the record's stable GUID — reopen re-resolves the live index from this (the gather-time index goes stale if the record set shifts while the page is open)
-            int windowOrdinal{ 0 }; // 1-based "W{n}" display chip; 0 = loose (no saved window)
-            int sentCount{ 0 };
-            int totalCount{ 0 };
-            // Agentmaster: a synthetic "saved window" row (id = "window:<guid>") for a recoverable record
-            // with NO archived Claude sessions (a pure-shell workspace, or sessions live elsewhere). Without
-            // it such a window was invisible + un-reopenable from this page (only the toolbar's "Reopen
-            // Windows (N)" covered it). No checkbox / no "Restore here"; its detail shows the tab
-            // composition (counts below) + "Reopen its window".
-            bool windowOnly{ false };
-            int winClaudeTabs{ 0 };
-            int winShellTabs{ 0 };
-            // Agentmaster: the W{n} chip's hover tooltip — what that saved window IS ("W2 · 4 tabs
-            // (2 claude, 2 shell) · 1466×780 @ 14,173"), built ONCE per record at gather time from its
-            // WindowRecord (tab composition + geometry); the render loop only has the row. Empty for
-            // loose rows (no chip).
-            std::wstring windowTip;
-            // Agentmaster: the row's lowercase search haystack, built ONCE at gather — title / dir
-            // (+ a slash-flipped twin) / branch / session id, then every queued prompt's label + text
-            // ('\n'-fenced fields). _RenderArchiveTable AND-matches the filter's whitespace tokens
-            // against this, so "remember that prompt I queued" (or a UUID pasted from hooks.log) finds
-            // its session — the old per-render haystack covered only title/dir/branch.
-            std::wstring searchBlob;
-        };
-        winrt::Windows::UI::Xaml::Controls::Grid _archivePageHost{ nullptr };          // full-bleed page over Root
-        winrt::Windows::UI::Xaml::Controls::Grid _archiveHeaderRow{ nullptr };         // LEFT: sortable column header
-        winrt::Windows::UI::Xaml::Controls::StackPanel _archiveRowsHost{ nullptr };    // LEFT: table data rows
-        winrt::Windows::UI::Xaml::Controls::StackPanel _archiveDetailHost{ nullptr };  // RIGHT: detail/preview
-        winrt::Windows::UI::Xaml::Controls::TextBox _archiveSearchBox{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBlock _archiveCountText{ nullptr };    // header "N sessions · M windows"
-        winrt::Windows::UI::Xaml::Controls::Button _archiveRestoreSelBtn{ nullptr };   // footer bulk action
-        winrt::Windows::UI::Xaml::Controls::Button _archiveDeleteSelBtn{ nullptr };    // Agentmaster: footer bulk PERMANENT delete (record-only; transcript on disk kept)
-        std::vector<_ArchiveRow> _archiveRows;
-        std::wstring _archiveSelectedId;                  // the row whose detail is shown
-        std::unordered_set<std::wstring> _archiveChecked;    // multi-select set (by session id)
-        std::unordered_set<std::wstring> _archiveVisibleIds; // Agentmaster: ids currently passing the filter (rebuilt each render); bulk-restore + its "(N)" count act on checked ∩ visible only
-        std::vector<std::wstring> _archiveVisibleOrder;      // Agentmaster: the visible ids in TABLE (sorted) order — bulk restore follows it, so restored tabs open in display order, not the unordered_set's hash order
-        int _archiveSortColumn{ 4 };                      // default sort column: Created (see _RenderArchiveTable)
-        bool _archiveSortAscending{ false };              // default: newest first
-        std::wstring _archiveFilter;                      // lowercased search text
-        // Agentmaster (Archive page live refresh): the registry changes while the page is open (a tab X
-        // archives a session, another window restores one, the liveness sweep archives a dead claude) —
-        // an observer (fires on ANY thread) pokes a throttled UI-thread re-gather while the page is
-        // visible; the search rebuild is debounced through its own throttle. _archivePageVisible mirrors
-        // the host's Visibility as an atomic so the observer thread can pre-filter without touching XAML.
-        // Token detached in ~TerminalPage (an ::Agentmaster::ObserverToken; uint64_t to avoid pulling
-        // SessionRegistry.h into this header — same pattern as _adoptionToken).
-        uint64_t _archiveRegistryObserverToken{ 0 };
-        std::shared_ptr<ThrottledFunc<>> _archiveRefreshThrottled{ nullptr };
-        std::shared_ptr<ThrottledFunc<>> _archiveFilterThrottled{ nullptr };
-        std::atomic<bool> _archivePageVisible{ false };
+        // Agentmaster (FAVORITES.md): the full-window Archive page + all its state were REMOVED — the
+        // Sessions browser is the sole history view. (The retired _archive* members/struct lived here.)
         // Agentmaster (tab status dot): this window's registry observer driving the tab-strip
         // "[icon] ● <title>" dot — a state change recolors the hosting tab's dot in place (the same
         // push that redraws the Manager board). Registered at engine init; detached in ~TerminalPage
         // (an ::Agentmaster::ObserverToken; uint64_t to avoid pulling SessionRegistry.h here — the
         // _adoptionToken pattern).
         uint64_t _agentDotObserverToken{ 0 };
-        // Agentmaster (branch backfill): archived ids whose transcript head this run already read for a
-        // missing `branch` — SessionInfo.branch had NO live writer (only the JSON loader), so the Branch
-        // column + search were permanently empty; the backfill reads each transcript at most once per run.
-        std::unordered_set<std::wstring> _archiveBranchBackfilled;
-        // Agentmaster: one-entry transcript cache for the detail pane, validated by (id, transcript
-        // mtime) — _RenderArchiveTable re-shows the detail on every rebuild (search keystrokes, observer
-        // refreshes), and an uncached ReadTranscriptInfo was a synchronous <=128 KB UI-thread file read
-        // each time. Discrete fields so this header needn't pull ProcessInspect.h (TranscriptInfo).
-        std::wstring _archiveDetailTiId;
-        int64_t _archiveDetailTiMtime{ 0 };
-        int64_t _archiveDetailTiCreated{ 0 };
-        int64_t _archiveDetailTiLast{ 0 };
-        std::wstring _archiveDetailTiBranch;
-        std::vector<std::wstring> _archiveDetailTiPrompts;
-        // Agentmaster: one-entry "last assistant reply" cache for the detail pane, keyed by (id,
-        // transcript mtime) like the head cache above. ReadTranscriptInfo is a HEAD read (title /
-        // branch / prompts); the LAST assistant message — "where did this conversation leave off?" —
-        // lives at the TAIL, so _LoadArchiveAssistantTail tail-reads + parses it OFF-THREAD and
-        // re-shows the detail on completion. An attempted (id, mtime) caches even an empty result so
-        // a reply-less transcript isn't re-read on every detail re-show.
-        std::wstring _archiveDetailTailId;
-        int64_t _archiveDetailTailMtime{ 0 };
-        std::wstring _archiveDetailTailText;
-        bool _archiveDetailTailPending{ false };
 
         // Agentmaster (Sessions page; SESSIONS.md): the full-window browser over EVERY on-disk
         // Claude Code session (not just managed ones), opened by the Manager's "Sessions" button
@@ -554,6 +467,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Primitives::ToggleButton _sessFuzzyBtn{ nullptr }; // (F) fuzzy
         winrt::Windows::UI::Xaml::Controls::CheckBox _sessOpenOnlyBtn{ nullptr }; // "Open" — filter the list to sessions live in any Agentmaster window (registry live)
         winrt::Windows::UI::Xaml::Controls::CheckBox _sessHiddenBtn{ nullptr }; // "Hidden" — REVEAL sessions in AppSettings.hiddenSessionIds (manually-hidden + auto-hidden on delete); default OFF (they are filtered out)
+        winrt::Windows::UI::Xaml::Controls::CheckBox _sessFavOnlyBtn{ nullptr }; // "Favorite" (FAVORITES.md) — filter the list to favorited sessions (the star column / SessionStore "favorite" key); default OFF
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
         winrt::Windows::UI::Xaml::Controls::Button _sessRefreshBtn{ nullptr }; // ↻ — re-enumerate the window + load-or-refresh each sidecar index (pick up new/updated sessions)
         winrt::Windows::UI::Xaml::Controls::Button _sessFilterChip{ nullptr }; // "✕ filter: …" — shown only while a row right-click "Filter" facet is active; click clears ALL facets
@@ -569,8 +483,9 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<std::wstring, int> _sessionsHitCounts; // sid -> matched messages (history + slow phase)
         std::unordered_map<std::wstring, std::vector<std::wstring>> _sessionsHitSnippets; // sid -> display snippets
         std::unordered_set<std::wstring> _sessionsFastIds; // fast-phase (title/dir/paths) matches
+        std::unordered_set<std::wstring> _sessionsFavorites; // FAVORITES.md: the favorited session ids (SessionStore "favorite" key), loaded off-thread in _RefreshSessionsRows; drives the ★ column + the "Favorite" filter
         std::wstring _sessionsSelectedId;
-        int _sessionsSortColumn{ 5 }; // default: Active (last activity), newest first
+        int _sessionsSortColumn{ 6 }; // default: Active (last activity), newest first — col 6 after the leftmost ★ column shifted everything +1 (FAVORITES.md)
         bool _sessionsSortAscending{ false };
         std::wstring _sessionsQueryText; // the raw search text (folding happens in the engine)
         std::atomic<bool> _sessionsPageVisible{ false };
@@ -857,31 +772,9 @@ namespace winrt::TerminalApp::implementation
         // installer is launched detached.
         void _QuitForUpdate();
 
-        // Agentmaster (Archive page): the redesigned archive surface — a full-window "page" mounted over
-        // TerminalPage's Root content rows (covering all panes below the tab strip), opened by the Archived button via
-        // SetOpenArchiveHandler. LEFT = a dense sortable table of archived sessions (+ which saved window
-        // each belongs to); RIGHT = a detail/preview of the selected row (metadata + read-only Flight Plan
-        // + restore actions); a search filter; multi-select bulk restore. Replaces the in-content overlay.
-        void _ShowArchivePage(); // build-if-needed + gather + render + show
-        void _HideArchivePage(); // hide (the Back button)
-        void _BuildArchivePageShell(); // one-time: host + header (Back/title/search) + table/detail split + footer
-        void _GatherArchiveRows(); // fill _archiveRows from RecoverableWindows() + loose archived sessions (+ transcript-stat timing)
-        void _RenderArchiveTable(); // apply _archiveFilter + sort to _archiveRows -> rebuild the table + sortable header + selection
-        void _UpdateArchiveSelectionHighlight(); // recolor row highlights for _archiveSelectedId WITHOUT a rebuild (deferred row-tap path)
-        void _ShowArchiveDetail(const std::wstring& sessionId); // populate the right pane for one row
-        void _RestoreCheckedArchived(); // bulk: restore every checked archived session
-        void _UpdateArchiveBulkButton(); // refresh the footer "Restore selected (N)" label + enabled
-        void _RefreshArchivePageIfVisible(); // re-gather + re-render an OPEN page (registry-observer / backfill poke; UI thread, clean tick)
-        winrt::fire_and_forget _BackfillArchiveBranches(std::vector<std::pair<std::wstring, std::wstring>> idDirs); // (id, dir) pairs: head-read gitBranch off-thread -> UpdateQuiet + ONE SaveSessions + a page refresh
-        winrt::fire_and_forget _LoadArchiveAssistantTail(std::wstring sessionId, std::wstring dir, int64_t mtime); // tail-read the transcript's LAST assistant message off-thread -> cache (id, mtime) + re-show the detail
-        winrt::fire_and_forget _OpenArchiveTranscript(std::wstring path); // detail "Open transcript": ShellExecute the .jsonl (system open/picker; Explorer /select fallback) — read-only, off the UI thread
-        void _ReopenSavedWindowById(int fallbackIndex, const std::wstring& windowId); // re-resolve the live record index from the STABLE windowId at action time (a gather-time index goes stale), then _ReopenSavedWindow — shared by the detail "Reopen its window" + the row double-click
-        // Agentmaster (Archive page — permanent remove, record-only): confirm, then drop the record(s)
-        // via _DeleteClaudeSession / DeleteWindowRecord; the conversation file on disk is KEPT. Routed
-        // from the detail pane's trash (session + saved-window) and the footer's "Delete selected".
-        winrt::fire_and_forget _PromptDeleteArchivedSession(std::wstring sessionId);
-        winrt::fire_and_forget _PromptDeleteArchivedWindow(std::wstring windowId);
-        winrt::fire_and_forget _PromptDeleteCheckedArchived();
+        // Agentmaster (FAVORITES.md): the full-window Archive page + its methods were REMOVED — the
+        // Sessions browser (below) is the sole history view. _RestoreArchivedSession (the resume seam)
+        // stays; it's now reached only from the Sessions page's Resume.
 
         // Agentmaster (Sessions page; SESSIONS.md): the global Claude-sessions browser — every
         // on-disk session in a selectable window (default 1 month), two-phase searched (fast
@@ -910,6 +803,7 @@ namespace winrt::TerminalApp::implementation
         void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)
         void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally
         void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
+        void _ToggleSessionFavorite(const std::wstring& sessionId); // FAVORITES.md: flip the durable star (SessionStore "favorite" key), update _sessionsFavorites, re-render. Shared by the ★ column click, the row right-click "Favorite"/"Unfavorite", and the session tab's context menu.
         // Agentmaster: the Sessions-page row right-click "Filter \xBB" submenu (composes AND with the
         // search text + the scope/Open/Hidden toggles — applied at the _RenderSessionsTable chokepoint).
         void _ApplySessionsRowFilter(int kind, const std::wstring& anchorId); // toggle the dimension's facet to the anchor row's value (or OFF if the anchor already matches it); re-renders

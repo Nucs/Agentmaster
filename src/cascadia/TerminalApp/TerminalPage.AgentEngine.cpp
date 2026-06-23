@@ -144,12 +144,6 @@ namespace winrt::TerminalApp::implementation
         {
             _sessionRegistry->RemoveAdoptionHandler(_adoptionToken);
         }
-        // Agentmaster (Archive page live refresh): drop this window's registry observer — it would
-        // dangle on the process-wide registry past this page's lifetime otherwise (Rule #10).
-        if (_sessionRegistry && _archiveRegistryObserverToken)
-        {
-            _sessionRegistry->RemoveObserver(_archiveRegistryObserverToken);
-        }
         // Agentmaster (tab status dot): same Rule-#10 detach for the dot's registry observer.
         if (_sessionRegistry && _agentDotObserverToken)
         {
@@ -703,18 +697,12 @@ namespace winrt::TerminalApp::implementation
                 self->_UpdateManagerSelectionHighlight();
             }
         });
+        // Agentmaster (FAVORITES.md): the board/tree "Close" verb (formerly Archive) — shut the session
+        // down but KEEP the record (always archived), so it stays resumable in the Sessions browser.
         content->SetArchiveHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())
             {
                 self->_ArchiveClaudeSession(id);
-            }
-        });
-        // Agentmaster: permanent remove (record-only) — the trash twin of Archive. Drops the registry
-        // record + persisted entry + saved-window refs; the conversation .jsonl on disk is KEPT.
-        content->SetDeleteHandler([weakThis](winrt::hstring id) {
-            if (auto self = weakThis.get())
-            {
-                self->_DeleteClaudeSession(id);
             }
         });
         content->SetRestoreHandler([weakThis](winrt::hstring id) {
@@ -880,22 +868,9 @@ namespace winrt::TerminalApp::implementation
                 self->_ReopenSavedWindows();
             }
         });
-        // M10 window-grouped restore: the grouped Archived overlay's per-window "Reopen window" button.
-        content->SetReopenWindowHandler([weakThis](int index) {
-            if (auto self = weakThis.get())
-            {
-                self->_ReopenSavedWindow(index);
-            }
-        });
-        // Agentmaster (Archive page): the Manager's Archived button opens the full-window Archive page.
-        content->SetOpenArchiveHandler([weakThis]() {
-            if (auto self = weakThis.get())
-            {
-                self->_ShowArchivePage();
-            }
-        });
-        // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button (right after
-        // Archived) opens the full-window browser over EVERY on-disk Claude Code session.
+        // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button opens the
+        // full-window browser over EVERY on-disk Claude Code session — the sole history view now that
+        // the separate Archive page is gone (FAVORITES.md).
         content->SetOpenSessionsHandler([weakThis]() {
             if (auto self = weakThis.get())
             {

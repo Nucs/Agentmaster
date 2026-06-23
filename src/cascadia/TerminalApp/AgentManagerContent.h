@@ -50,9 +50,8 @@ namespace winrt::TerminalApp::implementation
         // while the Manager tab is active — a live preview that follows the mouse, falling back to the
         // selected session.
         void SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler);
-        void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> archive (shut down, keep restorable)
-        void SetDeleteHandler(std::function<void(winrt::hstring)> handler); // Agentmaster: (sessionId) -> permanently remove from Agentmaster (record-only; the transcript on disk is kept)
-        void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) an archived session
+        void SetArchiveHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> Close (shut down, keep the record so it stays resumable in Sessions; FAVORITES.md)
+        void SetRestoreHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> re-launch (resume) a closed session
         // Agentmaster: the Launch box accepts EITHER a working dir OR a session id. A FOUND session id
         // turns the launch button into "Resume session" (resume the conversation) and reveals a "Fork"
         // button (fork it into a new conversation). Both resolve (dir, title) in the content, so the
@@ -94,15 +93,8 @@ namespace winrt::TerminalApp::implementation
         // WindowEmperor's startup reopen loop). The content computes N itself
         // (::Agentmaster::RecoverableWindows) and shows the button only when N>0.
         void SetReopenWindowsHandler(std::function<void()> handler);
-        // Agentmaster (M10 window-grouped restore): reopen ONE saved window by its canonical sorted
-        // record index (the `-s <idx>` the Emperor/recover path uses). Fired by the per-window "Reopen
-        // window" button in the grouped Archived overlay; the page dispatches a single window restore.
-        void SetReopenWindowHandler(std::function<void(int)> handler);
-        // Agentmaster (Archive page): the Manager's Archived button opens the full-window Archive PAGE
-        // (mounted on TerminalPage's Root, over the tab strip) instead of the old in-content overlay.
-        void SetOpenArchiveHandler(std::function<void()> handler);
-        // Agentmaster (Sessions page; SESSIONS.md): the Manager's "Sessions" button (right after
-        // Archived) opens the full-window browser over EVERY on-disk Claude Code session.
+        // Agentmaster (Sessions page; SESSIONS.md / FAVORITES.md): the Manager's "Sessions" button opens
+        // the full-window browser over EVERY on-disk Claude Code session — the sole history view.
         void SetOpenSessionsHandler(std::function<void()> handler);
         // Agentmaster (Sessions page; SESSIONS.md): the Settings cog's "Reset hidden sessions"
         // button — clear the user's "Hide from list" set (AppSettings.hiddenSessionIds). The page
@@ -372,8 +364,7 @@ namespace winrt::TerminalApp::implementation
         void _OnRenameSession(const std::wstring& id); // begin an in-place rename of the row
         void _CommitRename(); // apply the in-place editor's text to the session title
         void _CancelRename(); // discard the in-place editor (Esc)
-        void _RequestArchive(const std::wstring& id); // route to the page's archive seam (which presents the consequence + closes the tab)
-        void _RequestDelete(const std::wstring& id); // Agentmaster: confirm, then route to the page's permanent-remove seam (record-only; transcript on disk kept)
+        void _RequestArchive(const std::wstring& id); // route to the page's Close seam (presents the confirm + closes the tab; keeps the record so it stays resumable in Sessions — FAVORITES.md)
 
         // Settings cog: an in-content modal overlay (NOT a ContentDialog — a text box inside a
         // ContentDialog receives no keypresses in XAML Islands; see the _renameBox note). Built
@@ -407,16 +398,8 @@ namespace winrt::TerminalApp::implementation
         // tick (the XAML-Islands deferral rule). `fromSettings` true => also refresh the Settings fields.
         void _BrowseForClaudeExe(bool fromSettings);
 
-        // Archived-sessions overlay (mirrors the settings overlay): a modal list of sessions that
-        // were closed/archived (live==false). Each row Restores (re-launch + resume); the header
-        // states the consequence. Opened from the "Archived" toolbar button next to the cog.
-        void _BuildArchiveOverlay();
-        void _ShowArchive();
-        void _HideArchive();
-        void _RebuildArchiveList(); // (re)populate _archiveListHost from the registry's !live sessions
-        void _OnRestoreSession(const std::wstring& id); // confirm -> _restoreHandler(id)
-        void _OnRestoreAll(); // confirm -> restore every archived session
-        void _UpdateArchivedButton(const std::vector<::Agentmaster::SessionInfo>& sessions); // label "Archived (N)" + enable
+        // Agentmaster (FAVORITES.md): the Archived overlay/page + their methods were removed — the
+        // Sessions browser is the sole history view (closed sessions stay there, resumable, starred).
         // Agentmaster: keep-awake toggle. _ToggleKeepAwake flips the flag + calls SetThreadExecutionState
         // (ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED to hold, ES_CONTINUOUS alone to release);
         // _UpdateKeepAwakeButton repaints the button to reflect the current state.
@@ -468,7 +451,6 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _activateHandler;
         std::function<void(winrt::hstring, bool)> _hoverSessionHandler; // Agentmaster (Linked Lenses): push a managed card/row pointer enter/leave (id, entering) so the page pills its tab
         std::function<void(winrt::hstring)> _archiveHandler;
-        std::function<void(winrt::hstring)> _deleteHandler; // Agentmaster: permanent remove (record-only)
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)
@@ -480,8 +462,6 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;
         std::function<void()> _reopenWindowsHandler; // Agentmaster (M10): the "Reopen Windows" recover-button action
-        std::function<void(int)> _reopenWindowHandler; // Agentmaster (M10): reopen ONE saved window by record index (per-window "Reopen window")
-        std::function<void()> _openArchiveHandler; // Agentmaster (Archive page): open the full-window Archive page (TerminalPage-hosted)
         std::function<void()> _openSessionsHandler; // Agentmaster (Sessions page): open the full-window global Sessions browser (TerminalPage-hosted)
         std::function<void()> _resetHiddenSessionsHandler; // Agentmaster (Sessions page): the Settings cog's "Reset hidden sessions" action — clear AppSettings.hiddenSessionIds (TerminalPage-side)
         std::function<void()> _quitForUpdateHandler; // Agentmaster (updater): "Update now" -> quit the app gracefully (page's RequestQuit) so the installer can replace it
@@ -587,14 +567,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _templatesRow{ nullptr }; // Agentmaster: the Templates row — collapsed by default, toggled by the paper icon
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
-        winrt::Windows::UI::Xaml::Controls::Button _archivedBtn{ nullptr }; // "Archived (N)" (next to the cog) -> opens the archive overlay
-        winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" (right after Archived) -> the global on-disk sessions browser
+        winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" -> the global on-disk sessions browser (the sole history view; FAVORITES.md)
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
         winrt::Windows::UI::Xaml::Controls::Button _keepAwakeBtn{ nullptr }; // Agentmaster: "Keep Awake" toggle -> SetThreadExecutionState keeps the PC + display from sleeping
         bool _keepAwake{ false }; // Agentmaster: whether this window is currently holding the keep-awake execution-state flag
-        // ---- Archived-sessions overlay (the "Archived" button) ----
-        winrt::Windows::UI::Xaml::Controls::Grid _archiveOverlay{ nullptr }; // dimmed modal layer listing archived sessions
-        winrt::Windows::UI::Xaml::Controls::StackPanel _archiveListHost{ nullptr }; // rows of archived sessions (Restore each)
         // ---- "Claude not detected" overlay (native-exe-only policy gate) ----
         winrt::Windows::UI::Xaml::Controls::Grid _claudeMissingOverlay{ nullptr }; // dimmed modal layer; shown when launch/fork is blocked by no native claude.exe
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)

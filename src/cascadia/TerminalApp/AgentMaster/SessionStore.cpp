@@ -289,4 +289,25 @@ namespace Agentmaster
     {
         return LoadAllSessionStoreField(kSessionStoreTitleKey);
     }
+
+    // ===== typed convenience: the FAVORITE (FAVORITES.md) ====================================
+
+    bool IsSessionFavorite(const std::wstring& sessionId)
+    {
+        return !GetSessionStoreField(sessionId, kSessionStoreFavoriteKey).empty();
+    }
+    bool SetSessionFavorite(const std::wstring& sessionId, bool favorite)
+    {
+        // "1" when on; "" removes the key (and the file, once empty) when off — keeps the store sparse.
+        return SetSessionStoreField(sessionId, kSessionStoreFavoriteKey, favorite ? std::wstring{ L"1" } : std::wstring{});
+    }
+    std::unordered_set<std::wstring> LoadAllFavoriteSessions()
+    {
+        std::unordered_set<std::wstring> out;
+        for (const auto& [sid, value] : LoadAllSessionStoreField(kSessionStoreFavoriteKey))
+        {
+            out.insert(sid);
+        }
+        return out;
+    }
 }
