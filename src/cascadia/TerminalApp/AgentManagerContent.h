@@ -417,6 +417,11 @@ namespace winrt::TerminalApp::implementation
         void _OnRestoreSession(const std::wstring& id); // confirm -> _restoreHandler(id)
         void _OnRestoreAll(); // confirm -> restore every archived session
         void _UpdateArchivedButton(const std::vector<::Agentmaster::SessionInfo>& sessions); // label "Archived (N)" + enable
+        // Agentmaster: keep-awake toggle. _ToggleKeepAwake flips the flag + calls SetThreadExecutionState
+        // (ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED to hold, ES_CONTINUOUS alone to release);
+        // _UpdateKeepAwakeButton repaints the button to reflect the current state.
+        void _ToggleKeepAwake();
+        void _UpdateKeepAwakeButton();
         // Agentmaster (M10 Increment 3): the "Reopen Windows (N)" recover button. _UpdateReopenButton
         // sets its label to the recoverable-window count and shows it only when N>0; _OnReopenWindows
         // confirms, then fires _reopenWindowsHandler (the page reopens every not-currently-open record).
@@ -585,6 +590,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _archivedBtn{ nullptr }; // "Archived (N)" (next to the cog) -> opens the archive overlay
         winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" (right after Archived) -> the global on-disk sessions browser
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
+        winrt::Windows::UI::Xaml::Controls::Button _keepAwakeBtn{ nullptr }; // Agentmaster: "Keep Awake" toggle -> SetThreadExecutionState keeps the PC + display from sleeping
+        bool _keepAwake{ false }; // Agentmaster: whether this window is currently holding the keep-awake execution-state flag
         // ---- Archived-sessions overlay (the "Archived" button) ----
         winrt::Windows::UI::Xaml::Controls::Grid _archiveOverlay{ nullptr }; // dimmed modal layer listing archived sessions
         winrt::Windows::UI::Xaml::Controls::StackPanel _archiveListHost{ nullptr }; // rows of archived sessions (Restore each)

@@ -285,6 +285,60 @@ namespace
         return out;
     }
 
+    // Agentmaster (context-window adornment): a compact token count for the board card — "182K",
+    // "8.3K", "1.05M". Whole-K once past 10K (the common context range), one decimal below that,
+    // two-decimal M past a million. PR feedback (Eli): show the raw token count, not a %, because
+    // the context-window denominator (200K vs 1M) can't be reliably known from the model id.
+    std::wstring FormatTokenCount(int64_t n)
+    {
+        if (n < 0)
+        {
+            n = 0;
+        }
+        wchar_t buf[32];
+        if (n >= 1000000)
+        {
+            swprintf_s(buf, L"%.2fM", static_cast<double>(n) / 1000000.0);
+        }
+        else if (n >= 10000)
+        {
+            swprintf_s(buf, L"%lldK", static_cast<long long>((n + 500) / 1000)); // rounded whole-K
+        }
+        else if (n >= 1000)
+        {
+            swprintf_s(buf, L"%.1fK", static_cast<double>(n) / 1000.0);
+        }
+        else
+        {
+            swprintf_s(buf, L"%lld", static_cast<long long>(n));
+        }
+        return buf;
+    }
+
+    // Agentmaster: group a non-negative integer with thousands separators ("182,341") for the
+    // context-tokens tooltip (the exact count behind the compact "182K").
+    std::wstring GroupDigits(int64_t n)
+    {
+        if (n < 0)
+        {
+            n = 0;
+        }
+        std::wstring raw = std::to_wstring(n);
+        std::wstring out;
+        int count = 0;
+        for (auto it = raw.rbegin(); it != raw.rend(); ++it)
+        {
+            if (count && count % 3 == 0)
+            {
+                out.push_back(L',');
+            }
+            out.push_back(*it);
+            ++count;
+        }
+        std::reverse(out.begin(), out.end());
+        return out;
+    }
+
     // Agentmaster: format a duration (ms) as a consolidated span. Units descend month / day / hour /
     // minute / second; month(=30d) and minute SHARE the letter 'm', disambiguated by position (the
     // sequence is always largest->smallest), per the requested format: "1m4d6h" (1 month 4 days 6
@@ -1805,6 +1859,16 @@ namespace winrt::TerminalApp::implementation
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             bar.Children().Append(_sessionsBtn);
 
+            // Agentmaster: "Keep Awake" toggle — prevents the PC (and display) from sleeping while a
+            // long unattended run is in flight, mirroring the user's stay-awake.ps1. It calls
+            // SetThreadExecutionState from this (persistent) UI thread, so ES_CONTINUOUS holds the flag
+            // until released — no timer/loop needed (the per-thread state persists for the thread's life).
+            _keepAwakeBtn = Button{};
+            AgentSetTip(_keepAwakeBtn, L"Keep this PC (and display) awake \x2014 prevents sleep while a long unattended run is in flight. Held until toggled off or the window closes.");
+            _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleKeepAwake(); });
+            bar.Children().Append(_keepAwakeBtn);
+            _UpdateKeepAwakeButton();
+
             Grid::SetRow(bar, 0);
             _root.Children().Append(bar);
         }
@@ -2549,6 +2613,21 @@ namespace winrt::TerminalApp::implementation
             {
                 stack.Children().Append(t);
             }
+        }
+
+        // Agentmaster: context-window occupancy as a raw TOKEN COUNT (PR feedback, Eli). A % needs a
+        // context-window denominator, and the 200K-vs-1M window can't be reliably known from the model
+        // id (Opus 4.8 doesn't advertise its 1M variant), so a % gave misleading numbers — the raw
+        // token count is unambiguous and matches what Claude Code reports for the session. This is the
+        // newest assistant turn's usage (input + cache_creation + cache_read + output ≈ what's in the
+        // session's context right now), filled by the SessionScanner. Shown once usage exists.
+        if (s.contextTokens > 0)
+        {
+            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 11, false, 0.7);
+            const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
+                             L" tokens in the session (newest turn: input + cache + output).";
+            AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
+            stack.Children().Append(ctxText);
         }
 
         // autopilot badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
@@ -5641,6 +5720,51 @@ namespace winrt::TerminalApp::implementation
                                                   winrt::hstring{ L"Archived (" } + winrt::to_hstring(archived) + L")" :
                                                   winrt::hstring{ L"Archived" }));
         _archivedBtn.IsEnabled(archived > 0);
+    }
+
+    // Agentmaster: keep-awake toggle. SetThreadExecutionState's ES_CONTINUOUS flag is per-thread and
+    // persists for the life of the calling thread (or until reset) — this runs on the window's UI
+    // thread, which lives as long as the window, so no timer/poll loop is needed (unlike stay-awake.ps1,
+    // which loops only because its host PowerShell would otherwise exit). The flag is system-wide while
+    // ANY thread holds it; per-window toggles compose fine (the PC stays awake while any window holds it).
+    void AgentManagerContent::_ToggleKeepAwake()
+    {
+        _keepAwake = !_keepAwake;
+        constexpr DWORD esContinuous = 0x80000000; // ES_CONTINUOUS
+        constexpr DWORD esSystem = 0x00000001; // ES_SYSTEM_REQUIRED
+        constexpr DWORD esDisplay = 0x00000002; // ES_DISPLAY_REQUIRED
+        // Hold: continuous + system + display. Release: continuous alone clears the prior requirements.
+        ::SetThreadExecutionState(_keepAwake ? (esContinuous | esSystem | esDisplay) : esContinuous);
+        _UpdateKeepAwakeButton();
+    }
+
+    void AgentManagerContent::_UpdateKeepAwakeButton()
+    {
+        if (!_keepAwakeBtn)
+        {
+            return;
+        }
+        auto content = StackPanel{};
+        content.Orientation(Orientation::Horizontal);
+        content.Spacing(6);
+        FontIcon icon;
+        icon.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+        icon.Glyph(_keepAwake ? L"\xEC46" : L"\xE708"); // EC46 PowerButton (on) / E708 QuietHours-ish (off)
+        icon.FontSize(14);
+        content.Children().Append(icon);
+        content.Children().Append(Text(_keepAwake ? L"Awake On" : L"Keep Awake", 14, false, 1.0));
+        _keepAwakeBtn.Content(content);
+        // On -> accent-tinted so the held state reads at a glance; off -> revert to the theme default.
+        if (_keepAwake)
+        {
+            _keepAwakeBtn.Background(Fill(0xFF, 0x2E, 0x7D, 0x32)); // green = "holding"
+            _keepAwakeBtn.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
+        }
+        else
+        {
+            _keepAwakeBtn.Background(nullptr);
+            _keepAwakeBtn.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+        }
     }
 
     void AgentManagerContent::_UpdateReopenButton()

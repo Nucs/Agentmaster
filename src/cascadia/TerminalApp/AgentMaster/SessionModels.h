@@ -308,6 +308,13 @@ namespace Agentmaster
         // exists. Transient — re-derived each run (NOT persisted; Persistence.cpp must not write them).
         int64_t convCreatedUnixMs{}; // transcript ctime (≈ conversation start)
         int64_t convLastActivityUnixMs{}; // transcript mtime (≈ last activity)
+        // Context-window occupancy: the NEWEST assistant message's usage tokens
+        // (input + cache_creation + cache_read + output ≈ the size of the last request = current
+        // context size). Filled QUIETLY by the SessionScanner as it tail-reads the transcript;
+        // displayed on the Manager board card as a RAW TOKEN COUNT (PR feedback: a % needs a context-
+        // window denominator that can't be reliably inferred from the model id, so the raw count is
+        // shown instead). 0 until the first assistant turn. Transient — re-derived each run (NOT persisted).
+        int64_t contextTokens{};
 
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};
