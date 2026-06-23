@@ -1835,7 +1835,8 @@ namespace winrt::TerminalApp::implementation
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             actionsRow.Children().Append(_settingsBtn);
 
-            // Global Autopilot backstop: Pause-all / Resume-all. Placed AFTER the Settings cog.
+            // Global Autopilot backstop: Pause-all / Resume-all. Built here but appended LAST, so it
+            // sits at the RIGHT end of the actions row (after cog, Sessions, Keep Awake).
             _pauseBtn = Button{};
             _pauseBtn.FontSize(11);
             _pauseBtn.Padding(Thickness{ 8, 1, 8, 1 });
@@ -1852,7 +1853,7 @@ namespace winrt::TerminalApp::implementation
                     _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Autopilot" : L"Pause Autopilot"));
                 }
             });
-            actionsRow.Children().Append(_pauseBtn);
+            // (appended LAST — see below, after Keep Awake)
 
             // Agentmaster (Sessions page; SESSIONS.md / FAVORITES.md): the global on-disk Claude-sessions
             // browser — EVERY session on the machine in a selectable window, searchable, with the ★
@@ -1879,6 +1880,9 @@ namespace winrt::TerminalApp::implementation
             _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleKeepAwake(); });
             actionsRow.Children().Append(_keepAwakeBtn);
             _UpdateKeepAwakeButton();
+
+            // Pause/Resume Autopilot — the rightmost button in the actions row (built far above).
+            actionsRow.Children().Append(_pauseBtn);
 
             // Stack the compact actions row directly below the top (title + launch) row.
             toolbarCol.Children().Append(bar);
