@@ -400,10 +400,15 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (FAVORITES.md): the Archived overlay/page + their methods were removed — the
         // Sessions browser is the sole history view (closed sessions stay there, resumable, starred).
-        // Agentmaster: keep-awake toggle. _ToggleKeepAwake flips the flag + calls SetThreadExecutionState
-        // (ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED to hold, ES_CONTINUOUS alone to release);
-        // _UpdateKeepAwakeButton repaints the button to reflect the current state.
-        void _ToggleKeepAwake();
+        // Agentmaster: keep-awake control — a TRI-MODE button (Off / Always / While-Running).
+        // _CycleKeepAwake advances the mode (Off -> Always -> WhileRunning -> Off); _RefreshKeepAwakeHold
+        // computes the DESIRED execution-state hold for the current mode (Always => always hold; WhileRunning
+        // => hold iff a live session is actively Running) and, on a transition only, calls SetThreadExecutionState
+        // (ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED to hold, ES_CONTINUOUS alone to release). It is
+        // also called from _Refresh so WhileRunning tracks the fleet live; pass the already-fetched snapshot to
+        // avoid a second Snapshot() copy. _UpdateKeepAwakeButton repaints the button to reflect mode + hold.
+        void _CycleKeepAwake();
+        void _RefreshKeepAwakeHold(const std::vector<::Agentmaster::SessionInfo>* sessions = nullptr);
         void _UpdateKeepAwakeButton();
         // Agentmaster (M10 Increment 3): the "Reopen Windows (N)" recover button. _UpdateReopenButton
         // sets its label to the recoverable-window count and shows it only when N>0; _OnReopenWindows
@@ -569,8 +574,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
         winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" -> the global on-disk sessions browser (the sole history view; FAVORITES.md)
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
-        winrt::Windows::UI::Xaml::Controls::Button _keepAwakeBtn{ nullptr }; // Agentmaster: "Keep Awake" toggle -> SetThreadExecutionState keeps the PC + display from sleeping
-        bool _keepAwake{ false }; // Agentmaster: whether this window is currently holding the keep-awake execution-state flag
+        winrt::Windows::UI::Xaml::Controls::Button _keepAwakeBtn{ nullptr }; // Agentmaster: tri-mode "Keep Awake" button -> SetThreadExecutionState keeps the PC + display from sleeping
+        // Agentmaster: the user-selected keep-awake mode. Off = sleep normally; Always = always hold the
+        // execution-state flag; WhileRunning = hold ONLY while a live session is actively Running (so the
+        // machine can sleep once every agent is idle/waiting/done — and never mid-turn).
+        enum class KeepAwakeMode { Off, Always, WhileRunning };
+        KeepAwakeMode _keepAwakeMode{ KeepAwakeMode::Off };
+        bool _keepAwakeHeld{ false }; // whether SetThreadExecutionState is CURRENTLY holding the flag (drives transition-only OS calls + the button color)
         // ---- "Claude not detected" overlay (native-exe-only policy gate) ----
         winrt::Windows::UI::Xaml::Controls::Grid _claudeMissingOverlay{ nullptr }; // dimmed modal layer; shown when launch/fork is blocked by no native claude.exe
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)

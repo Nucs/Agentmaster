@@ -1863,15 +1863,17 @@ namespace winrt::TerminalApp::implementation
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
             actionsRow.Children().Append(_sessionsBtn);
 
-            // Agentmaster: "Keep Awake" toggle — prevents the PC (and display) from sleeping while a
-            // long unattended run is in flight, mirroring the user's stay-awake.ps1. It calls
+            // Agentmaster: tri-mode "Keep Awake" button — prevents the PC (and display) from sleeping
+            // while a long unattended run is in flight, mirroring the user's stay-awake.ps1. It calls
             // SetThreadExecutionState from this (persistent) UI thread, so ES_CONTINUOUS holds the flag
             // until released — no timer/loop needed (the per-thread state persists for the thread's life).
+            // Click cycles Off -> Always -> While-Running; While-Running holds only while a session is
+            // actively working (re-evaluated each _Refresh) so the machine can still sleep when all idle.
             _keepAwakeBtn = Button{};
             _keepAwakeBtn.FontSize(11);
             _keepAwakeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_keepAwakeBtn, L"Keep this PC (and display) awake \x2014 prevents sleep while a long unattended run is in flight. Held until toggled off or the window closes.");
-            _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleKeepAwake(); });
+            AgentSetTip(_keepAwakeBtn, L"Keep this PC (and display) awake. Click to cycle: Off \x2192 Always \x2192 While Running (holds only while a session is actively working, so the machine can still sleep once every agent is idle). Released when set Off or the window closes.");
+            _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleKeepAwake(); });
             actionsRow.Children().Append(_keepAwakeBtn);
             _UpdateKeepAwakeButton();
 
@@ -2450,6 +2452,7 @@ namespace winrt::TerminalApp::implementation
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
         _UpdateReopenButton();
+        _RefreshKeepAwakeHold(&sessions); // Agentmaster: WhileRunning mode tracks the fleet live (no-op for Off/Always)
 
         // Re-focus the same card/row if a tagged one held focus and still exists post-rebuild (it may
         // have moved columns on a state change, or be gone if archived — then we leave focus be). The
@@ -5287,19 +5290,75 @@ namespace winrt::TerminalApp::implementation
     // browser is the sole history view. Closing a session keeps it (always archived), resumable
     // from Sessions and marked by Favorite.
 
-    // Agentmaster: keep-awake toggle. SetThreadExecutionState's ES_CONTINUOUS flag is per-thread and
-    // persists for the life of the calling thread (or until reset) — this runs on the window's UI
-    // thread, which lives as long as the window, so no timer/poll loop is needed (unlike stay-awake.ps1,
-    // which loops only because its host PowerShell would otherwise exit). The flag is system-wide while
-    // ANY thread holds it; per-window toggles compose fine (the PC stays awake while any window holds it).
-    void AgentManagerContent::_ToggleKeepAwake()
+    // Agentmaster: keep-awake control (tri-mode). SetThreadExecutionState's ES_CONTINUOUS flag is per-thread
+    // and persists for the life of the calling thread (or until reset) — this runs on the window's UI thread,
+    // which lives as long as the window, so no timer/poll loop is needed (unlike stay-awake.ps1, which loops
+    // only because its host PowerShell would otherwise exit). The flag is system-wide while ANY thread holds
+    // it; per-window holds compose fine (the PC stays awake while any window holds it). On window close the UI
+    // thread exits and the per-thread flag is auto-released — so no explicit teardown is needed.
+    //
+    // _CycleKeepAwake advances the user's selected MODE; _RefreshKeepAwakeHold maps the mode to a desired hold.
+    void AgentManagerContent::_CycleKeepAwake()
     {
-        _keepAwake = !_keepAwake;
-        constexpr DWORD esContinuous = 0x80000000; // ES_CONTINUOUS
-        constexpr DWORD esSystem = 0x00000001; // ES_SYSTEM_REQUIRED
-        constexpr DWORD esDisplay = 0x00000002; // ES_DISPLAY_REQUIRED
-        // Hold: continuous + system + display. Release: continuous alone clears the prior requirements.
-        ::SetThreadExecutionState(_keepAwake ? (esContinuous | esSystem | esDisplay) : esContinuous);
+        switch (_keepAwakeMode)
+        {
+        case KeepAwakeMode::Off: _keepAwakeMode = KeepAwakeMode::Always; break;
+        case KeepAwakeMode::Always: _keepAwakeMode = KeepAwakeMode::WhileRunning; break;
+        case KeepAwakeMode::WhileRunning: _keepAwakeMode = KeepAwakeMode::Off; break;
+        }
+        // Re-evaluate the hold for the new mode immediately (queries the registry for WhileRunning) + repaint.
+        _RefreshKeepAwakeHold(nullptr);
+    }
+
+    // Compute the DESIRED execution-state hold for the current mode and apply it on a transition only (so a
+    // per-_Refresh call while nothing changed is a no-op OS-wise). WhileRunning holds iff a live session is
+    // actively Running — counted across the whole fleet (the hold is machine-global, and the Manager shows the
+    // whole fleet anyway), so the PC stays awake mid-turn but is allowed to sleep once every agent is at rest.
+    // `sessions`, when non-null, is the snapshot _Refresh already fetched (avoids a second Snapshot() copy).
+    void AgentManagerContent::_RefreshKeepAwakeHold(const std::vector<::Agentmaster::SessionInfo>* sessions)
+    {
+        bool desired = false;
+        switch (_keepAwakeMode)
+        {
+        case KeepAwakeMode::Off:
+            desired = false;
+            break;
+        case KeepAwakeMode::Always:
+            desired = true;
+            break;
+        case KeepAwakeMode::WhileRunning:
+        {
+            const auto anyRunning = [](const std::vector<::Agentmaster::SessionInfo>& v) {
+                for (const auto& s : v)
+                {
+                    if (s.live && s.state == ::Agentmaster::SessionState::Running)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (sessions)
+            {
+                desired = anyRunning(*sessions);
+            }
+            else if (_registry)
+            {
+                desired = anyRunning(_registry->Snapshot());
+            }
+            break;
+        }
+        }
+
+        if (desired != _keepAwakeHeld)
+        {
+            _keepAwakeHeld = desired;
+            constexpr DWORD esContinuous = 0x80000000; // ES_CONTINUOUS
+            constexpr DWORD esSystem = 0x00000001; // ES_SYSTEM_REQUIRED
+            constexpr DWORD esDisplay = 0x00000002; // ES_DISPLAY_REQUIRED
+            // Hold: continuous + system + display. Release: continuous alone clears the prior requirements.
+            ::SetThreadExecutionState(_keepAwakeHeld ? (esContinuous | esSystem | esDisplay) : esContinuous);
+        }
         _UpdateKeepAwakeButton();
     }
 
@@ -5309,26 +5368,51 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        const wchar_t* glyph = L"\xE708"; // default (Off): QuietHours-ish moon
+        const wchar_t* label = L"Keep Awake";
+        switch (_keepAwakeMode)
+        {
+        case KeepAwakeMode::Off:
+            glyph = L"\xE708";
+            label = L"Keep Awake";
+            break;
+        case KeepAwakeMode::Always:
+            glyph = L"\xEC46"; // PowerButton
+            label = L"Awake On";
+            break;
+        case KeepAwakeMode::WhileRunning:
+            glyph = L"\xE768"; // Play -> "while running"
+            label = L"Running Awake";
+            break;
+        }
+
         auto content = StackPanel{};
         content.Orientation(Orientation::Horizontal);
         content.Spacing(5);
         FontIcon icon;
         icon.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
-        icon.Glyph(_keepAwake ? L"\xEC46" : L"\xE708"); // EC46 PowerButton (on) / E708 QuietHours-ish (off)
+        icon.Glyph(glyph);
         icon.FontSize(12); // compact, matching the thinner actions-row buttons
         content.Children().Append(icon);
-        content.Children().Append(Text(_keepAwake ? L"Awake On" : L"Keep Awake", 11, false, 1.0));
+        content.Children().Append(Text(label, 11, false, 1.0));
         _keepAwakeBtn.Content(content);
-        // On -> accent-tinted so the held state reads at a glance; off -> revert to the theme default.
-        if (_keepAwake)
+
+        // Color: Off -> theme default; actively holding -> green; WhileRunning but idle (armed, not holding)
+        // -> amber, so the user can tell at a glance whether the machine is being kept awake right now.
+        if (_keepAwakeMode == KeepAwakeMode::Off)
         {
-            _keepAwakeBtn.Background(Fill(0xFF, 0x2E, 0x7D, 0x32)); // green = "holding"
+            _keepAwakeBtn.Background(nullptr);
+            _keepAwakeBtn.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+        }
+        else if (_keepAwakeHeld)
+        {
+            _keepAwakeBtn.Background(Fill(0xFF, 0x2E, 0x7D, 0x32)); // green = holding now
             _keepAwakeBtn.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
         }
         else
         {
-            _keepAwakeBtn.Background(nullptr);
-            _keepAwakeBtn.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+            _keepAwakeBtn.Background(Fill(0xFF, 0x8A, 0x6D, 0x1B)); // amber = armed (WhileRunning), nothing running
+            _keepAwakeBtn.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
         }
     }
 
@@ -8282,19 +8366,34 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _pathPickerUserDismissed = false; // opening clears the dismiss latch
-        if (_pathPanelBorder)
-        {
-            _pathPanelBorder.Width(std::max<double>(380.0, _cwdBox.ActualWidth()));
-        }
+
+        // Anchor the popup just under the cwd box (left-aligned with it). Capture its left edge in
+        // _root coordinates so the width below can be measured against the window's right edge.
+        double leftInRoot = 0.0;
         try
         {
             const auto xform = _cwdBox.TransformToVisual(_root);
             const auto pt = xform.TransformPoint(Point{ 0.0f, static_cast<float>(_cwdBox.ActualHeight()) });
-            _pathPopup.HorizontalOffset(static_cast<double>(pt.X));
+            leftInRoot = static_cast<double>(pt.X);
+            _pathPopup.HorizontalOffset(leftInRoot);
             _pathPopup.VerticalOffset(static_cast<double>(pt.Y) + 2.0);
         }
         catch (...)
         {
+        }
+
+        if (_pathPanelBorder)
+        {
+            // Width is set EXPLICITLY here, not left to content/MaxWidth: the rows are short folder
+            // leaf names, so a MaxWidth cap alone never grows the panel (it sizes to content and sits
+            // at the floor). Instead the panel fills from its left anchor out to 10% short of the
+            // window's right edge, with a readable floor when the window is narrow. The cwd box width
+            // is the lower bound so it's never narrower than the box it drops from.
+            const double minWidth = std::max<double>(560.0, _cwdBox.ActualWidth());
+            const double rootWidth = _root ? _root.ActualWidth() : 0.0;
+            const double rightLimit = rootWidth * 0.9; // leave a 10% gap on the window's right edge
+            const double width = std::max<double>(minWidth, rightLimit - leftInRoot);
+            _pathPanelBorder.Width(width);
         }
         _RebuildPathPicker();
         _pathPopup.IsOpen(true);
