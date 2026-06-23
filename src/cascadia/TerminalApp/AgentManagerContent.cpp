@@ -1525,13 +1525,16 @@ namespace winrt::TerminalApp::implementation
     {
         return { 1, 1 };
     }
-    void AgentManagerContent::Focus(FocusState reason)
+    void AgentManagerContent::Focus(FocusState /*reason*/)
     {
-        // Focus the cwd box (a real Control) so the tab takes focus cleanly.
-        if (_cwdBox)
-        {
-            _cwdBox.Focus(reason);
-        }
+        // Agentmaster: deliberately DO NOT move focus here. The host calls IPaneContent::Focus
+        // whenever the Manager pane is activated (app open, tab open, tab switch) — auto-focusing
+        // the cwd (Launch path) box put a blinking caret in it on every open, which the user did
+        // not want. Leave focus untouched so NOTHING in the Manager is focused until the user
+        // actually interacts: clicking the cwd box, a board card, a tree row, etc. focuses that
+        // element directly (and the path-picker drop-down still opens then, since it triggers on
+        // Pointer/Keyboard focus). (If we ever focus anything here it must be a real Control —
+        // _root is a Grid with no Focus(FocusState) — but here we intentionally focus nothing.)
     }
     void AgentManagerContent::Close()
     {
