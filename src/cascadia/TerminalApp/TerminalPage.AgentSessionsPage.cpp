@@ -570,22 +570,64 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(topDividerSpacer, 1);
         topRow.Children().Append(topDividerSpacer);
 
-        // FILTERS row — every control that scopes/narrows the search, on its own line under the box.
-        StackPanel bar;
+        // FILTERS row — its own line under the search box, spanning the table width via the SAME body
+        // column mirror as the top row. The scope / Open / Hidden / Favorite / window / refresh controls
+        // pack at the LEFT; the "✕ filter" chip is pinned to the RIGHT (the table's right edge, directly
+        // under the search box's right end).
+        Grid filtersRow;
+        filtersRow.Margin(Thickness{ 0, 8, 0, 0 }); // gap below the search row
+        {
+            const auto fcol = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                filtersRow.ColumnDefinitions().Append(c);
+            };
+            fcol(0.6, GridUnitType::Star); // == body table column
+            fcol(0, GridUnitType::Auto); // == body divider footprint (the spacer below)
+            fcol(0.4, GridUnitType::Star); // == body detail column
+        }
+        Grid::SetRow(filtersRow, 1);
+        header.Children().Append(filtersRow);
+
+        // The table-width left cell: controls (Star, left) + the filter chip (Auto, right) — separate
+        // columns so they never overlap; the controls column shrinks before the chip does.
+        Grid filtersLeft;
+        {
+            const auto flcol = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                filtersLeft.ColumnDefinitions().Append(c);
+            };
+            flcol(1, GridUnitType::Star); // the controls
+            flcol(0, GridUnitType::Auto); // the chip, right-aligned
+        }
+        Grid::SetColumn(filtersLeft, 0);
+        filtersRow.Children().Append(filtersLeft);
+
+        // The divider-matching spacer (Width 1 + 8px margins = 17px) so the left cell's right edge
+        // lines up with the table's right edge, like the top row.
+        Border filtersDividerSpacer;
+        filtersDividerSpacer.Width(1);
+        filtersDividerSpacer.Margin(Thickness{ 8, 0, 8, 0 });
+        Grid::SetColumn(filtersDividerSpacer, 1);
+        filtersRow.Children().Append(filtersDividerSpacer);
+
+        StackPanel bar; // the left-packed controls
         bar.Orientation(Orientation::Horizontal);
         bar.Spacing(6);
         bar.VerticalAlignment(VerticalAlignment::Center);
         bar.HorizontalAlignment(HorizontalAlignment::Left);
-        bar.Margin(Thickness{ 0, 8, 0, 0 }); // gap below the search row
-        Grid::SetRow(bar, 1);
+        Grid::SetColumn(bar, 0);
+        filtersLeft.Children().Append(bar);
 
         // "✕ filter: …" — the active row right-click "Filter" facet(s), shown only while one is set
-        // (collapsed otherwise, so it takes no layout space and the toggles sit flush at the start of
-        // the filters row). It reads as "search AND this filter"; clicking it clears ALL facets. The
-        // label is rebuilt by _UpdateSessionsFilterChip; the render path keeps it in sync.
+        // (collapsed otherwise, so it takes no layout space). It reads as "search AND this filter";
+        // clicking it clears ALL facets. Pinned to the RIGHT of the filters row (the table's right
+        // edge). The label is rebuilt by _UpdateSessionsFilterChip; the render path keeps it in sync.
         _sessFilterChip = Button{};
         _sessFilterChip.Visibility(Visibility::Collapsed);
         _sessFilterChip.MinWidth(0);
+        _sessFilterChip.HorizontalAlignment(HorizontalAlignment::Right);
         _sessFilterChip.VerticalAlignment(VerticalAlignment::Center);
         _sessFilterChip.Padding(Thickness{ 8, 2, 8, 2 });
         SessSetTip(_sessFilterChip, L"Active row filter \x2014 click to clear it.");
@@ -604,7 +646,8 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         });
-        bar.Children().Append(_sessFilterChip);
+        Grid::SetColumn(_sessFilterChip, 1);
+        filtersLeft.Children().Append(_sessFilterChip); // right column of the table-width filters cell
 
         // The scope toggles. A toggle flip re-runs the search (deferred through the same throttle).
         const auto onToggle = [this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
@@ -747,7 +790,8 @@ namespace winrt::TerminalApp::implementation
         });
         bar.Children().Append(_sessRefreshBtn);
 
-        header.Children().Append(bar); // the filters row (Grid::SetRow(bar, 1) set at its declaration)
+        // (filtersRow — holding the left-packed controls bar + the right-pinned chip — was appended to
+        // the header above; bar/chip live inside it, so nothing more to mount here.)
         Grid::SetRow(header, 0);
         host.Children().Append(header);
 
