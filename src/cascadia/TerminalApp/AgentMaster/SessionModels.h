@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "Activity.h" // RunningApp (Fleet Observer live-enrichment field on SessionInfo)
@@ -280,37 +279,14 @@ namespace Agentmaster
         // Context-window occupancy: the NEWEST assistant message's usage tokens
         // (input + cache_creation + cache_read + output ≈ the size of the last request = current
         // context size). Filled QUIETLY by the SessionScanner as it tail-reads the transcript;
-        // drives the Manager board card's context-% adornment (denominator via ContextWindowTokens).
-        // 0 until the first assistant turn. Transient — re-derived each run (NOT persisted).
+        // displayed on the Manager board card as a RAW TOKEN COUNT (PR feedback: a % needs a context-
+        // window denominator that can't be reliably inferred from the model id, so the raw count is
+        // shown instead). 0 until the first assistant turn. Transient — re-derived each run (NOT persisted).
         int64_t contextTokens{};
 
         std::vector<QueuedPrompt> queue; // the Flight Plan
         AutopilotState autopilot{};
     };
-
-    // Agentmaster: the context-window denominator for a session's context-% adornment. The transcript
-    // only records raw token counts, so the window is auto-detected: default 200,000 (the standard
-    // Claude window), bumped to 1,000,000 when the model id is a 1M-context variant (contains "1m",
-    // e.g. "claude-opus-4-8[1m]") OR the observed occupancy has already passed 200K — the latter is
-    // self-correcting, since only a >200K window could hold that many tokens. Pure + total.
-    inline int64_t ContextWindowTokens(std::wstring_view model, int64_t contextTokens) noexcept
-    {
-        bool oneMillion = contextTokens > 200000;
-        if (!oneMillion)
-        {
-            // case-insensitive scan for a "1m" marker in the model id
-            for (size_t i = 0; i + 1 < model.size(); ++i)
-            {
-                const wchar_t b = model[i + 1];
-                if (model[i] == L'1' && (b == L'm' || b == L'M'))
-                {
-                    oneMillion = true;
-                    break;
-                }
-            }
-        }
-        return oneMillion ? 1000000 : 200000;
-    }
 
     // A reusable plan (DESIGN §10 "Plans across the fleet"): a named sequence of prompts
     // that can be applied to any session or broadcast to many. Persisted separately.

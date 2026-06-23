@@ -162,6 +162,15 @@ namespace Agentmaster
                 continue; // not a JSON object line (tolerate anything)
             }
             const auto& obj = *parsed;
+            // Skip subagent/sidechain lines. A Task/Agent subagent's messages carry their OWN
+            // message.usage and turn structure — NOT the main session's — so counting them would
+            // corrupt contextTokens (it would jump to the subagent's context) and the state machine.
+            // In practice subagents stream to a separate subagents/*.jsonl, but this matches the
+            // defensiveness ReadTranscriptInfo already applies, in case a flow/version inlines them.
+            if (obj.BoolAt(L"isSidechain"))
+            {
+                continue;
+            }
             const std::wstring type = obj.StrAt(L"type");
 
             if (type == L"assistant")

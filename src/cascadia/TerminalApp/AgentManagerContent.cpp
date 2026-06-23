@@ -285,6 +285,60 @@ namespace
         return out;
     }
 
+    // Agentmaster (context-window adornment): a compact token count for the board card — "182K",
+    // "8.3K", "1.05M". Whole-K once past 10K (the common context range), one decimal below that,
+    // two-decimal M past a million. PR feedback (Eli): show the raw token count, not a %, because
+    // the context-window denominator (200K vs 1M) can't be reliably known from the model id.
+    std::wstring FormatTokenCount(int64_t n)
+    {
+        if (n < 0)
+        {
+            n = 0;
+        }
+        wchar_t buf[32];
+        if (n >= 1000000)
+        {
+            swprintf_s(buf, L"%.2fM", static_cast<double>(n) / 1000000.0);
+        }
+        else if (n >= 10000)
+        {
+            swprintf_s(buf, L"%lldK", static_cast<long long>((n + 500) / 1000)); // rounded whole-K
+        }
+        else if (n >= 1000)
+        {
+            swprintf_s(buf, L"%.1fK", static_cast<double>(n) / 1000.0);
+        }
+        else
+        {
+            swprintf_s(buf, L"%lld", static_cast<long long>(n));
+        }
+        return buf;
+    }
+
+    // Agentmaster: group a non-negative integer with thousands separators ("182,341") for the
+    // context-tokens tooltip (the exact count behind the compact "182K").
+    std::wstring GroupDigits(int64_t n)
+    {
+        if (n < 0)
+        {
+            n = 0;
+        }
+        std::wstring raw = std::to_wstring(n);
+        std::wstring out;
+        int count = 0;
+        for (auto it = raw.rbegin(); it != raw.rend(); ++it)
+        {
+            if (count && count % 3 == 0)
+            {
+                out.push_back(L',');
+            }
+            out.push_back(*it);
+            ++count;
+        }
+        std::reverse(out.begin(), out.end());
+        return out;
+    }
+
     // Agentmaster: format a duration (ms) as a consolidated span. Units descend month / day / hour /
     // minute / second; month(=30d) and minute SHARE the letter 'm', disambiguated by position (the
     // sequence is always largest->smallest), per the requested format: "1m4d6h" (1 month 4 days 6
@@ -2561,27 +2615,17 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Agentmaster: context-window usage % — how full the conversation's context is. The token
-        // count is the newest assistant usage block (filled by the SessionScanner); the denominator
-        // (200K / 1M) is auto-detected by ContextWindowTokens. Color-coded by fill: green (<50%) ->
-        // amber (50–79%) -> red (>=80%) so a card nearing auto-compact stands out. Shown only once a
-        // turn has produced usage (contextTokens > 0).
+        // Agentmaster: context-window occupancy as a raw TOKEN COUNT (PR feedback, Eli). A % needs a
+        // context-window denominator, and the 200K-vs-1M window can't be reliably known from the model
+        // id (Opus 4.8 doesn't advertise its 1M variant), so a % gave misleading numbers — the raw
+        // token count is unambiguous and matches what Claude Code reports for the session. This is the
+        // newest assistant turn's usage (input + cache_creation + cache_read + output ≈ what's in the
+        // session's context right now), filled by the SessionScanner. Shown once usage exists.
         if (s.contextTokens > 0)
         {
-            const int64_t window = ::Agentmaster::ContextWindowTokens(s.model, s.contextTokens);
-            int pct = static_cast<int>((s.contextTokens * 100 + window / 2) / window); // rounded
-            if (pct > 100)
-            {
-                pct = 100;
-            }
-            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::to_hstring(pct) + L"%", 11, false, 0.9);
-            const Color ctxColor = pct >= 80 ? Color{ 0xFF, 0xE0, 0x6C, 0x6C } : // red
-                                       (pct >= 50 ? Color{ 0xFF, 0xE0, 0xB0, 0x4C } : // amber
-                                            Color{ 0xFF, 0x6C, 0xC0, 0x6C }); // green
-            ctxText.Foreground(SolidColorBrush{ ctxColor });
-            const auto tip = std::wstring{ L"Context used: " } + std::to_wstring(s.contextTokens) +
-                             L" of " + std::to_wstring(window) + L" tokens (" + std::to_wstring(pct) +
-                             L"%). The window (200K / 1M) is auto-detected from the model.";
+            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 11, false, 0.7);
+            const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
+                             L" tokens in the session (newest turn: input + cache + output).";
             AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
             stack.Children().Append(ctxText);
         }
