@@ -342,6 +342,115 @@ namespace winrt::TerminalApp::implementation
             }
             return ::Agentmaster::ParseTranscriptTimestamp(t + L"T00:00:00Z");
         }
+
+        // The LOCAL [start, end) ms covering the calendar day / week (Monday-start) / month that
+        // `unixMs` falls in — the row right-click "By Same Day/Week/Month" buckets. DST-safe: the
+        // end is computed by advancing the field on the normalized start tm and re-running mktime
+        // (so a 23h/25h DST day still spans exactly one calendar day), NOT by adding a fixed 86400.
+        // gran: 0 = day, 1 = week, 2 = month. {0,0} on a bad/zero input.
+        std::pair<int64_t, int64_t> SessLocalBucket(int64_t unixMs, int gran)
+        {
+            if (unixMs <= 0)
+            {
+                return { 0, 0 };
+            }
+            const __time64_t t = unixMs / 1000;
+            struct tm lt
+            {
+            };
+            if (_localtime64_s(&lt, &t) != 0)
+            {
+                return { 0, 0 };
+            }
+            lt.tm_hour = 0;
+            lt.tm_min = 0;
+            lt.tm_sec = 0;
+            if (gran == 1)
+            {
+                lt.tm_mday -= (lt.tm_wday + 6) % 7; // back up to Monday (tm_wday 0=Sun); mktime normalizes a <=0 mday
+            }
+            else if (gran == 2)
+            {
+                lt.tm_mday = 1;
+            }
+            struct tm startTm = lt;
+            startTm.tm_isdst = -1; // let the CRT resolve DST for this local wall-clock time
+            const __time64_t startT = _mktime64(&startTm); // normalizes startTm in place
+            if (startT == static_cast<__time64_t>(-1))
+            {
+                return { 0, 0 };
+            }
+            struct tm endTm = startTm; // the normalized start; advance exactly one bucket
+            endTm.tm_isdst = -1;
+            if (gran == 0)
+            {
+                endTm.tm_mday += 1;
+            }
+            else if (gran == 1)
+            {
+                endTm.tm_mday += 7;
+            }
+            else
+            {
+                endTm.tm_mon += 1;
+            }
+            const __time64_t endT = _mktime64(&endTm);
+            if (endT == static_cast<__time64_t>(-1))
+            {
+                return { 0, 0 };
+            }
+            return { static_cast<int64_t>(startT) * 1000, static_cast<int64_t>(endT) * 1000 };
+        }
+
+        // A short human label for a time bucket — "day 2026-06-20" / "week of 2026-06-15" (the
+        // Monday) / "month 2026-06" — shown on the filter chip + the count line. "" on a bad input.
+        std::wstring SessBucketLabel(int64_t unixMs, int gran)
+        {
+            int64_t base = unixMs;
+            if (gran == 1)
+            {
+                base = SessLocalBucket(unixMs, 1).first; // the Monday of the week
+            }
+            if (base <= 0)
+            {
+                return L"";
+            }
+            const __time64_t t = base / 1000;
+            struct tm lt
+            {
+            };
+            if (_localtime64_s(&lt, &t) != 0)
+            {
+                return L"";
+            }
+            wchar_t buf[40]{};
+            if (gran == 2)
+            {
+                swprintf_s(buf, L"month %04d-%02d", lt.tm_year + 1900, lt.tm_mon + 1);
+            }
+            else if (gran == 1)
+            {
+                swprintf_s(buf, L"week of %04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+            }
+            else
+            {
+                swprintf_s(buf, L"day %04d-%02d-%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
+            }
+            return buf;
+        }
+
+        // The last path segment of a working dir, for a compact chip label (trailing separators
+        // trimmed). Falls back to the whole string when there is no separator.
+        std::wstring SessLeaf(const std::wstring& dir)
+        {
+            std::wstring d = dir;
+            while (!d.empty() && (d.back() == L'\\' || d.back() == L'/'))
+            {
+                d.pop_back();
+            }
+            const size_t cut = d.find_last_of(L"\\/");
+            return cut == std::wstring::npos ? d : d.substr(cut + 1);
+        }
     }
 
     // Build the page shell ONCE — host + search-bar header + table/detail split — mounted over
@@ -421,6 +530,26 @@ namespace winrt::TerminalApp::implementation
             }
         });
         bar.Children().Append(search);
+
+        // "✕ filter: …" — the active row right-click "Filter" facet(s), shown only while one is set
+        // (collapsed otherwise, so it takes no layout space and the toggles sit flush after the
+        // search box). It reads as "search AND this filter"; clicking it clears ALL facets. The
+        // label is rebuilt by _UpdateSessionsFilterChip; the render path keeps it in sync.
+        _sessFilterChip = Button{};
+        _sessFilterChip.Visibility(Visibility::Collapsed);
+        _sessFilterChip.MinWidth(0);
+        _sessFilterChip.VerticalAlignment(VerticalAlignment::Center);
+        _sessFilterChip.Padding(Thickness{ 8, 2, 8, 2 });
+        SessSetTip(_sessFilterChip, L"Active row filter \x2014 click to clear it.");
+        _sessFilterChip.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                if (auto self = weak.get())
+                {
+                    self->_ClearSessionsRowFilter();
+                }
+            });
+        });
+        bar.Children().Append(_sessFilterChip);
 
         // The scope toggles. A toggle flip re-runs the search (deferred through the same throttle).
         const auto onToggle = [this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
@@ -1194,6 +1323,19 @@ namespace winrt::TerminalApp::implementation
         // any Agentmaster window — the same `reg->live` the solid chip reflects). Registry Get is
         // mutex-guarded; queried per row only while the filter is on.
         const bool openOnly = _sessOpenOnlyBtn && _sessOpenOnlyBtn.IsChecked() && _sessOpenOnlyBtn.IsChecked().Value();
+        // The row right-click "Filter" facets (dir / branch / created-time bucket / fork family) AND
+        // with everything above. Computed once; an inactive filter is a no-op (Any() == false).
+        const bool rowFilterActive = _sessionsRowFilter.Any();
+        // Ids referenced as a fork parent by a gathered row — used per row to decide whether to offer
+        // "Filter \xBB By Fork Family" (a row has lineage when it is a fork, or something forked from it).
+        std::unordered_set<std::wstring> forkParents;
+        for (const auto& r : _sessionsRows)
+        {
+            if (!r.forkedFromId.empty())
+            {
+                forkParents.insert(r.forkedFromId);
+            }
+        }
         int hiddenInWindow = 0;
         std::vector<const _SessionsRow*> view;
         for (const auto& r : _sessionsRows)
@@ -1205,6 +1347,10 @@ namespace winrt::TerminalApp::implementation
                 {
                     continue; // hidden by the "Hide from list" set — reveal with the "Hidden" filter
                 }
+            }
+            if (rowFilterActive && !_SessionsRowPassesRowFilter(r))
+            {
+                continue; // dropped by an active right-click "Filter" facet (AND with search + toggles)
             }
             if (openOnly)
             {
@@ -1580,6 +1726,67 @@ namespace winrt::TerminalApp::implementation
                 });
                 rowMenu.Items().Append(fresh);
 
+                // --- Filter \xBB : narrow the list to sessions LIKE this one. Each facet ANDs with the
+                // search box + the scope/Open/Hidden toggles (all applied together at this render's
+                // chokepoint), and facets STACK across dimensions. A facet the anchor row already
+                // matches is shown \x2713 and clicking it clears that facet (so each item is a clean
+                // toggle). Picking a different time granularity replaces the time facet. Every item
+                // defers one tick (the MenuFlyout restores focus + the action re-renders — the page's
+                // pointer-handler discipline). The facets are pure browse-state; nothing is persisted. ---
+                {
+                    rowMenu.Items().Append(MenuFlyoutSeparator{});
+                    MenuFlyoutSubItem filterSub;
+                    filterSub.Text(L"Filter");
+                    SessSetTip(filterSub, L"Narrow the list to sessions like this one \x2014 combines (AND) with the search box and the other filters.");
+                    const auto addFacet = [&](_SessionsRowFilterKind kind, const std::wstring& label, const std::wstring& tip) {
+                        MenuFlyoutItem it;
+                        const bool active = _SessionsRowFilterMatchesAnchor(static_cast<int>(kind), r);
+                        it.Text(winrt::hstring{ (active ? L"\x2713 " : L"") + label });
+                        SessSetTip(it, winrt::hstring{ tip });
+                        const int kindInt = static_cast<int>(kind);
+                        it.Click([this, kindInt, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), kindInt, rid]() {
+                                if (auto self = weak.get())
+                                {
+                                    self->_ApplySessionsRowFilter(kindInt, rid);
+                                }
+                            });
+                        });
+                        filterSub.Items().Append(it);
+                    };
+                    addFacet(_SessionsRowFilterKind::SameDirectory, L"By Same Directory", L"Show only sessions whose working directory is this one (matched filesystem-aware). Click again on a matching row to clear.");
+                    if (!r.branch.empty())
+                    {
+                        addFacet(_SessionsRowFilterKind::SameBranch, L"By Same Branch", L"Show only sessions on this git branch (\x201C" + r.branch + L"\x201D).");
+                    }
+                    filterSub.Items().Append(MenuFlyoutSeparator{});
+                    addFacet(_SessionsRowFilterKind::SameDay, L"By Same Day", L"Show only sessions CREATED on the same calendar day as this one.");
+                    addFacet(_SessionsRowFilterKind::SameWeek, L"By Same Week", L"Show only sessions CREATED in the same week (Monday\x2013Sunday) as this one.");
+                    addFacet(_SessionsRowFilterKind::SameMonth, L"By Same Month", L"Show only sessions CREATED in the same calendar month as this one.");
+                    if (r.fork || forkParents.count(r.id) != 0)
+                    {
+                        filterSub.Items().Append(MenuFlyoutSeparator{});
+                        addFacet(_SessionsRowFilterKind::ForkFamily, L"By Fork Family", L"Show only this conversation together with its forks and fork-parent (the whole fork family within the listed window).");
+                    }
+                    if (_sessionsRowFilter.Any())
+                    {
+                        filterSub.Items().Append(MenuFlyoutSeparator{});
+                        MenuFlyoutItem clearItem;
+                        clearItem.Text(L"Clear filters");
+                        SessSetTip(clearItem, L"Remove every active row filter.");
+                        clearItem.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                                if (auto self = weak.get())
+                                {
+                                    self->_ClearSessionsRowFilter();
+                                }
+                            });
+                        });
+                        filterSub.Items().Append(clearItem);
+                    }
+                    rowMenu.Items().Append(filterSub);
+                }
+
                 rowMenu.Items().Append(MenuFlyoutSeparator{});
 
                 // Hide / Unhide — toggles AppSettings.hiddenSessionIds. A revealed hidden row (only
@@ -1629,6 +1836,10 @@ namespace winrt::TerminalApp::implementation
             if (openOnly)
             {
                 counts += L" \x00B7 open only"; // the "Open" filter is active (mirrors the "N hidden" note)
+            }
+            if (rowFilterActive)
+            {
+                counts += L" \x00B7 filtered"; // a row right-click "Filter" facet is narrowing the set (the chip shows which)
             }
             if (hiddenInWindow > 0)
             {
@@ -2295,6 +2506,253 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::SaveAppSettings(s);
         _appSettings.hiddenSessionIds.clear();
         _RenderSessionsTable(); // no-op if the page was never built (host null)
+    }
+
+    // ===== the Sessions-page row right-click "Filter" facets ================================
+    // A row's right-click "Filter \xBB" submenu narrows the visible set to rows matching the clicked
+    // ("anchor") row in some dimension. Each facet ANDs with the search text + the scope/Open/Hidden
+    // toggles (all applied together at the _RenderSessionsTable chokepoint), and facets stack across
+    // dimensions (dir AND branch AND time-bucket AND fork-family). Picking a facet a row already
+    // matches toggles it OFF. Transient browse-state — nothing persisted, nothing touched on disk.
+
+    // The AND-predicate over every active facet: true == keep this row. An inactive facet imposes no
+    // constraint. Directory is matched filesystem-aware (NormDirKey, Rule #8); branch is exact (git
+    // refs are case-sensitive); a time bucket is the half-open [start, end) created-time window; the
+    // fork family is set membership over the precomputed connected component.
+    bool TerminalPage::_SessionsRowPassesRowFilter(const _SessionsRow& r) const
+    {
+        const auto& f = _sessionsRowFilter;
+        if (f.hasDir && ::Agentmaster::NormDirKey(f.dir) != ::Agentmaster::NormDirKey(r.dir))
+        {
+            return false;
+        }
+        if (f.hasBranch && f.branch != r.branch)
+        {
+            return false;
+        }
+        if (f.timeGran != _SessionsRowFilterState::TimeGran::None && !(r.createdMs >= f.timeStartMs && r.createdMs < f.timeEndMs))
+        {
+            return false;
+        }
+        if (f.hasFamily && f.familyIds.count(r.id) == 0)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    // Does the facet for `kind`'s DIMENSION currently exist AND equal row r's value? Drives both the
+    // submenu's \x2713 (so the item that would toggle the active facet OFF reads as "checked") and the
+    // apply-toggle direction below. For the time dimension it is granularity-specific: with a WEEK
+    // facet active, the SameDay query returns false (so picking SameDay REPLACES week with day).
+    bool TerminalPage::_SessionsRowFilterMatchesAnchor(int kind, const _SessionsRow& r) const
+    {
+        const auto& f = _sessionsRowFilter;
+        switch (static_cast<_SessionsRowFilterKind>(kind))
+        {
+        case _SessionsRowFilterKind::SameDirectory:
+            return f.hasDir && ::Agentmaster::NormDirKey(f.dir) == ::Agentmaster::NormDirKey(r.dir);
+        case _SessionsRowFilterKind::SameBranch:
+            return f.hasBranch && f.branch == r.branch;
+        case _SessionsRowFilterKind::SameDay:
+            return f.timeGran == _SessionsRowFilterState::TimeGran::Day && r.createdMs >= f.timeStartMs && r.createdMs < f.timeEndMs;
+        case _SessionsRowFilterKind::SameWeek:
+            return f.timeGran == _SessionsRowFilterState::TimeGran::Week && r.createdMs >= f.timeStartMs && r.createdMs < f.timeEndMs;
+        case _SessionsRowFilterKind::SameMonth:
+            return f.timeGran == _SessionsRowFilterState::TimeGran::Month && r.createdMs >= f.timeStartMs && r.createdMs < f.timeEndMs;
+        case _SessionsRowFilterKind::ForkFamily:
+            return f.hasFamily && f.familyIds.count(r.id) != 0;
+        }
+        return false;
+    }
+
+    // The connected component of the fork graph that contains anchorId, over the GATHERED rows: a BFS
+    // treating each row's forkedFromId as an UNDIRECTED edge to its parent, so a fork, its parent, and
+    // their siblings all land in one family. A parent outside the current window is harmless — it just
+    // sits in the set (no such row renders). The anchor is always included (a lone session = {anchor}).
+    std::unordered_set<std::wstring> TerminalPage::_ComputeForkFamily(const std::wstring& anchorId) const
+    {
+        std::unordered_multimap<std::wstring, std::wstring> adj;
+        for (const auto& r : _sessionsRows)
+        {
+            if (!r.forkedFromId.empty())
+            {
+                adj.emplace(r.id, r.forkedFromId);
+                adj.emplace(r.forkedFromId, r.id);
+            }
+        }
+        std::unordered_set<std::wstring> seen{ anchorId }, out;
+        std::vector<std::wstring> stack{ anchorId };
+        while (!stack.empty())
+        {
+            const std::wstring cur = std::move(stack.back());
+            stack.pop_back();
+            out.insert(cur);
+            const auto range = adj.equal_range(cur);
+            for (auto it = range.first; it != range.second; ++it)
+            {
+                if (seen.insert(it->second).second)
+                {
+                    stack.push_back(it->second);
+                }
+            }
+        }
+        return out;
+    }
+
+    // Toggle the facet for `kind`'s dimension to the anchor row's value — or OFF when the anchor
+    // already matches it (so the same submenu item is a clean toggle). Picking a different time
+    // granularity REPLACES the time facet (one granularity at a time); the dir/branch/family facets
+    // are independent dimensions that coexist as AND. Re-renders + refreshes the chip.
+    void TerminalPage::_ApplySessionsRowFilter(int kind, const std::wstring& anchorId)
+    {
+        const _SessionsRow* a = nullptr;
+        for (const auto& r : _sessionsRows)
+        {
+            if (r.id == anchorId)
+            {
+                a = &r;
+                break;
+            }
+        }
+        if (!a)
+        {
+            return; // the anchor scrolled out of the gathered set
+        }
+        auto& f = _sessionsRowFilter;
+        const bool alreadyMatches = _SessionsRowFilterMatchesAnchor(kind, *a);
+        switch (static_cast<_SessionsRowFilterKind>(kind))
+        {
+        case _SessionsRowFilterKind::SameDirectory:
+            if (alreadyMatches)
+            {
+                f.hasDir = false;
+                f.dir.clear();
+            }
+            else
+            {
+                f.hasDir = true;
+                f.dir = a->dir;
+            }
+            break;
+        case _SessionsRowFilterKind::SameBranch:
+            if (a->branch.empty())
+            {
+                break; // nothing to pin on
+            }
+            if (alreadyMatches)
+            {
+                f.hasBranch = false;
+                f.branch.clear();
+            }
+            else
+            {
+                f.hasBranch = true;
+                f.branch = a->branch;
+            }
+            break;
+        case _SessionsRowFilterKind::SameDay:
+        case _SessionsRowFilterKind::SameWeek:
+        case _SessionsRowFilterKind::SameMonth:
+        {
+            if (alreadyMatches)
+            {
+                f.timeGran = _SessionsRowFilterState::TimeGran::None;
+                f.timeStartMs = 0;
+                f.timeEndMs = 0;
+                f.timeLabel.clear();
+                break;
+            }
+            int gran = 0; // SameDay
+            auto wantGran = _SessionsRowFilterState::TimeGran::Day;
+            if (static_cast<_SessionsRowFilterKind>(kind) == _SessionsRowFilterKind::SameWeek)
+            {
+                gran = 1;
+                wantGran = _SessionsRowFilterState::TimeGran::Week;
+            }
+            else if (static_cast<_SessionsRowFilterKind>(kind) == _SessionsRowFilterKind::SameMonth)
+            {
+                gran = 2;
+                wantGran = _SessionsRowFilterState::TimeGran::Month;
+            }
+            const auto [s, e] = SessLocalBucket(a->createdMs, gran);
+            if (s == 0 && e == 0)
+            {
+                break; // un-bucketable created time
+            }
+            f.timeGran = wantGran;
+            f.timeStartMs = s;
+            f.timeEndMs = e;
+            f.timeLabel = SessBucketLabel(a->createdMs, gran);
+            break;
+        }
+        case _SessionsRowFilterKind::ForkFamily:
+            if (alreadyMatches)
+            {
+                f.hasFamily = false;
+                f.familyIds.clear();
+            }
+            else
+            {
+                f.familyIds = _ComputeForkFamily(anchorId);
+                f.hasFamily = !f.familyIds.empty();
+            }
+            break;
+        }
+        _UpdateSessionsFilterChip();
+        _RenderSessionsTable();
+    }
+
+    // Drop EVERY facet (the chip click, and the submenu's "Clear filters") and re-render.
+    void TerminalPage::_ClearSessionsRowFilter()
+    {
+        _sessionsRowFilter = _SessionsRowFilterState{};
+        _UpdateSessionsFilterChip();
+        _RenderSessionsTable();
+    }
+
+    // Refresh the "\x2715 filter: \x2026" chip beside the search box — collapsed when no facet is
+    // active, else a "\xB7"-joined summary of the active facets (the same dimensions the count line
+    // mentions). Clicking the chip clears ALL facets (wired in _BuildSessionsPageShell).
+    void TerminalPage::_UpdateSessionsFilterChip()
+    {
+        if (!_sessFilterChip)
+        {
+            return;
+        }
+        const auto& f = _sessionsRowFilter;
+        if (!f.Any())
+        {
+            _sessFilterChip.Visibility(Visibility::Collapsed);
+            return;
+        }
+        std::wstring parts;
+        const auto add = [&](const std::wstring& p) {
+            if (!parts.empty())
+            {
+                parts += L" \x00B7 ";
+            }
+            parts += p;
+        };
+        if (f.hasDir)
+        {
+            add(L"dir " + SessLeaf(f.dir));
+        }
+        if (f.hasBranch)
+        {
+            add(L"branch " + f.branch);
+        }
+        if (f.timeGran != _SessionsRowFilterState::TimeGran::None)
+        {
+            add(f.timeLabel);
+        }
+        if (f.hasFamily)
+        {
+            add(L"fork family (" + std::to_wstring(f.familyIds.size()) + L")");
+        }
+        _sessFilterChip.Content(winrt::box_value(winrt::hstring{ L"\x2715 " + parts }));
+        SessSetTip(_sessFilterChip, winrt::hstring{ L"Active row filter (AND-ed with the search) \x2014 " + parts + L". Click to clear it." });
+        _sessFilterChip.Visibility(Visibility::Visible);
     }
 
     // ===== the generic window-level page-overlay seam (_agentPageOverlays) ===================

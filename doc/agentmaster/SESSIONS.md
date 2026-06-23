@@ -78,6 +78,22 @@
   list. **Resettable** from the Settings cog's **"Reset hidden sessions"** button (`_ResetHiddenSessions`
   via `SetResetHiddenSessionsHandler`), which clears the set and re-shows every hidden session. The
   cog FORM never edits the list, so the cog's Save preserves it from freshest disk (no regression).
+- **Filter ▸ (row right-click):** a **`Filter`** submenu on every row narrows the list to sessions
+  **like the clicked ("anchor") row** in one dimension — **By Same Directory** (filesystem-aware,
+  `NormDirKey` — Rule #8), **By Same Branch** (exact, shown only when the row has a branch), **By Same
+  Day / Week / Month** (the row's **created** time bucketed in **local** time — DST-safe `[start, end)`
+  via `SessLocalBucket`; week is Monday-start), and **By Fork Family** (the anchor's connected
+  fork-graph component — its forks + fork-parent — shown only when the row has lineage). Each is a
+  `_SessionsRowFilterKind` facet of `_sessionsRowFilter`; facets **stack across dimensions as AND**
+  (dir AND branch AND time AND family), the time dimension holds **one granularity at a time** (picking
+  Week replaces Day), and a facet the anchor row already matches reads **✓** and toggles **OFF** on
+  re-click (`_SessionsRowFilterMatchesAnchor` drives both the ✓ and the toggle direction). It is
+  applied at the SAME render chokepoint as Hide/Open/search (`_SessionsRowPassesRowFilter` in
+  `_RenderSessionsTable`), so it composes (**AND**) with the search text **and** the scope/Open/Hidden
+  toggles. A **`✕ filter: …`** chip beside the search box shows the active facets and clears them all
+  on click (the submenu also carries **Clear filters**); the count line notes `· filtered`. Like the
+  hidden set it is a pure **browse-list preference** — nothing is persisted and the transcript on disk
+  is never touched (it resets on app restart, unlike `hiddenSessionIds`).
 
 ### 1a. Resolved behaviors (proposals — confirm before build)
 
@@ -296,7 +312,9 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
    - *As shipped*, every row's right-click menu carries the relationship-appropriate primary
      action (**Jump to tab** when OPEN, else **Resume here**) PLUS **Fork here** on EVERY row —
      including a live one, since a fork writes its OWN transcript so the two-writers hazard
-     doesn't apply (`_ForkSessionFromDisk`) — **Open New Session Here**, and **Hide from list**
+     doesn't apply (`_ForkSessionFromDisk`) — **Open New Session Here**, a **Filter ▸** submenu
+     (By Same Directory / Branch / Day / Week / Month / Fork Family — the AND-stacking browse facets,
+     §1), and **Hide from list**
      (§1). Resume / Fork / Open-New open in a BACKGROUND tab so the list stays up for bulk-open.
      **Resume / Fork follow the `/clear`+plan continuation chain to its TAIL**
      (`ResolveContinuationTailOnDisk`): because a `/clear`'d or plan-restarted conversation mints a

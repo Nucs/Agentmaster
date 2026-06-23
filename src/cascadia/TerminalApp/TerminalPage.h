@@ -556,6 +556,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::CheckBox _sessHiddenBtn{ nullptr }; // "Hidden" — REVEAL sessions in AppSettings.hiddenSessionIds (manually-hidden + auto-hidden on delete); default OFF (they are filtered out)
         winrt::Windows::UI::Xaml::Controls::Button _sessWindowBtn{ nullptr }; // [1 month] — click cycles presets, hover opens the range popup
         winrt::Windows::UI::Xaml::Controls::Button _sessRefreshBtn{ nullptr }; // ↻ — re-enumerate the window + load-or-refresh each sidecar index (pick up new/updated sessions)
+        winrt::Windows::UI::Xaml::Controls::Button _sessFilterChip{ nullptr }; // "✕ filter: …" — shown only while a row right-click "Filter" facet is active; click clears ALL facets
         winrt::Windows::UI::Xaml::Controls::Primitives::Popup _sessRangePopup{ nullptr }; // hover: From/To range picker (answer Q4 — text boxes)
         winrt::Windows::UI::Xaml::DispatcherTimer _sessRangeCloseTimer{ nullptr }; // hover-intent: button-exit schedules a close; entering the popup cancels it (bridges the button->popup gap)
         winrt::Windows::UI::Xaml::Controls::TextBox _sessFromBox{ nullptr };
@@ -600,6 +601,46 @@ namespace winrt::TerminalApp::implementation
         // The visible row ids in TABLE (sorted+filtered) order — the Up/Down keyboard
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
+
+        // Agentmaster: a ROW-LEVEL filter set from a session row's right-click "Filter \xBB" submenu —
+        // narrows the visible set to rows matching the clicked ("anchor") row in one or more
+        // dimensions. It COMPOSES with the search text + the scope/Open/Hidden toggles as AND (it is
+        // applied at the same _RenderSessionsTable chokepoint as those). Multiple facets stack, one
+        // per dimension: directory, branch, a created-time bucket (day/week/month — mutually
+        // exclusive granularities of the one time axis), and the fork family. Picking a facet a row
+        // already matches toggles that facet OFF (so the same menu item is a clean toggle). Purely a
+        // transient browse-list view-state — nothing persisted, nothing touched on disk.
+        enum class _SessionsRowFilterKind
+        {
+            SameDirectory,
+            SameBranch,
+            SameDay, // created within the same local calendar day as the anchor row
+            SameWeek, // created within the same local week (Monday-start)
+            SameMonth, // created within the same local calendar month
+            ForkFamily, // the anchor session, its fork parent, and everything sharing that lineage (within the listed window)
+        };
+        struct _SessionsRowFilterState
+        {
+            enum class TimeGran
+            {
+                None,
+                Day,
+                Week,
+                Month
+            };
+            bool hasDir{ false };
+            std::wstring dir; // matched filesystem-aware (NormDirKey — Rule #8)
+            bool hasBranch{ false };
+            std::wstring branch; // exact match (git refs are case-sensitive)
+            TimeGran timeGran{ TimeGran::None };
+            int64_t timeStartMs{ 0 }; // [start, end) created-time window (local bucket), DST-safe
+            int64_t timeEndMs{ 0 };
+            std::wstring timeLabel; // "day 2026-06-20" / "week of 2026-06-15" / "month 2026-06"
+            bool hasFamily{ false };
+            std::unordered_set<std::wstring> familyIds; // ForkFamily — the connected fork-graph component
+            bool Any() const { return hasDir || hasBranch || timeGran != TimeGran::None || hasFamily; }
+        };
+        _SessionsRowFilterState _sessionsRowFilter;
 
         // Agentmaster: WINDOW-LEVEL page overlays (Archive, Sessions, any future full-window
         // page mounted over Root) — each registers itself ONCE at build (host + its atomic
@@ -869,6 +910,14 @@ namespace winrt::TerminalApp::implementation
         void _HideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Hide from list": _AddSessionIdToHiddenList + drop it from the table (the transcript on disk is untouched)
         void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally
         void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
+        // Agentmaster: the Sessions-page row right-click "Filter \xBB" submenu (composes AND with the
+        // search text + the scope/Open/Hidden toggles — applied at the _RenderSessionsTable chokepoint).
+        void _ApplySessionsRowFilter(int kind, const std::wstring& anchorId); // toggle the dimension's facet to the anchor row's value (or OFF if the anchor already matches it); re-renders
+        void _ClearSessionsRowFilter(); // drop EVERY facet (the chip click / submenu "Clear filters") + re-render
+        bool _SessionsRowPassesRowFilter(const _SessionsRow& r) const; // the AND-predicate over all active facets (true == keep) — the render chokepoint calls this
+        bool _SessionsRowFilterMatchesAnchor(int kind, const _SessionsRow& r) const; // does the facet for `kind`'s dimension exist AND equal row r's value? (drives the submenu ✓ + the apply-toggle direction)
+        std::unordered_set<std::wstring> _ComputeForkFamily(const std::wstring& anchorId) const; // the connected fork-graph component containing anchorId, over the gathered rows (forkedFromId edges, undirected)
+        void _UpdateSessionsFilterChip(); // refresh the "✕ filter: …" chip's label + visibility from _sessionsRowFilter
         // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
         // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.
         void _RegisterAgentPageOverlay(const winrt::Windows::UI::Xaml::Controls::Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss);

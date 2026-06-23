@@ -322,9 +322,22 @@ new id minted by us so hooks/registry correlate from the first event; offered on
 **including a LIVE one** — a fork writes its OWN transcript, so the adopt path's two-writers
 hazard doesn't apply; transcript-gated → fresh; titled via `DeriveForkTitle` (`"<title> (fork)"`,
 then `(fork 2)`/`(fork 3)`/… on a fork-of-a-fork, never stacked `(fork) (fork)`), logged
-`[sessions-page->fork]`), **Open New Session Here**, and a right-click **Hide from list**
+`[sessions-page->fork]`), **Open New Session Here**, a right-click **Filter ▸** submenu, and a
+right-click **Hide from list**
 (`_HideSessionFromList` → `_AddSessionIdToHiddenList` → `AppSettings.hiddenSessionIds`, persisted +
 filtered out of the browser; cleared from the cog's **Reset hidden sessions**); double-click = resume.
+The **Filter ▸** submenu (`_SessionsRowFilterState` / `_SessionsRowFilterKind`, SESSIONS.md §1) narrows
+the list to sessions **like the clicked row** — **By Same Directory** (filesystem-aware `NormDirKey`),
+**By Same Branch** (exact; only when the row has one), **By Same Day / Week / Month** (the row's
+**created** time bucketed in **local** time, DST-safe `[start,end)` via `SessLocalBucket`; week is
+Monday-start), and **By Fork Family** (the anchor's connected fork-graph component, when it has lineage).
+Facets **stack across dimensions as AND**, the time dimension holds **one granularity at a time**, and a
+facet the anchor row already matches reads **✓** and toggles **OFF** on re-click. It is applied at the
+SAME render chokepoint (`_SessionsRowPassesRowFilter` in `_RenderSessionsTable`), so it composes (**AND**)
+with the search text + the scope/Open/Hidden toggles; a dismissible **`✕ filter: …`** chip beside the
+search box (`_sessFilterChip`) shows + clears the active facets (the submenu also has **Clear filters**),
+the count line notes `· filtered`. Pure browse-state — nothing persisted, the transcript untouched (it
+resets on restart, unlike `hiddenSessionIds`).
 The hidden set is also **auto-populated on Delete permanently** (the `_RemoveSessionRecord` seam calls
 `_AddSessionIdToHiddenList`, so a deleted tab disappears from the Sessions list too, not just the
 Board/Archive — its `.jsonl` is still kept on disk). A search-bar **"Hidden" checkbox**
