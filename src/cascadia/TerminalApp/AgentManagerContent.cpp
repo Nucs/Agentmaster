@@ -1610,11 +1610,27 @@ namespace winrt::TerminalApp::implementation
 
         // ---- Toolbar ----
         {
-            auto bar = StackPanel{};
+            // Agentmaster: the toolbar is a VERTICAL stack — a TOP row (the "Agentmaster" title +
+            // the launch controls) over a compact ACTIONS row (Settings, Pause Autopilot, Sessions,
+            // Keep Awake) tucked just below the title in the top-left. The actions buttons are
+            // deliberately thinner (smaller font + slim padding), matching the header-toggle idiom.
+            auto toolbarCol = StackPanel{};
+            toolbarCol.Orientation(Orientation::Vertical);
+            toolbarCol.Spacing(6);
+            toolbarCol.Margin(Thickness{ 12, 8, 12, 0 });
+
+            auto bar = StackPanel{}; // top row: the title + launch controls
             bar.Orientation(Orientation::Horizontal);
             bar.Spacing(8);
-            bar.Margin(Thickness{ 12, 8, 12, 0 });
             bar.VerticalAlignment(VerticalAlignment::Center);
+
+            // The compact actions row, left-aligned directly under the title. Its buttons are
+            // appended below as each is built; the row itself is added to toolbarCol at the end.
+            auto actionsRow = StackPanel{};
+            actionsRow.Orientation(Orientation::Horizontal);
+            actionsRow.Spacing(6);
+            actionsRow.HorizontalAlignment(HorizontalAlignment::Left);
+            actionsRow.VerticalAlignment(VerticalAlignment::Center);
 
             bar.Children().Append(Text(L"Agentmaster", 18, true, 1.0));
             bar.Children().Append(Text(L"\x2014  launch a", 13, false, 0.6));
@@ -1801,19 +1817,25 @@ namespace winrt::TerminalApp::implementation
             bar.Children().Append(_reopenBtn);
 
             // Settings cog (opens the in-content settings overlay; built at the end of layout).
+            // Lives in the compact actions row below the title — thinner, smaller font.
             _settingsBtn = Button{};
+            _settingsBtn.FontSize(11);
+            _settingsBtn.Padding(Thickness{ 8, 1, 8, 1 });
             {
                 FontIcon cog;
                 cog.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
                 cog.Glyph(L"\xE713"); // Settings (cog)
+                cog.FontSize(13);
                 _settingsBtn.Content(cog);
             }
             AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Autopilot defaults, the Claude binary, the active profile, and app behavior.");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
-            bar.Children().Append(_settingsBtn);
+            actionsRow.Children().Append(_settingsBtn);
 
             // Global Autopilot backstop: Pause-all / Resume-all. Placed AFTER the Settings cog.
             _pauseBtn = Button{};
+            _pauseBtn.FontSize(11);
+            _pauseBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _pauseBtn.Content(winrt::box_value(L"Pause Autopilot"));
             AgentSetTip(_pauseBtn, L"Global Autopilot backstop \x2014 pauses or resumes auto-sending across ALL sessions at once.");
             _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
@@ -1827,30 +1849,37 @@ namespace winrt::TerminalApp::implementation
                     _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Autopilot" : L"Pause Autopilot"));
                 }
             });
-            bar.Children().Append(_pauseBtn);
+            actionsRow.Children().Append(_pauseBtn);
 
             // Agentmaster (Sessions page; SESSIONS.md / FAVORITES.md): the global on-disk Claude-sessions
             // browser — EVERY session on the machine in a selectable window, searchable, with the ★
             // Favorite column + filter. This is the SOLE history view (the separate "Archived" button +
             // page were removed: closing a session keeps it here, resumable, marked by Favorite).
             _sessionsBtn = Button{};
+            _sessionsBtn.FontSize(11);
+            _sessionsBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _sessionsBtn.Content(winrt::box_value(L"Sessions"));
             AgentSetTip(_sessionsBtn, L"Browse and search every Claude Code session on this machine \x2014 not just managed ones (last month by default). Star the ones you want to keep.");
             _sessionsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { if (_openSessionsHandler) { _openSessionsHandler(); } });
-            bar.Children().Append(_sessionsBtn);
+            actionsRow.Children().Append(_sessionsBtn);
 
             // Agentmaster: "Keep Awake" toggle — prevents the PC (and display) from sleeping while a
             // long unattended run is in flight, mirroring the user's stay-awake.ps1. It calls
             // SetThreadExecutionState from this (persistent) UI thread, so ES_CONTINUOUS holds the flag
             // until released — no timer/loop needed (the per-thread state persists for the thread's life).
             _keepAwakeBtn = Button{};
+            _keepAwakeBtn.FontSize(11);
+            _keepAwakeBtn.Padding(Thickness{ 8, 1, 8, 1 });
             AgentSetTip(_keepAwakeBtn, L"Keep this PC (and display) awake \x2014 prevents sleep while a long unattended run is in flight. Held until toggled off or the window closes.");
             _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleKeepAwake(); });
-            bar.Children().Append(_keepAwakeBtn);
+            actionsRow.Children().Append(_keepAwakeBtn);
             _UpdateKeepAwakeButton();
 
-            Grid::SetRow(bar, 0);
-            _root.Children().Append(bar);
+            // Stack the compact actions row directly below the top (title + launch) row.
+            toolbarCol.Children().Append(bar);
+            toolbarCol.Children().Append(actionsRow);
+            Grid::SetRow(toolbarCol, 0);
+            _root.Children().Append(toolbarCol);
         }
 
         // ---- Triage Board (row 1) ----
@@ -5282,13 +5311,13 @@ namespace winrt::TerminalApp::implementation
         }
         auto content = StackPanel{};
         content.Orientation(Orientation::Horizontal);
-        content.Spacing(6);
+        content.Spacing(5);
         FontIcon icon;
         icon.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
         icon.Glyph(_keepAwake ? L"\xEC46" : L"\xE708"); // EC46 PowerButton (on) / E708 QuietHours-ish (off)
-        icon.FontSize(14);
+        icon.FontSize(12); // compact, matching the thinner actions-row buttons
         content.Children().Append(icon);
-        content.Children().Append(Text(_keepAwake ? L"Awake On" : L"Keep Awake", 14, false, 1.0));
+        content.Children().Append(Text(_keepAwake ? L"Awake On" : L"Keep Awake", 11, false, 1.0));
         _keepAwakeBtn.Content(content);
         // On -> accent-tinted so the held state reads at a glance; off -> revert to the theme default.
         if (_keepAwake)
