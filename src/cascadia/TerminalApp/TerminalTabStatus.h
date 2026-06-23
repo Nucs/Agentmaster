@@ -35,6 +35,10 @@ namespace winrt::TerminalApp::implementation
         // note) — driven by TerminalPage::_SetTabSelectionPill via Tab.TabStatus().
         WINRT_OBSERVABLE_PROPERTY(bool, AgentSelectionVisible, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentSelectionBrush, PropertyChanged.raise, nullptr);
+        // Agentmaster (FAVORITES.md): the FAVORITE crown over the status dot (see the idl note) —
+        // driven by TerminalPage::_SetTabAgentFavorite via Tab.TabStatus(); rendered by
+        // TabHeaderControl.xaml as a small gold crown at the dot's north-west.
+        WINRT_OBSERVABLE_PROPERTY(bool, AgentFavoriteVisible, PropertyChanged.raise);
     };
 }
 

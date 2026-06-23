@@ -2,7 +2,8 @@
 
 > **Status: IMPLEMENTED (engine + UI; lib-compiled green + engine-tested 1101/1101). The base
 > refactor is built + dev-deployed + verified engine-live; the "★ Favorite & Close" close-dialog
-> follow-on (§4/§5) is lib-compiled green + pending the next deploy.** The user-facing "Archive"
+> follow-on (§4/§5) and the tab-strip FAVORITE crown (§5a) are lib-compiled green + pending the next
+> deploy.** The user-facing "Archive"
 > concept is removed — a managed tab's lifecycle verbs
 > are now **Close** and **Favorite**, and the **Sessions page is the sole browser** for history +
 > every other session on the machine. Favorited sessions are the "keep/find this" signal (replacing
@@ -10,11 +11,12 @@
 > store, built for exactly this reuse — a new `favorite` key). What shipped: the `SessionStore`
 > favorite key + helpers (`IsSessionFavorite`/`SetSessionFavorite`/`LoadAllFavoriteSessions`); the
 > Sessions page's leftmost **★ column** + **[ ] Favorite** filter + row "Favorite/Unfavorite" menu;
-> the session **tab right-click** Favorite/Unfavorite (beside Close); **Close = always archive** (the
-> 3-way Delete/Archive/Cancel confirm became **Close · ★ Favorite & Close · Cancel**, batch → **Close
-> All · ★ Favorite & Close All · Cancel All**, all Delete UI removed); and the full **Archive page +
-> "Archived" button + retired overlay + per-window reopen** removed (the toolbar "Reopen Windows (N)"
-> stays).
+> the session **tab right-click** Favorite/Unfavorite (beside Close); a **gold FAVORITE crown** perched
+> at the north-west of the tab-strip status dot (the visible "keeper" marker on a LIVE session's tab —
+> §5a); **Close = always archive** (the 3-way Delete/Archive/Cancel confirm became **Close · ★ Favorite
+> & Close · Cancel**, batch → **Close All · ★ Favorite & Close All · Cancel All**, all Delete UI
+> removed); and the full **Archive page + "Archived" button + retired overlay + per-window reopen**
+> removed (the toolbar "Reopen Windows (N)" stays).
 > Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions browser + `~/.claude` map) ·
 > [`PERSISTENCE.md`](./PERSISTENCE.md) (window records / reopen) · [`STATE.md`](./STATE.md) ·
 > [`DESIGN.md`](./DESIGN.md).
@@ -148,6 +150,37 @@ Plus the Sessions row right-click menu's `Favorite`/`Unfavorite` item (§3).
 
 The board card / tree row menu lose **Archive + Delete** → gain just **Close**; they do **not** get
 Favorite (per the chosen surfaces). The per-tab overlay HUD is unchanged (no star).
+
+---
+
+## 5a. The tab-strip FAVORITE crown (the visible "keeper" marker on a LIVE tab)
+
+Favorite was *write-mostly* on open sessions — you could star a tab, but the only place the star
+rendered was the Sessions page's ★ column; a favorited **open** session showed nothing on its Triage
+Board card, Explorer tree row, **tab strip**, or per-tab overlay. The tab strip now carries the
+marker: a **small gold crown** (`#F5C242`, matching the Sessions ★) perched at the **north-west** of
+the status dot, peak tilted toward NW.
+
+- **Render** (`TabHeaderControl.xaml`): a `Path` crown drawn as the LAST child of the status-dot wrap
+  Grid (so it sits ON TOP of the dot), `HorizontalAlignment=Left`/`VerticalAlignment=Top` within the
+  14px wrap (kept inside it — the wrap's overflow is clipped by the tab header), `RotateTransform`
+  `Angle=-20` so the peak faces NW, `IsHitTestVisible=False` (decorative). Bound to the new
+  `TerminalTabStatus.AgentFavoriteVisible` observable (mirrors the status dot / flash ring / selection
+  pill). Tune knobs in the XAML: `Width`/`Height` (size), `RotateTransform.Angle` (tilt), `Margin`
+  (NW offset).
+- **Drive** (`TerminalPage`): `_SetTabAgentFavorite(tab, on)` (low-level setter, idempotent) +
+  `_RefreshTabFavoriteCrown(sid)` (re-reads `IsSessionFavorite(sid)` and asserts the crown on the tab
+  THIS window hosts; map-miss = no-op). Called where a managed tab is set up — `_LaunchClaudeSession`
+  (launch/restore) and `_BindClaudeSessionToTab` (adopt) — so a favorited session shows its crown the
+  instant its tab appears, and from `_ToggleSessionFavorite` so a same-window toggle (tab menu /
+  same-window Sessions page) updates instantly.
+- **Known gap (cross-window live toggle):** favorite lives in `SessionStore` (disk), not the registry,
+  so there's no observer fan-out — toggling a session's star from a DIFFERENT window than the one
+  hosting its tab won't move the crown until that tab's next bind (relaunch/restore). Rare; documented.
+  (A registry-less engine fan-out, or reading `IsSessionFavorite` in `_UpdateTabAgentDot`, would close
+  it — deferred to avoid a per-state-change disk read.)
+- **Still no crown on the board card / tree row / overlay HUD** (gap #1's other surfaces) — the tab
+  strip was the requested one; the rest stay menu-only for now.
 
 ---
 

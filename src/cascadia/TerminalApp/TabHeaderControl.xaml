@@ -137,6 +137,35 @@
                      Stroke="Black"
                      StrokeThickness="1"
                      Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
+            <!--  Agentmaster (FAVORITES.md): the FAVORITE crown. A small gold crown perched at the
+                  NORTH-WEST of the status dot to mark a starred (favorited) session on its LIVE tab —
+                  the one visible "keeper" marker on the strip (the Sessions page has its ★ column;
+                  the board/tree/overlay had none). Drawn LAST so it sits ON TOP of the dot; Top/Left
+                  aligned within the 14px wrap (the gold #F5C242 matches the Sessions ★) and tilted
+                  ~-20° so the peak faces NW (head to the upper-left), as requested. Kept INSIDE the
+                  14px wrap (the flash-ring comment above: overflow gets clipped by the tab header),
+                  so the rendered 8x5 box at margin 1,0 plus the small rotation stays within bounds.
+                  IsHitTestVisible=False: decorative, never eats a tab click. Tune knobs: Width/Height
+                  (size), RotateTransform.Angle (NW tilt), Margin (NW offset).  -->
+            <Path x:Name="HeaderAgentFavoriteCrown"
+                  Width="8"
+                  Height="5"
+                  Margin="1,0,0,0"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Top"
+                  Stretch="Fill"
+                  IsHitTestVisible="False"
+                  Data="M0,6 L0,2 L2.7,3.8 L5,0.6 L7.3,3.8 L10,2 L10,6 Z"
+                  Fill="#F5C242"
+                  Stroke="#4D3A00"
+                  StrokeThickness="0.4"
+                  Visibility="{x:Bind TabStatus.AgentFavoriteVisible, Mode=OneWay}">
+                <Path.RenderTransform>
+                    <RotateTransform Angle="-20"
+                                     CenterX="4"
+                                     CenterY="2.5" />
+                </Path.RenderTransform>
+            </Path>
         </Grid>
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"

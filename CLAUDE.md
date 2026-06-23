@@ -389,7 +389,13 @@ mid-cycle adopts the current phase); an archived (`!live`) session forgets its l
 background restore can't spuriously flash. A **selection pill** rides the header too — a translucent
 accent pill behind the tab (`HeaderAgentSelectionPill`, driven by `TerminalTabStatus.AgentSelectionVisible`/
 `AgentSelectionBrush` at ~40% alpha via `_SetTabSelectionPill`) shown while the **Manager tab is active**
-and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. Deliberately
+and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. A
+**FAVORITE crown** also rides the dot (FAVORITES.md §5a): a small **gold `Path` crown** (`#F5C242`, the
+Sessions ★ color) perched at the **north-west** of the status dot (peak tilted NW, `RotateTransform`),
+drawn as the wrap-Grid's last child so it sits ON the dot — the one visible "keeper" marker on a LIVE
+session's tab (`HeaderAgentFavoriteCrown`, bound to `TerminalTabStatus.AgentFavoriteVisible`, driven by
+`_SetTabAgentFavorite` / `_RefreshTabFavoriteCrown` from the durable `IsSessionFavorite` at launch /
+bind / favorite-toggle; same-window-instant, cross-window-on-next-bind). Deliberately
 NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab title == persisted
 title) must never carry presentation glyphs through renames/persistence. The state palette is
 shared through **`AgentStatusColors.h`** (`AgentStatusColorFor`): the **per-tab overlay**
@@ -1354,7 +1360,8 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `TabColorChanged` event + `GetRuntimeTabColor`), `TabManagement.cpp` (incl. the generic
     `_DismissAgentPageOverlays` tab-switch seam), `TabHeaderControl.xaml` +
     `TerminalTabStatus.{h,idl}` (the tab-strip status dot: an `AgentStatusVisible`/
-    `AgentStatusBrush`-bound Ellipse in the indicator row); registrations in
+    `AgentStatusBrush`-bound Ellipse in the indicator row, plus the `AgentFavoriteVisible`-bound gold
+    **FAVORITE crown** `Path` at the dot's north-west — FAVORITES.md §5a); registrations in
     `TerminalAppLib.vcxproj`.
   - `src/cascadia/wt/shim.cpp` + `wt.vcxproj` (the `agentmaster <verb>` overload, CLI.md §2): the
     alias-target launcher shim is now **console-subsystem + dual-mode** (`SubSystem=Console`) — it

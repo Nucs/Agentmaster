@@ -2726,6 +2726,7 @@ namespace winrt::TerminalApp::implementation
         {
             _sessionsFavorites.erase(sessionId);
         }
+        _RefreshTabFavoriteCrown(sessionId); // FAVORITES.md: live-update the tab-strip crown if this window hosts the session
         _RenderSessionsTable(); // refresh the ★ glyph + (if the Favorite filter is on) the visible set
     }
 

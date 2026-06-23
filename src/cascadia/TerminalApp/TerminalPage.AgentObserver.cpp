@@ -25,6 +25,7 @@
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
 
 #include <mmsystem.h> // PlaySoundW — the prompt-nav boundary sound (alt+up/down at the ends)
 #pragma comment(lib, "winmm.lib")
@@ -263,6 +264,49 @@ namespace winrt::TerminalApp::implementation
             status.AgentStatusVisible(true);
         }
         CATCH_LOG();
+    }
+
+    // Agentmaster (FAVORITES.md): show/hide the gold FAVORITE crown over a tab's status dot. Low-level
+    // setter (mirrors _SetTabAgentDot): the WINRT_OBSERVABLE_PROPERTY no-ops when the value is unchanged,
+    // so re-asserting the same state is free. UI thread only.
+    void TerminalPage::_SetTabAgentFavorite(const TerminalApp::Tab& tab, bool on)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            if (const auto status = tab.TabStatus())
+            {
+                status.AgentFavoriteVisible(on);
+            }
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster (FAVORITES.md): (re)assert the crown on the tab THIS window hosts for sessionId from
+    // the durable on-disk truth (IsSessionFavorite). A map-miss is a cheap no-op (the session is hosted
+    // by another window, or not open). Called where a managed tab is set up (launch + adopt/bind) so a
+    // favorited session shows its crown the instant its tab appears, and from _ToggleSessionFavorite so a
+    // same-window toggle updates instantly. (Cross-window LIVE toggles aren't pushed — favorite lives in
+    // SessionStore, not the registry, so there's no observer fan-out; the hosting window picks it up on
+    // the tab's next bind. A small, documented gap; see FAVORITES.md.)
+    void TerminalPage::_RefreshTabFavoriteCrown(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        const auto it = _claudeTabs.find(sessionId);
+        if (it == _claudeTabs.end())
+        {
+            return;
+        }
+        if (const auto tab = it->second.get())
+        {
+            _SetTabAgentFavorite(tab, ::Agentmaster::IsSessionFavorite(sessionId));
+        }
     }
 
     // Agentmaster (tab status dot): the registry-observer reaction (bounced to this window's UI
@@ -1781,6 +1825,7 @@ namespace winrt::TerminalApp::implementation
         {
             _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state));
         }
+        _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
         _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");

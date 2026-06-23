@@ -370,6 +370,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _SetTabAgentDot(tab, AgentStatusColorFor(s->state));
             }
+            _RefreshTabFavoriteCrown(spec.sessionId); // FAVORITES.md: show the gold crown if this session is starred
         }
 
         const std::wstring tag = !forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] "));
