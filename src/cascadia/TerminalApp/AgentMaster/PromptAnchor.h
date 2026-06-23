@@ -317,6 +317,12 @@ namespace Agentmaster
     // Resolve ONE prompt against `haystack`, searching at or after `fromOffset` (the greedy cursor).
     // Backs off to shorter needles, and to the last global occurrence (outOfOrder) when nothing is
     // in-order. The caller advances its own cursor by the returned match end for the next prompt.
+    //
+    // NOT the production path (SUMMARY_JUMP.md §3): the jump (▸), alt+up/down nav, and icon eligibility ALL
+    // resolve the WHOLE prompt list via ResolvePromptAnchors in one order-preserving pass — duplicate
+    // disambiguation places each anchor relative to the others, so a per-anchor resolve would mis-bind a
+    // repeated prompt. This single-message helper is for tests / a genuinely degenerate one-prompt caller
+    // only; do NOT wire it into the scan paths (keep "guarantee full batch resolve only").
     inline AnchorMatch ResolveOnePromptAnchor(std::wstring_view haystack,
                                               std::wstring_view message,
                                               size_t fromOffset,

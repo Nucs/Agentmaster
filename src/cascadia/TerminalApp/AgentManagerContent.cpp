@@ -7771,14 +7771,14 @@ namespace winrt::TerminalApp::implementation
 
         if (!textToSend.empty())
         {
-            // Inject + submit. (Multiline bodies submit on the first CR for now; bracketed
-            // paste for true multi-line prompts is a follow-up.)
+            // Inject + submit via a bracketed paste so a multi-line body lands as ONE message
+            // (BuildPromptSubmission, #6) instead of submitting on the first embedded line break.
             // Agentmaster: check the result and roll the prompt back to Pending on a
             // failed inject. "Send now" marked it Sent above; if the selected session has no stdin
             // injector bound (not a live/bound tab yet, or an observe-only external), injecting fails
             // and the prompt would otherwise be a stranded phantom Sent that was never delivered
             // (Correctness Rule #4). Reverting to Pending keeps it in the queue to retry.
-            const bool delivered = _registry->Inject(_selectedId, textToSend + L"\r");
+            const bool delivered = _registry->Inject(_selectedId, ::Agentmaster::BuildPromptSubmission(textToSend));
             if (!delivered && !sentPromptId.empty())
             {
                 _registry->Update(_selectedId, [&](SessionInfo& s) {

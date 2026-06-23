@@ -157,9 +157,25 @@ namespace Agentmaster
             else if (plan.action == EnterRetryAction::GiveUp)
             {
                 done.push_back(id);
+                // Agentmaster (#4): the submit never landed after kEnterRetryMax presses. Don't leave a
+                // phantom Sent (it reads as delivered but isn't) and don't let autopilot advance past a
+                // broken step: mark the prompt Failed and PAUSE this session's autopilot (mirrors the
+                // stopOnError backstop). The user fixes the cause, then Send-now / re-arms autopilot.
+                // (Rolling back to Pending would just re-send and be re-eaten — an infinite loop.)
+                _registry->Update(id, [&](SessionInfo& ss) {
+                    for (auto& p : ss.queue)
+                    {
+                        if (p.id == plan.promptId && p.status == PromptStatus::Sent && !p.echoed)
+                        {
+                            p.status = PromptStatus::Failed;
+                            break;
+                        }
+                    }
+                    ss.autopilot.mode = AutopilotMode::Off;
+                });
                 AppendStateLog(L"autopilot.log",
                                L"[enter-retry-giveup] " + id + L" (turn never started after " +
-                                   std::to_wstring(kEnterRetryMax) + L" Enter retries)\n");
+                                   std::to_wstring(kEnterRetryMax) + L" Enter retries; marked Failed, autopilot paused)\n");
             }
             else if (plan.action == EnterRetryAction::Retry)
             {
@@ -274,9 +290,10 @@ namespace Agentmaster
                 });
                 if (!text.empty())
                 {
-                    // Inject + submit (null-terminated by std::wstring). Idempotent: the
-                    // prompt is already marked Sent above, so a duplicate advance won't resend.
-                    const bool delivered = _registry->Inject(id, text + L"\r");
+                    // Inject + submit via a bracketed paste so a multi-line body lands as ONE message
+                    // (BuildPromptSubmission, #6) instead of submitting on the first embedded line break.
+                    // Idempotent: the prompt is already marked Sent above, so a duplicate advance won't resend.
+                    const bool delivered = _registry->Inject(id, BuildPromptSubmission(text));
                     if (delivered)
                     {
                         AppendStateLog(L"autopilot.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
@@ -453,7 +470,7 @@ namespace Agentmaster
             // stranded as a phantom Sent that was never delivered AND never re-fires (the re-fire keys
             // on Pending), violating Correctness Rule #4. Mirror _process: revert to Pending; the next
             // advance re-decides AwaitConfirm and re-arms the confirm once the injector binds.
-            const bool delivered = _registry->Inject(sessionId, text + L"\r");
+            const bool delivered = _registry->Inject(sessionId, BuildPromptSubmission(text));
             if (delivered)
             {
                 AppendStateLog(L"autopilot.log", L"[confirm-send] " + sessionId + L"\n");

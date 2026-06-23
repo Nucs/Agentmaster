@@ -373,6 +373,12 @@ namespace winrt::TerminalApp::implementation
         std::unordered_set<std::wstring> _manualUnreadSessions;
         winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
         bool _agentFlashPhase{ false };
+        // Agentmaster (alt+up/down prompt nav, SUMMARY_JUMP.md §7): while a managed Claude tab is focused,
+        // re-read its sent prompts (mtime-gated) + re-resolve the summary panel's jump eligibility every
+        // 30 s, so the jump data stays in sync with the live buffer without a keypress. Free-running; each
+        // tick no-ops unless the focused tab is a Claude session. Started in _InitAgentmasterEngine, stopped
+        // in ~TerminalPage.
+        winrt::Windows::UI::Xaml::DispatcherTimer _promptNavRefreshTimer{ nullptr };
 
         // Agentmaster (M10; PERSISTENCE.md §13): per-window workspace persistence. _windowId is
         // this window's stable GUID; _windowRecord is its persisted UI state (geometry + Manager
@@ -698,7 +704,8 @@ namespace winrt::TerminalApp::implementation
         std::vector<int> _JumpEligibilityInSession(const std::wstring& sessionId, const std::vector<std::wstring>& msgs); // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 == not on screen) for icon dimming
         winrt::Microsoft::Terminal::Control::TermControl _ControlForSession(const std::wstring& sessionId); // Agentmaster (SUMMARY_JUMP.md): the live control hosting a session's tab, or null
         std::wstring _FocusedPromptNavSession(); // Agentmaster (alt+up/down): the focused tab's managed CLAUDE sessionId, or empty (=> the handler falls back to MoveFocus)
-        winrt::fire_and_forget _ScrollAdjacentPrompt(std::wstring sessionId, bool up); // Agentmaster (alt+up/down): center the view on the nearest OFF-SCREEN sent prompt up/down; mtime-cached transcript read; boundary sound at the ends
+        winrt::fire_and_forget _ScrollAdjacentPrompt(std::wstring sessionId, bool up); // Agentmaster (alt+up/down): re-read the sent prompts (mtime-gated), then center the view on the nearest OFF-SCREEN sent prompt up/down (fresh resolve every press); boundary sound at the ends
+        winrt::fire_and_forget _RefreshPromptNavCache(std::wstring sessionId); // Agentmaster (alt+up/down, SUMMARY_JUMP.md §7): the 30s focused refresh — re-read sent prompts (mtime-gated) into _promptNavCache + re-resolve the overlay's jump eligibility, WITHOUT navigating
         void _NavigateAdjacentPrompt(const std::wstring& sessionId, const std::vector<std::wstring>& prompts, bool up); // Agentmaster (alt+up/down): the UI-thread half of _ScrollAdjacentPrompt (resolve control + scroll, else sound)
         void _PlayPromptNavLimitSound(); // Agentmaster (alt+up/down): boundary feedback when there is no further off-screen prompt
         void _ToggleSummaryPanel(); // Agentmaster (TAB_OVERLAY.md): pencil button -> flip the GLOBAL AppSettings.showSummaryPanel (RMW settings.json) + apply live to every linked overlay in this window

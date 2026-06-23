@@ -1293,15 +1293,25 @@ static void TestEnterRetry()
         CHECK(r.action == EnterRetryAction::Waiting && r.promptId == L"rp", "fresh send -> waiting");
     }
     {
-        // One ms before the interval -> still waiting.
+        // One ms before the FIRST-retry delay -> still waiting. A fresh send (enterRetries==0) is due
+        // after the SHORT kEnterRetryFirstMs (the snappy first re-press), not the longer interval.
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
-        CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs - 1).action == EnterRetryAction::Waiting, "just under interval -> waiting");
+        CHECK(DecideEnterRetry(s, T + kEnterRetryFirstMs - 1).action == EnterRetryAction::Waiting, "just under first delay -> waiting");
     }
     {
-        // Interval elapsed, turn never started -> re-press Enter.
+        // First-retry delay elapsed, turn never started -> re-press Enter (attempt 0).
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
-        const auto r = DecideEnterRetry(s, T + kEnterRetryIntervalMs);
-        CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp" && r.attempt == 0, "interval elapsed -> retry");
+        const auto r = DecideEnterRetry(s, T + kEnterRetryFirstMs);
+        CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp" && r.attempt == 0, "first delay elapsed -> retry");
+    }
+    {
+        // Escalating: AFTER the first press (enterRetries==1) the next press waits the LONGER
+        // kEnterRetryIntervalMs, not the short first delay. (The worker refreshes sentAtUnixMs to the
+        // last press, so the comparison is "since the last press".)
+        auto s = mk(SessionState::WaitingForInput, T, false, 1);
+        CHECK(DecideEnterRetry(s, T + kEnterRetryFirstMs).action == EnterRetryAction::Waiting, "2nd press waits longer than the first");
+        const auto r2 = DecideEnterRetry(s, T + kEnterRetryIntervalMs);
+        CHECK(r2.action == EnterRetryAction::Retry && r2.attempt == 1, "2nd press due at the longer interval");
     }
     {
         // Same, from a freshly-resumed Idle session (it never emits a Stop).
@@ -1387,6 +1397,35 @@ static void TestEnterRetry()
         s.queue.push_back(p2);
         const auto r = DecideEnterRetry(s, T + 2000 + kEnterRetryIntervalMs);
         CHECK(r.action == EnterRetryAction::Retry && r.promptId == L"rp2", "latest send is the watched one");
+    }
+}
+
+// Agentmaster (#6) — BuildPromptSubmission wraps a prompt body in a bracketed paste + ONE trailing CR
+// so a multi-line body submits as a single message (not line-by-line, the "submit on first CR" bug).
+// Pure + deterministic.
+static void TestBuildPromptSubmission()
+{
+    std::wprintf(L"BuildPromptSubmission (bracketed-paste submit, #6):\n");
+    const std::wstring B = L"\x1b[200~"; // bracketed-paste begin
+    const std::wstring E = L"\x1b[201~"; // bracketed-paste end
+
+    CHECK(BuildPromptSubmission(L"test 1") == B + L"test 1" + E + L"\r", "single line wrapped + one CR");
+    CHECK(BuildPromptSubmission(L"line1\rline2") == B + L"line1\nline2" + E + L"\r", "CR line breaks -> LF inside the paste");
+    CHECK(BuildPromptSubmission(L"a\r\nb") == B + L"a\nb" + E + L"\r", "CRLF -> a single LF");
+    CHECK(BuildPromptSubmission(L"a\nb") == B + L"a\nb" + E + L"\r", "a bare LF body is preserved");
+    CHECK(BuildPromptSubmission(L"") == B + E + L"\r", "empty body is still well-formed");
+    {
+        // The whole point of #6: exactly ONE submit CR (the trailing one) regardless of line count.
+        const auto out = BuildPromptSubmission(L"x\ry\rz");
+        size_t crs = 0;
+        for (const wchar_t c : out)
+        {
+            if (c == L'\r')
+            {
+                ++crs;
+            }
+        }
+        CHECK(crs == 1, "a multi-line body yields exactly one submit CR");
     }
 }
 
@@ -1824,7 +1863,7 @@ static void TestAppSettings()
     {
         const auto out = DeserializeAppSettings(L"");
         CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
-        CHECK(out.defaultAutopilotMode == AutopilotMode::Off && out.maxAutoSends == 100u, "settings autopilot defaults on empty");
+        CHECK(out.defaultAutopilotMode == AutopilotMode::Full && out.maxAutoSends == 100u, "settings autopilot default Full on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");
         CHECK(out.summaryPanelWrapNewlines == false, "settings summaryPanelWrapNewlines default false (literal-\\n look) on empty");
@@ -4459,6 +4498,96 @@ static void BenchPromptAnchor()
     std::wprintf(L"  [sink %zu]\n", static_cast<size_t>(g_benchSink));
 }
 
+// Agentmaster (SUMMARY_JUMP.md §4 / point 2 "guarantee full batch resolve only"): measure the FULL batch
+// resolve on a REAL, heavy on-disk session. Production resolves the ENTIRE prompt list on EVERY scan (no
+// cache, by design), so a heavy session is the cost ceiling we commit to. Gated on AM_BENCH_SESSION (full
+// path to a .jsonl): it SKIPS (does not fail) when unset, so CI / other machines never depend on a local
+// file. "mixed" = the real, noise-filtered prompt list resolved against the trailing kAnchorRecentWindowChars
+// of the transcript (recent prompts present, older ones a fast absence) — exactly what ControlCore caps +
+// resolves; "all-miss" = the same N with guaranteed-absent needles (each forces a full-haystack scan).
+static void BenchPromptAnchorRealSession()
+{
+    using namespace Agentmaster;
+    wchar_t envbuf[1024]{};
+    const DWORD got = GetEnvironmentVariableW(L"AM_BENCH_SESSION", envbuf, 1024);
+    if (got == 0 || got >= 1024)
+    {
+        std::wprintf(L"\n--- PromptAnchor heavy-session bench: SKIPPED (set AM_BENCH_SESSION=<path-to-.jsonl>) ---\n");
+        return;
+    }
+    const std::wstring path(envbuf, got);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec))
+    {
+        std::wprintf(L"\n--- PromptAnchor heavy-session bench: file not found (%ls) ---\n", path.c_str());
+        return;
+    }
+
+    // The real, noise-filtered prompt list the panel / alt-nav resolve (production parity).
+    const auto info = AnalyzeSessionTranscript(path, 0);
+    const std::vector<std::wstring>& prompts = info.userMsgs;
+
+    // Raw transcript -> wide, used as a haystack stand-in; cap to the production recent window so recent
+    // prompts are present and older ones have "scrolled off" (the realistic mix ControlCore resolves).
+    std::wstring raw;
+    {
+        std::FILE* fp = nullptr;
+        if (_wfopen_s(&fp, path.c_str(), L"rb") == 0 && fp)
+        {
+            std::fseek(fp, 0, SEEK_END);
+            const long sz = std::ftell(fp);
+            std::fseek(fp, 0, SEEK_SET);
+            std::string bytes(sz > 0 ? static_cast<size_t>(sz) : 0u, '\0');
+            if (!bytes.empty())
+            {
+                const size_t rd = std::fread(bytes.data(), 1, bytes.size(), fp);
+                bytes.resize(rd);
+            }
+            std::fclose(fp);
+            if (!bytes.empty())
+            {
+                const int wlen = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+                if (wlen > 0)
+                {
+                    raw.resize(static_cast<size_t>(wlen));
+                    MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), raw.data(), wlen);
+                }
+            }
+        }
+    }
+    std::wstring hay = raw.size() > kAnchorRecentWindowChars ? raw.substr(raw.size() - kAnchorRecentWindowChars) : raw;
+    const double mb = static_cast<double>(hay.size()) * sizeof(wchar_t) / (1024.0 * 1024.0);
+
+    const auto rr = ResolvePromptAnchors(hay, prompts);
+    int found = 0;
+    for (const auto& m : rr)
+    {
+        if (m.found)
+        {
+            ++found;
+        }
+    }
+
+    std::vector<std::wstring> miss;
+    miss.reserve(prompts.size());
+    for (size_t i = 0; i < prompts.size(); ++i)
+    {
+        miss.push_back(L"zqxjw9-absent-prompt-" + std::to_wstring(i)); // 8+ chars, nowhere in the haystack
+    }
+
+    const int iters = 10;
+    const double tMixed = TimeMsAvg(iters, [&] { const auto r = ResolvePromptAnchors(hay, prompts); g_benchSink += r.size(); });
+    const double tMiss = TimeMsAvg(iters, [&] { const auto r = ResolvePromptAnchors(hay, miss); g_benchSink += r.size(); });
+
+    std::wprintf(L"\n--- PromptAnchor heavy-session bench (REAL transcript; full batch resolve, no cache) ---\n");
+    std::wprintf(L"  session : %ls\n", path.c_str());
+    std::wprintf(L"  prompts=%zu  resolved-in-tail=%d  haystack=%.2f MB (capped at kAnchorRecentWindowChars)\n",
+                 prompts.size(), found, mb);
+    std::wprintf(L"  resolve(mixed/realistic)=%8.3f ms   resolve(all-miss/worst)=%8.3f ms   [one scan, UI thread, x%d]\n",
+                 tMixed, tMiss, iters);
+    std::wprintf(L"  [sink %zu]\n", static_cast<size_t>(g_benchSink));
+}
+
 static void TestSummaryUserMsgNoise()
 {
     using namespace Agentmaster;
@@ -4502,6 +4631,7 @@ int wmain()
     TestProfileBootstrap();
     TestScheduler();
     TestEnterRetry();
+    TestBuildPromptSubmission();
     TestSchedulerIntegration();
     TestTranscriptScan();
     TestBlockedAndInterruptedStates();
@@ -4522,6 +4652,7 @@ int wmain()
     TestBridgeRoundTrip();
 
     BenchPromptAnchor();
+    BenchPromptAnchorRealSession(); // SUMMARY_JUMP.md §4: full batch resolve on a real heavy session (AM_BENCH_SESSION)
 
     std::wprintf(L"\n%d checks, %d failures - %S\n", g_checks, g_failures, g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures == 0 ? 0 : 1;

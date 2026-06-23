@@ -252,6 +252,17 @@ absence scan); `validate-one` = the cheap per-click recheck.
 | 1.84 MB (~10k rows) | 50 | **9.1 ms** | 16.1 ms | 3.5 µs |
 | 9.19 MB (~50k rows) | 200 | 67 ms | 477 ms | 3.5 µs |
 
+**Measured on a real heavy session** (`4b4750ec…`, 11 MB / 3619 lines → **68** noise-filtered prompts;
+`BenchPromptAnchorRealSession`, set `AM_BENCH_SESSION=<path>`; /O2, this i9-13900K): one full batch resolve
+over the capped **2.29 MB** tail = **~117 ms** realistic mix (35 prompts present + 33 scrolled-off) / ~58 ms
+pure all-miss. The realistic figure runs *higher* than the synthetic rows because real "absent" prompts share
+short prefixes with on-screen text, so the membership pre-check passes and they pay the full backoff +
+global-rfind path (a synthetic absent needle is nowhere → one scan). This is the cost of **always-full-resolve,
+no cache** (the "never lose sync" decision, point 2): fine for a per-keypress jump / alt-nav (a deliberate
+one-off), **but the periodic eligibility refresh (5 s visible / 30 s focused) runs the SAME resolve on the UI
+thread** — a recurring ~100 ms hitch on a heavy session. Follow-up if felt: move ONLY the eligibility resolve
+off the UI thread (still no cache) — the jump/nav stay synchronous.
+
 **Production-effective ceiling ≈ the 1.84 MB row (~9 ms / ~16 ms).** `ControlCore` caps the linearized
 haystack to `kAnchorRecentWindowChars` (1.2M wchars ≈ 2.4 MB ≈ a typical full WT scrollback) before
 resolving, so even a 50k-row buffer resolves over ~the medium row, not the uncapped 9 MB figure. A prompt
@@ -288,6 +299,10 @@ Refresh is gated to stay cheap (the user's "don't hurt performance"):
   it tracks buffer changes during active sessions for free.
 - **On a 5 s tick** — reusing `_summaryTimer`, which is **stopped while the panel is hidden**, so idle/hidden
   cost is 0; a visible panel pays at most one bounded resolve per 5 s.
+- **On a 30 s tick while the TAB is FOCUSED** — `TerminalPage::_promptNavRefreshTimer` (independent of the
+  panel's visibility) re-reads the focused Claude session's prompts (mtime-gated) into `_promptNavCache` and
+  calls `AgentTabOverlay::RefreshJumpData()`, so both alt-nav and the panel icons stay in sync as the buffer
+  scrolls under a focused-but-idle session — without a keypress.
 - **After a click** — a jump makes the other icons re-check immediately (the buffer/viewport just moved).
 
 (A mutation-id epoch gate could make an idle *visible* panel free too — noted as a future optimization.)
@@ -364,7 +379,7 @@ jump chime). It reuses this unit's resolve verbatim — only the trigger + the s
   is **strictly** outside it: **up** picks the largest prompt row `< viewTop`, **down** the smallest
   `> viewBottom`. Center via `ScrollBar().Value(max(0, row − viewH/2))`; return the landed **message
   index**, or `−1` (→ the boundary sound). Because the target is centered, the next press finds the next
-  still-off-screen prompt — a prompt the centering brought on screen is, by definition, no longer a target.
+  still-off-screen prompt — a prompt the centering brought on screen is, by definition, no longer a target. **Down with no further off-screen prompt** does NOT just sound the boundary — it scrolls to the **bottom of the scrollable** (the live tail) and returns `-2` (the "reached the last message, press down => go to the bottom" affordance); the caller then moves on silently and clears the summary highlight. Already at the bottom returns `-1` (the boundary sound). **Up** is symmetric but clamps to the conversation, not the buffer top: when nothing is off-screen above, it **stops at the topmost matched prompt** (centers it, returns its index so the caller highlights it) rather than scrolling into pre-conversation scrollback; once already centered on / above it, `-1` (boundary sound).
 - **Summary highlight**: the message we land on is highlighted in the summary panel — a translucent
   accent band behind its ` N.` row, brought into view — so the jumped-to prompt is obvious. The **▸
   button** path highlights the index it already knows; **alt-nav** uses the index
@@ -375,12 +390,18 @@ jump chime). It reuses this unit's resolve verbatim — only the trigger + the s
   alt-nav still scrolls the terminal.)
 - **Prompts source** (`_ScrollAdjacentPrompt`, off-thread): the transcript's user messages
   (`AnalyzeSessionTranscript().userMsgs`, the same list the panel numbers), **mtime-cached per session**
-  (`_promptNavCache`) so stepping re-reads the file only when it GREW. A warm cache navigates instantly
-  (off-screen targets are older prompts, so one-turn staleness is harmless) while a background refresh
-  keeps it current; a cold session loads, then navigates. So nav works with the summary panel **off**
-  (the panel's own prompt cache only exists while it is shown).
+  (`_promptNavCache`). EACH press re-reads the file **BEFORE** navigating (a stat every press; a full re-read
+  only when it GREW — the shared `ReadPromptNavIfGrown`), so a just-sent prompt is immediately catchable and
+  we never navigate against a stale needle list. (Earlier this navigated with the warm cache FIRST and
+  refreshed AFTER, costing one press of sync — the "captures not caught / not refreshed" report.) The
+  buffer-position resolve still runs from scratch on every press (`ScrollToAdjacentConversationPrompt`). A
+  **30 s focused refresh** (`_promptNavRefreshTimer`, while a Claude tab is focused) keeps the cache warm
+  between presses. Nav works with the summary panel **off** (the panel's own prompt cache only exists while
+  it is shown).
 - **Cost**: per keypress ≈ one `ResolveConversationPromptRows` (~9 ms at a realistic scrollback, §4) on
-  the UI thread, plus a stat / bounded transcript read off-thread. Steady state **0** (only on keypress).
+  the UI thread, plus a stat / bounded transcript read off-thread. While a Claude tab is focused, the 30 s
+  timer adds one off-thread stat every 30 s (a re-read + an eligibility resolve only when the transcript
+  grew); otherwise steady state is **0**.
 - **Status**: lib-compiles green (settings model + `TerminalControlLib` + `TerminalAppLib`); runtime
   (the visible scroll + the boundary sound) pends the same deploy as the jump (§6).
 

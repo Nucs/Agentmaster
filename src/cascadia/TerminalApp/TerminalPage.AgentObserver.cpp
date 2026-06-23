@@ -1222,72 +1222,120 @@ namespace winrt::TerminalApp::implementation
         return sid;
     }
 
+    // Agentmaster (alt+up / alt+down prompt nav): WORKER-thread helper — (re)read a session's sent prompts
+    // when its transcript GREW. `path` / `mtime` are in/out: `path` is resolved when empty, `mtime` is
+    // advanced to the file's current write time. Returns true (and fills `outFresh`) when it re-read, false
+    // when the cached list is still current. Shared by _ScrollAdjacentPrompt (a jump) and
+    // _RefreshPromptNavCache (the 30 s focused refresh) so the two stay byte-for-byte consistent.
+    static bool ReadPromptNavIfGrown(const std::wstring& sessionId, std::wstring& path, int64_t& mtime, bool hadPrompts, std::vector<std::wstring>& outFresh)
+    {
+        if (path.empty())
+        {
+            path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+        }
+        if (path.empty())
+        {
+            return false;
+        }
+        const int64_t prevMtime = mtime;
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        {
+            ULARGE_INTEGER li{};
+            li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+            li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+            mtime = static_cast<int64_t>(li.QuadPart);
+        }
+        if (!hadPrompts || mtime != prevMtime)
+        {
+            outFresh = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */).userMsgs;
+            return true;
+        }
+        return false;
+    }
+
     // Agentmaster (alt+up / alt+down prompt nav): center the view on the nearest SENT prompt that is
-    // currently OFF-SCREEN in the given direction. The prompts are the transcript's user messages
-    // (AnalyzeSessionTranscript.userMsgs — the same list the summary panel numbers + jumps), cached per
-    // session and re-read only when the transcript GREW (mtime), so a warm session navigates instantly.
-    // A warm cache navigates NOW (off-screen targets are older prompts, so one-turn staleness is harmless)
-    // while the background refresh keeps the cache current; a cold session loads first, then navigates.
-    // fire_and_forget: starts on the UI thread, reads the file on a worker, finishes on the UI thread.
+    // currently OFF-SCREEN in the given direction. To NEVER lose sync with the live buffer, EACH press
+    // re-reads the transcript's sent prompts (mtime-gated — a stat every press, a full re-read only when it
+    // GREW) BEFORE navigating, so the needle list is current; the buffer-position resolve in
+    // TermControl::ScrollToAdjacentConversationPrompt is already from-scratch on every call. (Previously a
+    // warm cache navigated FIRST and refreshed AFTER, so a just-sent prompt wasn't catchable until the next
+    // press — the "captures not caught / not refreshed" report.) fire_and_forget: UI -> worker -> UI.
     winrt::fire_and_forget TerminalPage::_ScrollAdjacentPrompt(std::wstring sessionId, bool up)
     {
         auto strongThis{ get_strong() }; // keep the page alive across the co_awaits
 
-        // (UI thread) snapshot the cache for this session.
-        std::wstring cachedPath;
-        int64_t cachedMtime = 0;
-        std::vector<std::wstring> prompts;
+        // (UI thread) snapshot the cache KEY (path, mtime, whether we have prompts yet) — not the list,
+        // since we always navigate AFTER the refresh below.
+        std::wstring path;
+        int64_t mtime = 0;
         bool hadPrompts = false;
         if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
         {
-            cachedPath = it->second.path;
-            cachedMtime = it->second.mtime;
-            prompts = it->second.prompts;
-            hadPrompts = !prompts.empty();
+            path = it->second.path;
+            mtime = it->second.mtime;
+            hadPrompts = !it->second.prompts.empty();
         }
 
-        // Warm cache: navigate immediately with what we have.
-        if (hadPrompts)
-        {
-            _NavigateAdjacentPrompt(sessionId, prompts, up);
-        }
-
-        // (worker) (re)resolve the transcript path + re-analyze only when it grew (mtime-gated).
+        // (worker) re-read the prompt list when the transcript grew — BEFORE we navigate.
         co_await winrt::resume_background();
-
-        std::wstring path = cachedPath.empty() ? ::Agentmaster::ResolveClaudeTranscriptPath(sessionId) : cachedPath;
-        int64_t mtime = cachedMtime;
-        bool refreshed = false;
         std::vector<std::wstring> fresh;
-        if (!path.empty())
-        {
-            WIN32_FILE_ATTRIBUTE_DATA fad{};
-            if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
-            {
-                ULARGE_INTEGER li{};
-                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
-                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
-                mtime = static_cast<int64_t>(li.QuadPart);
-            }
-            if (!hadPrompts || mtime != cachedMtime)
-            {
-                fresh = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */).userMsgs;
-                refreshed = true;
-            }
-        }
+        const bool refreshed = ReadPromptNavIfGrown(sessionId, path, mtime, hadPrompts, fresh);
 
-        // (UI thread) store the refresh; on a COLD session, navigate now that prompts exist.
+        // (UI thread) store any refresh, then navigate with the FRESHEST prompt list (a fresh
+        // position resolve happens inside _NavigateAdjacentPrompt regardless).
         co_await wil::resume_foreground(Dispatcher());
+        std::vector<std::wstring> prompts;
         if (refreshed)
         {
             auto& e = _promptNavCache[sessionId];
             e.path = path;
             e.mtime = mtime;
             e.prompts = fresh;
+            prompts = std::move(fresh);
         }
-        if (!hadPrompts)
+        else if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
         {
-            _NavigateAdjacentPrompt(sessionId, refreshed ? fresh : prompts, up);
+            prompts = it->second.prompts; // transcript unchanged -> the cached list is already current
+        }
+        _NavigateAdjacentPrompt(sessionId, prompts, up);
+    }
+
+    // Agentmaster (alt+up / alt+down prompt nav, SUMMARY_JUMP.md §7): the 30 s focused refresh — re-read the
+    // session's sent prompts (mtime-gated) into _promptNavCache and re-resolve the summary panel's jump-icon
+    // eligibility, WITHOUT navigating. Keeps the jump data in sync with a buffer that scrolls under an
+    // idle-but-focused session, so the next jump (and the panel's icon dimming) is already current.
+    winrt::fire_and_forget TerminalPage::_RefreshPromptNavCache(std::wstring sessionId)
+    {
+        auto strongThis{ get_strong() };
+
+        std::wstring path;
+        int64_t mtime = 0;
+        bool hadPrompts = false;
+        if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+        {
+            path = it->second.path;
+            mtime = it->second.mtime;
+            hadPrompts = !it->second.prompts.empty();
+        }
+
+        co_await winrt::resume_background();
+        std::vector<std::wstring> fresh;
+        const bool refreshed = ReadPromptNavIfGrown(sessionId, path, mtime, hadPrompts, fresh);
+
+        co_await wil::resume_foreground(Dispatcher());
+        if (refreshed)
+        {
+            auto& e = _promptNavCache[sessionId];
+            e.path = path;
+            e.mtime = mtime;
+            e.prompts = std::move(fresh);
+        }
+        // Re-resolve the summary panel's jump-icon eligibility against the live buffer (a no-op if the panel
+        // is closed / has no jump buttons). The position resolve is fresh; this only re-dims stale icons.
+        if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
+        {
+            it->second->RefreshJumpData();
         }
     }
 
@@ -1308,6 +1356,16 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         const int idx = control.ScrollToAdjacentConversationPrompt(_PromptsToVector(prompts), up);
+        // -2: stepping DOWN past the last prompt scrolled to the BOTTOM (live tail). We DID move, so no
+        // boundary sound; clear any stale summary highlight (we're past the numbered prompts now).
+        if (idx == -2)
+        {
+            if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
+            {
+                it->second->HighlightSummaryMessage(-1);
+            }
+            return;
+        }
         if (idx < 0)
         {
             _PlayPromptNavLimitSound(); // no further sent prompt off-screen in that direction

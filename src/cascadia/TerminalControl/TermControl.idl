@@ -126,8 +126,10 @@ namespace Microsoft.Terminal.Control
         Windows.Foundation.Collections.IVector<Int32> ResolveConversationPromptRows(Windows.Foundation.Collections.IVector<String> messages);
         // Agentmaster (alt+up / alt+down prompt nav): scroll to the nearest SENT prompt that is currently
         // OFF-SCREEN in the given direction (up = above the viewport, down = below), CENTERING it. Returns
-        // the 0-based MESSAGE INDEX navigated to (so the caller can highlight that summary row), or -1 if
-        // there is no off-screen prompt in that direction.
+        // the 0-based MESSAGE INDEX navigated to (so the caller can highlight that summary row); -1 at a true
+        // boundary; or -2 when stepping DOWN past the last prompt scrolled to the BOTTOM / live tail (the
+        // caller moves on silently and clears the highlight). At the UP end (nothing off-screen above) it
+        // stops at the TOPMOST matched prompt — centers it and returns its index, -1 only once already there.
         Int32 ScrollToAdjacentConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, Boolean up);
 
         void CreateSearchBoxControl();

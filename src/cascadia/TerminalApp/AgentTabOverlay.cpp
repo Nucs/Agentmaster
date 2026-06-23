@@ -2348,6 +2348,14 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (SUMMARY_JUMP.md §7): public entry for the page's 30 s focused refresh — just re-resolve
+    // eligibility (the underlying position resolve is fresh on every call). Kept thin so the page never
+    // reaches into privates.
+    void AgentTabOverlay::RefreshJumpData()
+    {
+        _RefreshJumpEligibility();
+    }
+
     // Agentmaster (SUMMARY_JUMP.md): remember the message we jumped to and paint the band on its row.
     // Called from the ▸ button (idx known directly) and from the page after alt+up / alt+down nav (the
     // landed 0-based index). The mark moves to the new target on the next jump.

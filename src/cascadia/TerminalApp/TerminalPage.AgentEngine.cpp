@@ -162,6 +162,11 @@ namespace winrt::TerminalApp::implementation
         {
             _scanner->RemoveLivenessProbe(_livenessToken);
         }
+        // Agentmaster (alt+up/down prompt nav): stop the 30 s focused-refresh timer (UI thread, safe).
+        if (_promptNavRefreshTimer)
+        {
+            _promptNavRefreshTimer.Stop();
+        }
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
         // get_weak() + an agile dispatcher), this keeps the engine's sink list bounded (Rule #10).
@@ -625,6 +630,29 @@ namespace winrt::TerminalApp::implementation
                 }
             });
         }
+
+        // Agentmaster (alt+up/down prompt nav, SUMMARY_JUMP.md §7): a free-running 30 s refresh that keeps
+        // the FOCUSED Claude session's jump data in sync with the live buffer between keypresses — re-reads
+        // its sent prompts (mtime-gated) into _promptNavCache + re-resolves the summary panel's jump-icon
+        // eligibility. Each tick no-ops unless a managed Claude tab is focused. Self-stops if the page is
+        // gone (weak); also stopped in ~TerminalPage. (_InitAgentmasterEngine runs once per window — the
+        // `_sessionRegistry` guard at the top — so this builds + starts exactly one timer.)
+        _promptNavRefreshTimer = DispatcherTimer{};
+        _promptNavRefreshTimer.Interval(std::chrono::seconds{ 30 });
+        _promptNavRefreshTimer.Tick([weakThis = get_weak()](const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable&) {
+            if (auto self = weakThis.get())
+            {
+                if (const auto sid = self->_FocusedPromptNavSession(); !sid.empty())
+                {
+                    self->_RefreshPromptNavCache(sid);
+                }
+            }
+            else if (const auto t = sender.try_as<DispatcherTimer>())
+            {
+                t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+            }
+        });
+        _promptNavRefreshTimer.Start();
     }
 
     // Agentmaster: wire a freshly-created Manager content to the engine. Idempotently

@@ -146,6 +146,12 @@ namespace winrt::TerminalApp::implementation
         // target on the next jump. Out-of-range, or the panel not built, == no-op. Call on the UI thread.
         void HighlightSummaryMessage(int index);
 
+        // Agentmaster (SUMMARY_JUMP.md §4a / §7): re-resolve the summary panel's jump-icon eligibility
+        // against the live buffer (dim the icons whose prompt isn't on screen right now). Invoked by the
+        // page's 30 s focused refresh, on top of the panel's own visible-only 5 s tick. No-op when the panel
+        // is closed / has no jump buttons. Call on the UI thread.
+        void RefreshJumpData();
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer

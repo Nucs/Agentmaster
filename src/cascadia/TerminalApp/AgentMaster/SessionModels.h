@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Activity.h" // RunningApp (Fleet Observer live-enrichment field on SessionInfo)
@@ -123,6 +124,37 @@ namespace Agentmaster
         // kEnterRetryMax (Scheduler.h). Reset to 0 at each fresh send.
         uint32_t enterRetries{ 0 };
     };
+
+    // Agentmaster (#6 — multi-line submit): build the ConPTY input that types `text` into Claude's
+    // Ink TUI and submits it as ONE message. A bare `text + CR` makes Ink submit on the FIRST embedded
+    // line break (the WinUI compose TextBox emits CR per line), tearing a multi-line prompt across
+    // submits — and the lone-CR Enter-retry can't reassemble it. Wrap the body in a bracketed paste
+    // (ESC[200~ … ESC[201~) so Ink treats embedded newlines as literal pasted text, then a single
+    // trailing CR (outside the paste) submits the whole block. Embedded CR / CRLF are normalized to LF
+    // for clean pasted lines. Assumes Claude's TUI enables bracketed-paste mode (it does — it supports
+    // multi-line paste). Also hardens single-line sends against the CR-eaten race: the submit CR now
+    // follows a complete, delimited paste instead of riding in raw with the text. PURE.
+    inline std::wstring BuildPromptSubmission(std::wstring_view text)
+    {
+        std::wstring body;
+        body.reserve(text.size());
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            if (text[i] == L'\r')
+            {
+                body.push_back(L'\n');
+                if (i + 1 < text.size() && text[i + 1] == L'\n')
+                {
+                    ++i; // collapse CRLF -> one LF
+                }
+            }
+            else
+            {
+                body.push_back(text[i]);
+            }
+        }
+        return L"\x1b[200~" + body + L"\x1b[201~\r";
+    }
 
     struct ApprovalPolicy
     {
@@ -300,11 +332,13 @@ namespace Agentmaster
     };
 
     // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autopilot").
-    // Every default reproduces the prior hardcoded behavior, so a missing settings.json (or
-    // any unset field) changes nothing. Persisted to ~/.agentmaster/settings.json, loaded at
-    // startup, and applied at two seams: the spawn recipe (Claude fields) and new-session
-    // creation (autopilot defaults are stamped onto the session's AutopilotState). These are
-    // GLOBAL defaults/backstops; per-session autopilot mode still lives in the Flight Plan.
+    // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutopilotMode (now
+    // Full, the product default — "all new or opened sessions run on Autopilot"), so a missing
+    // settings.json mostly changes nothing. Persisted to ~/.agentmaster/settings.json, loaded at
+    // startup, and applied at two seams: the spawn recipe (Claude fields) and session OPEN — the
+    // autopilot MODE is stamped onto EVERY opened session (new / adopted / restored); the other
+    // autopilot backstops are stamped onto NEW sessions only. These are GLOBAL defaults/backstops;
+    // per-session autopilot mode still lives in the Flight Plan (changeable after open).
     struct AppSettings
     {
         // --- Claude sessions (spawn recipe; see ClaudeSpawn) ---
@@ -330,8 +364,13 @@ namespace Agentmaster
         // enrichment are all claude.exe-keyed).
         std::wstring claudeExePath{};
 
-        // --- Autopilot defaults stamped onto NEW sessions (not restored ones) ---
-        AutopilotMode defaultAutopilotMode{ AutopilotMode::Off };
+        // --- Autopilot defaults ---
+        // The MODE seeds every OPENED session — new, adopted, AND restored/window-restored (a
+        // reopened session is re-armed on this default, OVERRIDING its saved per-session mode),
+        // and stays changeable afterward (the Flight Plan toggle / this cog). Default Full ==
+        // "all new or opened sessions run on Autopilot". The backstops below are stamped onto
+        // NEW sessions only; a restored one keeps its persisted maxAutoSends/stopOnError/pauseOnHumanInput.
+        AutopilotMode defaultAutopilotMode{ AutopilotMode::Full };
         uint32_t maxAutoSends{ 100 }; // runaway backstop
         bool stopOnError{ true }; // pause a plan when a turn ends in error
         bool pauseOnHumanInput{ true }; // suspend auto-send while the human is typing

@@ -312,12 +312,24 @@ namespace winrt::TerminalApp::implementation
         info.pendingConfirmPromptId.clear();
         if (!restored)
         {
-            // A NEW session inherits the global Autopilot defaults from the cog; a restored one
-            // keeps its persisted AutopilotState (Correctness Rule #6).
+            // A NEW session inherits ALL the global Autopilot defaults from the cog.
             info.autopilot.mode = _appSettings.defaultAutopilotMode;
             info.autopilot.maxAutoSends = _appSettings.maxAutoSends;
             info.autopilot.stopOnError = _appSettings.stopOnError;
             info.autopilot.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+        }
+        else
+        {
+            // Agentmaster: an OPENED (restored / window-restored) session ALSO adopts the cog's
+            // default Autopilot MODE — the product rule is "all new OR opened sessions run on the
+            // default (Full)" — even though it keeps its persisted queue + backstops. This
+            // intentionally OVERRIDES the session's saved per-session mode (a deliberate carve-out
+            // from the old "a restored session keeps its mode"); it stays changeable afterward via
+            // the Flight Plan toggle. Re-arming zeroes the per-run send counter so a reopened plan
+            // isn't instantly capped by a lingering in-memory autoSendsThisRun (pendingConfirmPromptId
+            // was already cleared above). Codex restores keep their own Off (see _LaunchCodexSession).
+            info.autopilot.mode = _appSettings.defaultAutopilotMode;
+            info.autopilot.autoSendsThisRun = 0;
         }
         _sessionRegistry->Upsert(info);
 

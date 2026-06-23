@@ -2804,8 +2804,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // coordinate space is the same one JumpToConversationPrompt centers in (absolute buffer rows ==
     // scrollbar values). The viewport currently spans [viewTop, viewTop + viewH - 1]; "off-screen" means
     // strictly outside it. Returns the 0-based MESSAGE INDEX navigated to (so the caller can highlight that
-    // row in the summary panel), or -1 if there is no off-screen prompt that way (=> the caller plays a
-    // boundary sound). UI thread.
+    // row in the summary panel); -1 at a true boundary (=> the caller plays a limit sound); or -2 when DOWN
+    // past the last prompt scrolled to the BOTTOM / live tail (=> the caller moves on silently + clears the
+    // highlight). At the UP end (no prompt off-screen above), it STOPS AT the topmost matched prompt —
+    // centers it and returns its index — and only returns -1 once already there. UI thread.
     int32_t TermControl::ScrollToAdjacentConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, bool up)
     {
         const auto rows = _core.ResolveConversationPromptRows(messages);
@@ -2818,12 +2820,19 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         const auto viewBottom = viewTop + viewH - 1;
         int best = -1; // the chosen prompt's buffer row
         int bestIdx = -1; // its 0-based message index (returned for the summary-panel highlight)
+        int topRow = -1; // the topmost (smallest-row) resolvable prompt — the "stop at the topmost match" clamp for UP
+        int topIdx = -1;
         for (uint32_t k = 0; k < rows.Size(); ++k)
         {
             const auto r = rows.GetAt(k);
             if (r < 0)
             {
                 continue; // prompt not resolvable / not on screen
+            }
+            if (topRow < 0 || r < topRow)
+            {
+                topRow = r;
+                topIdx = static_cast<int>(k);
             }
             if (up)
             {
@@ -2846,6 +2855,33 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         if (best < 0)
         {
+            if (!up)
+            {
+                // Agentmaster: stepping DOWN past the last off-screen prompt goes to the BOTTOM of the
+                // scrollable (the live tail) — unless we're already there. -2 tells the caller we DID move
+                // (no boundary sound) with no numbered prompt to highlight.
+                const auto maxV = ScrollBar().Maximum();
+                if (static_cast<double>(viewTop) < maxV)
+                {
+                    ScrollBar().Value(maxV);
+                    return -2;
+                }
+                return -1;
+            }
+            // Agentmaster: stepping UP with no off-screen prompt above the viewport STOPS AT the topmost
+            // matched prompt — center it when we can still scroll UP to do so (it was within the viewport,
+            // skipped because centering the previous target brought it on screen). Already centered on / above
+            // it => nothing further up => boundary sound (-1). Returns its message index, so the caller
+            // highlights it like any landed prompt.
+            if (topRow >= 0)
+            {
+                const auto targetTop = (std::max)(0, topRow - viewH / 2);
+                if (targetTop < viewTop)
+                {
+                    ScrollBar().Value(static_cast<double>(targetTop));
+                    return topIdx;
+                }
+            }
             return -1;
         }
         const auto targetTop = (std::max)(0, best - viewH / 2);

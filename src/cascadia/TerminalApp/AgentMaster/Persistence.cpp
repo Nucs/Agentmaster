@@ -484,7 +484,9 @@ namespace Agentmaster
         s.includeCoAuthoredBy = v.BoolAt(L"includeCoAuthoredBy", true);
         s.env = v.StrAt(L"env");
         s.claudeExePath = v.StrAt(L"claudeExePath");
-        s.defaultAutopilotMode = AutopilotModeFromString(v.StrAt(L"defaultAutopilotMode", L"Off"));
+        // Default Full (Agentmaster): a missing field => Full, matching the struct default so an
+        // older / absent settings.json also opts every new/opened session into Autopilot.
+        s.defaultAutopilotMode = AutopilotModeFromString(v.StrAt(L"defaultAutopilotMode", L"Full"));
         s.maxAutoSends = v.U32At(L"maxAutoSends", 100);
         s.stopOnError = v.BoolAt(L"stopOnError", true);
         s.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);

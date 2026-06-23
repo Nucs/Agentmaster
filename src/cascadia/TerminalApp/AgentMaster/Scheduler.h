@@ -43,13 +43,15 @@ namespace Agentmaster
     // is absorbed as a NEWLINE instead of sending — the prompt sits typed-but-not-submitted and the
     // turn never starts (no UserPromptSubmit, no transcript write, state stuck Idle/WaitingForInput).
     // The scheduler watches every just-sent Flight prompt; if the turn has not started within
-    // kEnterRetryIntervalMs it re-presses a LONE Enter (never the text again — that would duplicate
-    // it), up to kEnterRetryMax extra presses, then gives up (the prompt stays Sent; the user can
-    // Send-now). kEnterRetryPollMs is how often the worker re-checks while a send awaits pickup.
-    // kEnterRetryActivityMarginMs guards the transcript-advanced "it started" signal against a send
-    // fired sub-second after the prior turn ended (so a real conversation write — not the prior
-    // turn's tail — is what clears the watch).
-    inline constexpr int64_t kEnterRetryIntervalMs = 10000; // wait this long for the turn to start before re-pressing Enter
+    // kEnterRetryFirstMs (then kEnterRetryIntervalMs for later presses) it re-presses a LONE Enter
+    // (never the text again — that would duplicate it), up to kEnterRetryMax extra presses, then gives
+    // up: the prompt is marked Failed and the session's autopilot is PAUSED (it never landed — don't
+    // strand a phantom Sent nor advance past a broken step; the user Send-nows / re-arms). kEnterRetry-
+    // PollMs is how often the worker re-checks while a send awaits pickup. kEnterRetryActivityMarginMs
+    // guards the transcript-advanced "it started" signal against a send fired sub-second after the
+    // prior turn ended (so a real conversation write — not the prior turn's tail — is what clears it).
+    inline constexpr int64_t kEnterRetryFirstMs = 3000; // first re-press fires fast — rescue the common eaten-CR case without a long stall
+    inline constexpr int64_t kEnterRetryIntervalMs = 6000; // subsequent re-presses: slower (the turn may be genuinely starting)
     inline constexpr uint32_t kEnterRetryMax = 3; // never re-press Enter more than this many times
     inline constexpr int64_t kEnterRetryPollMs = 1000; // worker re-check cadence while a send awaits pickup
     inline constexpr int64_t kEnterRetryActivityMarginMs = 1000; // transcript must advance at least this far past the send to count as "started"
@@ -256,7 +258,10 @@ namespace Agentmaster
             plan.action = EnterRetryAction::GiveUp;
             return plan;
         }
-        if ((nowUnixMs - best->sentAtUnixMs) >= kEnterRetryIntervalMs)
+        // First re-press fires after kEnterRetryFirstMs (snappy rescue); later presses space out by
+        // kEnterRetryIntervalMs. sentAtUnixMs is refreshed on each press, so this is "since last press".
+        const int64_t due = (best->enterRetries == 0) ? kEnterRetryFirstMs : kEnterRetryIntervalMs;
+        if ((nowUnixMs - best->sentAtUnixMs) >= due)
         {
             plan.action = EnterRetryAction::Retry;
             return plan;

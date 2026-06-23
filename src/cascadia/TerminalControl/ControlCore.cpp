@@ -836,6 +836,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         return winrt::single_threaded_vector<int32_t>(std::move(rows));
     }
 
+    // Single prompt -> its buffer row. Deliberately delegates to the BATCH ResolveConversationPromptRows
+    // over the FULL list (then indexes) — NEVER a per-anchor resolve — so the order-preserving, duplicate-
+    // aware assignment (PromptAnchor.h / SUMMARY_JUMP.md §3) is identical to eligibility + alt-nav. Every
+    // scan re-resolves all anchors from scratch (no cache, by design — "never lose sync"). Keep it so.
     int32_t ControlCore::ResolveConversationPromptRow(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index)
     {
         const auto rows = ResolveConversationPromptRows(messages);
