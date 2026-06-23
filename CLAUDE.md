@@ -247,8 +247,10 @@ Autopilot (drive the Codex TUI; launch is PULL-correlated, resume=`codex resume 
 in-content archive overlay, and the Archive page's per-window "Reopen window" + synthetic "Saved window"
 rows are ALL gone. A managed tab's lifecycle verbs are now just **Close** and **Favorite**: **Close**
 *always archives* (keeps the `live=false` record so the session stays resumable from Sessions — it NEVER
-deletes; the old 3-way Delete/Archive/Cancel confirm collapsed to **Close/Cancel**, the batch close to
-**Close All/Cancel All**, and every "Delete permanently" UI was removed). **Favorite** (a hollow ☆ /
+deletes; the old 3-way Delete/Archive/Cancel confirm became **Close · ★ Favorite & Close · Cancel**, the
+batch close **Close All · ★ Favorite & Close All · Cancel All**, and every "Delete permanently" UI was
+removed — **★ Favorite & Close** (dialog `Secondary`) stars the session(s) via `SetSessionFavorite` before
+archiving, so a keep-this close is one gesture; closing NEVER auto-favorites). **Favorite** (a hollow ☆ /
 filled-yellow ★) is the new "keep/find this" marker, persisted via the **SessionStore `favorite` key**
 (the durable per-session *title* store, reused — survives Close, works for never-managed on-disk sessions,
 one sparse scan; `IsSessionFavorite` / `SetSessionFavorite` / `LoadAllFavoriteSessions`). It surfaces as a
@@ -984,15 +986,19 @@ What works, by area:
   **Archived** and does **NOT** auto-launch it (Rule #6) — the app opens to just the Manager
   tab; the prior fleet comes back from the **Sessions browser** (per-row **Resume here**). Closing a
   session's tab (the X, the tree `Del`, the Manager's **Close**, or the Flight-Plan **Close** item) all
-  route through the ONE close seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`): a **Close**
-  confirm (gated by `confirmBeforeKill`) — Close flips `live=false` + clears the injector + persists +
-  closes the tab, KEEPING the record so the session stays resumable from the Sessions browser. **Close
-  always archives — there is no Delete** ([`FAVORITES.md`](doc/agentmaster/FAVORITES.md): always archive,
-  never delete); the conversation `.jsonl` on disk is **never** touched. Closing a **batch** that holds managed
-  sessions (a window close, or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
-  train of per-tab confirms — **Close All · Cancel All** (Close All keeps each session resumable in the
-  Sessions browser with its Flight Plan — nothing on disk is deleted; Cancel All aborts the whole close; a
-  batch of only plain shell tabs skips the dialog). The
+  route through the ONE close seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`): a 3-way
+  confirm (gated by `confirmBeforeKill`) — **Close · ★ Favorite & Close · Cancel** — where both Close
+  paths flip `live=false` + clear the injector + persist + close the tab, KEEPING the record so the
+  session stays resumable from the Sessions browser, and **★ Favorite & Close** additionally stars it
+  (`SetSessionFavorite(id,true)`, dialog `Secondary`) so a keep-this close is one gesture (closing never
+  auto-favorites — FAVORITES.md §4/§5). **Close always archives — there is no Delete**
+  ([`FAVORITES.md`](doc/agentmaster/FAVORITES.md): always archive, never delete); the conversation
+  `.jsonl` on disk is **never** touched. Closing a **batch** that holds managed sessions (a window close,
+  or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
+  train of per-tab confirms — **Close All · ★ Favorite & Close All · Cancel All** (either Close path keeps
+  each session resumable in the Sessions browser with its Flight Plan — nothing on disk is deleted; ★
+  Favorite & Close All stars every managed session first via a `favoriteAll` flag in the apply loop;
+  Cancel All aborts the whole close; a batch of only plain shell tabs skips the dialog). The
   tab context-menu's **Close ›** submenu also gained **Close tabs to the left** (`_CloseTabsBefore`, the
   left twin of close-to-the-right), and both close-left/right now **skip the pinned Manager tab** (index 0)
   so a bulk close can never kill it. Restore

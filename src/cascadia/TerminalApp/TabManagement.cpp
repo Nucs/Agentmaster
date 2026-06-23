@@ -27,6 +27,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeConversationExists / AppendStateLog
 #include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions
+#include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close All" batch branch)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 
 #include <shlobj.h>
@@ -1155,6 +1156,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        bool favoriteAll = false; // FAVORITES.md: set when the batch dialog's "Favorite & Close All" is chosen
         if (managedCount > 0)
         {
             if (const auto presenter{ _dialogPresenter.get() })
@@ -1178,8 +1180,9 @@ namespace winrt::TerminalApp::implementation
                 dialog.Title(winrt::box_value(winrt::hstring{ titleStr }));
                 dialog.Content(winrt::box_value(winrt::hstring{ body }));
                 dialog.PrimaryButtonText(L"Close All");
+                dialog.SecondaryButtonText(L"★ Favorite & Close All"); // FAVORITES.md: star every managed session, then close the batch
                 dialog.CloseButtonText(L"Cancel All");
-                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel All
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel All (the Close button)
 
                 const auto result = co_await presenter.ShowDialog(dialog);
                 const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
@@ -1187,11 +1190,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return;
                 }
-                if (result != ContentDialogResult::Primary)
+                if (result == ContentDialogResult::None)
                 {
                     co_return; // Cancel All / dismiss -> stop the close
                 }
-                // Primary == Close All -> fall through to the per-tab close below.
+                favoriteAll = (result == ContentDialogResult::Secondary); // Secondary == Favorite & Close All
+                // Primary (Close All) or Secondary (Favorite & Close All) -> fall through to the per-tab close below.
             }
             // No presenter to confirm with -> close anyway (non-destructive; don't strand the close).
         }
@@ -1221,6 +1225,11 @@ namespace winrt::TerminalApp::implementation
             const auto sessionId = _ClaudeSessionForTab(tab);
             if (!sessionId.empty())
             {
+                // FAVORITES.md: "Favorite & Close All" stars every managed session before archiving.
+                if (favoriteAll)
+                {
+                    ::Agentmaster::SetSessionFavorite(sessionId, true);
+                }
                 // Always archive (keep the record) + close — FAVORITES.md: there is no Delete All.
                 // skipConfirm: the batch dialog already ran. The session stays resumable in Sessions.
                 co_await _ArchiveAndCloseClaudeTab(tab, sessionId, /*skipConfirm*/ true);

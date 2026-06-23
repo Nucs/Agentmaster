@@ -1,17 +1,20 @@
 # Agentmaster — Refactor: kill "Archive", introduce "Favorite", unify on the Sessions page
 
-> **Status: IMPLEMENTED (engine + UI; lib-compiled green + engine-tested 1101/1101; pending the
-> deploy build).** The user-facing "Archive" concept is removed — a managed tab's lifecycle verbs
+> **Status: IMPLEMENTED (engine + UI; lib-compiled green + engine-tested 1101/1101). The base
+> refactor is built + dev-deployed + verified engine-live; the "★ Favorite & Close" close-dialog
+> follow-on (§4/§5) is lib-compiled green + pending the next deploy.** The user-facing "Archive"
+> concept is removed — a managed tab's lifecycle verbs
 > are now **Close** and **Favorite**, and the **Sessions page is the sole browser** for history +
 > every other session on the machine. Favorited sessions are the "keep/find this" signal (replacing
 > the implicit "I archived it"), persisted via the existing per-session `SessionStore` (the title
 > store, built for exactly this reuse — a new `favorite` key). What shipped: the `SessionStore`
 > favorite key + helpers (`IsSessionFavorite`/`SetSessionFavorite`/`LoadAllFavoriteSessions`); the
 > Sessions page's leftmost **★ column** + **[ ] Favorite** filter + row "Favorite/Unfavorite" menu;
-> the session **tab right-click** Favorite/Unfavorite (beside Close); **Close = always archive**
-> (the 3-way Delete/Archive/Cancel confirm collapsed to Close/Cancel, batch → Close All/Cancel, all
-> Delete UI removed); and the full **Archive page + "Archived" button + retired overlay + per-window
-> reopen** removed (the toolbar "Reopen Windows (N)" stays).
+> the session **tab right-click** Favorite/Unfavorite (beside Close); **Close = always archive** (the
+> 3-way Delete/Archive/Cancel confirm became **Close · ★ Favorite & Close · Cancel**, batch → **Close
+> All · ★ Favorite & Close All · Cancel All**, all Delete UI removed); and the full **Archive page +
+> "Archived" button + retired overlay + per-window reopen** removed (the toolbar "Reopen Windows (N)"
+> stays).
 > Companions: [`SESSIONS.md`](./SESSIONS.md) (the Sessions browser + `~/.claude` map) ·
 > [`PERSISTENCE.md`](./PERSISTENCE.md) (window records / reopen) · [`STATE.md`](./STATE.md) ·
 > [`DESIGN.md`](./DESIGN.md).
@@ -108,11 +111,17 @@ toggle), deferred like the rest.
 
 - `_ArchiveAndCloseClaudeTab` → **always archive**: drop the Delete/Archive/Cancel dialog; keep the
   archive bookkeeping (flip `live=false`, unbind injector, `SaveSessions`, close the tab).
-  `confirmBeforeKill` (relabeled **"Confirm before closing"**) gates a simple **Close / Cancel**
-  confirm — *"It stays in Sessions; resume it anytime."* (non-destructive, so the default can even
-  be no-confirm).
-- Batch close (`TabManagement.cpp`): "🗑 Delete All / Archive All / Cancel All" → **"Close All /
-  Cancel All"**.
+  `confirmBeforeKill` (relabeled **"Confirm before closing"**) gates a **three-way** confirm —
+  **Close · ★ Favorite & Close · Cancel** (mapped to `Primary` / `Secondary` / `None`). **Favorite &
+  Close** stars the session (`SetSessionFavorite(id, true)`) *before* the archive bookkeeping, so it
+  surfaces in the Sessions page's ★ column / `[ ] Favorite` filter afterward; plain **Close** just
+  archives. The default button is **Cancel** (safe). Non-destructive either way, so the confirm can
+  be turned off — but with it off there is no dialog, hence no Favorite-&-Close button (star from the
+  Sessions page or the tab menu instead — the accepted trade-off of putting it on the dialog).
+- Batch close (`TabManagement.cpp`): "🗑 Delete All / Archive All / Cancel All" → **"Close All · ★
+  Favorite & Close All · Cancel All"**. `Secondary` sets a `favoriteAll` flag; the apply loop then
+  `SetSessionFavorite(id, true)` on every managed session before `_ArchiveAndCloseClaudeTab(…,
+  skipConfirm=true)`. A pure shell-tab batch is unaffected (keeps upstream's single confirm).
 - **Remove all "Delete permanently" UI**: the board-card + tree-row `_MakeSessionMenu`, the tab
   menu, (and the gone Archive page). Keep `_RemoveSessionRecord` *internal-only* for the
   resume-fresh stale-record drop, but **remove its `_AddSessionIdToHiddenList` auto-hide coupling**
@@ -124,13 +133,16 @@ toggle), deferred like the rest.
 
 ## 5. The Favorite verbs (where you toggle the star)
 
-Two entry points (per the chosen surfaces):
+Entry points (per the chosen surfaces):
 
 1. **Clicking the star** in the Sessions page's leftmost column (§3).
 2. **The session tab's right-click context menu** — add **Favorite / Unfavorite** next to **Close**,
    shown when the tab is a managed Claude session (`_ClaudeSessionForTab(tab)` non-empty), wired to
    `_ToggleSessionFavorite(sid)`. *Simple interaction with the session (its tab) makes it eligible
    to favorite.*
+3. **The close confirm's "★ Favorite & Close" button** (§4) — keep + close in one gesture, at the
+   moment you're closing (single + batch). Closing never auto-favorites; this is the explicit
+   "keep this one" choice surfaced right where you make the close decision.
 
 Plus the Sessions row right-click menu's `Favorite`/`Unfavorite` item (§3).
 

@@ -26,6 +26,7 @@
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
 #include "AgentMaster/ProcessInspect.h" // ProcessAlive / ProcessStartUnixMs / ResolveSessionId
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/SessionStore.h" // SetSessionFavorite (FAVORITES.md: "Favorite & Close" dialog branch)
 
 using namespace winrt;
 using namespace winrt::Microsoft::Management::Deployment;
@@ -658,8 +659,9 @@ namespace winrt::TerminalApp::implementation
                                                     winrt::hstring{ L"Closing shuts the session down. It stays in Sessions — resume it anytime, and star it there to keep it in your favorites." } :
                                                     winrt::hstring{ L"“" + title + L"” — closing shuts it down. It stays in Sessions — resume it anytime, and star it there to keep it in your favorites." }));
                 dialog.PrimaryButtonText(L"Close");
+                dialog.SecondaryButtonText(L"★ Favorite & Close"); // FAVORITES.md: keep+close in one gesture (star, then archive)
                 dialog.CloseButtonText(L"Cancel");
-                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel (the Close button)
 
                 const auto weak = get_weak();
                 const auto result = co_await presenter.ShowDialog(dialog);
@@ -668,11 +670,18 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return;
                 }
-                if (result != ContentDialogResult::Primary)
+                if (result == ContentDialogResult::None)
                 {
                     co_return; // Cancel / dismiss -> leave the session Open
                 }
-                // Primary == Close -> fall through to the archive (keep-the-record) bookkeeping below.
+                if (result == ContentDialogResult::Secondary)
+                {
+                    // "Favorite & Close": star the session (durable SessionStore key) BEFORE archiving,
+                    // so it's findable via the Sessions page's ★ column / [ ] Favorite filter afterward.
+                    ::Agentmaster::SetSessionFavorite(sessionId, true);
+                }
+                // Primary (Close) or Secondary (Favorite & Close) -> fall through to the archive
+                // (keep-the-record) bookkeeping below.
             }
             // No presenter to confirm with -> close anyway (it's non-destructive; don't strand the close).
         }
