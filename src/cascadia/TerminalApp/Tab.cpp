@@ -319,6 +319,10 @@ namespace winrt::TerminalApp::implementation
         {
             _agentToolTipOpenTimer.Stop();
         }
+        if (_agentToolTipDismissTimer)
+        {
+            _agentToolTipDismissTimer.Stop();
+        }
         if (_agentToolTip)
         {
             _agentToolTip.IsOpen(false);
@@ -422,13 +426,22 @@ namespace winrt::TerminalApp::implementation
         _agentToolTip.Content(textBlock); // swap content on the REUSED object — never re-SetToolTip an open tip
     }
 
-    // Agentmaster (tab tooltip): open the agent tooltip FAST on hover and close it reliably on leave.
-    // The framework hover delay is sluggish (and this SDK exposes no ToolTipService.InitialShowDelay), and
-    // the service's auto-dismiss is unreliable under XAML Islands — so we drive it ourselves: a one-shot
-    // DispatcherTimer at ~1/3 the system hover time opens it, and the TabViewItem's own PointerExited
-    // closes it (this is the AgentTipHelpers recipe). Wired ONCE on the TabViewItem — the tooltip CONTENT
-    // changes per refresh, but the handlers operate on the reused _agentToolTip. The handlers no-op unless
-    // a tooltip is currently active, so a tab that reverts to the default tooltip is unaffected.
+    // Agentmaster (tab tooltip): open the agent tooltip FAST on hover and — the part that actually bites —
+    // close it RELIABLY. The framework hover delay is sluggish (and this SDK exposes no
+    // ToolTipService.InitialShowDelay), so a one-shot DispatcherTimer at ~1/3 the system hover time opens
+    // it. But driving IsOpen ourselves bypasses the framework's native auto-dismiss — and under XAML
+    // Islands that auto-dismiss, AND PointerExited, are both routinely MISSED (window deactivate, a fast
+    // exit off the top of the tab strip, a pointer-capture stolen by a tab click/drag), which strands the
+    // manually-opened popup open forever (the "stuck tooltip" bug). So closing is defense-in-depth:
+    //   - close from THREE pointer-loss events (Exited / Canceled / CaptureLost), not just Exited;
+    //   - an auto-dismiss BACKSTOP timer force-closes after a read window no matter what — re-armed while
+    //     the pointer keeps moving over the tab (keep-alive, so active reading isn't cut off), but always
+    //     firing once the mouse stops or leaves, so the tip can never get stuck;
+    //   - PointerMoved re-opens after a stationary auto-dismiss, so the tab is never left "hovered but
+    //     refusing to show".
+    // Wired ONCE on the TabViewItem; the tooltip CONTENT changes per refresh but the handlers operate on
+    // the reused _agentToolTip and no-op unless a tooltip is active (a tab on the default tooltip is
+    // unaffected). This is the AgentTipHelpers recipe, hardened for the manual-open case.
     void Tab::_WireAgentToolTipHover()
     {
         if (_agentToolTipHoverWired)
@@ -443,39 +456,84 @@ namespace winrt::TerminalApp::implementation
         _agentToolTipHoverWired = true;
         const auto weakThis = get_weak();
 
+        // One-shot fast-open timer: opens the tip ~1/3 the system hover time after the pointer arrives,
+        // then arms the auto-dismiss backstop.
+        {
+            unsigned int hoverMs{ 400 };
+            if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
+            {
+                hoverMs = 400;
+            }
+            WUX::DispatcherTimer openTimer;
+            openTimer.Interval(std::chrono::milliseconds{ hoverMs / 3 }); // ~1/3 the system hover time
+            const auto weakTick = weakThis;
+            openTimer.Tick([weakTick](auto&& s, auto&&) {
+                if (const auto t = s.try_as<WUX::DispatcherTimer>())
+                {
+                    t.Stop(); // one-shot: open once, then idle until the next hover
+                }
+                const auto self = weakTick.get();
+                if (self && self->_agentToolTipActive && self->_agentToolTip)
+                {
+                    self->_agentToolTip.IsOpen(true);
+                    self->_ArmAgentToolTipDismiss(); // start the backstop the instant it opens
+                }
+            });
+            _agentToolTipOpenTimer = openTimer;
+        }
+
+        // One-shot auto-dismiss backstop: the guaranteed close even if every pointer-loss event is missed.
+        {
+            WUX::DispatcherTimer dismissTimer;
+            dismissTimer.Interval(std::chrono::seconds{ 8 }); // generous read window; re-armed on PointerMoved
+            const auto weakTick = weakThis;
+            dismissTimer.Tick([weakTick](auto&& s, auto&&) {
+                if (const auto t = s.try_as<WUX::DispatcherTimer>())
+                {
+                    t.Stop();
+                }
+                const auto self = weakTick.get();
+                if (self && self->_agentToolTip)
+                {
+                    self->_agentToolTip.IsOpen(false);
+                }
+            });
+            _agentToolTipDismissTimer = dismissTimer;
+        }
+
         tvi.PointerEntered([weakThis](auto&&, auto&&) {
             const auto self = weakThis.get();
             if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
             {
                 return; // not an agent tab right now -> let the framework handle the default tooltip
             }
-            if (!self->_agentToolTipOpenTimer)
+            // Start the open countdown only if it isn't already pending — restarting it on every event
+            // would keep pushing the open out, so it'd never fire while the pointer lingers.
+            if (self->_agentToolTipOpenTimer && !self->_agentToolTipOpenTimer.IsEnabled())
             {
-                unsigned int hoverMs{ 400 };
-                if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
-                {
-                    hoverMs = 400;
-                }
-                WUX::DispatcherTimer dt;
-                dt.Interval(std::chrono::milliseconds{ hoverMs / 3 }); // ~1/3 the system hover time
-                const auto weakTick = weakThis;
-                dt.Tick([weakTick](auto&& s, auto&&) {
-                    if (const auto t = s.try_as<WUX::DispatcherTimer>())
-                    {
-                        t.Stop(); // one-shot: open once, then idle until the next hover
-                    }
-                    const auto self2 = weakTick.get();
-                    if (self2 && self2->_agentToolTipActive && self2->_agentToolTip)
-                    {
-                        self2->_agentToolTip.IsOpen(true);
-                    }
-                });
-                self->_agentToolTipOpenTimer = dt;
+                self->_agentToolTipOpenTimer.Start();
             }
-            self->_agentToolTipOpenTimer.Start();
         });
 
-        tvi.PointerExited([weakThis](auto&&, auto&&) {
+        tvi.PointerMoved([weakThis](auto&&, auto&&) {
+            const auto self = weakThis.get();
+            if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
+            {
+                return;
+            }
+            if (self->_agentToolTip.IsOpen())
+            {
+                self->_ArmAgentToolTipDismiss(); // keep-alive: push the dismiss out while genuinely hovering
+            }
+            else if (self->_agentToolTipOpenTimer && !self->_agentToolTipOpenTimer.IsEnabled())
+            {
+                self->_agentToolTipOpenTimer.Start(); // re-open after a stationary auto-dismiss (or a missed enter)
+            }
+        });
+
+        // Close from EVERY pointer-loss event, not just Exited (which islands routinely drops). All three
+        // share the same handler shape (sender, PointerRoutedEventArgs).
+        const auto closeHandler = [weakThis](auto&&, auto&&) {
             const auto self = weakThis.get();
             if (!self)
             {
@@ -485,11 +543,30 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_agentToolTipOpenTimer.Stop();
             }
+            if (self->_agentToolTipDismissTimer)
+            {
+                self->_agentToolTipDismissTimer.Stop();
+            }
             if (self->_agentToolTip)
             {
                 self->_agentToolTip.IsOpen(false);
             }
-        });
+        };
+        tvi.PointerExited(closeHandler);
+        tvi.PointerCanceled(closeHandler);
+        tvi.PointerCaptureLost(closeHandler);
+    }
+
+    // Agentmaster (tab tooltip): (re)start the auto-dismiss backstop from now. Stop+Start so an already-
+    // running timer is reset to a full read window — that's the keep-alive while the pointer moves over the
+    // tab. UI thread only (called from the tooltip hover handlers / the open tick).
+    void Tab::_ArmAgentToolTipDismiss()
+    {
+        if (_agentToolTipDismissTimer)
+        {
+            _agentToolTipDismissTimer.Stop();
+            _agentToolTipDismissTimer.Start();
+        }
     }
 
     // Method Description:

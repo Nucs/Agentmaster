@@ -224,6 +224,13 @@ namespace winrt::TerminalApp::implementation
         // this SDK has no ToolTipService.InitialShowDelay) — the AgentTipHelpers recipe, wired once.
         winrt::Windows::UI::Xaml::Controls::ToolTip _agentToolTip{ nullptr };
         winrt::Windows::UI::Xaml::DispatcherTimer _agentToolTipOpenTimer{ nullptr };
+        // Auto-dismiss BACKSTOP. We drive IsOpen(true) ourselves, which bypasses the framework's native
+        // tooltip auto-dismiss — and that auto-dismiss (like PointerExited) is unreliable under XAML
+        // Islands anyway. Without a backstop a single missed PointerExited (window deactivate, a fast
+        // exit off the top of the tab strip, a stolen pointer-capture) strands the popup open FOREVER.
+        // This one-shot timer force-closes it after a generous read window, re-armed while the pointer
+        // genuinely moves over the tab (keep-alive) — so it can never get stuck. See _WireAgentToolTipHover.
+        winrt::Windows::UI::Xaml::DispatcherTimer _agentToolTipDismissTimer{ nullptr };
         bool _agentToolTipHoverWired{ false };
 
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _themeColor{ nullptr };
@@ -317,6 +324,7 @@ namespace winrt::TerminalApp::implementation
         void _UpdateToolTip();
         void _UpdateAgentToolTip(); // Agentmaster: (re)build the rich session tooltip's content on the reused ToolTip object (colored state line / bold title / plain body); frozen while open
         void _WireAgentToolTipHover(); // Agentmaster: wire (once) the TabViewItem hover handlers that fast-open / reliably close the agent tooltip (AgentTipHelpers recipe)
+        void _ArmAgentToolTipDismiss(); // Agentmaster: (re)start the auto-dismiss backstop timer — the keep-alive + the guarantee the tip never sticks open
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);
