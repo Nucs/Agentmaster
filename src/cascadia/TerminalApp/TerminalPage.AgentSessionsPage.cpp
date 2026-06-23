@@ -1253,6 +1253,17 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // SAFETY NET (0xC000027B): the row-filter rebuild crashed the app from a flyout context twice.
+        // The throttle reroute (filter actions arm the search throttle, so the rebuild lands on a clean
+        // timer tick — _RenderSessionsAfterFilterChange) is the real fix; this try/catch is belt-and-
+        // suspenders + a dump-free diagnostic — it turns any residual throw into a logged no-crash (the
+        // next render heals the half-built tree). UI-thread only; no co_await inside, so SEH-safe.
+        try
+        {
+        // Keep the "✕ filter" chip in lockstep with the filter state on EVERY render. The filter
+        // actions arm the search throttle rather than mutating XAML in the flyout context, so the
+        // chip update rides here — on the same clean tick as the row rebuild (the 0xC000027B fix).
+        _UpdateSessionsFilterChip();
         const int64_t now = SessNowMs();
         const bool searching = !_sessionsQueryText.empty();
 
@@ -1670,24 +1681,6 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring forkTitle = r.msgs > 0 ? r.title : std::wstring{}; // never-prompted -> let the fork seam derive a smart name
                 const bool rIsOpen = _claudeTabs.find(rid) != _claudeTabs.end();
 
-                // The "Filter ▸" submenu is a CASCADE (a MenuFlyoutSubItem): clicking a child item
-                // tears down TWO popups (the submenu then the parent). Rebuilding the row tree —
-                // which destroys THIS flyout's anchor row — one tick after the click races the
-                // parent popup's teardown and throws a stowed exception (0xC000027B) in the XAML
-                // flyout machinery (the crash). So the filter items don't act from their Click; they
-                // set _sessionsRowMenuPendingAction and we run it HERE, once the WHOLE flyout (both
-                // popups) has closed, plus one more deferred tick so the anchor is safe to destroy.
-                // Empty for a plain dismiss or a non-filter item (those defer their own work) — no-op.
-                rowMenu.Closed([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
-                    if (!_sessionsRowMenuPendingAction)
-                    {
-                        return;
-                    }
-                    auto act = std::move(_sessionsRowMenuPendingAction);
-                    _sessionsRowMenuPendingAction = nullptr;
-                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [act = std::move(act)]() { act(); });
-                });
-
                 if (rIsOpen)
                 {
                     MenuFlyoutItem jump;
@@ -1769,15 +1762,14 @@ namespace winrt::TerminalApp::implementation
                         it.Text(winrt::hstring{ (active ? L"\x2713 " : L"") + label });
                         SessSetTip(it, winrt::hstring{ tip });
                         const int kindInt = static_cast<int>(kind);
-                        // Defer to the flyout's Closed event (the cascade-teardown fix above), not a
-                        // RunAsync from here — set the latch; Closed runs it once both popups are gone.
+                        // _ApplySessionsRowFilter only mutates the (non-XAML) filter state and ARMS the
+                        // search throttle — it does NOT rebuild the row tree here. The rebuild lands
+                        // later on the throttle's clean timer tick, fully detached from this cascade
+                        // flyout's teardown (the stowed-exception crash was rebuilding rows — destroying
+                        // the closing flyout's anchor — in/near the teardown context). Safe to call
+                        // straight from the Click; the flyout closes normally afterward.
                         it.Click([this, kindInt, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                            _sessionsRowMenuPendingAction = [weak = get_weak(), kindInt, rid]() {
-                                if (auto self = weak.get())
-                                {
-                                    self->_ApplySessionsRowFilter(kindInt, rid);
-                                }
-                            };
+                            _ApplySessionsRowFilter(kindInt, rid);
                         });
                         filterSub.Items().Append(it);
                     };
@@ -1801,14 +1793,10 @@ namespace winrt::TerminalApp::implementation
                         MenuFlyoutItem clearItem;
                         clearItem.Text(L"Clear filters");
                         SessSetTip(clearItem, L"Remove every active row filter.");
-                        // Same cascade-teardown deferral as the facet items — run on flyout Closed.
+                        // Like the facet items: mutate state + arm the throttle; the rebuild lands on
+                        // the throttle's clean timer tick, detached from this flyout's teardown.
                         clearItem.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                            _sessionsRowMenuPendingAction = [weak = get_weak()]() {
-                                if (auto self = weak.get())
-                                {
-                                    self->_ClearSessionsRowFilter();
-                                }
-                            };
+                            _ClearSessionsRowFilter();
                         });
                         filterSub.Items().Append(clearItem);
                     }
@@ -1879,6 +1867,17 @@ namespace winrt::TerminalApp::implementation
                 counts += L" \x00B7 indexing\x2026";
             }
             _sessionsCountText.Text(winrt::hstring{ counts });
+        }
+        }
+        catch (const winrt::hresult_error& e)
+        {
+            wchar_t hb[16]{};
+            swprintf_s(hb, L"%08X", static_cast<unsigned>(static_cast<int32_t>(e.code())));
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessions-render] EXCEPTION hr=0x" + std::wstring{ hb } + L" " + std::wstring{ e.message() } + L"\n");
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[sessions-render] EXCEPTION (non-winrt)\n");
         }
     }
 
@@ -2727,16 +2726,35 @@ namespace winrt::TerminalApp::implementation
             }
             break;
         }
-        _UpdateSessionsFilterChip();
-        _RenderSessionsTable();
+        _RenderSessionsAfterFilterChange();
     }
 
-    // Drop EVERY facet (the chip click, and the submenu's "Clear filters") and re-render.
+    // Drop EVERY facet (the chip click, and the submenu's "Clear filters").
     void TerminalPage::_ClearSessionsRowFilter()
     {
         _sessionsRowFilter = _SessionsRowFilterState{};
-        _UpdateSessionsFilterChip();
-        _RenderSessionsTable();
+        _RenderSessionsAfterFilterChange();
+    }
+
+    // Re-render after a filter facet changed — but NOT synchronously here. A filter action fires from
+    // a MenuFlyout(SubItem) item or the chip; rebuilding the row tree in/near that context destroyed
+    // the closing flyout's anchor row and threw a stowed XAML exception (0xC000027B). So we route the
+    // rebuild through the SAME throttle the search box uses: a ~250ms-debounced render on a clean timer
+    // tick, fully detached from the flyout teardown. Search rebuilds the identical rows + submenus
+    // constantly without crashing, so this reuses a proven-safe path. _RenderSessionsTable refreshes
+    // the filter chip itself, so the chip update also lands in the safe context. (Pre-build fallback:
+    // render inline — there is no flyout before the page is built.)
+    void TerminalPage::_RenderSessionsAfterFilterChange()
+    {
+        if (_sessionsSearchThrottled)
+        {
+            _sessionsSearchThrottled->Run();
+        }
+        else
+        {
+            _UpdateSessionsFilterChip();
+            _RenderSessionsTable();
+        }
     }
 
     // Refresh the "\x2715 filter: \x2026" chip beside the search box — collapsed when no facet is
