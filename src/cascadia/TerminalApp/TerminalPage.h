@@ -641,6 +641,13 @@ namespace winrt::TerminalApp::implementation
             bool Any() const { return hasDir || hasBranch || timeGran != TimeGran::None || hasFamily; }
         };
         _SessionsRowFilterState _sessionsRowFilter;
+        // A filter-submenu item's work is run on the row flyout's Closed event, not from its
+        // Click — a MenuFlyoutSubItem is a CASCADE (clicking a child tears down TWO popups), and
+        // rebuilding the row tree one tick after the click races the parent popup's teardown and
+        // throws a stowed exception (0xC000027B) in the XAML flyout machinery. The item sets this
+        // latch; the flyout's Closed handler runs + clears it (one flyout open at a time, so a
+        // single shared slot is safe). Empty for a dismiss/non-filter item — then Closed no-ops.
+        std::function<void()> _sessionsRowMenuPendingAction;
 
         // Agentmaster: WINDOW-LEVEL page overlays (Archive, Sessions, any future full-window
         // page mounted over Root) — each registers itself ONCE at build (host + its atomic

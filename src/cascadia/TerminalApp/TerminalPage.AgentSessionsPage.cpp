@@ -545,6 +545,13 @@ namespace winrt::TerminalApp::implementation
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                 if (auto self = weak.get())
                 {
+                    // Move focus OFF the chip before _ClearSessionsRowFilter collapses it — collapsing
+                    // the focused element forces XAML to re-home focus, which is fragile under XAML
+                    // Islands. The search box is the natural landing spot (and re-arms typing).
+                    if (self->_sessionsSearchBox)
+                    {
+                        self->_sessionsSearchBox.Focus(FocusState::Programmatic);
+                    }
                     self->_ClearSessionsRowFilter();
                 }
             });
@@ -1663,6 +1670,24 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring forkTitle = r.msgs > 0 ? r.title : std::wstring{}; // never-prompted -> let the fork seam derive a smart name
                 const bool rIsOpen = _claudeTabs.find(rid) != _claudeTabs.end();
 
+                // The "Filter ▸" submenu is a CASCADE (a MenuFlyoutSubItem): clicking a child item
+                // tears down TWO popups (the submenu then the parent). Rebuilding the row tree —
+                // which destroys THIS flyout's anchor row — one tick after the click races the
+                // parent popup's teardown and throws a stowed exception (0xC000027B) in the XAML
+                // flyout machinery (the crash). So the filter items don't act from their Click; they
+                // set _sessionsRowMenuPendingAction and we run it HERE, once the WHOLE flyout (both
+                // popups) has closed, plus one more deferred tick so the anchor is safe to destroy.
+                // Empty for a plain dismiss or a non-filter item (those defer their own work) — no-op.
+                rowMenu.Closed([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+                    if (!_sessionsRowMenuPendingAction)
+                    {
+                        return;
+                    }
+                    auto act = std::move(_sessionsRowMenuPendingAction);
+                    _sessionsRowMenuPendingAction = nullptr;
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [act = std::move(act)]() { act(); });
+                });
+
                 if (rIsOpen)
                 {
                     MenuFlyoutItem jump;
@@ -1744,13 +1769,15 @@ namespace winrt::TerminalApp::implementation
                         it.Text(winrt::hstring{ (active ? L"\x2713 " : L"") + label });
                         SessSetTip(it, winrt::hstring{ tip });
                         const int kindInt = static_cast<int>(kind);
+                        // Defer to the flyout's Closed event (the cascade-teardown fix above), not a
+                        // RunAsync from here — set the latch; Closed runs it once both popups are gone.
                         it.Click([this, kindInt, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), kindInt, rid]() {
+                            _sessionsRowMenuPendingAction = [weak = get_weak(), kindInt, rid]() {
                                 if (auto self = weak.get())
                                 {
                                     self->_ApplySessionsRowFilter(kindInt, rid);
                                 }
-                            });
+                            };
                         });
                         filterSub.Items().Append(it);
                     };
@@ -1774,13 +1801,14 @@ namespace winrt::TerminalApp::implementation
                         MenuFlyoutItem clearItem;
                         clearItem.Text(L"Clear filters");
                         SessSetTip(clearItem, L"Remove every active row filter.");
+                        // Same cascade-teardown deferral as the facet items — run on flyout Closed.
                         clearItem.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                            _sessionsRowMenuPendingAction = [weak = get_weak()]() {
                                 if (auto self = weak.get())
                                 {
                                     self->_ClearSessionsRowFilter();
                                 }
-                            });
+                            };
                         });
                         filterSub.Items().Append(clearItem);
                     }
