@@ -649,6 +649,49 @@ namespace
         b.FontWeight(FontWeights::SemiBold());
     }
 
+    // Agentmaster: paint a button a SOLID color (white text) whose color SURVIVES hover/press. WinUI's
+    // default Button template overrides a locally-set Background in its PointerOver/Pressed visual states
+    // with the ButtonBackground{PointerOver,Pressed} theme brushes (and likewise the foreground), so a
+    // plain b.Background(...) reverts to the subtle theme hover brush the instant the pointer enters — the
+    // "colored button loses its color (and the text recolors) on mouse-over" bug. Overriding those theme-
+    // resource KEYS in the button's OWN Resources makes the template resolve them to our colors in every
+    // state, so hover/press just shifts shade instead of dropping the color. (Unlike EmphasizeScopeButton,
+    // which deliberately accepts the revert and leans on bold weight, this button has no other emphasis to
+    // fall back on, so the color must hold.) base/hover/pressed are 0xAARRGGBB; reuse-safe (each call
+    // rebuilds the four overrides). Pair with ClearHoldButton to return to default chrome.
+    void PaintHoldButton(const Button& b, uint32_t base, uint32_t hover, uint32_t pressed)
+    {
+        if (!b)
+        {
+            return;
+        }
+        const auto brush = [](uint32_t c) {
+            return Fill(static_cast<uint8_t>((c >> 24) & 0xFF), static_cast<uint8_t>((c >> 16) & 0xFF), static_cast<uint8_t>((c >> 8) & 0xFF), static_cast<uint8_t>(c & 0xFF));
+        };
+        const auto white = Fill(0xFF, 0xFF, 0xFF, 0xFF);
+        auto res = b.Resources();
+        res.Clear(); // our button; nothing else lives in its dictionary — also drops a prior mode's overrides
+        res.Insert(winrt::box_value(L"ButtonBackgroundPointerOver"), brush(hover));
+        res.Insert(winrt::box_value(L"ButtonBackgroundPressed"), brush(pressed));
+        res.Insert(winrt::box_value(L"ButtonForegroundPointerOver"), white);
+        res.Insert(winrt::box_value(L"ButtonForegroundPressed"), white);
+        b.Background(brush(base));
+        b.Foreground(white);
+    }
+
+    // Agentmaster: undo PaintHoldButton — drop the per-state overrides and revert to the default subtle
+    // toolbar-button chrome (so its hover matches the sibling Sessions/Pause buttons again).
+    void ClearHoldButton(const Button& b)
+    {
+        if (!b)
+        {
+            return;
+        }
+        b.Resources().Clear();
+        b.Background(nullptr);
+        b.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+    }
+
     // Agentmaster: the dim per-session timing adornment "-created/active/-lastAgo" + an explanatory
     // tooltip. Returns a null TextBlock (falsy) when there is no creation time to show, so callers
     // can `if (auto t = TimingText(...)) row.Children().Append(t);`.
@@ -1658,7 +1701,7 @@ namespace winrt::TerminalApp::implementation
             bar.Children().Append(Text(L"session in", 13, false, 0.6));
 
             _cwdBox = TextBox{};
-            _cwdBox.Width(360);
+            _cwdBox.Width(504); // Agentmaster: 40% wider than the original 360, so longer paths are readable
             _cwdBox.PlaceholderText(L"working directory (the M axis)");
             AgentSetTip(_cwdBox, L"Where to launch: a working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders."); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
             {
@@ -1784,7 +1827,7 @@ namespace winrt::TerminalApp::implementation
             cwdCol.Children().Append(_cwdBox);
             _cwdUnderline = Border{};
             _cwdUnderline.Height(2);
-            _cwdUnderline.Width(360); // match _cwdBox.Width(360)
+            _cwdUnderline.Width(504); // match _cwdBox.Width(504)
             _cwdUnderline.HorizontalAlignment(HorizontalAlignment::Left);
             _cwdUnderline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
             _cwdUnderline.Background(Fill(0x00, 0x00, 0x00, 0x00)); // transparent = neutral; kept present so painting it never reflows the bar
@@ -5375,6 +5418,16 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Repaint only on an actual (mode, held) transition — _RefreshKeepAwakeHold calls this on every
+        // _Refresh, and rebuilding the content + resource overrides each tick would churn (and flicker).
+        if (_keepAwakeRendered && _keepAwakeRenderedMode == _keepAwakeMode && _keepAwakeRenderedHeld == _keepAwakeHeld)
+        {
+            return;
+        }
+        _keepAwakeRendered = true;
+        _keepAwakeRenderedMode = _keepAwakeMode;
+        _keepAwakeRenderedHeld = _keepAwakeHeld;
+
         const wchar_t* glyph = L"\xE708"; // default (Off): QuietHours-ish moon
         const wchar_t* label = L"Keep Awake";
         switch (_keepAwakeMode)
@@ -5405,21 +5458,20 @@ namespace winrt::TerminalApp::implementation
         _keepAwakeBtn.Content(content);
 
         // Color: Off -> theme default; actively holding -> green; WhileRunning but idle (armed, not holding)
-        // -> amber, so the user can tell at a glance whether the machine is being kept awake right now.
+        // -> amber, so the user can tell at a glance whether the machine is being kept awake right now. The
+        // colored states use PaintHoldButton so the fill (and white text) hold through hover/press instead of
+        // reverting to the subtle theme hover brush — base/hover(lighter)/pressed(darker) per state.
         if (_keepAwakeMode == KeepAwakeMode::Off)
         {
-            _keepAwakeBtn.Background(nullptr);
-            _keepAwakeBtn.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+            ClearHoldButton(_keepAwakeBtn);
         }
         else if (_keepAwakeHeld)
         {
-            _keepAwakeBtn.Background(Fill(0xFF, 0x2E, 0x7D, 0x32)); // green = holding now
-            _keepAwakeBtn.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
+            PaintHoldButton(_keepAwakeBtn, 0xFF2E7D32, 0xFF3C9A42, 0xFF21601F); // green = holding now
         }
         else
         {
-            _keepAwakeBtn.Background(Fill(0xFF, 0x8A, 0x6D, 0x1B)); // amber = armed (WhileRunning), nothing running
-            _keepAwakeBtn.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
+            PaintHoldButton(_keepAwakeBtn, 0xFF8A6D1B, 0xFFA8851F, 0xFF6B5414); // amber = armed (WhileRunning), nothing running
         }
     }
 

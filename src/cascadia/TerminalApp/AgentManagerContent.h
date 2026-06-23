@@ -581,6 +581,12 @@ namespace winrt::TerminalApp::implementation
         enum class KeepAwakeMode { Off, Always, WhileRunning };
         KeepAwakeMode _keepAwakeMode{ KeepAwakeMode::Off };
         bool _keepAwakeHeld{ false }; // whether SetThreadExecutionState is CURRENTLY holding the flag (drives transition-only OS calls + the button color)
+        // Last-rendered button appearance — _UpdateKeepAwakeButton repaints ONLY on a (mode, held) transition,
+        // so the frequent _Refresh -> _RefreshKeepAwakeHold calls don't rebuild the content + resources (or
+        // flicker the button) every tick. _keepAwakeRendered forces the very first paint.
+        KeepAwakeMode _keepAwakeRenderedMode{ KeepAwakeMode::Off };
+        bool _keepAwakeRenderedHeld{ false };
+        bool _keepAwakeRendered{ false };
         // ---- "Claude not detected" overlay (native-exe-only policy gate) ----
         winrt::Windows::UI::Xaml::Controls::Grid _claudeMissingOverlay{ nullptr }; // dimmed modal layer; shown when launch/fork is blocked by no native claude.exe
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
