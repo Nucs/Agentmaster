@@ -479,45 +479,73 @@ namespace winrt::TerminalApp::implementation
             row(1, GridUnitType::Star); // 1 body (table | detail)
         }
 
-        // --- header: Back · title/count · [search](👤)(🤖)(📁)(📄)(F)[window] ---
+        // --- header: a TOP row (Back · title/count · the search box, stretched to the table's right
+        // edge) over a FILTERS row (the scope toggles, Open/Hidden/Favorite, time window, refresh) —
+        // the same title-over-actions split the Manager toolbar uses. ---
         Grid header;
         header.Margin(Thickness{ 16, 10, 16, 8 });
         {
-            const auto hcol = [&](double v, GridUnitType t) {
+            const auto hrow = [&](double v, GridUnitType t) {
+                RowDefinition r;
+                r.Height(GridLengthHelper::FromValueAndType(v, t));
+                header.RowDefinitions().Append(r);
+            };
+            hrow(0, GridUnitType::Auto); // 0: Back · title · search
+            hrow(0, GridUnitType::Auto); // 1: the filters
+        }
+
+        // TOP row — its columns MIRROR the body below (table 0.6* · divider · detail 0.4*) so the
+        // search box, stretched to fill the left column after Back + the title, ends exactly at the
+        // table's right edge. Only the left column is populated; the rest is alignment space.
+        Grid topRow;
+        {
+            const auto tcol = [&](double v, GridUnitType t) {
                 ColumnDefinition c;
                 c.Width(GridLengthHelper::FromValueAndType(v, t));
-                header.ColumnDefinitions().Append(c);
+                topRow.ColumnDefinitions().Append(c);
             };
-            hcol(0, GridUnitType::Auto); // back
-            hcol(0, GridUnitType::Auto); // title/count — sized to content so the search bar sits right after it
-            hcol(0, GridUnitType::Auto); // the search bar cluster — now left-aligned, next to the title
-            hcol(1, GridUnitType::Star); // trailing spacer absorbs the rest, keeping the cluster on the LEFT
+            tcol(0.6, GridUnitType::Star); // == body table column
+            tcol(0, GridUnitType::Auto); // == body divider footprint (the spacer below)
+            tcol(0.4, GridUnitType::Star); // == body detail column
         }
+        Grid::SetRow(topRow, 0);
+        header.Children().Append(topRow);
+
+        // Left-column content: Back · title/count · search (the box fills the column's remainder).
+        Grid topLeft;
+        {
+            const auto lcol = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                topLeft.ColumnDefinitions().Append(c);
+            };
+            lcol(0, GridUnitType::Auto); // back
+            lcol(0, GridUnitType::Auto); // title/count
+            lcol(1, GridUnitType::Star); // search box — fills the rest of the table-width column
+        }
+        Grid::SetColumn(topLeft, 0);
+        topRow.Children().Append(topLeft);
+
         Button back;
         back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
+        back.VerticalAlignment(VerticalAlignment::Center);
         SessSetTip(back, L"Back \x2014 close the Sessions browser and return to your tabs.");
         back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _HideSessionsPage(); });
         Grid::SetColumn(back, 0);
-        header.Children().Append(back);
+        topLeft.Children().Append(back);
 
         StackPanel titleStack;
-        titleStack.Margin(Thickness{ 14, 0, 0, 0 });
+        titleStack.Margin(Thickness{ 14, 0, 14, 0 });
         titleStack.VerticalAlignment(VerticalAlignment::Center);
         titleStack.Children().Append(SessText(L"Claude Code Sessions", 18, true, 1.0));
         _sessionsCountText = SessText(L"", 12, false, 0.6);
         titleStack.Children().Append(_sessionsCountText);
         Grid::SetColumn(titleStack, 1);
-        header.Children().Append(titleStack);
-
-        StackPanel bar;
-        bar.Orientation(Orientation::Horizontal);
-        bar.Spacing(6);
-        bar.VerticalAlignment(VerticalAlignment::Center);
-        bar.Margin(Thickness{ 18, 0, 0, 0 }); // gap from the title (the cluster now sits next to it, not at the right edge)
+        topLeft.Children().Append(titleStack);
 
         TextBox search;
         search.PlaceholderText(L"search for sessions");
-        search.Width(240);
+        search.HorizontalAlignment(HorizontalAlignment::Stretch); // stretch to the table's right edge
         search.VerticalAlignment(VerticalAlignment::Center);
         SessSetTip(search, L"Filter the list \x2014 every word must match (each may match a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a session-id GUID to find that session and its forks");
         _sessionsSearchBox = search;
@@ -531,11 +559,29 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         });
-        bar.Children().Append(search);
+        Grid::SetColumn(search, 2);
+        topLeft.Children().Append(search);
+
+        // The divider-matching spacer (the body divider is Width 1 + 8px margins = a 17px footprint),
+        // so topLeft's right edge lines up exactly with the table's right edge.
+        Border topDividerSpacer;
+        topDividerSpacer.Width(1);
+        topDividerSpacer.Margin(Thickness{ 8, 0, 8, 0 });
+        Grid::SetColumn(topDividerSpacer, 1);
+        topRow.Children().Append(topDividerSpacer);
+
+        // FILTERS row — every control that scopes/narrows the search, on its own line under the box.
+        StackPanel bar;
+        bar.Orientation(Orientation::Horizontal);
+        bar.Spacing(6);
+        bar.VerticalAlignment(VerticalAlignment::Center);
+        bar.HorizontalAlignment(HorizontalAlignment::Left);
+        bar.Margin(Thickness{ 0, 8, 0, 0 }); // gap below the search row
+        Grid::SetRow(bar, 1);
 
         // "✕ filter: …" — the active row right-click "Filter" facet(s), shown only while one is set
-        // (collapsed otherwise, so it takes no layout space and the toggles sit flush after the
-        // search box). It reads as "search AND this filter"; clicking it clears ALL facets. The
+        // (collapsed otherwise, so it takes no layout space and the toggles sit flush at the start of
+        // the filters row). It reads as "search AND this filter"; clicking it clears ALL facets. The
         // label is rebuilt by _UpdateSessionsFilterChip; the render path keeps it in sync.
         _sessFilterChip = Button{};
         _sessFilterChip.Visibility(Visibility::Collapsed);
@@ -701,8 +747,7 @@ namespace winrt::TerminalApp::implementation
         });
         bar.Children().Append(_sessRefreshBtn);
 
-        Grid::SetColumn(bar, 2);
-        header.Children().Append(bar);
+        header.Children().Append(bar); // the filters row (Grid::SetRow(bar, 1) set at its declaration)
         Grid::SetRow(header, 0);
         host.Children().Append(header);
 
