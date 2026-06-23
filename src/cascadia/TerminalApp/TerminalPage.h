@@ -914,7 +914,6 @@ namespace winrt::TerminalApp::implementation
         // search text + the scope/Open/Hidden toggles — applied at the _RenderSessionsTable chokepoint).
         void _ApplySessionsRowFilter(int kind, const std::wstring& anchorId); // toggle the dimension's facet to the anchor row's value (or OFF if the anchor already matches it); re-renders
         void _ClearSessionsRowFilter(); // drop EVERY facet (the chip click / submenu "Clear filters") + re-render
-        void _RenderSessionsAfterFilterChange(); // re-render after a facet change via the search throttle (a clean timer tick, detached from the flyout teardown — the 0xC000027B crash was rebuilding rows in the flyout context); inline fallback before the page is built
         bool _SessionsRowPassesRowFilter(const _SessionsRow& r) const; // the AND-predicate over all active facets (true == keep) — the render chokepoint calls this
         bool _SessionsRowFilterMatchesAnchor(int kind, const _SessionsRow& r) const; // does the facet for `kind`'s dimension exist AND equal row r's value? (drives the submenu ✓ + the apply-toggle direction)
         std::unordered_set<std::wstring> _ComputeForkFamily(const std::wstring& anchorId) const; // the connected fork-graph component containing anchorId, over the gathered rows (forkedFromId edges, undirected)

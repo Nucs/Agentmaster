@@ -63,6 +63,23 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // IDEMPOTENT re-call guard. Calling AgentSetTip AGAIN on the SAME element (e.g. a persistent
+        // control whose tip text changes — the Sessions page's "✕ filter" chip re-tipped on every
+        // render) must NOT stack a second PointerEntered/Exited/Unloaded set: each handler's open-timer
+        // captures ITS OWN ToolTip `t`, and SetToolTip below only re-points the element at the NEWEST
+        // one — so the prior handlers survive and, on hover, call IsOpen(true) on an ORPHANED, owner-less
+        // ToolTip that XAML can't place → a stowed fail-fast (0xC000027B) in Windows.UI.Xaml.dll. So if
+        // the element already carries an explicit ToolTip from a prior call, just UPDATE its content and
+        // return (the one existing handler set still opens that same object — no new handlers, no orphan,
+        // and no element<->handler cycle since we still never capture `el`). The first call falls through.
+        if (const auto existing = winrt::Windows::UI::Xaml::Controls::ToolTipService::GetToolTip(el))
+        {
+            if (const auto already = existing.try_as<winrt::Windows::UI::Xaml::Controls::ToolTip>())
+            {
+                already.Content(winrt::box_value(tip));
+                return;
+            }
+        }
         winrt::Windows::UI::Xaml::Controls::ToolTip t;
         t.Content(winrt::box_value(tip));
         // Agentmaster: every surface that uses AgentSetTip (the Manager tab + the Archive / Sessions
