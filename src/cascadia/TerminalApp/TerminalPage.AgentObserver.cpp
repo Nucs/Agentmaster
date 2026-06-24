@@ -1273,27 +1273,40 @@ namespace winrt::TerminalApp::implementation
     // _RefreshPromptNavCache (the 30 s focused refresh) so the two stay byte-for-byte consistent.
     static bool ReadPromptNavIfGrown(const std::wstring& sessionId, std::wstring& path, int64_t& mtime, bool hadPrompts, std::vector<std::wstring>& outFresh)
     {
-        if (path.empty())
+        // Agentmaster (extra-safe): this runs on a BACKGROUND thread inside a fire_and_forget coroutine,
+        // so ANY exception escaping here (a transcript-parse throw from AnalyzeSessionTranscript, a
+        // std::bad_alloc on a huge transcript, etc.) would unwind out of the coroutine with no caller to
+        // catch it and std::terminate the whole app -- killing EVERY session at once. Contain it: degrade
+        // to "no refresh" (the caller then navigates with the cached/empty prompt list, which is always
+        // safe). Logged, never silently hidden, so a genuine parse bug stays discoverable.
+        try
         {
-            path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+            if (path.empty())
+            {
+                path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+            }
+            if (path.empty())
+            {
+                return false;
+            }
+            const int64_t prevMtime = mtime;
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                ULARGE_INTEGER li{};
+                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                mtime = static_cast<int64_t>(li.QuadPart);
+            }
+            if (!hadPrompts || mtime != prevMtime)
+            {
+                outFresh = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */).userMsgs;
+                return true;
+            }
         }
-        if (path.empty())
+        catch (...)
         {
-            return false;
-        }
-        const int64_t prevMtime = mtime;
-        WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
-        {
-            ULARGE_INTEGER li{};
-            li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
-            li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
-            mtime = static_cast<int64_t>(li.QuadPart);
-        }
-        if (!hadPrompts || mtime != prevMtime)
-        {
-            outFresh = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */).userMsgs;
-            return true;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] ReadPromptNavIfGrown: swallowed exception (no crash)\n");
         }
         return false;
     }
@@ -1399,26 +1412,40 @@ namespace winrt::TerminalApp::implementation
             _PlayPromptNavLimitSound();
             return;
         }
-        const int idx = control.ScrollToAdjacentConversationPrompt(_PromptsToVector(prompts), up);
-        // -2: stepping DOWN past the last prompt scrolled to the BOTTOM (live tail). We DID move, so no
-        // boundary sound; clear any stale summary highlight (we're past the numbered prompts now).
-        if (idx == -2)
+        // Agentmaster (extra-safe): the cross-ABI scroll call reads the live viewport and touches the
+        // ScrollBar XAML part; an unexpected winrt::hresult_error (e.g. a not-yet-applied template's null
+        // ScrollBar, or a teardown race) would otherwise unwind into the fire_and_forget caller and
+        // std::terminate the app. Contain it here -- a failed navigation just plays the boundary sound.
+        // (The AV path itself is already guarded inside ScrollToAdjacentConversationPrompt; this catches
+        // the THROWN-exception cousins.) Logged, never silently hidden.
+        try
         {
+            const int idx = control.ScrollToAdjacentConversationPrompt(_PromptsToVector(prompts), up);
+            // -2: stepping DOWN past the last prompt scrolled to the BOTTOM (live tail). We DID move, so no
+            // boundary sound; clear any stale summary highlight (we're past the numbered prompts now).
+            if (idx == -2)
+            {
+                if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
+                {
+                    it->second->HighlightSummaryMessage(-1);
+                }
+                return;
+            }
+            if (idx < 0)
+            {
+                _PlayPromptNavLimitSound(); // no further sent prompt off-screen in that direction
+                return;
+            }
+            // Highlight the message we landed on in this session's summary panel (if the panel is open).
             if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
             {
-                it->second->HighlightSummaryMessage(-1);
+                it->second->HighlightSummaryMessage(idx);
             }
-            return;
         }
-        if (idx < 0)
+        catch (...)
         {
-            _PlayPromptNavLimitSound(); // no further sent prompt off-screen in that direction
-            return;
-        }
-        // Highlight the message we landed on in this session's summary panel (if the panel is open).
-        if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
-        {
-            it->second->HighlightSummaryMessage(idx);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] _NavigateAdjacentPrompt: scroll/highlight threw (no crash)\n");
+            _PlayPromptNavLimitSound();
         }
     }
 
