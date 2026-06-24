@@ -169,6 +169,24 @@ namespace Agentmaster
         std::vector<WindowActivateSink> activateSinks;
         uint64_t nextActivateToken{ 1 };
 
+        // Agentmaster (cross-window restart): per-window "restart this session's connection in place"
+        // sinks — same shape + lifetime as activateSinks. A managed Claude/Codex session's "Restart
+        // session" (offered on the Triage Board card / Explorer-tree row, mirroring the WT tab menu)
+        // rebuilds the LIVE ConPTY connection, which can only happen in the window that HOSTS the tab.
+        // The board's GLOBAL scope shows the whole fleet, so a restart there must reach the hosting
+        // window: each TerminalPage registers a sink at engine init ("restart this session if YOU host
+        // its tab; no-op on a miss") and detaches it at teardown (Rule #10). Snapshot-under-lock /
+        // invoke-outside-it, like activateSinks (each sink marshals into its own window's dispatcher).
+        struct WindowRestartSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void(const std::wstring& sessionId)> fn;
+        };
+        std::mutex restartMutex;
+        std::vector<WindowRestartSink> restartSinks;
+        uint64_t nextRestartToken{ 1 };
+
         // Agentmaster (cross-window settings broadcast): per-window "global settings changed" sinks.
         // The Settings cog AND the Explorer-Tree / Triage-Board sort toggles all write the GLOBAL
         // AppSettings (settings.json) from whichever window the user is in. To keep every OPEN window in
@@ -259,6 +277,16 @@ namespace Agentmaster
     uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
     void UnregisterWindowActivateHandler(uint64_t token);
     void ActivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    // Agentmaster (cross-window restart): register THIS window's restart sink (monotonic token; detach
+    // with UnregisterWindowRestartHandler — removing a stale token is a no-op, the registry-token
+    // pattern). RestartSessionInOtherWindows fans `sessionId` out to every registered sink EXCEPT
+    // `sourceWindowId`'s (the caller already tried its own _claudeTabs): exactly one window hosts a
+    // session's tab, so at most one sink acts; with no host anywhere (archived / mid-bind) every sink
+    // misses and the call is a no-op. Used by the Triage Board / Explorer-tree "Restart session".
+    uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
+    void UnregisterWindowRestartHandler(uint64_t token);
+    void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
 
     // Agentmaster (cross-window settings broadcast): register THIS window's settings sink (monotonic
     // token; detach with UnregisterSettingsChangedHandler — removing a stale token is a no-op, the

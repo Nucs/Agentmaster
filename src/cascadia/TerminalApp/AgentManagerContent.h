@@ -58,6 +58,13 @@ namespace winrt::TerminalApp::implementation
         // page just forwards to _ResumeSessionFromDisk / _ForkSessionFromDisk.
         void SetResumeSessionHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler); // (sessionId, dir, title)
         void SetForkSessionHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler); // (sessionId, dir, title)
+        // Agentmaster (Triage Board / Explorer-tree session menu — mirror the WT tab's "Restart session"
+        // / "Fork session"). Restart: (sessionId) -> rebuild the live ConPTY connection in place (the
+        // page does it local-first, then fans out to the hosting window). Fork: (sessionId) -> the
+        // kind-aware fork the WT tab menu uses (Claude --fork-session / Codex `codex fork`), opening the
+        // fork tab in the acting window. Both are kind-agnostic at this seam — the page branches.
+        void SetRestartSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> restart a managed session's connection in place
+        void SetForkManagedSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> fork a managed session (kind-aware), like the WT tab's "Fork session"
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL scope.
         // (pid, workingDir) -> the page resolves the conversation id from the transcript and resumes it
@@ -491,6 +498,8 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _restoreHandler;
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)
+        std::function<void(winrt::hstring)> _restartSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Restart session" -> rebuild a managed session's connection in place (page does it cross-window)
+        std::function<void(winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab
         std::function<void(uint32_t, winrt::hstring, bool, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex (pid, cwd, adopt, fork): Adopt (adopt=true; fork picks fork/resume) / Open-New-Codex (adopt=false)
@@ -690,6 +699,7 @@ namespace winrt::TerminalApp::implementation
         bool _envTabIsDir{ false }; // which tab is showing (false = Global)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setCleanupDays{ nullptr }; // ENV_VARS.md §8: cleanupPeriodDays in the user's GLOBAL ~/.claude/settings.json (history retention; read/written via the ClaudeUserSettings repo, NOT AppSettings)
         // ---- UPDATES (Agentmaster updater; Updater.h) ----
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAllowPrerelease{ nullptr }; // include GitHub pre-releases in the update check (default OFF)
         winrt::Windows::UI::Xaml::Controls::Button _setCheckUpdates{ nullptr }; // "Check for updates" -> the same prompt the startup check shows

@@ -44,6 +44,14 @@ namespace Agentmaster
                 MigrateDirColorsToV2IfNeeded();
             }
 
+            // Agentmaster (ENV_VARS.md §8): one-time shipped defaults, for NEW installs AND updaters
+            // alike. CLAUDE_CODE_MAX_RETRIES=50000 is appended to the global env, and cleanupPeriodDays=
+            // 36500 is written into the user's ~/.claude/settings.json (so Claude never purges global
+            // history). Both are marker-gated, so a user who edits or deletes either keeps it gone.
+            // Process-once, before any window seeds the cog or a session spawns.
+            SeedSessionEnvDefaults();
+            SeedClaudeCleanupPeriodDaysIfNeeded();
+
             // Observer: record every state change to a log file (and the debugger). Runs on a
             // bridge thread, so it must touch no XAML.
             e->registry->AddObserver([](const SessionInfo& s, HookEvent ev) {
@@ -491,6 +499,65 @@ namespace Agentmaster
         for (const auto& fn : sinks)
         {
             fn(sessionId); // fire-and-forget; the (single) hosting window selects + foregrounds, the rest miss
+        }
+    }
+
+    uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.restartMutex);
+        const auto token = e.nextRestartToken++;
+        e.restartSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterWindowRestartHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.restartMutex);
+        for (auto it = e.restartSinks.begin(); it != e.restartSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.restartSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void RestartSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the ActivateSessionInOtherWindows pattern): each
+        // sink hops into its own window's dispatcher, so holding the engine lock across foreign-window
+        // marshaling would be a needless ordering hazard.
+        std::vector<std::function<void(const std::wstring&)>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.restartMutex);
+            sinks.reserve(e.restartSinks.size());
+            for (const auto& s : e.restartSinks)
+            {
+                if (s.fn && s.windowId != sourceWindowId)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(sessionId); // fire-and-forget; the (single) hosting window restarts the session, the rest miss
         }
     }
 

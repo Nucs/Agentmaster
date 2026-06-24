@@ -484,6 +484,47 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
+    // Agentmaster (Triage Board / Explorer-tree "Restart session"): restart a managed session's live
+    // connection in place — local first (this window hosts the tab), else fan out to the hosting window.
+    // Mirrors _ActivateClaudeSession's local-first-then-fan-out shape: the board's GLOBAL scope shows the
+    // whole fleet, but the LIVE ConPTY pane lives in exactly ONE window, and restarting it touches that
+    // window's TermControl, so it must run there.
+    void TerminalPage::_RestartClaudeSession(winrt::hstring sessionId)
+    {
+        const std::wstring id{ sessionId };
+        if (_RestartClaudeSessionLocal(id))
+        {
+            return;
+        }
+        ::Agentmaster::RestartSessionInOtherWindows(id, _windowId);
+    }
+
+    // Agentmaster (cross-window restart): restart `sessionId`'s tab IN THIS WINDOW — the local half of
+    // _RestartClaudeSession and the receiving half of the engine's restart fan-out. Returns false when
+    // this window doesn't host the session's tab (the caller then fans out). Reuses the SAME entry the WT
+    // tab menu's "Restart session" uses (_restartPaneConnection): the NotConnected guard (never restart a
+    // never-activated restored tab -> AV) + _RestartManagedSession (rebuild from the CURRENT conversation,
+    // re-point the injector). Acts on the tab's ACTIVE pane, exactly like the tab menu — a managed session
+    // is normally single-pane; returns true whenever the tab is found here so a hosted session never fans
+    // out to other windows.
+    bool TerminalPage::_RestartClaudeSessionLocal(const std::wstring& sessionId)
+    {
+        const auto it = _claudeTabs.find(sessionId);
+        const auto tab = (it != _claudeTabs.end()) ? it->second.get() : nullptr;
+        if (!tab)
+        {
+            return false; // not hosted here -> the caller fans out to the other windows
+        }
+        if (const auto tabImpl = _GetTabImpl(tab))
+        {
+            if (const auto content = tabImpl->GetActiveContent().try_as<TerminalApp::TerminalPaneContent>())
+            {
+                _restartPaneConnection(content, nullptr);
+            }
+        }
+        return true;
+    }
+
     // Agentmaster: close a session (the Manager's "Close" / tree Del / Flight-Plan "Close"). It
     // routes through the SAME tab-close seam as clicking the tab's X, so the one Close confirm +
     // archive (keep-the-record) bookkeeping (in _HandleCloseTabRequested -> _ArchiveAndCloseClaudeTab)
@@ -1276,6 +1317,53 @@ namespace winrt::TerminalApp::implementation
                 conn.WriteInput(winrt::array_view<const char16_t>{ begin, begin + text.size() });
             });
         }
+        return true;
+    }
+
+    // Agentmaster: fork a MANAGED session by id — the kind-aware fork shared by the WT tab's "Fork
+    // session" (_DuplicateTab) AND the Triage Board / Explorer-tree "Fork session" menu, so the two can
+    // never drift. Branches the conversation into a NEW, independent session (the source's transcript is
+    // untouched), registered as a normal managed session ("<title> (fork)", fresh Flight Plan), opened in
+    // THIS window (it reads the shared registry — no live tab needed, so the board can fork a session
+    // hosted in another window into here). A source never prompted has no transcript/rollout to fork ->
+    // fresh in the same dir (Rule #6). insertPosition threads tab placement (-1 == end). Returns false
+    // only when `sourceId` is not a known managed session.
+    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition)
+    {
+        if (!_sessionRegistry || sourceId.empty())
+        {
+            return false;
+        }
+        const auto src = _sessionRegistry->Get(sourceId);
+        if (!src)
+        {
+            return false; // not a known managed session
+        }
+        const std::wstring dir = src->workingDir;
+        const std::wstring forkBase = !src->title.empty() ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
+        const std::wstring ttl = ::Agentmaster::DeriveForkTitle(forkBase); // bump " (fork N)" instead of stacking
+        // Codex (kind-aware): sourceId is the Codex's durable HANDLE id, which has NO Claude transcript,
+        // so the Claude branch below would silently spawn a fresh claude.exe in the codex's dir (wrong
+        // agent). Route to the Codex launcher — it forks via `codex fork <rolloutUuid>` and rollout-gates
+        // it internally (a vanished/never-prompted rollout -> a fresh codex in the same dir), so we just
+        // hand it the real rollout uuid.
+        if (src->kind == ::Agentmaster::AgentKind::Codex)
+        {
+            const std::wstring forkFrom = src->codexSessionId; // the REAL rollout uuid (the fork source)
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->codex] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
+            _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+            return true;
+        }
+        // Native-exe-only policy gate (auto-recovering): a Claude fork is a launch (--fork-session).
+        // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
+        if (!::Agentmaster::EnsureClaudeAvailable())
+        {
+            _PromptClaudeMissing();
+            return true; // it IS a managed Claude session — handled (refused), never naively duplicated
+        }
+        const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
+        _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
         return true;
     }
 

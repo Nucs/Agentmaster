@@ -1319,6 +1319,14 @@ namespace winrt::TerminalApp::implementation
     {
         _forkSessionHandler = std::move(handler);
     }
+    void AgentManagerContent::SetRestartSessionHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _restartSessionHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetForkManagedSessionHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _forkManagedSessionHandler = std::move(handler);
+    }
     void AgentManagerContent::SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler)
     {
         _renameHandler = std::move(handler);
@@ -5025,6 +5033,30 @@ namespace winrt::TerminalApp::implementation
         auto disp = _dispatcher;
         auto weak = get_weak();
 
+        // Agentmaster: resolve the session's kind + state ONCE so this menu can mirror the WT tab's
+        // right-click session ops (New Session Here / Restart session / Fork session — kind-aware:
+        // Codex spawns/forks codex, not claude) and offer the Waiting-for-you triage "Move to Idle/Done".
+        // Read at flyout-creation time — each _Refresh rebuilds the card so the menu tracks the latest
+        // state; the click handlers re-resolve where it matters (the Move-to-Idle mutator re-checks under
+        // the registry lock).
+        std::optional<SessionInfo> info;
+        if (_registry)
+        {
+            info = _registry->Get(id);
+        }
+        const bool isCodex = info && info->kind == AgentKind::Codex;
+        const SessionState state = info ? info->state : SessionState::Idle;
+
+        // A Segoe Fluent glyph icon for a menu item — so this menu reads like the WT tab's right-click
+        // menu, which icons every item. The same glyphs the tab menu uses (Tab.cpp): Add \xE710,
+        // RestartConnection \xE72C, Duplicate \xF5ED, Rename \xE8AC, Copy \xE8C8, Close \xE711.
+        const auto glyphIcon = [](const wchar_t* glyph) {
+            FontIcon fi;
+            fi.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            fi.Glyph(glyph);
+            return fi;
+        };
+
         // All items defer one tick: a MenuFlyout restores focus to its target as it closes,
         // which would otherwise yank focus out of the freshly-shown rename editor / dialog (and the
         // spawn / tree rebuild for Open New Session Here).
@@ -5035,6 +5067,7 @@ namespace winrt::TerminalApp::implementation
         // separator sets the navigate action apart from the session-edit ops below.
         MenuFlyoutItem jump;
         jump.Text(L"Jump to Tab");
+        jump.Icon(glyphIcon(L"\xE7B3")); // RedEye — matches the Flight Plan's "jump to the live tab" eye
         AgentSetTip(jump, L"Switch to this session's live terminal tab (jumps to its hosting window if it lives elsewhere)");
         jump.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
@@ -5050,10 +5083,48 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(jump);
+
+        // Move to Idle/Done — Waiting-for-you triage only. The immediate, user-driven twin of the timed
+        // WaitingForInput -> Idle decay (SessionScanner::_maybeDecayWaiting): demote this card so it
+        // leaves the "Waiting-for-you" column for "Idle / Done". A deliberate state transition layered on
+        // the hook-derived machine (the decay sets the SAME state the SAME way, so it sticks — the scanner
+        // only re-promotes to Waiting/Running on NEW turn activity, never bouncing a quiescent Idle back).
+        if (state == SessionState::WaitingForInput)
+        {
+            MenuFlyoutItem moveIdle;
+            moveIdle.Text(L"Move to Idle/Done");
+            moveIdle.Icon(glyphIcon(L"\xE73E")); // CheckMark — "I've handled this; stop waiting on me"
+            AgentSetTip(moveIdle, L"Dismiss this \x201CWaiting-for-you\x201D card to the Idle / Done column \x2014 the manual version of the unread-timeout decay. It returns to Waiting-for-you on the session's next turn.");
+            moveIdle.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, id]() {
+                    auto self = weak.get();
+                    if (!self || !self->_registry)
+                    {
+                        return;
+                    }
+                    // Re-check under the registry lock against the LIVE record: a new turn may have moved
+                    // the state since the menu was built — never demote a session that is now Running.
+                    // Stamp readUnixMs (mark it read) + clear manualUnread so a prior "Mark Unread" can't
+                    // keep it pinned, mirroring the decay's read-gated semantics.
+                    self->_registry->Update(id, [](SessionInfo& s) {
+                        if (s.state == SessionState::WaitingForInput)
+                        {
+                            s.state = SessionState::Idle;
+                            s.manualUnread = false;
+                            s.readUnixMs = NowMs();
+                        }
+                    });
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(moveIdle);
+        }
+
         menu.Items().Append(MenuFlyoutSeparator{});
 
         MenuFlyoutItem rename;
         rename.Text(L"Rename (F2)");
+        rename.Icon(glyphIcon(L"\xE8AC")); // Rename (matches the WT tab menu)
         // Advertise the in-place editor's commit keys + that they're configurable. Which key commits
         // (Enter vs Shift+Enter) follows the GLOBAL TabRenameCommitMode setting; the other inserts a
         // newline (titles can be multi-line), Esc cancels, and clicking away always commits.
@@ -5070,38 +5141,36 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(rename);
 
-        // Close — shut the session down (FAVORITES.md: the "Close" verb that replaced Archive/Delete).
-        // It keeps the record (always archived) so it stays in Sessions, resumable anytime — the
-        // conversation on disk is never deleted. Routed through _RequestArchive (the archive seam).
-        MenuFlyoutItem closeItem;
-        closeItem.Text(L"Close");
-        AgentSetTip(closeItem, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted).");
-        closeItem.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestArchive(id); } });
-            }
-            else if (auto self = weak.get())
-            {
-                self->_RequestArchive(id);
-            }
-        });
-        menu.Items().Append(closeItem);
+        // The three WT-tab-menu session ops (mirrored here at the user's request): New Session Here /
+        // Restart session / Fork session — kind-aware (a Codex card spawns + forks codex, a Claude card
+        // claude). Uses the row's cwd captured at build time (a session's workingDir is fixed at launch).
 
-        // Open New Session Here — the LAST option in every scope (LOCAL/GLOBAL here, EXTERNAL in
-        // _MakeExternalTreeMenu): spawn a managed Claude session in THIS row's working dir, a new
-        // independent conversation. Uses the row's cwd captured at build time (a session's workingDir
-        // is fixed at launch).
+        // New Session Here — spawn a NEW, independent managed session in this row's working dir.
         MenuFlyoutItem openHere;
-        openHere.Text(L"Open New Session Here");
-        AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
-        openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
-            // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
-            // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
-            // no-op'ing at the engine backstop when Claude isn't installed.
-            auto act = [weak, cwd]() {
+        openHere.Text(isCodex ? L"Open New Codex Session Here" : L"Open New Session Here");
+        openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
+        AgentSetTip(openHere, isCodex ? L"Launch a managed Codex session in this directory (a new, independent conversation)" : L"Launch a managed Claude session in this directory (a new, independent conversation)");
+        openHere.Click([weak, disp, cwd, isCodex](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, cwd, isCodex]() {
                 auto self = weak.get();
-                if (!self || !self->_spawnHandler)
+                if (!self)
+                {
+                    return;
+                }
+                if (isCodex)
+                {
+                    // Codex spawn (adopt=false, fork ignored) — no native-exe gate (Codex isn't exe-only;
+                    // the launcher falls back to a bare `codex` token + surfaces any error).
+                    if (self->_codexLaunchHandler)
+                    {
+                        self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false, false);
+                    }
+                    return;
+                }
+                // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
+                // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
+                // no-op'ing at the engine backstop when Claude isn't installed.
+                if (!self->_spawnHandler)
                 {
                     return;
                 }
@@ -5116,6 +5185,50 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(openHere);
 
+        // Restart session — rebuild THIS session's live ConPTY connection in place (the page resumes the
+        // current conversation; never replays the launch commandline). Kind-agnostic at this seam: the
+        // page's _RestartManagedSession handles both Claude (with its own claude.exe gate) and Codex.
+        MenuFlyoutItem restart;
+        restart.Text(L"Restart session");
+        restart.Icon(glyphIcon(L"\xE72C")); // RestartConnection (matches the WT tab menu)
+        AgentSetTip(restart, L"Restart this session \x2014 relaunch the agent and resume its current conversation in place (the terminal pane is reused).");
+        restart.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { if (self->_restartSessionHandler) { self->_restartSessionHandler(winrt::hstring{ id }); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_restartSessionHandler)
+                {
+                    self->_restartSessionHandler(winrt::hstring{ id });
+                }
+            }
+        });
+        menu.Items().Append(restart);
+
+        // Fork session — branch this conversation into a NEW, independent one (Claude: `--resume <id>
+        // --fork-session`; Codex: `codex fork <rolloutUuid>`) opened in this window, the source untouched.
+        // The page's _ForkManagedSessionById is the kind-aware fork shared with the WT tab's "Fork session".
+        MenuFlyoutItem fork;
+        fork.Text(L"Fork session");
+        fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
+        AgentSetTip(fork, L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched.");
+        fork.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { if (self->_forkManagedSessionHandler) { self->_forkManagedSessionHandler(winrt::hstring{ id }); } } });
+            }
+            else if (auto self = weak.get())
+            {
+                if (self->_forkManagedSessionHandler)
+                {
+                    self->_forkManagedSessionHandler(winrt::hstring{ id });
+                }
+            }
+        });
+        menu.Items().Append(fork);
+
         // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
         // It routes through the SAME shared CopySessionField action the overlay's copy menu uses, so the
         // two menus can never drift: Session Id / Path / Branch / the REAL Claude & Codex launch CLIs /
@@ -5124,6 +5237,7 @@ namespace winrt::TerminalApp::implementation
         // the rename/archive/spawn items above they need no defer (matches the old single "Copy Session Id").
         MenuFlyoutSubItem copySub;
         copySub.Text(L"Copy");
+        copySub.Icon(glyphIcon(L"\xE8C8")); // Copy (matches the WT tab menu's "Copy >")
         AgentSetTip(copySub, L"Copy this session's id, path, branch, launch command line, transcript, or full summary");
         const auto addCopyItem = [&copySub, weak, id](const wchar_t* text, const wchar_t* tip, int which) {
             MenuFlyoutItem item;
@@ -5151,6 +5265,28 @@ namespace winrt::TerminalApp::implementation
         addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
         addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
         menu.Items().Append(copySub);
+
+        // Close — the LAST item, set apart by a separator and carrying the X glyph, exactly like the WT
+        // tab's right-click menu (its terminal Close item, glyph \xE711). Close shuts the session down
+        // (FAVORITES.md: the "Close" verb that replaced Archive/Delete) but KEEPS the record (always
+        // archived) so it stays in Sessions, resumable anytime — the conversation on disk is never
+        // deleted. Routed through _RequestArchive (the archive seam).
+        menu.Items().Append(MenuFlyoutSeparator{});
+        MenuFlyoutItem closeItem;
+        closeItem.Text(L"Close");
+        closeItem.Icon(glyphIcon(L"\xE711")); // Close (the X — matches the WT tab menu's Close)
+        AgentSetTip(closeItem, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime; star it there to keep it in your favorites (the conversation on disk is never deleted).");
+        closeItem.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+            if (disp)
+            {
+                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { self->_RequestArchive(id); } });
+            }
+            else if (auto self = weak.get())
+            {
+                self->_RequestArchive(id);
+            }
+        });
+        menu.Items().Append(closeItem);
 
         return menu;
     }
@@ -5838,6 +5974,18 @@ namespace winrt::TerminalApp::implementation
         // single ;-delimited box. Built in its own method to keep this builder readable + the diff local.
         _BuildEnvVarsArea(panel);
 
+        // CLAUDE HISTORY (ENV_VARS.md §8): cleanupPeriodDays lives in the user's GLOBAL ~/.claude/settings.json
+        // (NOT an Agentmaster setting, NOT an env var). Read on open / written on save through the
+        // ClaudeUserSettings repository (a managed layer that preserves every other key in that file). 36500
+        // (~100y) ships by default so Claude never purges global history; blank removes our key (Claude's
+        // 30-day default). A separate field from the env area on purpose — it's a Claude settings key, not env.
+        panel.Children().Append(Text(L"CLAUDE HISTORY", 11, true, 0.6));
+        _setCleanupDays = TextBox{};
+        _setCleanupDays.Header(winrt::box_value(L"Keep Claude history (days)"));
+        _setCleanupDays.PlaceholderText(L"e.g. 36500 (~never) \x2014 blank = Claude default (30 days)");
+        AgentSetTip(_setCleanupDays, L"Sets cleanupPeriodDays in your global ~/.claude/settings.json \x2014 how many days Claude keeps session transcripts before deleting them at startup (your GLOBAL Claude history, used by Resume + the Sessions browser). 36500 \x2248 never. Blank removes the key (Claude's 30-day default). Avoid 0: in Claude it DISABLES history entirely.");
+        panel.Children().Append(_setCleanupDays);
+
         // CLAUDE BINARY (native-exe-only policy): the auto-detected native claude.exe + an optional
         // explicit override. The whole app gates launch/fork/resume on resolving one (ResolveClaudeExe);
         // the override must be a real *.exe (a .cmd/.bat or the Node CLI is rejected).
@@ -6082,6 +6230,12 @@ namespace winrt::TerminalApp::implementation
         {
             _setClaudeExePath.Text(winrt::hstring{ _appSettings.claudeExePath });
         }
+        if (_setCleanupDays)
+        {
+            // ENV_VARS.md §8: reflect the LIVE value from the user's global ~/.claude/settings.json (blank if unset).
+            const auto days = ::Agentmaster::GetClaudeCleanupPeriodDays();
+            _setCleanupDays.Text(winrt::hstring{ days ? std::to_wstring(*days) : std::wstring{} });
+        }
         if (_setClaudeDetected)
         {
             const auto& exe = ::Agentmaster::SharedEngine().claudeExePath;
@@ -6265,6 +6419,46 @@ namespace winrt::TerminalApp::implementation
             const auto b = p.find_last_not_of(L" \t");
             _appSettings.claudeExePath = (a == std::wstring::npos) ? std::wstring{} : p.substr(a, b - a + 1);
         }
+        if (_setCleanupDays)
+        {
+            // ENV_VARS.md §8: write cleanupPeriodDays back to the user's global ~/.claude/settings.json.
+            // Blank => remove our key (revert to Claude's 30-day default); a pure non-negative integer => set
+            // it; any other text => leave the file untouched. (0 is accepted but is a Claude footgun — the
+            // tooltip warns; we don't second-guess a deliberate entry.)
+            std::wstring t{ _setCleanupDays.Text() };
+            const auto a = t.find_first_not_of(L" \t\r\n");
+            const auto b = t.find_last_not_of(L" \t\r\n");
+            const std::wstring s = (a == std::wstring::npos) ? std::wstring{} : t.substr(a, b - a + 1);
+            if (s.empty())
+            {
+                ::Agentmaster::SetClaudeCleanupPeriodDays(std::nullopt);
+            }
+            else
+            {
+                bool pure = true;
+                for (const wchar_t c : s)
+                {
+                    if (c < L'0' || c > L'9')
+                    {
+                        pure = false;
+                        break;
+                    }
+                }
+                if (pure)
+                {
+                    int64_t v = 0;
+                    for (const wchar_t c : s)
+                    {
+                        v = v * 10 + static_cast<int64_t>(c - L'0');
+                        if (v > 100000000)
+                        {
+                            v = 100000000; // clamp; cleanupPeriodDays far past ~100y is meaningless
+                        }
+                    }
+                    ::Agentmaster::SetClaudeCleanupPeriodDays(v);
+                }
+            }
+        }
         if (_setDefaultMode)
         {
             const int idx = _setDefaultMode.SelectedIndex();
@@ -6389,6 +6583,8 @@ namespace winrt::TerminalApp::implementation
             _appSettings.summaryPanelWrapNewlines = disk.summaryPanelWrapNewlines; // wrap-line toggle (panel times bar), out-of-cog UI action
             _appSettings.updateSkippedVersion = disk.updateSkippedVersion; // updater "Skip this version" (out-of-cog JSON RMW)
             _appSettings.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs; // updater "Postpone N days" (out-of-cog JSON RMW)
+            _appSettings.envDefaultsVersion = disk.envDefaultsVersion; // shipped-default seed marker (engine-init, out-of-cog) — a Save must never reset it (would re-add a deleted default)
+            _appSettings.claudeCleanupDaysSeeded = disk.claudeCleanupDaysSeeded; // shipped-default seed marker (engine-init, out-of-cog)
         }
         if (_settingsSink)
         {

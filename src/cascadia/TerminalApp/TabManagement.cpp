@@ -345,34 +345,12 @@ namespace winrt::TerminalApp::implementation
             }
             if (!sourceId.empty())
             {
-                const auto src = _sessionRegistry->Get(sourceId);
-                const std::wstring dir = src ? src->workingDir : std::wstring{};
-                const std::wstring forkBase = (src && !src->title.empty()) ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
-                const std::wstring ttl = ::Agentmaster::DeriveForkTitle(forkBase); // bump " (fork N)" instead of stacking
-                // Codex (kind-aware): sourceId is the Codex's durable HANDLE id, which has NO Claude
-                // transcript, so the Claude branch below would silently spawn a fresh claude.exe in the
-                // codex's dir (wrong agent). Route to the Codex launcher instead — it forks via
-                // `codex fork <rolloutUuid>` and rollout-gates it internally (a vanished/never-prompted
-                // rollout -> a fresh codex in the same dir), so we just hand it the real rollout uuid.
-                if (src && src->kind == ::Agentmaster::AgentKind::Codex)
-                {
-                    const std::wstring forkFrom = src->codexSessionId; // the REAL rollout uuid (the fork source)
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->codex-fork] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
-                    _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
-                    return;
-                }
-                // Native-exe-only policy gate (auto-recovering): a Claude duplicate forks via
-                // _LaunchClaudeSession (a launch). The Codex branch above needs no claude.exe; this one
-                // does, so prompt instead of silently no-op'ing at the launch backstop when Claude isn't
-                // installed (a managed Claude tab can outlive a claude.exe that was since removed).
-                if (!::Agentmaster::EnsureClaudeAvailable())
-                {
-                    _PromptClaudeMissing();
-                    return;
-                }
-                const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
-                ::Agentmaster::AppendStateLog(L"hooks.log", L"[duplicate->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-                _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+                // Fork the managed session (kind-aware: Claude `--resume <id> --fork-session`, Codex
+                // `codex fork <rolloutUuid>`, both transcript/rollout-gated -> fresh) via the ONE shared
+                // seam, also used by the Triage Board / Explorer-tree "Fork session" so the two can't
+                // drift. ALWAYS return for a managed tab — it must never be naively duplicated (re-running
+                // a `--resume <id>` commandline = two writers on one transcript -> corruption).
+                _ForkManagedSessionById(sourceId, insertPosition);
                 return;
             }
         }

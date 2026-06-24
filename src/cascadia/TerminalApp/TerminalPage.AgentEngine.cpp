@@ -168,6 +168,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowActivateHandler(_windowActivateToken);
         }
+        // Agentmaster (cross-window restart): drop this window's restart sink too (Rule #10).
+        if (_windowRestartToken)
+        {
+            ::Agentmaster::UnregisterWindowRestartHandler(_windowRestartToken);
+        }
         // Agentmaster (cross-window settings broadcast): drop this window's settings sink too (Rule #10).
         if (_settingsChangedToken)
         {
@@ -487,6 +492,24 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        // Cross-window restart sink: the twin of the activate sink for "Restart session" (Triage Board
+        // card / Explorer-tree row). When ANOTHER window's restart targets a session hosted HERE, this
+        // sink hops to this window's UI thread and rebuilds its connection in place (no foreground — a
+        // restart shouldn't yank the user away from the board). A miss is a no-op. Detached in
+        // ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowRestartToken = ::Agentmaster::RegisterWindowRestartHandler(_windowId, [weakThis, dispatcher](const std::wstring& id) {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis, id]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_RestartClaudeSessionLocal(id);
+                    }
+                });
+            });
+        }
+
         // Cross-window settings broadcast: a GLOBAL settings change in ANOTHER window (the cog Save, or
         // the Explorer-Tree / Triage-Board sort toggle) reaches here; this sink hops to this window's UI
         // thread and re-applies it live (this window's _appSettings + the sort toggles + a board/tree
@@ -724,6 +747,25 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ForkSessionFromDisk(std::wstring{ id }, std::wstring{ dir }, std::wstring{ title });
+            }
+        });
+        // Agentmaster: the Triage Board / Explorer-tree session menu's "Restart session" — restart a
+        // managed session's live connection in place (resume the current conversation; never replay the
+        // launch commandline). Local-first, then fan out to the hosting window (the board GLOBAL scope
+        // shows the whole fleet; the live pane lives in exactly one window).
+        content->SetRestartSessionHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_RestartClaudeSession(id);
+            }
+        });
+        // Agentmaster: the Triage Board / Explorer-tree session menu's "Fork session" — kind-aware fork
+        // (Claude --fork-session / Codex `codex fork`), the same path the WT tab's "Fork session" uses,
+        // opening the fork tab in THIS window (it reads the shared registry; no live tab needed).
+        content->SetForkManagedSessionHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                self->_ForkManagedSessionById(std::wstring{ id });
             }
         });
         content->SetRenameHandler([weakThis](winrt::hstring id, winrt::hstring title) {
