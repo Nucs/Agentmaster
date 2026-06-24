@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -128,11 +129,61 @@ namespace Agentmaster
     // generated forwarder script. Pure + unit-tested.
     std::wstring PsSingleQuote(std::wstring_view s);
 
-    // Parse a ';'-delimited list of NAME=VALUE assignments (e.g. "FOO=bar;BAZ=qux") into pairs,
-    // for AppSettings.env (extra environment applied to every spawned session). Entries without
-    // '=' or with an empty NAME are skipped; whitespace around an entry and around NAME is
-    // trimmed; VALUE is taken verbatim (may itself contain '='). Pure + unit-tested.
+    // Parse a list of NAME=VALUE assignments into pairs, for AppSettings.env (extra environment
+    // applied to every spawned session) and the per-directory env (dir-env.json). Entries are
+    // separated by EITHER a newline (the multi-line editor format) OR a ';' (the legacy single-line
+    // format), so an old ';'-delimited settings.json still parses. Entries without '=' / with an
+    // empty NAME / starting with '#' (a comment) are skipped; whitespace around an entry and around
+    // NAME is trimmed; VALUE is taken verbatim (may itself contain '='). Pure + unit-tested.
     std::vector<std::pair<std::wstring, std::wstring>> ParseEnvAssignments(std::wstring_view spec);
+
+    // Merge a GLOBAL env block (AppSettings.env) with a working-directory's PER-DIR overrides
+    // (dir-env.json) into the final ordered NAME=VALUE pairs. Per-dir entries OVERRIDE global ones
+    // with the same name (Windows env names are case-INsensitive, so the match is too); within one
+    // block the last assignment of a name wins. Reserved CCMGR_* names are dropped (the spawn injects
+    // them and a user entry must never clobber the hook correlation). First-seen order is preserved.
+    // PURE (no disk) + unit-tested — the testable core of ResolveSessionEnv.
+    std::vector<std::pair<std::wstring, std::wstring>> MergeSessionEnv(std::wstring_view globalEnv, std::wstring_view perDirEnv);
+
+    // ResolveSessionEnv = MergeSessionEnv(settings.env, GetDirEnv(workingDir)) — the env applied to a
+    // session spawned in `workingDir`. Disk-touching (reads dir-env.json via Persistence::GetDirEnv);
+    // the merge itself is the pure MergeSessionEnv above.
+    std::vector<std::pair<std::wstring, std::wstring>> ResolveSessionEnv(const AppSettings& settings, std::wstring_view workingDir);
+
+    // --- env-text lexer (drives the Settings cog's live border color + bottom status line) ---
+    // A per-line verdict over an env editor's text. Ignored = blank / '#' comment (no var); Ok = a
+    // valid NAME=VALUE; Warn = parsed but won't apply as typed (reserved CCMGR_*, an Agentmaster-owned
+    // name like AM_SESSION/WT_SESSION, or a duplicate that a later line overrides); Error = unparseable
+    // (no '=', empty name, or an invalid name — env names must be [A-Za-z_][A-Za-z0-9_]*).
+    enum class EnvLineKind
+    {
+        Ignored,
+        Ok,
+        Warn,
+        Error
+    };
+    struct EnvLineDiag
+    {
+        uint32_t line{}; // 1-based line number
+        EnvLineKind kind{ EnvLineKind::Ignored };
+        std::wstring name; // the parsed NAME ("" when none)
+        std::wstring message; // human note ("" for Ignored/Ok)
+    };
+    struct EnvLexResult
+    {
+        std::vector<EnvLineDiag> lines;
+        uint32_t ok{}; // count of valid variables
+        uint32_t warn{};
+        uint32_t error{};
+        EnvLineKind worst{ EnvLineKind::Ok }; // worst level present (drives the border color)
+        uint32_t firstIssueLine{}; // 1-based line of the first Warn/Error (0 if none)
+        std::wstring firstIssue; // its message ("" if none)
+    };
+    // Lex an env editor's text into per-line diagnostics + counts + the worst level + the first issue.
+    // PURE + unit-tested; the UI composes the glyph/color from `worst` and the bottom status from the
+    // counts + firstIssue. Uses the SAME accept/skip rules as ParseEnvAssignments, so a line the lexer
+    // calls Ok/Warn is exactly one the spawn applies (Warn => applied-but-noteworthy / dropped-if-reserved).
+    EnvLexResult LexEnvText(std::wstring_view text);
 
     // --- OS-touching ---
 

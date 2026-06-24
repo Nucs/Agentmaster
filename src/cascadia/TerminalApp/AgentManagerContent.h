@@ -381,6 +381,21 @@ namespace winrt::TerminalApp::implementation
         void _HideSettings();
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
 
+        // Agentmaster (ENV_VARS.md): the cog's "Environment variables" area — a Global / Per-directory
+        // two-tab editor (multi-line NAME=VALUE, one per line) feeding ResolveSessionEnv at spawn. Built
+        // once into the settings panel; _Load seeds it on cog open; _Save writes AppSettings.env (global)
+        // + flushes the per-directory draft to dir-env.json. The per-dir draft is held in memory until
+        // Save so Cancel discards (the cog's form semantics), mirroring _appSettings for the global side.
+        void _BuildEnvVarsArea(const winrt::Windows::UI::Xaml::Controls::StackPanel& panel);
+        void _LoadEnvVarsArea(); // seed global text from _appSettings.env + load dir-env.json into the draft
+        void _SaveEnvVarsArea(); // global -> _appSettings.env; flush _dirEnvDraft -> SaveDirEnv
+        void _SwitchEnvTab(bool perDir); // toggle Global <-> Per-directory panels + restyle the tab buttons
+        void _RebuildEnvDirList(); // (re)populate the per-dir selector from session dirs ∪ dir-env keys, filtered
+        void _SelectEnvDir(const std::wstring& normKey, const std::wstring& displayPath); // load a dir's env into the per-dir editor
+        // Lex an env editor's text -> recolor its wrapping border + write its status line (the SAME
+        // green/amber/red palette _ValidateLaunchBox uses). `perDir` picks which editor/border/status.
+        void _RefreshEnvLex(bool perDir);
+
         // Agentmaster (updater; Updater.h): the Settings cog's UPDATES section. Runs a GitHub
         // release check OFF the UI thread (WinHTTP), then marshals back. interactive==true (the
         // "Check for updates" button): show the prompt (Update now / Postpone 3·7·30 days / Skip
@@ -626,7 +641,27 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAlwaysShowHomeButton{ nullptr }; // TABS: always show the strip "Home" button (OFF => only when the Manager tab is scrolled off); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
-        winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ;-delimited NAME=VALUE applied to every session
+        winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ENV area: GLOBAL multi-line NAME=VALUE editor (one per line)
+        // ENV area (ENV_VARS.md): the two-tab "Environment variables" editor. Global vs Per-directory tab
+        // buttons swap two panels; each editor is wrapped in a Border whose color = the live lexer status,
+        // with a status TextBlock beneath it.
+        winrt::Windows::UI::Xaml::Controls::Button _setEnvTabGlobal{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _setEnvTabDir{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _envGlobalPanel{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _envDirPanel{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _setEnvBorder{ nullptr }; // wraps _setEnv; recolored by the lexer
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setEnvStatus{ nullptr }; // global editor bottom status line
+        winrt::Windows::UI::Xaml::Controls::TextBox _setEnvDirFilter{ nullptr }; // type-to-filter the dir list
+        winrt::Windows::UI::Xaml::Controls::ListBox _setEnvDirList{ nullptr }; // selectable known/working dirs (● = has env)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setEnvDir{ nullptr }; // PER-DIR multi-line NAME=VALUE editor (selected dir)
+        winrt::Windows::UI::Xaml::Controls::Border _setEnvDirBorder{ nullptr }; // wraps _setEnvDir; recolored by the lexer
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setEnvDirStatus{ nullptr }; // per-dir editor bottom status line
+        // The in-memory per-directory env draft (NormDirKey -> env-text), seeded from dir-env.json on cog
+        // open, edited across dir switches, and flushed on Save (Cancel discards). Mirrors dir-colors'
+        // representation (a flat vector of pairs) so no new include is needed.
+        std::vector<std::pair<std::wstring, std::wstring>> _dirEnvDraft;
+        std::wstring _envEditingDirKey; // NormDirKey of the dir currently loaded into _setEnvDir ("" = none)
+        bool _envTabIsDir{ false }; // which tab is showing (false = Global)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setClaudeDetected{ nullptr }; // Agentmaster: the AUTO-DETECTED native claude.exe (read-only; "Not detected" when none)
         winrt::Windows::UI::Xaml::Controls::TextBox _setClaudeExePath{ nullptr }; // Agentmaster: explicit claude.exe override (blank = auto-detect; must be an .exe)
         // ---- UPDATES (Agentmaster updater; Updater.h) ----

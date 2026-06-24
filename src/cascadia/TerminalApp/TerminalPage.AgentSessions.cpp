@@ -862,18 +862,11 @@ namespace winrt::TerminalApp::implementation
         // 0x80070002 (ERROR_FILE_NOT_FOUND). Empty launcher falls back to the bare token (surfaces the error).
         const std::wstring commandline = ::Agentmaster::BuildCodexCommandline(resumeUuid, forkUuid, ::Agentmaster::SharedEngine().codexExePath);
 
-        // Child env: NO CCMGR_* (Codex has no hook bridge) — just the cog's global env (CCMGR_* filtered);
+        // Child env: NO CCMGR_* (Codex has no hook bridge) — the cog's global env merged with this dir's
+        // per-dir overrides (ResolveSessionEnv: dir-env.json over AppSettings.env, CCMGR_* dropped);
         // _BuildAgentConnection appends this window's AM_SESSION ownership stamp (same as a launched claude),
         // so the Fleet Observer attributes this codex to THIS window.
-        std::vector<std::pair<std::wstring, std::wstring>> codexEnv;
-        for (auto& kv : ::Agentmaster::ParseEnvAssignments(::Agentmaster::LoadAppSettings().env))
-        {
-            if (kv.first.rfind(L"CCMGR_", 0) == 0)
-            {
-                continue;
-            }
-            codexEnv.emplace_back(std::move(kv.first), std::move(kv.second));
-        }
+        const auto codexEnv = ::Agentmaster::ResolveSessionEnv(::Agentmaster::LoadAppSettings(), dir);
         // Host codex inside an interactive pwsh too (same as claude): quitting codex drops to a live
         // `PS <cwd>>` prompt instead of a dead "press Enter to restart" pane. The observer finds
         // codex.exe as a descendant of pwsh (FindDescendantByImage is descendant-OR-self), so the C1/C2
@@ -1229,16 +1222,9 @@ namespace winrt::TerminalApp::implementation
                 resumeUuid = info->codexSessionId;
             }
             const std::wstring commandline = ::Agentmaster::BuildCodexCommandline(resumeUuid, {}, ::Agentmaster::SharedEngine().codexExePath);
-            // Codex child env: cog env only (CCMGR_* filtered); _BuildAgentConnection stamps AM_SESSION.
-            std::vector<std::pair<std::wstring, std::wstring>> codexEnv;
-            for (auto& kv : ::Agentmaster::ParseEnvAssignments(::Agentmaster::LoadAppSettings().env))
-            {
-                if (kv.first.rfind(L"CCMGR_", 0) == 0)
-                {
-                    continue;
-                }
-                codexEnv.emplace_back(std::move(kv.first), std::move(kv.second));
-            }
+            // Codex child env: global cog env merged with this dir's per-dir overrides (ResolveSessionEnv,
+            // CCMGR_* dropped); _BuildAgentConnection stamps AM_SESSION.
+            const auto codexEnv = ::Agentmaster::ResolveSessionEnv(::Agentmaster::LoadAppSettings(), dir);
             const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, commandline);
             newConn = _BuildAgentConnection(hostedCmd, dir, title, codexEnv, /*inheritCursor*/ true);
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] codex " + managedId + (resumeUuid.empty() ? L" (fresh)" : (L" (resume " + resumeUuid + L")")) + L"\n");

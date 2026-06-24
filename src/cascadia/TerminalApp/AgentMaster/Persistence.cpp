@@ -990,6 +990,8 @@ namespace Agentmaster
 
         // dir-colors.json is read-modify-written; one process (M9) but many window threads.
         std::mutex g_dirColorMtx;
+        // dir-env.json (the per-directory env overrides) is read-modify-written the same way.
+        std::mutex g_dirEnvMtx;
 
         // --- Auto tab-color allocator (Agentmaster) -------------------------------------------------
         // A fixed palette of distinct, readable tab colors. A directory with no explicit (user-picked)
@@ -1506,6 +1508,120 @@ namespace Agentmaster
         }
         SaveDirColors(kept);
     }
+
+    // --- per-directory env overrides (dir-env.json) ---------------------------------------------
+    // Same shape + lifecycle as dir-colors.json: a NormDirKey -> env-text map, where env-text is the
+    // multi-line NAME=VALUE block the Settings cog's Per-directory tab edits. Merged OVER the global
+    // AppSettings.env at spawn time (MergeSessionEnv / ResolveSessionEnv). The cog is the only writer.
+    std::wstring SerializeDirEnv(const std::vector<std::pair<std::wstring, std::wstring>>& entries)
+    {
+        auto root = json::Value::MkObj();
+        root.Set(L"version", json::Value::MkNum(1));
+        auto arr = json::Value::MkArr();
+        for (const auto& [dir, env] : entries)
+        {
+            auto o = json::Value::MkObj();
+            o.Set(L"dir", json::Value::MkStr(dir));
+            o.Set(L"env", json::Value::MkStr(env));
+            arr.Push(std::move(o));
+        }
+        root.Set(L"dirs", std::move(arr));
+        return json::Dump(root);
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> DeserializeDirEnv(std::wstring_view text)
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        const auto parsed = json::Parse(text);
+        if (!parsed)
+        {
+            return out;
+        }
+        if (const auto* arr = parsed->Find(L"dirs"); arr && arr->type == json::Value::Type::Arr)
+        {
+            for (const auto& el : arr->arr)
+            {
+                if (el.type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                const auto dir = el.StrAt(L"dir");
+                const auto env = el.StrAt(L"env");
+                // A blank (empty OR whitespace-only) env carries no overrides — drop it (a cleared editor
+                // removes the dir; matches SetDirEnv's blank check).
+                bool blank = true;
+                for (const wchar_t c : env)
+                {
+                    if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+                    {
+                        blank = false;
+                        break;
+                    }
+                }
+                if (!dir.empty() && !blank)
+                {
+                    out.emplace_back(dir, env);
+                }
+            }
+        }
+        return out;
+    }
+
+    void SaveDirEnv(const std::vector<std::pair<std::wstring, std::wstring>>& entries)
+    {
+        WriteAllUtf8(AgentmasterStateDir() + L"\\dir-env.json", SerializeDirEnv(entries));
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> LoadDirEnv()
+    {
+        return DeserializeDirEnv(ReadAllUtf8(AgentmasterStateDir() + L"\\dir-env.json"));
+    }
+
+    std::wstring GetDirEnv(const std::wstring& dir)
+    {
+        const std::wstring key = NormDirKey(dir);
+        std::lock_guard guard{ g_dirEnvMtx };
+        for (const auto& [k, env] : LoadDirEnv())
+        {
+            if (k == key)
+            {
+                return env;
+            }
+        }
+        return {};
+    }
+
+    void SetDirEnv(const std::wstring& dir, std::wstring_view envText)
+    {
+        const std::wstring key = NormDirKey(dir);
+        std::lock_guard guard{ g_dirEnvMtx };
+        auto entries = LoadDirEnv();
+        std::vector<std::pair<std::wstring, std::wstring>> kept;
+        kept.reserve(entries.size() + 1);
+        for (auto& e : entries)
+        {
+            if (e.first != key)
+            {
+                kept.push_back(std::move(e));
+            }
+        }
+        // A non-blank block upserts; a blank one simply removes the dir's entry.
+        bool blank = true;
+        for (const wchar_t c : envText)
+        {
+            if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+            {
+                blank = false;
+                break;
+            }
+        }
+        if (!blank)
+        {
+            kept.emplace_back(key, std::wstring{ envText });
+        }
+        SaveDirEnv(kept);
+    }
+
     void SaveLayout(const ManagerLayout& layout)
     {
         WriteAllUtf8(AgentmasterStateDir() + L"\\layout.json", SerializeLayout(layout));

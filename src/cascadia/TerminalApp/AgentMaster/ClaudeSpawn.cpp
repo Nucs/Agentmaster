@@ -13,8 +13,10 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include "Persistence.h" // GetDirEnv (the per-directory env overrides; ResolveSessionEnv reads it)
 #include "ProcessInspect.h" // SnapshotProcesses / FindDescendantByImage / ReadProcessCwd (moved here)
 #include "ProfileBootstrap.h" // the per-install state PROFILE (AgentmasterStateDir now resolves through it)
 
@@ -1135,9 +1137,11 @@ try {
         WriteFileUtf8(dir + L"\\bridge.json", json);
     }
 
-    std::vector<std::pair<std::wstring, std::wstring>> ParseEnvAssignments(std::wstring_view spec)
+    namespace
     {
-        const auto trim = [](std::wstring_view v) -> std::wstring_view {
+        // Trim ASCII whitespace (incl. CR/LF) from both ends. Shared by the env parser + lexer.
+        std::wstring_view EnvTrim(std::wstring_view v)
+        {
             size_t a = 0, b = v.size();
             while (a < b && (v[a] == L' ' || v[a] == L'\t' || v[a] == L'\r' || v[a] == L'\n'))
             {
@@ -1148,32 +1152,236 @@ try {
                 --b;
             }
             return v.substr(a, b - a);
-        };
+        }
+
+        // ASCII upper-fold for case-INsensitive env-name comparison (Windows env names are
+        // case-insensitive; env names are conventionally ASCII).
+        std::wstring EnvNameFold(std::wstring_view n)
+        {
+            std::wstring f{ n };
+            for (auto& c : f)
+            {
+                if (c >= L'a' && c <= L'z')
+                {
+                    c = static_cast<wchar_t>(c - L'a' + L'A');
+                }
+            }
+            return f;
+        }
+
+        // A reserved name the spawn owns: CCMGR_* (hook correlation). A user entry that names one is
+        // dropped at merge time so it can never clobber the bridge wiring.
+        bool IsReservedEnvName(std::wstring_view name)
+        {
+            return EnvNameFold(name).rfind(L"CCMGR_", 0) == 0;
+        }
+
+        // A name Agentmaster sets itself on every connection (ConPTY / Engine), so a user value is
+        // ignored — the lexer warns about these (distinct from the dropped-entirely CCMGR_*).
+        bool IsAgentmasterOwnedEnvName(std::wstring_view name)
+        {
+            const std::wstring f = EnvNameFold(name);
+            return f == L"AM_SESSION" || f == L"WT_SESSION" || f == L"WT_PROFILE_ID";
+        }
+
+        // Env var name rule: [A-Za-z_][A-Za-z0-9_]*  (POSIX-portable, what every shell accepts).
+        bool IsValidEnvName(std::wstring_view n)
+        {
+            if (n.empty())
+            {
+                return false;
+            }
+            const wchar_t c0 = n[0];
+            if (!((c0 >= L'A' && c0 <= L'Z') || (c0 >= L'a' && c0 <= L'z') || c0 == L'_'))
+            {
+                return false;
+            }
+            for (size_t i = 1; i < n.size(); ++i)
+            {
+                const wchar_t c = n[i];
+                if (!((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'_'))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> ParseEnvAssignments(std::wstring_view spec)
+    {
+        const auto isSep = [](wchar_t c) { return c == L';' || c == L'\n' || c == L'\r'; };
 
         std::vector<std::pair<std::wstring, std::wstring>> out;
         size_t i = 0;
         while (i <= spec.size())
         {
-            const size_t semi = spec.find(L';', i);
-            const size_t end = (semi == std::wstring_view::npos) ? spec.size() : semi;
-            const std::wstring_view entry = trim(spec.substr(i, end - i));
-            const size_t eq = entry.find(L'=');
-            if (eq != std::wstring_view::npos)
+            size_t sep = i;
+            while (sep < spec.size() && !isSep(spec[sep]))
             {
-                const std::wstring_view name = trim(entry.substr(0, eq));
-                const std::wstring_view value = trim(entry.substr(eq + 1));
-                if (!name.empty())
+                ++sep;
+            }
+            const std::wstring_view entry = EnvTrim(spec.substr(i, sep - i));
+            // Skip blanks + '#' comments (a "#FOO=bar" line must NOT spawn a var named "#FOO").
+            if (!entry.empty() && entry.front() != L'#')
+            {
+                const size_t eq = entry.find(L'=');
+                if (eq != std::wstring_view::npos)
                 {
-                    out.emplace_back(std::wstring{ name }, std::wstring{ value });
+                    const std::wstring_view name = EnvTrim(entry.substr(0, eq));
+                    const std::wstring_view value = EnvTrim(entry.substr(eq + 1));
+                    if (!name.empty())
+                    {
+                        out.emplace_back(std::wstring{ name }, std::wstring{ value });
+                    }
                 }
             }
-            if (semi == std::wstring_view::npos)
+            if (sep >= spec.size())
             {
                 break;
             }
-            i = semi + 1;
+            i = sep + 1;
         }
         return out;
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> MergeSessionEnv(std::wstring_view globalEnv, std::wstring_view perDirEnv)
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        std::unordered_map<std::wstring, size_t> indexByFold; // fold(NAME) -> position in `out`
+        const auto apply = [&](const std::vector<std::pair<std::wstring, std::wstring>>& src) {
+            for (const auto& [name, value] : src)
+            {
+                if (IsReservedEnvName(name))
+                {
+                    continue; // CCMGR_* is the spawn's — never user-overridable
+                }
+                const std::wstring fold = EnvNameFold(name);
+                const auto it = indexByFold.find(fold);
+                if (it == indexByFold.end())
+                {
+                    indexByFold.emplace(fold, out.size());
+                    out.emplace_back(name, value);
+                }
+                else
+                {
+                    out[it->second].second = value; // last writer wins; keep the first-seen NAME spelling + position
+                }
+            }
+        };
+        apply(ParseEnvAssignments(globalEnv)); // base
+        apply(ParseEnvAssignments(perDirEnv)); // per-dir overrides the global same-named entry
+        return out;
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> ResolveSessionEnv(const AppSettings& settings, std::wstring_view workingDir)
+    {
+        return MergeSessionEnv(settings.env, GetDirEnv(std::wstring{ workingDir }));
+    }
+
+    EnvLexResult LexEnvText(std::wstring_view text)
+    {
+        EnvLexResult r;
+        std::unordered_map<std::wstring, uint32_t> seen; // fold(NAME) of prior Ok lines -> their line no
+        uint32_t lineNo = 0;
+        size_t i = 0;
+        const auto note = [&](EnvLineKind k, const std::wstring& msg, uint32_t at) {
+            if ((k == EnvLineKind::Warn || k == EnvLineKind::Error) && r.firstIssueLine == 0)
+            {
+                r.firstIssueLine = at;
+                r.firstIssue = msg;
+            }
+            if (k == EnvLineKind::Error)
+            {
+                ++r.error;
+                if (r.worst != EnvLineKind::Error)
+                {
+                    r.worst = EnvLineKind::Error;
+                }
+            }
+            else if (k == EnvLineKind::Warn)
+            {
+                ++r.warn;
+                if (r.worst == EnvLineKind::Ok)
+                {
+                    r.worst = EnvLineKind::Warn;
+                }
+            }
+            else if (k == EnvLineKind::Ok)
+            {
+                ++r.ok;
+            }
+        };
+
+        // Walk lines (split on '\n'; a trailing '\r' is trimmed by EnvTrim). A lone ';'-delimited
+        // legacy string is one "line" here — fine, it still lexes each entry below only if it has '\n';
+        // for the multi-line editor (the only LexEnvText caller) every entry is its own line.
+        while (i <= text.size())
+        {
+            size_t nl = text.find(L'\n', i);
+            const size_t end = (nl == std::wstring_view::npos) ? text.size() : nl;
+            ++lineNo;
+            const std::wstring_view raw = text.substr(i, end - i);
+            const std::wstring_view entry = EnvTrim(raw);
+            EnvLineDiag d;
+            d.line = lineNo;
+            if (entry.empty() || entry.front() == L'#')
+            {
+                d.kind = EnvLineKind::Ignored;
+            }
+            else
+            {
+                const size_t eq = entry.find(L'=');
+                if (eq == std::wstring_view::npos)
+                {
+                    d.kind = EnvLineKind::Error;
+                    d.message = L"missing '=' (expected NAME=VALUE)";
+                }
+                else
+                {
+                    const std::wstring name{ EnvTrim(entry.substr(0, eq)) };
+                    d.name = name;
+                    if (name.empty())
+                    {
+                        d.kind = EnvLineKind::Error;
+                        d.message = L"empty variable name";
+                    }
+                    else if (!IsValidEnvName(name))
+                    {
+                        d.kind = EnvLineKind::Error;
+                        d.message = L"invalid name \"" + name + L"\" (use letters, digits, _ ; not starting with a digit)";
+                    }
+                    else if (IsReservedEnvName(name))
+                    {
+                        d.kind = EnvLineKind::Warn;
+                        d.message = L"\"" + name + L"\" is reserved (ignored)";
+                    }
+                    else if (IsAgentmasterOwnedEnvName(name))
+                    {
+                        d.kind = EnvLineKind::Warn;
+                        d.message = L"\"" + name + L"\" is set by Agentmaster (ignored)";
+                    }
+                    else if (const auto it = seen.find(EnvNameFold(name)); it != seen.end())
+                    {
+                        d.kind = EnvLineKind::Warn;
+                        d.message = L"duplicate of line " + std::to_wstring(it->second) + L" (last value wins)";
+                    }
+                    else
+                    {
+                        d.kind = EnvLineKind::Ok;
+                        seen.emplace(EnvNameFold(name), lineNo);
+                    }
+                }
+            }
+            note(d.kind, d.message, d.line);
+            r.lines.push_back(std::move(d));
+            if (nl == std::wstring_view::npos)
+            {
+                break;
+            }
+            i = nl + 1;
+        }
+        return r;
     }
 
     // The child-env block shared by every managed-Claude spawn — fresh launch, resume, fork, AND the
@@ -1185,12 +1393,11 @@ try {
     {
         spec.env.emplace_back(L"CCMGR_SESSION_ID", spec.sessionId);
         spec.env.emplace_back(L"CCMGR_HOOK_PIPE", spec.pipeName);
-        for (auto& kv : ParseEnvAssignments(settings.env))
+        // The global env (settings.env) merged with this dir's per-dir overrides (dir-env.json) — per-dir
+        // wins, CCMGR_* dropped (ResolveSessionEnv handles both), applied AFTER the CCMGR_* vars so the
+        // hook correlation can never be clobbered.
+        for (auto& kv : ResolveSessionEnv(settings, spec.workingDir))
         {
-            if (kv.first.rfind(L"CCMGR_", 0) == 0)
-            {
-                continue;
-            }
             spec.env.emplace_back(std::move(kv.first), std::move(kv.second));
         }
     }

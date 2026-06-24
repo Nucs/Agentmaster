@@ -360,9 +360,13 @@ namespace Agentmaster
         std::wstring model{};
         // false => emit includeCoAuthoredBy:false (drop Claude's commit/PR co-author byline).
         bool includeCoAuthoredBy{ true };
-        // Extra environment variables injected into EVERY spawned session, edited as a single
-        // ';'-delimited list of NAME=VALUE pairs (e.g. "FOO=bar;HTTPS_PROXY=http://h:8080").
-        // Parsed by ParseEnvAssignments at spawn; CCMGR_* names are ignored (reserved).
+        // The GLOBAL extra environment injected into EVERY spawned session (Claude AND Codex), edited
+        // in the Settings cog's "Environment variables" area (Global tab) as a multi-line NAME=VALUE
+        // list (one per line; an old ';'-delimited single line still parses). Parsed by
+        // ParseEnvAssignments; merged with the PER-DIRECTORY overrides (dir-env.json, NOT stored here —
+        // it's keyed by working dir) at spawn via MergeSessionEnv/ResolveSessionEnv, per-dir winning.
+        // CCMGR_* names are dropped (reserved for hook correlation); AM_SESSION/WT_SESSION are set by
+        // the connection and a user value is ignored.
         std::wstring env{};
         // Agentmaster (native-exe-only policy): an explicit override path to the native claude.exe.
         // "" => auto-detect (PATH claude.exe, ~/.local/bin\claude.exe, or a claude.cmd's npm binary —

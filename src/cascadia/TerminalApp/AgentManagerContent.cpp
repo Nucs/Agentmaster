@@ -1701,7 +1701,13 @@ namespace winrt::TerminalApp::implementation
             bar.Children().Append(Text(L"session in", 13, false, 0.6));
 
             _cwdBox = TextBox{};
-            _cwdBox.Width(504); // Agentmaster: 40% wider than the original 360, so longer paths are readable
+            // Agentmaster: 504 (the old fixed width) is now the MINIMUM; the box grows with its typed
+            // content — a NoWrap TextBox in the horizontal launch bar measures to its text — capped by a
+            // window-relative MaxWidth (set in _root's SizeChanged below) so a long path never pushes the
+            // Launch button off-screen. Left alignment keeps it content-sized rather than stretched-to-fill.
+            _cwdBox.MinWidth(504);
+            _cwdBox.MaxWidth(504); // seed; widened to (window width - box-left - button reserve) on SizeChanged
+            _cwdBox.HorizontalAlignment(HorizontalAlignment::Left);
             _cwdBox.PlaceholderText(L"working directory (the M axis)");
             AgentSetTip(_cwdBox, L"Where to launch: a working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders."); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
             {
@@ -1827,12 +1833,39 @@ namespace winrt::TerminalApp::implementation
             cwdCol.Children().Append(_cwdBox);
             _cwdUnderline = Border{};
             _cwdUnderline.Height(2);
-            _cwdUnderline.Width(504); // match _cwdBox.Width(504)
-            _cwdUnderline.HorizontalAlignment(HorizontalAlignment::Left);
+            // Stretch (no fixed width) so the underline always spans the box's CURRENT width: the box now
+            // grows with content and cwdCol's width tracks it, so a stretched underline stays matched.
+            _cwdUnderline.HorizontalAlignment(HorizontalAlignment::Stretch);
             _cwdUnderline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
             _cwdUnderline.Background(Fill(0x00, 0x00, 0x00, 0x00)); // transparent = neutral; kept present so painting it never reflows the bar
             cwdCol.Children().Append(_cwdUnderline);
             bar.Children().Append(cwdCol);
+
+            // Agentmaster: cap the cwd box's growth so a long path can't push the Launch/Fork buttons off
+            // the right edge. The box grows with content between its 504 min and this max; the max is
+            // (window width) minus the box's live left offset (the "Agentmaster — launch a … session in"
+            // prefix, read via TransformToVisual so it tracks that text) minus a reserve for the Launch/Fork
+            // buttons on the right. Recomputed on every resize; setting the box's MaxWidth never resizes
+            // _root (the pane/window owns _root's size), so there's no layout loop.
+            if (_root)
+            {
+                _root.SizeChanged([this](const IInspectable&, const SizeChangedEventArgs& e) {
+                    if (!_cwdBox)
+                    {
+                        return;
+                    }
+                    double boxLeft = 360.0; // fallback if the box isn't arranged yet on the first pass
+                    try
+                    {
+                        boxLeft = _cwdBox.TransformToVisual(_root).TransformPoint(Point{ 0.0f, 0.0f }).X;
+                    }
+                    catch (...)
+                    {
+                    }
+                    const double maxW = e.NewSize().Width - boxLeft - 200.0; // 200 ~= Launch + Fork + spacing + margin
+                    _cwdBox.MaxWidth(std::max<double>(504.0, maxW));
+                });
+            }
 
             _launchBtn = Button{};
             _launchBtn.Content(winrt::box_value(L"Launch Claude"));
@@ -5781,12 +5814,9 @@ namespace winrt::TerminalApp::implementation
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
         AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
         panel.Children().Append(_setIncludeCoAuthored);
-        _setEnv = TextBox{};
-        _setEnv.Header(winrt::box_value(L"Environment variables (applied to every session)"));
-        _setEnv.PlaceholderText(L"NAME=VALUE;NAME=VALUE  (e.g. FOO=bar;HTTPS_PROXY=http://h:8080)");
-        _setEnv.TextWrapping(TextWrapping::Wrap);
-        AgentSetTip(_setEnv, L"Extra environment variables set on every launched session \x2014 a semicolon-separated NAME=VALUE list (e.g. HTTPS_PROXY=http://h:8080).");
-        panel.Children().Append(_setEnv);
+        // ENV_VARS.md: the two-tab "Environment variables" area (Global / Per-directory) replaces the old
+        // single ;-delimited box. Built in its own method to keep this builder readable + the diff local.
+        _BuildEnvVarsArea(panel);
 
         // CLAUDE BINARY (native-exe-only policy): the auto-detected native claude.exe + an optional
         // explicit override. The whole app gates launch/fork/resume on resolving one (ResolveClaudeExe);
@@ -6026,10 +6056,8 @@ namespace winrt::TerminalApp::implementation
         {
             _setIncludeCoAuthored.IsOn(_appSettings.includeCoAuthoredBy);
         }
-        if (_setEnv)
-        {
-            _setEnv.Text(winrt::hstring{ _appSettings.env });
-        }
+        // ENV_VARS.md: seed both env tabs (global text + the per-directory draft from dir-env.json).
+        _LoadEnvVarsArea();
         if (_setClaudeExePath)
         {
             _setClaudeExePath.Text(winrt::hstring{ _appSettings.claudeExePath });
@@ -6208,10 +6236,8 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.includeCoAuthoredBy = _setIncludeCoAuthored.IsOn();
         }
-        if (_setEnv)
-        {
-            _appSettings.env = std::wstring{ _setEnv.Text() };
-        }
+        // ENV_VARS.md: global editor -> _appSettings.env; flush the per-directory draft -> dir-env.json.
+        _SaveEnvVarsArea();
         if (_setClaudeExePath)
         {
             std::wstring p{ _setClaudeExePath.Text() };
@@ -6353,6 +6379,407 @@ namespace winrt::TerminalApp::implementation
         // the shared engine's cached path; ClaudeAvailable() flips accordingly).
         ::Agentmaster::RefreshClaudeExe(_appSettings.claudeExePath);
         _HideSettings();
+    }
+
+    // === ENV_VARS.md: the "Environment variables" area (Global / Per-directory two-tab editor) ===========
+    // The plumbing already merges global + per-dir at spawn (ResolveSessionEnv); this is the editor.
+
+    void AgentManagerContent::_BuildEnvVarsArea(const StackPanel& panel)
+    {
+        // Section header (matches the "CLAUDE SESSIONS" style above it).
+        panel.Children().Append(Text(L"ENVIRONMENT VARIABLES", 11, true, 0.6));
+
+        // Tab toggle: [ Global ][ Per-directory ] — two Buttons swapping the two panels (the LOCAL/GLOBAL
+        // scope-toggle idiom; not a Pivot, which themes unreliably under XAML Islands).
+        auto tabs = StackPanel{};
+        tabs.Orientation(Orientation::Horizontal);
+        tabs.Spacing(0);
+        tabs.Margin(Thickness{ 0, 2, 0, 4 });
+        _setEnvTabGlobal = Button{};
+        _setEnvTabGlobal.Content(box_value(L"Global"));
+        _setEnvTabGlobal.FontSize(12);
+        _setEnvTabGlobal.Padding(Thickness{ 12, 2, 12, 2 });
+        _setEnvTabGlobal.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        AgentSetTip(_setEnvTabGlobal, L"Variables applied to EVERY session (Claude and Codex), in every directory.");
+        _setEnvTabGlobal.Click([this](const IInspectable&, const RoutedEventArgs&) { _SwitchEnvTab(false); });
+        _setEnvTabDir = Button{};
+        _setEnvTabDir.Content(box_value(L"Per-directory"));
+        _setEnvTabDir.FontSize(12);
+        _setEnvTabDir.Padding(Thickness{ 12, 2, 12, 2 });
+        _setEnvTabDir.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        AgentSetTip(_setEnvTabDir, L"Variables added only for sessions launched in a chosen working directory \x2014 they OVERRIDE a Global variable of the same name.");
+        _setEnvTabDir.Click([this](const IInspectable&, const RoutedEventArgs&) { _SwitchEnvTab(true); });
+        tabs.Children().Append(_setEnvTabGlobal);
+        tabs.Children().Append(_setEnvTabDir);
+        panel.Children().Append(tabs);
+
+        // A multi-line NAME=VALUE editor, monospaced; its OWN border is suppressed so the wrapping Border
+        // (recolored by the live lexer) is the status indicator.
+        const auto makeEditor = [](TextBox& box) {
+            box = TextBox{};
+            box.AcceptsReturn(true);
+            box.TextWrapping(TextWrapping::Wrap);
+            box.FontFamily(FontFamily{ L"Consolas" });
+            box.FontSize(12);
+            box.MinHeight(84);
+            box.MaxHeight(168);
+            box.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            ScrollViewer::SetVerticalScrollBarVisibility(box, ScrollBarVisibility::Auto);
+        };
+        const auto wrapInBorder = [](const TextBox& box, Border& border) {
+            border = Border{};
+            border.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            border.CornerRadius(CornerRadius{ 2, 2, 2, 2 });
+            border.BorderBrush(Fill(0x60, 0x80, 0x80, 0x80)); // subtle neutral until the lexer paints it
+            border.Child(box);
+        };
+
+        // --- Global panel ---
+        _envGlobalPanel = StackPanel{};
+        _envGlobalPanel.Spacing(2);
+        {
+            auto hint = Text(L"One NAME=VALUE per line (e.g. HTTPS_PROXY=http://h:8080). Applied to every session.", 11, false, 0.55);
+            hint.TextWrapping(TextWrapping::Wrap);
+            _envGlobalPanel.Children().Append(hint);
+        }
+        makeEditor(_setEnv);
+        _setEnv.PlaceholderText(L"NAME=VALUE\nNAME=VALUE");
+        AgentSetTip(_setEnv, L"Environment variables applied to every launched session (Claude and Codex). One NAME=VALUE per line; '#' starts a comment.");
+        _setEnv.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshEnvLex(false); });
+        wrapInBorder(_setEnv, _setEnvBorder);
+        _envGlobalPanel.Children().Append(_setEnvBorder);
+        _setEnvStatus = Text(L"", 11, false, 0.7);
+        _envGlobalPanel.Children().Append(_setEnvStatus);
+        panel.Children().Append(_envGlobalPanel);
+
+        // --- Per-directory panel (hidden until its tab is picked) ---
+        _envDirPanel = StackPanel{};
+        _envDirPanel.Spacing(2);
+        _envDirPanel.Visibility(Visibility::Collapsed);
+        {
+            auto hint = Text(L"Pick a working directory, then add variables for sessions launched there \x2014 they override the Global ones of the same name.  \x25CF = already has variables.", 11, false, 0.55);
+            hint.TextWrapping(TextWrapping::Wrap);
+            _envDirPanel.Children().Append(hint);
+        }
+        _setEnvDirFilter = TextBox{};
+        _setEnvDirFilter.PlaceholderText(L"type to filter directories\x2026");
+        _setEnvDirFilter.FontSize(12);
+        _setEnvDirFilter.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RebuildEnvDirList(); });
+        _envDirPanel.Children().Append(_setEnvDirFilter);
+        _setEnvDirList = ListBox{};
+        _setEnvDirList.MaxHeight(120);
+        _setEnvDirList.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) {
+            if (!_setEnvDirList)
+            {
+                return;
+            }
+            const auto sel = _setEnvDirList.SelectedItem().try_as<ListBoxItem>();
+            if (!sel)
+            {
+                return; // a Clear() during rebuild fires SelectionChanged with no item — keep editing the current dir
+            }
+            const std::wstring composite{ winrt::unbox_value_or<winrt::hstring>(sel.Tag(), L"") };
+            const auto sepPos = composite.find(L'\x1f');
+            if (sepPos == std::wstring::npos)
+            {
+                return;
+            }
+            _SelectEnvDir(composite.substr(0, sepPos), composite.substr(sepPos + 1));
+        });
+        _envDirPanel.Children().Append(_setEnvDirList);
+        makeEditor(_setEnvDir);
+        _setEnvDir.IsEnabled(false);
+        _setEnvDir.PlaceholderText(L"select a directory above");
+        _setEnvDir.Header(box_value(L"Variables for the selected directory"));
+        _setEnvDir.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshEnvLex(true); });
+        wrapInBorder(_setEnvDir, _setEnvDirBorder);
+        _envDirPanel.Children().Append(_setEnvDirBorder);
+        _setEnvDirStatus = Text(L"", 11, false, 0.7);
+        _envDirPanel.Children().Append(_setEnvDirStatus);
+        panel.Children().Append(_envDirPanel);
+
+        _SwitchEnvTab(false); // start on Global (also styles the tab buttons)
+    }
+
+    void AgentManagerContent::_SwitchEnvTab(bool perDir)
+    {
+        _envTabIsDir = perDir;
+        if (_envGlobalPanel)
+        {
+            _envGlobalPanel.Visibility(perDir ? Visibility::Collapsed : Visibility::Visible);
+        }
+        if (_envDirPanel)
+        {
+            _envDirPanel.Visibility(perDir ? Visibility::Visible : Visibility::Collapsed);
+        }
+        const auto style = [](const Button& b, bool active) {
+            if (!b)
+            {
+                return;
+            }
+            b.Background(active ? Fill(0xFF, 0x0E, 0x63, 0x9C) : Fill(0x00, 0x00, 0x00, 0x00));
+            b.Foreground(active ? Fill(0xFF, 0xFF, 0xFF, 0xFF) : Fill(0xFF, 0xB0, 0xB0, 0xB0));
+        };
+        style(_setEnvTabGlobal, !perDir);
+        style(_setEnvTabDir, perDir);
+        if (perDir)
+        {
+            _RebuildEnvDirList();
+        }
+    }
+
+    void AgentManagerContent::_RebuildEnvDirList()
+    {
+        if (!_setEnvDirList)
+        {
+            return;
+        }
+        const auto lc = [](std::wstring s) {
+            for (auto& c : s)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            return s;
+        };
+        const auto isBlank = [](const std::wstring& v) {
+            for (const wchar_t c : v)
+            {
+                if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        // Candidates: every live session's working dir UNION every dir already holding env in the draft.
+        std::vector<std::pair<std::wstring, std::wstring>> cands; // (NormDirKey, displayPath)
+        std::unordered_set<std::wstring> seen;
+        if (_registry)
+        {
+            for (const auto& s : _registry->Snapshot())
+            {
+                if (s.workingDir.empty())
+                {
+                    continue;
+                }
+                const std::wstring key = ::Agentmaster::NormDirKey(s.workingDir);
+                if (seen.insert(key).second)
+                {
+                    cands.emplace_back(key, s.workingDir);
+                }
+            }
+        }
+        std::unordered_set<std::wstring> withEnv;
+        for (const auto& [k, env] : _dirEnvDraft)
+        {
+            if (!isBlank(env))
+            {
+                withEnv.insert(k);
+            }
+            if (seen.insert(k).second)
+            {
+                cands.emplace_back(k, k); // no live session in this dir — show the key itself
+            }
+        }
+
+        const std::wstring filt = lc(std::wstring{ _setEnvDirFilter ? _setEnvDirFilter.Text() : winrt::hstring{} });
+        std::vector<std::pair<std::wstring, std::wstring>> shown;
+        for (const auto& c : cands)
+        {
+            if (filt.empty() || lc(c.second).find(filt) != std::wstring::npos)
+            {
+                shown.push_back(c);
+            }
+        }
+        std::sort(shown.begin(), shown.end(), [&](const auto& a, const auto& b) {
+            const bool ea = withEnv.count(a.first) != 0;
+            const bool eb = withEnv.count(b.first) != 0;
+            if (ea != eb)
+            {
+                return ea; // dirs that already have env sort first
+            }
+            return lc(a.second) < lc(b.second);
+        });
+
+        _setEnvDirList.Items().Clear();
+        for (const auto& [key, disp] : shown)
+        {
+            ListBoxItem item{};
+            const bool has = withEnv.count(key) != 0;
+            item.Content(box_value(winrt::hstring{ (has ? std::wstring{ L"\x25CF  " } : std::wstring{ L"     " }) + disp }));
+            item.Tag(box_value(winrt::hstring{ key + L"\x1f" + disp })); // (NormDirKey, displayPath) for SelectionChanged
+            item.FontSize(12);
+            _setEnvDirList.Items().Append(item);
+        }
+    }
+
+    void AgentManagerContent::_SelectEnvDir(const std::wstring& normKey, const std::wstring& displayPath)
+    {
+        if (!_setEnvDir)
+        {
+            return;
+        }
+        // The previously-edited dir's text is already mirrored into _dirEnvDraft by _RefreshEnvLex(true)
+        // (fired on every keystroke), so switching keys loses nothing.
+        _envEditingDirKey = normKey;
+        std::wstring text;
+        for (const auto& [k, env] : _dirEnvDraft)
+        {
+            if (k == normKey)
+            {
+                text = env;
+                break;
+            }
+        }
+        _setEnvDir.IsEnabled(true);
+        _setEnvDir.Header(box_value(winrt::hstring{ L"Variables for: " + displayPath }));
+        _setEnvDir.Text(winrt::hstring{ text }); // fires _RefreshEnvLex(true) -> lex + (idempotent) draft upsert under normKey
+    }
+
+    void AgentManagerContent::_RefreshEnvLex(bool perDir)
+    {
+        const auto box = perDir ? _setEnvDir : _setEnv;
+        const auto border = perDir ? _setEnvDirBorder : _setEnvBorder;
+        const auto status = perDir ? _setEnvDirStatus : _setEnvStatus;
+        if (!box)
+        {
+            return;
+        }
+        const std::wstring text{ box.Text() };
+
+        // Keep the per-dir draft current as the user types (the global side writes _appSettings only on Save).
+        if (perDir && !_envEditingDirKey.empty())
+        {
+            bool found = false;
+            for (auto& [k, env] : _dirEnvDraft)
+            {
+                if (k == _envEditingDirKey)
+                {
+                    env = text;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                _dirEnvDraft.emplace_back(_envEditingDirKey, text);
+            }
+        }
+
+        const auto res = ::Agentmaster::LexEnvText(text);
+
+        // Same palette as _ValidateLaunchBox: green ok / amber warn / red error; a subtle gray at rest.
+        const SolidColorBrush green = Fill(0xFF, 0x4C, 0xAF, 0x50);
+        const SolidColorBrush red = Fill(0xFF, 0xE5, 0x39, 0x35);
+        const SolidColorBrush amber = Fill(0xFF, 0xDA, 0xA5, 0x20);
+        const SolidColorBrush neutral = Fill(0x60, 0x80, 0x80, 0x80);
+        const SolidColorBrush dim = Fill(0xFF, 0x99, 0x99, 0x99);
+
+        const bool empty = (res.ok == 0 && res.warn == 0 && res.error == 0);
+        if (border)
+        {
+            const SolidColorBrush bc = empty ? neutral :
+                                       res.worst == ::Agentmaster::EnvLineKind::Error ? red :
+                                       res.worst == ::Agentmaster::EnvLineKind::Warn  ? amber :
+                                                                                        green;
+            border.BorderBrush(bc);
+        }
+        if (status)
+        {
+            std::wstring msg;
+            SolidColorBrush fg = dim;
+            if (empty)
+            {
+                msg = (perDir && _envEditingDirKey.empty()) ? L"Select a directory to edit its variables." : L"No variables.";
+            }
+            else if (res.error > 0)
+            {
+                msg = L"\x2715 " + res.firstIssue + L" (line " + std::to_wstring(res.firstIssueLine) + L")";
+                fg = red;
+            }
+            else if (res.warn > 0)
+            {
+                msg = L"\x26A0 " + std::to_wstring(res.ok) + (res.ok == 1 ? L" variable \x00B7 " : L" variables \x00B7 ") + res.firstIssue + L" (line " + std::to_wstring(res.firstIssueLine) + L")";
+                fg = amber;
+            }
+            else
+            {
+                msg = L"\x2713 " + std::to_wstring(res.ok) + (res.ok == 1 ? L" variable" : L" variables");
+                fg = green;
+            }
+            status.Text(winrt::hstring{ msg });
+            status.Foreground(fg);
+        }
+    }
+
+    void AgentManagerContent::_LoadEnvVarsArea()
+    {
+        // Global: show the stored env one-per-line. A legacy ';'-delimited value reads as multi-line ('; '
+        // is only ever a separator — values can't contain it — so this is lossless), then saves back
+        // newline-delimited (ParseEnvAssignments accepts both).
+        if (_setEnv)
+        {
+            std::wstring disp = _appSettings.env;
+            for (auto& c : disp)
+            {
+                if (c == L';')
+                {
+                    c = L'\n';
+                }
+            }
+            _setEnv.Text(winrt::hstring{ disp });
+        }
+        // Per-directory: load the on-disk map into the editable draft; reset the selector + editor (the
+        // draft is the working copy until Save, so Cancel discards any per-dir edits made in the modal).
+        _dirEnvDraft = ::Agentmaster::LoadDirEnv();
+        _envEditingDirKey.clear();
+        if (_setEnvDirFilter)
+        {
+            _setEnvDirFilter.Text(L"");
+        }
+        if (_setEnvDir)
+        {
+            _setEnvDir.Text(L"");
+            _setEnvDir.IsEnabled(false);
+            _setEnvDir.Header(box_value(L"Variables for the selected directory"));
+        }
+        _RebuildEnvDirList();
+        _RefreshEnvLex(false);
+        _RefreshEnvLex(true);
+        _SwitchEnvTab(false); // always open on the Global tab
+    }
+
+    void AgentManagerContent::_SaveEnvVarsArea()
+    {
+        if (_setEnv)
+        {
+            _appSettings.env = std::wstring{ _setEnv.Text() }; // newline-delimited; ParseEnvAssignments handles it
+        }
+        // Flush the per-directory draft (the active editor is already mirrored in by _RefreshEnvLex). Drop
+        // blank entries so a cleared editor removes a dir (matches SetDirEnv / DeserializeDirEnv semantics).
+        std::vector<std::pair<std::wstring, std::wstring>> clean;
+        clean.reserve(_dirEnvDraft.size());
+        for (const auto& [k, env] : _dirEnvDraft)
+        {
+            bool blank = true;
+            for (const wchar_t c : env)
+            {
+                if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+                {
+                    blank = false;
+                    break;
+                }
+            }
+            if (!k.empty() && !blank)
+            {
+                clean.emplace_back(k, env);
+            }
+        }
+        ::Agentmaster::SaveDirEnv(clean);
     }
 
     void AgentManagerContent::SetQuitForUpdateHandler(std::function<void()> handler)

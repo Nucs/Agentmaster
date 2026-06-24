@@ -125,6 +125,18 @@ namespace Agentmaster
     std::optional<std::wstring> GetDirColor(const std::wstring& dir);
     void SetDirColor(const std::wstring& dir, const std::optional<std::wstring>& colorHex);
 
+    // Per-directory env overrides on disk (dir-env.json) — a NormDirKey -> env-text map (env-text is
+    // the multi-line NAME=VALUE block the Settings cog's Per-directory tab edits). Merged OVER the
+    // global AppSettings.env at spawn (MergeSessionEnv / ResolveSessionEnv). Same shape + thread-safe
+    // load-modify-save lifecycle as dir-colors.json; the cog is the sole writer. SetDirEnv with a blank
+    // block removes the dir's entry.
+    std::wstring SerializeDirEnv(const std::vector<std::pair<std::wstring, std::wstring>>& entries);
+    std::vector<std::pair<std::wstring, std::wstring>> DeserializeDirEnv(std::wstring_view text);
+    void SaveDirEnv(const std::vector<std::pair<std::wstring, std::wstring>>& entries);
+    std::vector<std::pair<std::wstring, std::wstring>> LoadDirEnv();
+    std::wstring GetDirEnv(const std::wstring& dir);
+    void SetDirEnv(const std::wstring& dir, std::wstring_view envText);
+
     // ---- tab naming + per-directory color (pure; testable) ----
     // Derive a tab/session display name from a working directory: walk up past generic build/
     // output/structural segments (bin/obj/Debug/... the top 20) to the first meaningful folder,
