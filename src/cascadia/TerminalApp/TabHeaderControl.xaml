@@ -148,8 +148,8 @@
                   IsHitTestVisible=False: decorative, never eats a tab click. Tune knobs: Width/Height
                   (size), RotateTransform.Angle (NW tilt), Margin (NW offset).  -->
             <Path x:Name="HeaderAgentFavoriteCrown"
-                  Width="8"
-                  Height="5"
+                  Width="9"
+                  Height="6"
                   Margin="1,0,0,0"
                   HorizontalAlignment="Left"
                   VerticalAlignment="Top"
@@ -162,8 +162,8 @@
                   Visibility="{x:Bind TabStatus.AgentFavoriteVisible, Mode=OneWay}">
                 <Path.RenderTransform>
                     <RotateTransform Angle="-20"
-                                     CenterX="4"
-                                     CenterY="2.5" />
+                                     CenterX="4.5"
+                                     CenterY="3" />
                 </Path.RenderTransform>
             </Path>
         </Grid>
