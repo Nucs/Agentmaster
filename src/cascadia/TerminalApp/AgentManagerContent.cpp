@@ -5146,19 +5146,52 @@ namespace winrt::TerminalApp::implementation
         return menu;
     }
 
-    // Agentmaster: the Flight-Plan message right-click menu. Per-prompt queue ops (Move up / Move
-    // down / Delete) appear only on UPCOMING rows (a sent/historical row can't be reordered);
-    // Archive (the whole session) is always offered. The queue ops act on `promptId` (the
+    // Agentmaster: the Flight-Plan message right-click menu. Copy (this prompt's text) is offered on
+    // EVERY row; the per-prompt queue ops (Move up / Move down / Delete) appear only on UPCOMING rows
+    // (a sent/historical row can't be reordered or unqueued). The queue ops act on `promptId` (the
     // right-clicked row, selecting it first) and — like _MakeSessionMenu — defer one tick so the
-    // closing flyout's focus restore doesn't race the list rebuild.
+    // closing flyout's focus restore doesn't race the list rebuild. (No session-level item here — the
+    // whole-session verbs live on the board card / tree row menu, _MakeSessionMenu.)
     MenuFlyout AgentManagerContent::_MakePromptMenu(const std::wstring& promptId, bool upcoming)
     {
         MenuFlyout menu;
         auto disp = _dispatcher;
         auto weak = get_weak();
 
+        // Copy this prompt's text to the clipboard — every row, sent or upcoming. Reads the live
+        // queue at click time so it copies the current body; no list rebuild, so no defer needed.
+        MenuFlyoutItem copyItem;
+        copyItem.Text(L"Copy");
+        AgentSetTip(copyItem, L"Copy this prompt's text to the clipboard.");
+        copyItem.Click([weak, promptId](const IInspectable&, const RoutedEventArgs&) {
+            auto self = weak.get();
+            if (!self || !self->_registry || self->_selectedId.empty())
+            {
+                return;
+            }
+            std::wstring text;
+            if (const auto s = self->_registry->Get(self->_selectedId))
+            {
+                for (const auto& p : s->queue)
+                {
+                    if (p.id == promptId)
+                    {
+                        text = p.text.empty() ? p.label : p.text;
+                        break;
+                    }
+                }
+            }
+            if (!text.empty())
+            {
+                CopyTextToClipboard(text);
+            }
+        });
+        menu.Items().Append(copyItem);
+
         if (upcoming)
         {
+            menu.Items().Append(MenuFlyoutSeparator{}); // divide Copy from the queue ops
+
             MenuFlyoutItem up;
             up.Text(L"Move up");
             AgentSetTip(up, L"Move this queued prompt earlier in the send order.");
@@ -5206,29 +5239,7 @@ namespace winrt::TerminalApp::implementation
                 }
             });
             menu.Items().Append(del);
-
-            menu.Items().Append(MenuFlyoutSeparator{});
         }
-
-        // Close — shut the session down (FAVORITES.md: the "Close" verb that replaced Archive/Delete).
-        // Keeps the record (always archived) so it stays in Sessions, resumable anytime.
-        MenuFlyoutItem closeItem;
-        closeItem.Text(L"Close session");
-        AgentSetTip(closeItem, L"Close this session \x2014 shut its tab down. It stays in Sessions and can be resumed anytime (the conversation on disk is never deleted).");
-        closeItem.Click([weak, disp](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak]() { if (auto self = weak.get()) { if (!self->_selectedId.empty()) { self->_RequestArchive(self->_selectedId); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (!self->_selectedId.empty())
-                {
-                    self->_RequestArchive(self->_selectedId);
-                }
-            }
-        });
-        menu.Items().Append(closeItem);
 
         return menu;
     }
@@ -7263,13 +7274,13 @@ namespace winrt::TerminalApp::implementation
                 _NotifyLensChanged(); // M10
                 _Refresh();
             });
-            // Right-click menu: queue ops (Move up / Move down / Delete) on UPCOMING rows only
-            // (a sent/historical row can't be reordered), plus Archive session always. showOrigin
-            // is true for the SENT summary, false for the UPCOMING queue.
+            // Right-click menu: Copy (this prompt's text) on every row, plus queue ops (Move up /
+            // Move down / Delete) on UPCOMING rows only (a sent/historical row can't be reordered).
+            // showOrigin is true for the SENT summary, false for the UPCOMING queue.
             rowBtn.ContextFlyout(_MakePromptMenu(pid, !showOrigin));
             AgentSetTip(rowBtn, showOrigin ?
-                                    winrt::hstring{ L"A message this session already received \x2014 right-click to archive the session." } :
-                                    winrt::hstring{ L"A queued prompt \x2014 click to select it; right-click to move or delete it." });
+                                    winrt::hstring{ L"A message this session already received \x2014 right-click to copy it." } :
+                                    winrt::hstring{ L"A queued prompt \x2014 click to select it; right-click to copy, move or delete it." });
             _planListHost.Children().Append(rowBtn);
         };
 
