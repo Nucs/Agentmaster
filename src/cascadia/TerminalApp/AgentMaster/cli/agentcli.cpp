@@ -410,7 +410,17 @@ namespace
             lc.sessionId = ResolveLiveId(lc.facts, pres ? pres->sessionId : std::wstring_view{});
             if (!lc.sessionId.empty())
             {
-                TranscriptTimes(lc.facts.cwd, lc.sessionId, lc.createdMs, lc.lastActivityMs);
+                int64_t mtimeLast = 0;
+                TranscriptTimes(lc.facts.cwd, lc.sessionId, lc.createdMs, mtimeLast); // ctime=created
+                // last-activity is LINE-DERIVED, not the file mtime: `claude --resume` + /model /
+                // permission-mode / shell-cwd changes append untimestamped state lines that bump the
+                // mtime without being activity (see ReadTranscriptLastActivityTail). mtime is only the
+                // degenerate fallback when no timestamped conversation line is found.
+                lc.lastActivityMs = ReadTranscriptLastActivityTail(lc.facts.cwd, lc.sessionId);
+                if (!lc.lastActivityMs)
+                {
+                    lc.lastActivityMs = mtimeLast;
+                }
             }
             f.live.push_back(std::move(lc));
         }
@@ -694,7 +704,10 @@ namespace
                 }
                 if (!lastMs)
                 {
-                    lastMs = l;
+                    // LINE-DERIVED last-activity (not the file mtime — see ReadTranscriptLastActivityTail);
+                    // mtime `l` is only the degenerate fallback when no timestamped conversation line exists.
+                    const int64_t line = ReadTranscriptLastActivityTail(cwd, s.id);
+                    lastMs = line ? line : l;
                 }
             }
         }
