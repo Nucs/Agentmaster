@@ -129,6 +129,7 @@ namespace winrt::TerminalApp::implementation
         void SetAgentCopyMenuVisible(bool visible); // Agentmaster: show/hide the "Copy >" session-field submenu (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentMarkUnreadVisible(bool visible); // Agentmaster: show/hide the "Mark Unread" item (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentFavoriteState(bool visible, bool isFavorite); // Agentmaster (FAVORITES.md): show/hide the "Favorite"/"Unfavorite" item + set its label by the session's current star (managed agent-session tabs only; page-driven at flyout-open)
+        void SetFavoriteAndCloseAllVisible(bool visible); // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item (shown only when the window hosts >=1 managed session; page-driven at flyout-open)
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
@@ -147,6 +148,8 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> MarkUnreadRequested; // Agentmaster: context-menu "Mark Unread" -> page flashes this tab's red ring until visited (even if it's the focused tab)
         til::event<winrt::delegate<>> FavoriteRequested; // Agentmaster (FAVORITES.md): context-menu "Favorite"/"Unfavorite" -> page toggles this tab's session star (SessionStore), the same toggle as the Sessions page's ★ column
         til::event<winrt::delegate<>> CloseTabsBeforeRequested; // Agentmaster: context-menu "Close > Close tabs to the left" -> page closes every tab left of this one (skipping the pinned Manager tab)
+        til::event<winrt::delegate<>> CloseAllTabsRequested; // Agentmaster: context-menu "Close > Close all tabs" -> page closes every tab in this window (skipping the pinned Manager tab)
+        til::event<winrt::delegate<>> FavoriteAndCloseAllTabsRequested; // Agentmaster (FAVORITES.md): context-menu "Close > ★ Favorite & close all tabs" -> page stars every managed session, then closes every tab
         til::event<winrt::delegate<int32_t /*which*/>> CopySessionFieldRequested; // Agentmaster: context-menu "Copy > <field>" -> page copies that field of this tab's managed session via the shared CopySessionField action (the same options as the per-tab overlay's copy button); `which` is the copy-menu code (see AgentCopyActions.h)
         til::event<winrt::delegate<winrt::hstring /*title*/, winrt::hstring /*body*/, winrt::TerminalApp::IPaneContent /*content*/>> TabToastNotificationRequested;
         til::typed_event<IInspectable, IInspectable> TaskbarProgressChanged;
@@ -187,6 +190,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeOtherTabsMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsBeforeMenuItem{}; // Agentmaster: "Close tabs to the left" (the left-hand twin of _closeTabsAfterMenuItem)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsAfterMenuItem{};
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeAllTabsMenuItem{}; // Agentmaster: "Close all tabs" — the whole-window twin of "Close other tabs"
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _favoriteAndCloseAllTabsMenuItem{}; // Agentmaster (FAVORITES.md): "★ Favorite & close all tabs" — star every managed session, then close all; member so the page can show/hide it per whether the window hosts a managed session (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closePaneMenuItem{};
         // Agentmaster: the "Move tab" / "Close" sub-menus and the "Close tab" item are kept
         // as members (not locals in _CreateContextMenu) so the pinned Manager tab can gray

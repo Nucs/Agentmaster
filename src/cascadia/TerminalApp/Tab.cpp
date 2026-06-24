@@ -1914,7 +1914,11 @@ namespace winrt::TerminalApp::implementation
         // Create a sub-menu for our extended move tab items.
         // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
         // out the whole "Move tab" sub-menu. See DisableCloseAndMoveMenuItems().
+        Controls::FontIcon moveSubMenuSymbol; // Agentmaster: a glyph on the "Move tab" submenu header
+        moveSubMenuSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        moveSubMenuSymbol.Glyph(L"\xE7C2"); // Move
         _moveSubMenu.Text(RS_(L"TabMoveSubMenu"));
+        _moveSubMenu.Icon(moveSubMenuSymbol);
         _moveSubMenu.Items().Append(_moveToNewWindowMenuItem);
         _moveSubMenu.Items().Append(_moveRightMenuItem);
         _moveSubMenu.Items().Append(_moveLeftMenuItem);
@@ -1981,6 +1985,38 @@ namespace winrt::TerminalApp::implementation
         WUX::Controls::ToolTipService::SetToolTip(_closeOtherTabsMenuItem, box_value(closeOtherTabsToolTip));
         Automation::AutomationProperties::SetHelpText(_closeOtherTabsMenuItem, closeOtherTabsToolTip);
 
+        // Close all tabs (Agentmaster) — the whole-window twin of "Close other tabs": closes EVERY tab
+        // (this one included), skipping the pinned Manager tab. Raises an Agentmaster event; the page
+        // snapshots all tabs and routes them through the SAME _RemoveTabs chokepoint as "Close tabs to
+        // the left/right" (aggregate confirm + per-session archive bookkeeping + the Manager-tab skip).
+        _closeAllTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->CloseAllTabsRequested.raise();
+            }
+        });
+        _closeAllTabsMenuItem.Text(RS_(L"TabCloseAll"));
+        const auto closeAllTabsToolTip = RS_(L"TabCloseAllToolTip");
+
+        WUX::Controls::ToolTipService::SetToolTip(_closeAllTabsMenuItem, box_value(closeAllTabsToolTip));
+        Automation::AutomationProperties::SetHelpText(_closeAllTabsMenuItem, closeAllTabsToolTip);
+
+        // ★ Favorite & close all tabs (Agentmaster, FAVORITES.md) — star every managed session in the
+        // window, then close every tab: the batch twin of the single tab's "★ Favorite & Close" (a
+        // one-gesture "keep all of these + close"). Built COLLAPSED; the page shows it at flyout-open only
+        // when the window hosts >=1 managed session (SetFavoriteAndCloseAllVisible) — there is nothing to
+        // favorite otherwise. Raises FavoriteAndCloseAllTabsRequested; the page routes through _RemoveTabs
+        // with forceFavorite so the star disposition is pre-committed (a 2-button confirm, no re-offer).
+        _favoriteAndCloseAllTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->FavoriteAndCloseAllTabsRequested.raise();
+            }
+        });
+        _favoriteAndCloseAllTabsMenuItem.Text(L"\x2605 Favorite & close all tabs"); // ★ (star matches the close-confirm's "★ Favorite & Close All")
+        _favoriteAndCloseAllTabsMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only when the window hosts a managed session (page-driven)
+        WUX::Controls::ToolTipService::SetToolTip(_favoriteAndCloseAllTabsMenuItem, box_value(winrt::hstring{ L"Star every managed session (find them later in Sessions), then close all tabs" }));
+
         // Close
         // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
         // out the "Close tab" entry. See DisableCloseAndMoveMenuItems().
@@ -2004,10 +2040,16 @@ namespace winrt::TerminalApp::implementation
         // Create a sub-menu for our extended close items.
         // Agentmaster: kept as a member (not a local) so the pinned Manager tab can gray
         // out the whole "Close" sub-menu. See DisableCloseAndMoveMenuItems().
+        Controls::FontIcon closeSubMenuSymbol; // Agentmaster: a glyph on the "Close" submenu header (same Cancel/X as "Close tab")
+        closeSubMenuSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        closeSubMenuSymbol.Glyph(L"\xE711"); // Cancel
         _closeSubMenu.Text(RS_(L"TabCloseSubMenu"));
+        _closeSubMenu.Icon(closeSubMenuSymbol);
         _closeSubMenu.Items().Append(_closeTabsBeforeMenuItem); // Agentmaster: left, then right, then "other"
         _closeSubMenu.Items().Append(_closeTabsAfterMenuItem);
         _closeSubMenu.Items().Append(_closeOtherTabsMenuItem);
+        _closeSubMenu.Items().Append(_closeAllTabsMenuItem); // Agentmaster: close every tab in the window
+        _closeSubMenu.Items().Append(_favoriteAndCloseAllTabsMenuItem); // Agentmaster (FAVORITES.md): star all + close all (shown only when a managed session exists)
         flyout.Items().Append(_closeSubMenu);
 
         flyout.Items().Append(_closeTabMenuItem);
@@ -2328,6 +2370,13 @@ namespace winrt::TerminalApp::implementation
         // only the Manager as the "other" tab).
         _closeOtherTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs + 1);
 
+        // Agentmaster: "Close all tabs" / "★ Favorite & close all tabs" — enabled when there is at
+        // least one CLOSABLE tab (one past the reserved leading tabs the Manager occupies). Since this
+        // menu only ever appears on a non-Manager tab, that holds whenever the menu is shown, but gate
+        // it for robustness (and so it greys out in the degenerate [Manager only] strip).
+        _closeAllTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs);
+        _favoriteAndCloseAllTabsMenuItem.IsEnabled(numOfTabs > _reservedLeadingTabs);
+
         // Agentmaster: enabled only if there is a CLOSABLE tab to the left — i.e. a tab past the
         // reserved leading ones. From index 1 with the Manager at index 0 the only tab to the left
         // is the Manager (skipped by _RemoveTabs), so this stays disabled.
@@ -2405,6 +2454,17 @@ namespace winrt::TerminalApp::implementation
 
         _favoriteMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
         _favoriteMenuItem.Text(isFavorite ? L"Unfavorite" : L"Favorite");
+    }
+
+    // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item. Unlike
+    // the per-tab favorite (gated on THIS tab being a session), this is a WINDOW-scope action, so the page
+    // shows it when the window hosts >=1 managed session — there is nothing to favorite otherwise. Built
+    // collapsed in _AppendCloseMenuItems; the page calls this at flyout-open (alongside SetAgentFavoriteState).
+    void Tab::SetFavoriteAndCloseAllVisible(bool visible)
+    {
+        ASSERT_UI_THREAD();
+
+        _favoriteAndCloseAllTabsMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
     }
 
     void Tab::UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs, const uint32_t reservedLeading)

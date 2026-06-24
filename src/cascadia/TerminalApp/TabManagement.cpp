@@ -1088,12 +1088,46 @@ namespace winrt::TerminalApp::implementation
         _RemoveTabs(tabsToRemove);
     }
 
+    // Agentmaster: close EVERY tab in this window — the whole-window close driven by the tab
+    // context-menu "Close > Close all tabs" / "★ Favorite & close all tabs" items. Snapshots all tabs
+    // and hands them to _RemoveTabs, which owns the aggregate close confirmation, the per-session
+    // archive bookkeeping, AND the pinned-Manager-tab skip (it filters the Manager tab out, so it
+    // survives). favoriteFirst forwards to _RemoveTabs(forceFavorite): it stars every managed session
+    // before archiving and confirms with a 2-button "★ Favorite & Close All / Cancel All" (the favorite
+    // is already chosen), vs the neutral 3-way dialog for a plain close-all.
+    void TerminalPage::_CloseAllTabs(const bool favoriteFirst)
+    {
+        std::vector<winrt::TerminalApp::Tab> tabsToRemove;
+        std::copy(begin(_tabs), end(_tabs), std::back_inserter(tabsToRemove));
+        _RemoveTabs(tabsToRemove, favoriteFirst);
+    }
+
+    // Agentmaster (FAVORITES.md): does this window currently host at least one managed Claude/Codex
+    // session? Gates the visibility of the "★ Favorite & close all tabs" close-submenu item (there is
+    // nothing to favorite when only shell tabs are open). _claudeTabs maps sessionId -> the hosting tab
+    // for THIS window and entries are erased on archive/close/liveness, so a single live weak ref means
+    // a managed session is open here.
+    bool TerminalPage::_WindowHasManagedSession() const
+    {
+        for (const auto& kv : _claudeTabs)
+        {
+            if (kv.second.get())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Method Description:
     // - Closes provided tabs one by one
     // - Shows a single aggregate confirmation dialog upfront if the confirmOnClose setting warrants it.
     // Arguments:
     // - tabs - tabs to remove
-    safe_void_coroutine TerminalPage::_RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs)
+    // - forceFavorite - Agentmaster (FAVORITES.md): the caller already chose "★ Favorite & Close All"
+    //   (the "★ Favorite & close all tabs" menu item), so pre-commit the favorite disposition and show a
+    //   2-button confirm instead of re-offering it. Defaulted false for every existing caller.
+    safe_void_coroutine TerminalPage::_RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs, const bool forceFavorite)
     {
         // Agentmaster: never bulk-close the pinned, non-closable Manager tab. Upstream's
         // "Close other tabs" copies every tab but the focused one (which includes the Manager
@@ -1134,7 +1168,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        bool favoriteAll = false; // FAVORITES.md: set when the batch dialog's "Favorite & Close All" is chosen
+        bool favoriteAll = forceFavorite; // FAVORITES.md: set when the batch dialog's "Favorite & Close All" is chosen — OR pre-committed by the "★ Favorite & close all tabs" menu item (forceFavorite)
         if (managedCount > 0)
         {
             if (const auto presenter{ _dialogPresenter.get() })
@@ -1150,17 +1184,33 @@ namespace winrt::TerminalApp::implementation
                 // FAVORITES.md: Close always archives (keep the record); there is no Delete All. The
                 // sessions stay in the Sessions browser, resumable anytime; nothing on disk is deleted.
                 body += L" will be closed.\n\nThe sessions stay in the Sessions browser — resume any of them anytime (their conversation files on disk are kept). Other tabs are closed too.";
+                if (forceFavorite)
+                {
+                    body += L"\n\nEvery session will be starred (★) first so you can find them under the Favorite filter.";
+                }
 
-                const std::wstring titleStr = L"Close " + std::to_wstring(closable.size()) + (closable.size() == 1 ? L" tab?" : L" tabs?");
+                const auto verb = forceFavorite ? std::wstring{ L"Favorite & close " } : std::wstring{ L"Close " };
+                const std::wstring titleStr = verb + std::to_wstring(closable.size()) + (closable.size() == 1 ? L" tab?" : L" tabs?");
 
                 ContentDialog dialog;
                 dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
                 dialog.Title(winrt::box_value(winrt::hstring{ titleStr }));
                 dialog.Content(winrt::box_value(winrt::hstring{ body }));
-                dialog.PrimaryButtonText(L"Close All");
-                dialog.SecondaryButtonText(L"★ Favorite & Close All"); // FAVORITES.md: star every managed session, then close the batch
-                dialog.CloseButtonText(L"Cancel All");
-                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel All (the Close button)
+                if (forceFavorite)
+                {
+                    // The favorite disposition is already chosen ("★ Favorite & close all tabs"): a plain
+                    // 2-button confirm, no redundant "Close All" vs "Favorite & Close All" re-offer.
+                    dialog.PrimaryButtonText(L"★ Favorite & Close All");
+                    dialog.CloseButtonText(L"Cancel All");
+                    dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel All (the Close button)
+                }
+                else
+                {
+                    dialog.PrimaryButtonText(L"Close All");
+                    dialog.SecondaryButtonText(L"★ Favorite & Close All"); // FAVORITES.md: star every managed session, then close the batch
+                    dialog.CloseButtonText(L"Cancel All");
+                    dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel All (the Close button)
+                }
 
                 const auto result = co_await presenter.ShowDialog(dialog);
                 const auto strong = weak.get(); // ShowDialog awaits; re-acquire before touching state
@@ -1172,8 +1222,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     co_return; // Cancel All / dismiss -> stop the close
                 }
-                favoriteAll = (result == ContentDialogResult::Secondary); // Secondary == Favorite & Close All
-                // Primary (Close All) or Secondary (Favorite & Close All) -> fall through to the per-tab close below.
+                if (!forceFavorite)
+                {
+                    favoriteAll = (result == ContentDialogResult::Secondary); // Secondary == Favorite & Close All
+                }
+                // forceFavorite: favoriteAll already true; Primary (★ Favorite & Close All) == confirm.
+                // Otherwise Primary (Close All) or Secondary (Favorite & Close All) -> fall through to the per-tab close below.
             }
             // No presenter to confirm with -> close anyway (non-destructive; don't strand the close).
         }

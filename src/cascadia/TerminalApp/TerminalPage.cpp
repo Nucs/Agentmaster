@@ -2396,6 +2396,26 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster: context-menu "Close > Close all tabs" -> close EVERY tab in this window. Routed
+        // through _CloseAllTabs -> _RemoveTabs so it shares the aggregate confirmation, the per-session
+        // archive bookkeeping, and the pinned-Manager-tab skip (the Manager tab survives).
+        hostingTab.CloseAllTabsRequested([weakThis]() {
+            if (auto page{ weakThis.get() })
+            {
+                page->_CloseAllTabs(/*favoriteFirst*/ false);
+            }
+        });
+
+        // Agentmaster (FAVORITES.md): context-menu "Close > ★ Favorite & close all tabs" -> star every
+        // managed session, then close every tab. favoriteFirst makes _RemoveTabs pre-commit the favorite
+        // disposition (a 2-button confirm) instead of re-offering "★ Favorite & Close All" in the dialog.
+        hostingTab.FavoriteAndCloseAllTabsRequested([weakThis]() {
+            if (auto page{ weakThis.get() })
+            {
+                page->_CloseAllTabs(/*favoriteFirst*/ true);
+            }
+        });
+
         // Agentmaster: context-menu "Copy > <field>" -> copy that field of the managed session hosting
         // THIS tab, through the SAME shared CopySessionField action the per-tab overlay's copy button and
         // the Manager's Copy submenu use (so the three copy menus can never drift). `which` is the copy-menu
@@ -2435,6 +2455,10 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentCopyMenuVisible(isSession);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
+                    // Agentmaster (FAVORITES.md): "★ Favorite & close all tabs" is a WINDOW-scope action —
+                    // show it whenever this window hosts >=1 managed session (not just when THIS tab is one),
+                    // since it stars every session in the window. Nothing to favorite otherwise -> hidden.
+                    tab->SetFavoriteAndCloseAllVisible(page->_WindowHasManagedSession());
                 }
             });
         }

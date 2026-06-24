@@ -872,8 +872,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::Foundation::IAsyncAction _HandleCloseTabRequested(winrt::TerminalApp::Tab tab, bool skipConfirmClose = false);
         void _CloseTabAtIndex(uint32_t index);
         void _CloseTabsBefore(const winrt::TerminalApp::Tab& tab); // Agentmaster: context-menu "Close tabs to the left"
+        void _CloseAllTabs(const bool favoriteFirst); // Agentmaster: context-menu "Close > Close all tabs" / "★ Favorite & close all tabs"
+        bool _WindowHasManagedSession() const; // Agentmaster (FAVORITES.md): does this window host >=1 managed Claude/Codex session? (gates "★ Favorite & close all tabs" visibility)
         void _RemoveTab(const winrt::TerminalApp::Tab& tab);
-        safe_void_coroutine _RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs);
+        safe_void_coroutine _RemoveTabs(const std::vector<winrt::TerminalApp::Tab> tabs, const bool forceFavorite = false); // Agentmaster: forceFavorite pre-commits the "★ Favorite & Close All" disposition (a 2-button confirm) for the favorite-&-close-all path
 
         void _InitializeTab(winrt::com_ptr<Tab> newTabImpl, uint32_t insertPosition = -1);
         void _RegisterTerminalEvents(Microsoft::Terminal::Control::TermControl term);
