@@ -90,6 +90,27 @@ namespace
         }
     }
 
+    // Agentmaster: PointerExited is a BUBBLING routed event, so a hit-testable CHILD (an action button,
+    // a selectable summary text run, the resize grip) raises its OWN exit that bubbles up to the badge/
+    // panel root's PointerExited handler whenever the pointer merely crosses BETWEEN children, or off a
+    // child back onto the root's own padding. A naive handler then dims the badge/panel WHILE the pointer
+    // is still over it — and because the root never "re-enters" (it never actually left), it can stick dim
+    // until the pointer leaves and returns. Returns true when the pointer is still inside `sender`'s OWN
+    // bounds => the exit came from a child, so the handler can ignore it; a genuine leave samples at/outside
+    // the edge => false. (Mirror of AgentManagerContent's PointerStillWithin — fully-qualify IInspectable
+    // here to dodge the global ::IInspectable vs winrt ambiguity a free function has no member scope to break.)
+    bool PointerWithin(const winrt::Windows::Foundation::IInspectable& sender, const PointerRoutedEventArgs& e)
+    {
+        const auto fe = sender.try_as<FrameworkElement>();
+        if (!fe)
+        {
+            return false;
+        }
+        const auto p = e.GetCurrentPoint(fe).Position();
+        constexpr double kEdge = 1.0; // treat the outermost ~1px as "left" so an edge-sampled real leave is never swallowed
+        return p.X > kEdge && p.Y > kEdge && p.X < fe.ActualWidth() - kEdge && p.Y < fe.ActualHeight() - kEdge;
+    }
+
     // Is SHIFT held right now? A summary-panel resize started with SHIFT down is LOCAL-only (this tab,
     // ephemeral — not persisted, not cross-tab-shared). CoreWindow is available in this app's XAML
     // islands (the splitter cursors above rely on it); if it's somehow absent, treat SHIFT as up so the
@@ -1229,7 +1250,11 @@ namespace winrt::TerminalApp::implementation
                 self->_SetExpanded(true);
             }
         });
-        _root.PointerExited([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+        _root.PointerExited([weak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerWithin(sender, e))
+            {
+                return; // a child's bubbled exit while the pointer is still on the badge — not a real leave
+            }
             if (auto self = weak.get())
             {
                 self->_hovering = false;
@@ -1834,16 +1859,21 @@ namespace winrt::TerminalApp::implementation
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
         _summaryRoot.Opacity(kSummaryRestOpacity); // dim at rest — same value as the badge (_root.Opacity)
         // Same hover MECHANISM as the badge (_WireHover/_SetExpanded): brighten to full on pointer-over,
-        // back to dim on exit. PointerExited fires only when the pointer truly leaves the panel — moving
-        // onto a child grip keeps the parent "entered" — so it stays bright while hovering anywhere on
-        // the panel (incl. while resizing).
+        // back to dim on exit. The panel is text-heavy (selectable title / times / body runs) + has resize
+        // grips, all hit-testable children whose bubbled PointerExited would otherwise dim the panel WHILE
+        // the pointer is still on it (the root never re-enters — it can stick dim); PointerWithin swallows
+        // those child-bubbled exits, so it stays bright while hovering anywhere on the panel (incl. resizing).
         _summaryRoot.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs&) {
             if (const auto self = weak.get())
             {
                 self->_summaryRoot.Opacity(kSummaryHoverOpacity);
             }
         });
-        _summaryRoot.PointerExited([weak](const IInspectable&, const PointerRoutedEventArgs&) {
+        _summaryRoot.PointerExited([weak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerWithin(sender, e))
+            {
+                return; // a child's bubbled exit while the pointer is still on the panel — not a real leave
+            }
             if (const auto self = weak.get())
             {
                 self->_summaryRoot.Opacity(kSummaryRestOpacity);

@@ -629,36 +629,15 @@ namespace
         return b;
     }
 
-    // Agentmaster: emphasize the PRIMARY header toggle. The LOCAL/GLOBAL scope button is the one
-    // control in the board/tree header that changes WHAT you are looking at, so it should read
-    // louder than its siblings (sort, refresh, Clear, Show all — all secondary). A filled accent
-    // background + bold white text makes it the "primary" button among the default subtle-chrome
-    // ones. Applied once at construction; the label content still changes later via the
-    // _Update*ScopeButton setters without disturbing this styling. (WinUI's button template
-    // overrides a locally-set Background in its PointerOver/Pressed visual states, so the accent
-    // briefly reverts to the theme hover brush while the pointer is over it — but the bold weight
-    // is NOT part of any visual state, so the emphasis still reads on hover.)
-    void EmphasizeScopeButton(const Button& b)
-    {
-        if (!b)
-        {
-            return;
-        }
-        b.Background(Fill(0xFF, 0x35, 0x6A, 0xB8)); // a deliberate accent blue — distinct from the neutral card/button chrome
-        b.Foreground(Fill(0xFF, 0xFF, 0xFF, 0xFF));
-        b.FontWeight(FontWeights::SemiBold());
-    }
-
     // Agentmaster: paint a button a SOLID color (white text) whose color SURVIVES hover/press. WinUI's
     // default Button template overrides a locally-set Background in its PointerOver/Pressed visual states
     // with the ButtonBackground{PointerOver,Pressed} theme brushes (and likewise the foreground), so a
     // plain b.Background(...) reverts to the subtle theme hover brush the instant the pointer enters — the
     // "colored button loses its color (and the text recolors) on mouse-over" bug. Overriding those theme-
     // resource KEYS in the button's OWN Resources makes the template resolve them to our colors in every
-    // state, so hover/press just shifts shade instead of dropping the color. (Unlike EmphasizeScopeButton,
-    // which deliberately accepts the revert and leans on bold weight, this button has no other emphasis to
-    // fall back on, so the color must hold.) base/hover/pressed are 0xAARRGGBB; reuse-safe (each call
-    // rebuilds the four overrides). Pair with ClearHoldButton to return to default chrome.
+    // state, so hover/press just shifts shade instead of dropping the color. base/hover/pressed are
+    // 0xAARRGGBB; reuse-safe (each call rebuilds the four overrides). Pair with ClearHoldButton to return
+    // to default chrome.
     void PaintHoldButton(const Button& b, uint32_t base, uint32_t hover, uint32_t pressed)
     {
         if (!b)
@@ -690,6 +669,25 @@ namespace
         b.Resources().Clear();
         b.Background(nullptr);
         b.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
+    }
+
+    // Agentmaster: emphasize the PRIMARY header toggle. The LOCAL/GLOBAL/EXTERNAL scope button is the one
+    // control in the board/tree header that changes WHAT you are looking at, so it should read louder than
+    // its siblings (sort, refresh, Clear, Show all — all secondary): a filled accent background + bold white
+    // text makes it the "primary" button among the default subtle-chrome ones. Applied once at construction;
+    // the label content still changes later via the _Update*ScopeButton setters without disturbing this
+    // styling. Uses PaintHoldButton so the accent HOLDS through hover/press (shifting shade) instead of
+    // reverting to the subtle theme hover brush — previously only the normal-state Background was set, so the
+    // accent dropped to gray on mouse-over (the same revert the keep-awake button hit) and only the bold
+    // weight carried the emphasis there.
+    void EmphasizeScopeButton(const Button& b)
+    {
+        if (!b)
+        {
+            return;
+        }
+        PaintHoldButton(b, 0xFF356AB8, 0xFF3E7DCE, 0xFF2B5391); // accent blue, lighter on hover / darker on press
+        b.FontWeight(FontWeights::SemiBold());
     }
 
     // Agentmaster: the dim per-session timing adornment "-created/active/-lastAgo" + an explanatory
