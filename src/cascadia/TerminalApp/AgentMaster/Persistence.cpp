@@ -474,6 +474,8 @@ namespace Agentmaster
             hidden.Push(json::Value::MkStr(id));
         }
         o.Set(L"hiddenSessionIds", std::move(hidden));
+        o.Set(L"envDefaultsVersion", json::Value::MkNum(s.envDefaultsVersion));
+        o.Set(L"claudeCleanupDaysSeeded", json::Value::MkBool(s.claudeCleanupDaysSeeded));
         return o;
     }
 
@@ -546,6 +548,10 @@ namespace Agentmaster
                 }
             }
         }
+        // Shipped-default seeding markers (ENV_VARS.md §8). Absent => 0 / false, so a pre-feature
+        // settings.json runs the one-time seed once (new installs + updaters alike get the defaults).
+        s.envDefaultsVersion = v.U32At(L"envDefaultsVersion", 0);
+        s.claudeCleanupDaysSeeded = v.BoolAt(L"claudeCleanupDaysSeeded", false);
         return s;
     }
 
@@ -1620,6 +1626,217 @@ namespace Agentmaster
             kept.emplace_back(key, std::wstring{ envText });
         }
         SaveDirEnv(kept);
+    }
+
+    // --- the Claude USER settings.json repository (ENV_VARS.md §8) -------------------------------
+    // The user's GLOBAL ~/.claude/settings.json (NOT Agentmaster's own settings.json). cleanupPeriodDays
+    // (history retention) lives here; the cog's "Keep Claude history (days)" field reads/writes it.
+
+    static std::mutex& ClaudeUserSettingsMtx()
+    {
+        static std::mutex m;
+        return m;
+    }
+
+    // Pretty-print a json::Value with 2-space indentation, so our RMW leaves the user's hand-editable
+    // settings.json readable (json::Dump is a single line). Scalars reuse the shared compact dump.
+    static void DumpJsonPretty(const json::Value& v, std::wstring& out, int depth)
+    {
+        const auto indent = [&out](int d) {
+            for (int k = 0; k < d; ++k)
+            {
+                out += L"  ";
+            }
+        };
+        if (v.type == json::Value::Type::Obj)
+        {
+            if (v.members.empty())
+            {
+                out += L"{}";
+                return;
+            }
+            out += L"{\n";
+            for (size_t k = 0; k < v.members.size(); ++k)
+            {
+                indent(depth + 1);
+                json::detail::Escape(v.members[k].first, out);
+                out += L": ";
+                DumpJsonPretty(v.members[k].second, out, depth + 1);
+                if (k + 1 < v.members.size())
+                {
+                    out += L',';
+                }
+                out += L'\n';
+            }
+            indent(depth);
+            out += L'}';
+        }
+        else if (v.type == json::Value::Type::Arr)
+        {
+            if (v.arr.empty())
+            {
+                out += L"[]";
+                return;
+            }
+            out += L"[\n";
+            for (size_t k = 0; k < v.arr.size(); ++k)
+            {
+                indent(depth + 1);
+                DumpJsonPretty(v.arr[k], out, depth + 1);
+                if (k + 1 < v.arr.size())
+                {
+                    out += L',';
+                }
+                out += L'\n';
+            }
+            indent(depth);
+            out += L']';
+        }
+        else
+        {
+            json::detail::Dump(v, out); // scalar: null / bool / number / string
+        }
+    }
+
+    // Resolve <CLAUDE_CONFIG_DIR | %USERPROFILE%\.claude> (mirrors ClaudeProjectsDir's base). "" if unresolved.
+    static std::wstring ClaudeConfigBase()
+    {
+        const auto env = [](const wchar_t* n) -> std::wstring {
+            const DWORD need = ::GetEnvironmentVariableW(n, nullptr, 0);
+            if (need == 0)
+            {
+                return {};
+            }
+            std::wstring buf(need, L'\0');
+            const DWORD got = ::GetEnvironmentVariableW(n, buf.data(), need);
+            if (got == 0 || got >= need)
+            {
+                return {};
+            }
+            buf.resize(got);
+            return buf;
+        };
+        std::wstring base = env(L"CLAUDE_CONFIG_DIR");
+        if (base.empty())
+        {
+            const std::wstring home = env(L"USERPROFILE");
+            if (home.empty())
+            {
+                return {};
+            }
+            base = home + L"\\.claude";
+        }
+        return base;
+    }
+
+    std::optional<std::wstring> UpsertJsonNumberKey(std::wstring_view existing, std::wstring_view key, std::optional<double> value)
+    {
+        const std::wstring keyStr{ key };
+        json::Value root = json::Value::MkObj();
+        bool hasContent = false;
+        for (const wchar_t c : existing)
+        {
+            if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+            {
+                hasContent = true;
+                break;
+            }
+        }
+        if (hasContent)
+        {
+            const auto parsed = json::Parse(existing);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                return std::nullopt; // non-empty but not an object => refuse to clobber the user's file
+            }
+            root = *parsed;
+        }
+        // Drop any existing instance of the key (preserving the order of the rest), then re-add when setting.
+        auto& m = root.members;
+        m.erase(std::remove_if(m.begin(), m.end(), [&keyStr](const std::pair<std::wstring, json::Value>& kv) { return kv.first == keyStr; }), m.end());
+        if (value)
+        {
+            root.Set(keyStr, json::Value::MkNum(*value));
+        }
+        std::wstring out;
+        DumpJsonPretty(root, out, 0);
+        out += L'\n';
+        return out;
+    }
+
+    std::wstring ClaudeUserSettingsPath()
+    {
+        const std::wstring base = ClaudeConfigBase();
+        return base.empty() ? std::wstring{} : (base + L"\\settings.json");
+    }
+
+    std::optional<int64_t> GetClaudeCleanupPeriodDays()
+    {
+        std::lock_guard guard{ ClaudeUserSettingsMtx() };
+        const std::wstring path = ClaudeUserSettingsPath();
+        if (path.empty())
+        {
+            return std::nullopt;
+        }
+        const auto parsed = json::Parse(ReadAllUtf8(path));
+        if (!parsed || parsed->type != json::Value::Type::Obj)
+        {
+            return std::nullopt;
+        }
+        const auto* mem = parsed->Find(L"cleanupPeriodDays");
+        if (!mem || mem->type != json::Value::Type::Num)
+        {
+            return std::nullopt;
+        }
+        return mem->AsI64();
+    }
+
+    bool SetClaudeCleanupPeriodDays(std::optional<int64_t> days)
+    {
+        std::lock_guard guard{ ClaudeUserSettingsMtx() };
+        const std::wstring path = ClaudeUserSettingsPath();
+        if (path.empty())
+        {
+            return false;
+        }
+        const std::optional<double> v = days ? std::optional<double>{ static_cast<double>(*days) } : std::nullopt;
+        const auto updated = UpsertJsonNumberKey(ReadAllUtf8(path), L"cleanupPeriodDays", v);
+        if (!updated)
+        {
+            return false; // a non-empty file we couldn't parse — never overwrite it
+        }
+        return WriteAllUtf8(path, *updated);
+    }
+
+    void SeedSessionEnvDefaults()
+    {
+        auto s = LoadAppSettings();
+        if (s.envDefaultsVersion >= kEnvDefaultsVersion)
+        {
+            return; // already seeded the current set; a default the user deleted stays gone
+        }
+        auto [newEnv, newVersion] = ApplyEnvDefaults(s.env, s.envDefaultsVersion);
+        s.env = std::move(newEnv);
+        s.envDefaultsVersion = newVersion;
+        SaveAppSettings(s);
+    }
+
+    void SeedClaudeCleanupPeriodDaysIfNeeded()
+    {
+        auto s = LoadAppSettings();
+        if (s.claudeCleanupDaysSeeded)
+        {
+            return; // seeded once already; respect a user who changed/removed it
+        }
+        // Only write a default when the user hasn't set cleanupPeriodDays themselves (don't override a
+        // deliberate value). 36500 ~= 100 years => Claude effectively never purges global history. (0 would
+        // be a footgun — in Claude it DISABLES transcript persistence entirely.)
+        if (!GetClaudeCleanupPeriodDays().has_value())
+        {
+            SetClaudeCleanupPeriodDays(36500);
+        }
+        s.claudeCleanupDaysSeeded = true;
+        SaveAppSettings(s);
     }
 
     void SaveLayout(const ManagerLayout& layout)

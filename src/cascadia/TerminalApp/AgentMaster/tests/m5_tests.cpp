@@ -951,6 +951,61 @@ static void TestSpawnBuilders()
         CHECK(back2.size() == 1 && back2[0].first == L"c:\\e", "dir-env: blank-env entry dropped on load");
     }
 
+    // ApplyEnvDefaults (ENV_VARS.md §8): one-time seed of the shipped GLOBAL env defaults, version-gated.
+    {
+        // Fresh install (version 0, empty env): CLAUDE_CODE_MAX_RETRIES=50000 appended; version -> current.
+        auto [env1, ver1] = ApplyEnvDefaults(L"", 0);
+        CHECK(ver1 == kEnvDefaultsVersion, "env-defaults: version bumped to current");
+        CHECK(env1.find(L"CLAUDE_CODE_MAX_RETRIES=50000") != std::wstring::npos, "env-defaults: seeds CLAUDE_CODE_MAX_RETRIES=50000");
+
+        // Already current: nothing re-added (a user who deleted it keeps it gone).
+        auto [env2, ver2] = ApplyEnvDefaults(L"", kEnvDefaultsVersion);
+        CHECK(env2.empty() && ver2 == kEnvDefaultsVersion, "env-defaults: no re-seed once current version reached");
+
+        // User already has the NAME (any case): never duplicated; version still advances.
+        auto [env3, ver3] = ApplyEnvDefaults(L"claude_code_max_retries=7", 0);
+        CHECK(env3 == L"claude_code_max_retries=7" && ver3 == kEnvDefaultsVersion, "env-defaults: existing NAME (case-insensitive) not duplicated");
+
+        // Non-empty env without the default: appended on its OWN line (no run-together).
+        auto [env4, ver4] = ApplyEnvDefaults(L"FOO=bar", 0);
+        CHECK(env4 == L"FOO=bar\nCLAUDE_CODE_MAX_RETRIES=50000", "env-defaults: appended on a fresh line");
+    }
+
+    // UpsertJsonNumberKey (ENV_VARS.md §8): the PURE RMW core of the Claude user settings.json repository.
+    {
+        // Empty input + set => a fresh object carrying the key.
+        const auto fresh = UpsertJsonNumberKey(L"", L"cleanupPeriodDays", 36500.0);
+        const auto p1 = fresh ? json::Parse(*fresh) : std::nullopt;
+        CHECK(p1 && p1->I64At(L"cleanupPeriodDays", 0) == 36500, "upsert: sets the number on an empty doc");
+
+        // Preserve other keys; upsert (no duplicate) when the key already exists.
+        const auto merged = UpsertJsonNumberKey(L"{\"a\":1,\"b\":\"x\",\"cleanupPeriodDays\":30}", L"cleanupPeriodDays", 36500.0);
+        const auto p2 = merged ? json::Parse(*merged) : std::nullopt;
+        CHECK(p2 && p2->I64At(L"a", 0) == 1 && p2->StrAt(L"b") == L"x", "upsert: preserves other keys");
+        CHECK(p2 && p2->I64At(L"cleanupPeriodDays", 0) == 36500, "upsert: updates the existing key value");
+        int dupCount = 0;
+        if (p2)
+        {
+            for (const auto& kv : p2->members)
+            {
+                if (kv.first == L"cleanupPeriodDays")
+                {
+                    ++dupCount;
+                }
+            }
+        }
+        CHECK(dupCount == 1, "upsert: exactly one cleanupPeriodDays member (no duplicate appended)");
+
+        // nullopt removes the key, keeping the rest.
+        const auto removed = UpsertJsonNumberKey(L"{\"a\":1,\"cleanupPeriodDays\":30}", L"cleanupPeriodDays", std::nullopt);
+        const auto p3 = removed ? json::Parse(*removed) : std::nullopt;
+        CHECK(p3 && p3->Find(L"cleanupPeriodDays") == nullptr && p3->I64At(L"a", 0) == 1, "upsert: nullopt removes the key, keeps the rest");
+
+        // A non-empty, non-object file is NEVER clobbered (caller must not overwrite).
+        CHECK(!UpsertJsonNumberKey(L"this is not json", L"cleanupPeriodDays", 36500.0).has_value(), "upsert: refuses an unparseable non-empty file");
+        CHECK(!UpsertJsonNumberKey(L"[1,2,3]", L"cleanupPeriodDays", 36500.0).has_value(), "upsert: refuses a non-object JSON (array)");
+    }
+
     // PsSingleQuote: PowerShell single-quoted literal (only escape = doubled quote).
     CHECK(PsSingleQuote(L"C:\\Users\\x\\.agentmaster") == L"'C:\\Users\\x\\.agentmaster'", "ps quote: plain path verbatim");
     CHECK(PsSingleQuote(L"C:\\Users\\o'brien") == L"'C:\\Users\\o''brien'", "ps quote: embedded quote doubled");

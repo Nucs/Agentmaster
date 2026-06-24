@@ -137,6 +137,32 @@ namespace Agentmaster
     std::wstring GetDirEnv(const std::wstring& dir);
     void SetDirEnv(const std::wstring& dir, std::wstring_view envText);
 
+    // ---- Claude USER settings.json repository (ENV_VARS.md §8) ----
+    // A thin managed layer over the user's GLOBAL Claude settings file — `<CLAUDE_CONFIG_DIR | ~/.claude>
+    // /settings.json` — which is DISTINCT from Agentmaster's own settings.json (the cog's AppSettings).
+    // Used for `cleanupPeriodDays` (transcript/history retention), surfaced as the cog's "Keep Claude
+    // history (days)" field. Every write is a read-modify-write that PRESERVES every key we don't manage,
+    // and REFUSES to overwrite a non-empty file it can't parse (so a hand-edited settings.json is never
+    // clobbered). Thread-safe.
+    // PURE core (no disk; unit-tested): given the current file TEXT, set (or remove, when `value` is
+    // nullopt) a top-level NUMBER key, preserving every other key + its order, pretty-printed (2-space).
+    // Returns nullopt iff `existing` is non-empty but not a JSON object (caller must NOT overwrite then).
+    std::optional<std::wstring> UpsertJsonNumberKey(std::wstring_view existing, std::wstring_view key, std::optional<double> value);
+    std::wstring ClaudeUserSettingsPath(); // "<config>/settings.json" ("" if USERPROFILE/CLAUDE_CONFIG_DIR unresolved)
+    std::optional<int64_t> GetClaudeCleanupPeriodDays(); // nullopt => key absent / file missing / unreadable
+    bool SetClaudeCleanupPeriodDays(std::optional<int64_t> days); // nullopt removes the key; RMW; true on success
+
+    // ---- one-time shipped-default seeding (run once at engine init; ENV_VARS.md §8) ----
+    // SeedSessionEnvDefaults: append any not-yet-seeded global env defaults (ApplyEnvDefaults /
+    // kEnvDefaultsVersion) to AppSettings.env and bump AppSettings.envDefaultsVersion — so new installs +
+    // updaters get them, and a deleted default never returns. No-op once envDefaultsVersion is current.
+    void SeedSessionEnvDefaults();
+    // SeedClaudeCleanupPeriodDaysIfNeeded: if we've not seeded before (AppSettings.claudeCleanupDaysSeeded)
+    // AND the user's global settings.json has no cleanupPeriodDays of their own, write 36500 (~never purge
+    // history; 0 is a Claude footgun — it DISABLES persistence) and set the marker. Respects a user value;
+    // never re-seeds after the user changes/removes it.
+    void SeedClaudeCleanupPeriodDaysIfNeeded();
+
     // ---- tab naming + per-directory color (pure; testable) ----
     // Derive a tab/session display name from a working directory: walk up past generic build/
     // output/structural segments (bin/obj/Debug/... the top 20) to the first meaningful folder,

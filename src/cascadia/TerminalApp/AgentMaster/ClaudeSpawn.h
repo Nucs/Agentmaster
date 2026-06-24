@@ -185,6 +185,19 @@ namespace Agentmaster
     // calls Ok/Warn is exactly one the spawn applies (Warn => applied-but-noteworthy / dropped-if-reserved).
     EnvLexResult LexEnvText(std::wstring_view text);
 
+    // --- shipped global env defaults (ENV_VARS.md §8) ----------------------------------------------
+    // Agentmaster ships a tiny set of GLOBAL env defaults, seeded ONCE into AppSettings.env so a NEW
+    // install AND an UPDATER both get them — and a user who then EDITS or DELETES one keeps it gone (the
+    // seed is gated on a stored version, never re-applied). Each default carries the version it was
+    // introduced in; ApplyEnvDefaults appends only those with introVersion > seededVersion whose NAME is
+    // not already present (case-insensitive, Windows env semantics), so adding a future default seeds just
+    // the new one. Returns {new env text, new seeded version}. PURE + unit-tested (the disk wrapper is
+    // Persistence::SeedSessionEnvDefaults).
+    //   v1: CLAUDE_CODE_MAX_RETRIES=50000 — the API-retry ceiling. (Claude clamps the EFFECTIVE value to 15
+    //       since CLI v2.1.186; the literal 50000 is intentional + harmless, and the user may change it.)
+    inline constexpr uint32_t kEnvDefaultsVersion = 1;
+    std::pair<std::wstring, uint32_t> ApplyEnvDefaults(std::wstring_view envText, uint32_t seededVersion);
+
     // --- OS-touching ---
 
     // The ACTIVE PROFILE dir — where this install persists everything (sessions.json,

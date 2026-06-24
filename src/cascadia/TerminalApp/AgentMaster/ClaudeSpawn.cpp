@@ -1279,6 +1279,59 @@ try {
         return MergeSessionEnv(settings.env, GetDirEnv(std::wstring{ workingDir }));
     }
 
+    std::pair<std::wstring, uint32_t> ApplyEnvDefaults(std::wstring_view envText, uint32_t seededVersion)
+    {
+        struct Default
+        {
+            uint32_t introVersion;
+            const wchar_t* name;
+            const wchar_t* value;
+        };
+        // The shipped global env defaults, in introduction order. Bump kEnvDefaultsVersion (ClaudeSpawn.h)
+        // and give a new entry introVersion = the new version when adding one.
+        static const Default kDefaults[] = {
+            { 1, L"CLAUDE_CODE_MAX_RETRIES", L"50000" },
+        };
+
+        // Names already present in the editor (case-insensitive — Windows env semantics, the same fold
+        // MergeSessionEnv uses) are never duplicated, so a user value / a prior seed always wins.
+        const auto existing = ParseEnvAssignments(envText);
+        const auto hasName = [&](const wchar_t* name) {
+            const std::wstring fold = EnvNameFold(name);
+            for (const auto& [k, v] : existing)
+            {
+                if (EnvNameFold(k) == fold)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        std::wstring out{ envText };
+        for (const auto& d : kDefaults)
+        {
+            if (d.introVersion <= seededVersion)
+            {
+                continue; // considered in a prior seed (a deletion since then must stick)
+            }
+            if (hasName(d.name))
+            {
+                continue; // user already has this NAME (or a prior seed added it)
+            }
+            if (!out.empty() && out.back() != L'\n')
+            {
+                out += L'\n'; // each default on its own line (the multi-line editor format)
+            }
+            out += d.name;
+            out += L'=';
+            out += d.value;
+        }
+        // We've now considered every default up through kEnvDefaultsVersion.
+        const uint32_t newVersion = seededVersion < kEnvDefaultsVersion ? kEnvDefaultsVersion : seededVersion;
+        return { out, newVersion };
+    }
+
     EnvLexResult LexEnvText(std::wstring_view text)
     {
         EnvLexResult r;

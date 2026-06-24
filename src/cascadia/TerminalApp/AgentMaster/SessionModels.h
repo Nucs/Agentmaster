@@ -520,6 +520,20 @@ namespace Agentmaster
         // these out of its table; nothing else reads the list — it is purely a browse-list
         // preference, never a lifecycle action (a hidden session is untouched on disk).
         std::vector<std::wstring> hiddenSessionIds{};
+
+        // --- shipped-default seeding markers (ENV_VARS.md §8; NOT shown in the cog) ---
+        // Agentmaster ships a few defaults ONCE and then respects user edits/removals. These markers
+        // record that the one-time seed ran, so a default a user deletes never returns:
+        //  * envDefaultsVersion — the highest kEnvDefaultsVersion already seeded into `env`. 0 == none yet
+        //    (a new install OR a pre-feature settings.json), so the seed runs once and bumps it. See
+        //    ApplyEnvDefaults / SeedSessionEnvDefaults. v1 seeds CLAUDE_CODE_MAX_RETRIES=50000.
+        //  * claudeCleanupDaysSeeded — whether we've already written the default cleanupPeriodDays=36500
+        //    into the user's GLOBAL ~/.claude/settings.json (so Claude never purges global history). Only
+        //    seeded when the user hasn't set it themselves; never re-seeded after they change/remove it.
+        //    See SeedClaudeCleanupPeriodDaysIfNeeded. (cleanupPeriodDays itself lives in Claude's file, not
+        //    here — it's editable from the cog's "Keep Claude history (days)" field via the repository.)
+        uint32_t envDefaultsVersion{ 0 };
+        bool claudeCleanupDaysSeeded{ false };
     };
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====
