@@ -869,6 +869,88 @@ static void TestSpawnBuilders()
         CHECK(bad.size() == 1 && bad[0].first == L"GOOD", "env parse: skips malformed/empty entries");
     }
 
+    // ParseEnvAssignments: newline-delimited (the multi-line editor) + '#' comments + mixed separators.
+    {
+        const auto e = ParseEnvAssignments(L"FOO=bar\nHTTPS_PROXY=http://h:8080\n# a comment\n\nBAZ=1");
+        CHECK(e.size() == 3, "env parse: newline split, blank + '#' comment skipped");
+        CHECK(e[0].first == L"FOO" && e[0].second == L"bar", "env parse: newline FOO=bar");
+        CHECK(e[1].first == L"HTTPS_PROXY" && e[1].second == L"http://h:8080", "env parse: newline keeps ://");
+        CHECK(e[2].first == L"BAZ" && e[2].second == L"1", "env parse: entry after comment + blank");
+        const auto crlf = ParseEnvAssignments(L"A=1\r\nB=2\r\n");
+        CHECK(crlf.size() == 2 && crlf[0].first == L"A" && crlf[1].first == L"B", "env parse: CRLF lines");
+        const auto mixed = ParseEnvAssignments(L"A=1;B=2\nC=3");
+        CHECK(mixed.size() == 3, "env parse: ';' and newline both separate (back-compat)");
+        const auto comment = ParseEnvAssignments(L"#FOO=bar");
+        CHECK(comment.empty(), "env parse: a '#'-led line is a comment even with '='");
+    }
+
+    // MergeSessionEnv: per-dir overrides global (case-insensitive name match), CCMGR_* dropped, last-wins.
+    {
+        const auto m = MergeSessionEnv(L"FOO=global\nBAR=keep\nCCMGR_X=nope", L"foo=perdir\nNEW=1");
+        CHECK(m.size() == 3, "merge: FOO/BAR/NEW (CCMGR_ dropped)");
+        bool fooOk = false, barOk = false, newOk = false, ccmgr = false;
+        for (const auto& [k, v] : m)
+        {
+            if (k == L"FOO")
+            {
+                fooOk = (v == L"perdir"); // per-dir wins; first-seen NAME spelling "FOO" kept
+            }
+            if (k == L"BAR")
+            {
+                barOk = (v == L"keep");
+            }
+            if (k == L"NEW")
+            {
+                newOk = (v == L"1");
+            }
+            if (k.rfind(L"CCMGR_", 0) == 0)
+            {
+                ccmgr = true;
+            }
+        }
+        CHECK(fooOk, "merge: per-dir 'foo' overrides global 'FOO' (case-insensitive)");
+        CHECK(barOk, "merge: global-only BAR kept");
+        CHECK(newOk, "merge: per-dir-only NEW added");
+        CHECK(!ccmgr, "merge: CCMGR_* dropped");
+        const auto dup = MergeSessionEnv(L"A=1\nA=2", L"");
+        CHECK(dup.size() == 1 && dup[0].second == L"2", "merge: duplicate name -> last value wins");
+        CHECK(MergeSessionEnv(L"", L"").empty(), "merge: empty -> none");
+    }
+
+    // LexEnvText: per-line verdicts + worst level + first-issue (drives the cog border + status line).
+    {
+        const auto okr = LexEnvText(L"FOO=bar\nBAZ=1");
+        CHECK(okr.ok == 2 && okr.warn == 0 && okr.error == 0, "lex: two valid vars");
+        CHECK(okr.worst == EnvLineKind::Ok, "lex: all-ok worst == Ok");
+
+        const auto err = LexEnvText(L"FOO=bar\nNOEQUALS\n=noname\n1BAD=x");
+        CHECK(err.error == 3, "lex: missing '=' + empty name + invalid name => 3 errors");
+        CHECK(err.worst == EnvLineKind::Error, "lex: worst == Error");
+        CHECK(err.firstIssueLine == 2, "lex: first issue on line 2 (NOEQUALS)");
+
+        const auto warn = LexEnvText(L"FOO=1\nCCMGR_X=2\nAM_SESSION=3\nFOO=4");
+        CHECK(warn.error == 0 && warn.warn == 3, "lex: reserved + owned + duplicate => 3 warns");
+        CHECK(warn.worst == EnvLineKind::Warn, "lex: worst == Warn (no errors)");
+        CHECK(warn.ok == 1, "lex: only the first FOO counts as a valid var");
+
+        const auto ign = LexEnvText(L"\n# comment\n   ");
+        CHECK(ign.ok == 0 && ign.warn == 0 && ign.error == 0, "lex: blanks + comment => nothing");
+    }
+
+    // dir-env.json round-trip (Serialize/Deserialize; pure — no disk).
+    {
+        std::vector<std::pair<std::wstring, std::wstring>> entries{
+            { L"c:\\work\\proj", L"AWS_PROFILE=dev\nFOO=bar" },
+            { L"c:\\work\\other", L"X=1" },
+        };
+        const auto back = DeserializeDirEnv(SerializeDirEnv(entries));
+        CHECK(back.size() == 2, "dir-env: round-trip two entries");
+        CHECK(back[0].first == L"c:\\work\\proj" && back[0].second == L"AWS_PROFILE=dev\nFOO=bar", "dir-env: multi-line env survives");
+        std::vector<std::pair<std::wstring, std::wstring>> withBlank{ { L"c:\\d", L"   " }, { L"c:\\e", L"Y=2" } };
+        const auto back2 = DeserializeDirEnv(SerializeDirEnv(withBlank));
+        CHECK(back2.size() == 1 && back2[0].first == L"c:\\e", "dir-env: blank-env entry dropped on load");
+    }
+
     // PsSingleQuote: PowerShell single-quoted literal (only escape = doubled quote).
     CHECK(PsSingleQuote(L"C:\\Users\\x\\.agentmaster") == L"'C:\\Users\\x\\.agentmaster'", "ps quote: plain path verbatim");
     CHECK(PsSingleQuote(L"C:\\Users\\o'brien") == L"'C:\\Users\\o''brien'", "ps quote: embedded quote doubled");
@@ -1172,9 +1254,14 @@ static void TestScheduler()
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "maxAutoSends -> none");
     }
     {
+        // A pending question / "needs you" state is treated like a mid-turn Running state: the
+        // prompt stays Pending and waits for the next (non-question) turn-complete — it is NOT
+        // parked in Held, and autopilot is NOT paused (the "reacted to needs-approval" bug).
         auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
         s.lastMessageWasQuestion = true;
-        CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::Hold, "question -> hold");
+        const auto p = DecideAdvance(s, now, 0, false);
+        CHECK(p.action == AdvanceAction::None, "question -> none (stay queued, wait like running)");
+        CHECK(s.queue[0].status == PromptStatus::Pending, "question: prompt is left Pending (never moved to Held)");
     }
     {
         auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
@@ -1505,6 +1592,110 @@ static void TestSchedulerIntegration()
     CHECK(runToggleCase(/*external*/ true, /*injector*/ true), "adopted: toggle Off->Full sends pending");
     // Observe-only external (external=true, NO injector): must NOT send (nothing to drive, no churn).
     CHECK(!runToggleCase(/*external*/ true, /*injector*/ false), "observe-only: toggle does not send (no injector)");
+
+    // --- Question-guard treats a pending question / "needs you" status like a Running mid-turn: the
+    //     queued prompt STAYS Pending (never parked in Held, autopilot never paused) and fires only
+    //     when the question clears (a later non-question turn-complete). The "reacted to
+    //     needs-approval" report (session 2de51dd0): two Flight prompts were Held + stranded. ---
+    {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+
+        const std::wstring id = L"q-sess";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput; // turn complete, but...
+            s.live = true;
+            s.lastMessageWasQuestion = true; // ...the agent ended it asking the user something
+            s.autopilot.mode = AutopilotMode::Full;
+            s.autopilot.throttleMs = 0;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"the queued prompt";
+            p.status = PromptStatus::Pending;
+            p.origin = PromptOrigin::Flight;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+
+        // An observed change while the question stands must NOT send — the prompt stays Pending.
+        reg->Update(id, [](SessionInfo&) {});
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        {
+            const auto snap = reg->Get(id);
+            CHECK(snap && snap->queue[0].status == PromptStatus::Pending, "question pending: prompt stays Pending (not Held), not sent");
+            CHECK(injected.load() == 0, "question pending: nothing injected while the question stands");
+        }
+        // The question clears (a non-question turn-complete) -> the queued prompt now fires.
+        reg->Update(id, [](SessionInfo& s) { s.lastMessageWasQuestion = false; });
+        bool sent = false;
+        for (int i = 0; i < 200 && !sent; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sent = snap && snap->queue[0].status == PromptStatus::Sent;
+            if (!sent)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        CHECK(sent && injected.load() > 0, "question cleared: the queued prompt fires (was waiting like running)");
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
+
+    // --- A Held prompt persisted by an OLDER build must rehabilitate, not strand: an observed change
+    //     wakes the advance (OnObserved counts Held as work), _process un-holds it to Pending (the
+    //     question is gone), and it sends. Without the OnObserved Held-as-work fix it sat dead. ---
+    {
+        auto reg = std::make_shared<SessionRegistry>();
+        Scheduler sched{ reg };
+        sched.Start();
+        reg->SetAdvanceHandler([&sched](const std::wstring& id) { sched.RequestAdvance(id); });
+        const auto obsTok = reg->AddObserver([&sched](const SessionInfo& s, HookEvent) { sched.OnObserved(s); });
+
+        const std::wstring id = L"held-sess";
+        std::atomic<int> injected{ 0 };
+        {
+            SessionInfo s;
+            s.id = id;
+            s.workingDir = L"K:\\tmp";
+            s.state = SessionState::WaitingForInput;
+            s.live = true;
+            s.lastMessageWasQuestion = false; // the question is gone — the Held prompt should recover
+            s.autopilot.mode = AutopilotMode::Full;
+            s.autopilot.throttleMs = 0;
+            QueuedPrompt p;
+            p.id = L"p1";
+            p.text = L"the held prompt";
+            p.status = PromptStatus::Held; // a legacy hold loaded from disk
+            p.origin = PromptOrigin::Flight;
+            s.queue.push_back(p);
+            reg->Upsert(std::move(s));
+        }
+        reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
+
+        reg->Update(id, [](SessionInfo&) {}); // an enrich/observe tick wakes the advance
+        bool sent = false;
+        for (int i = 0; i < 200 && !sent; ++i)
+        {
+            const auto snap = reg->Get(id);
+            sent = snap && snap->queue[0].status == PromptStatus::Sent;
+            if (!sent)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        CHECK(sent && injected.load() > 0, "legacy Held prompt rehabilitated to Pending and sent (not stranded)");
+        reg->RemoveObserver(obsTok);
+        sched.Stop();
+    }
 }
 
 static void TestPersistence()

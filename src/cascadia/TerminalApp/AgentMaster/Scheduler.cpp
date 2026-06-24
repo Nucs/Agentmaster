@@ -332,6 +332,10 @@ namespace Agentmaster
         switch (plan.action)
         {
         case AdvanceAction::Hold:
+            // LEGACY / unreached: DecideAdvance no longer returns Hold — a pending question now
+            // leaves the prompt Pending (it stays queued and waits, like a Running mid-turn).
+            // Retained defensively so the switch stays exhaustive; if it ever fired again it would
+            // re-create the strand bug this case once caused.
             _registry->Update(id, [&](SessionInfo& ss) {
                 if (plan.promptIndex < ss.queue.size() && ss.queue[plan.promptIndex].status == PromptStatus::Pending)
                 {
@@ -412,16 +416,21 @@ namespace Agentmaster
             (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
             _registry->HasInjector(s.id))
         {
-            bool hasPending = false;
+            bool hasWork = false;
             for (const auto& p : s.queue)
             {
-                if (p.status == PromptStatus::Pending)
+                // Pending = ready to (re)consider. Held = a question-guard hold persisted by an
+                // older build (current builds never park a prompt in Held — the guard keeps it
+                // Pending instead): include it so _process's un-hold recovery is reachable and a
+                // stranded Held prompt rehabilitates to Pending once the question clears, rather
+                // than sitting dead forever (OnObserved is the only re-trigger for an idle session).
+                if (p.status == PromptStatus::Pending || p.status == PromptStatus::Held)
                 {
-                    hasPending = true;
+                    hasWork = true;
                     break;
                 }
             }
-            if (hasPending)
+            if (hasWork)
             {
                 RequestAdvance(s.id);
             }

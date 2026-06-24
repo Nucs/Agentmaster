@@ -60,7 +60,10 @@ namespace Agentmaster
     {
         None, // nothing to do (see reason)
         Send, // auto-send queue[promptIndex] (Full)
-        Hold, // a guard blocked auto-send (e.g. agent asked a question)
+        Hold, // LEGACY — no longer produced. A pending question / "needs you" state now leaves the
+              // prompt Pending (treated like a Running mid-turn: stay queued, wait for a status
+              // change), NOT parked in a separate Held status. Kept only so _process can still
+              // rehabilitate Held prompts persisted by older builds. See the question-guard below.
         AwaitConfirm, // SemiAuto: arm queue[promptIndex] for one-click confirm
         PlanDone, // no Pending prompts remain
     };
@@ -79,8 +82,8 @@ namespace Agentmaster
     //   globalPause          — the scheduler's global Pause-all backstop
     // Encodes, in order: global pause; mode Off; not-ready (only Idle or WaitingForInput are
     // ready — see below); pause-on-human-input; maxAutoSends; awaiting-injection-pickup guard;
-    // (no Pending => PlanDone); Manual-gate skip; question-guard Hold; SemiAuto => AwaitConfirm;
-    // Full => Send.
+    // (no Pending => PlanDone); Manual-gate skip; question-guard (None — the prompt stays queued
+    // and waits, exactly like a Running mid-turn); SemiAuto => AwaitConfirm; Full => Send.
     inline AdvancePlan DecideAdvance(const SessionInfo& s,
                                      int64_t nowUnixMs,
                                      int64_t lastHumanInputUnixMs,
@@ -166,12 +169,19 @@ namespace Agentmaster
             return plan; // None: only "Send now" fires a Manual item
         }
 
+        // Question-guard: the agent ended its turn asking the user something (a clarifying
+        // question / a "needs you" state). Treat it EXACTLY like a mid-turn Running state for the
+        // queue — leave the next prompt PENDING and wait for the next status change (a later,
+        // non-question turn-complete) to fire it. We deliberately do NOT react by parking it in a
+        // separate Held status: a "needs you" status must not be reacted to beyond how Running is
+        // (the message just stays queued), and a Held prompt could otherwise strand — OnObserved's
+        // idle-start re-trigger only watches Pending prompts. A per-prompt opt-out (guardPattern
+        // == kAnswersQuestionOk) marks a prompt that is itself the answer, so it still fires through.
         const bool overridesQuestionGuard = (item.guardPattern == kAnswersQuestionOk);
         if (s.lastMessageWasQuestion && !overridesQuestionGuard)
         {
-            plan.action = AdvanceAction::Hold;
-            plan.reason = L"question-guard (agent asked a question)";
-            return plan;
+            plan.reason = L"question pending — stay queued and wait (treated like running)";
+            return plan; // None: the prompt stays Pending; a later non-question turn-complete fires it
         }
 
         if (s.autopilot.mode == AutopilotMode::SemiAuto)

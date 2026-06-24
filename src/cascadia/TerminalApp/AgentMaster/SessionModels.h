@@ -80,7 +80,9 @@ namespace Agentmaster
     {
         Pending,
         Sent,
-        Held, // a guard blocked auto-send (e.g., the agent asked a question)
+        Held, // LEGACY — no longer produced. A pending question / "needs you" state now keeps the
+              // prompt Pending (it stays queued and waits, like a Running mid-turn) instead of being
+              // parked here. Still parsed (for older sessions.json) + rehabilitated to Pending.
         Skipped,
         Failed
     };
