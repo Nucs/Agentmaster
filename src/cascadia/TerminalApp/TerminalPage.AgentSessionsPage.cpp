@@ -1490,9 +1490,77 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _sessionsVisibleOrder.clear(); // rebuilt below in final (sorted) order — the Up/Down nav list
+
+        // Agentmaster (relevance ranking): when a search is active, order the results in TIERS —
+        // a match in the session's NAME/identity (its displayed title, branch, or a pasted id)
+        // ranks ABOVE a match only in its working dir / touched paths (tier 1), which ranks above a
+        // match found ONLY in the conversation content (tier 2, the slow phase). The user's chosen
+        // column sort applies WITHIN each tier. Without this, the column sort alone (default:
+        // last-activity desc) floats a recently-active INCIDENTAL content match above the exact name
+        // match the user searched for: searching "browse" surfaced an unrelated, just-active session
+        // that merely mentions "browse" once in its transcript ABOVE the session actually titled
+        // "Browse …" — and a click/resume/fork then acted on the wrong (top) row. Tier 0 reuses the
+        // SAME match primitives the fast phase uses (ParseSessionQuery / MatchesQueryText / the guid
+        // identity rule), restricted to the name fields, so "found it by name" lands on top.
+        std::unordered_map<std::wstring, int> relevance;
+        if (searching)
+        {
+            const auto terms = ::Agentmaster::ParseSessionQuery(_sessionsQueryText);
+            const bool qFuzzy = _sessFuzzyBtn && _sessFuzzyBtn.IsChecked() && _sessFuzzyBtn.IsChecked().Value();
+            relevance.reserve(view.size());
+            for (const auto* rp : view)
+            {
+                const auto& r = *rp;
+                // Tier 0 — the NAME: EVERY term matches the displayed title, the branch, or (a guid
+                // term) the session's own / fork-parent id (the "found it by name" tier). Empty terms
+                // (a whitespace-only query) can't be a name match — every row then falls to tier 1
+                // (the fast phase returns the whole window), so ordering is unchanged.
+                bool nameMatch = !terms.empty();
+                if (nameMatch)
+                {
+                    const std::wstring titleLower = ::Agentmaster::FoldLower(r.title);
+                    const std::wstring branchLower = ::Agentmaster::FoldLower(r.branch);
+                    const std::wstring idLower = ::Agentmaster::FoldLower(r.id);
+                    const std::wstring forkLower = ::Agentmaster::FoldLower(r.forkedFromId);
+                    for (const auto& t : terms)
+                    {
+                        const bool fz = ::Agentmaster::TermIsFuzzy(t, qFuzzy);
+                        const bool hit =
+                            (t.isGuid && (t.textLower == idLower || (!forkLower.empty() && t.textLower == forkLower))) ||
+                            ::Agentmaster::MatchesQueryText(titleLower, t.textLower, fz) ||
+                            ::Agentmaster::MatchesQueryText(branchLower, t.textLower, fz);
+                        if (!hit)
+                        {
+                            nameMatch = false;
+                            break;
+                        }
+                    }
+                }
+                // Tier 1 — a fast (structured) match that ISN'T the name: cwd or a tool-touched path.
+                // Tier 2 — content-only: present in the slow-phase hit counts but not the fast set.
+                const int tier = nameMatch ? 0 : (_sessionsFastIds.count(r.id) ? 1 : 2);
+                relevance.emplace(r.id, tier);
+            }
+        }
+
         const int sortCol = _sessionsSortColumn;
         const bool asc = _sessionsSortAscending;
-        std::sort(view.begin(), view.end(), [sortCol, asc](const _SessionsRow* a, const _SessionsRow* b) {
+        std::sort(view.begin(), view.end(), [sortCol, asc, searching, &relevance](const _SessionsRow* a, const _SessionsRow* b) {
+            if (searching)
+            {
+                // Relevance tier dominates the column sort (more-relevant tier first, independent of
+                // the column's asc/desc) so the name match the user searched for can't be buried
+                // under a recently-active incidental content match. Within a tier, the column sort
+                // below decides order. A row missing from the map (shouldn't happen) sorts last.
+                const auto ra = relevance.find(a->id);
+                const auto rb = relevance.find(b->id);
+                const int ta = ra != relevance.end() ? ra->second : 3;
+                const int tb = rb != relevance.end() ? rb->second : 3;
+                if (ta != tb)
+                {
+                    return ta < tb;
+                }
+            }
             const auto cmpS = [](const std::wstring& x, const std::wstring& y) {
                 const auto lx = ::Agentmaster::FoldLower(x), ly = ::Agentmaster::FoldLower(y);
                 return lx < ly ? -1 : (lx > ly ? 1 : 0);
