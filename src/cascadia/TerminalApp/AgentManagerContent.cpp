@@ -2370,21 +2370,42 @@ namespace winrt::TerminalApp::implementation
                 outer.Children().Append(actions);
 
                 // Top line (Agentmaster): a two-state [Summary | Flight Plan] segmented toggle that
-                // REPLACES the old "FLIGHT PLAN" label — one long button split in two, only one half
-                // "checked" at a time. The selected half is accent-filled (holds through hover, like the
-                // scope toggles); the other reads as the inactive segment. Summary is the default and the
-                // choice is GLOBAL (AppSettings::flightPlanShowsSummary), so it persists + syncs across
-                // every window (see _SelectPlanPaneTab / _UpdatePlanPaneTab). The Summary tab is empty for
-                // now; the Flight Plan tab holds the existing pane (Autopilot + queue + compose box).
+                // REPLACES the old "FLIGHT PLAN" label — a COMPACT pill split in two, only one half
+                // "checked" at a time. Both halves share ONE width (symmetric), sized to fit the LONGER
+                // label ("Flight Plan", measured in its bold/selected form so it never clips), and the
+                // pill is LEFT-aligned rather than stretched across the pane. The selected half is accent-
+                // filled (holds through hover/press via PaintHoldButton — the scope-toggle accent) + bold;
+                // the other reads as the inactive segment. Summary is the default and the choice is GLOBAL
+                // (AppSettings::flightPlanShowsSummary), so it persists + syncs across every window (see
+                // _SelectPlanPaneTab / _UpdatePlanPaneTab). The Summary tab is empty for now; the Flight
+                // Plan tab holds the existing pane (Autopilot + queue + compose box).
                 auto tabBar = Grid{};
-                tabBar.ColumnDefinitions().Append(starCol(1)); // Summary half
-                tabBar.ColumnDefinitions().Append(starCol(1)); // Flight Plan half
+                tabBar.HorizontalAlignment(HorizontalAlignment::Left); // compact — size to the two segments, don't stretch the pane width
+                tabBar.ColumnDefinitions().Append(autoCol()); // Summary segment (fixed symmetric width)
+                tabBar.ColumnDefinitions().Append(autoCol()); // Flight Plan segment
+                // Symmetric segment width = the wider label's measured width (measure the SemiBold form —
+                // the selected state — so a bold label never clips) + horizontal padding + a little slack.
+                // Both segments take this one width, so "Summary" is simply padded out to match "Flight Plan".
+                const double tabFont = 11.0;
+                const double tabHPad = 10.0;
+                const auto measureLabel = [tabFont](const winrt::hstring& s) -> double {
+                    TextBlock t;
+                    t.Text(s);
+                    t.FontSize(tabFont);
+                    t.FontWeight(FontWeights::SemiBold());
+                    t.Measure(winrt::Windows::Foundation::Size{ 10000.0f, 10000.0f });
+                    return static_cast<double>(t.DesiredSize().Width);
+                };
+                const double wSummary = measureLabel(L"Summary");
+                const double wFlight = measureLabel(L"Flight Plan");
+                const double tabLabelW = wFlight > wSummary ? wFlight : wSummary;
+                const double tabSegW = (tabLabelW > 1.0 ? tabLabelW : 80.0) + tabHPad * 2 + 8.0; // + padding + slack (fallback if Measure runs pre-tree)
                 auto mkTabBtn = [&](const winrt::hstring& label, const winrt::hstring& tip, const CornerRadius& cr, bool summary) {
                     auto btn = Button{};
                     btn.Content(winrt::box_value(label));
-                    btn.FontSize(12);
-                    btn.Padding(Thickness{ 8, 4, 8, 4 });
-                    btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+                    btn.FontSize(tabFont);
+                    btn.Padding(Thickness{ tabHPad, 2, tabHPad, 2 });
+                    btn.Width(tabSegW); // both segments equal -> symmetric, sized to fit the longer label
                     btn.HorizontalContentAlignment(HorizontalAlignment::Center);
                     btn.CornerRadius(cr); // outer edges rounded, the middle seam square -> reads as one segmented pill
                     AgentSetTip(btn, tip);
