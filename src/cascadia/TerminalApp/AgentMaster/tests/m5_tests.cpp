@@ -3056,6 +3056,62 @@ static void TestTranscriptResolve()
         CHECK(RecapFromTranscriptChunk(L"").empty(), "RecapFromTranscriptChunk: empty chunk -> empty");
     }
 
+    // --- LastActivityMsFromTranscriptChunk: line-derived last-activity (ignores untimestamped state) --
+    // The Fleet Observer feeds SessionInfo.convLastActivityUnixMs from THIS, not the file mtime: a
+    // `claude --resume` + a /model / permission-mode / shell-cwd change APPEND UNTIMESTAMPED trailer
+    // lines (last-prompt/mode/permission-mode) that bump the file mtime WITHOUT being conversation
+    // activity — so a restored tab focused after a restart would otherwise read "active just now" (it
+    // only resumed; measured live: 7–32 h gaps between the last real line and the mtime). This is the
+    // PURE extractor (no file IO): the NEWEST timestamp among non-meta/compact/sidechain user/assistant
+    // lines. Mirrors TranscriptStore::QuickRowFacts (the Sessions browser's line-derived last-activity).
+    {
+        const std::wstring userEarly = LR"j({"type":"user","userType":"external","message":{"content":"hi"},"timestamp":"2026-02-01T10:00:00.000Z"})j" L"\n";
+        const std::wstring asstLate = LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]},"timestamp":"2026-02-01T10:05:00.000Z"})j" L"\n";
+        // The untimestamped trailer/state lines `claude --resume` and mode/permission changes append:
+        const std::wstring trailers =
+            LR"j({"type":"last-prompt","sessionId":"x"})j" L"\n"
+            LR"j({"type":"mode","mode":"default","sessionId":"x"})j" L"\n"
+            LR"j({"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"x"})j" L"\n";
+
+        const int64_t both = LastActivityMsFromTranscriptChunk(userEarly + asstLate);
+        const int64_t early = LastActivityMsFromTranscriptChunk(userEarly);
+        const int64_t late = LastActivityMsFromTranscriptChunk(asstLate);
+        CHECK(both > 0 && early > 0 && late > 0, "LastActivityMsFromTranscriptChunk: timestamped user/assistant lines yield a positive ms");
+        CHECK(both == late, "LastActivityMsFromTranscriptChunk: the NEWEST conversation timestamp wins (assistant @10:05 > user @10:00)");
+        CHECK(late > early, "LastActivityMsFromTranscriptChunk: a later ISO timestamp parses to a greater ms (sanity on the parse)");
+
+        // THE BUG: the untimestamped resume/mode/permission trailer lines must NOT change the answer (the
+        // file mtime would jump to resume-time; the line-derived value must stay at the last REAL line).
+        CHECK(LastActivityMsFromTranscriptChunk(userEarly + asstLate + trailers) == both,
+              "LastActivityMsFromTranscriptChunk: untimestamped resume/mode/permission trailer lines are IGNORED (the fix)");
+        CHECK(LastActivityMsFromTranscriptChunk(trailers) == 0,
+              "LastActivityMsFromTranscriptChunk: a chunk of only untimestamped state lines yields 0 (-> caller falls back to mtime)");
+
+        // A fork copies its parent's tail VERBATIM (old stamps); a newer real line still wins (max, not last-seen).
+        CHECK(LastActivityMsFromTranscriptChunk(asstLate + userEarly) == late,
+              "LastActivityMsFromTranscriptChunk: newest wins even when an OLDER stamp appears last (fork-copied tail)");
+
+        // The away_summary RECAP (type "system") is written WHILE idle (~5 min after the last real line):
+        // it is NOT conversation activity, so a timestamped system line is excluded.
+        const std::wstring recapSys = LR"j({"type":"system","subtype":"away_summary","content":"recap","timestamp":"2026-02-01T10:30:00.000Z"})j" L"\n";
+        CHECK(LastActivityMsFromTranscriptChunk(userEarly + recapSys) == early,
+              "LastActivityMsFromTranscriptChunk: a timestamped away_summary system line does NOT count as activity");
+
+        // Meta / sidechain (subagent) lines are excluded too (mirrors ReadTranscriptInfo / ParseTranscriptDelta).
+        const std::wstring metaLine = LR"j({"type":"user","isMeta":true,"message":{"content":"<command>"},"timestamp":"2026-02-01T11:00:00.000Z"})j" L"\n";
+        const std::wstring sideLine = LR"j({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"sub"}]},"timestamp":"2026-02-01T11:00:00.000Z"})j" L"\n";
+        CHECK(LastActivityMsFromTranscriptChunk(userEarly + metaLine) == early, "LastActivityMsFromTranscriptChunk: isMeta lines are skipped");
+        CHECK(LastActivityMsFromTranscriptChunk(userEarly + sideLine) == early, "LastActivityMsFromTranscriptChunk: isSidechain (subagent) lines are skipped");
+
+        // A TAIL read can begin MID-LINE: the partial leading JSON fails to parse and is skipped; a
+        // complete conversation line after it is still captured.
+        const std::wstring partialLead = std::wstring{ LR"j(...","text":"a truncated line"}]},"timestamp":"2020-01-01T00:00:00.000Z"})j" } + L"\n" + asstLate;
+        CHECK(LastActivityMsFromTranscriptChunk(partialLead) == late,
+              "LastActivityMsFromTranscriptChunk: a partial leading line (tail starting mid-line) is skipped; a complete line after it is captured");
+
+        CHECK(LastActivityMsFromTranscriptChunk(L"") == 0, "LastActivityMsFromTranscriptChunk: empty chunk -> 0");
+    }
+
     // --- AnalyzeSessionTranscript: the idle RECAP (away_summary) is captured into .awaySummary -------
     // The summary panel / Sessions detail / copyable Summary read SessionSummary.awaySummary. The LAST
     // away_summary wins (a session that went idle, came back, and went idle again has a fresher recap),

@@ -668,7 +668,14 @@ What works, by area:
     `ReadClaudeFacts`
     (cmdline+env parse); `ClassifyRunningApp`; transcript resolution (`EncodeCwdToProjectDir` — every
     non-`[A-Za-z0-9]` → `-`; `ResolveSessionId` — see Rule #14); and **transcript content** —
-    `TranscriptTimes` (cheap ctime/mtime stat = conversation age + last activity) + `ReadTranscriptInfo`
+    `TranscriptTimes` (cheap stat: ctime = conversation age + mtime — the latter used now only as the
+    gate/fallback, NOT as "last activity": `claude --resume` + /model/permission-mode/shell-cwd changes
+    APPEND untimestamped `last-prompt`/`mode`/`permission-mode`/`summary` trailer lines that bump mtime
+    without being activity, so a restored tab focused after restart read "active just now"; measured 7–32 h
+    gaps) + `LastActivityMsFromTranscriptChunk`/`ReadTranscriptLastActivityTail` (the LINE-DERIVED
+    last-activity — the newest `timestamp` among non-meta/compact/sidechain user/assistant lines + folded
+    subagent side-file activity; the cheap, mtime-gateable form of `TranscriptInfo.lastTs`, matching
+    `TranscriptStore::QuickRowFacts`; the observer feeds `convLastActivityUnixMs` from THIS) + `ReadTranscriptInfo`
     (head or full read → the first-prompt **title**, `gitBranch`, and the human prompts, parsed like
     `ParseTranscriptDelta`; recent transcripts carry NO `summary` — verified 0/1842 over 90 days — so the
     first prompt is the title). A denied/elevated/WOW64 PEB read ⇒ observe-only, never mis-bound.

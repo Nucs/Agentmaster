@@ -296,6 +296,19 @@ namespace Agentmaster
         }
     }
 
+    int64_t ProcessObserver::_LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs)
+    {
+        auto& c = _lineActivityBySid[sid];
+        if (c.mtime != mtimeMs) // transcript grew (or first sight) -> re-derive from the tail; else reuse
+        {
+            c.mtime = mtimeMs;
+            c.lastActivityMs = ReadTranscriptLastActivityTail(cwd, sid);
+        }
+        // 0 == no timestamped conversation line in the window (a never-prompted / unreadable transcript)
+        // -> fall back to the mtime, preserving the old behavior for that degenerate case.
+        return c.lastActivityMs != 0 ? c.lastActivityMs : mtimeMs;
+    }
+
     void ProcessObserver::_surveyOnce(bool forcedByWake)
     {
         const int64_t now = NowMs();
@@ -615,12 +628,18 @@ namespace Agentmaster
                 correlatedPids.push_back(cpid);
                 rosteredOwner[cpid] = ownerWin; // mark this pid OURS for the census below
 
-                // Conversation timing (age + last activity) from the transcript — a cheap stat, only
-                // once the id is resolved. Drives the Manager's per-session timing adornment.
-                int64_t convCreated = 0, convLast = 0;
+                // Conversation timing from the transcript — only once the id is resolved. Drives the
+                // Manager's per-session timing adornment. createdUnixMs is the file ctime (file birth ==
+                // conversation start — honest). lastActivity is LINE-DERIVED (the last real conversation
+                // line), NOT the file mtime: `claude --resume` + mode/permission/cwd changes append
+                // untimestamped state lines that bump mtime without being activity, so a restored tab
+                // focused after a restart would read "active just now" (it only resumed). The tail read
+                // is mtime-gated (a quiet/just-resumed session costs only this stat after it settles).
+                int64_t convCreated = 0, convMtime = 0, convLast = 0;
                 if (!sid.empty())
                 {
-                    TranscriptTimes(f.cwd, sid, convCreated, convLast);
+                    TranscriptTimes(f.cwd, sid, convCreated, convMtime); // ctime=created, mtime=the gate
+                    convLast = _LineDerivedLastActivity(f.cwd, sid, convMtime);
                 }
 
                 CorrelationRow cr;
@@ -847,7 +866,13 @@ namespace Agentmaster
             ex.sessionId = sid;
             if (!sid.empty())
             {
-                TranscriptTimes(f.cwd, sid, ex.createdUnixMs, ex.lastActivityUnixMs);
+                // extMtime = the raw transcript mtime — the gate for the recap re-read below AND the
+                // fallback for the line-derived last-activity. ex.lastActivityUnixMs itself is set to
+                // the LINE-DERIVED value at the end of this block (not the mtime), for the same reason
+                // as the managed path: `claude --resume` / mode / cwd changes bump mtime without being
+                // activity, so an idle external would otherwise read "active just now".
+                int64_t extMtime = 0;
+                TranscriptTimes(f.cwd, sid, ex.createdUnixMs, extMtime);
                 auto cached = _extInfoCache.find(sid);
                 if (cached == _extInfoCache.end())
                 {
@@ -883,16 +908,20 @@ namespace Agentmaster
                 // — the agentmaster-cli `show` window — because a FRESH recap always lands at the very tail,
                 // so the shallow read catches every NEW one while a buried prior recap stays cached. So the
                 // deep read is one-time-per-external (like the title head read), not per tick.
-                if (cached->second.recapMtime != ex.lastActivityUnixMs)
+                if (cached->second.recapMtime != extMtime)
                 {
                     const size_t window = (cached->second.recapMtime == 0) ? (4u << 20) : 131072;
-                    cached->second.recapMtime = ex.lastActivityUnixMs;
+                    cached->second.recapMtime = extMtime;
                     if (std::wstring r = ReadTranscriptRecapTail(f.cwd, sid, window); !r.empty())
                     {
                         cached->second.recap = std::move(r);
                     }
                 }
                 ex.recap = cached->second.recap;
+
+                // Line-derived last-activity (NOT the lying mtime). mtime-gated via _lineActivityBySid,
+                // so an idle external costs only the TranscriptTimes stat above after the one settling read.
+                ex.lastActivityUnixMs = _LineDerivedLastActivity(f.cwd, sid, extMtime);
             }
             externalRows.push_back(std::move(ex));
         }

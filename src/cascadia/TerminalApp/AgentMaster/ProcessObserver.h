@@ -178,5 +178,25 @@ namespace Agentmaster
         std::unordered_set<uint32_t> _guiExcludedLogged; // GUI claude pids (the desktop Electron app) skipped — logged once
         std::unordered_set<uint32_t> _orphanLogged; // orphaned claude pids (host terminal exited) skipped — logged once
         std::unordered_map<std::wstring, std::wstring> _shellCwdCache; // wtSession -> last TRUSTWORTHY shell cwd (survives idle gaps when a pwsh has no child this tick)
+
+        // Worker-thread-only cache (no lock) of a session's LINE-DERIVED last-activity, mtime-gated.
+        // The observer feeds SessionInfo.convLastActivityUnixMs from the transcript's last REAL
+        // conversation line (ReadTranscriptLastActivityTail), NOT the file mtime — `claude --resume` +
+        // /model / permission-mode / shell-cwd changes APPEND untimestamped state lines that bump the
+        // mtime without being activity, so a restored tab focused after a restart would otherwise read
+        // "active just now" (it only resumed). Keyed by session id; the tail is re-read only when the
+        // transcript mtime advances, so an idle/just-resumed session costs ONLY the TranscriptTimes
+        // stat after the one read that settles it. Not pruned (mirrors _extInfoCache; bounded by the
+        // distinct conversation ids seen in a run). See _LineDerivedLastActivity.
+        struct LineActivity
+        {
+            int64_t mtime{ 0 }; // the transcript mtime the value was last derived at (the gate)
+            int64_t lastActivityMs{ 0 }; // line-derived last-activity (0 == none found -> caller uses mtime)
+        };
+        std::unordered_map<std::wstring, LineActivity> _lineActivityBySid;
+        // Worker-thread-only: the line-derived last-activity for `sid` (the value to publish as
+        // convLastActivityUnixMs), gated by _lineActivityBySid against the transcript `mtimeMs` (from
+        // TranscriptTimes) — which is also the fallback when no timestamped conversation line is found.
+        int64_t _LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs);
     };
 }

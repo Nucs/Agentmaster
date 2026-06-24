@@ -298,6 +298,22 @@ namespace Agentmaster
     std::wstring ReadTranscriptRecapTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
     std::wstring ReadTranscriptRecapTail(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
 
+    // Agentmaster: the line-derived LAST-ACTIVITY readers — the cheap, mtime-gateable form of
+    // TranscriptInfo.lastTs. The Fleet Observer feeds this into SessionInfo.convLastActivityUnixMs
+    // INSTEAD of the file mtime (TranscriptTimes): `claude --resume`, a /model or permission-mode
+    // change, and a shell-cwd reset all APPEND UNTIMESTAMPED state lines (last-prompt/mode/
+    // permission-mode/summary) to the tail, so the mtime jumps to resume-time while the conversation
+    // did nothing — a restored tab focused after a restart would otherwise read "active just now"
+    // (measured live: 7–32 h gaps). LastActivityMsFromTranscriptChunk is the PURE per-chunk extractor
+    // (unit-tested): the NEWEST `timestamp` among REAL conversation lines (type user/assistant,
+    // non-meta/compact/sidechain), ignoring the trailer/state + away_summary lines; matches
+    // TranscriptStore::QuickRowFacts (the Sessions browser's line-derived last-activity). The tail
+    // reader grows its window past the (often untimestamped) tail block + a >1 MiB final line and
+    // folds in SUBAGENT side-file activity. 0 == no timestamped conversation line (caller -> mtime).
+    int64_t LastActivityMsFromTranscriptChunk(std::wstring_view chunk);
+    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId);
+    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId);
+
     // Agentmaster (TAB_OVERLAY.md row 3 "Transcript"): read a transcript into a plain-text
     // conversation — ONLY the human + assistant TEXT messages, in order. Tool calls, tool results,
     // thinking, meta/summary/sidechain lines are all dropped (the user asked for "the whole

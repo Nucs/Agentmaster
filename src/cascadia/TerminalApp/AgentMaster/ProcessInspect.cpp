@@ -2525,6 +2525,111 @@ namespace Agentmaster
         return ::SystemTimeToFileTime(&st, &outUtc) != FALSE;
     }
 
+    // Agentmaster: the line-derived LAST-ACTIVITY ms from a transcript chunk — the NEWEST `timestamp`
+    // among REAL conversation lines (type "user"/"assistant", non-meta/compact/sidechain). WHY this
+    // exists vs the file mtime (TranscriptTimes): `claude --resume`, a /model or permission-mode change,
+    // and a shell-cwd reset all APPEND UNTIMESTAMPED state lines (`last-prompt`/`mode`/`permission-mode`/
+    // `summary`) to the tail — so the file MTIME jumps to resume-time while the conversation did nothing.
+    // A restored session focused after a restart would otherwise read "active just now" (it only resumed;
+    // measured live: such trailer blocks sit 7–32 h after the last real line). Those lines carry no
+    // `timestamp` AND aren't user/assistant, so this skips them — matching TranscriptStore::QuickRowFacts
+    // (the Sessions browser's line-derived last-activity) + AnalyzeSessionTranscript's lastTs. "max, not
+    // last-seen": a fork's copied tail carries OLD stamps, so the newest among the chunk wins. Pure +
+    // total; tolerates a partial leading line (a tail read can start mid-line — it fails json::Parse and
+    // is skipped). 0 when the chunk holds no timestamped conversation line.
+    int64_t LastActivityMsFromTranscriptChunk(std::wstring_view chunk)
+    {
+        int64_t newest = 0;
+        size_t start = 0;
+        for (size_t i = 0; i <= chunk.size(); ++i)
+        {
+            if (i < chunk.size() && chunk[i] != L'\n')
+            {
+                continue;
+            }
+            std::wstring_view line(chunk.data() + start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue; // garbage / a partial leading line — skip
+            }
+            const auto& obj = *parsed;
+            // The same real-conversation-line predicate ReadTranscriptInfo / ParseTranscriptDelta use:
+            // type user/assistant only; drop meta / compact-summary / sidechain (subagent) turns. The
+            // untimestamped trailer/state lines (last-prompt/mode/permission-mode) and the away_summary
+            // recap (type "system") are excluded here, so neither inflates "last activity".
+            const std::wstring type = obj.StrAt(L"type");
+            if ((type != L"user" && type != L"assistant") || obj.BoolAt(L"isMeta") || obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isSidechain"))
+            {
+                continue;
+            }
+            const std::wstring ts = obj.StrAt(L"timestamp");
+            if (ts.empty())
+            {
+                continue;
+            }
+            FILETIME ft{};
+            if (SeParseIso(ts, ft))
+            {
+                const int64_t ms = FileTimeToUnixMs(ft);
+                if (ms > newest)
+                {
+                    newest = ms;
+                }
+            }
+        }
+        return newest;
+    }
+
+    // Agentmaster: the line-derived last-activity read from the transcript TAIL — the cheap,
+    // mtime-gateable form of TranscriptInfo.lastTs that the Fleet Observer feeds into
+    // SessionInfo.convLastActivityUnixMs INSTEAD of the lying file mtime (see
+    // LastActivityMsFromTranscriptChunk for WHY mtime lies). Grows the tail window (the literal tail is
+    // usually untimestamped state lines, and a single assistant line can exceed 1 MiB) until a
+    // timestamped conversation line lands or the cap is hit. Folds in SUBAGENT side-file activity — a
+    // running Task/Agent subagent keeps the PARENT transcript quiescent, so its work lives in the side
+    // files (the same fold TranscriptTimesIn does), and those files are short-lived/never-resumed so
+    // their mtime is honest. 0 when the file is absent / has no timestamped conversation line in the
+    // window (the caller then falls back to the mtime). Filesystem only.
+    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId)
+    {
+        if (projectsDir.empty() || cwd.empty() || sessionId.empty())
+        {
+            return 0;
+        }
+        const std::wstring path = std::wstring{ projectsDir } + L"\\" + EncodeCwdToProjectDir(cwd) + L"\\" + std::wstring{ sessionId } + L".jsonl";
+        int64_t lineMs = 0;
+        for (const size_t window : { size_t{ 256u << 10 }, size_t{ 2u << 20 }, size_t{ 16u << 20 } })
+        {
+            const std::string bytes = ReadFileTail(path, window);
+            if (bytes.empty())
+            {
+                break; // absent / unreadable / empty
+            }
+            lineMs = LastActivityMsFromTranscriptChunk(Utf8ToWide(bytes));
+            if (lineMs != 0 || bytes.size() < window)
+            {
+                break; // found a conversation timestamp, or the whole file already fit this window
+            }
+        }
+        const int64_t subMs = SubagentActivityUnixMs(path); // running-subagent activity (parent quiescent)
+        return (std::max<int64_t>)(lineMs, subMs); // explicit template arg + parens dodge the windows.h max() macro
+    }
+
+    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId)
+    {
+        return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId);
+    }
+
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes)
     {
         SessionSummary out;
