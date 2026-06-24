@@ -258,6 +258,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         WUX::Controls::ToolTip toolTip{};
+        // Agentmaster: pin the tooltip Dark, exactly as _UpdateAgentToolTip does for managed tabs. This
+        // is the DEFAULT tab-tooltip path — shell (pwsh/cmd) tabs, the Manager tab, and any tab before a
+        // rich session tooltip is pushed — and it was the lone tab tooltip left rendering at the popup
+        // root's (light) theme: a ToolTip lives in the popup root and does NOT inherit the host theme, and
+        // ToolTipService theme propagation is unreliable under XAML Islands (see AgentTipHelpers /
+        // _UpdateAgentToolTip), so a non-managed tab's title tooltip flashed light over the dark strip
+        // while managed tabs' tooltips were dark. Pin it so every tab's tooltip matches.
+        toolTip.RequestedTheme(WUX::ElementTheme::Dark);
         toolTip.Content(textBlock);
         WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), toolTip);
     }
