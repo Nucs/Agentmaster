@@ -114,11 +114,15 @@ toggle), deferred like the rest.
 - `_ArchiveAndCloseClaudeTab` → **always archive**: drop the Delete/Archive/Cancel dialog; keep the
   archive bookkeeping (flip `live=false`, unbind injector, `SaveSessions`, close the tab).
   `confirmBeforeKill` (relabeled **"Confirm before closing"**) gates a **three-way** confirm —
-  **Close · ★ Favorite & Close · Cancel** (mapped to `Primary` / `Secondary` / `None`). **Favorite &
-  Close** stars the session (`SetSessionFavorite(id, true)`) *before* the archive bookkeeping, so it
-  surfaces in the Sessions page's ★ column / `[ ] Favorite` filter afterward; plain **Close** just
-  archives. The default button is **Cancel** (safe). Non-destructive either way, so the confirm can
-  be turned off — but with it off there is no dialog, hence no Favorite-&-Close button (star from the
+  **Close · ★ Favorite & Close · Cancel** (mapped to `Primary` / `Secondary` / `None`). The
+  `Secondary` button **flips sense on the session's current star** (`IsSessionFavorite(id)`): an
+  unstarred session shows **★ Favorite & Close** (stars it via `SetSessionFavorite(id, true)` *before*
+  the archive bookkeeping, so it surfaces in the Sessions page's ★ column / `[ ] Favorite` filter
+  afterward); an **already-favorite** one shows **☆ Unfavorite & Close** instead (the hollow ☆
+  anti-star — the same unfavorited glyph the Sessions page's ★ column uses — `SetSessionFavorite(id,
+  false)`), since re-favoriting a starred session would be a no-op. Plain **Close** just archives. The
+  default button is **Cancel** (safe). Non-destructive either way, so the confirm can be turned off —
+  but with it off there is no dialog, hence no Favorite-&-Close button (toggle the star from the
   Sessions page or the tab menu instead — the accepted trade-off of putting it on the dialog).
 - Batch close (`TabManagement.cpp`): "🗑 Delete All / Archive All / Cancel All" → **"Close All · ★
   Favorite & Close All · Cancel All"**. `Secondary` sets a `favoriteAll` flag; the apply loop then
@@ -143,8 +147,10 @@ Entry points (per the chosen surfaces):
    `_ToggleSessionFavorite(sid)`. *Simple interaction with the session (its tab) makes it eligible
    to favorite.*
 3. **The close confirm's "★ Favorite & Close" button** (§4) — keep + close in one gesture, at the
-   moment you're closing (single + batch). Closing never auto-favorites; this is the explicit
-   "keep this one" choice surfaced right where you make the close decision.
+   moment you're closing (single + batch). On the single-tab confirm it **flips to "☆ Unfavorite &
+   Close"** when the session is already starred, so the Secondary button always does the *useful*
+   toggle. Closing never auto-favorites; this is the explicit "keep this one" (or "drop the star")
+   choice surfaced right where you make the close decision.
 
 Plus the Sessions row right-click menu's `Favorite`/`Unfavorite` item (§3).
 

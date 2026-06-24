@@ -250,7 +250,11 @@ rows are ALL gone. A managed tab's lifecycle verbs are now just **Close** and **
 deletes; the old 3-way Delete/Archive/Cancel confirm became **Close · ★ Favorite & Close · Cancel**, the
 batch close **Close All · ★ Favorite & Close All · Cancel All**, and every "Delete permanently" UI was
 removed — **★ Favorite & Close** (dialog `Secondary`) stars the session(s) via `SetSessionFavorite` before
-archiving, so a keep-this close is one gesture; closing NEVER auto-favorites). **Favorite** (a hollow ☆ /
+archiving, so a keep-this close is one gesture; closing NEVER auto-favorites). On the **single-tab** close
+confirm the `Secondary` button **flips sense on the session's current star** (`IsSessionFavorite`): an
+already-favorite session offers **☆ Unfavorite & Close** instead (the hollow ☆ anti-star — the Sessions ★
+column's own unfavorited glyph — `SetSessionFavorite(id,false)`), since re-favoriting a starred session
+would be a no-op. **Favorite** (a hollow ☆ /
 filled-yellow ★) is the new "keep/find this" marker, persisted via the **SessionStore `favorite` key**
 (the durable per-session *title* store, reused — survives Close, works for never-managed on-disk sessions,
 one sparse scan; `IsSessionFavorite` / `SetSessionFavorite` / `LoadAllFavoriteSessions`). It surfaces as a

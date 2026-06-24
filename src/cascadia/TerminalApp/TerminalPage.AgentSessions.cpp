@@ -703,6 +703,10 @@ namespace winrt::TerminalApp::implementation
                         title = s->title;
                     }
                 }
+                // FAVORITES.md: is this session ALREADY starred? Drives the Secondary button's sense
+                // below (Favorite & Close vs Unfavorite & Close). The star lives in the durable
+                // SessionStore, not the registry SessionInfo, so read it directly.
+                const bool alreadyFavorite = ::Agentmaster::IsSessionFavorite(sessionId);
                 ContentDialog dialog;
                 dialog.Tag(winrt::box_value(L"agentmaster-dark")); // Agentmaster: force dark (Agent Manager UI) — see TerminalWindow::ShowDialog
                 dialog.Title(winrt::box_value(L"Close session?"));
@@ -713,7 +717,12 @@ namespace winrt::TerminalApp::implementation
                                                     winrt::hstring{ L"Closing shuts the session down. It stays in Sessions — resume it anytime, and star it there to keep it in your favorites." } :
                                                     winrt::hstring{ L"“" + title + L"” — closing shuts it down. It stays in Sessions — resume it anytime, and star it there to keep it in your favorites." }));
                 dialog.PrimaryButtonText(L"Close");
-                dialog.SecondaryButtonText(L"★ Favorite & Close"); // FAVORITES.md: keep+close in one gesture (star, then archive)
+                // FAVORITES.md: the Secondary button FLIPS sense on alreadyFavorite — "★ Favorite & Close"
+                // (star, then archive) when unstarred, vs "☆ Unfavorite & Close" when it's ALREADY a
+                // favorite. The hollow ☆ is the anti-star (the SAME unfavorited glyph the Sessions page's
+                // ★ column uses), so the gesture clearly reads as REMOVING the star rather than re-applying
+                // it (re-favoriting an already-favorite session would be a no-op).
+                dialog.SecondaryButtonText(alreadyFavorite ? L"☆ Unfavorite & Close" : L"★ Favorite & Close");
                 dialog.CloseButtonText(L"Cancel");
                 dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel (the Close button)
 
@@ -730,12 +739,14 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (result == ContentDialogResult::Secondary)
                 {
-                    // "Favorite & Close": star the session (durable SessionStore key) BEFORE archiving,
-                    // so it's findable via the Sessions page's ★ column / [ ] Favorite filter afterward.
-                    ::Agentmaster::SetSessionFavorite(sessionId, true);
+                    // The Secondary gesture TOGGLES the durable star (SessionStore key) BEFORE archiving:
+                    // an unfavorited session is starred ("★ Favorite & Close") so it's findable via the
+                    // Sessions page's ★ column / [ ] Favorite filter; an already-favorite one is UN-starred
+                    // ("☆ Unfavorite & Close"). Either way we then fall through to the archive below.
+                    ::Agentmaster::SetSessionFavorite(sessionId, !alreadyFavorite);
                 }
-                // Primary (Close) or Secondary (Favorite & Close) -> fall through to the archive
-                // (keep-the-record) bookkeeping below.
+                // Primary (Close) or Secondary (Favorite/Unfavorite & Close) -> fall through to the
+                // archive (keep-the-record) bookkeeping below.
             }
             // No presenter to confirm with -> close anyway (it's non-destructive; don't strand the close).
         }
