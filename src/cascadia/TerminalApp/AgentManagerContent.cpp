@@ -2476,14 +2476,22 @@ namespace winrt::TerminalApp::implementation
                 Grid::SetRow(outer, 1);
                 _flightPlanBody.Children().Append(outer);
 
-                // Summary TAB body: empty for now — a faint centered placeholder so a blank pane doesn't
-                // read as a rendering bug. (Replace with real content when the Summary view is built.)
+                // Summary TAB body (Agentmaster): the SAME session-summary box the Sessions page + the
+                // per-tab overlay render (RenderSessionSummaryBox), shown for the selected managed Claude
+                // session — analyzed off-thread + cached (see _RefreshSummaryTab / _LoadSummaryForSession),
+                // user MESSAGES reversed to newest-first, and the WHOLE box inside ONE inner ScrollViewer
+                // so the narrow Flight-Plan pane scrolls a long summary instead of clipping it.
                 _summaryHost = Grid{};
+                _summaryBoxHost = StackPanel{};
+                _summaryBoxHost.Spacing(0); // the rendered box manages its own spacing (mono TextBlocks + rules)
+                _summaryBoxHost.Margin(Thickness{ 0, 6, 6, 0 }); // a little top gap below the toggle + right gap clear of the scrollbar
                 {
-                    auto hint = Text(L"Summary", 13, false, 0.35);
-                    hint.HorizontalAlignment(HorizontalAlignment::Center);
-                    hint.VerticalAlignment(VerticalAlignment::Center);
-                    _summaryHost.Children().Append(hint);
+                    auto ssv = ScrollViewer{};
+                    ssv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto); // the inner scrollbar
+                    ssv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+                    ssv.Content(_summaryBoxHost);
+                    _summaryScroll = ssv;
+                    _summaryHost.Children().Append(ssv);
                 }
 
                 // Both tab bodies share one grid cell; _UpdatePlanPaneTab toggles which is Visible.
@@ -2607,6 +2615,7 @@ namespace winrt::TerminalApp::implementation
         _SyncProgressTimer(); // Agentmaster: run the 1s countdown-bar drainer iff any Waiting-for-you bar is now tracked
         _RebuildTree(sessions);
         _RebuildPlan(sessions);
+        _RefreshSummaryTab(); // Agentmaster: refresh the Summary tab (cheap; no-op unless that tab is active)
         _UpdateReopenButton();
         _RefreshKeepAwakeHold(&sessions); // Agentmaster: WhileRunning mode tracks the fleet live (no-op for Off/Always)
 
@@ -8477,6 +8486,205 @@ namespace winrt::TerminalApp::implementation
         {
             _flightPlanBody.Visibility(summary ? Visibility::Collapsed : Visibility::Visible);
         }
+        _RefreshSummaryTab(); // populate/refresh the Summary tab when it becomes active (self-guards otherwise)
+    }
+
+    // Agentmaster (Summary tab): show the selected managed Claude session's summary box (the SAME
+    // RenderSessionSummaryBox the Sessions page + per-tab overlay render) in the Flight-Plan Summary
+    // tab. Cheap + idempotent: early-returns unless the Summary tab is active; renders from the
+    // single-entry cache when (id, mtime) is unchanged; otherwise kicks the off-thread analyze. The
+    // user messages are reversed to newest-first; the whole box rides one inner scrollbar.
+    void AgentManagerContent::_RefreshSummaryTab()
+    {
+        if (!_summaryBoxHost || !_appSettings.flightPlanShowsSummary)
+        {
+            return; // Summary tab not built, or not the active tab — nothing to do
+        }
+        // Subject = the selected MANAGED CLAUDE session. Codex / external / nothing-selected get a
+        // placeholder (the Flight Plan tab still serves those). The analyze cache key is the registry's
+        // convLastActivityUnixMs — the same "last activity" signal the timing adornment uses.
+        std::wstring id, dir;
+        int64_t mtime = 0;
+        if (!_selectedId.empty() && _registry)
+        {
+            if (const auto s = _registry->Get(_selectedId); s && s->kind == ::Agentmaster::AgentKind::Claude)
+            {
+                id = _selectedId;
+                dir = s->workingDir;
+                mtime = s->convLastActivityUnixMs;
+            }
+        }
+        if (id.empty())
+        {
+            // Nothing summarizable selected — render the placeholder ONCE (sentinel), not every refresh.
+            if (_summaryShownId != L"\x01none")
+            {
+                _summaryBoxHost.Children().Clear();
+                auto hint = Text(_selectedId.empty() ? L"Select a Claude session to see its summary." : L"Summary is shown for Claude sessions.", 12, false, 0.5);
+                hint.TextWrapping(TextWrapping::Wrap);
+                hint.Margin(Thickness{ 2, 10, 2, 0 });
+                _summaryBoxHost.Children().Append(hint);
+                _summaryShownId = L"\x01none";
+                _summaryShownMtime = -1;
+            }
+            return;
+        }
+        // Warm cache for this exact (id, mtime): render it (unless it's already on screen).
+        if (_summaryCacheId == id && _summaryCacheMtime == mtime)
+        {
+            if (_summaryShownId != id || _summaryShownMtime != mtime)
+            {
+                _RenderSummaryBox(_summaryCacheText);
+                _summaryShownId = id;
+                _summaryShownMtime = mtime;
+            }
+            return;
+        }
+        // Need a (re)analyze. Show a loading line ONLY when switching to a different subject — if THIS
+        // id's box (an older mtime) is already on screen, keep showing it (no flash) until the new one
+        // lands. A busy session's mtime keeps changing, so flashing a spinner each tick would churn.
+        if (_summaryShownId != id && _summaryShownId != L"\x01loading")
+        {
+            _summaryBoxHost.Children().Clear();
+            auto hint = Text(L"Loading summary\x2026", 12, false, 0.5);
+            hint.Margin(Thickness{ 2, 10, 2, 0 });
+            _summaryBoxHost.Children().Append(hint);
+            _summaryShownId = L"\x01loading";
+            _summaryShownMtime = -1;
+        }
+        if (_summaryLoadingId != id) // one in-flight analyze per id — a busy session can't stack loads
+        {
+            _LoadSummaryForSession(id, dir, mtime);
+        }
+    }
+
+    // Off-thread analyze + render of a Claude session's summary box (the Sessions-page recipe), posted
+    // back via the dispatcher. Messages are reversed to newest-first before rendering. Cached single-
+    // entry by (id, mtime); a stale result (selection moved on, or the Summary tab was left) is dropped.
+    void AgentManagerContent::_LoadSummaryForSession(const std::wstring& id, const std::wstring& dir, int64_t mtime)
+    {
+        _summaryLoadingId = id;
+        auto weak = get_weak();
+        auto disp = _dispatcher;
+        std::thread([weak, disp, id, dir, mtime]() {
+            std::wstring text;
+            const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(id);
+            if (!path.empty())
+            {
+                auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                // Newest-first: reverse the chronological user messages so RenderSessionSummaryBox (which
+                // numbers in vector order) lists 1 = the most recent. Only MESSAGES are reordered.
+                std::reverse(a.userMsgs.begin(), a.userMsgs.end());
+                std::wstring planFile = a.planFilePath;
+                if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
+                {
+                    // A plan-start session's plan file lives in its PARENT transcript (session-end.js).
+                    const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
+                    if (!parentPath.empty())
+                    {
+                        planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                    }
+                }
+                // full=false: the trimmed, space-saving variant (the per-tab overlay's view) — omits the
+                // id / Dir / Folder / Resume / Branch header (redundant for an already-selected session),
+                // leaving the value-add (Recap, Tasks, Messages, Files). Fits the narrow pane.
+                text = ::Agentmaster::RenderSessionSummaryBox(a, id, dir, path, L"claude --resume " + id, L"", L"", planFile, /*full*/ false);
+            }
+            if (!disp)
+            {
+                return;
+            }
+            disp.TryEnqueue([weak, id, mtime, text = std::move(text)]() {
+                auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                // Cache the analyze regardless of current selection (a quick re-select stays warm).
+                self->_summaryCacheId = id;
+                self->_summaryCacheMtime = mtime;
+                self->_summaryCacheText = text;
+                if (self->_summaryLoadingId == id)
+                {
+                    self->_summaryLoadingId.clear();
+                }
+                // Render only if the Summary tab is still active AND this id is still the selected subject.
+                if (!self->_appSettings.flightPlanShowsSummary || self->_selectedId != id)
+                {
+                    return;
+                }
+                self->_RenderSummaryBox(text);
+                self->_summaryShownId = id;
+                self->_summaryShownMtime = mtime;
+            });
+        }).detach();
+    }
+
+    // Render a RenderSessionSummaryBox result into _summaryBoxHost — mirrors the Sessions page's
+    // SessAppendSummaryBox: split on '\n'; a lone kSummarySepMark line becomes a full-width rule; every
+    // other run becomes a monospace, wrapped, selectable TextBlock. Replaces the panel's content.
+    void AgentManagerContent::_RenderSummaryBox(const std::wstring& text)
+    {
+        if (!_summaryBoxHost)
+        {
+            return;
+        }
+        _summaryBoxHost.Children().Clear();
+        if (text.empty())
+        {
+            auto hint = Text(L"No messages recorded for this session yet.", 12, false, 0.5);
+            hint.TextWrapping(TextWrapping::Wrap);
+            hint.Margin(Thickness{ 2, 10, 2, 0 });
+            _summaryBoxHost.Children().Append(hint);
+            return;
+        }
+        std::wstring seg;
+        const auto flush = [&]() {
+            if (seg.empty())
+            {
+                return;
+            }
+            TextBlock tb{};
+            tb.FontFamily(FontFamily{ L"Cascadia Mono" });
+            tb.FontSize(11);
+            tb.TextWrapping(TextWrapping::Wrap);
+            tb.IsTextSelectionEnabled(true);
+            tb.Opacity(0.85);
+            tb.Text(winrt::hstring{ seg });
+            _summaryBoxHost.Children().Append(tb);
+            seg.clear();
+        };
+        size_t i = 0;
+        while (i <= text.size())
+        {
+            const size_t nl = text.find(L'\n', i);
+            const size_t end = (nl == std::wstring::npos) ? text.size() : nl;
+            const std::wstring lineStr = text.substr(i, end - i);
+            if (lineStr.size() == 1 && lineStr[0] == ::Agentmaster::kSummarySepMark)
+            {
+                flush(); // close the run above the rule
+                Border rule{};
+                rule.Height(1);
+                rule.HorizontalAlignment(HorizontalAlignment::Stretch); // border to border
+                rule.Background(Fill(0x40, 0xFF, 0xFF, 0xFF));
+                rule.Margin(Thickness{ 0, 4, 0, 4 });
+                _summaryBoxHost.Children().Append(rule);
+            }
+            else
+            {
+                if (!seg.empty())
+                {
+                    seg += L"\n";
+                }
+                seg += lineStr;
+            }
+            if (nl == std::wstring::npos)
+            {
+                break;
+            }
+            i = nl + 1;
+        }
+        flush();
     }
 
     void AgentManagerContent::_RefreshTemplateCombo()

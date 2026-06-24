@@ -273,6 +273,16 @@ namespace winrt::TerminalApp::implementation
         // tab's content (Summary host vs the Flight Plan body), no-op while the controls are null.
         void _SelectPlanPaneTab(bool summary);
         void _UpdatePlanPaneTab();
+        // Agentmaster (Summary tab): render the selected managed Claude session's summary — the SAME
+        // RenderSessionSummaryBox the Sessions page / per-tab overlay use — into the Summary tab, with
+        // the user MESSAGES newest-first and the whole box on one inner scrollbar. _RefreshSummaryTab
+        // (cheap; called on every plan refresh + tab switch) resolves the subject and renders from the
+        // single-entry cache or kicks the off-thread analyze; _LoadSummaryForSession does the background
+        // analyze+render; _RenderSummaryBox splits the box text into mono lines + full-width rules
+        // (mirrors the Sessions page's SessAppendSummaryBox).
+        void _RefreshSummaryTab();
+        void _LoadSummaryForSession(const std::wstring& id, const std::wstring& dir, int64_t mtime);
+        void _RenderSummaryBox(const std::wstring& text);
         void _OnSaveTemplate();
         void _OnApplyTemplate(bool toWholeDirectory);
         void _RefreshTemplateCombo();
@@ -592,13 +602,29 @@ namespace winrt::TerminalApp::implementation
         bool _promptHistoryNavigating{ false };
         winrt::Windows::UI::Xaml::Controls::Button _autopilotBtn{ nullptr }; // Agentmaster: Autopilot mode toggle, now in a thin strip atop the Flight Plan TAB body (was the old FLIGHT PLAN header)
         // Agentmaster: the Flight-Plan pane's two-state [Summary | Flight Plan] segmented tab toggle
-        // (its top line) + the two swappable tab bodies. _summaryHost is the (empty for now) Summary
-        // tab; _flightPlanBody holds the Autopilot strip + the prompt queue / compose box. Visibility
-        // is driven by AppSettings::flightPlanShowsSummary via _UpdatePlanPaneTab.
+        // (its top line) + the two swappable tab bodies. _summaryHost holds the Summary tab; _flightPlanBody
+        // holds the Autopilot strip + the prompt queue / compose box. Visibility is driven by
+        // AppSettings::flightPlanShowsSummary via _UpdatePlanPaneTab.
         winrt::Windows::UI::Xaml::Controls::Button _summaryTabBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _flightPlanTabBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Grid _summaryHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Grid _flightPlanBody{ nullptr };
+        // Agentmaster (Summary tab): the scrollable host + box panel for the Summary tab. _summaryScroll
+        // is the ONE inner scrollbar (the narrow pane scrolls a long box); _summaryBoxHost holds the
+        // rendered RenderSessionSummaryBox lines (mono TextBlocks + full-width rules), mirroring the
+        // Sessions page's SessAppendSummaryBox. Loaded off-thread + cached single-entry by (id, mtime);
+        // user messages are rendered newest-first. _summaryShown* tracks what is CURRENTLY on screen
+        // (incl. "\x01loading" / "\x01none" sentinels) so a frequent _Refresh doesn't rebuild the box
+        // (and lose scroll) when nothing changed; _summaryLoadingId dedupes the in-flight analyze (one
+        // per id — a busy session's mtime churn can't stack loads).
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _summaryScroll{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _summaryBoxHost{ nullptr };
+        std::wstring _summaryCacheId;
+        int64_t _summaryCacheMtime{ -1 };
+        std::wstring _summaryCacheText;
+        std::wstring _summaryShownId;
+        int64_t _summaryShownMtime{ -1 };
+        std::wstring _summaryLoadingId;
         winrt::Windows::UI::Xaml::Controls::StackPanel _templatesRow{ nullptr }; // Agentmaster: the Templates row — collapsed by default, toggled by the paper icon
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
