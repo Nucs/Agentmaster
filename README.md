@@ -5,88 +5,96 @@ _By developers, for developers - Never lose a session again - feel like Windows 
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
-[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue + Autopilot)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
+[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
 
-## Features
+## ✨ What it does for you
 
-- **Agent Manager tab** — a pinned mission-control tab: a **Triage Board** (state columns), an **Explorer Tree** (working dirs → sessions; `LOCAL`/`GLOBAL`/`EXTERNAL` + sort), and a **Flight Plan** (per-session queue + history). The regions, the tab strip, and the launch box track one selection **both ways**, across every window.
-- **Fleet Observer** — finds, correlates, and enriches *every* Claude (and Codex) session — even a hand-typed one that fires zero hooks — by reading each process's PEB and transcript out-of-band. Read-only and invisible to the shell; sessions running outside the manager can be watched or **adopted**.
-- **Claude Code engine** — semantic state without screen-scraping: hook-derived first, then reconciled from the transcript tail and the Observer so it self-heals dropped/out-of-order events (blocked-on-question, Esc-interrupt, subagent work, `/clear`·`/compact`·`/resume` divergence).
-- **Autopilot & templating** — on turn-complete the next queued prompt auto-sends (Full) / one-click confirms (Semi) / waits (Manual), bounded by stop-on-error, max-sends, pause-on-human-input and a question-guard. It re-presses Enter when the TUI eats a submit, sends idempotently, and can save a queue as a template to broadcast across a directory.
-- **Tab status indicator** — every tab gets a state-colored strip dot and a top-right badge: linked → status · `model · effort · kind` · Autopilot · queue · workdir/branch; anything else → a dim `○ kind · unlinked` that flips live. Hover to copy the id / path / branch / real launch CLI / summary / transcript.
-- **Per-tab summary panel** — a pencil-toggled overlay rendering the live `session-end.js` box (plan · tasks · prompts · files read/created/edited) straight from the transcript, with a ticking age/activity line.
-- **Sessions browser** — search *every* Claude session on disk: an instant index pass, then a ripgrep content scan with hits attributed in-process to scope (👤 you · 🤖 assistant · 📁/📄 paths · fuzzy). Resume / Fork / Jump from any row.
-- **Archive page** — closing a session archives it (never destroys it — transcripts are never touched). Sortable, searchable, grouped by window, with a "last assistant reply" preview; restore one, bulk-restore, or reopen a whole window.
-- **`agentmaster` CLI** — query the fleet from any shell, app up or down: `show` / `list` / `sessions` / `tabs` / `windows` / `external`, plus `--self` and `--json`. Read-only, no live responder.
-- **Persistence & restoration** — reopen a window whole: geometry, resumed Claude *and* Codex sessions, shell tabs at their real cwd, focused tab, and the Manager lens. One engine across all windows, a per-install profile folder, and permanent per-directory tab colors.
+### 🗂️ One tab to run the whole fleet
+A pinned **Manager** tab is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Flight Plan** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which.
 
-[![The Agentmaster Sessions browser — every on-disk Claude Code session with a scoped/fuzzy search bar and time-range filter on the left, and a detail pane (metadata, conversation, Resume / Fork / Open-New-Session-Here) on the right](doc/agentmaster/img/sessions-browser.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/sessions-browser.png)
+### 💾 Never lose a session — ever
+Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted.
 
-[![The tab right-click menu's Copy › submenu — copy a session's Session Id, working-dir Path, Branch Name, the real Claude or Codex launch CLI, the full session Summary, or the whole Transcript](doc/agentmaster/img/tab-copy-menu.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/tab-copy-menu.png)
+### 👀 Manages every agent — even the ones you didn't launch
+The **Fleet Observer** detects, correlates, and enriches *every* Claude/Codex session by reading process memory and transcripts **out-of-band** — no hooks, no setup, completely invisible to the shell. Hand-type `claude` in any tab and it's managed within seconds. Sessions running *outside* the app show up too: watch them read-only, or **adopt** them (fork a safe copy, or resume).
 
-## Status
+### 🚦 Know who needs you — at a glance
+State is **never screen-scraped**: it's hook-derived and then self-healed from the transcript, so dropped or out-of-order events can't lie to you. It drives a **board column** and a hover card carrying the conversation's **recap** (*"what we did / what's next"*). **Waiting-for-you** works like an unread inbox: a finished turn stays flagged until you've actually looked at it.
 
-In active use, shipping regular [releases](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the released package, and the standalone engine harness passes 900+ checks.
+### 🔎 Observability everywhere — every tab is a status lens
+You never have to open the Manager to read a session. Every classified tab wears a **state-colored dot** in the strip and a **top-right overlay badge** — *status · `model · effort · kind` · Autopilot · queued · workdir/branch · the next queued prompt* — that flips live as the session moves, with a one-hover **copy** menu — also on the **tab's right-click menu** — for its id / path / branch / **real launch CLI** / summary / transcript. The badge's **pencil** unfolds a per-tab **summary panel** (plan · tasks · prompts · files read/created/edited), and a per-prompt **Jump** (or **Alt+↑/↓**) scrolls straight to where a prompt was sent. Even a plain shell tab keeps a dim `○ kind · unlinked` twin — nothing in your strip is a mystery.
 
-- **Claude Code** — fully managed: launch, observe, drive (Autopilot), persist, archive, restore.
-- **Fleet Observer** — manages *every* session, hooks or not; external ones read-only.
-- **Codex** (the OpenAI Codex CLI) — a managed agent for observe + state + the full launch / restore / adopt lifecycle; driving its TUI is next.
-- Installs **side-by-side** under its own identity, distinct from real Windows Terminal and a from-source dev build.
+<table>
+<tr>
+<td width="74%" valign="top">
+<a href="https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/sessions-browser.png"><img alt="The Agentmaster Sessions browser — every on-disk Claude Code session with a scoped, fuzzy search bar and time-range filter on the left, and a detail pane (metadata · conversation · Resume / Fork / Open-New-Session) on the right" src="doc/agentmaster/img/sessions-browser.png" width="100%"></a>
+</td>
+<td width="26%" valign="top">
+<a href="https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/tab-copy-menu.png"><img alt="The managed-tab right-click menu (per-tab actions + observability) with the Copy submenu open — Session Id · Path · Branch · Claude/Codex launch CLI · Summary · Transcript" src="doc/agentmaster/img/tab-copy-menu.png" width="100%"></a>
+</td>
+</tr>
+</table>
 
-See [`IMPLEMENTATION.md`](doc/agentmaster/IMPLEMENTATION.md) and [`CLAUDE.md`](CLAUDE.md) for detail.
+> **And the small stuff that adds up:** **★ favorite** a session to pin it, permanent **per-directory tab colors** (a folder keeps its color across tabs, windows, and restarts), per-install **profiles** so a from-source dev build sits beside the release, and a **Settings** cog for the knobs (model · env · Autopilot defaults).
 
-## Install
+#### Additional features
+- **Autopilot** — auto-sends the next queued prompt on turn-complete (Full / Semi / Manual), with stop-on-error · max-sends · pause-on-input · question-guard · Enter-retry, and savable plan templates.
+- **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
+- **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release opt-in, and uninstall.
+- **Keep Awake** — toolbar toggle (Off / Always / While-Running) so the machine won't sleep mid-run.
+- **Context-window usage** — every card shows how full the conversation's context is (e.g. `ctx 182K`).
+- **Never dead-ends** — quit an agent and you land on a live shell prompt at its cwd, not a dead pane.
+- **Sessions row Filter** — right-click a row to narrow the list by dir / branch / day / week / month / fork-family.
+- **Favorite crown** — a starred session wears a gold crown on its tab-strip dot.
+- **Home / Jump-Back** — jump to the pinned Manager tab and back to where you were.
+- **Hide / Unhide** — drop a session from the Sessions list (reversible; the transcript is untouched).
 
-**One line, no download** — paste into PowerShell (omit `-Version` for latest; add `-Portable` for a cert-free/no-admin install, `-Launch` to start after):
+## 🟢 Status
+
+In active use, shipping regular [**releases**](https://github.com/Nucs/Agentmaster/releases). The full pipeline runs end-to-end in the packaged app; the standalone engine harness passes **1,100+** checks.
+
+- **Claude Code** — fully managed: launch · observe · drive · persist · restore.
+- **Codex** (OpenAI Codex CLI) — managed for observe + state + the full launch / restore / adopt lifecycle (driving its TUI is next).
+- **Every session** — the Observer manages them whether they fire hooks or not; external ones stay read-only until you adopt.
+- Installs **side-by-side** under its own identity — your real Windows Terminal is left untouched.
+
+## ⬇️ Install
+
+**One line, no download** — paste into PowerShell. It grabs the latest release, verifies the signature, and trusts the cert behind a single UAC prompt (skipped on upgrades once trusted):
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.4.1
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1)))
 ```
 
-It downloads the signed bundle, verifies its SHA-256, trusts the cert behind a single UAC prompt (skipped when already trusted, so upgrades are usually prompt-free), and installs. Options: `-Version` · `-Portable` · `-Launch` · `-Prerelease` · `-Force` · `-Uninstall`.
+Flags: `-Version <x.y.z>` · `-Portable` (cert-free, no admin) · `-Launch` · `-Prerelease` · `-Force` · `-Uninstall`.
 
-Or grab the assets from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `WindowsTerminal.exe`, fully self-contained — no cert), or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
+Prefer the files? Grab them from [**Releases**](https://github.com/Nucs/Agentmaster/releases): the **portable zip** (unzip, run `agentmaster.exe` — fully self-contained, no cert) or the self-signed **`.msixbundle`** (trust `Agentmaster.cer` once, then `Add-AppxPackage`).
 
-On first launch the app silently picks a per-install **profile folder** (`~/.agentmaster`, or `~/.agentmaster-dev` for a dev build) holding everything it persists; change it later from ⚙ → Profile. Requires Windows 10 19041+, x64/arm64, and a native [Claude Code](https://www.anthropic.com/claude-code) `claude.exe` (auto-detected on `PATH` / `~/.local/bin` / npm; a pure-Node CLI is unsupported). See [`PROFILES.md`](doc/agentmaster/PROFILES.md).
+First launch silently picks a per-install **profile folder** (`~/.agentmaster`) holding everything it persists. **Requires** Windows 10 19041+, x64/arm64, and a native [Claude Code](https://www.anthropic.com/claude-code) `claude.exe` on `PATH` (Codex optional).
 
-## Docs
+## 📚 Docs & building
 
-- [`DESIGN`](doc/agentmaster/DESIGN.md) · [`IMPLEMENTATION`](doc/agentmaster/IMPLEMENTATION.md) — the design + milestones.
-- [`HOOKS`](doc/agentmaster/HOOKS.md) · [`OBSERVER`](doc/agentmaster/OBSERVER.md) · [`STATE`](doc/agentmaster/STATE.md) — the hooks bridge, Fleet Observer, and state engine.
-- [`SESSIONS`](doc/agentmaster/SESSIONS.md) · [`TAB_OVERLAY`](doc/agentmaster/TAB_OVERLAY.md) · [`CLI`](doc/agentmaster/CLI.md) — the Sessions browser, per-tab badge/panel, and the `agentmaster` command line.
-- [`PERSISTENCE`](doc/agentmaster/PERSISTENCE.md) · [`PROFILES`](doc/agentmaster/PROFILES.md) — workspace restore + per-install identities/profiles.
-- [`CLAUDE.md`](CLAUDE.md) — full working notes: status by area, build/deploy, gotchas, correctness rules.
+- **Start here:** [`CLAUDE.md`](CLAUDE.md) — full working notes (status by area, build/deploy, gotchas, correctness rules) · [`DESIGN`](doc/agentmaster/DESIGN.md) · [`IMPLEMENTATION`](doc/agentmaster/IMPLEMENTATION.md)
+- **Internals:** [`OBSERVER`](doc/agentmaster/OBSERVER.md) · [`HOOKS`](doc/agentmaster/HOOKS.md) · [`STATE`](doc/agentmaster/STATE.md) · [`SESSIONS`](doc/agentmaster/SESSIONS.md) · [`PERSISTENCE`](doc/agentmaster/PERSISTENCE.md) · [`PROFILES`](doc/agentmaster/PROFILES.md) · [`CLI`](doc/agentmaster/CLI.md) · [`TAB_OVERLAY`](doc/agentmaster/TAB_OVERLAY.md)
 
-Code (all marked `Agentmaster`, kept additive): the Manager UI in `AgentManagerContent`, the plain-C++ engine + Fleet Observer under `src/cascadia/TerminalApp/AgentMaster/`, the per-tab overlay `AgentTabOverlay`, small touches at the `TerminalPage` / `Tab` / `TabManagement` integration points, and the `Package-{Rel,Dev}.appxmanifest` identities.
-
-## Building
-
-Toolchain: VS 2022 + the *Desktop Development with C++* and *Universal Windows Platform Development* workloads + the Windows SDK (10.0.22621 / 26100). Build entry: `OpenConsole.slnx`.
+Build it with VS 2022 (*Desktop C++* + *UWP* workloads, Windows SDK 10.0.22621/26100):
 
 ```powershell
 pwsh -File .\tools\Build-Agentmaster.ps1            # first build (restores packages)
 pwsh -File .\tools\Build-Agentmaster.ps1 -NoRestore # inner loop
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) (*Building FAST*) for incremental-build tips, lib-only compile checks, and the raw `msbuild` invocation.
-
-## Deploy & run (from source)
-
-A packaged app can't be run via `WindowsTerminal.exe` directly — deploy the loose layout (what VS F5 does; no signing/cert/admin), which registers the **dev** identity `AgentmasterDev` (distinct from the released `Agentmaster`, so both coexist):
+To run from source, deploy the loose layout (registers the **dev** identity `AgentmasterDev`, which coexists with the release):
 
 ```powershell
 Add-AppxPackage -Register ".\src\cascadia\CascadiaPackage\bin\x64\Debug\AppxManifest.xml" -ForceUpdateFromAnyVersion
 ```
 
-Launch via the `agentmasterdev` alias or the **Agentmaster Dev** Start-menu entry. State lives in the dev profile (`%USERPROFILE%\.agentmaster-dev\`); see [`PROFILES.md`](doc/agentmaster/PROFILES.md).
+Our code is additive and marked `Agentmaster`: the Manager UI in `AgentManagerContent`, the plain-C++ engine + Fleet Observer under `src/cascadia/TerminalApp/AgentMaster/`, the per-tab overlay `AgentTabOverlay`, and small touches at the `TerminalPage` / `Tab` integration points.
 
-## Relationship to Windows Terminal
+## 🔗 Relationship to Windows Terminal & License
 
-Agentmaster is a fork of [`microsoft/terminal`](https://github.com/microsoft/terminal) at `v1.24.2372`; upstream code, docs, and third-party notices are retained (see [`NOTICE.md`](NOTICE.md)). The pristine upstream tree lives on `main`; Agentmaster's work is on the `agentmaster` branch. For Windows Terminal itself, see [aka.ms/terminal-docs](https://aka.ms/terminal-docs).
-
-## License
-
-[MIT](LICENSE), the same as upstream Windows Terminal — the original `Copyright (c) Microsoft Corporation` notice is retained alongside the fork author's.
+A fork of [`microsoft/terminal`](https://github.com/microsoft/terminal) at `v1.24.2372` — pristine upstream on `main`, the fork's work on `agentmaster`; upstream code, docs, and notices are retained ([`NOTICE.md`](NOTICE.md)). Licensed [MIT](LICENSE), same as upstream, with the original `Copyright (c) Microsoft Corporation` notice kept alongside the fork author's. For Windows Terminal itself, see [aka.ms/terminal-docs](https://aka.ms/terminal-docs).
 
 ---
 
