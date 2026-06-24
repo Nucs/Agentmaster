@@ -2815,6 +2815,29 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         {
             return -1;
         }
+        // Agentmaster: bail BEFORE touching the viewport unless at least one prompt resolved to a buffer
+        // row. This is both a correctness no-op (no resolvable prompt => no scroll target anyway) and the
+        // guard that prevents a crash: ResolveConversationPromptRows is gated on _initializedTerminal and,
+        // when the ControlCore has NOT Initialize()d yet (a lazily-restored / not-yet-laid-out tab whose
+        // connection has started but whose first-layout Initialize hasn't run), returns a FULL-SIZE,
+        // all-(-1) vector. That non-empty result slips past the Size()==0 check above, and the
+        // _core.ScrollOffset() / _core.ViewHeight() reads below are NOT _initializedTerminal-guarded —
+        // they would dereference the still-null TextBuffer (AV 0xC0000005 in TextBuffer::GetSize). Unlike
+        // JumpToConversationPrompt (which bails on its single row < 0), this batch path must explicitly
+        // confirm something resolved before reading the viewport.
+        auto anyResolved = false;
+        for (uint32_t k = 0; k < rows.Size(); ++k)
+        {
+            if (rows.GetAt(k) >= 0)
+            {
+                anyResolved = true;
+                break;
+            }
+        }
+        if (!anyResolved)
+        {
+            return -1;
+        }
         const auto viewTop = _core.ScrollOffset();
         const auto viewH = _core.ViewHeight();
         const auto viewBottom = viewTop + viewH - 1;
