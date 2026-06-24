@@ -1002,13 +1002,24 @@ namespace Agentmaster
         std::sort(externalRows.begin(), externalRows.end(), [](const ExternalClaudeRow& a, const ExternalClaudeRow& b) { return a.pid < b.pid; });
         std::sort(oursPids.begin(), oursPids.end());
         {
-            std::wstring sig = std::to_wstring(factsByPid.size()) + L":" + std::to_wstring(ours) + L":" +
-                               std::to_wstring(external) + L":" + std::to_wstring(other) + L":" + std::to_wstring(orphan) +
-                               L":c" + std::to_wstring(codexCount); // codex births/deaths re-log the census
-            sig += std::to_wstring(codexByPid.size());
+            // Census log gating — signal over noise. The re-log fires ONLY when OUR fleet changes:
+            // the set of our claudes OR any of their identifying facts (rostered / bg / model /
+            // effort / cwd / wt / win — exactly what the detail block below prints). EXTERNAL-world
+            // churn — unrelated claudes/codex starting and dying (`wt`/`other`/`orphan`/`codex`/the
+            // total) — NO LONGER triggers a re-log: it is observe-only UI, not signal worth a line,
+            // and on a busy box (dozens of unrelated claudes) it was the bulk of the spam, together
+            // with a too-short keepalive. The summary line still PRINTS the full live counts as
+            // context (they're just not what TRIGGERS the re-log), and the keepalive still snapshots
+            // the whole fleet periodically. (Was: ANY count change + a 15 s keepalive re-emitted the
+            // whole summary+detail block — ~34% of a 65 MB log was this one census.)
+            std::wstring sig;
             for (const auto p : oursPids)
             {
-                sig += L"," + std::to_wstring(p);
+                const auto& f = factsByPid[p];
+                const bool rostered = rosteredOwner.count(p) != 0;
+                const std::wstring win = rostered ? rosteredOwner[p] : WindowIdFromAmSession(f.amSession);
+                sig += std::to_wstring(p) + L"|" + (rostered ? L"r" : L"s") + L"|" + (f.background ? L"1" : L"0") +
+                       L"|" + f.model + L"|" + f.effort + L"|" + f.cwd + L"|" + f.wtSession + L"|" + win + L";";
             }
             if (sig != _lastCensusSig || (now - _lastCensusLogMs) >= kObserverCensusKeepaliveMs)
             {

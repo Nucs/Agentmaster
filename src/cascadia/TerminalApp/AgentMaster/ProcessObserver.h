@@ -39,7 +39,7 @@ namespace Agentmaster
 
     inline constexpr int64_t kObserverHeartbeatMs = 2000; // §8c FULL-survey cadence (the birth-detection floor; preserved by O7's debounce)
     inline constexpr int64_t kObserverFastTickMs = 1000; // O7: cheap (µs) liveness cadence BETWEEN full surveys
-    inline constexpr int64_t kObserverCensusKeepaliveMs = 15000; // re-log an unchanged census at most this often
+    inline constexpr int64_t kObserverCensusKeepaliveMs = 300000; // re-log an UNCHANGED census at most this often (5 min): a periodic fleet snapshot, NOT a per-tick drip (was 15 s — the bulk of the log spam alongside external-churn-triggered re-logs, now gated to OUR fleet only)
 
     class ProcessObserver
     {
