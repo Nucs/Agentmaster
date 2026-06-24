@@ -131,6 +131,9 @@ namespace winrt::TerminalApp::implementation
         STDMETHODIMP Initialize(HWND hwnd);
 
         void SetSettings(Microsoft::Terminal::Settings::Model::CascadiaSettings settings, bool needRefreshUI);
+        // Agentmaster: lightweight apply for a keyboard-layout change — re-resolve keybindings
+        // only, without the per-pane settings reapply that froze the window on a language switch.
+        void RefreshKeybindings(Microsoft::Terminal::Settings::Model::CascadiaSettings settings);
 
         void Create();
         Windows::UI::Xaml::Automation::Peers::AutomationPeer OnCreateAutomationPeer();

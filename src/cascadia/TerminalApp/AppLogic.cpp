@@ -144,14 +144,36 @@ namespace winrt::TerminalApp::implementation
             [weakSelf = get_weak()]() {
                 if (auto self{ weakSelf.get() })
                 {
-                    self->ReloadSettings();
+                    self->_reloadSettingsImpl(false);
+                }
+            });
+
+        // Agentmaster: a keyboard-layout switch only needs the keybindings re-resolved — a
+        // punctuation key's vkey is layout-dependent (KeyChordSerialization's VkKeyScanW), so a
+        // binding like "ctrl+," can map to a different vkey across layouts. Upstream handled this
+        // with a full ReloadSettingsThrottled() (GH#11522), which re-ran the dynamic-profile
+        // generators AND re-applied settings to every pane. That per-control reapply, across many
+        // live Claude sessions, is what froze the window for seconds on every language change.
+        // Route layout changes to a lightweight reload that re-parses settings (cheap) but applies
+        // ONLY the keybindings to the live UI (see _reloadSettingsImpl / TerminalPage::RefreshKeybindings).
+        _reloadKeybindingsForLayout = std::make_shared<ThrottledFunc<>>(
+            DispatcherQueue::GetForCurrentThread(),
+            til::throttled_func_options{
+                .delay = std::chrono::milliseconds{ 100 },
+                .debounce = true,
+                .trailing = true,
+            },
+            [weakSelf = get_weak()]() {
+                if (auto self{ weakSelf.get() })
+                {
+                    self->_reloadSettingsImpl(true);
                 }
             });
 
         _languageProfileNotifier = winrt::make_self<LanguageProfileNotifier>([this]() {
-            // TODO: This is really bad, because we reset any current user customizations.
-            // See GH#11522.
-            ReloadSettingsThrottled();
+            // Agentmaster: keybindings-only refresh — replaces upstream's full
+            // ReloadSettingsThrottled() that hung the window on every keyboard-layout change.
+            _reloadKeybindingsForLayout->Run();
         });
 
         // Do this here, rather than at the top of main. This will prevent us from
@@ -374,6 +396,15 @@ namespace winrt::TerminalApp::implementation
     //     a background thread.
     void AppLogic::ReloadSettings()
     {
+        _reloadSettingsImpl(false);
+    }
+
+    // Agentmaster: shared body of ReloadSettings(). keybindingsOnly==true (a keyboard-layout
+    // change) still re-parses settings so layout-dependent keychords re-resolve, but tags the
+    // SettingsLoadEventArgs so each window applies ONLY the keybindings (TerminalPage::
+    // RefreshKeybindings) instead of the heavy per-pane reapply.
+    void AppLogic::_reloadSettingsImpl(bool keybindingsOnly)
+    {
         // Attempt to load our settings.
         // If it fails,
         //  - don't change the settings (and don't actually apply the new settings)
@@ -401,7 +432,8 @@ namespace winrt::TerminalApp::implementation
                                                                   static_cast<uint64_t>(_settingsLoadedResult),
                                                                   _settingsLoadExceptionText,
                                                                   warnings.GetView(),
-                                                                  _settings);
+                                                                  _settings,
+                                                                  keybindingsOnly);
                 SettingsChanged.raise(*this, *ev);
                 return;
             }
@@ -433,7 +465,8 @@ namespace winrt::TerminalApp::implementation
                                                           _settingsLoadedResult,
                                                           _settingsLoadExceptionText,
                                                           warnings.GetView(),
-                                                          _settings);
+                                                          _settings,
+                                                          keybindingsOnly);
         SettingsChanged.raise(*this, *ev);
     }
 

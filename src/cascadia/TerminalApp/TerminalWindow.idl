@@ -37,6 +37,9 @@ namespace TerminalApp
 
         Microsoft.Terminal.Settings.Model.CascadiaSettings NewSettings { get; };
 
+        // Agentmaster: keyboard-layout change → re-resolve keybindings only (skip per-pane reapply).
+        Boolean KeybindingsOnly { get; };
+
     };
 
     // See IDialogPresenter and TerminalPage's DialogPresenter for more

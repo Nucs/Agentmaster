@@ -66,6 +66,10 @@ namespace winrt::TerminalApp::implementation
         ::TerminalApp::AppCommandlineArgs _settingsAppArgs;
 
         std::shared_ptr<ThrottledFunc<>> _reloadSettings;
+        // Agentmaster: a keyboard-layout change routes here instead of _reloadSettings, so the
+        // reload applies ONLY keybindings to the live UI (no per-pane reapply). See AppLogic.cpp.
+        // Declared before _languageProfileNotifier so it outlives the notifier that calls it.
+        std::shared_ptr<ThrottledFunc<>> _reloadKeybindingsForLayout;
 
         std::vector<Microsoft::Terminal::Settings::Model::SettingsLoadWarnings> _warnings{};
 
@@ -77,6 +81,9 @@ namespace winrt::TerminalApp::implementation
         TerminalApp::ContentManager _contentManager{ winrt::make<implementation::ContentManager>() };
 
         void _ApplyLanguageSettingChange() noexcept;
+        // Agentmaster: shared body of ReloadSettings(); keybindingsOnly==true tags the
+        // SettingsLoadEventArgs so windows skip the heavy per-pane reapply on a layout change.
+        void _reloadSettingsImpl(bool keybindingsOnly);
 
         [[nodiscard]] HRESULT _TryLoadSettings() noexcept;
         void _ProcessLazySettingsChanges();

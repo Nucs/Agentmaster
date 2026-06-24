@@ -309,6 +309,36 @@ namespace winrt::TerminalApp::implementation
         _systemRowsToScroll = _ReadSystemRowsToScroll();
     }
 
+    // Agentmaster: lightweight settings apply for a keyboard-layout change.
+    // Keybindings can be layout-dependent — KeyChordSerialization resolves a punctuation key's
+    // vkey via VkKeyScanW at parse time, so a binding like "ctrl+," can map to a different vkey
+    // after switching layout. Upstream re-resolved these by doing a FULL settings reload from the
+    // LanguageProfileNotifier (GH#11522), which re-applied fonts/colors/profiles to every pane.
+    // That per-control reapply, across many live Claude sessions, is what froze the window for
+    // seconds on every language switch. Here we only swap in the freshly-parsed settings and
+    // re-hook the keybindings — no per-pane reapply, no flyout/theme rebuild.
+    // INVARIANT: must be called on OUR UI thread.
+    void TerminalPage::RefreshKeybindings(CascadiaSettings settings)
+    {
+        assert(Dispatcher().HasThreadAccess());
+        _settings = settings;
+
+        // Mirror only the keybinding-relevant work that SetSettings + _RefreshUIForSettingsReload
+        // do, and nothing else.
+        if (const auto p = CommandPaletteElement())
+        {
+            p.SetActionMap(_settings.ActionMap());
+        }
+
+        _HookupKeyBindings(_settings.ActionMap());
+
+        for (const auto& tab : _tabs)
+        {
+            auto tabImpl{ winrt::get_self<Tab>(tab) };
+            tabImpl->SetActionMap(_settings.ActionMap());
+        }
+    }
+
     bool TerminalPage::IsRunningElevated() const noexcept
     {
         // GH#2455 - Make sure to try/catch calls to Application::Current,

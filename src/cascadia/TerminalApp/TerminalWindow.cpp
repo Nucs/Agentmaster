@@ -932,7 +932,17 @@ namespace winrt::TerminalApp::implementation
 
         // Update the settings in TerminalPage
         // We're on our UI thread right now, so this is safe
-        _root->SetSettings(_settings, true);
+        // Agentmaster: a keyboard-layout change only re-resolves keybindings — apply just those
+        // and skip the heavy per-pane settings reapply (the multi-second freeze on a language
+        // switch; see AppLogic::_reloadSettingsImpl).
+        if (args.KeybindingsOnly())
+        {
+            _root->RefreshKeybindings(_settings);
+        }
+        else
+        {
+            _root->SetSettings(_settings, true);
+        }
 
         // Bubble the notification up to the AppHost, now that we've updated our _settings.
         SettingsChanged.raise(*this, args);
