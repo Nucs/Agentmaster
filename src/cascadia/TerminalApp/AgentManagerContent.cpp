@@ -667,7 +667,11 @@ namespace
             return;
         }
         b.Resources().Clear();
-        b.Background(nullptr);
+        // ClearValue (NOT Background(nullptr)): a NULL background brush is not hit-test-visible, which would
+        // leave this button's body dead (clicks/hover only on its text). Clearing the local value lets the
+        // default Style's {ThemeResource ButtonBackground} apply — which the Manager seeds non-null at _root
+        // scope (see the AgentManagerContent ctor) — so an Off-state Keep-Awake button stays clickable.
+        b.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::BackgroundProperty());
         b.ClearValue(winrt::Windows::UI::Xaml::Controls::Control::ForegroundProperty());
     }
 
@@ -1219,6 +1223,31 @@ namespace winrt::TerminalApp::implementation
         // it here is exactly the theme-correct dark value with no light-mode bleed. (Must stay non-null /
         // opaque for the hit-testing reason above.)
         _root.Background(Fill(0xFF, 0x2E, 0x2E, 0x2E)); // opaque #2e2e2e == TabViewBackground (dark)
+
+        // Agentmaster: explicit Button STATE brushes for the WHOLE Manager subtree. SAME root cause as the
+        // opaque _root fill above — a NULL background brush is NOT hit-test-visible. Under the forced-Dark
+        // island theme (RequestedTheme above), the default {ThemeResource ButtonBackground} / *PointerOver /
+        // *Pressed brushes do NOT resolve here (they come back null), so a plain Button's BODY isn't
+        // hit-testable: hover + clicks only land on its text CONTENT, never the button's padding — the
+        // "buttons don't click or hover; it hits the label/text instead" report. The board CARDS dodge this
+        // only because each sets an explicit Fill() Background (and the keep-awake/scope buttons because
+        // PaintHoldButton seeds these very keys per-button). Seed them ONCE at _root scope so every default
+        // Button under the Manager (the toolbar cog / Pause / Sessions / Keep-Awake, the launch + header
+        // toggles, the Flight-Plan compose buttons, the settings-overlay buttons, …) is hit-testable across
+        // its whole body and shows a real hover/press. A near-invisible rest fill (alpha 0x01 — the
+        // "~invisible yet hit-testable" value used elsewhere here) keeps the flat look; hover/press lift.
+        // A button with its OWN Background/Resources (cards, PaintHoldButton) overrides these locally. This
+        // is the global twin of PaintHoldButton (which proved per-button Resources resolve in this subtree).
+        // Inserted BEFORE _BuildLayout so the buttons it creates resolve these on first style-apply.
+        {
+            auto br = _root.Resources();
+            br.Insert(winrt::box_value(L"ButtonBackground"), Fill(0x01, 0xFF, 0xFF, 0xFF)); // flat rest, hit-testable
+            br.Insert(winrt::box_value(L"ButtonBackgroundPointerOver"), Fill(0x22, 0xFF, 0xFF, 0xFF)); // subtle hover lift
+            br.Insert(winrt::box_value(L"ButtonBackgroundPressed"), Fill(0x33, 0xFF, 0xFF, 0xFF)); // a touch more on press
+            br.Insert(winrt::box_value(L"ButtonForeground"), Fill(0xFF, 0xE6, 0xE6, 0xE6)); // light text on the dark UI
+            br.Insert(winrt::box_value(L"ButtonForegroundPointerOver"), Fill(0xFF, 0xFF, 0xFF, 0xFF));
+            br.Insert(winrt::box_value(L"ButtonForegroundPressed"), Fill(0xFF, 0xFF, 0xFF, 0xFF));
+        }
 
         _BuildLayout();
 
