@@ -5,7 +5,7 @@ _By developers, for developers - Never lose a session again - feel like Windows 
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
-![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue + Autopilot)](doc/agentmaster/img/agent-manager.png)
+[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue + Autopilot)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
 
 ## Features
 
@@ -20,9 +20,9 @@ Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity 
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down: `show` / `list` / `sessions` / `tabs` / `windows` / `external`, plus `--self` and `--json`. Read-only, no live responder.
 - **Persistence & restoration** — reopen a window whole: geometry, resumed Claude *and* Codex sessions, shell tabs at their real cwd, focused tab, and the Manager lens. One engine across all windows, a per-install profile folder, and permanent per-directory tab colors.
 
-![The Agentmaster Sessions browser — every on-disk Claude Code session with a scoped/fuzzy search bar and time-range filter on the left, and a detail pane (metadata, conversation, Resume / Fork / Open-New-Session-Here) on the right](doc/agentmaster/img/sessions-browser.png)
+[![The Agentmaster Sessions browser — every on-disk Claude Code session with a scoped/fuzzy search bar and time-range filter on the left, and a detail pane (metadata, conversation, Resume / Fork / Open-New-Session-Here) on the right](doc/agentmaster/img/sessions-browser.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/sessions-browser.png)
 
-![The tab right-click menu's Copy › submenu — copy a session's Session Id, working-dir Path, Branch Name, the real Claude or Codex launch CLI, the full session Summary, or the whole Transcript](doc/agentmaster/img/tab-copy-menu.png)
+[![The tab right-click menu's Copy › submenu — copy a session's Session Id, working-dir Path, Branch Name, the real Claude or Codex launch CLI, the full session Summary, or the whole Transcript](doc/agentmaster/img/tab-copy-menu.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/tab-copy-menu.png)
 
 ## Status
 
