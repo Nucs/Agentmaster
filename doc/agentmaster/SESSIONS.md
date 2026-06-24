@@ -41,6 +41,10 @@
       assistant text/thinking, tool inputs/results, system content).
     - `📁` ⇒ match **directories accessed** (tool-call paths' directory parts + the cwd).
     - `📄` ⇒ match **files accessed** (tool-call paths' leaves).
+    - **Directory matching is slash-INSENSITIVE** — for the cwd + `📁` dir-parts, `/` and `\` are
+      equivalent (`MatchesPathQuery` folds both sides to `/`), so a `src/foo` query finds a Windows
+      `src\foo` cwd and vice versa. A separator-free term is unaffected (defers to `MatchesQueryText`,
+      allocation-free); `📄` leaves never hold a separator so stay a plain match.
     - `(F)` ⇒ **fuzzy** (query characters in order, gaps allowed — identical semantics in rg
       and the in-process matcher).
   - **Defaults:** `📁` + `📄` start **ON** — they ride the FAST phase only (in-memory match

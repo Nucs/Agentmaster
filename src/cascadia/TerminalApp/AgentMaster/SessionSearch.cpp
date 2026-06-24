@@ -424,6 +424,32 @@ namespace Agentmaster
         return true;
     }
 
+    bool MatchesPathQuery(std::wstring_view textLower, std::wstring_view queryLower, bool fuzzy)
+    {
+        // A needle with no path separator can never be affected by folding '/'<->'\': the
+        // separators surround the match but are never part of it (substring), and a slash in the
+        // haystack is skipped either way (subsequence). So skip normalization for the common
+        // plain-word case — it stays allocation-free, and the Windows cwd (full of backslashes)
+        // is only re-spelled when the query itself carries a separator.
+        if (queryLower.find_first_of(L"/\\") == std::wstring_view::npos)
+        {
+            return MatchesQueryText(textLower, queryLower, fuzzy);
+        }
+        const auto toForward = [](std::wstring_view s) {
+            std::wstring out{ s };
+            for (wchar_t& c : out)
+            {
+                if (c == L'\\')
+                {
+                    c = L'/';
+                }
+            }
+            return out;
+        };
+        // The temporaries outlive the call (full-expression lifetime), so the string_views are safe.
+        return MatchesQueryText(toForward(textLower), toForward(queryLower), fuzzy);
+    }
+
     std::wstring MakeSnippet(std::wstring_view text, std::wstring_view queryLower, bool fuzzy, size_t maxChars)
     {
         if (maxChars == 0)
@@ -491,7 +517,7 @@ namespace Agentmaster
                 bool hit = t.isGuid && (t.textLower == idLower || (!forkLower.empty() && t.textLower == forkLower));
                 if (!hit)
                 {
-                    hit = MatchesQueryText(cwdLower, t.textLower, fz); // cwd: always a match target
+                    hit = MatchesPathQuery(cwdLower, t.textLower, fz); // cwd: always a match target, slash-insensitive
                 }
                 if (!hit && q.scopeTitle)
                 {
@@ -509,12 +535,12 @@ namespace Agentmaster
                     for (const auto& p : st.pathsAccessed)
                     {
                         const std::wstring lowered = FoldLower(p);
-                        if (q.scopeDirs && MatchesQueryText(DirPart(lowered), t.textLower, fz))
+                        if (q.scopeDirs && MatchesPathQuery(DirPart(lowered), t.textLower, fz)) // dirs: slash-insensitive
                         {
                             hit = true;
                             break;
                         }
-                        if (q.scopeFiles && MatchesQueryText(LeafPart(lowered), t.textLower, fz))
+                        if (q.scopeFiles && MatchesQueryText(LeafPart(lowered), t.textLower, fz)) // a leaf never holds a separator
                         {
                             hit = true;
                             break;

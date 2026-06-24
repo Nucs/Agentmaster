@@ -26,7 +26,9 @@
 //   match target; 🏷 (default ON) adds the session TITLE (custom/ai/summary/first-prompt + the
 //   runtime liveTitle overlay = an open session's live tab title); 📁 matches the DIRECTORY part
 //   of every tool-touched path; 📄 matches the LEAF (file name) of every tool-touched path. With
-//   🏷 off and both message scopes off, terms match cwd (+ 📁/📄 paths) only (§1a).
+//   🏷 off and both message scopes off, terms match cwd (+ 📁/📄 paths) only (§1a). DIRECTORY
+//   matching (cwd + 📁) is slash-INSENSITIVE — '/' and '\' are equivalent (MatchesPathQuery) — so
+//   a path term finds a session regardless of which separator the user or the stored cwd uses.
 //
 // Plain C++ + Win32, no WinRT (PCH NotUsing; links into the standalone harness). The matchers /
 // regex builder / snippet maker are PURE; only the rg invocation + history scan touch the OS.
@@ -120,6 +122,15 @@ namespace Agentmaster
     // The in-process equivalent of the rg match: substring (non-fuzzy) or in-order subsequence
     // (fuzzy) over PRE-FOLDED haystack/needle. Empty needle matches.
     bool MatchesQueryText(std::wstring_view textLower, std::wstring_view queryLower, bool fuzzy);
+
+    // Slash-INSENSITIVE variant for DIRECTORY / path haystacks (the cwd + the 📁 dir-part of
+    // tool-touched paths): '/' and '\' are treated as the same separator — both sides are folded
+    // to '/' before the usual MatchesQueryText — so a "src/foo" query finds a Windows "src\foo"
+    // cwd and vice versa. Substring/subsequence semantics are otherwise identical. A needle with
+    // NO separator cannot be affected by the folding (the separator chars surround, never form,
+    // the match), so the call then defers straight to MatchesQueryText — the common plain-word
+    // case stays allocation-free. Inputs PRE-folded like MatchesQueryText. Pure.
+    bool MatchesPathQuery(std::wstring_view textLower, std::wstring_view queryLower, bool fuzzy);
 
     // A display snippet around the first match: ~40 chars of left context + the match + right
     // context, single-line-collapsed, capped at maxChars. Fuzzy (no contiguous match position)

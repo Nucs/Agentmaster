@@ -108,7 +108,7 @@ sink, no `SessionInfo` change — a small additive intercept in commandline pars
 ```
 agentmaster show <ref> [--tail N] [--json]   # full introspection of one session/tab — the heart
             list                              # fleet overview: windows → tabs → sessions, by state
-            sessions [--state S] [--dir D] [--archived]
+            sessions [--state S] [--dir D] [--archived]   # --dir D: substring on workingDir, slash-INSENSITIVE (/ ≡ \)
             tabs [--window W]                 # every tab across windows (claude + shells), kind, link
             windows                           # geometry, ordered tabs, Manager lens
             external                          # unmanaged-claude census (real-WT / bare console)

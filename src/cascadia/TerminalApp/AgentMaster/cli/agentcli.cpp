@@ -195,6 +195,32 @@ namespace
         return false;
     }
 
+    // Slash-INSENSITIVE substring, for matching a DIRECTORY (the `sessions --dir` filter): '/' and
+    // '\' are treated as the same separator so `--dir src/foo` finds a Windows `...\src\foo`
+    // working dir and vice versa. A needle with no separator can't be affected by the folding, so
+    // it defers to the plain IContains (which keeps the ordinal case-insensitive comparison).
+    bool IContainsPath(std::wstring_view hay, std::wstring_view needle)
+    {
+        if (needle.find_first_of(L"/\\") == std::wstring_view::npos)
+        {
+            return IContains(hay, needle);
+        }
+        const auto toForward = [](std::wstring_view s) {
+            std::wstring out{ s };
+            for (wchar_t& c : out)
+            {
+                if (c == L'\\')
+                {
+                    c = L'/';
+                }
+            }
+            return out;
+        };
+        const std::wstring h = toForward(hay);
+        const std::wstring n = toForward(needle);
+        return IContains(h, n);
+    }
+
     std::wstring EnvVar(const wchar_t* name)
     {
         const DWORD need = ::GetEnvironmentVariableW(name, nullptr, 0);
@@ -1109,7 +1135,7 @@ namespace
             {
                 continue; // default: only OPEN (live) sessions, like the Board
             }
-            if (!a.dirFilter.empty() && !IContains(s.workingDir, a.dirFilter))
+            if (!a.dirFilter.empty() && !IContainsPath(s.workingDir, a.dirFilter))
             {
                 continue;
             }

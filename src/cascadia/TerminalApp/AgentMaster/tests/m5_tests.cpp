@@ -3830,6 +3830,17 @@ static void TestSessionSearch()
     CHECK(!MatchesQueryText(L"the quick brown fox", L"fbq", true), "match: fuzzy order matters");
     CHECK(MatchesQueryText(L"anything", L"", true), "match: empty query matches");
 
+    // --- MatchesPathQuery: '/' and '\' equivalent for directory haystacks (pre-folded) ---
+    CHECK(MatchesPathQuery(L"c:\\users\\src\\foo", L"src/foo", false), "pathmatch: forward-slash query finds a backslash dir");
+    CHECK(MatchesPathQuery(L"c:/users/src/foo", L"src\\foo", false), "pathmatch: backslash query finds a forward-slash dir");
+    CHECK(MatchesPathQuery(L"c:\\users\\src\\foo", L"src\\foo", false), "pathmatch: backslash query, backslash dir (unchanged)");
+    CHECK(MatchesPathQuery(L"c:/users/src/foo", L"src/foo", false), "pathmatch: forward query, forward dir (unchanged)");
+    CHECK(!MatchesPathQuery(L"c:\\users\\src\\foo", L"src/bar", false), "pathmatch: a non-substring still misses");
+    CHECK(MatchesPathQuery(L"c:\\users\\src\\foo", L"users/src/foo", true), "pathmatch: fuzzy honors slash equivalence");
+    // A separator-free needle behaves EXACTLY like MatchesQueryText (the allocation-free fast path).
+    CHECK(MatchesPathQuery(L"c:\\users\\src\\foo", L"src", false) == MatchesQueryText(L"c:\\users\\src\\foo", L"src", false), "pathmatch: separator-free needle == MatchesQueryText");
+    CHECK(MatchesPathQuery(L"the quick brown fox", L"", false), "pathmatch: empty query matches");
+
     // --- MakeSnippet ---
     {
         const std::wstring text = L"prefix prefix prefix prefix prefix prefix THE-NEEDLE suffix\nsecond line";
@@ -3918,6 +3929,43 @@ static void TestSessionSearch()
         q.fuzzy = true;
         r = SearchIndexFast(entries, q);
         CHECK(!r.empty() && r[0] == L"s-title", "fast: fuzzy subsequence over the title");
+    }
+
+    // --- SearchIndexFast: directory matching is slash-insensitive (cwd + 📁), both directions ---
+    {
+        std::vector<SessionIndexEntry> entries(2);
+        entries[0].sessionId = L"s-win"; // backslash-stored cwd (the Windows norm)
+        entries[0].stats.cwd = L"K:\\source\\BravoProj";
+        entries[0].stats.pathsAccessed = { L"K:\\source\\BravoProj\\src\\widget.cpp" };
+        entries[1].sessionId = L"s-posix"; // forward-slash-stored cwd (a transcript can carry either)
+        entries[1].stats.cwd = L"/home/user/AlphaProj";
+        entries[1].stats.pathsAccessed = { L"/home/user/AlphaProj/lib/core.ts" };
+
+        SessionQuery q;
+        q.text = L"source/bravoproj"; // forward-slash query against the backslash cwd
+        auto r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-win", "fast: forward-slash cwd query matches the backslash-stored cwd");
+
+        q.text = L"home\\user\\alphaproj"; // backslash query against the forward-slash cwd
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-posix", "fast: backslash cwd query matches the forward-slash-stored cwd");
+
+        q = {};
+        q.scopeDirs = true;
+        q.text = L"bravoproj/src"; // forward-slash 📁 query against the backslash path's dir part
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-win", "fast: 📁 dir scope is slash-insensitive (forward query, backslash path)");
+
+        q = {};
+        q.scopeDirs = true;
+        q.text = L"alphaproj\\lib"; // backslash 📁 query against the forward-slash path's dir part
+        r = SearchIndexFast(entries, q);
+        CHECK(r.size() == 1 && r[0] == L"s-posix", "fast: 📁 dir scope is slash-insensitive (backslash query, forward path)");
+
+        q = {};
+        q.text = L"source/zeta"; // a genuinely-absent path term still misses (no false positives)
+        r = SearchIndexFast(entries, q);
+        CHECK(r.empty(), "fast: slash-insensitivity does not loosen a non-substring miss");
     }
 
     // --- SearchIndexFast: the 🏷 title scope gates title matching; liveTitle overlay is searchable ---
