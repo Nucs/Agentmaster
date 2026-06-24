@@ -123,7 +123,25 @@ namespace
 
 namespace Agentmaster
 {
+    static TranscriptParse ParseTranscriptDeltaImpl(std::wstring_view chunk);
+    // Agentmaster (extra-safe): the scanner WORKER THREAD calls this every tick; an uncaught parse throw
+    // here (a malformed/partial .jsonl chunk, std::bad_alloc) would unwind off the worker with no catch
+    // and std::terminate the whole app. Contain it -> return an empty delta, so the reconciler simply
+    // makes no state change this pass (the file byte-cursor is advanced by bytes READ, independent of
+    // parse success, so a bad chunk is skipped, not retried forever). See AnalyzeSessionTranscript.
     TranscriptParse ParseTranscriptDelta(std::wstring_view chunk)
+    {
+        try
+        {
+            return ParseTranscriptDeltaImpl(chunk);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] ParseTranscriptDelta: swallowed parse exception (no crash)\n");
+            return {};
+        }
+    }
+    static TranscriptParse ParseTranscriptDeltaImpl(std::wstring_view chunk)
     {
         TranscriptParse out;
         size_t lineStart = 0;

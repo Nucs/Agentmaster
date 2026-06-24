@@ -2191,7 +2191,22 @@ namespace Agentmaster
         out.title = FirstLineTrim(firstPrompt);
     }
 
+    static CodexRolloutInfo ReadCodexRolloutInfoImpl(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts);
+    // Agentmaster (extra-safe): never let a rollout-parse throw escape into a background coroutine (would
+    // std::terminate the app) -- contain it and return an empty result. See AnalyzeSessionTranscript.
     CodexRolloutInfo ReadCodexRolloutInfo(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts)
+    {
+        try
+        {
+            return ReadCodexRolloutInfoImpl(rolloutPath, maxBytes, maxPrompts);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] ReadCodexRolloutInfo: swallowed parse exception (no crash)\n");
+            return {};
+        }
+    }
+    static CodexRolloutInfo ReadCodexRolloutInfoImpl(std::wstring_view rolloutPath, size_t maxBytes, size_t maxPrompts)
     {
         CodexRolloutInfo info;
         if (rolloutPath.empty())
@@ -2216,7 +2231,22 @@ namespace Agentmaster
         return info;
     }
 
+    static std::wstring ReadConversationTextImpl(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
+    // Agentmaster (extra-safe): never let a transcript-read throw escape into a background coroutine (the
+    // copy-transcript action) -- contain it and return empty. See AnalyzeSessionTranscript.
     std::wstring ReadConversationText(std::wstring_view transcriptPath, bool codex, size_t maxBytes)
+    {
+        try
+        {
+            return ReadConversationTextImpl(transcriptPath, codex, maxBytes);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] ReadConversationText: swallowed parse exception (no crash)\n");
+            return {};
+        }
+    }
+    static std::wstring ReadConversationTextImpl(std::wstring_view transcriptPath, bool codex, size_t maxBytes)
     {
         if (transcriptPath.empty())
         {
@@ -2630,7 +2660,28 @@ namespace Agentmaster
         return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId);
     }
 
+    static SessionSummary AnalyzeSessionTranscriptImpl(std::wstring_view transcriptPath, size_t maxBytes);
+    // Agentmaster (extra-safe): a transcript parser must NEVER throw into its caller. Most callers run on
+    // a BACKGROUND thread inside a fire_and_forget coroutine (the summary panel, alt-nav, the Sessions
+    // browser) or the scanner thread, where an uncaught exception -- a malformed/partial .jsonl, an
+    // unguarded substr, a std::bad_alloc on a huge file -- would unwind with no frame to catch it and
+    // std::terminate the whole app, taking every session with it. This thin wrapper contains any throw
+    // and returns an empty result (== the existing "not found" path); the real work is the Impl below.
+    // OutputDebugString can't throw and needs no profile/logging dependency, so the engine stays pure for
+    // the test harness + CLI while a genuine parse bug stays discoverable (DebugView / a debugger).
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes)
+    {
+        try
+        {
+            return AnalyzeSessionTranscriptImpl(transcriptPath, maxBytes);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] AnalyzeSessionTranscript: swallowed parse exception (no crash)\n");
+            return {};
+        }
+    }
+    static SessionSummary AnalyzeSessionTranscriptImpl(std::wstring_view transcriptPath, size_t maxBytes)
     {
         SessionSummary out;
         if (transcriptPath.empty())
