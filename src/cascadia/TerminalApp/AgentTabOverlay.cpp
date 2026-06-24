@@ -6,6 +6,7 @@
 
 #include "AgentCopyActions.h" // the shared CopySessionField (reused by the Triage Board's Copy submenu)
 #include "AgentStatusColors.h" // the ONE shared state->color palette (board / overlay / tab dot)
+#include "AgentTipHelpers.h" // AgentSetTip — the Dark-pinned, fast-open, stuck-proof hover tooltip recipe (vs raw ToolTipService)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
@@ -984,9 +985,9 @@ namespace winrt::TerminalApp::implementation
         Run text{};
         text.Text(winrt::hstring{ std::wstring{ L" " } + kind + L"  " + kDot + L"  unlinked" });
         tb.Inlines().Append(text);
-        ToolTipService::SetToolTip(tb, winrt::box_value(winrt::hstring{
+        AgentSetTip(tb, winrt::hstring{
             L"Observed by Agentmaster, not a linked session. A claude links on its first prompt;\n"
-            L"shells (pwsh/cmd) and external codex stay observe-only here." }));
+            L"shells (pwsh/cmd) and external codex stay observe-only here." });
         _row1.Children().Append(tb);
     }
 
@@ -1045,7 +1046,7 @@ namespace winrt::TerminalApp::implementation
             tb.Text(winrt::hstring{ t });
             if (tip)
             {
-                ToolTipService::SetToolTip(tb, winrt::box_value(winrt::hstring{ tip }));
+                AgentSetTip(tb, winrt::hstring{ tip });
             }
             _row1.Children().Append(tb);
         };
@@ -1068,9 +1069,9 @@ namespace winrt::TerminalApp::implementation
             lbl.Text(winrt::hstring{ std::wstring{ L" " } + StateLabel(s.state) });
             lbl.Foreground(fg);
             tb.Inlines().Append(lbl);
-            ToolTipService::SetToolTip(tb, winrt::box_value(winrt::hstring{
+            AgentSetTip(tb, winrt::hstring{
                 L"Live session status, colour-matched to the Triage Board\n"
-                L"(running / waiting / needs-approval / error / done / idle)." }));
+                L"(running / waiting / needs-approval / error / done / idle)." });
             _row1.Children().Append(tb);
         }
 
@@ -1105,10 +1106,10 @@ namespace winrt::TerminalApp::implementation
             t.Foreground(modeBrush);
             t.Text(winrt::hstring{ ModeLabel(mode) });
             b.Content(t);
-            ToolTipService::SetToolTip(b, winrt::box_value(winrt::hstring{
+            AgentSetTip(b, winrt::hstring{
                 L"Autopilot \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
                 L"Off: you drive. Semi: it proposes the next queued prompt, you confirm.\n"
-                L"Full: it auto-sends the queue on each turn-complete." }));
+                L"Full: it auto-sends the queue on each turn-complete." });
             const auto weak = get_weak();
             b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
@@ -1179,7 +1180,7 @@ namespace winrt::TerminalApp::implementation
                     detail = detail.empty() ? s.branch : (detail + L"  " + kDot + L"  " + s.branch);
                 }
                 const std::wstring tip = std::wstring{ L"Working directory \x00B7 git branch\n" } + detail;
-                ToolTipService::SetToolTip(_subline, winrt::box_value(winrt::hstring{ tip }));
+                AgentSetTip(_subline, winrt::hstring{ tip });
                 _subline.Visibility(Visibility::Visible);
             }
         }
@@ -1224,7 +1225,7 @@ namespace winrt::TerminalApp::implementation
                     full = full.substr(0, 4000) + L"\x2026"; // …
                 }
                 const std::wstring tip = std::wstring{ L"Next queued prompt \x2014 sent on the next turn-complete (or via Send now).\n\n" } + full;
-                ToolTipService::SetToolTip(_promptLine, winrt::box_value(winrt::hstring{ tip }));
+                AgentSetTip(_promptLine, winrt::hstring{ tip });
                 _promptLine.Visibility(Visibility::Visible);
             }
         }
@@ -1329,7 +1330,7 @@ namespace winrt::TerminalApp::implementation
             fi.Glyph(glyph);
             fi.FontSize(12);
             b.Content(fi);
-            ToolTipService::SetToolTip(b, winrt::box_value(winrt::hstring{ tip }));
+            AgentSetTip(b, winrt::hstring{ tip });
             return b;
         };
 
@@ -1398,7 +1399,7 @@ namespace winrt::TerminalApp::implementation
         const auto addItem = [&flyout, weak](const wchar_t* text, const wchar_t* tip, int which) {
             MenuFlyoutItem item{};
             item.Text(text);
-            ToolTipService::SetToolTip(item, winrt::box_value(winrt::hstring{ tip }));
+            AgentSetTip(item, winrt::hstring{ tip });
             item.Click([weak, which](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
                 {
@@ -1588,9 +1589,9 @@ namespace winrt::TerminalApp::implementation
         _summaryTimesText.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0)); // dimmer than the body
         _summaryTimesText.Margin(ThicknessHelper::FromLengths(0, 0, 0, 3)); // a small gap above the content
         _summaryTimesText.Visibility(Visibility::Collapsed);
-        ToolTipService::SetToolTip(_summaryTimesText, winrt::box_value(winrt::hstring{
+        AgentSetTip(_summaryTimesText, winrt::hstring{
             L"age = time since the conversation started \x00B7 last user msg = since your last prompt"
-            L" \x00B7 last activity = since the transcript last changed (updates live)." }));
+            L" \x00B7 last activity = since the transcript last changed (updates live)." });
 
         // The body is a vertical StackPanel (not one TextBlock) so a section separator can be a
         // full-width Border rule that fills the panel border-to-border + re-fills on resize — a fixed
@@ -1640,8 +1641,8 @@ namespace winrt::TerminalApp::implementation
         wrapBtn.VerticalAlignment(VerticalAlignment::Top);
         wrapBtn.HorizontalAlignment(HorizontalAlignment::Right);
         wrapBtn.Content(_summaryWrapIcon);
-        ToolTipService::SetToolTip(wrapBtn, winrt::box_value(winrt::hstring{
-            L"Wrap message newlines: keep a multi-line prompt as multiple lines instead of a literal \\n (all tabs)" }));
+        AgentSetTip(wrapBtn, winrt::hstring{
+            L"Wrap message newlines: keep a multi-line prompt as multiple lines instead of a literal \\n (all tabs)" });
         wrapBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {
@@ -1677,8 +1678,8 @@ namespace winrt::TerminalApp::implementation
         truncBtn.VerticalAlignment(VerticalAlignment::Top);
         truncBtn.HorizontalAlignment(HorizontalAlignment::Right);
         truncBtn.Content(_summaryTruncateIcon);
-        ToolTipService::SetToolTip(truncBtn, winrt::box_value(winrt::hstring{
-            L"Truncate long messages: cap each to 6 lines (when wrapping) or 500 characters; off shows everything" }));
+        AgentSetTip(truncBtn, winrt::hstring{
+            L"Truncate long messages: cap each to 6 lines (when wrapping) or 500 characters; off shows everything" });
         truncBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {
@@ -1721,8 +1722,8 @@ namespace winrt::TerminalApp::implementation
         _summaryTitleText.Foreground(Fill(0xFF, 0xF0, 0xF0, 0xF0)); // brighter than the body — it's the heading
         _summaryTitleText.Margin(ThicknessHelper::FromLengths(0, 0, 0, 2)); // a small gap above the times line
         _summaryTitleText.Visibility(Visibility::Collapsed);
-        ToolTipService::SetToolTip(_summaryTitleText, winrt::box_value(winrt::hstring{
-            L"This session's title \x2014 the same value as the tab name." }));
+        AgentSetTip(_summaryTitleText, winrt::hstring{
+            L"This session's title \x2014 the same value as the tab name." });
 
         StackPanel outer{}; // title + header (times + truncate/wrap toggles) pinned over the scrolling content
         outer.Orientation(Orientation::Vertical);
@@ -1820,18 +1821,18 @@ namespace winrt::TerminalApp::implementation
         leftGrip.HorizontalAlignment(HorizontalAlignment::Left);
         leftGrip.VerticalAlignment(VerticalAlignment::Stretch);
         wireGrip(leftGrip, true, false, CoreCursorType::SizeWestEast);
-        ToolTipService::SetToolTip(leftGrip, winrt::box_value(winrt::hstring{
+        AgentSetTip(leftGrip, winrt::hstring{
             L"Drag to resize the panel width (shared across tabs).\n"
-            L"Hold Shift to size this tab only." }));
+            L"Hold Shift to size this tab only." });
 
         Border bottomGrip{};
         bottomGrip.Height(6);
         bottomGrip.HorizontalAlignment(HorizontalAlignment::Stretch);
         bottomGrip.VerticalAlignment(VerticalAlignment::Bottom);
         wireGrip(bottomGrip, false, true, CoreCursorType::SizeNorthSouth);
-        ToolTipService::SetToolTip(bottomGrip, winrt::box_value(winrt::hstring{
+        AgentSetTip(bottomGrip, winrt::hstring{
             L"Drag to resize the panel height (shared across tabs).\n"
-            L"Hold Shift to size this tab only." }));
+            L"Hold Shift to size this tab only." });
 
         Border cornerGrip{};
         cornerGrip.Width(14);
@@ -1839,9 +1840,9 @@ namespace winrt::TerminalApp::implementation
         cornerGrip.HorizontalAlignment(HorizontalAlignment::Left);
         cornerGrip.VerticalAlignment(VerticalAlignment::Bottom);
         wireGrip(cornerGrip, true, true, CoreCursorType::SizeNortheastSouthwest); // bottom-left corner == NE/SW diagonal
-        ToolTipService::SetToolTip(cornerGrip, winrt::box_value(winrt::hstring{
+        AgentSetTip(cornerGrip, winrt::hstring{
             L"Drag to resize the panel width and height at once (shared across tabs).\n"
-            L"Hold Shift to size this tab only." }));
+            L"Hold Shift to size this tab only." });
 
         Grid layout{};
         layout.Children().Append(contentBorder);
@@ -1893,8 +1894,8 @@ namespace winrt::TerminalApp::implementation
         {
             MenuFlyoutItem copyItem{};
             copyItem.Text(L"Copy Summary");
-            ToolTipService::SetToolTip(copyItem, winrt::box_value(winrt::hstring{
-                L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims" }));
+            AgentSetTip(copyItem, winrt::hstring{
+                L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims" });
             copyItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
                 {
@@ -2252,7 +2253,7 @@ namespace winrt::TerminalApp::implementation
             ji.Glyph(L"\x25B8"); // ▸ — "go to / jump"
             ji.FontSize(10);
             jb.Content(ji);
-            ToolTipService::SetToolTip(jb, winrt::box_value(winrt::hstring{ L"Jump to where this prompt is on screen" }));
+            AgentSetTip(jb, winrt::hstring{ L"Jump to where this prompt is on screen" });
             const auto weak = get_weak();
             jb.Click([weak, idx](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
                 if (const auto self = weak.get())
