@@ -1757,6 +1757,21 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto t = weakOld.get(); t && t == hostTab && oldId != id)
             {
+                // Agentmaster (--fork-session source-id echo BACKSTOP): if the session already bound to
+                // this tab was FORKED FROM the incoming id, this "new conversation id" is actually the
+                // fork's SOURCE — a `--fork-session` claude fires its first SessionStart under the source
+                // id (see SessionInfo::forkParentId). It is NOT an in-session /resume; the fork keeps
+                // writing its own id and every later hook lands there. Do NOT re-home (that would track
+                // the inactive source and orphan the fork); keep the fork bound and retire the transient
+                // source-id record. The registry guard (SessionRegistry::OnHookEvent) normally absorbs
+                // this echo earlier via the eagerly-stamped tabToken; this is the defense-in-depth catch
+                // for any echo that reaches the bind path anyway. (ids are canonical lowercase GUIDs.)
+                if (const auto oldInfo = _sessionRegistry->Get(oldId); oldInfo && !oldInfo->forkParentId.empty() && oldInfo->forkParentId == id)
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-echo] kept " + oldId + L" bound; ignored source-id " + id + L" on its tab\n");
+                    _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) { s.live = false; }); // retire the transient source-id record
+                    return; // leave the fork (oldId) as the sole binding for this tab
+                }
                 // COPY the key first: `oldId` is a reference INTO the _claudeTabs node, and the
                 // erase below frees that node — using `oldId` afterwards (the _claudeOverlays erase)
                 // would hash freed memory -> AV. (Latent use-after-free; the observer's more frequent

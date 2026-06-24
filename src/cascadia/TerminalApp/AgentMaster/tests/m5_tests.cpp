@@ -469,6 +469,72 @@ static void TestRegistryFanout()
     CHECK(ad2.load() == 1, "removed adopter did not fire");
 }
 
+// Agentmaster: a `claude --resume <src> --fork-session --session-id <new>` fork (the Sessions-page /
+// duplicate-tab / adopt-external fork) fires its FIRST SessionStart hook under the SOURCE id <src>,
+// NOT the minted <new> we registered + bound to its ConPTY at launch. The registry must IGNORE that
+// source-id echo — otherwise the bind/re-home path mistakes it for an in-session /resume, re-homes the
+// fork's tab off <new> onto the inactive <src>, and orphans the real fork (which gets every later
+// hook). The guard recognizes the echo precisely: a LIVE fork session carrying forkParentId == <src>
+// on the SAME ConPTY (the eagerly-stamped tabToken). It is one-shot: cleared once the fork emits under
+// its own id, so a LATER deliberate /resume back to <src> re-homes normally.
+static void TestForkSourceIdEcho()
+{
+    std::wprintf(L"SessionRegistry: --fork-session source-id SessionStart echo is ignored:\n");
+    SessionRegistry reg;
+
+    int adopted = 0;
+    std::wstring lastAdopt;
+    reg.AddAdoptionHandler([&](const std::wstring& id, const std::wstring&, const std::wstring&) { adopted++; lastAdopt = id; });
+
+    // A launched fork: live, its ConPTY's WT_SESSION stamped eagerly, forkParentId = the SOURCE it
+    // branched from (exactly what _LaunchClaudeSession records for a fork).
+    {
+        SessionInfo fork = MakeSession(L"fork-new");
+        fork.live = true;
+        fork.tabToken = L"wt-fork";
+        fork.forkParentId = L"src-parent";
+        reg.Upsert(fork);
+    }
+    const auto baseCount = reg.Count();
+
+    // The fork's startup SessionStart echoes the SOURCE id on the fork's OWN ConPTY -> IGNORED whole.
+    HookMessage echo = Msg(L"src-parent", HookEvent::SessionStart);
+    echo.cwd = L"K:/x";
+    echo.tabToken = L"wt-fork";
+    reg.OnHookEvent(echo);
+    CHECK(reg.Count() == baseCount, "fork-echo: source-id SessionStart created no record");
+    CHECK(!reg.Get(L"src-parent").has_value(), "fork-echo: source id not adopted");
+    CHECK(adopted == 0, "fork-echo: no adoption fired for the source-id echo");
+    CHECK(reg.Get(L"fork-new") && reg.Get(L"fork-new")->live, "fork-echo: the fork stays live + bound");
+    CHECK(reg.Get(L"fork-new")->forkParentId == L"src-parent", "fork-echo: guard still armed (echo never reached the own-id path)");
+
+    // The SAME source id on a DIFFERENT ConPTY (a genuinely separate session in another tab) is NOT
+    // the echo -> processed normally (created + adopted). The tabToken match is the discriminator.
+    HookMessage other = Msg(L"src-parent", HookEvent::SessionStart);
+    other.cwd = L"K:/x";
+    other.tabToken = L"wt-other";
+    reg.OnHookEvent(other);
+    CHECK(reg.Get(L"src-parent").has_value(), "fork-echo: same id on a different tabToken IS adopted");
+    CHECK(adopted == 1 && lastAdopt == L"src-parent", "fork-echo: adoption fired for the non-echo SessionStart");
+
+    // One-shot: once a fork emits under its OWN id the guard retires, so a later deliberate /resume
+    // back to the source re-homes normally. Fresh ids to stay independent of src-parent created above.
+    {
+        SessionInfo fork2 = MakeSession(L"fork2-new");
+        fork2.live = true;
+        fork2.tabToken = L"wt-fork2";
+        fork2.forkParentId = L"src2-parent";
+        reg.Upsert(fork2);
+    }
+    reg.OnHookEvent(Msg(L"fork2-new", HookEvent::UserPromptSubmit)); // own-id hook -> retires the guard
+    CHECK(reg.Get(L"fork2-new") && reg.Get(L"fork2-new")->forkParentId.empty(), "fork-echo: own-id hook clears the one-shot guard");
+    HookMessage late = Msg(L"src2-parent", HookEvent::SessionStart);
+    late.cwd = L"K:/x";
+    late.tabToken = L"wt-fork2";
+    reg.OnHookEvent(late);
+    CHECK(reg.Get(L"src2-parent").has_value(), "fork-echo: after the guard retires a source-id SessionStart is processed");
+}
+
 static void TestTypedCapture()
 {
     std::wprintf(L"Flight Plan: record typed messages + suppress our own echoes:\n");
@@ -4995,6 +5061,7 @@ int wmain()
     TestWire();
     TestRegistry();
     TestRegistryFanout();
+    TestForkSourceIdEcho();
     TestTypedCapture();
     TestObserveClaude();
     TestSupersedeStaleTabSiblings();

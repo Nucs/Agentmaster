@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <chrono>
 
+#include "ClaudeSpawn.h" // AppendStateLog (the --fork-session source-id-echo suppression trace)
+
 namespace
 {
     int64_t NowMs()
@@ -237,6 +239,41 @@ namespace Agentmaster
 
     void SessionRegistry::OnHookEvent(const HookMessage& msg)
     {
+        // Agentmaster (--fork-session source-id echo, SessionModels.h SessionInfo::forkParentId): a
+        // `claude --resume <src> --fork-session --session-id <new>` fork fires its FIRST SessionStart
+        // hook under the SOURCE id <src>, NOT the freshly minted <new> we registered + bound to this
+        // ConPTY at launch. Were it processed, the unknown <src> would be adopted as a new session and
+        // the bind/re-home path would re-home the fork's tab off <new> onto <src> (the inactive source
+        // it branched from), orphaning the real fork — every later hook lands on <new>. Recognize the
+        // echo precisely: a LIVE fork session on the SAME ConPTY (the eagerly stamped tabToken) carries
+        // forkParentId == <src>. The tabToken match is the discriminator, so a genuinely-open <src> in
+        // another tab (its own, different ConPTY) is unaffected. Ignore the event whole — no phantom
+        // record, no adoption fan-out. Scoped to SessionStart (rare), so the extra scan is off the
+        // hot path. (Mirrors the observer's id resolution, which already prefers --session-id over
+        // --resume; the push side needed the same.)
+        if (msg.event == HookEvent::SessionStart && !msg.tabToken.empty())
+        {
+            bool forkSourceEcho = false;
+            {
+                std::lock_guard guard{ _mtx };
+                for (const auto& [sid, fs] : _sessions)
+                {
+                    if (fs.live && !fs.forkParentId.empty() &&
+                        TabTokenEq(fs.forkParentId, msg.sessionId) &&
+                        TabTokenEq(fs.tabToken, msg.tabToken))
+                    {
+                        forkSourceEcho = true;
+                        break;
+                    }
+                }
+            }
+            if (forkSourceEcho)
+            {
+                AppendStateLog(L"hooks.log", L"[fork-echo] ignored source-id SessionStart " + msg.sessionId + L" (its fork already owns ConPTY " + msg.tabToken + L")\n");
+                return;
+            }
+        }
+
         SessionInfo snapshot;
         bool found = false;
         bool triggerAdvance = false;
@@ -279,6 +316,15 @@ namespace Agentmaster
             if (!msg.tabToken.empty())
             {
                 s.tabToken = msg.tabToken;
+            }
+            // Agentmaster (--fork-session source-id echo): this hook is for the session's OWN id, so the
+            // fork has settled past its startup window (where it echoed the SOURCE id). Retire the
+            // one-shot echo guard — a LATER deliberate in-session /resume back to that exact source id
+            // should re-home normally, not be mistaken for the (already-passed) startup echo. The single
+            // startup SessionStart echo arrives BEFORE any own-id hook, so it was already suppressed.
+            if (!s.forkParentId.empty())
+            {
+                s.forkParentId.clear();
             }
             // Ordered transition (HookEvents.h): stale-Stop + type-ahead aware. The wire `ts` is
             // the hook's FIRE time — events can arrive out of order (the Stop forwarder does

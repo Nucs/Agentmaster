@@ -1909,6 +1909,24 @@ build **binlog uploads as an artifact** to diagnose the first run.
   a tail — a `live + active-state + zero-transcript + quiescent → release` safety net would
   self-heal one); and `/resume`-ing an already-open conversation into a managed tab is **two writers**
   on one transcript (the adopt-external hazard, now reachable manually).
+- **A `--fork-session` fork echoes its SOURCE id on the FIRST SessionStart, not the new id — don't
+  re-home the fork's tab onto it.** `claude --resume <src> --fork-session --session-id <new>` (the
+  Sessions-page / duplicate-tab / adopt-external fork) writes a NEW transcript `<new>` and every steady
+  hook lands on `<new>` — BUT its **first `SessionStart` hook fires under the SOURCE id `<src>`** (claude
+  is "resuming `<src>`" at that instant, before it forks). Confirmed live: a fork minted `45f96288` (the
+  id we registered + bound at launch) fired `[SessionStart] ec794664` (its fork SOURCE), which the
+  registry adopted as an unknown session and `_BindClaudeSessionToTab` mistook for an in-session
+  `/resume` → **`[rehome] 45f96288 -> ec794664`**, re-homing the fork's tab onto the inactive source.
+  The real fork (`45f96288`, still getting every later hook + observer enrichment) was orphaned: the
+  tab/overlay/state dot tracked `ec794664` (no observer pid → its copy→Launch-CLI synthesized a plain
+  `--resume ec794664`, the symptom that surfaced this — it didn't match the actual `45f96288`). **Fix:**
+  a fork records `SessionInfo::forkParentId = <src>` (transient) AND its ConPTY's `tabToken` is stamped
+  **eagerly at launch** (not lazily on the first hook — the echo arrives BEFORE any own-id hook).
+  `SessionRegistry::OnHookEvent` then IGNORES a `SessionStart` for `<src>` whose `tabToken` matches a
+  live fork carrying `forkParentId == <src>` (`[fork-echo] ignored …`); `_BindClaudeSessionToTab` has the
+  same backstop. The guard is **one-shot** — cleared on the fork's first own-id hook — so a LATER
+  deliberate `/resume <src>` in the fork's tab still re-homes normally. (Mirrors the observer's id
+  resolution, which already prefers `--session-id` over `--resume`; the push side needed the same.)
 - **Tab title — the mechanism + its traps (the MECHANISM behind Rule #11).** A tab carries TWO title
   channels: the user-rename **override** `Tab::_runtimeTabText`, and the active control's
   OSC/profile/`StartingTitle` title. `Tab::Title()`/`_GetActiveTitle()` returns the override when set,

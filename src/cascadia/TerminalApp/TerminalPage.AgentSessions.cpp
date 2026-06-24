@@ -311,6 +311,18 @@ namespace winrt::TerminalApp::implementation
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.live = true; // OPEN: has a live tab/claude now -> shows on the Triage Board (not Archived)
         info.pendingConfirmPromptId.clear();
+        // Agentmaster: stamp the hosting ConPTY's WT_SESSION (== the wire tabToken hooks will report)
+        // EAGERLY, not lazily on the first hook — GuidToPlainString here is byte-identical to the
+        // connection's WT_SESSION env (same fn, same guid), so the first real hook's tabToken write is
+        // a no-op. This is what the --fork-session source-id-echo guard keys on (SessionInfo::forkParentId
+        // / SessionRegistry::OnHookEvent): a fork's FIRST SessionStart arrives under the SOURCE id
+        // BEFORE this session's own first hook, so the fork must already know its tabToken for the guard
+        // to recognize + drop that echo (else its tab is wrongly re-homed onto the source conversation).
+        info.tabToken = ::Microsoft::Console::Utils::GuidToPlainString(connection.SessionId());
+        if (!forkFromId.empty())
+        {
+            info.forkParentId = forkFromId; // remember the fork SOURCE for the echo guard (empty for a non-fork)
+        }
         if (!restored)
         {
             // A NEW session inherits ALL the global Autopilot defaults from the cog.

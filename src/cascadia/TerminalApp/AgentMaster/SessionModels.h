@@ -226,8 +226,22 @@ namespace Agentmaster
         // session by this. It is STABLE across an in-session `/resume` — which mints a NEW Claude
         // session id but keeps the SAME ConPTY — so the periodic tab reconcile re-homes the tab to
         // the new id by matching this against each live terminal's WT_SESSION. Empty until a hook
-        // arrives (and after a fresh load, until the session re-emits one).
+        // arrives (and after a fresh load, until the session re-emits one) — EXCEPT a Manager launch
+        // stamps it eagerly from the connection's WT_SESSION (see the forkParentId note below).
         std::wstring tabToken;
+        // Agentmaster (Transient, NOT persisted): the SOURCE conversation id this session was FORKED
+        // from — set ONLY at launch when this is a fork (`claude --resume <src> --fork-session
+        // --session-id <this.id>`; the Sessions-page / duplicate-tab / adopt-external fork). It exists
+        // to absorb a Claude quirk: a `--fork-session` claude fires its FIRST SessionStart hook under
+        // the SOURCE id `<src>`, NOT the freshly-minted `<this.id>` we registered + bound at launch.
+        // Without this, the registry sees `<src>` as an unknown session and the bind/re-home path
+        // mistakes the echo for an in-session `/resume`, re-homing the fork's tab off `<this.id>` onto
+        // `<src>` — so the tab tracks the wrong (inactive, source) conversation while the real fork
+        // (`<this.id>`, which gets every later hook) is orphaned. SessionRegistry::OnHookEvent uses it
+        // (with the eagerly-stamped tabToken) to IGNORE that source-id startup echo. Empty for a
+        // non-fork; cleared after a restart (the resumed fork re-launches as a plain `--resume
+        // <this.id>`, so no source-id echo occurs — hence transient).
+        std::wstring forkParentId;
         // Transient runtime flag (NOT persisted): is this session OPEN (has a live tab +
         // claude.exe this run) or ARCHIVED (shut down but kept restorable)? The Triage Board /
         // Explorer Tree show only Open (live) sessions; Archived (!live) ones are listed behind
