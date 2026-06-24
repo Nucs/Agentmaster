@@ -2998,7 +2998,15 @@ namespace winrt::TerminalApp::implementation
             ApplyCursor(cursorType);
             grip.Background(hotGrip);
         });
-        bar.PointerExited([this, grip, idleGrip](const IInspectable&, const PointerRoutedEventArgs&) {
+        bar.PointerExited([this, grip, idleGrip](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            // The grip is a hit-testable child filling the bar's center band, so moving off it onto the
+            // bar's own margin area bubbles the grip's PointerExited here — a false leave that would dim
+            // the grip (drop the "draggable" highlight) while the pointer is still on the divider. Swallow
+            // those; only a real leave (pointer outside the bar) resets. (PointerStillWithin, like the cards.)
+            if (PointerStillWithin(sender, e))
+            {
+                return;
+            }
             if (_dragKind == DragKind::None) // mid-drag the pointer may leave the thin bar — keep it hot
             {
                 ApplyCursor(CoreCursorType::Arrow);
