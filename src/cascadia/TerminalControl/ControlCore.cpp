@@ -760,6 +760,14 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     // TextBuffer::SearchText's own haystack), runs the pure PromptAnchor resolver over the whole prompt
     // list (order-preserving greedy, so duplicate texts map to the right occurrence), then maps the
     // resolved char offset back to an absolute buffer row. TermControl centers the view on it.
+    //
+    // CALLER CONTRACT: when the ControlCore has not Initialize()d yet (a lazily-restored / not-yet-laid-out
+    // tab), this returns a vector that is STILL FULL-SIZE (one entry per input message) but all -1 -- NOT an
+    // empty vector. So a non-empty result does NOT imply the buffer/viewport are readable; a `Size() == 0`
+    // check is insufficient. A caller that then reads the viewport (ScrollOffset/ViewHeight) MUST first
+    // confirm at least one entry is >= 0 (something actually resolved), else it will AV on the null buffer
+    // (this is exactly the bug ScrollToAdjacentConversationPrompt had; JumpToConversationPrompt is safe
+    // because it bails on its single row < 0).
     Windows::Foundation::Collections::IVector<int32_t> ControlCore::ResolveConversationPromptRows(const Windows::Foundation::Collections::IVector<winrt::hstring>& messages)
     {
         std::vector<int32_t> rows;
