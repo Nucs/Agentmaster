@@ -481,6 +481,14 @@ namespace Agentmaster
         // cycles MostActive/Newest/Oldest/Alpha — the tree's set minus ByPid (pid grouping is meaningless
         // once cards are split across state columns).
         ExplorerSort boardSort{ ExplorerSort::MostActive };
+        // Agentmaster: which tab the Manager's FLIGHT-PLAN pane shows. Its top line is a two-state
+        // [Summary | Flight Plan] segmented toggle; true == the (currently empty) Summary tab is
+        // selected, false == the Flight Plan tab (the prompt queue / Autopilot / compose box). GLOBAL
+        // across windows like treeSort/boardSort: a click in any window persists it here + broadcasts,
+        // so every window's pane shows the same tab and the choice survives restart. Default true
+        // (Summary). NOTE: distinct from showSummaryPanel — that is the per-tab OVERLAY's pencil-toggled
+        // summary panel (TAB_OVERLAY.md); this is the Manager Flight-Plan pane's tab selection.
+        bool flightPlanShowsSummary{ true };
         // Agentmaster: the Archive page's table|detail splitter position — the TABLE's share of
         // the two columns, kept within (0.05, 0.95). Applied as STAR ratios, so the split scales
         // with the window (window-size-relative, not pixels). GLOBAL like treeSort: written by

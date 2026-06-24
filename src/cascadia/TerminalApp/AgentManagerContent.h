@@ -266,6 +266,13 @@ namespace winrt::TerminalApp::implementation
         // the button's colored state dot + label (dim/disabled when no live session is selected).
         void _CycleAutopilot();
         void _UpdateAutopilotButton(::Agentmaster::AutopilotMode mode, bool enabled);
+        // Agentmaster: the Flight-Plan pane's two-state [Summary | Flight Plan] tab toggle (its top
+        // line). _SelectPlanPaneTab(summary) sets the GLOBAL choice (AppSettings::flightPlanShowsSummary),
+        // persists + broadcasts it through the settings sink (the treeSort idiom), and re-paints;
+        // _UpdatePlanPaneTab reflects the current choice — accents the selected segment and shows that
+        // tab's content (Summary host vs the Flight Plan body), no-op while the controls are null.
+        void _SelectPlanPaneTab(bool summary);
+        void _UpdatePlanPaneTab();
         void _OnSaveTemplate();
         void _OnApplyTemplate(bool toWholeDirectory);
         void _RefreshTemplateCombo();
@@ -568,7 +575,15 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _promptHistory;
         std::wstring _promptHistoryDraft;
         bool _promptHistoryNavigating{ false };
-        winrt::Windows::UI::Xaml::Controls::Button _autopilotBtn{ nullptr }; // Agentmaster: Autopilot mode toggle in the FLIGHT PLAN header (replaces the old combo)
+        winrt::Windows::UI::Xaml::Controls::Button _autopilotBtn{ nullptr }; // Agentmaster: Autopilot mode toggle, now in a thin strip atop the Flight Plan TAB body (was the old FLIGHT PLAN header)
+        // Agentmaster: the Flight-Plan pane's two-state [Summary | Flight Plan] segmented tab toggle
+        // (its top line) + the two swappable tab bodies. _summaryHost is the (empty for now) Summary
+        // tab; _flightPlanBody holds the Autopilot strip + the prompt queue / compose box. Visibility
+        // is driven by AppSettings::flightPlanShowsSummary via _UpdatePlanPaneTab.
+        winrt::Windows::UI::Xaml::Controls::Button _summaryTabBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _flightPlanTabBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Grid _summaryHost{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Grid _flightPlanBody{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _templatesRow{ nullptr }; // Agentmaster: the Templates row — collapsed by default, toggled by the paper icon
         winrt::Windows::UI::Xaml::Controls::Button _pauseBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)

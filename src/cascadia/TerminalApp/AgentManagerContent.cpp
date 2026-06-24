@@ -1460,6 +1460,7 @@ namespace winrt::TerminalApp::implementation
         // just the ctor defaults — including a board sort changed in another window (adopted on launch).
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
+        _UpdatePlanPaneTab(); // reflect the (global, persisted) Flight-Plan pane tab; no-op while its controls are null
     }
     void AgentManagerContent::SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler)
     {
@@ -1478,6 +1479,7 @@ namespace winrt::TerminalApp::implementation
         _appSettings = settings;
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
+        _UpdatePlanPaneTab(); // adopt another window's Flight-Plan pane tab choice (GLOBAL setting)
         _Refresh();
     }
 
@@ -2367,31 +2369,83 @@ namespace winrt::TerminalApp::implementation
                 Grid::SetRow(actions, 2);
                 outer.Children().Append(actions);
 
-                // Header row: the title + an Autopilot mode toggle (Agentmaster) — mirrors the
-                // EXPLORER TREE LOCAL/GLOBAL toggle, but acts on the SELECTED session. A colored
-                // state dot (gray circle = Off, amber half = Semi, green disc = Full) emphasizes
-                // the mode; clicking cycles Off -> Semi-auto -> Full. Dim/disabled with no live
-                // session selected.
-                auto headerLabel = StackPanel{};
-                headerLabel.Orientation(Orientation::Horizontal);
-                headerLabel.Spacing(8);
-                headerLabel.VerticalAlignment(VerticalAlignment::Center);
-                headerLabel.Children().Append(Text(L"FLIGHT PLAN", 12, true, 0.8));
+                // Top line (Agentmaster): a two-state [Summary | Flight Plan] segmented toggle that
+                // REPLACES the old "FLIGHT PLAN" label — one long button split in two, only one half
+                // "checked" at a time. The selected half is accent-filled (holds through hover, like the
+                // scope toggles); the other reads as the inactive segment. Summary is the default and the
+                // choice is GLOBAL (AppSettings::flightPlanShowsSummary), so it persists + syncs across
+                // every window (see _SelectPlanPaneTab / _UpdatePlanPaneTab). The Summary tab is empty for
+                // now; the Flight Plan tab holds the existing pane (Autopilot + queue + compose box).
+                auto tabBar = Grid{};
+                tabBar.ColumnDefinitions().Append(starCol(1)); // Summary half
+                tabBar.ColumnDefinitions().Append(starCol(1)); // Flight Plan half
+                auto mkTabBtn = [&](const winrt::hstring& label, const winrt::hstring& tip, const CornerRadius& cr, bool summary) {
+                    auto btn = Button{};
+                    btn.Content(winrt::box_value(label));
+                    btn.FontSize(12);
+                    btn.Padding(Thickness{ 8, 4, 8, 4 });
+                    btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+                    btn.HorizontalContentAlignment(HorizontalAlignment::Center);
+                    btn.CornerRadius(cr); // outer edges rounded, the middle seam square -> reads as one segmented pill
+                    AgentSetTip(btn, tip);
+                    btn.Click([this, summary](const IInspectable&, const RoutedEventArgs&) { _SelectPlanPaneTab(summary); });
+                    return btn;
+                };
+                _summaryTabBtn = mkTabBtn(L"Summary", L"Summary \x2014 a per-session overview (coming soon).", CornerRadius{ 6, 0, 0, 6 }, true);
+                _flightPlanTabBtn = mkTabBtn(L"Flight Plan", L"Flight Plan \x2014 the selected session's prompt queue, Autopilot, and compose box.", CornerRadius{ 0, 6, 6, 0 }, false);
+                Grid::SetColumn(_summaryTabBtn, 0);
+                tabBar.Children().Append(_summaryTabBtn);
+                Grid::SetColumn(_flightPlanTabBtn, 1);
+                tabBar.Children().Append(_flightPlanTabBtn);
+
+                // Flight Plan TAB body: a thin strip carrying the Autopilot toggle (relocated from the
+                // old header — mirrors the EXPLORER TREE toggle but acts on the SELECTED session; a colored
+                // state dot cycles Off -> Semi-auto -> Full, dim/disabled with no live session) over the
+                // existing prompt list / compose box (`outer`).
                 _autopilotBtn = Button{};
                 _autopilotBtn.FontSize(11);
                 _autopilotBtn.Padding(Thickness{ 8, 1, 8, 1 });
                 AgentSetTip(_autopilotBtn, L"Autopilot for the selected session \x2014 click to cycle: Off (manual) \xB7 Semi-auto (you confirm each send) \xB7 Full (auto-send the queue when a turn completes).");
                 _autopilotBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutopilot(); });
-                headerLabel.Children().Append(_autopilotBtn);
                 _UpdateAutopilotButton(AutopilotMode::Off, false);
+                auto apStrip = StackPanel{};
+                apStrip.Orientation(Orientation::Horizontal);
+                apStrip.HorizontalAlignment(HorizontalAlignment::Right);
+                apStrip.Margin(Thickness{ 0, 0, 0, 6 });
+                apStrip.Children().Append(_autopilotBtn);
+
+                _flightPlanBody = Grid{};
+                _flightPlanBody.RowDefinitions().Append(autoRow()); // 0: Autopilot strip
+                _flightPlanBody.RowDefinitions().Append(starRow(1)); // 1: the existing body (`outer`)
+                Grid::SetRow(apStrip, 0);
+                _flightPlanBody.Children().Append(apStrip);
+                Grid::SetRow(outer, 1);
+                _flightPlanBody.Children().Append(outer);
+
+                // Summary TAB body: empty for now — a faint centered placeholder so a blank pane doesn't
+                // read as a rendering bug. (Replace with real content when the Summary view is built.)
+                _summaryHost = Grid{};
+                {
+                    auto hint = Text(L"Summary", 13, false, 0.35);
+                    hint.HorizontalAlignment(HorizontalAlignment::Center);
+                    hint.VerticalAlignment(VerticalAlignment::Center);
+                    _summaryHost.Children().Append(hint);
+                }
+
+                // Both tab bodies share one grid cell; _UpdatePlanPaneTab toggles which is Visible.
+                auto contentArea = Grid{};
+                contentArea.Children().Append(_summaryHost);
+                contentArea.Children().Append(_flightPlanBody);
 
                 auto wrap = Grid{};
-                wrap.RowDefinitions().Append(autoRow());
-                wrap.RowDefinitions().Append(starRow(1));
-                Grid::SetRow(headerLabel, 0);
-                wrap.Children().Append(headerLabel);
-                Grid::SetRow(outer, 1);
-                wrap.Children().Append(outer);
+                wrap.RowDefinitions().Append(autoRow()); // 0: the [Summary | Flight Plan] toggle
+                wrap.RowDefinitions().Append(starRow(1)); // 1: the selected tab's body
+                Grid::SetRow(tabBar, 0);
+                wrap.Children().Append(tabBar);
+                Grid::SetRow(contentArea, 1);
+                wrap.Children().Append(contentArea);
+
+                _UpdatePlanPaneTab(); // initial paint + visibility from _appSettings (default: Summary)
 
                 auto b = section(wrap);
                 Grid::SetColumn(b, 2);
@@ -7910,6 +7964,60 @@ namespace winrt::TerminalApp::implementation
         row.Children().Append(Text(label, 11, false, enabled ? 0.95 : 0.5));
         _autopilotBtn.Content(row);
         _autopilotBtn.IsEnabled(enabled);
+    }
+
+    // Agentmaster: select the Flight-Plan pane's [Summary | Flight Plan] tab. The choice is a GLOBAL app
+    // setting (AppSettings::flightPlanShowsSummary), so — exactly like the Explorer-Tree / Triage-Board
+    // sort toggles — mutate _appSettings, re-paint, then push it through the settings sink (the page
+    // persists settings.json + broadcasts it to every OTHER window, which adopt it in ApplyExternalSettings).
+    // A no-op when unchanged, so re-clicking the active tab doesn't churn persistence/broadcast.
+    void AgentManagerContent::_SelectPlanPaneTab(bool summary)
+    {
+        if (_appSettings.flightPlanShowsSummary == summary)
+        {
+            return; // already on this tab
+        }
+        _appSettings.flightPlanShowsSummary = summary;
+        _UpdatePlanPaneTab();
+        if (_settingsSink)
+        {
+            _settingsSink(_appSettings); // persist globally (settings.json) + broadcast to other windows
+        }
+    }
+
+    // Agentmaster: reflect the current Flight-Plan pane tab — accent the selected segment (held through
+    // hover via PaintHoldButton, the scope-toggle accent) + bold it, leave the other on default chrome,
+    // and show ONLY that tab's body (the empty Summary host vs the Flight Plan body). No-op until the
+    // controls exist, so it's safe to call from SetSettings before _BuildLayout has run.
+    void AgentManagerContent::_UpdatePlanPaneTab()
+    {
+        if (!_summaryTabBtn || !_flightPlanTabBtn)
+        {
+            return;
+        }
+        const bool summary = _appSettings.flightPlanShowsSummary;
+        const auto paintSegment = [](const Button& b, bool selected) {
+            if (selected)
+            {
+                PaintHoldButton(b, 0xFF356AB8, 0xFF3E7DCE, 0xFF2B5391); // accent blue, holds through hover/press
+                b.FontWeight(FontWeights::SemiBold());
+            }
+            else
+            {
+                ClearHoldButton(b); // default subtle chrome = the inactive segment
+                b.FontWeight(FontWeights::Normal());
+            }
+        };
+        paintSegment(_summaryTabBtn, summary);
+        paintSegment(_flightPlanTabBtn, !summary);
+        if (_summaryHost)
+        {
+            _summaryHost.Visibility(summary ? Visibility::Visible : Visibility::Collapsed);
+        }
+        if (_flightPlanBody)
+        {
+            _flightPlanBody.Visibility(summary ? Visibility::Collapsed : Visibility::Visible);
+        }
     }
 
     void AgentManagerContent::_RefreshTemplateCombo()

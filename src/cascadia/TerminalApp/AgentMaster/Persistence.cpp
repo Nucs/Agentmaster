@@ -461,6 +461,7 @@ namespace Agentmaster
         o.Set(L"summaryPanelTruncate", json::Value::MkBool(s.summaryPanelTruncate));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
+        o.Set(L"flightPlanShowsSummary", json::Value::MkBool(s.flightPlanShowsSummary));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
@@ -512,6 +513,8 @@ namespace Agentmaster
         // (most-recently-active first). A stored "pid" would deserialize fine but the board never
         // produces it (its cycle skips ByPid), so it can only arrive via a hand-edit.
         s.boardSort = ExplorerSortFromString(v.StrAt(L"boardSort", L"active"));
+        // Manager Flight-Plan pane tab (Agentmaster): absent => Summary (true), the default tab.
+        s.flightPlanShowsSummary = v.BoolAt(L"flightPlanShowsSummary", true);
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value
             // must not collapse a pane (fall back to the 50/50 default instead).
