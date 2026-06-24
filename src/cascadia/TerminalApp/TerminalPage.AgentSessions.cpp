@@ -148,6 +148,10 @@ namespace winrt::TerminalApp::implementation
     // context-menu "New Session Here" passes clickedIndex+1 so the new tab lands next to it.
     void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
     {
+        // Nav audit: the user asked for a FRESH session here (Manager "Launch Claude", a tree/board/
+        // Sessions-page "Open New Session Here", or a tab-menu spawn). The resulting minted id lands
+        // in the downstream [spawn] line.
+        ::Agentmaster::LogNav(L"open-new claude dir=" + std::wstring{ workingDir } + (_openClaudeTabInBackground ? L" [bg]" : L""));
         // Native-exe-only policy gate (auto-recovering). A page / tab-menu spawn that reaches here did
         // NOT pass through the Manager's rich modal, so prompt with the page dialog instead of silently
         // no-op'ing at _LaunchClaudeSession's backstop. (A Manager-tab spawn already gated upstream and
@@ -454,10 +458,15 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_ActivateClaudeSession(winrt::hstring sessionId)
     {
         const std::wstring id{ sessionId };
+        // Nav audit: the user asked to jump to this session's live tab (board/tree double-click, tree
+        // Enter, a "Jump to tab" menu, the Flight-Plan eye, or the Sessions page). `local` = the tab
+        // is in THIS window; `fan-out` = it lives in another window, handed off via the engine sink.
         if (_FocusClaudeSessionTab(id, /*bringWindowToFront*/ false))
         {
+            ::Agentmaster::LogNav(L"activate " + ::Agentmaster::ShortId(id) + L" (local)");
             return;
         }
+        ::Agentmaster::LogNav(L"activate " + ::Agentmaster::ShortId(id) + L" (fan-out to other windows)");
         ::Agentmaster::ActivateSessionInOtherWindows(id, _windowId);
     }
 
@@ -764,6 +773,9 @@ namespace winrt::TerminalApp::implementation
         }
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
+        // Nav audit (the user closed this tab) beside the [archive] mechanism line. Close always
+        // archives — the record stays resumable from Sessions; nothing on disk is deleted.
+        ::Agentmaster::LogNav(L"close " + ::Agentmaster::ShortId(sessionId) + L" (archived, resumable)");
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + sessionId + L"\n");
 
         tab.Close(); // -> Closed -> _RemoveTab (tab.Shutdown disconnects -> claude.exe exits)
@@ -1075,6 +1087,10 @@ namespace winrt::TerminalApp::implementation
         const std::wstring dir{ cwd };
         const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
         const std::wstring id = ::Agentmaster::ResolveSessionId(dir, start);
+        // Nav audit: the user adopted an EXTERNAL claude (its conversation resolved from cwd+start).
+        // fork = branch a copy into a new transcript (safe on a live external); resume = take it over.
+        // The downstream [adopt-external] + [fork]/[resume] lines carry the resulting managed id.
+        ::Agentmaster::LogNav(L"adopt-external pid=" + std::to_wstring(pid) + L" " + ::Agentmaster::ShortId(id) + (fork ? L" (fork-a-copy)" : L" (resume/take-over)") + L" cwd=" + dir);
 
         if (fork && !id.empty())
         {
@@ -1568,6 +1584,7 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring id{ sessionId };
         const std::wstring name{ title };
+        ::Agentmaster::LogNav(L"rename " + ::Agentmaster::ShortId(id) + L" -> \"" + name.substr(0, 80) + L"\"");
         _sessionRegistry->Update(id, [&name](::Agentmaster::SessionInfo& s) { s.title = name; });
 
         const auto it = _claudeTabs.find(id);

@@ -672,6 +672,16 @@ try {
         }
     }
 
+    void LogNav(std::wstring_view msg)
+    {
+        AppendStateLog(L"hooks.log", L"[nav] " + std::wstring{ msg } + L"\n");
+    }
+
+    std::wstring ShortId(const std::wstring& id)
+    {
+        return id.empty() ? std::wstring{ L"(none)" } : id.substr(0, 8);
+    }
+
     std::pair<std::wstring, std::wstring> MaterializeSharedHookFiles(const std::wstring& stateDir, const AppSettings& settings)
     {
         const std::wstring forwarderPath = stateDir + L"\\agentmaster-hook.ps1";

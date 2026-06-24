@@ -1810,6 +1810,11 @@ namespace winrt::TerminalApp::implementation
                     s.pendingConfirmPromptId.clear();
                 });
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[rehome] " + superseded + L" -> " + id + L" (same tab, new conversation id)\n");
+                // Nav audit: a TAB SWAPPED its bound session id (claude switched conversation in place
+                // — /clear, /resume into another conversation, or /compact). Surface it in the [nav]
+                // trail so "my tab is suddenly a different session" is followable, not just inferable
+                // from the deeper [rehome] line. The old id is archived (its Flight Plan stays restorable).
+                ::Agentmaster::LogNav(L"tab-swap " + ::Agentmaster::ShortId(superseded) + L" -> " + ::Agentmaster::ShortId(id) + L" (same tab; claude switched conversation \x2014 /clear, /resume or /compact)");
                 _claudeTabs.erase(superseded);
                 _claudeOverlays.erase(superseded);
                 reHomedFromOtherId = true; // the tab's pinned text is `superseded`'s title — don't bleed it onto `id`

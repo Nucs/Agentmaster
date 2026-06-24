@@ -1280,6 +1280,23 @@ namespace winrt::TerminalApp::implementation
         _sessionsHitSnippets.clear();
         _RenderSessionsTable();
 
+        // Nav audit (debounced — one per settled query, not per keystroke): the query, the active
+        // scopes, and the fast-phase hit count. The companion "search-done … content=N" below lands
+        // when the background content scan finishes. Together they show exactly what a search
+        // surfaced — the context that was missing when "browse" turned up an unexpected session.
+        if (!q.text.empty())
+        {
+            std::wstring scopes;
+            if (q.scopeTitle) scopes += L"title,";
+            if (q.scopeUser) scopes += L"user,";
+            if (q.scopeAgent) scopes += L"agent,";
+            if (q.scopeDirs) scopes += L"dirs,";
+            if (q.scopeFiles) scopes += L"files,";
+            if (q.fuzzy) scopes += L"fuzzy,";
+            if (!scopes.empty()) scopes.pop_back();
+            ::Agentmaster::LogNav(L"sessions search q=\"" + q.text + L"\" scopes=[" + scopes + L"] fast=" + std::to_wstring(_sessionsFastIds.size()));
+        }
+
         if (q.text.empty() || (!q.scopeUser && !q.scopeAgent))
         {
             co_return; // title/dir/path matching is fully covered by the fast phase (§1a)
@@ -1348,6 +1365,7 @@ namespace winrt::TerminalApp::implementation
         self->_sessionsHitCounts = std::move(counts);
         self->_sessionsHitSnippets = std::move(snippets);
         self->_RenderSessionsTable();
+        ::Agentmaster::LogNav(L"sessions search-done q=\"" + q.text + L"\" content=" + std::to_wstring(self->_sessionsHitCounts.size()) + L" (slow phase)"); // the content-scan matches just landed + re-sorted the table
         if (!self->_sessionsSelectedId.empty())
         {
             self->_ShowSessionsDetail(self->_sessionsSelectedId); // refresh the snippets pane
@@ -1833,6 +1851,11 @@ namespace winrt::TerminalApp::implementation
                     if (auto self = weak.get())
                     {
                         self->_sessionsSelectedId = id;
+                        // Nav audit: which session the user looked at + WHY it's in the result set
+                        // (name/dir = fast match, content = slow phase). This is the line that would
+                        // have made the "browse surfaced the wrong session" report self-evident.
+                        const std::wstring via = self->_sessionsQueryText.empty() ? std::wstring{ L"browse" } : (self->_sessionsFastIds.count(id) ? std::wstring{ L"name/dir" } : (self->_sessionsHitCounts.count(id) ? std::wstring{ L"content" } : std::wstring{ L"?" }));
+                        ::Agentmaster::LogNav(L"sessions select " + ::Agentmaster::ShortId(id) + L" via=" + via + (self->_sessionsQueryText.empty() ? std::wstring{} : (L" q=\"" + self->_sessionsQueryText + L"\"")));
                         self->_UpdateSessionsSelectionHighlight(); // recolor only — no table rebuild per click
                         self->_ShowSessionsDetail(id);
                         self->_PrefetchSessionsSummaries(id, 0); // warm the upper + lower neighbor in the background
@@ -2485,12 +2508,17 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Nav audit: the user picked this ROW to resume (right-click "Resume here", the detail-pane
+        // button, or a double-click prompt). The clicked id is what they SEE; the continuation
+        // resolve below + the downstream [resume]/[restore-fresh] carry what actually launched.
+        ::Agentmaster::LogNav(L"sessions resume-click row=" + ::Agentmaster::ShortId(sessionId) + L" \"" + title.substr(0, 80) + L"\" dir=" + dir + (_openClaudeTabInBackground ? L" [bg]" : L""));
         const std::wstring target = _ResolveRestoreChainTail(sessionId, dir, title); // follow /clear chain to the tail
         const auto existing = _sessionRegistry->Get(target);
         if (existing && existing->live)
         {
             // Already OPEN somewhere in this app. Foreground: jump to it. Background bulk-open: leave
             // focus where it is (don't yank to an already-open tab) — it's already there to switch to.
+            ::Agentmaster::LogNav(L"sessions resume -> jump " + ::Agentmaster::ShortId(target) + (target == sessionId ? L"" : (L" (resolved from " + ::Agentmaster::ShortId(sessionId) + L")")) + L" (already open)");
             if (!_openClaudeTabInBackground)
             {
                 _ActivateClaudeSession(winrt::hstring{ target });
@@ -2535,6 +2563,11 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Nav audit: the user picked this ROW to fork. The clicked id is what they SEE; the
+        // continuation resolve below logs the actual fork SOURCE, and the downstream [fork] line
+        // carries the NEW forked id ("[fork] <new> (forked from <source>)") — so grepping [nav]+[fork]
+        // gives the full row-clicked -> source -> new-id chain the user asked to be able to follow.
+        ::Agentmaster::LogNav(L"sessions fork-click row=" + ::Agentmaster::ShortId(parentId) + L" \"" + title.substr(0, 80) + L"\" dir=" + dir + (_openClaudeTabInBackground ? L" [bg]" : L""));
         // Native-exe-only policy gate (auto-recovering): a fork is a claude launch (--fork-session).
         // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
         if (!::Agentmaster::EnsureClaudeAvailable())
@@ -2671,6 +2704,7 @@ namespace winrt::TerminalApp::implementation
         // A selection filtered out of view counts as none (idx -1): Down = first, Up = last.
         const int next = (idx < 0) ? (delta > 0 ? 0 : n - 1) : (((idx + delta) % n + n) % n);
         _sessionsSelectedId = _sessionsVisibleOrder[next];
+        ::Agentmaster::LogNav(L"sessions select " + ::Agentmaster::ShortId(_sessionsSelectedId) + L" via=key" + (delta > 0 ? L"\x2193" : L"\x2191") + (_sessionsQueryText.empty() ? std::wstring{} : (L" q=\"" + _sessionsQueryText + L"\"")));
         _UpdateSessionsSelectionHighlight();
         _ShowSessionsDetail(_sessionsSelectedId);
         // PREFETCH in the direction of travel so the FOLLOWING Up/Down lands on a warm cache —
@@ -2723,6 +2757,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        ::Agentmaster::LogNav(L"sessions hide " + ::Agentmaster::ShortId(sessionId));
         _AddSessionIdToHiddenList(sessionId);
         // If the hidden row was selected, drop the selection so the detail pane doesn't keep
         // showing a session that's no longer in the list.
@@ -2744,6 +2779,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        ::Agentmaster::LogNav(L"sessions unhide " + ::Agentmaster::ShortId(sessionId));
         auto s = ::Agentmaster::LoadAppSettings();
         const auto it = std::find(s.hiddenSessionIds.begin(), s.hiddenSessionIds.end(), sessionId);
         if (it != s.hiddenSessionIds.end())
@@ -2786,6 +2822,7 @@ namespace winrt::TerminalApp::implementation
         }
         const bool nowFav = !::Agentmaster::IsSessionFavorite(sessionId); // flip the on-disk truth
         ::Agentmaster::SetSessionFavorite(sessionId, nowFav);
+        ::Agentmaster::LogNav(L"favorite " + ::Agentmaster::ShortId(sessionId) + (nowFav ? L" on" : L" off"));
         if (nowFav)
         {
             _sessionsFavorites.insert(sessionId);

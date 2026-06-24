@@ -7803,6 +7803,10 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::_SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath)
     {
         _ResetPromptHistory(); // an external's Flight Plan is read-only — no managed history to recall
+        // Nav audit: the user selected an EXTERNAL (unmanaged) session to inspect — board External
+        // card or Explorer-Tree EXTERNAL row — surfacing its read-only conversation. Distinct from a
+        // managed select (no tab-focus equivalent — we host no tab for it).
+        ::Agentmaster::LogNav(L"manager select-external " + ::Agentmaster::ShortId(sessionId) + L" cwd=" + cwd);
         _selectedId.clear();
         _selectedPromptId.clear();
         _selectedExternalSessionId = sessionId;

@@ -212,6 +212,17 @@ namespace Agentmaster
     // (swallows all I/O errors). Used as M5's live verification surface for hook -> state.
     void AppendStateLog(std::wstring_view fileLeaf, std::wstring_view line);
 
+    // Agentmaster: the USER-NAVIGATION audit trail. Writes "[nav] <msg>\n" to hooks.log so the
+    // whole "what did the user click / select / fork / resume / close" journey is reconstructable
+    // with `grep '\[nav\]' hooks.log` — the user-INTENT layer that sits above the engine-mechanism
+    // tags ([fork] / [resume] / [rehome] / …), which carry the resulting ids it references. Every
+    // UI action/navigation funnel emits one. Thread-safe + best-effort like AppendStateLog.
+    void LogNav(std::wstring_view msg);
+
+    // First 8 chars of an id (the established log convention for a short session/conversation id;
+    // substr clamps, so a shorter id is returned whole). "" -> "(none)".
+    std::wstring ShortId(const std::wstring& id);
+
     // A fresh lowercase hyphenated UUID (CoCreateGuid).
     std::wstring NewSessionId();
 

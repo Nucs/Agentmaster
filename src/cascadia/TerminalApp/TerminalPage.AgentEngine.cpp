@@ -1011,6 +1011,10 @@ namespace winrt::TerminalApp::implementation
         {
             return; // not a managed Claude/Codex session tab -> nothing to select
         }
+        // Nav audit: the user switched FOCUS to this managed session's tab (a tab click, Ctrl+Tab, a
+        // switchToTab action, or the landing of an Activate/jump). The core "where is the user now"
+        // navigation signal; gated on Initialized so a restore's focus-restore can't spam it.
+        ::Agentmaster::LogNav(L"tab-focus " + ::Agentmaster::ShortId(id));
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
