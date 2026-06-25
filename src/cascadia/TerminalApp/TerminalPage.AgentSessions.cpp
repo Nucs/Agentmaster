@@ -279,6 +279,10 @@ namespace winrt::TerminalApp::implementation
         const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
         if (!pane)
         {
+            // Silent before: a null pane (ConPTY/tab build failed) produced no tab AND no trace — a launch
+            // that "did nothing". Record it so a vanished spawn is diagnosable (the registry upsert + the
+            // [spawn]/[fork]/[resume] success line below never ran).
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-fail] " + spec.sessionId + L" \"" + ttl + L"\" cwd=" + dir + L" (pane build returned null \x2014 no tab created)\n");
             return nullptr;
         }
 
@@ -981,6 +985,9 @@ namespace winrt::TerminalApp::implementation
         const auto pane = _MakePane(newTerminalArgs, winrt::TerminalApp::Tab{ nullptr }, connection);
         if (!pane)
         {
+            // Silent before: a null pane (ConPTY/tab build failed) produced no tab AND no trace (see the
+            // Claude launcher) — record it so a vanished Codex spawn is diagnosable.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[launch-fail] " + handleId + L" \"" + ttl + L"\" cwd=" + dir + L" (codex pane build returned null \x2014 no tab created)\n");
             return nullptr;
         }
         // Suppress closeOnExit so a finished/crashed codex leaves its tab open to read (the liveness

@@ -54,19 +54,30 @@ namespace
 
     bool WriteAllUtf8(const std::wstring& path, std::wstring_view content)
     {
+        // The single chokepoint for EVERY persistence write (sessions.json, windows/<id>.json, templates,
+        // recent-dirs, open-windows, dir-colors). A failure here = state silently NOT saved (lost on next
+        // launch), so surface it — previously every failure path returned false with no trace. [persist-fail]
+        // is rare (disk full / permissions / a locked file), so it never floods steady state.
         try
         {
             std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
             if (!f)
             {
+                AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (open failed \x2014 state NOT saved)\n");
                 return false;
             }
             const auto bytes = Utf16ToUtf8(content);
             f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-            return f.good();
+            if (!f.good())
+            {
+                AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (write incomplete \x2014 state NOT saved)\n");
+                return false;
+            }
+            return true;
         }
         catch (...)
         {
+            AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (exception \x2014 state NOT saved)\n");
             return false;
         }
     }

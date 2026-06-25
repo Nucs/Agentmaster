@@ -1183,8 +1183,8 @@ What works, by area:
 - **Logging & observability (`hooks.log`).** All traces go through `AppendStateLog(fileLeaf, line)`
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
-  tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[observer]`/`[activity]`/… (each
+  tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids); and (3) the **`[nav]` USER-NAVIGATION AUDIT TRAIL** — the user-INTENT layer
   ABOVE the mechanism tags (whose ids it references), so `grep '\[nav\]' hooks.log` reconstructs the whole
   journey. Helpers: `LogNav(msg)` writes `[nav] <msg>\n`; `ShortId(id)` = the first-8-char convention
@@ -1232,9 +1232,14 @@ What works, by area:
   (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter facets — the active scopes already ride
   the `search` line). **Census log gating** (the observer's
   `[observer] census`): re-logs only on OUR-fleet change + a 5-min keepalive, NOT on external-world churn —
-  see the *Fleet Observer S-lane* bullet. **Known gap (not yet done):** `AppendStateLog` lines carry **no
-  timestamp** — adding an `[HH:MM:SS.mmm]` prefix at that one chokepoint would time-stamp every layer
-  (incl. the whole `[nav]` trail) at once.
+  see the *Fleet Observer S-lane* bullet. **Timestamps (DONE):** every record is now prefixed at the
+  `AppendStateLog` chokepoint with a LOCAL-time `[HH:MM:SS.mmm]` stamp (applied only at a line boundary, so
+  a partial-line caller is never split mid-line), time-ordering EVERY layer at once — turn time, Enter-retry
+  gaps, observer lag, and the span between a `[nav]` begin and its end now read straight off the log.
+  **Silent-failure surfacing (DONE):** a launch that built no tab (`[launch-fail]` — the Claude + Codex
+  null-pane returns) and any failed state write (`[persist-fail]` — the `WriteAllUtf8` chokepoint behind
+  sessions.json / window-records / templates / dir-colors / …, i.e. state silently lost on next launch) now
+  LOG instead of vanishing.
 
 Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellext CLSIDs — the one
 shared seam left between the release and dev packages; distinct dev iconography; profile

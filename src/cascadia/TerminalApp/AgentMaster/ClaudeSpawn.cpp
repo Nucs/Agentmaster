@@ -653,9 +653,33 @@ try {
         return dir;
     }
 
+    // Agentmaster: a local-time [HH:MM:SS.mmm] stamp prefixed to the START of every log record (below), so
+    // the hook event stream / engine-mechanism tags / [nav] trail / observer census in hooks.log (and the
+    // autopilot/scanner logs) are all time-ordered — turn time, Enter-retry gaps, observer lag, and the
+    // span between a [nav] begin and its end read straight off the log. LOCAL time (the user's wall clock)
+    // so it lines up with what they saw on screen. (Closes the documented "no timestamp" Known gap.)
+    static std::wstring LogTimestampPrefix()
+    {
+        SYSTEMTIME st{};
+        ::GetLocalTime(&st);
+        wchar_t buf[24];
+        ::swprintf(buf,
+                   24,
+                   L"[%02u:%02u:%02u.%03u] ",
+                   static_cast<unsigned>(st.wHour),
+                   static_cast<unsigned>(st.wMinute),
+                   static_cast<unsigned>(st.wSecond),
+                   static_cast<unsigned>(st.wMilliseconds));
+        return std::wstring{ buf };
+    }
+
     void AppendStateLog(std::wstring_view fileLeaf, std::wstring_view line)
     {
         static std::mutex mtx;
+        // Per-file "is the cursor at a fresh line?" so the stamp prefixes only at a line boundary — a
+        // (hypothetical) partial-line caller is never split mid-line. Every current caller writes a whole
+        // '\n'-terminated record, so in practice each record gets exactly one leading stamp.
+        static std::unordered_map<std::wstring, bool> atLineStart;
         std::lock_guard<std::mutex> lk{ mtx };
         try
         {
@@ -663,8 +687,19 @@ try {
             std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::app);
             if (f)
             {
-                const auto bytes = Utf16ToUtf8(line);
+                const std::wstring leaf{ fileLeaf };
+                const auto it = atLineStart.find(leaf);
+                const bool fresh = (it == atLineStart.end()) || it->second; // first write this run => assume a fresh line
+                std::wstring out;
+                out.reserve(line.size() + 16);
+                if (fresh && !line.empty())
+                {
+                    out += LogTimestampPrefix();
+                }
+                out.append(line);
+                const auto bytes = Utf16ToUtf8(out);
                 f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                atLineStart[leaf] = !line.empty() && line.back() == L'\n'; // next write starts a line iff this ended one
             }
         }
         catch (...)
