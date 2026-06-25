@@ -1200,14 +1200,16 @@ What works, by area:
   `close-begin` ↔ `close-done` · `sessions-page open-begin` ↔ `shown` (the page-open crash class) ·
   `reopen-windows-begin` ↔ `…-done` (the toolbar "Reopen Windows (N)" dispatch loop). A blocked launch (no
   native `claude.exe`) still emits its `…-done (blocked …)` so an unpaired begin ALWAYS means a crash, never
-  the gate. Other covered funnels (~46 sites total, all
+  the gate. Other covered funnels (~52 sites total, all
   user-action-driven — never per-tick; search is debounced): **Sessions page** — `search` (q + active scopes
   + fast count, then `search-done content=N`), `select` (row click AND Up/Down nav, tagged `via=name/dir |
   content | browse` — the field a row matched, the line that makes "why did this row surface" self-evident),
   `favorite on/off`, `hide`/`unhide`; **cross-cutting funnels** (cover the Manager board/tree + page + tab
   menus) — `activate` (local vs cross-window fan-out), `rename` (Explorer/Manager `_RenameClaudeSession` AND
   the tab-strip `_SyncClaudeTitleFromTab`, the latter only on a real change); **Flight Plan** — `queue`,
-  `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`, `pause-all`; **navigation**
+  `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`, `pause-all`, `template-save`
+  (a session's queue → a reusable plan) + `template-apply` (the template's prompts → one session, or → EVERY
+  session in a dir — the broadcast carries the affected count); **navigation**
   — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a restore's focus-restore can't
   spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/`/resume`/`/compact`, beside
   `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md);
@@ -1218,13 +1220,17 @@ What works, by area:
   action); **clipboard/shell** — `copy <field>` (the ONE `CopySessionField` chokepoint behind EVERY copy
   menu — the per-tab overlay's AND the board/tree Copy submenu — `field` ∈
   session-id/path/branch/claude-cli/codex-cli/transcript/summary), `open-path` (the overlay folder button →
-  explorer), `settings-save` (the cog Save — logs the behavior-impacting fields skipPerms/model/autopilot/
-  claudeExe). The fork chain reads `[nav] sessions fork-click row=… → [sessions-page->fork] source=… →
+  explorer); **cog/settings** — `settings-save` (the cog Save — logs the behavior-impacting fields
+  skipPerms/model/autopilot/claudeExe), `profile-change <from> -> <to>` (re-point the install's profile
+  folder, applies on restart), `check-for-updates` (the interactive button only — not the silent on-open
+  check), `reset-hidden-sessions` (un-hide every Sessions-browser row). The fork chain reads
+  `[nav] sessions fork-click row=… → [sessions-page->fork] source=… →
   [fork] <new> (forked from <source>) → [nav] sessions fork-done new=<new> from=<source>` (row-clicked →
   resolved source → new id, end-capped so a crash mid-fork is visible). **Deliberately UNLOGGED**
-  (low signal / would add noise): Flight-Plan queue micro-edits (move/delete a Pending row), template save/
-  apply, and the pure view-filter toggles (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter
-  facets — the active scopes already ride the `search` line). **Census log gating** (the observer's
+  (low signal / would add noise): Flight-Plan queue micro-edits (move/delete a Pending row), the settings-cog
+  OPEN + the summary-panel pencil/wrap toggles + the path-picker navigation, and the pure view-filter toggles
+  (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter facets — the active scopes already ride
+  the `search` line). **Census log gating** (the observer's
   `[observer] census`): re-logs only on OUR-fleet change + a 5-min keepalive, NOT on external-world churn —
   see the *Fleet Observer S-lane* bullet. **Known gap (not yet done):** `AppendStateLog` lines carry **no
   timestamp** — adding an `[HH:MM:SS.mmm]` prefix at that one chokepoint would time-stamp every layer

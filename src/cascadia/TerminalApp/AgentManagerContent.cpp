@@ -6135,6 +6135,7 @@ namespace winrt::TerminalApp::implementation
         _setResetHidden.Content(winrt::box_value(L"Reset hidden sessions"));
         AgentSetTip(_setResetHidden, L"Un-hide every session you removed from the Sessions browser with \x201CHide from list\x201D");
         _setResetHidden.Click([this](const IInspectable& sender, const RoutedEventArgs&) {
+            ::Agentmaster::LogNav(L"reset-hidden-sessions (un-hide every Sessions-browser row)"); // Nav audit: the cog "Reset hidden sessions"
             if (_resetHiddenSessionsHandler)
             {
                 _resetHiddenSessionsHandler();
@@ -6192,6 +6193,10 @@ namespace winrt::TerminalApp::implementation
                         return;
                     }
                     ::Agentmaster::Profiles::SaveChoice(pick.dir);
+                    // Nav audit: the user re-pointed this install at a different profile folder (the cog's
+                    // "Change profile folder…"). It re-homes ALL persisted state and applies on the NEXT
+                    // start (never mid-run), so the trail records the staged from -> to.
+                    ::Agentmaster::LogNav(L"profile-change " + active + L" -> " + pick.dir + (pick.migrate ? std::wstring{ L" (migrate data)" } : std::wstring{}) + L" (applies on restart)");
                     if (pick.migrate)
                     {
                         ::Agentmaster::Profiles::MigrateProfileData(active, pick.dir);
@@ -7087,6 +7092,12 @@ namespace winrt::TerminalApp::implementation
         if (_setAllowPrerelease)
         {
             prerelease = _setAllowPrerelease.IsOn();
+        }
+        // Nav audit: the user clicked "Check for updates" (interactive only — the silent on-cog-open check
+        // is automatic, never logged). The result lands in the cog label, not the trail.
+        if (interactive)
+        {
+            ::Agentmaster::LogNav(std::wstring{ L"check-for-updates (allowPrerelease=" } + (prerelease ? L"1" : L"0") + L")");
         }
 
         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
@@ -8974,6 +8985,8 @@ namespace winrt::TerminalApp::implementation
         }
         _templates.push_back(::Agentmaster::MakeTemplateFromQueue(name, sel->queue));
         ::Agentmaster::SaveTemplates(_templates);
+        // Nav audit: the user saved the selected session's queue as a reusable plan template.
+        ::Agentmaster::LogNav(L"template-save \"" + name + L"\" prompts=" + std::to_wstring(sel->queue.size()) + L" from=" + ::Agentmaster::ShortId(_selectedId));
         if (_templateNameBox)
         {
             _templateNameBox.Text(L"");
@@ -9005,6 +9018,10 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             _registry->Update(_selectedId, [&](SessionInfo& s) { ::Agentmaster::AppendTemplateToQueue(s.queue, tmpl); });
+            // Nav audit: the user applied a template's prompts to THIS session's queue (consequential — it
+            // adds what Autopilot will send; more than a single `queue`, so logged even though the per-prompt
+            // queue micro-edits aren't).
+            ::Agentmaster::LogNav(L"template-apply \"" + tmpl.name + L"\" prompts=" + std::to_wstring(tmpl.prompts.size()) + L" -> " + ::Agentmaster::ShortId(_selectedId));
             _FocusPromptBox(); // Agentmaster: return focus to the compose box after applying a template
             return;
         }
@@ -9022,13 +9039,18 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        int applied = 0;
         for (const auto& s : _registry->Snapshot())
         {
             if (PathEq(s.workingDir, dir))
             {
                 _registry->Update(s.id, [&](SessionInfo& ss) { ::Agentmaster::AppendTemplateToQueue(ss.queue, tmpl); });
+                ++applied;
             }
         }
+        // Nav audit: the user broadcast a template to EVERY session in a directory — the most consequential
+        // template action (queues prompts across many sessions at once).
+        ::Agentmaster::LogNav(L"template-apply \"" + tmpl.name + L"\" prompts=" + std::to_wstring(tmpl.prompts.size()) + L" -> dir=" + dir + L" sessions=" + std::to_wstring(applied));
         _FocusPromptBox(); // Agentmaster: return focus to the compose box after applying a template
     }
 
