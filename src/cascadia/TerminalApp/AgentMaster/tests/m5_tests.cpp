@@ -2668,20 +2668,29 @@ static void TestBlockedAndInterruptedStates()
     CHECK(!PresenceIsBusy(L"shell"), "presence: 'shell' is not working");
     CHECK(!PresenceIsBusy(L""), "presence: no heartbeat is not working");
     // subagentActive arm — a subagent transcript is actively growing (the parent's tail is the pending Task tool_use, non-terminal):
-    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, true, false, L""), "ext-work: Idle + subagent writing (no parent stop_reason) -> Running");
-    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"tool_use"), "ext-work: subagent writing + in-flight (tool_use) tail -> Running");
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"end_turn"), "ext-work: turn ENDED (terminal tail) — a subagent's final write lands us before end_turn, so 'fresh subagent' here is the just-finished turn, NOT new work: do NOT bounce Waiting->Running");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, true, false, L"", false), "ext-work: Idle + subagent writing (no parent stop_reason) -> Running");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"tool_use", false), "ext-work: subagent writing + in-flight (tool_use) tail -> Running");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"end_turn", false), "ext-work: turn ENDED (terminal tail) — a subagent's final write lands us before end_turn, so 'fresh subagent' here is the just-finished turn, NOT new work: do NOT bounce Waiting->Running");
     // presenceBusy arm — gated on a NON-terminal tail (no post-Stop flicker):
-    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L""), "ext-work: Idle + presence busy + in-flight tail -> Running (e.g. a freshly /fork'd conversation)");
-    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"tool_use"), "ext-work: presence busy + mid-turn tail -> Running");
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, false, true, L"end_turn"), "ext-work: stale 'busy' right after a real Stop (terminal tail) does NOT bounce Waiting back to Running");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"", false), "ext-work: Idle + presence busy + in-flight tail -> Running (e.g. a freshly /fork'd conversation)");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"tool_use", false), "ext-work: presence busy + mid-turn tail -> Running");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, false, true, L"end_turn", false), "ext-work: stale 'busy' right after a real Stop (terminal tail) does NOT bounce Waiting back to Running");
+    // interrupt guard (the Running<->Waiting oscillation fix) — an INTERRUPTED turn is recon-stop's job
+    // (-> Waiting); after an Esc the dying subagents keep flushing side files + the heartbeat lingers
+    // "busy", so promoting here would flip-flop with ShouldSynthesizeStop every tick (the field freeze that
+    // flooded hooks.log to ~291 MB). The latch self-clears on a real resume (parser, fresh-append), so this
+    // only suppresses while the tail IS still the interrupt marker:
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"", true), "ext-work: INTERRUPTED + subagent still flushing -> do NOT promote Waiting->Running (recon-stop owns the interrupt; else oscillation)");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"", true), "ext-work: INTERRUPTED + lingering 'busy' heartbeat -> no promotion (the turn was aborted, not resumed)");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, true, L"tool_use", true), "ext-work: INTERRUPTED wins even over a non-terminal tool_use tail with both activity signals set");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"", false), "ext-work: NON-interrupted subagent work still promotes (the latch self-clears on a real resume)");
     // state gate — only Idle/Waiting are repairable:
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Running, true, true, L"tool_use"), "ext-work: already Running -> no-op");
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::NeedsApproval, true, true, L""), "ext-work: NeedsApproval ('needs you') never cleared by activity");
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Error, true, true, L""), "ext-work: Error never cleared by inference");
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Done, true, true, L""), "ext-work: Done never revived");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Running, true, true, L"tool_use", false), "ext-work: already Running -> no-op");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::NeedsApproval, true, true, L"", false), "ext-work: NeedsApproval ('needs you') never cleared by activity");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Error, true, true, L"", false), "ext-work: Error never cleared by inference");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Done, true, true, L"", false), "ext-work: Done never revived");
     // neither signal -> unchanged (a genuinely idle session):
-    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, false, L"tool_use"), "ext-work: no subagent + not busy -> no synthesis (parent-only path owns it)");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, false, L"tool_use", false), "ext-work: no subagent + not busy -> no synthesis (parent-only path owns it)");
 
     // --- presence-IDLE release: claude's OWN heartbeat says "idle" while we are stuck Running on a
     //     NON-terminal tail (a trailing user prompt that produced no assistant output + a dropped/absent

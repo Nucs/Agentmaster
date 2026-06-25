@@ -623,7 +623,7 @@ namespace Agentmaster
         // end_turn) can bounce a just-Waiting session back to Running. The re-Get mirrors the other
         // synths' freshest-state re-check (a real hook landing mid-pass wins), and — gated to
         // Idle/Waiting — it self-limits: once it lands Running it stops re-firing.
-        if (ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceBusy, st.lastStopReason))
+        if (ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceBusy, st.lastStopReason, st.interrupted))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))

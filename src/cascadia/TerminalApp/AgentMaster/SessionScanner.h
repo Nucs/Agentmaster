@@ -339,26 +339,36 @@ namespace Agentmaster
     //     fact, not a transcript-replay artifact, so the primed-cursor gate the parent-append repairs
     //     need does not apply.
     //   * presenceBusy — claude's heartbeat self-reports "busy" (it follows a live /fork to a new id).
-    // BOTH arms are gated on a NON-TERMINAL tail: a TERMINAL stop_reason (end_turn / stop_sequence /
+    // BOTH arms are gated on a NON-TERMINAL, NON-INTERRUPTED tail: a TERMINAL stop_reason (end_turn / stop_sequence /
     // max_tokens / refusal) means the turn is OVER, and recent side-file activity / a lingering "busy"
     // is then the TAIL END of the turn that just finished — the subagent's last write lands µs BEFORE
     // the parent's end_turn (so it is always "fresh" at turn-end), and "busy" lingers a tick after a
     // real Stop — NOT new work, so it must never bounce a settled (WaitingForInput) session back to
-    // Running. During a LIVE subagent the parent tail is the pending Task/Agent tool_use (non-terminal),
-    // so genuine in-flight work is unaffected. Only from the two states a missed turn-start strands a
+    // Running. An INTERRUPT (user Esc) is likewise a turn-ender owned by recon-stop (ShouldSynthesizeStop
+    // -> Waiting): after an Esc the dying subagents keep flushing side files for up to kScanSubagentFreshMs
+    // and claude's heartbeat lingers "busy" for a tick, so WITHOUT an interrupt guard recon-stop
+    // (Running -> Waiting on interrupted) and THIS promotion (Waiting -> Running on that stale activity)
+    // FLIP-FLOP every tick — a Running<->Waiting oscillation that floods scanner/autopilot/hooks logs and
+    // the UI until the freshness window expires (in the field it ballooned hooks.log to ~291 MB and wedged
+    // the hosting window). Guarding on `interrupted` makes the two MUTUALLY EXCLUSIVE — the same discipline
+    // ShouldSynthesizeResumed / ShouldSynthesizeBlockedOnUser / ShouldSynthesizeStopFromPresenceIdle already
+    // follow. The latch is NOT sticky past a real resume: the parser clears st.interrupted the instant a new
+    // turn appends (fresh assistant output OR a new non-interrupt user prompt), so a genuinely resumed
+    // session promotes to Running on its next pass. During a LIVE (un-interrupted) subagent the parent tail
+    // is the pending Task/Agent tool_use (non-terminal), so genuine in-flight work is unaffected. Only from the two states a missed turn-start strands a
     // session in (Idle / WaitingForInput); Running needs no repair, and NeedsApproval / Error / Done are
     // "needs you / ended" a mere activity signal must not clear. The caller synthesizes it as tool
     // ACTIVITY (PostToolUse -> Running), NOT a UserPromptSubmit (which would inflate the type-ahead
     // queue accounting, ++queuedPrompts).
-    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceBusy, std::wstring_view lastStopReason) noexcept
+    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceBusy, std::wstring_view lastStopReason, bool interrupted) noexcept
     {
         if (state != SessionState::Idle && state != SessionState::WaitingForInput)
         {
             return false;
         }
-        if (IsTerminalStopReason(lastStopReason))
+        if (interrupted || IsTerminalStopReason(lastStopReason))
         {
-            return false; // a COMPLETED turn — recent subagent activity / lingering "busy" is its tail end, not new work
+            return false; // a COMPLETED or INTERRUPTED turn — recent subagent activity / lingering "busy" is its tail end, not new work (an interrupt is recon-stop's job -> Waiting; promoting here would oscillate against it)
         }
         return subagentActive || presenceBusy;
     }
