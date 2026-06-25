@@ -513,10 +513,15 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_RestartClaudeSession(winrt::hstring sessionId)
     {
         const std::wstring id{ sessionId };
+        // Nav audit: the user asked to RESTART this session (tab/overlay menu) — relaunch its claude on
+        // the same conversation. `local` = hosted here; `fan-out` = handed to its hosting window. The
+        // downstream [restart]/[restart-blocked] carry the mechanism.
         if (_RestartClaudeSessionLocal(id))
         {
+            ::Agentmaster::LogNav(L"restart " + ::Agentmaster::ShortId(id) + L" (local)");
             return;
         }
+        ::Agentmaster::LogNav(L"restart " + ::Agentmaster::ShortId(id) + L" (fan-out to other windows)");
         ::Agentmaster::RestartSessionInOtherWindows(id, _windowId);
     }
 

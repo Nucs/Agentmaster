@@ -296,7 +296,15 @@ different field): `"quoted phrase"` = ONE **exact** contiguous term ((F) never a
 quotes), and a bare **whole session-id GUID** token ({braces} tolerated, never fuzzied) also
 matches the session's **identity** — its id + fork-parent id — so a pasted id finds the session
 and its forks; in the content phases a guid term **scopes** hits to that session, and a
-guid-only query is answered by the fast phase alone. Rows carry fork-aware **created** (a
+guid-only query is answered by the fast phase alone. **When a search is active the rows are RANKED IN
+RELEVANCE TIERS** (`_RenderSessionsTable`, reusing the fast phase's `ParseSessionQuery`/`MatchesQueryText`/
+guid-identity primitives over the name fields): **tier 0** a NAME/identity match (the displayed title,
+branch, or a pasted id) > **tier 1** a dir/path-only match (cwd or a tool-touched path) > **tier 2**
+content-only (the slow phase), with the chosen **column sort applied WITHIN each tier**. So the session
+you searched BY NAME lands on top instead of being buried under a recently-active *incidental* content
+match — the default sort is Active-desc, which otherwise floated a one-off transcript mention of "browse"
+above the session actually titled "Browse …" (and a click/resume/fork then acted on the wrong top row).
+Rows carry fork-aware **created** (a
 fork duplicates its parent's lines verbatim with `forkedFrom` stamps — file birth is the truth),
 **line-derived last-activity** (file mtime lies: measured median ~1 h, max ~43 days —
 SESSIONS.md §5), the title precedence `customTitle > aiTitle > legacy summary > first REAL
@@ -706,10 +714,19 @@ What works, by area:
     in `OnHookEvent` for provenance.
   - **S-lane (`ProcessObserver`).** A process-wide worker (next to the scanner, thread/condvar shape
     mirrored) on a ~2 s heartbeat + on-roster-change `Wake()`: ONE snapshot → `ReadClaudeFacts` + classify
-    EVERY claude (the census, logged `[observer] census claudes=N ours=A wt=W other=O orphan=P codex=C rostered=R`) → merge
+    EVERY claude (the census, logged `[observer] census claudes=N ours=A wt=W other=O orphan=P codex=C rostered=R`
+    + an `[observer]   ours pid=…` detail line per OUR claude) → merge
     every window's published tab roster → per roster tab, `FindDescendantByImage` the shell's claude,
     resolve its id, and feed `ObserveClaude`. **A claude correlated to a tab in OUR roster is OURS
     regardless of `AM_SESSION`** (Rule #13). Publishes two copy-under-lock tables (Correlation + Activity).
+    **Census log gating (signal over noise — `ProcessObserver.cpp`).** The census block re-logs ONLY when
+    OUR fleet changes (the ours-claude set or any of their identifying facts — rostered/bg/model/effort/cwd/
+    wt/win — exactly what the detail line prints) **or** the `kObserverCensusKeepaliveMs` keepalive (5 min)
+    elapses. EXTERNAL-world churn (unrelated claudes/codex starting + dying — `wt`/`other`/`orphan`/`codex`/
+    the total) does **NOT** trigger a re-log — the summary line still PRINTS the live counts as context,
+    they're just not what TRIGGERS it. (Was: ANY count change + a 15 s keepalive re-emitted the whole
+    summary+detail block, ~34% of a 65 MB `hooks.log`; the `[observer] skipping GUI/orphaned/PEB-denied`
+    lines are separately one-shot-per-pid gated, and `[activity]` transitions are change-gated.)
   - **UI lane (`TerminalPage::_ObserverProbe`, replaces `_DiscoverClaudeTabsByCwd`).** The one WinRT
     thread: each scanner tick it builds THIS window's roster `{WT_SESSION = SessionId(), shell PID =
     GetProcessId(ConptyConnection::RootProcessHandle()), bound}`, `PublishRoster`s it (both reads are µs),
@@ -1163,6 +1180,35 @@ What works, by area:
   **Reset hidden sessions** button — `_resetHiddenSessionsHandler` — that clears it). Loaded at engine init, seeded via `SetSettings`,
   persisted + re-materialized on Save via `SetSettingsHandler`. Every default reproduces prior
   behavior, so a missing `settings.json` (or any unset field) is a no-op.
+- **Logging & observability (`hooks.log`).** All traces go through `AppendStateLog(fileLeaf, line)`
+  (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
+  (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
+  tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[archive]`/`[teardown-archive]`/
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[observer]`/`[activity]`/… (each
+  carries the resulting ids); and (3) the **`[nav]` USER-NAVIGATION AUDIT TRAIL** — the user-INTENT layer
+  ABOVE the mechanism tags (whose ids it references), so `grep '\[nav\]' hooks.log` reconstructs the whole
+  journey. Helpers: `LogNav(msg)` writes `[nav] <msg>\n`; `ShortId(id)` = the first-8-char convention
+  (`ClaudeSpawn.h/.cpp`). Covered funnels (~28 sites, all user-action-driven — never per-tick; search is
+  debounced): **Sessions page** — `search` (q + active scopes + fast count, then `search-done content=N`),
+  `select` (row click AND Up/Down nav, tagged `via=name/dir | content | browse` — the field a row matched,
+  the line that makes "why did this row surface" self-evident), `resume-click` (incl. the jump-to-open
+  branch), `fork-click`, `favorite on/off`, `hide`/`unhide`; **cross-cutting funnels** (cover the Manager
+  board/tree + page + tab menus) — `activate` (local vs cross-window fan-out), `rename` (Explorer/Manager
+  `_RenameClaudeSession` AND the tab-strip `_SyncClaudeTitleFromTab`, the latter only on a real change),
+  `open-new` (claude + codex), `adopt-external`/`adopt-codex` (fork-a-copy vs resume), `close`;
+  **Flight Plan** — `queue`, `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`,
+  `pause-all`; **navigation** — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a
+  restore's focus-restore can't spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/
+  `/resume`/`/compact`, beside `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸,
+  SUMMARY_JUMP.md). The fork chain reads `[nav] sessions fork-click row=… → [sessions-page->fork] source=… →
+  [fork] <new> (forked from <source>)` (row-clicked → resolved source → new id). **Deliberately UNLOGGED**
+  (low signal / would add noise): Flight-Plan queue micro-edits (move/delete a Pending row), template save/
+  apply, and the pure view-filter toggles (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter
+  facets — the active scopes already ride the `search` line). **Census log gating** (the observer's
+  `[observer] census`): re-logs only on OUR-fleet change + a 5-min keepalive, NOT on external-world churn —
+  see the *Fleet Observer S-lane* bullet. **Known gap (not yet done):** `AppendStateLog` lines carry **no
+  timestamp** — adding an `[HH:MM:SS.mmm]` prefix at that one chokepoint would time-stamp every layer
+  (incl. the whole `[nav]` trail) at once.
 
 Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellext CLSIDs — the one
 shared seam left between the release and dev packages; distinct dev iconography; profile
@@ -1397,7 +1443,11 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   picked on an install's FIRST LAUNCH — Production / Development / Browse… — and changeable from
   the cog's PROFILE row, applied on restart). Contents: `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
-  `hooks.log` + `autopilot.log` (engine traces), `forwarder-errors.log` (the hook forwarder's
+  `hooks.log` + `autopilot.log` (engine traces — `hooks.log` carries the hook event stream
+  [`[SessionStart]`/`[Stop]`/…], the engine-mechanism tags [`[fork]`/`[resume]`/`[rehome]`/`[spawn]`/
+  `[archive]`/`[restore-fresh]`/`[recon-*]`/…], the `[observer]` census, **and the `[nav]` USER-NAVIGATION
+  AUDIT TRAIL** — see the *Logging & observability* bullet above; `grep '\[nav\]' hooks.log` reconstructs the user's whole journey),
+  `forwarder-errors.log` (the hook forwarder's
   local silent-drop trace — a delivery that never reached the bridge: no sid / no pipe / a dead
   pipe's connect timeout; the bridge-side hooks.log only sees lines that ARRIVED), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
