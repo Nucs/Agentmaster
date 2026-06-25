@@ -1517,6 +1517,10 @@ namespace winrt::TerminalApp::implementation
         _claudeOverlays.erase(id); // releases the overlay com_ptr -> detaches its registry observer
         _claudeTabs.erase(id); // drop the per-window binding; the injector + live flag stay untouched
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out] " + id + L" (Claude tab leaving this window; binding kept alive for the destination)\n");
+        // Nav audit (beside [move-out]): the user dragged/moved this managed tab to ANOTHER window — its
+        // session changes host window, so the nav trail records that it LEFT here (the destination re-homes
+        // it on its next observer probe; this window's binding is evicted, injector + live flag kept).
+        ::Agentmaster::LogNav(L"move-out " + ::Agentmaster::ShortId(id) + L" (tab moved to another window)");
     }
 
     // Agentmaster (cross-window move, pane-level): a single PANE is being moved to another window (the

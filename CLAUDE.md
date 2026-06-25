@@ -1197,8 +1197,10 @@ What works, by area:
   ↔ `fork-managed-done` (the LIVE managed-session fork — the WT tab "Fork session" / board+tree menu) ·
   `resume-click` ↔ `resume-done` (or the early `resume -> jump` when already open) · `open-new {claude,codex}`
   ↔ `open-new … done` · `adopt-{external,codex}` ↔ `adopt-… done` · `restart-begin` ↔ `restart-done` ·
-  `close-begin` ↔ `close-done`. A blocked launch (no native `claude.exe`) still emits its `…-done (blocked …)`
-  so an unpaired begin ALWAYS means a crash, never the gate. Other covered funnels (~37 sites total, all
+  `close-begin` ↔ `close-done` · `sessions-page open-begin` ↔ `shown` (the page-open crash class) ·
+  `reopen-windows-begin` ↔ `…-done` (the toolbar "Reopen Windows (N)" dispatch loop). A blocked launch (no
+  native `claude.exe`) still emits its `…-done (blocked …)` so an unpaired begin ALWAYS means a crash, never
+  the gate. Other covered funnels (~46 sites total, all
   user-action-driven — never per-tick; search is debounced): **Sessions page** — `search` (q + active scopes
   + fast count, then `search-done content=N`), `select` (row click AND Up/Down nav, tagged `via=name/dir |
   content | browse` — the field a row matched, the line that makes "why did this row surface" self-evident),
@@ -1208,10 +1210,18 @@ What works, by area:
   `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`, `pause-all`; **navigation**
   — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a restore's focus-restore can't
   spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/`/resume`/`/compact`, beside
-  `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md). The fork
-  chain reads `[nav] sessions fork-click row=… → [sessions-page->fork] source=… → [fork] <new> (forked from
-  <source>) → [nav] sessions fork-done new=<new> from=<source>` (row-clicked → resolved source → new id,
-  end-capped so a crash mid-fork is visible). **Deliberately UNLOGGED**
+  `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md);
+  **lifecycle/window** — `mark-unread` (the tab "Mark Unread"; its clear twin is an automatic tab VISIT,
+  already covered by `tab-focus`), `move-out` (a managed tab dragged to ANOTHER window — where the session
+  went, beside `[move-out]`), `manager bring-to-front` (surface an external's hosting window),
+  `sessions-page close (back)` (the explicit Back; the programmatic hide after a resume/fork rides THAT
+  action); **clipboard/shell** — `copy <field>` (the ONE `CopySessionField` chokepoint behind EVERY copy
+  menu — the per-tab overlay's AND the board/tree Copy submenu — `field` ∈
+  session-id/path/branch/claude-cli/codex-cli/transcript/summary), `open-path` (the overlay folder button →
+  explorer), `settings-save` (the cog Save — logs the behavior-impacting fields skipPerms/model/autopilot/
+  claudeExe). The fork chain reads `[nav] sessions fork-click row=… → [sessions-page->fork] source=… →
+  [fork] <new> (forked from <source>) → [nav] sessions fork-done new=<new> from=<source>` (row-clicked →
+  resolved source → new id, end-capped so a crash mid-fork is visible). **Deliberately UNLOGGED**
   (low signal / would add noise): Flight-Plan queue micro-edits (move/delete a Pending row), template save/
   apply, and the pure view-filter toggles (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter
   facets — the active scopes already ride the `search` line). **Census log gating** (the observer's

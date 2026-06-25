@@ -1488,6 +1488,9 @@ namespace winrt::TerminalApp::implementation
         std::wstring dir = !info->workingDir.empty() ? info->workingDir : info->liveCwd;
         if (!dir.empty())
         {
+            // Nav audit: the user clicked the overlay's folder button (Open Path) — opens the session's
+            // working dir in explorer.exe.
+            ::Agentmaster::LogNav(L"open-path " + ::Agentmaster::ShortId(_sessionId) + L" dir=" + dir);
             OpenPathInExplorerAsync(dir);
             PlayActionSound(); // same click feedback as the copy menu (Open Path)
         }
@@ -1513,6 +1516,11 @@ namespace winrt::TerminalApp::implementation
         }
         const auto& s = *info;
         const bool codex = (s.kind == AgentKind::Codex);
+        // Nav audit: the user copied a session field to the clipboard. This ONE shared action backs BOTH
+        // copy menus (the per-tab overlay's + the Triage Board / Explorer-tree Copy submenu), so logging
+        // here covers "what was picked" for every copy site at once.
+        static const wchar_t* const kCopyFieldNames[] = { L"session-id", L"path", L"branch", L"claude-cli", L"codex-cli", L"transcript", L"summary" };
+        ::Agentmaster::LogNav(std::wstring{ L"copy " } + ((which >= 0 && which < 7) ? kCopyFieldNames[which] : L"?") + L" " + ::Agentmaster::ShortId(sessionId));
         switch (which)
         {
         case 0: // Session Id — the resumable conversation id (Codex: its rollout uuid)

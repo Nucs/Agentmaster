@@ -530,7 +530,7 @@ namespace winrt::TerminalApp::implementation
         back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
         back.VerticalAlignment(VerticalAlignment::Center);
         SessSetTip(back, L"Back \x2014 close the Sessions browser and return to your tabs.");
-        back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { _HideSessionsPage(); });
+        back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { ::Agentmaster::LogNav(L"sessions-page close (back)"); _HideSessionsPage(); }); // Nav audit: the EXPLICIT close (the programmatic _HideSessionsPage after a resume/fork is part of THAT action, so it isn't logged here)
         Grid::SetColumn(back, 0);
         topLeft.Children().Append(back);
 
@@ -1024,6 +1024,10 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_ShowSessionsPage()
     {
+        // Nav audit BEGIN: the user opened the Sessions browser (the toolbar "Sessions" button). The build
+        // is DEFERRED (the page-open crash class below), so log BEFORE it — an open-begin with no matching
+        // "shown" pinpoints a crash building/showing the page.
+        ::Agentmaster::LogNav(L"sessions-page open-begin");
         // DEFER the build/show off the opening click (the Archive page's pinned crash class:
         // restructuring the tree while the pointer event is still routing AVs the hit-test).
         Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
@@ -1039,6 +1043,7 @@ namespace winrt::TerminalApp::implementation
             }
             self->_sessionsPageHost.Visibility(Visibility::Visible);
             self->_sessionsPageVisible.store(true, std::memory_order_relaxed);
+            ::Agentmaster::LogNav(L"sessions-page shown"); // END (pairs with open-begin): the page is up; rows render async next
             if (self->_sessionsSearchBox)
             {
                 // Focus INTO the page so keyboard events route through its host (a covered

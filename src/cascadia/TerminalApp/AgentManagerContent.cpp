@@ -4869,6 +4869,10 @@ namespace winrt::TerminalApp::implementation
                 break;
             }
         }
+        // Nav audit: the user asked to surface an EXTERNAL claude's hosting window (the external row menu's
+        // "Bring Window To Front"). The OS work (walk ancestors -> foreground -> UIA tab pick) runs on a
+        // detached worker, so this records the intent + what was picked (pid / host shell / conversation).
+        ::Agentmaster::LogNav(L"manager bring-to-front pid=" + std::to_wstring(pid) + L" host=" + std::to_wstring(hostPid) + L" " + ::Agentmaster::ShortId(sessionId) + L" cwd=" + cwd);
         std::thread([pid, hostPid, sessionId = std::move(sessionId), title = std::move(title), cwd]() {
             ::Agentmaster::BringClaudeWindowToFront(pid, hostPid, sessionId, title, cwd);
         }).detach();
@@ -6618,6 +6622,13 @@ namespace winrt::TerminalApp::implementation
         }
         if (_settingsSink)
         {
+            // Nav audit: the user saved the global Settings (cog) — the one consequential cog action; it
+            // governs every future session. Record the most behavior-impacting fields (the rest persist to
+            // settings.json, the durable record).
+            ::Agentmaster::LogNav(std::wstring{ L"settings-save skipPerms=" } + (_appSettings.skipPermissions ? L"1" : L"0") +
+                                  L" model=" + (_appSettings.model.empty() ? std::wstring{ L"(default)" } : _appSettings.model) +
+                                  L" autopilot=" + (_appSettings.defaultAutopilotMode == AutopilotMode::Full ? L"Full" : _appSettings.defaultAutopilotMode == AutopilotMode::SemiAuto ? L"Semi" : L"Off") +
+                                  L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath));
             _settingsSink(_appSettings); // page persists + applies to future spawns
         }
         // Native-exe-only policy: re-resolve the claude.exe now, so a changed/cleared override (or a

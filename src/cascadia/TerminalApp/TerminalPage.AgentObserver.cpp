@@ -673,6 +673,10 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _manualUnreadSessions.insert(sessionId); // idempotent
+        // Nav audit: the user manually marked this session UNREAD (the tab right-click "Mark Unread") — a
+        // deliberate "remind me" that flashes the ring until visited + promotes an at-rest card to Waiting.
+        // (Its clear twin is automatic — a tab VISIT, already covered by tab-focus — so it stays unlogged.)
+        ::Agentmaster::LogNav(L"mark-unread " + ::Agentmaster::ShortId(sessionId));
         _EnsureAgentFlashTimer();
         _ApplyAgentFlashRingForSession(sessionId); // flash at the current shared phase NOW, even if focused
         // Agentmaster (Waiting-for-you "unread" model): the manual mark is also an ENGINE fact, so the

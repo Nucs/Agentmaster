@@ -680,6 +680,10 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
+        // Nav audit BEGIN: the user clicked the toolbar "Reopen Windows (N)" — reopen each saved-but-not-open
+        // window via our alias (`-w -1 -s <idx>`). The per-dispatch [reopen] ok= lines are the granular end;
+        // a reopen-windows-begin with no reopen-windows-done pinpoints a crash mid-loop.
+        ::Agentmaster::LogNav(L"reopen-windows-begin count=" + std::to_wstring(recoverable.size()));
 
         // ShellExecuteExW may block, so dispatch from a background thread (NOTE: don't touch `this`
         // past here — everything below is local, mirroring _OpenNewWindow).
@@ -707,6 +711,7 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
         }
+        ::Agentmaster::LogNav(L"reopen-windows-done dispatched=" + std::to_wstring(recoverable.size())); // END (pairs with reopen-windows-begin); runs on the background thread — LogNav is thread-safe + touches no `this`
 
         co_return;
     }
