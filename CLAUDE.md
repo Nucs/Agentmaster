@@ -1188,20 +1188,30 @@ What works, by area:
   carries the resulting ids); and (3) the **`[nav]` USER-NAVIGATION AUDIT TRAIL** — the user-INTENT layer
   ABOVE the mechanism tags (whose ids it references), so `grep '\[nav\]' hooks.log` reconstructs the whole
   journey. Helpers: `LogNav(msg)` writes `[nav] <msg>\n`; `ShortId(id)` = the first-8-char convention
-  (`ClaudeSpawn.h/.cpp`). Covered funnels (~28 sites, all user-action-driven — never per-tick; search is
-  debounced): **Sessions page** — `search` (q + active scopes + fast count, then `search-done content=N`),
-  `select` (row click AND Up/Down nav, tagged `via=name/dir | content | browse` — the field a row matched,
-  the line that makes "why did this row surface" self-evident), `resume-click` (incl. the jump-to-open
-  branch), `fork-click`, `favorite on/off`, `hide`/`unhide`; **cross-cutting funnels** (cover the Manager
-  board/tree + page + tab menus) — `activate` (local vs cross-window fan-out), `rename` (Explorer/Manager
-  `_RenameClaudeSession` AND the tab-strip `_SyncClaudeTitleFromTab`, the latter only on a real change),
-  `open-new` (claude + codex), `adopt-external`/`adopt-codex` (fork-a-copy vs resume), `close`;
-  **Flight Plan** — `queue`, `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`,
-  `pause-all`; **navigation** — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a
-  restore's focus-restore can't spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/
-  `/resume`/`/compact`, beside `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸,
-  SUMMARY_JUMP.md). The fork chain reads `[nav] sessions fork-click row=… → [sessions-page->fork] source=… →
-  [fork] <new> (forked from <source>)` (row-clicked → resolved source → new id). **Deliberately UNLOGGED**
+  (`ClaudeSpawn.h/.cpp`). **Begin/end pairing (crash-resilient):** every action that LAUNCHES a process or
+  tears one down logs a **BEGIN** before the work + an **END** after — so a begin with no matching end
+  pinpoints a crash/hang mid-action. The END of a resource-creating action carries the **new managed id**,
+  resolved from the just-created tab via `_ClaudeSessionForTab` (so it reflects what ACTUALLY opened — a
+  transcript-gated resume/fork that degraded to FRESH reports the NEW id, not the requested one). Paired
+  funnels: `fork-click` ↔ `fork-done new=… from=…` (the Sessions-page on-disk fork) · `fork-managed-begin`
+  ↔ `fork-managed-done` (the LIVE managed-session fork — the WT tab "Fork session" / board+tree menu) ·
+  `resume-click` ↔ `resume-done` (or the early `resume -> jump` when already open) · `open-new {claude,codex}`
+  ↔ `open-new … done` · `adopt-{external,codex}` ↔ `adopt-… done` · `restart-begin` ↔ `restart-done` ·
+  `close-begin` ↔ `close-done`. A blocked launch (no native `claude.exe`) still emits its `…-done (blocked …)`
+  so an unpaired begin ALWAYS means a crash, never the gate. Other covered funnels (~37 sites total, all
+  user-action-driven — never per-tick; search is debounced): **Sessions page** — `search` (q + active scopes
+  + fast count, then `search-done content=N`), `select` (row click AND Up/Down nav, tagged `via=name/dir |
+  content | browse` — the field a row matched, the line that makes "why did this row surface" self-evident),
+  `favorite on/off`, `hide`/`unhide`; **cross-cutting funnels** (cover the Manager board/tree + page + tab
+  menus) — `activate` (local vs cross-window fan-out), `rename` (Explorer/Manager `_RenameClaudeSession` AND
+  the tab-strip `_SyncClaudeTitleFromTab`, the latter only on a real change); **Flight Plan** — `queue`,
+  `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`, `pause-all`; **navigation**
+  — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a restore's focus-restore can't
+  spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/`/resume`/`/compact`, beside
+  `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md). The fork
+  chain reads `[nav] sessions fork-click row=… → [sessions-page->fork] source=… → [fork] <new> (forked from
+  <source>) → [nav] sessions fork-done new=<new> from=<source>` (row-clicked → resolved source → new id,
+  end-capped so a crash mid-fork is visible). **Deliberately UNLOGGED**
   (low signal / would add noise): Flight-Plan queue micro-edits (move/delete a Pending row), template save/
   apply, and the pure view-filter toggles (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter
   facets — the active scopes already ride the `search` line). **Census log gating** (the observer's

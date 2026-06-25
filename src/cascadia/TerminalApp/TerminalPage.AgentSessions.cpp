@@ -158,10 +158,15 @@ namespace winrt::TerminalApp::implementation
         // only reaches here when Claude IS present — a cache hit.)
         if (!::Agentmaster::EnsureClaudeAvailable())
         {
+            ::Agentmaster::LogNav(L"open-new claude done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
             _PromptClaudeMissing();
             return;
         }
-        _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition);
+        const auto spawnedTab = _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition);
+        // Nav audit END (pairs with the open-new BEGIN above): the minted id of the fresh session. An
+        // open-new with no matching done = the launch crashed/no-op'd before the tab was created.
+        const std::wstring spawnedId = spawnedTab ? _ClaudeSessionForTab(spawnedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"open-new claude done " + (spawnedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(spawnedId))));
     }
 
     // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a
@@ -513,15 +518,20 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_RestartClaudeSession(winrt::hstring sessionId)
     {
         const std::wstring id{ sessionId };
-        // Nav audit: the user asked to RESTART this session (tab/overlay menu) — relaunch its claude on
-        // the same conversation. `local` = hosted here; `fan-out` = handed to its hosting window. The
-        // downstream [restart]/[restart-blocked] carry the mechanism.
+        // Nav audit BEGIN: the user asked to RESTART this session (tab/overlay menu) — relaunch its claude
+        // on the same conversation. Restart rebuilds the ConPTY (a crash-prone seam — _restartPaneConnection
+        // has AV'd before), so log BEFORE the work: a restart-begin with no restart-done pinpoints a crash
+        // mid-rebuild. The downstream [restart]/[restart-blocked] carry the mechanism.
+        ::Agentmaster::LogNav(L"restart-begin " + ::Agentmaster::ShortId(id));
         if (_RestartClaudeSessionLocal(id))
         {
-            ::Agentmaster::LogNav(L"restart " + ::Agentmaster::ShortId(id) + L" (local)");
+            ::Agentmaster::LogNav(L"restart-done " + ::Agentmaster::ShortId(id) + L" (local)");
             return;
         }
-        ::Agentmaster::LogNav(L"restart " + ::Agentmaster::ShortId(id) + L" (fan-out to other windows)");
+        // Not hosted here -> hand the restart to the window that owns the tab; that window's own
+        // _RestartClaudeSessionLocal does the rebuild. So "fan-out" is the HANDOFF, not the completion —
+        // the receiving window's mechanism tags carry the rest.
+        ::Agentmaster::LogNav(L"restart-done " + ::Agentmaster::ShortId(id) + L" (fan-out to other windows)");
         ::Agentmaster::RestartSessionInOtherWindows(id, _windowId);
     }
 
@@ -778,12 +788,15 @@ namespace winrt::TerminalApp::implementation
         }
         _claudeTabs.erase(sessionId);
         _claudeOverlays.erase(sessionId); // drop the per-tab overlay (detaches its registry observer)
-        // Nav audit (the user closed this tab) beside the [archive] mechanism line. Close always
-        // archives — the record stays resumable from Sessions; nothing on disk is deleted.
-        ::Agentmaster::LogNav(L"close " + ::Agentmaster::ShortId(sessionId) + L" (archived, resumable)");
+        // Nav audit BEGIN (the user closed this tab) beside the [archive] mechanism line. Close always
+        // archives — the record stays resumable from Sessions; nothing on disk is deleted. Logged BEFORE
+        // tab.Close() tears down the ConPTY (claude.exe exits), so a close-begin with no close-done flags a
+        // crash during teardown.
+        ::Agentmaster::LogNav(L"close-begin " + ::Agentmaster::ShortId(sessionId) + L" (archived, resumable)");
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[archive] " + sessionId + L"\n");
 
         tab.Close(); // -> Closed -> _RemoveTab (tab.Shutdown disconnects -> claude.exe exits)
+        ::Agentmaster::LogNav(L"close-done " + ::Agentmaster::ShortId(sessionId));
         co_return;
     }
 
@@ -844,35 +857,34 @@ namespace winrt::TerminalApp::implementation
     // transcript-gated) with its Flight Plan + autopilot, and flips it back to live (Open). A
     // missing transcript yields a fresh id; _LaunchClaudeSession then drops the stale record so it
     // doesn't linger. (Name kept for churn; "archived" here just means the !live state.)
-    void TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId)
+    TerminalApp::Tab TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId)
     {
         if (!_sessionRegistry)
         {
-            return;
+            return nullptr;
         }
         const auto info = _sessionRegistry->Get(std::wstring{ sessionId });
         if (!info || info->live)
         {
-            return; // unknown, or already Open
+            return nullptr; // unknown, or already Open
         }
         // Kind-aware restore: a Codex record resumes via `codex resume <uuid>` (gated on its rollout),
         // a Claude record via `claude --resume <id>`. Both fall back to fresh when the transcript is gone.
+        // Returns the launched tab so the caller's nav-END can name the actually-opened id (a resume that
+        // degraded to fresh reports the NEW id, not the requested one).
         if (info->kind == ::Agentmaster::AgentKind::Codex)
         {
-            _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            return _LaunchCodexSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
         }
-        else
+        // Native-exe-only policy gate (auto-recovering) — Claude restore only (Codex above needs no
+        // claude.exe). Covers the Archive page's "Restore here" / bulk Restore / double-click and the
+        // Manager's restore handler; the idempotent prompt collapses a bulk loop to one dialog.
+        if (!::Agentmaster::EnsureClaudeAvailable())
         {
-            // Native-exe-only policy gate (auto-recovering) — Claude restore only (Codex above needs no
-            // claude.exe). Covers the Archive page's "Restore here" / bulk Restore / double-click and the
-            // Manager's restore handler; the idempotent prompt collapses a bulk loop to one dialog.
-            if (!::Agentmaster::EnsureClaudeAvailable())
-            {
-                _PromptClaudeMissing();
-                return;
-            }
-            _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
+            _PromptClaudeMissing();
+            return nullptr;
         }
+        return _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
     }
 
     // Agentmaster (Codex managed-session support): launch a codex.exe on a ConPTY as a MANAGED tab,
@@ -892,7 +904,13 @@ namespace winrt::TerminalApp::implementation
         // toggle on Codex, or an External "Open New Codex Session Here"). The minted handle id lands
         // in the downstream [codex-spawn] line; the observer fills its rollout uuid on first prompt.
         ::Agentmaster::LogNav(L"open-new codex dir=" + std::wstring{ workingDir } + (_openClaudeTabInBackground ? L" [bg]" : L""));
-        _LaunchCodexSession(workingDir, title, std::nullopt, {}, insertPosition);
+        const auto spawnedTab = _LaunchCodexSession(workingDir, title, std::nullopt, {}, insertPosition);
+        // Nav audit END (pairs with the open-new codex BEGIN above): the minted DURABLE handle id (the
+        // registry/tab key). The real rollout uuid is filled later by the observer on first prompt — so
+        // the [codex-spawn] mechanism line + a later _ReconcileManagedCodex carry the rollout; this END
+        // names the handle the user's tab is keyed on. A begin with no done = a crash before the tab existed.
+        const std::wstring spawnedId = spawnedTab ? _ClaudeSessionForTab(spawnedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"open-new codex done " + (spawnedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(spawnedId))));
     }
 
     TerminalApp::Tab TerminalPage::_LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid, uint32_t insertPosition)
@@ -1050,7 +1068,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           std::wstring{ L"[adopt-codex] pid=" } + std::to_wstring(pid) + L" cwd=" + dir + L" -> fork " + uuid + L"\n");
-            _LaunchCodexSession(cwd, winrt::hstring{}, std::nullopt, uuid); // fork: new rollout, source untouched
+            const auto adoptedTab = _LaunchCodexSession(cwd, winrt::hstring{}, std::nullopt, uuid); // fork: new rollout, source untouched
+            // Nav audit END (pairs with the adopt-codex BEGIN above): the NEW managed handle id of the
+            // forked-copy tab. A begin with no done = a crash before the managed tab was created.
+            const std::wstring adoptedId = adoptedTab ? _ClaudeSessionForTab(adoptedTab) : std::wstring{};
+            ::Agentmaster::LogNav(L"adopt-codex done " + (adoptedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(adoptedId))) + L" (fork of " + ::Agentmaster::ShortId(uuid) + L")");
             return;
         }
 
@@ -1066,7 +1088,11 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       std::wstring{ L"[adopt-codex] pid=" } + std::to_wstring(pid) + L" cwd=" + dir +
                                           L" -> " + (uuid.empty() ? std::wstring{ L"(fresh \x2014 no rollout)" } : (L"resume " + uuid)) + L"\n");
-        _LaunchCodexSession(cwd, winrt::hstring{}, restored);
+        const auto adoptedTab = _LaunchCodexSession(cwd, winrt::hstring{}, restored);
+        // Nav audit END (pairs with the adopt-codex BEGIN above): the NEW managed handle id of the
+        // take-over (resume) tab — or a fresh handle when the external had no rollout yet.
+        const std::wstring adoptedId = adoptedTab ? _ClaudeSessionForTab(adoptedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"adopt-codex done " + (adoptedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(adoptedId))) + (uuid.empty() ? std::wstring{ L" (fresh \x2014 no rollout)" } : (L" (resume of " + ::Agentmaster::ShortId(uuid) + L")")));
     }
 
     // Agentmaster (Fleet Observer): adopt an EXTERNAL (observe-only) claude from the Explorer Tree's
@@ -1109,7 +1135,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::AppendStateLog(L"hooks.log",
                                           std::wstring{ L"[adopt-external] pid=" } + std::to_wstring(pid) + L" cwd=" + dir + L" -> fork " + id + L"\n");
-            _LaunchClaudeSession(cwd, winrt::hstring{}, std::nullopt, id); // fork: new transcript, source untouched (safe on a live external)
+            const auto adoptedTab = _LaunchClaudeSession(cwd, winrt::hstring{}, std::nullopt, id); // fork: new transcript, source untouched (safe on a live external)
+            // Nav audit END (pairs with the adopt-external BEGIN above): the NEW managed id of the
+            // forked-copy tab. A begin with no done = a crash before the managed tab was created.
+            const std::wstring adoptedId = adoptedTab ? _ClaudeSessionForTab(adoptedTab) : std::wstring{};
+            ::Agentmaster::LogNav(L"adopt-external done " + (adoptedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(adoptedId))) + L" (fork of " + ::Agentmaster::ShortId(id) + L")");
             return;
         }
 
@@ -1130,7 +1160,11 @@ namespace winrt::TerminalApp::implementation
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       std::wstring{ L"[adopt-external] pid=" } + std::to_wstring(pid) + L" cwd=" + dir +
                                           L" -> " + (id.empty() ? std::wstring{ L"(fresh \x2014 no transcript)" } : (L"resume " + id)) + L"\n");
-        _LaunchClaudeSession(cwd, winrt::hstring{}, restored);
+        const auto adoptedTab = _LaunchClaudeSession(cwd, winrt::hstring{}, restored);
+        // Nav audit END (pairs with the adopt-external BEGIN above): the NEW managed id of the take-over
+        // (resume) tab — or a fresh id when the external had no transcript yet.
+        const std::wstring adoptedId = adoptedTab ? _ClaudeSessionForTab(adoptedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"adopt-external done " + (adoptedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(adoptedId))) + (id.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : (L" (resume of " + ::Agentmaster::ShortId(id) + L")")));
     }
 
     // Agentmaster: which session (if any) hosts this tab? Reverse-lookup of _claudeTabs (whose
@@ -1391,6 +1425,10 @@ namespace winrt::TerminalApp::implementation
         {
             return false; // not a known managed session
         }
+        // Nav audit BEGIN: the user forked a LIVE managed session (the WT tab "Fork session" / _DuplicateTab,
+        // or the board/tree "Fork session" menu). Logs the SOURCE + kind before the launch; the matching
+        // fork-managed-done names the new id. A begin with no done = a crash between the two.
+        ::Agentmaster::LogNav(std::wstring{ L"fork-managed-begin source=" } + ::Agentmaster::ShortId(sourceId) + (src->kind == ::Agentmaster::AgentKind::Codex ? L" (codex)" : L" (claude)"));
         const std::wstring dir = src->workingDir;
         const std::wstring forkBase = !src->title.empty() ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
         const std::wstring ttl = ::Agentmaster::DeriveForkTitle(forkBase); // bump " (fork N)" instead of stacking
@@ -1403,19 +1441,24 @@ namespace winrt::TerminalApp::implementation
         {
             const std::wstring forkFrom = src->codexSessionId; // the REAL rollout uuid (the fork source)
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->codex] source=" + sourceId + (forkFrom.empty() ? L" (no rollout uuid -> fresh codex)" : L"") + L"\n");
-            _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+            const auto forkedTab = _LaunchCodexSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+            const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
+            ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (codex, fresh \x2014 no rollout)" } : std::wstring{ L" (codex)" }));
             return true;
         }
         // Native-exe-only policy gate (auto-recovering): a Claude fork is a launch (--fork-session).
         // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
         if (!::Agentmaster::EnsureClaudeAvailable())
         {
+            ::Agentmaster::LogNav(L"fork-managed-done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
             _PromptClaudeMissing();
             return true; // it IS a managed Claude session — handled (refused), never naively duplicated
         }
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-        _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+        const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}));
         return true;
     }
 

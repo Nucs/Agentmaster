@@ -2531,6 +2531,7 @@ namespace winrt::TerminalApp::implementation
         // to an existing tab, so it stays ungated.
         if (!::Agentmaster::EnsureClaudeAvailable())
         {
+            ::Agentmaster::LogNav(L"sessions resume-done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
             _PromptClaudeMissing();
             return;
         }
@@ -2544,7 +2545,12 @@ namespace winrt::TerminalApp::implementation
             s.live = false; // archived-shaped: exactly what _RestoreArchivedSession expects
             _sessionRegistry->Upsert(std::move(s));
         }
-        _RestoreArchivedSession(winrt::hstring{ target });
+        const auto resumedTab = _RestoreArchivedSession(winrt::hstring{ target });
+        // Nav audit END (pairs with the resume-click BEGIN above): the actually-opened id. Normally ==
+        // target; a resume whose transcript vanished degrades to a FRESH id (Rule #6), reported here. A
+        // resume-click with neither a "resume -> jump" nor a resume-done means the launch crashed mid-open.
+        const std::wstring resumedId = resumedTab ? _ClaudeSessionForTab(resumedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"sessions resume-done " + (resumedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(resumedId) + (resumedId == target ? std::wstring{} : (L" (target was " + ::Agentmaster::ShortId(target) + L" \x2014 fresh)")))));
         if (!_openClaudeTabInBackground)
         {
             _HideSessionsPage(); // foreground: land on the freshly opened tab. Background bulk-open keeps the list open.
@@ -2572,6 +2578,7 @@ namespace winrt::TerminalApp::implementation
         // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
         if (!::Agentmaster::EnsureClaudeAvailable())
         {
+            ::Agentmaster::LogNav(L"sessions fork-done (blocked \x2014 no native claude.exe; install prompt shown)"); // pair the BEGIN so an unpaired begin always means a crash, never the gate
             _PromptClaudeMissing();
             return;
         }
@@ -2603,7 +2610,14 @@ namespace winrt::TerminalApp::implementation
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(forkParentId) ? forkParentId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[sessions-page->fork] source=" + forkParentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-        _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+        // Nav audit END (pairs with the fork-click BEGIN above): the NEW forked id — exactly "the id of the
+        // new forked session" the user asked to be able to trace, alongside the source it forked from. A
+        // fork-click with NO matching fork-done means the launch crashed/hung between the two (the
+        // crash-resilience the begin/end pairing buys). The id is resolved from the just-created tab, so it
+        // reflects what actually opened (a no-transcript parent degrades to a FRESH session, noted here).
+        const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
+        ::Agentmaster::LogNav(L"sessions fork-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(forkParentId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no parent transcript)" } : std::wstring{}));
         if (!_openClaudeTabInBackground)
         {
             _HideSessionsPage(); // foreground: land on the fork. Background bulk-open keeps the list open.
