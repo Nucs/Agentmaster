@@ -883,6 +883,10 @@ namespace winrt::TerminalApp::implementation
     // the rollout still existing; else a fresh codex (a new rollout the observer will resolve).
     void TerminalPage::_SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
     {
+        // Nav audit: the user asked for a FRESH Codex session here (the launch bar's Claude⇄Codex
+        // toggle on Codex, or an External "Open New Codex Session Here"). The minted handle id lands
+        // in the downstream [codex-spawn] line; the observer fills its rollout uuid on first prompt.
+        ::Agentmaster::LogNav(L"open-new codex dir=" + std::wstring{ workingDir } + (_openClaudeTabInBackground ? L" [bg]" : L""));
         _LaunchCodexSession(workingDir, title, std::nullopt, {}, insertPosition);
     }
 
@@ -1032,6 +1036,10 @@ namespace winrt::TerminalApp::implementation
         const std::wstring dir{ cwd };
         const int64_t start = ::Agentmaster::ProcessStartUnixMs(pid);
         const std::wstring uuid = ::Agentmaster::ResolveCodexSession(dir, start).sessionId;
+        // Nav audit: the user adopted an EXTERNAL codex (rollout resolved from cwd+start). fork =
+        // branch a copy into a new rollout; resume = take it over. Downstream [adopt-codex]/[codex-*]
+        // carry the managed handle.
+        ::Agentmaster::LogNav(L"adopt-codex pid=" + std::to_wstring(pid) + L" " + ::Agentmaster::ShortId(uuid) + (fork ? L" (fork-a-copy)" : L" (resume/take-over)") + L" cwd=" + dir);
 
         if (fork && !uuid.empty())
         {
@@ -1650,6 +1658,10 @@ namespace winrt::TerminalApp::implementation
         // observer / persist / UI). A null info (no record yet) makes the Update a no-op anyway.
         if (!info || info->title != text)
         {
+            // Nav audit: a genuine USER rename via the TAB STRIP (double-click header / "Rename Tab" /
+            // renameTab action) — the other rename entry point beside the Explorer/Manager _RenameClaudeSession.
+            // Only the real change is logged (the latch + this equality guard drop programmatic re-pins).
+            ::Agentmaster::LogNav(L"rename " + ::Agentmaster::ShortId(id) + L" -> \"" + text.substr(0, 80) + L"\" (tab strip)");
             _sessionRegistry->Update(id, [&text](::Agentmaster::SessionInfo& s) { s.title = text; });
         }
         // If the user typed surrounding whitespace, normalize the tab strip to the trimmed value we

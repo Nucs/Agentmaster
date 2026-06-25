@@ -1205,7 +1205,13 @@ namespace winrt::TerminalApp::implementation
         {
             return -1;
         }
-        return control.JumpToConversationPrompt(_PromptsToVector(msgs), static_cast<uint32_t>(index));
+        // Nav audit: the user clicked a summary-panel ▸ to scroll the session's terminal to where that
+        // prompt is rendered (SUMMARY_JUMP.md). row >= 0 == centered on that buffer row; -1 == the
+        // prompt couldn't be located in the live scrollback. (The per-render eligibility probe
+        // _JumpEligibilityInSession is deliberately NOT logged — it isn't a user action.)
+        const int row = control.JumpToConversationPrompt(_PromptsToVector(msgs), static_cast<uint32_t>(index));
+        ::Agentmaster::LogNav(L"jump-to-prompt " + ::Agentmaster::ShortId(sessionId) + L" prompt#" + std::to_wstring(index) + (row >= 0 ? (L" -> buffer row " + std::to_wstring(row)) : std::wstring{ L" (not found in scrollback)" }));
+        return row;
     }
 
     // Agentmaster (SUMMARY_JUMP.md): a row per prompt (>=0 == resolvable/on-screen, -1 == not) for the

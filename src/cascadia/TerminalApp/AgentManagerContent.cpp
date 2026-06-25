@@ -1957,6 +1957,7 @@ namespace winrt::TerminalApp::implementation
             AgentSetTip(_pauseBtn, L"Global Autopilot backstop \x2014 pauses or resumes auto-sending across ALL sessions at once.");
             _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _globalPaused = !_globalPaused;
+                ::Agentmaster::LogNav(_globalPaused ? L"pause-all on (global Autopilot backstop)" : L"pause-all off (global Autopilot resumed)");
                 if (_pauseHandler)
                 {
                     _pauseHandler(_globalPaused);
@@ -8218,6 +8219,9 @@ namespace winrt::TerminalApp::implementation
             p.text = text;
             s.queue.push_back(std::move(p));
         });
+        // Nav audit: the user QUEUED a prompt to this session (the envelope). The first line is the
+        // identifying context; Autopilot/Send-now later consumes it (scheduler [send]/[confirm-send]).
+        ::Agentmaster::LogNav(L"queue " + ::Agentmaster::ShortId(id) + L" \"" + label + L"\"");
         _addPromptBox.Text(L"");
         _Refresh();
         _FocusPromptBox(); // Agentmaster: keep focus in the editor so the user can queue the next prompt
@@ -8368,6 +8372,12 @@ namespace winrt::TerminalApp::implementation
             // and the prompt would otherwise be a stranded phantom Sent that was never delivered
             // (Correctness Rule #4). Reverting to Pending keeps it in the queue to retry.
             const bool delivered = _registry->Inject(_selectedId, ::Agentmaster::BuildPromptSubmission(textToSend));
+            // Nav audit: the user hit Send-now (the !) for this session — the prompt's first line +
+            // whether it actually reached a bound injector (an unbound/observe-only target rolls back).
+            std::wstring snLabel = textToSend.substr(0, 56);
+            std::replace(snLabel.begin(), snLabel.end(), L'\n', L' ');
+            std::replace(snLabel.begin(), snLabel.end(), L'\r', L' ');
+            ::Agentmaster::LogNav(L"send-now " + ::Agentmaster::ShortId(_selectedId) + L" \"" + snLabel + L"\"" + (delivered ? L"" : L" (no injector \x2014 rolled back to Pending)"));
             if (!delivered && !sentPromptId.empty())
             {
                 _registry->Update(_selectedId, [&](SessionInfo& s) {
@@ -8591,6 +8601,8 @@ namespace winrt::TerminalApp::implementation
         }
         const AutopilotMode mode = index == 2 ? AutopilotMode::Full : index == 1 ? AutopilotMode::SemiAuto :
                                                                                    AutopilotMode::Off;
+        // Nav audit: the user changed this session's Autopilot mode (the Flight-Plan header toggle).
+        ::Agentmaster::LogNav(L"autopilot " + ::Agentmaster::ShortId(_selectedId) + L" -> " + (mode == AutopilotMode::Full ? L"Full" : mode == AutopilotMode::SemiAuto ? L"Semi" : L"Off"));
         _registry->Update(_selectedId, [&](SessionInfo& s) {
             s.autopilot.mode = mode;
             if (mode != AutopilotMode::Off)
