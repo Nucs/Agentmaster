@@ -5241,6 +5241,42 @@ namespace winrt::TerminalApp::implementation
             menu.Items().Append(moveIdle);
         }
 
+        // Move to Waiting-for-you — Idle/Done triage only (the reverse of "Move to Idle/Done"): a PLAIN
+        // promote of a quiescent card back into the "Waiting-for-you" column. EXPLICITLY separate from
+        // "Mark Unread" (the tab strip's sticky/flashy promote) — this sets NO sticky manualUnread and
+        // raises no red-ring flash; it just moves columns. Refresh the decay anchor + leave it unread so it
+        // behaves like a fresh turn-complete (waits the full Waiting-for-you timeout, then decays normally)
+        // instead of instantly decaying off an ancient lastActivity.
+        if (info && (state == SessionState::Idle || state == SessionState::Done))
+        {
+            MenuFlyoutItem moveWaiting;
+            moveWaiting.Text(L"Move to Waiting-for-you");
+            moveWaiting.Icon(glyphIcon(L"\xE823")); // Clock — put it back in the Waiting-for-you column
+            AgentSetTip(moveWaiting, L"Move this card into the \x201CWaiting-for-you\x201D column \x2014 a plain move (no red-ring flash; unlike \x201CMark Unread\x201D it decays normally). It returns to Idle / Done after the unread timeout.");
+            moveWaiting.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, id]() {
+                    auto self = weak.get();
+                    if (!self || !self->_registry)
+                    {
+                        return;
+                    }
+                    // Re-check under the registry lock against the LIVE record: only promote a still-
+                    // quiescent (Idle/Done) card — never bump a session that has since gone Running.
+                    self->_registry->Update(id, [](SessionInfo& s) {
+                        if (s.state == SessionState::Idle || s.state == SessionState::Done)
+                        {
+                            s.state = SessionState::WaitingForInput;
+                            s.manualUnread = false; // plain move (NOT the sticky "Mark Unread")
+                            s.lastActivityUnixMs = NowMs(); // restart the Waiting-for-you window (don't instant-decay)
+                            s.readUnixMs = 0; // unread for this "turn", like a real turn-complete
+                        }
+                    });
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(moveWaiting);
+        }
+
         menu.Items().Append(MenuFlyoutSeparator{});
 
         MenuFlyoutItem rename;
