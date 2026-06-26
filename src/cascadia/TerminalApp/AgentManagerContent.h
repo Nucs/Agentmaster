@@ -320,7 +320,7 @@ namespace winrt::TerminalApp::implementation
         // result from plain MRU order to case-insensitive fuzzy matches ranked by Levenshtein
         // closeness (closest first); an empty query keeps the historical MRU order.
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
-        winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
+        winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText, const std::wstring& branch = {}); // `branch` (RECENT rows) appends "— <branch>"
         // Agentmaster: a "GIT WORKTREES" row — "<name> — <path> — <branch>". Mirrors _MakePathRow
         // (transparent + focus-neutral); a click drills the launch box into the worktree.
         winrt::Windows::UI::Xaml::Controls::Button _MakeWorktreeRow(const std::wstring& fullPath, const std::wstring& name, const std::wstring& branch, bool isCurrent);

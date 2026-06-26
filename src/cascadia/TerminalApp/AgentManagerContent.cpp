@@ -9315,7 +9315,7 @@ namespace winrt::TerminalApp::implementation
         });
     }
 
-    Button AgentManagerContent::_MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText)
+    Button AgentManagerContent::_MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText, const std::wstring& branch)
     {
         auto row = StackPanel{};
         row.Orientation(Orientation::Horizontal);
@@ -9325,6 +9325,14 @@ namespace winrt::TerminalApp::implementation
         // Recents show their full path (displayText empty); folders show just the leaf —
         // the section header already states which directory they live in.
         row.Children().Append(Text(displayText.empty() ? winrt::hstring{ fullPath } : displayText, 13, false, 1.0));
+        // Agentmaster: a non-empty `branch` (the RECENT rows pass it, via ReadGitBranchForDir) appends
+        // "— <branch>" at the end — the GIT WORKTREES row's "<path> — <branch>" idiom — so a recent dir
+        // that's a git repo shows the branch it's on. Empty (folders / non-repos) renders nothing.
+        if (!branch.empty())
+        {
+            row.Children().Append(Text(L"\x2014", 13, false, 0.35));
+            row.Children().Append(Text(winrt::hstring{ branch }, 13, false, 0.7));
+        }
 
         auto btn = Button{};
         btn.Content(row);
@@ -9446,7 +9454,7 @@ namespace winrt::TerminalApp::implementation
                 winrt::hstring{ L"RECENT" }));
             for (const auto& d : recents)
             {
-                _pathListHost.Children().Append(_MakePathRow(d, L"\x21BB", winrt::hstring{}));
+                _pathListHost.Children().Append(_MakePathRow(d, L"\x21BB", winrt::hstring{}, ReadGitBranchForDir(d))); // Agentmaster: show the recent dir's git branch at the end, like the worktree rows
             }
         }
 
