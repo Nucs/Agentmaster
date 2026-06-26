@@ -518,6 +518,7 @@ namespace Agentmaster
                 f.timestampMs = EpochNumToMs(ts->num); // oldest strata carried epoch numbers
             }
         }
+        f.uuid = obj.StrAt(L"uuid"); // the tree-node id (empty on state/marker lines) — feeds onActiveBranch
         f.sidechain = obj.BoolAt(L"isSidechain");
         f.cwd = obj.StrAt(L"cwd");
         f.gitBranch = obj.StrAt(L"gitBranch");
@@ -764,6 +765,42 @@ namespace Agentmaster
             cur = it->second;
         }
         return active;
+    }
+
+    std::vector<TranscriptLineFacts> ClassifyTranscriptLines(std::wstring_view transcriptText, size_t maxUserTextChars, size_t maxAgentTextChars, bool markActiveBranch)
+    {
+        // The active-branch set comes from the WHOLE text (the trailing leaf marker + the full
+        // uuid->parent map). markActiveBranch=false (a partial / HEAD read, whose tail marker is absent
+        // and whose in-window markers would be STALE) => empty set => every message stays active.
+        const std::unordered_set<std::wstring> active = markActiveBranch ? ActiveBranchUuids(transcriptText) : std::unordered_set<std::wstring>{};
+        std::vector<TranscriptLineFacts> out;
+        size_t start = 0;
+        for (size_t i = 0; i <= transcriptText.size(); ++i)
+        {
+            if (i < transcriptText.size() && transcriptText[i] != L'\n')
+            {
+                continue;
+            }
+            std::wstring_view line = transcriptText.substr(start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            TranscriptLineFacts f = ClassifyTranscriptLine(line, maxUserTextChars, maxAgentTextChars);
+            // A uuid-bearing node absent from the active set sits on a rewound-away branch. uuid-less
+            // state/marker lines, and the keep-all case (empty set), stay onActiveBranch==true.
+            if (!active.empty() && !f.uuid.empty() && active.count(f.uuid) == 0)
+            {
+                f.onActiveBranch = false;
+            }
+            out.push_back(std::move(f));
+        }
+        return out;
     }
 
     // ===== streaming scan + stats ============================================================

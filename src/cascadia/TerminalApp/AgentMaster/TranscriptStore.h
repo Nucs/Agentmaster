@@ -118,6 +118,13 @@ namespace Agentmaster
     struct TranscriptLineFacts
     {
         TranscriptLineKind kind{ TranscriptLineKind::Other };
+        std::wstring uuid; // the line's own `uuid` (its conversation-tree node id); empty for state/marker lines
+        // Agentmaster (revert-aware): the per-message "IsActiveLeaf" flag — true when this message is on
+        // the ACTIVE conversation branch (the chain from the current leaf to root), false when a double-ESC
+        // rewind abandoned its branch. ClassifyTranscriptLine alone leaves it true (a single line has no
+        // tree context); ClassifyTranscriptLines stamps it from the whole-file leaf chain. DISPLAY keeps
+        // only true; SEARCH ignores it (every line stays indexed/findable).
+        bool onActiveBranch{ true };
         int64_t timestampMs{}; // 0 when the line carries no timestamp (state/tail lines)
         bool sidechain{}; // isSidechain:true (inline subagent lines, old strata) — never main-chain state/stats
         bool meta{}; // isMeta / isCompactSummary / a noise prompt — not a human message
@@ -158,6 +165,16 @@ namespace Agentmaster
     // all-messages behavior), and MUST NOT call this on a truncated/head read (an early in-window
     // `last-prompt` marker would name a STALE leaf). Pure; no file IO; cycle-safe.
     std::unordered_set<std::wstring> ActiveBranchUuids(std::wstring_view transcriptText);
+
+    // Classify EVERY line of a transcript's COMPLETE text into per-message facts, AND stamp each
+    // message's `onActiveBranch` ("IsActiveLeaf") from the current leaf chain (ActiveBranchUuids). The
+    // reusable per-message view carrying the active/reverted status: DISPLAY consumers keep only
+    // onActiveBranch==true; SEARCH keeps all. uuid-less state/marker lines stay onActiveBranch==true.
+    // Pass `markActiveBranch=false` when `transcriptText` is a PARTIAL / HEAD read (the tail leaf marker
+    // is absent and any in-window marker would name a STALE leaf) — then NOTHING is marked inactive
+    // (keep-all). maxUserTextChars / maxAgentTextChars cap the extracted bodies (0 == don't extract that
+    // body), per ClassifyTranscriptLine. Pure; no file IO.
+    std::vector<TranscriptLineFacts> ClassifyTranscriptLines(std::wstring_view transcriptText, size_t maxUserTextChars = 0, size_t maxAgentTextChars = 0, bool markActiveBranch = true);
 
     // ===== streaming scan + stats (the incremental-index primitives) =========================
 

@@ -1366,156 +1366,66 @@ namespace Agentmaster
         {
             return info; // times only
         }
-        const bool truncated = (maxBytes != 0); // a head read may end mid-line -> skip the last segment
+        const bool truncated = (maxBytes != 0); // a head read may end mid-line
         const std::wstring wide = Utf8ToWide(bytes);
 
-        // Agentmaster (revert-aware DISPLAY): exclude rewound-away branches so the title + prompt
-        // list reflect only the LIVE conversation (the chain from the current leaf to root). Empty
-        // on a truncated HEAD read (the tail leaf marker is absent — and an early in-window marker
-        // would name a stale leaf), so a head-read title degrades to the legacy first-in-file prompt.
-        // SEARCH does NOT filter — TranscriptStore::ActiveBranchUuids.
-        const std::unordered_set<std::wstring> activeBranch = truncated ? std::unordered_set<std::wstring>{} : ActiveBranchUuids(wide);
+        // Agentmaster (revert-aware DISPLAY): build the per-message facts WITH the "IsActiveLeaf"
+        // property (onActiveBranch) and honor it, so the title + prompt list reflect ONLY the LIVE
+        // conversation — the chain from the current leaf to root. A double-ESC rewind orphans the
+        // abandoned branch (its lines stay in the file, interleaved with the live ones). Marking is
+        // whole-file, so on a truncated HEAD read (the tail leaf marker is absent, and an in-window
+        // marker would name a STALE leaf) we DON'T mark — the title degrades to the legacy first-in-file
+        // prompt. SEARCH never filters on this (TranscriptStore keeps indexing every line).
+        const auto lines = ClassifyTranscriptLines(wide, /*maxUserTextChars*/ static_cast<size_t>(-1), /*maxAgentTextChars*/ 0, /*markActiveBranch*/ !truncated);
 
         std::wstring firstPrompt;
-        size_t start = 0;
-        for (size_t i = 0; i <= wide.size(); ++i)
+        for (const auto& f : lines)
         {
-            if (i < wide.size() && wide[i] != L'\n')
+            // Title lines win by precedence (custom > ai > legacy summary); the LAST of each kind wins
+            // (a retitle appends a newer line). They carry no uuid, so a rewind never filters them — a
+            // user's chosen title persists across one.
+            if (f.kind == TranscriptLineKind::CustomTitle)
             {
-                continue;
-            }
-            // The segment after the final '\n' (i == size) is partial on a truncated head read.
-            if (i == wide.size() && truncated)
-            {
-                break;
-            }
-            std::wstring_view line(wide.data() + start, i - start);
-            start = i + 1;
-            while (!line.empty() && line.back() == L'\r')
-            {
-                line.remove_suffix(1);
-            }
-            if (line.empty())
-            {
-                continue;
-            }
-            const auto parsed = json::Parse(line);
-            if (!parsed || parsed->type != json::Value::Type::Obj)
-            {
-                continue;
-            }
-            const auto& obj = *parsed;
-            const std::wstring lineType = obj.StrAt(L"type");
-            // A user-SET conversation title ({"type":"custom-title","customTitle":...}). The LAST
-            // one wins — a retitle appends a newer line. Display + tab matching prefer it over the
-            // first prompt (it is the user's own label for the conversation).
-            if (lineType == L"custom-title")
-            {
-                const std::wstring ct = obj.StrAt(L"customTitle");
-                if (!ct.empty())
+                if (!f.title.empty())
                 {
-                    info.customTitle = FirstLineTrim(ct);
+                    info.customTitle = f.title;
                 }
                 continue;
             }
-            // The async-generated picker title (second precedence) + the LEGACY summary line
-            // (v2.0.75-2.1.25 only — kept so 100-versions-old transcripts still title sensibly).
-            if (lineType == L"ai-title")
+            if (f.kind == TranscriptLineKind::AiTitle)
             {
-                const std::wstring at = obj.StrAt(L"aiTitle");
-                if (!at.empty())
+                if (!f.title.empty())
                 {
-                    info.aiTitle = FirstLineTrim(at);
+                    info.aiTitle = f.title;
                 }
                 continue;
             }
-            if (lineType == L"summary")
+            if (f.kind == TranscriptLineKind::Summary)
             {
-                const std::wstring sm = obj.StrAt(L"summary");
-                if (!sm.empty())
+                if (!f.title.empty())
                 {
-                    info.summary = FirstLineTrim(sm);
+                    info.summary = f.title;
                 }
                 continue;
             }
-            // Agentmaster (revert-aware): a user line on a rewound-away branch is not part of the
-            // live conversation — skip it so a discarded prompt never becomes the title or a list
-            // entry. The title lines handled above (custom/ai/summary) carry no uuid and so are
-            // never filtered (a user's chosen title persists across a rewind). Empty set => keep all.
-            if (!activeBranch.empty())
-            {
-                if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && activeBranch.count(uuid) == 0)
-                {
-                    continue;
-                }
-            }
-            // isCompactSummary == the synthetic post-compaction recap; isSidechain == an inline
-            // subagent line (old strata wrote them into the main file) — neither is a human prompt.
-            if (lineType != L"user" || obj.BoolAt(L"isMeta") || obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isSidechain"))
+            // A rewound-away line (onActiveBranch==false) contributes no prompt. f.userText is non-empty
+            // ONLY for a REAL human prompt — ClassifyTranscriptLine already drops meta / noise / sidechain
+            // / tool-result turns — so this one test stands in for the whole old user-line filter chain.
+            if (!f.onActiveBranch || f.kind != TranscriptLineKind::UserPrompt || f.userText.empty())
             {
                 continue;
             }
-            if (info.gitBranch.empty())
+            if (info.gitBranch.empty() && !f.gitBranch.empty())
             {
-                const std::wstring gb = obj.StrAt(L"gitBranch");
-                if (!gb.empty())
-                {
-                    info.gitBranch = gb;
-                }
-            }
-            const auto* msg = obj.Find(L"message");
-            if (!msg || msg->type != json::Value::Type::Obj)
-            {
-                continue;
-            }
-            const auto* content = msg->Find(L"content");
-            if (!content)
-            {
-                continue;
-            }
-            std::wstring prompt;
-            if (content->type == json::Value::Type::Str)
-            {
-                prompt = content->str;
-            }
-            else if (content->type == json::Value::Type::Arr)
-            {
-                // A pure-text user message is a human prompt; ANY tool_result block means a tool turn.
-                bool hasToolResult = false;
-                std::wstring text;
-                for (const auto& blk : content->arr)
-                {
-                    if (blk.type != json::Value::Type::Obj)
-                    {
-                        continue;
-                    }
-                    const std::wstring bt = blk.StrAt(L"type");
-                    if (bt == L"tool_result")
-                    {
-                        hasToolResult = true;
-                        break;
-                    }
-                    if (bt == L"text")
-                    {
-                        text += blk.StrAt(L"text");
-                    }
-                }
-                if (!hasToolResult)
-                {
-                    prompt = text;
-                }
-            }
-            if (prompt.empty() || IsNoiseUserPrompt(prompt))
-            {
-                continue; // command echoes / task notifications / interrupts / reminders — control markers, not human messages
+                info.gitBranch = f.gitBranch;
             }
             if (firstPrompt.empty())
             {
-                firstPrompt = prompt;
+                firstPrompt = f.userText;
             }
             if (info.userPrompts.size() < maxPrompts)
             {
-                info.userPrompts.push_back(std::move(prompt));
+                info.userPrompts.push_back(f.userText);
             }
         }
         info.title = FirstLineTrim(firstPrompt);
@@ -2950,16 +2860,16 @@ namespace Agentmaster
             }
             const auto& obj = *parsed;
 
-            // Agentmaster (revert-aware): drop a line belonging to a rewound-away branch. Only
-            // uuid-bearing lines are tree nodes; uuid-less state/marker lines (mode / permission-mode
-            // / last-prompt / file-history-snapshot) pass through. Done BEFORE the timestamp capture
-            // so a discarded turn never sets first/last activity. Empty activeBranch => keep all.
-            if (!activeBranch.empty())
+            // Agentmaster (revert-aware): the per-message "IsActiveLeaf" property — false when this line
+            // sits on a branch a double-ESC rewind abandoned (its uuid isn't on the current leaf->root
+            // chain). uuid-less state/marker lines (mode / permission-mode / last-prompt / snapshot) and
+            // the keep-all case (empty set — a head read / no marker) are active. Decided BEFORE the
+            // timestamp capture so a discarded turn never sets first/last activity.
+            const std::wstring lineUuid = obj.StrAt(L"uuid");
+            const bool onActiveBranch = activeBranch.empty() || lineUuid.empty() || activeBranch.count(lineUuid) != 0;
+            if (!onActiveBranch)
             {
-                if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && activeBranch.count(uuid) == 0)
-                {
-                    continue;
-                }
+                continue; // not part of the live conversation
             }
 
             const std::wstring ts = obj.StrAt(L"timestamp");

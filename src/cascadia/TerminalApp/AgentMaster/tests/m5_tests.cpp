@@ -3391,6 +3391,42 @@ static void TestTranscriptResolve()
         CHECK(active.count(L"u_test") == 0 && active.count(L"u_a1") == 0 && active.count(L"u_orphan") == 0,
               "ActiveBranchUuids: the rewound-away branch (incl. the INTERLEAVED orphan after the live root) is excluded");
 
+        // (1b) the per-message property: ClassifyTranscriptLines stamps onActiveBranch ("IsActiveLeaf")
+        // on every message; ClassifyTranscriptLine alone captures uuid + defaults onActiveBranch true.
+        {
+            const auto facts = ClassifyTranscriptLines(std::wstring{ revert.begin(), revert.end() }, 4096, 0);
+            auto branchOf = [&facts](const wchar_t* id) -> int {
+                for (const auto& f : facts)
+                {
+                    if (f.uuid == id)
+                    {
+                        return f.onActiveBranch ? 1 : 0;
+                    }
+                }
+                return -1; // not found
+            };
+            CHECK(branchOf(L"u_live1") == 1 && branchOf(L"u_a2") == 1 && branchOf(L"u_live2") == 1,
+                  "ClassifyTranscriptLines: live nodes carry onActiveBranch=true");
+            CHECK(branchOf(L"u_test") == 0 && branchOf(L"u_a1") == 0 && branchOf(L"u_orphan") == 0,
+                  "ClassifyTranscriptLines: rewound-away nodes (incl. the interleaved orphan) carry onActiveBranch=false");
+
+            const auto one = ClassifyTranscriptLine(LR"j({"type":"user","uuid":"solo","parentUuid":null,"message":{"content":"hi"}})j", 100, 0);
+            CHECK(one.uuid == L"solo" && one.onActiveBranch,
+                  "ClassifyTranscriptLine: captures uuid; onActiveBranch defaults true (a single line has no tree context)");
+
+            // markActiveBranch=false (a partial / HEAD read) => nothing is marked inactive (keep-all).
+            const auto noMark = ClassifyTranscriptLines(std::wstring{ revert.begin(), revert.end() }, 4096, 0, false);
+            bool anyInactive = false;
+            for (const auto& f : noMark)
+            {
+                if (!f.onActiveBranch)
+                {
+                    anyInactive = true;
+                }
+            }
+            CHECK(!anyInactive, "ClassifyTranscriptLines: markActiveBranch=false leaves every message active (partial/head read)");
+        }
+
         // (2) the summary panel (AnalyzeSessionTranscript, full read): only the live typed prompts; the
         // discarded "test" + the interleaved "ORPHANED follow-up" are gone, and first-activity is the
         // LIVE root's time (the discarded earlier turn never sets it).
