@@ -59,6 +59,20 @@ namespace Agentmaster
     // a typical full scrollback (WT default ~9k lines). Tunable; not a hard correctness limit.
     inline constexpr size_t kAnchorRecentWindowChars = 1'200'000;
 
+    // Agentmaster (SUMMARY_JUMP.md §5): the glyph(s) Claude Code renders at the START of a SENT user
+    // prompt's line in its TUI. U+276F (the heavy right-angle prompt ornament) is the primary marker;
+    // U+203A (single right-angle quote) a secondary variant. Both are rare + specific -- unlike plain '>',
+    // which pervades markdown quotes, shell prompts, redirections and diffs and would false-positive -- so
+    // a prompt-text match that sits right after one of these is almost certainly the REAL user-prompt
+    // render, not an assistant echo of the same words. The ControlCore adapter passes this as
+    // AnchorOptions::promptMarkers; PromptAnchor.h's own default is empty (no enforcement), so the pure
+    // resolver + its existing tests are unchanged unless a caller opts in. Plain '>' is deliberately
+    // EXCLUDED (it is the synthetic marker the unit tests use, precisely because it is too common to
+    // validate against in a real buffer). NOTE: \u escapes, not raw glyphs -- this TU compiles without
+    // /utf-8, so a raw multibyte literal would mojibake-decode (the same reason the tests build non-ASCII
+    // text from code points).
+    inline constexpr std::wstring_view kClaudePromptMarkers = L"\u276F\u203A";
+
     // Tunables for the resolver. Defaults are the shipping values (SUMMARY_JUMP.md §2/§3).
     struct AnchorOptions
     {
@@ -66,6 +80,16 @@ namespace Agentmaster
         size_t minNeedle = 8; // backoff floor; never search a needle shorter than this (avoid matching "the")
         int backoffSteps = 4; // max needle-shrink attempts (full, then halving, down to minNeedle)
         double partialThreshold = 0.85; // quality below this flags the match `partial`
+
+        // Agentmaster (SUMMARY_JUMP.md §5): prompt-marker VALIDATION. When non-empty, a forward candidate
+        // occurrence is accepted only if one of these marker chars appears within `markerLookback` chars
+        // immediately before the match start (in the normalized haystack) — so a match binds to a real
+        // user-prompt render (which Claude prefixes with the marker) and not to an incidental echo of the
+        // same text in assistant output / a tool result / a diff. Empty => legacy, marker-agnostic matching.
+        // SAFETY: if markers are set but NONE occur anywhere in the haystack (a Claude build/theme that
+        // renders prompts without the glyph), enforcement auto-disables for that resolve (never regresses).
+        std::wstring promptMarkers = {}; // e.g. kClaudePromptMarkers; empty => off
+        size_t markerLookback = 4; // normalized chars before a match to scan for a marker (covers the U+276F glyph + a space and a box/indent char)
     };
 
     // The resolved buffer location for one prompt. Offsets are into the SAME haystack passed in
@@ -204,11 +228,104 @@ namespace Agentmaster
             return false;
         }
 
+        // Agentmaster (SUMMARY_JUMP.md §5) — PROMPT-MARKER VALIDATION. Claude Code prefixes a SENT user
+        // prompt's rendered line with a marker glyph (kClaudePromptMarkers). A match that sits right after
+        // such a marker is the REAL user-prompt render; the same text appearing elsewhere (an assistant
+        // echo, a tool result, a diff) carries no marker. The helpers below are pure + generic — the marker
+        // SET is injected by the caller via AnchorOptions::promptMarkers, so PromptAnchor.h stays free of
+        // app-specific knowledge.
+
+        // Any of `markers` within [pos-lookback, pos) of `norm`? (A real render starts right after a marker;
+        // an echoed/incidental occurrence does not.) `lookback` is tiny — a marker glyph, a space, maybe a
+        // box/indent char. O(lookback).
+        inline bool MarkerBefore(const std::wstring& norm, size_t pos, std::wstring_view markers, size_t lookback)
+        {
+            if (markers.empty() || pos == 0)
+            {
+                return false;
+            }
+            const size_t start = pos > lookback ? pos - lookback : 0;
+            for (size_t i = start; i < pos; ++i)
+            {
+                if (markers.find(norm[i]) != std::wstring_view::npos)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Is marker validation USABLE in this haystack? When markers are configured but NONE occur anywhere
+        // (a Claude build/theme that renders SENT prompts without the glyph, or an alt-screen session with no
+        // scrollback), the resolver disables enforcement for that resolve so matching degrades to the legacy,
+        // marker-agnostic behavior instead of failing every prompt. One pass over `norm` (markers is tiny).
+        inline bool AnyMarkerPresent(const std::wstring& norm, std::wstring_view markers)
+        {
+            return !markers.empty() && norm.find_first_of(markers) != std::wstring::npos;
+        }
+
+        // Find an occurrence of `pat` in `norm` that satisfies the marker gate. `global`=false: the EARLIEST
+        // at/after `from`; true: the LAST anywhere (rfind). When `enforceMarker`, only an occurrence preceded
+        // by a marker (MarkerBefore) qualifies — the scan skips an unmarked occurrence (e.g. an assistant
+        // echo) and keeps looking. Returns npos if none qualifies. (When !enforceMarker this is exactly the
+        // old single norm.find / norm.rfind.)
+        inline size_t FindAcceptable(const std::wstring& norm,
+                                     std::wstring_view pat,
+                                     size_t from,
+                                     bool global,
+                                     bool enforceMarker,
+                                     std::wstring_view markers,
+                                     size_t lookback)
+        {
+            if (pat.empty())
+            {
+                return std::wstring::npos;
+            }
+            if (!global)
+            {
+                for (size_t scan = from;;)
+                {
+                    const auto p = norm.find(pat, scan);
+                    if (p == std::wstring::npos)
+                    {
+                        return std::wstring::npos;
+                    }
+                    if (!enforceMarker || MarkerBefore(norm, p, markers, lookback))
+                    {
+                        return p;
+                    }
+                    scan = p + 1; // unmarked occurrence (echo) — keep scanning forward
+                }
+            }
+            for (size_t end = std::wstring::npos;;)
+            {
+                const auto p = norm.rfind(pat, end);
+                if (p == std::wstring::npos)
+                {
+                    return std::wstring::npos;
+                }
+                if (!enforceMarker || MarkerBefore(norm, p, markers, lookback))
+                {
+                    return p;
+                }
+                if (p == 0)
+                {
+                    return std::wstring::npos;
+                }
+                end = p - 1; // unmarked — keep scanning backward (toward the start)
+            }
+        }
+
         // Locate `nmsg` — and, when `tryRev`, its char-reversal `rmsg` (the visual form an RTL line takes
         // in the buffer) — in `norm`, longest needle first. `global`=false searches at/after `cursor`
         // (earliest occurrence); true searches the LAST occurrence (rfind). Forward is always tried first
         // so an LTR hit never reaches the reversed pass. On an in-order hit, *cursorEnd (if non-null) is
         // set to the norm offset to advance the greedy cursor past this match. Returns found=false if none.
+        //
+        // `enforceMarker` (SUMMARY_JUMP.md §5) gates the FORWARD (LTR) orientation to occurrences preceded by
+        // a prompt marker — rejecting an assistant echo of the prompt text. It is NOT applied to the reversed
+        // (RTL) orientation: a marker's position under bidi reversal is unreliable, and RTL is already
+        // best-effort, so a reversed hit is accepted on text alone (preserving today's RTL behavior).
         inline AnchorMatch LocateOriented(const std::wstring& norm,
                                           const std::vector<uint32_t>& map,
                                           const std::wstring& nmsg,
@@ -218,12 +335,13 @@ namespace Agentmaster
                                           const std::vector<size_t>& lens,
                                           const AnchorOptions& opts,
                                           bool global,
+                                          bool enforceMarker,
                                           size_t* cursorEnd)
         {
             for (const auto len : lens)
             {
-                const auto fpos = global ? norm.rfind(std::wstring_view{ nmsg }.substr(0, len))
-                                         : norm.find(std::wstring_view{ nmsg }.substr(0, len), cursor);
+                const auto fpos = FindAcceptable(norm, std::wstring_view{ nmsg }.substr(0, len), cursor, global,
+                                                 enforceMarker, opts.promptMarkers, opts.markerLookback);
                 if (fpos != std::wstring::npos)
                 {
                     if (cursorEnd)
@@ -234,8 +352,8 @@ namespace Agentmaster
                 }
                 if (tryRev)
                 {
-                    const auto rpos = global ? norm.rfind(std::wstring_view{ rmsg }.substr(0, len))
-                                             : norm.find(std::wstring_view{ rmsg }.substr(0, len), cursor);
+                    const auto rpos = FindAcceptable(norm, std::wstring_view{ rmsg }.substr(0, len), cursor, global,
+                                                     /*enforceMarker*/ false, opts.promptMarkers, opts.markerLookback);
                     if (rpos != std::wstring::npos)
                     {
                         if (cursorEnd)
@@ -346,6 +464,10 @@ namespace Agentmaster
             return out;
         }
 
+        // Marker validation (SUMMARY_JUMP.md §5) is enforced only when markers are configured AND actually
+        // present in this haystack; otherwise the resolve is legacy/marker-agnostic (never regresses).
+        const bool enforceMarker = !opts.promptMarkers.empty() && detail::AnyMarkerPresent(norm, opts.promptMarkers);
+
         // RTL prompts render character-reversed in the terminal buffer (visual order); also try the
         // reversal for those. Forward is tried first inside LocateOriented, so LTR is never perturbed.
         const bool tryRev = detail::ContainsRtl(nmsg);
@@ -365,16 +487,30 @@ namespace Agentmaster
             return out;
         }
 
-        // In-order: earliest occurrence at/after the cursor, longest needle first.
-        if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, nullptr); m.found)
+        // Marker-PREFERRED (SUMMARY_JUMP.md §5): in-order, then last-global — accepting only MARKED
+        // occurrences when enforceMarker. (Single-prompt helper; not the production batch path.)
+        if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, enforceMarker, nullptr); m.found)
         {
             return m;
         }
-        // Fallback: the LAST (most-recent) occurrence anywhere — flagged out-of-order.
-        if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, nullptr); m.found)
+        if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, enforceMarker, nullptr); m.found)
         {
             m.outOfOrder = true;
             return m;
+        }
+        // SOFT FALLBACK: no marked occurrence -> degrade to the legacy marker-agnostic resolve so a prompt
+        // that legacy would have found never vanishes under enforcement (mirrors the batch path).
+        if (enforceMarker)
+        {
+            if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, /*enforceMarker*/ false, nullptr); m.found)
+            {
+                return m;
+            }
+            if (auto m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, /*enforceMarker*/ false, nullptr); m.found)
+            {
+                m.outOfOrder = true;
+                return m;
+            }
         }
         return out;
     }
@@ -397,6 +533,10 @@ namespace Agentmaster
         {
             return results;
         }
+
+        // Marker validation (SUMMARY_JUMP.md §5): compute ONCE for the whole batch — enforced only when
+        // markers are configured AND present in this haystack (else legacy/marker-agnostic; never regresses).
+        const bool enforceMarker = !opts.promptMarkers.empty() && detail::AnyMarkerPresent(norm, opts.promptMarkers);
 
         size_t cursor = 0; // greedy: the lowest normalized offset the next prompt may occupy
         for (size_t mi = 0; mi < messages.size(); ++mi)
@@ -424,18 +564,35 @@ namespace Agentmaster
                 continue; // results[mi] stays not-found; cursor unchanged
             }
 
-            // In-order first (advances the greedy cursor); else the last global occurrence (out-of-order,
-            // cursor unchanged) so a scrolled-off / duplicate send still offers a lower-confidence jump.
+            // Marker-PREFERRED, order-preserving resolve (SUMMARY_JUMP.md §3/§5). When enforceMarker, the
+            // first two probes accept ONLY a marked occurrence (a real user-prompt render), so a match binds
+            // to the prompt and not to an assistant echo of the same words: in-order first (advances the
+            // greedy cursor); else the last global marked occurrence (out-of-order). If NO marked occurrence
+            // exists for this prompt (its render scrolled off, or — defensively — the marker glyph isn't on
+            // sent-prompt lines in this build), a SOFT FALLBACK repeats the same two probes WITHOUT the
+            // marker, degrading to exactly the legacy result, so enforcement can NEVER make a prompt that
+            // legacy would resolve vanish. (When !enforceMarker the first probes already ARE the legacy ones,
+            // so the fallback is a no-op and is skipped.)
             size_t cend = cursor;
-            AnchorMatch m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, &cend);
+            AnchorMatch m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, enforceMarker, &cend);
             if (m.found)
             {
                 cursor = cend;
             }
-            else
+            else if (m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, enforceMarker, nullptr); m.found)
             {
-                m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, nullptr);
+                m.outOfOrder = true;
+            }
+            else if (enforceMarker)
+            {
+                // No marked hit -> legacy (marker-agnostic) resolve: in-order (advance) else global (oo-order).
+                size_t cend2 = cursor;
+                m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, cursor, lens, opts, /*global*/ false, /*enforceMarker*/ false, &cend2);
                 if (m.found)
+                {
+                    cursor = cend2;
+                }
+                else if (m = detail::LocateOriented(norm, map, nmsg, rmsg, tryRev, 0, lens, opts, /*global*/ true, /*enforceMarker*/ false, nullptr); m.found)
                 {
                     m.outOfOrder = true;
                 }

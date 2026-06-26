@@ -829,7 +829,14 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             }
         }
 
-        const auto results = ::Agentmaster::ResolvePromptAnchors(haystack, msgs);
+        // Agentmaster (SUMMARY_JUMP.md §5): validate each match against Claude Code's user-prompt marker
+        // glyph (❯ / ›). A match that sits right after a marker is the REAL sent-prompt render; the same
+        // text echoed in assistant output / a tool result carries no marker and is rejected — so jump /
+        // alt-nav / eligibility bind to the prompt, not its echo. Self-disables if this buffer has no marker
+        // (a Claude theme that renders without it, or an alt-screen session) so matching never regresses.
+        ::Agentmaster::AnchorOptions opts;
+        opts.promptMarkers = std::wstring{ ::Agentmaster::kClaudePromptMarkers };
+        const auto results = ::Agentmaster::ResolvePromptAnchors(haystack, msgs, opts);
         for (size_t k = 0; k < results.size() && k < rows.size(); ++k)
         {
             if (!results[k].found)

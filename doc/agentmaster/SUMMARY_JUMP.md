@@ -73,6 +73,21 @@ AgentTabOverlay (summary panel UI)                     TerminalApp
   candidate it falls back to the **last (most-recent) global occurrence**, flagged `outOfOrder` (lower
   confidence) rather than guessing silently. A planned **v2** replaces this single-pass greedy with a
   two-pass *neighbor-bracketing* scheme that fixes a tail-retention mis-assignment — see **§3a**.
+- **Marker validation (the `❯` proximity check)** — Claude Code renders a SENT user prompt's line with a
+  **prompt-marker glyph at its start** (`❯` U+276F, or `›` U+203A). The resolver **prefers** a forward match
+  that sits within a few chars *after* such a marker (`AnchorOptions::promptMarkers` + `markerLookback`,
+  injected by the `ControlCore` adapter as `kClaudePromptMarkers`), so a match binds to the **real
+  user-prompt render** and not to an incidental echo of the same words in assistant output / a tool result /
+  a diff. Plain `>` is deliberately **excluded** (it pervades markdown quotes, shell prompts, redirections,
+  and diffs). This also sharpens duplicate disambiguation — between two textually-identical occurrences, the
+  marked one wins. It is a **preference with a legacy fallback, not a hard gate**: a prompt with no marked
+  occurrence at all (render scrolled off, or the glyph absent on sent lines in this build) still resolves via
+  the ordinary marker-agnostic search, so enforcement can never zero-out a prompt legacy would have found.
+  **Self-disabling too:** if the configured markers occur *nowhere* in the linearized buffer, the check turns
+  OFF for that resolve outright. Applied to the **forward (LTR)** orientation only — the marker's place under
+  bidi reversal is unreliable, so an RTL (reversed) match is accepted on text alone (§5). Pure: it lives
+  entirely in `PromptAnchor.h` (`detail::MarkerBefore` / `AnyMarkerPresent` / `FindAcceptable`), with the
+  marker SET injected by the caller so the resolver stays free of app-specific knowledge.
 - **Re-validation tiers** (the answer to "refresh on click + interval without hurting performance"):
   1. **Epoch gate** (caller, O(1)) — buffer mutation-id unchanged ⇒ a cached row is still valid ⇒ no work.
   2. **`ValidatePromptAnchor`** (O(needle)) — the cheap per-click re-check at the cached offset.
@@ -324,6 +339,20 @@ resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initiali
 - **Not on screen** → `-1`, no scroll (no chime). The transcript still has the prompt; a "open transcript
   here" fallback is a future nicety. **The icon is also DIMMED** (opacity 0.2 vs 0.75) so a prompt that
   currently won't jump is visually distinct — see *icon eligibility* below.
+- **Prompt-marker proximity (`❯`)** — a candidate match is **preferred** when it sits right after Claude
+  Code's user-prompt marker glyph (`❯` U+276F / `›` U+203A) — a small lookback window in the normalized
+  haystack — so **jump / alt-nav / eligibility bind to the prompt the user actually sent**, not to an
+  assistant echo of the same words that happens to also be on screen (the common "it jumped to the
+  assistant's text" failure). Plain `>` is excluded (too common — markdown quotes / shell prompts / diffs).
+  It is a **preference, not a hard gate**: if a prompt has **no** marked occurrence at all (its real render
+  scrolled off, or — defensively — the glyph isn't on sent-prompt lines in this build), the resolve **falls
+  back to the legacy marker-agnostic match** for that prompt, so enforcement can never make a prompt that
+  legacy would resolve disappear. As an extra safety, the whole check **self-disables** for a resolve when
+  no configured marker occurs *anywhere* in the buffer; and it is skipped for the RTL reversed orientation
+  (the marker's bidi position is unreliable). Implemented purely in `PromptAnchor.h`
+  (`AnchorOptions::promptMarkers`, caller-injected as `kClaudePromptMarkers`); see §3. (A strict
+  hard-gate variant — drop the per-prompt fallback so an off-screen render's echo resolves to *not-found* —
+  is a one-line change, deferred until the glyph is runtime-confirmed.)
 - **RTL (Hebrew / Arabic)** — a terminal renders an RTL line in **visual order (character-reversed)** while
   the transcript stores it **logical**, so an RTL prompt appears reversed in the buffer and a logical-order
   search misses. The resolver detects an RTL prompt (`ContainsRtl`) and **also tries the character-reversal**

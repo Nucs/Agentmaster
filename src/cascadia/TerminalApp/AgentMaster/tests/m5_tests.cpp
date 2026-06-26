@@ -4849,6 +4849,74 @@ static void TestPromptAnchor()
         CHECK(!ValidatePromptAnchor(hay, L"fix the build", m.offset + 8), "validate: false at a wrong offset");
         CHECK(!ValidatePromptAnchor(hay, L"fix the build", hay.size() + 100), "validate: false past end");
     }
+
+    // Agentmaster (SUMMARY_JUMP.md §5): prompt-MARKER validation. Claude Code prefixes a SENT prompt's
+    // rendered line with a marker glyph (U+276F); requiring a match to sit right after one binds it to the
+    // real user-prompt render instead of an assistant ECHO of the same words. The glyph is built from its
+    // code point so this TU stays pure-ASCII (it compiles without /utf-8); the marker SET passed to the
+    // resolver is the shipping constant kClaudePromptMarkers (already \u-escaped in the header).
+    {
+        const std::wstring caret(1, static_cast<wchar_t>(0x276F)); // the heavy right-angle prompt ornament
+        AnchorOptions mopts;
+        mopts.promptMarkers = std::wstring{ kClaudePromptMarkers };
+
+        // (1) An echo PRECEDES the real render. Legacy (no markers) binds to the earlier echo; marker
+        //     validation binds to the caret-marked render instead. This is the core win.
+        {
+            const std::wstring hay = L"assistant: ill fix the bug now\n" + caret + L" fix the bug\nout\n";
+            const size_t echoPos = hay.find(L"fix the bug");
+            const size_t markedPos = hay.find(L"fix the bug", hay.find(caret));
+            CHECK(echoPos != std::wstring::npos && markedPos != std::wstring::npos && echoPos < markedPos, "marker: fixture sane (echo before render)");
+
+            auto noMark = ResolvePromptAnchors(hay, { L"fix the bug" });
+            CHECK(noMark[0].found && noMark[0].offset == echoPos, "marker: legacy binds the earlier echo");
+
+            auto withMark = ResolvePromptAnchors(hay, { L"fix the bug" }, mopts);
+            CHECK(withMark[0].found && withMark[0].offset == markedPos, "marker: validation binds the caret-marked render, not the echo");
+        }
+
+        // (2) Soft fallback (regression-proofing): when markers ARE in use (present for another prompt) but
+        //     a prompt's text appears ONLY unmarked (no caret render — its own scrolled off, or the marker
+        //     glyph isn't on sent lines in this build), that prompt STILL resolves via a legacy fallback.
+        //     Marker enforcement never makes a prompt that legacy would resolve disappear.
+        {
+            const std::wstring hay = caret + L" unrelated heading line\nassistant: please refactor the auth module now\n";
+            auto r = ResolvePromptAnchors(hay, { L"unrelated heading line", L"refactor the auth module now" }, mopts);
+            CHECK(r[0].found, "marker: the caret-marked prompt resolves");
+            CHECK(r[1].found, "marker(soft fallback): an unmarked-only prompt still resolves (never regresses)");
+        }
+
+        // (3) Self-adapting: markers requested but NONE present (a '>'-rendering build) => enforcement
+        //     auto-disables and falls back to legacy text matching (never regresses).
+        {
+            const std::wstring hay = L"> fix the build\nout\n"; // '>' is not a configured marker; no U+276F anywhere
+            auto r = ResolvePromptAnchors(hay, { L"fix the build" }, mopts);
+            CHECK(r[0].found, "marker: no marker in buffer => enforcement disabled, legacy match still resolves");
+        }
+
+        // (4) Duplicate disambiguation: two caret-marked sends with an assistant echo between them resolve
+        //     to the TWO real renders, in order (the unmarked echo is skipped by the gate).
+        {
+            const std::wstring hay = caret + L" deploy now\nassistant: ok i will deploy now\n" + caret + L" deploy now\nout\n";
+            const size_t firstMarked = hay.find(L"deploy now");
+            const size_t lastMarked = hay.rfind(L"deploy now");
+            auto r = ResolvePromptAnchors(hay, { L"deploy now", L"deploy now" }, mopts);
+            CHECK(r[0].found && r[1].found && r[0].offset == firstMarked && r[1].offset == lastMarked, "marker: duplicates map to the two caret renders, echo skipped");
+            CHECK(!r[0].outOfOrder && !r[1].outOfOrder, "marker: duplicates resolved in order");
+        }
+
+        // (5) Proximity, not just same-line: with TWO caret lines — one where the text appears FAR down a
+        //     long marked line (beyond markerLookback), another where it starts right AT the marker — the
+        //     match binds to the proximate (real-render) one, skipping the distant in-line occurrence. (A
+        //     real prompt's needle is its first line and so starts right at the marker; an incidental
+        //     occurrence lands mid-line, too far to validate.)
+        {
+            const std::wstring hay = caret + L" heading XXXXXXXXXXXXXXXXXXXXXX run the migration\n" + caret + L" run the migration\nout\n";
+            const size_t proximate = hay.rfind(L"run the migration"); // second caret line: text right after the marker
+            auto r = ResolvePromptAnchors(hay, { L"run the migration" }, mopts);
+            CHECK(r[0].found && r[0].offset == proximate, "marker: binds the occurrence right after the marker, not a distant in-line one");
+        }
+    }
 }
 
 // Build a synthetic Claude scrollback: `rows` lines of filler with `prompts` "> <prompt>" lines
