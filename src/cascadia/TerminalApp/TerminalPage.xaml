@@ -14,7 +14,8 @@
       mc:Ignorable="d">
 
     <Grid x:Name="Root"
-          Background="Transparent">
+          Background="Transparent"
+          PreviewKeyDown="_ManagerPaneNavPreviewKeyDown">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />

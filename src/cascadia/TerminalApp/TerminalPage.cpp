@@ -1979,22 +1979,37 @@ namespace winrt::TerminalApp::implementation
         e.Handled(true);
     }
 
-    // Agentmaster (Manager-tab tab nav): the Manager tab hosts custom XAML content with focusable
-    // boxes (cwd / search / prompt compose / inline rename). WT routes keybindings to the page via a
-    // BUBBLING KeyDown on the pane root (_KeyDownHandler, wired in _OpenAgentManagerTab / _MakePane) —
-    // "keys the content didn't handle" — so a focused box that consumes a key (arrow keys especially)
-    // swallows it before it can bubble. That made alt+left / alt+right (and ctrl+tab) do nothing from
-    // the Manager tab, because AgentManagerContent::Focus() lands focus on the cwd TextBox. Catch the
-    // TAB-SWITCHING chords at the TUNNELING PreviewKeyDown stage (root->down, before the box) so they
-    // fire regardless of focus; every other key is left alone and falls through to the control, so
-    // typing / Enter in the boxes is untouched. The chord is resolved through the live ActionMap
-    // (honors user keybindings, not hardcoded), and ONLY tab-switching actions are taken — stealing
-    // every bound chord here (e.g. Enter -> CopyToClipboard) would break text input. Mirrors the
-    // Archive/Sessions pages' selective PreviewKeyDown. Defined here (next to _KeyDownHandler) so it
-    // shares the complete ControlKeyStates / KeyChord / ShortcutAction types this TU already includes.
+    // Agentmaster (Manager-tab tab nav): the Manager tab hosts custom XAML content, and its pane content
+    // does NOT take keyboard focus on activation — so after you switch to the Manager tab, focus sits on
+    // the tab HEADER (outside the pane). A PreviewKeyDown wired ONLY to the pane root never fires then,
+    // which made the tab-switching chords (alt+left/right, ctrl+tab, shift+home) do nothing from the
+    // Manager tab until you first clicked an element in the pane. So this handler is also wired to the
+    // page ROOT grid (TerminalPage.xaml, x:Name="Root") — the common ancestor of BOTH the tab strip and
+    // the pane content — so it tunnels through whatever has focus (tab header OR pane). It stays wired to
+    // the Manager pane root too (_MakePane) for belt-and-suspenders; the e.Handled() guard below makes the
+    // second one a no-op. Because Root fires for EVERY tab, GATE to the Manager tab (the reliable
+    // _GetFocusedTab()==_managerTab check) and bail otherwise, so a terminal tab keeps its own
+    // TermControl/ActionMap key handling 100% untouched. On the Manager tab ONLY the tab-switching actions
+    // are taken (resolved through the live ActionMap, honoring user keybindings); every other key falls
+    // through to the focused control, so typing / Enter in the boxes is untouched. Defined here (next to
+    // _KeyDownHandler) so it shares the complete ControlKeyStates / KeyChord / ShortcutAction types.
     void TerminalPage::_ManagerPaneNavPreviewKeyDown(const Windows::Foundation::IInspectable& /*sender*/, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e)
     {
         if (e.Handled())
+        {
+            return;
+        }
+        // Reliable "are we on the Agent Manager tab?" check. This handler is wired to the page Root and so
+        // fires for EVERY tab; off the Manager tab we must do nothing and let the focused control / a
+        // terminal's own ActionMap handle the key. (When invoked from the pane-root wiring this is always
+        // true; it matters for the Root wiring, which is what makes shift+home work from the tab header.)
+        if (!_managerTab || _GetFocusedTab() != _managerTab)
+        {
+            return;
+        }
+        // The page Root also sees keys for an open command palette / suggestions overlay (they render over
+        // the active tab, which may be the Manager tab) — don't steal shift+home etc. from their text box.
+        if (_commandPaletteIs(Visibility::Visible) || _suggestionsControlIs(Visibility::Visible))
         {
             return;
         }
