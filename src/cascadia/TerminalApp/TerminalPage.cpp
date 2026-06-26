@@ -2034,6 +2034,7 @@ namespace winrt::TerminalApp::implementation
         case ShortcutAction::NextTab:
         case ShortcutAction::PrevTab:
         case ShortcutAction::SwitchToTab:
+        case ShortcutAction::AgentToggleManagerTab: // Agentmaster: shift+home home/back toggle — tunnel it past the Manager's text boxes (which would eat shift+home as select-to-line-start)
             break;
         default:
             return;
@@ -2397,6 +2398,26 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (Waiting-for-you triage): context-menu "Move to Idle/Done" / "Move to Waiting-for-you"
+        // -> move THIS tab's managed session between the WaitingForInput and Idle/Done triage states. The
+        // tab-menu twin of the Manager board card's "Move to Idle/Done" plus its reverse. The page re-derives
+        // the direction from the session's LIVE state (the menu label was fixed at flyout-open), so a turn
+        // that advanced since then is never mis-moved. Explicitly separate from "Mark Unread" (no sticky
+        // flag, no ring flash). No-op on a non-session tab (the item is hidden there — see the Opening
+        // handler below).
+        hostingTab.TriageMoveRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                page->_MoveSessionTriageState(sid);
+            }
+        });
+
         // Agentmaster (FAVORITES.md): context-menu "Favorite"/"Unfavorite" -> toggle THIS tab's session
         // star (the SessionStore "favorite" key), the SAME durable star the Sessions page's ★ column
         // sets. No-op on a non-session tab (the item is hidden there — see the flyout Opening handler).
@@ -2485,6 +2506,33 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentCopyMenuVisible(isSession);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
+                    // Agentmaster (Waiting-for-you triage): the status-adaptive "Move to Idle/Done" /
+                    // "Move to Waiting-for-you" item — shown only when this session is in a triage state.
+                    // Waiting-for-you -> offer the demote ("Move to Idle/Done"); Idle/Done -> offer the plain
+                    // promote ("Move to Waiting-for-you"); Running / NeedsApproval / Error -> hidden.
+                    bool triageVisible = false;
+                    bool triageToIdle = false;
+                    if (isSession && page->_sessionRegistry)
+                    {
+                        if (const auto triageInfo = page->_sessionRegistry->Get(sid))
+                        {
+                            switch (triageInfo->state)
+                            {
+                            case ::Agentmaster::SessionState::WaitingForInput:
+                                triageVisible = true;
+                                triageToIdle = true;
+                                break;
+                            case ::Agentmaster::SessionState::Idle:
+                            case ::Agentmaster::SessionState::Done:
+                                triageVisible = true;
+                                triageToIdle = false;
+                                break;
+                            default:
+                                break;
+                            }
+                        }
+                    }
+                    tab->SetAgentTriageMoveState(triageVisible, triageToIdle);
                     // Agentmaster (FAVORITES.md): "★ Favorite & close all tabs" is a WINDOW-scope action —
                     // show it whenever this window hosts >=1 managed session (not just when THIS tab is one),
                     // since it stars every session in the window. Nothing to favorite otherwise -> hidden.
@@ -2800,6 +2848,16 @@ namespace winrt::TerminalApp::implementation
     //   warn for the current window state, show a warning dialog.
     safe_void_coroutine TerminalPage::CloseWindow()
     {
+        // Agentmaster: the window ✕ (chrome close / Alt+F4 / the closeWindow action) is the PRIMARY exit
+        // for a window — the pinned, non-closable Manager tab means there is no "last tab closes the
+        // window" path, so this is what users reach for. Replace upstream's bland generic confirm
+        // ("Do you want to close all tabs?", ConfirmCloseDialogKind::Window) with a PERSISTENCE-AWARE one:
+        // closing a window is NON-DESTRUCTIVE — _FlushWindowRecord saves its geometry/lens/ordered tabs to
+        // windows/<id>.json and _ArchiveWindowSessionsOnTeardown archives every managed session (kept
+        // resumable; nothing on disk is touched) — so the dialog SAYS SO, and it adds a "Close All Windows"
+        // escalation that quits the whole app via RequestQuit (which raises its OWN second confirm). Shown
+        // only when _ShouldWarnOnClose() warrants a confirm; with confirms off we fall straight through to
+        // the non-destructive close below (the record is still flushed + sessions archived — nothing lost).
         if (_ShouldWarnOnClose() &&
             !_displayingCloseDialog)
         {
@@ -2808,23 +2866,90 @@ namespace winrt::TerminalApp::implementation
                 _newTabButton.Flyout().Hide();
             }
             _DismissTabContextMenus();
-            _displayingCloseDialog = true;
 
-            const auto weak = get_weak();
-            auto warningResult = co_await _ShowConfirmCloseDialog(ConfirmCloseDialogKind::Window);
-            // Hold a strong reference to `this` after the co_await; we may
-            // be the last holder if the window was already being torn down.
-            auto strong = weak.get();
-            if (!strong)
+            // No presenter to confirm with -> close anyway (non-destructive; don't strand the close).
+            if (const auto presenter{ _dialogPresenter.get() })
             {
-                co_return;
-            }
+                _displayingCloseDialog = true;
 
-            _displayingCloseDialog = false;
+                // Count THIS window's live managed (Claude/Codex) sessions for the reassurance body.
+                size_t managedCount = 0;
+                for (const auto& kv : _claudeTabs)
+                {
+                    if (kv.second.get())
+                    {
+                        ++managedCount;
+                    }
+                }
 
-            if (warningResult != ContentDialogResult::Primary)
-            {
-                co_return;
+                std::wstring body;
+                if (managedCount > 0)
+                {
+                    body = L"This window and its " + std::to_wstring(managedCount) +
+                           (managedCount == 1 ? L" agent session" : L" agent sessions") +
+                           L" are saved. Closing keeps every session resumable from the Sessions browser, and the "
+                           L"window itself — its layout and tabs — can be brought back with “Reopen Windows.” "
+                           L"Nothing is lost.";
+                }
+                else
+                {
+                    body = L"This window is saved — its layout and tabs can be brought back with "
+                           L"“Reopen Windows.” Nothing is lost.";
+                }
+                body += L"\n\nChoose “Close All Windows” to quit Agentmaster entirely (you'll be asked to confirm).";
+
+                TextBlock msg;
+                msg.Text(winrt::hstring{ body });
+                msg.TextWrapping(TextWrapping::WrapWholeWords);
+                CheckBox dontAsk;
+                dontAsk.Content(box_value(L"Don't ask me again"));
+                dontAsk.IsChecked(false);
+                StackPanel panel;
+                panel.Spacing(12);
+                panel.Children().Append(msg);
+                panel.Children().Append(dontAsk);
+
+                ContentDialog dialog;
+                dialog.Tag(box_value(L"agentmaster-dark")); // force the Agent-Manager dark theme (TerminalWindow::ShowDialog)
+                dialog.Title(box_value(L"Close this window?"));
+                dialog.Content(panel);
+                dialog.PrimaryButtonText(L"Close Window");
+                dialog.SecondaryButtonText(L"Close All Windows");
+                dialog.CloseButtonText(L"Cancel");
+                dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
+
+                const auto weak = get_weak();
+                const auto warningResult = co_await presenter.ShowDialog(dialog);
+                // Hold a strong reference to `this` after the co_await; we may
+                // be the last holder if the window was already being torn down.
+                const auto strong = weak.get();
+                if (!strong)
+                {
+                    co_return;
+                }
+
+                _displayingCloseDialog = false;
+
+                if (warningResult == ContentDialogResult::None)
+                {
+                    co_return; // Cancel / dismiss -> keep this window open
+                }
+                if (warningResult == ContentDialogResult::Secondary)
+                {
+                    // "Close All Windows" -> quit the whole app. RequestQuit raises its OWN confirm
+                    // ("Do you want to close all windows?") and then tears down every window (each flushes
+                    // its record + archives its sessions). Do NOT also run this window's close below — let
+                    // RequestQuit drive the app-wide, equally non-destructive teardown.
+                    RequestQuit();
+                    co_return;
+                }
+                // Primary ("Close Window"): honor the inline "don't ask again" exactly like the shared
+                // _ShowConfirmCloseDialog does, then fall through to the non-destructive close below.
+                if (const auto c = dontAsk.IsChecked(); c && c.Value())
+                {
+                    _settings.GlobalSettings().ConfirmOnClose(ConfirmOnClose::Never);
+                    _settings.WriteSettingsToDisk();
+                }
             }
         }
 
