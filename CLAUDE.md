@@ -416,12 +416,19 @@ background restore can't spuriously flash. A **selection pill** rides the header
 accent pill behind the tab (`HeaderAgentSelectionPill`, driven by `TerminalTabStatus.AgentSelectionVisible`/
 `AgentSelectionBrush` at ~40% alpha via `_SetTabSelectionPill`) shown while the **Manager tab is active**
 and this session is hovered/selected there: the tab-strip half of the Linked-Lenses selection sync. A
-**FAVORITE crown** also rides the dot (FAVORITES.md §5a): a small **gold `Path` crown** (`#F5C242`, the
-Sessions ★ color) perched at the **north-west** of the status dot (peak tilted NW, `RotateTransform`),
-drawn as the wrap-Grid's last child so it sits ON the dot — the one visible "keeper" marker on a LIVE
-session's tab (`HeaderAgentFavoriteCrown`, bound to `TerminalTabStatus.AgentFavoriteVisible`, driven by
-`_SetTabAgentFavorite` / `_RefreshTabFavoriteCrown` from the durable `IsSessionFavorite` at launch /
-bind / favorite-toggle; same-window-instant, cross-window-on-next-bind). Deliberately
+**FAVORITE marker** also rides the dot (FAVORITES.md §5a) in one of **two user-selectable glyphs** (the
+Settings cog's **TABS ▸ Favorite marker** dropdown — a GLOBAL `AppSettings::favoriteIcon`, default
+**Crown**): **Crown** = a small **gold `Path` crown** (`#F5C242`, the Sessions ★ color) perched at the
+**north-west** of the status dot (peak tilted NW, `RotateTransform`), drawn as the wrap-Grid's last child
+so it sits ON the dot; **Star** = the state-colored status dot becomes the **foreground of a white,
+golden-tipped `Path` star** (a 5-point star drawn BEHIND the dot — white fill, gold `#F5C242` stroke
+whose miter tips read golden — so its points radiate around the dot). The one visible "keeper" marker on
+a LIVE session's tab (`HeaderAgentFavoriteCrown` / `HeaderAgentFavoriteStar`, bound to the **mutually
+exclusive** `TerminalTabStatus.AgentFavoriteVisible` (crown) / `AgentFavoriteStarVisible` (star), driven
+by `_SetTabAgentFavorite` (reads `favoriteIcon`, asserts exactly one) / `_RefreshTabFavoriteCrown` /
+`_RefreshAllFavoriteIcons` from the durable `IsSessionFavorite` at launch / bind / favorite-toggle, and
+re-asserted live on a Crown↔Star change via the cog Save + cross-window broadcast; same-window-instant,
+cross-window-on-next-bind). Deliberately
 NOT a title prefix — the one-title invariant (Rule #11: Explorer name == tab title == persisted
 title) must never carry presentation glyphs through renames/persistence. The state palette is
 shared through **`AgentStatusColors.h`** (`AgentStatusColorFor`): the **per-tab overlay**
@@ -1007,14 +1014,21 @@ What works, by area:
   Enter is absorbed as a **newline** instead of sending — the prompt sits typed-but-unsubmitted and
   the turn never starts (no `UserPromptSubmit`, no transcript write, state stuck `Idle`/
   `WaitingForInput`). The scheduler **watches** every just-sent Flight prompt and, if the turn hasn't
-  **started** within `kEnterRetryIntervalMs` (10s), re-presses a **lone Enter** (never the text again
-  — it is already typed; resending would duplicate it), up to `kEnterRetryMax` (3) times, then gives
-  up (the prompt stays `Sent`; Send-now still works). **"Started" = OR of three signals** so it
+  **started**, re-presses a **lone Enter** (never the text again — it is already typed; resending
+  would duplicate it): the FIRST re-press fires fast (`kEnterRetryFirstMs`, 3s — rescue the common
+  eaten-CR case without a long stall), later presses space out by `kEnterRetryIntervalMs` (6s), up
+  to `kEnterRetryMax` (3) presses, then **gives up — the prompt is marked `Failed` and the session's
+  Autopilot is PAUSED** (mode→Off): it never landed, so don't strand a phantom `Sent` nor advance
+  past a broken step (the user Send-nows / re-arms; rolling back to `Pending` would just re-send and
+  be re-eaten — an infinite loop). **"Started" = OR of three signals** so it
   degrades across hook / no-hook sessions: the prompt's `UserPromptSubmit` echo arrived (`echoed`) ·
   the session left the ready set (state advanced past `Idle`/`WaitingForInput`, e.g. `Running` — the
   transcript-tail-driven adopted path) · the transcript advanced past the send
   (`convLastActivityUnixMs`, with `kEnterRetryActivityMarginMs` slop — the no-hook fast-turn
-  fallback). Only **live, non-external** (injector-bound) sessions are driven. The watch is **armed
+  fallback). Only **live, injector-bound** sessions are driven — the gate is **controllability**
+  (`HasInjector`: do we hold this session's stdin?), NOT provenance (`external`: did we launch it?);
+  an **adopted** `+`-tab claude is `external=true` yet injector-bound, so it IS driven (gating on
+  `external` here was the autopilot-on-adopted bug). The watch is **armed
   from `OnObserved`** — every send path marks the prompt `Sent` through the registry, which notifies
   this observer — so no send path needs to know about it, and it works regardless of autopilot **mode**
   (a manual Send-now must still submit). The worker `wait_for`s a `kEnterRetryPollMs` poll cadence
