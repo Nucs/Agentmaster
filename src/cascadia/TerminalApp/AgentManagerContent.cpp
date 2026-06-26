@@ -2832,7 +2832,7 @@ namespace winrt::TerminalApp::implementation
         // session's context right now), filled by the SessionScanner. Shown once usage exists.
         if (s.contextTokens > 0)
         {
-            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 11, false, 0.7);
+            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 10, false, 0.45);
             const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
                              L" tokens in the session (newest turn: input + cache + output).";
             AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
