@@ -325,10 +325,24 @@ new id minted by us so hooks/registry correlate from the first event; offered on
 **including a LIVE one** — a fork writes its OWN transcript, so the adopt path's two-writers
 hazard doesn't apply; transcript-gated → fresh; titled via `DeriveForkTitle` (`"<title> (fork)"`,
 then `(fork 2)`/`(fork 3)`/… on a fork-of-a-fork, never stacked `(fork) (fork)`), logged
-`[sessions-page->fork]`), **Open New Session Here**, a right-click **Filter ▸** submenu, and a
+`[sessions-page->fork]`), **Open New Session Here**, an **Edit Title** (rename in place), a right-click
+**Filter ▸** submenu, and a
 right-click **Hide from list**
 (`_HideSessionFromList` → `_AddSessionIdToHiddenList` → `AppSettings.hiddenSessionIds`, persisted +
 filtered out of the browser; cleared from the cog's **Reset hidden sessions**); double-click = resume.
+**Edit Title — rename a session IN PLACE** (right-click **Edit Title** OR a **"slow double-click"**: a
+re-click of the already-selected row, the Windows-Explorer rename gesture, disambiguated from a fast
+double-click=resume by an OS-`GetDoubleClickTime` arm timer a `DoubleTapped` disarms). It swaps the row's
+Title cell for a focused in-place `TextBox` (`_BeginSessionsRename`; a `ContentDialog` text box gets no
+keypresses under XAML Islands, so editing is inline — the Manager's Explorer-tree rename idiom), Enter /
+focus-loss commits + Escape cancels (both deferred so the re-render can't tear the box out; a blank edit
+keeps the old title — never empty, Rule #11). The title is **persisted durably**
+(`_PersistEditedSessionTitle`): a registry-known session (open OR archived) routes through
+`_RenameClaudeSession` (registry + the WT tab if open + the Engine observer mirrors it to the
+**SessionStore** `title` key AND `sessions.json` — the title is ONE value), a pure on-disk session writes
+the SessionStore directly (`SetStoredSessionTitle`, the overlay `LoadAllStoredSessionTitles` reads for
+closed rows); the edit reflects instantly into the in-memory rows + 🏷 search index (no re-gather) and
+survives across windows/runs.
 The **Filter ▸** submenu (`_SessionsRowFilterState` / `_SessionsRowFilterKind`, SESSIONS.md §1) narrows
 the list to sessions **like the clicked row** — **By Same Directory** (filesystem-aware `NormDirKey`),
 **By Same Branch** (exact; only when the row has one), **By Same Day / Week / Month** (the row's

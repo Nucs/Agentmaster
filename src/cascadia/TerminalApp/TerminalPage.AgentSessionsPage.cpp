@@ -996,6 +996,10 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
+            if (!_sessRenamingId.empty())
+            {
+                return; // an in-place title editor owns the keyboard — don't hijack Up/Down for row nav
+            }
             e.Handled(true);
             const int delta = (k == winrt::Windows::System::VirtualKey::Down) ? 1 : -1;
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), delta]() {
@@ -1020,6 +1024,33 @@ namespace winrt::TerminalApp::implementation
                     self->_RunSessionsSearch();
                 }
             });
+
+        // Slow-double-click TITLE EDIT (the Windows-Explorer rename gesture): re-clicking an
+        // already-selected row arms this timer; if no fast double-tap (= resume) intervenes within
+        // the system double-click time, it begins the in-place editor. The interval matches the OS so
+        // the gesture feels native; a row DoubleTapped disarms it (a double-click resumes, never
+        // renames). One-shot — the Tick stops it.
+        _sessRenameArmTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+        _sessRenameArmTimer.Interval(std::chrono::milliseconds{ static_cast<int64_t>(::GetDoubleClickTime()) });
+        _sessRenameArmTimer.Tick([weak = get_weak()](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+            auto self = weak.get();
+            if (!self)
+            {
+                return;
+            }
+            if (self->_sessRenameArmTimer)
+            {
+                self->_sessRenameArmTimer.Stop(); // one-shot
+            }
+            const std::wstring id = self->_sessRenamePendingId;
+            self->_sessRenamePendingId.clear();
+            // Begin only if the armed row is still the selection and nothing else is mid-edit (a
+            // double-tap would have disarmed us; a moved selection means the user went elsewhere).
+            if (!id.empty() && self->_sessionsSelectedId == id && self->_sessRenamingId.empty())
+            {
+                self->_BeginSessionsRename(id);
+            }
+        });
     }
 
     void TerminalPage::_ShowSessionsPage()
@@ -1074,6 +1105,11 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_sessRangePopup.IsOpen(false);
                 }
+                // Drop any in-flight title editing so a re-open starts clean (no stray pending arm,
+                // no half-built editor surviving the collapse).
+                self->_DisarmSessionsRenameTimer();
+                self->_sessRenamingId.clear();
+                self->_sessRenameBox = nullptr;
             }
         });
     }
@@ -1380,6 +1416,14 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_RenderSessionsTable()
     {
         if (!_sessionsRowsHost || !_sessionsHeaderRow)
+        {
+            return;
+        }
+        // An in-place title editor is live (the box exists) — suppress the re-render so a background
+        // search/refresh tick can't tear the editor out mid-edit (the Manager's _RebuildTree guard).
+        // _BeginSessionsRename nulls _sessRenameBox first, so the render that BUILDS the editor passes;
+        // _Commit/_CancelSessionsRename clear _sessRenamingId, so the exit render passes too.
+        if (!_sessRenamingId.empty() && _sessRenameBox)
         {
             return;
         }
@@ -1719,21 +1763,64 @@ namespace winrt::TerminalApp::implementation
             // short underline, a long ellipsized one fills the column — with VerticalAlignment::Center so
             // it sits under the glyphs, not at the row's bottom edge. The dim for an on-disk row is on the
             // BRUSH (not the Border) so the title text keeps its own live/archived opacity.
-            auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
             // Full-strength rule for a live row; a translucent one (alpha ~0.6) for an on-disk row,
             // baked into the brush's alpha — NOT the Border's Opacity, which would also fade the text.
+            // (Computed before the title/editor branch — the Directory cell below reuses this brush.)
             const uint8_t ulAlpha = live ? 0xFF : 0x99;
             auto underline = dirColor ? SessBrush(ulAlpha, dirColor->R, dirColor->G, dirColor->B) : SessBrush(ulAlpha, 0x60, 0x60, 0x60);
-            Border titleWrap;
-            titleWrap.Child(title);
-            titleWrap.HorizontalAlignment(HorizontalAlignment::Left);
-            titleWrap.VerticalAlignment(VerticalAlignment::Center);
-            titleWrap.BorderBrush(underline);
-            titleWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
-            titleWrap.Padding(Thickness{ 0, 0, 0, 1 }); // a hair of gap between the descenders and the rule
-            titleWrap.IsHitTestVisible(false); // clickthrough -> the row Border is the one click target + tooltip
-            Grid::SetColumn(titleWrap, 2);
-            g.Children().Append(titleWrap);
+            if (!_sessRenamingId.empty() && _sessRenamingId == r.id)
+            {
+                // In-place TITLE editor (the Manager's Explorer-tree rename idiom; a ContentDialog is
+                // ruled out — a TextBox inside one gets no keypresses under XAML Islands). Commit on
+                // Enter / focus-loss, cancel on Escape; both DEFERRED so the re-render the commit
+                // triggers doesn't tear this box out mid-keystroke. Focus + select-all on Loaded so
+                // the first keystroke replaces the old name.
+                auto box = TextBox{};
+                box.Text(winrt::hstring{ r.title });
+                box.FontSize(12);
+                box.Padding(Thickness{ 4, 1, 4, 1 });
+                box.VerticalAlignment(VerticalAlignment::Center);
+                box.HorizontalAlignment(HorizontalAlignment::Stretch);
+                box.KeyDown([this](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::KeyRoutedEventArgs& e) {
+                    if (e.Key() == winrt::Windows::System::VirtualKey::Enter)
+                    {
+                        e.Handled(true);
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() { if (auto self = weak.get()) { self->_CommitSessionsRename(); } });
+                    }
+                    else if (e.Key() == winrt::Windows::System::VirtualKey::Escape)
+                    {
+                        e.Handled(true);
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() { if (auto self = weak.get()) { self->_CancelSessionsRename(); } });
+                    }
+                });
+                box.LostFocus([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() { if (auto self = weak.get()) { self->_CommitSessionsRename(); } });
+                });
+                box.Loaded([](const winrt::Windows::Foundation::IInspectable& s, const RoutedEventArgs&) {
+                    if (const auto tb = s.try_as<TextBox>())
+                    {
+                        tb.Focus(FocusState::Programmatic);
+                        tb.SelectAll();
+                    }
+                });
+                _sessRenameBox = box;
+                Grid::SetColumn(box, 2);
+                g.Children().Append(box);
+            }
+            else
+            {
+                auto title = SessText(winrt::hstring{ (r.fork ? L"\x2442 " : L"") + r.title }, 12, false, live ? 1.0 : 0.85);
+                Border titleWrap;
+                titleWrap.Child(title);
+                titleWrap.HorizontalAlignment(HorizontalAlignment::Left);
+                titleWrap.VerticalAlignment(VerticalAlignment::Center);
+                titleWrap.BorderBrush(underline);
+                titleWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
+                titleWrap.Padding(Thickness{ 0, 0, 0, 1 }); // a hair of gap between the descenders and the rule
+                titleWrap.IsHitTestVisible(false); // clickthrough -> the row Border is the one click target + tooltip
+                Grid::SetColumn(titleWrap, 2);
+                g.Children().Append(titleWrap);
+            }
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
             // Same working-directory-color underline as the title (reusing the row's `underline`
@@ -1848,13 +1935,33 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                SessCloseTipsIn(b); // a click dismisses the row's tip (the standard behavior the islands stack drops)
                 const std::wstring id{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") };
+                if (!_sessRenamingId.empty() && _sessRenamingId == id)
+                {
+                    return; // this row is being edited — let the in-place box own the click (don't re-select)
+                }
+                SessCloseTipsIn(b); // a click dismisses the row's tip (the standard behavior the islands stack drops)
                 e.Handled(true);
+                // Slow-double-click TITLE EDIT (the Windows-Explorer rename gesture): a click that
+                // RE-clicks the already-selected row arms a short timer; if no fast double-tap (=
+                // resume) lands within the OS double-click time, _BeginSessionsRename fires. Reading
+                // _sessionsSelectedId synchronously here is correct for the slow case (the prior
+                // click's deferred select has long since run); a fast double-click disarms via
+                // DoubleTapped below regardless. Any other click disarms a stale pending arm first.
+                const bool wasSelected = (_sessionsSelectedId == id);
+                _DisarmSessionsRenameTimer();
+                if (wasSelected && _sessRenamingId.empty())
+                {
+                    _ArmSessionsRenameTimer(id);
+                }
                 // Defer: selection re-renders the detail pane (tree mutation) — the page's crash class.
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id]() {
                     if (auto self = weak.get())
                     {
+                        if (!self->_sessRenamingId.empty() && self->_sessRenamingId != id)
+                        {
+                            self->_CommitSessionsRename(); // an edit on another row is in flight — commit it before switching (a Border click didn't steal the editor's focus)
+                        }
                         self->_sessionsSelectedId = id;
                         // Nav audit: which session the user looked at + WHY it's in the result set
                         // (name/dir = fast match, content = slow phase). This is the line that would
@@ -1868,12 +1975,17 @@ namespace winrt::TerminalApp::implementation
                 });
             });
             rowB.DoubleTapped([this](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::DoubleTappedRoutedEventArgs& e) {
+                _DisarmSessionsRenameTimer(); // a fast double-click is a RESUME, never a rename — cancel the pending slow-double-click arm
                 const auto b = s.try_as<Border>();
                 if (!b)
                 {
                     return;
                 }
                 const std::wstring id{ winrt::unbox_value_or<winrt::hstring>(b.Tag(), L"") };
+                if (!_sessRenamingId.empty() && _sessRenamingId == id)
+                {
+                    return; // this row is being edited — the box owns double-clicks (word select), not resume
+                }
                 e.Handled(true);
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id]() {
                     auto self = weak.get();
@@ -1959,6 +2071,23 @@ namespace winrt::TerminalApp::implementation
                     });
                     rowMenu.Items().Append(resume);
                 }
+
+                // Edit Title — the durable per-session title (persisted in the SessionStore; for an
+                // OPEN session it routes through the live rename so the tab + Explorer/board lens track
+                // it, Rule #11). Opens the SAME in-place editor the slow-double-click gesture does — a
+                // ContentDialog text box gets no keypresses under XAML Islands, so editing is inline.
+                MenuFlyoutItem editTitle;
+                editTitle.Text(L"Edit Title");
+                SessSetTip(editTitle, L"Rename this session \x2014 edits the title in place and remembers it (persisted per session).");
+                editTitle.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_BeginSessionsRename(rid);
+                        }
+                    });
+                });
+                rowMenu.Items().Append(editTitle);
 
                 MenuFlyoutItem forkBtn;
                 forkBtn.Text(L"Fork here");
@@ -2707,6 +2836,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        _DisarmSessionsRenameTimer(); // moving the selection by keyboard cancels a pending slow-double-click arm
         const int n = static_cast<int>(_sessionsVisibleOrder.size());
         int idx = -1;
         if (!_sessionsSelectedId.empty())
@@ -2852,6 +2982,141 @@ namespace winrt::TerminalApp::implementation
         }
         _RefreshTabFavoriteCrown(sessionId); // FAVORITES.md: live-update the tab-strip crown if this window hosts the session
         _RenderSessionsTable(); // refresh the ★ glyph + (if the Favorite filter is on) the visible set
+    }
+
+    // ===== in-place TITLE editing (Edit Title / slow-double-click) ==========================
+    // The Sessions browser lets you rename a session in place — the durable per-session TITLE the
+    // SessionStore keeps (the SAME store the favorite star uses). Two entry points: the row
+    // right-click "Edit Title" and the Windows-Explorer "slow double-click" gesture (re-click the
+    // already-selected row). Both swap the row's Title cell for a focused TextBox (a ContentDialog
+    // text box gets no keypresses under XAML Islands — the Manager's in-place rename idiom). Commit
+    // persists the trimmed title; for a session known to the registry it routes through the live
+    // rename so the open tab + Explorer/board lens track it (Rule #11).
+
+    void TerminalPage::_BeginSessionsRename(const std::wstring& sessionId)
+    {
+        if (sessionId.empty() || !_sessionsRowsHost)
+        {
+            return;
+        }
+        if (!_sessRenamingId.empty())
+        {
+            if (_sessRenamingId == sessionId)
+            {
+                return; // already editing this row
+            }
+            _CommitSessionsRename(); // a different row is already mid-edit — commit it before switching (clicking a Border doesn't steal the editor's focus, so LostFocus wouldn't have fired)
+        }
+        _DisarmSessionsRenameTimer(); // any pending slow-double-click arm is now consumed
+        // Make the target row the selection so the editor renders in a known, visible row and the
+        // detail pane tracks it (the right-click path may fire on a row that wasn't selected yet).
+        _sessionsSelectedId = sessionId;
+        _sessRenamingId = sessionId;
+        _sessRenameBox = nullptr; // bootstrap: the next render builds + focuses the editor (the guard lets THIS render through)
+        _RenderSessionsTable(); // colors the row selected + swaps its Title cell for the editor
+        _ShowSessionsDetail(sessionId);
+    }
+
+    void TerminalPage::_CommitSessionsRename()
+    {
+        if (_sessRenamingId.empty())
+        {
+            return; // idempotent: a deferred Enter-commit + the LostFocus that follows must collapse to one
+        }
+        const std::wstring id = _sessRenamingId;
+        std::wstring name = _sessRenameBox ? std::wstring{ _sessRenameBox.Text() } : std::wstring{};
+        // Trim surrounding whitespace/newlines — a blank/whitespace edit keeps the old title (matches
+        // the Manager's _CommitRename + the WT tab renamer; a title never goes empty, Rule #11).
+        const auto first = name.find_first_not_of(L" \t\r\n");
+        const auto last = name.find_last_not_of(L" \t\r\n");
+        name = (first == std::wstring::npos) ? std::wstring{} : name.substr(first, last - first + 1);
+
+        _sessRenamingId.clear();
+        _sessRenameBox = nullptr;
+        if (!name.empty())
+        {
+            _PersistEditedSessionTitle(id, name);
+        }
+        // Exit edit mode: the Title cell renders as text again. With an active query, re-run the
+        // search so the new title's membership + ranking update (the 🏷 title scope); otherwise a
+        // plain re-render is enough. Refresh the detail header either way.
+        if (!_sessionsQueryText.empty())
+        {
+            _RunSessionsSearch();
+        }
+        else
+        {
+            _RenderSessionsTable();
+        }
+        _ShowSessionsDetail(_sessionsSelectedId);
+    }
+
+    void TerminalPage::_CancelSessionsRename()
+    {
+        if (_sessRenamingId.empty())
+        {
+            return;
+        }
+        _sessRenamingId.clear();
+        _sessRenameBox = nullptr;
+        _RenderSessionsTable(); // back to the text Title cell, nothing written
+    }
+
+    // The persistence core. Rule #11 — the title is ONE value. A session KNOWN to the process-wide
+    // registry (open OR archived) goes through the live rename seam: it writes SessionInfo.title
+    // (-> the Engine observer mirrors it to <profile>/session-store/<sid>.json AND sessions.json) and
+    // re-pins the WT tab when the session is open in this window. A pure ON-DISK session (never
+    // managed by this app) isn't in the registry, so write the durable store directly — exactly the
+    // overlay the Sessions browser reads for closed/historical rows (LoadAllStoredSessionTitles).
+    // Either way the new title is reflected into the in-memory rows + the search index entry so the
+    // table (display + sort + the 🏷 title search) and the detail header update without a re-gather.
+    void TerminalPage::_PersistEditedSessionTitle(const std::wstring& sessionId, const std::wstring& title)
+    {
+        if (sessionId.empty() || title.empty())
+        {
+            return;
+        }
+        ::Agentmaster::LogNav(L"sessions edit-title " + ::Agentmaster::ShortId(sessionId) + L" -> \"" + title.substr(0, 80) + L"\"");
+        if (_sessionRegistry && _sessionRegistry->Get(sessionId).has_value())
+        {
+            _RenameClaudeSession(winrt::hstring{ sessionId }, winrt::hstring{ title }); // registry (+ tab if open); the Engine observer mirrors to the durable store + sessions.json
+        }
+        else
+        {
+            ::Agentmaster::SetStoredSessionTitle(sessionId, title); // pure on-disk row — write the durable store directly
+        }
+        for (size_t i = 0; i < _sessionsRows.size(); ++i)
+        {
+            if (_sessionsRows[i].id == sessionId)
+            {
+                _sessionsRows[i].title = title;
+                if (i < _sessionsEntries.size() && _sessionsEntries[i].sessionId == sessionId)
+                {
+                    _sessionsEntries[i].liveTitle = title; // keep the 🏷 title search in step with the edit
+                }
+                break;
+            }
+        }
+    }
+
+    void TerminalPage::_ArmSessionsRenameTimer(const std::wstring& sessionId)
+    {
+        if (!_sessRenameArmTimer || sessionId.empty())
+        {
+            return;
+        }
+        _sessRenamePendingId = sessionId;
+        _sessRenameArmTimer.Stop();
+        _sessRenameArmTimer.Start(); // a DispatcherTimer restarts its interval on Start()
+    }
+
+    void TerminalPage::_DisarmSessionsRenameTimer()
+    {
+        _sessRenamePendingId.clear();
+        if (_sessRenameArmTimer)
+        {
+            _sessRenameArmTimer.Stop();
+        }
     }
 
     // ===== the Sessions-page row right-click "Filter" facets ================================

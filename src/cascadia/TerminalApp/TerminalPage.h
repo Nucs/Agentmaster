@@ -525,6 +525,19 @@ namespace winrt::TerminalApp::implementation
         // navigation list (the archive page's _archiveVisibleOrder pattern). Rebuilt each render.
         std::vector<std::wstring> _sessionsVisibleOrder;
 
+        // Agentmaster: IN-PLACE TITLE EDITING in the Sessions browser (the Manager's Explorer-tree
+        // rename idiom, here over the Title cell). Two entry points — the row right-click "Edit
+        // Title" and a "slow double-click" (re-clicking the already-selected row, the Windows-
+        // Explorer rename gesture) — both call _BeginSessionsRename, which swaps the Title cell for a
+        // focused TextBox (a ContentDialog is ruled out: a text box inside one gets no keypresses
+        // under XAML Islands). Commit writes the durable SessionStore title and, for a session known
+        // to the registry, routes through _RenameClaudeSession so the live tab + Explorer/board lens
+        // track it (Rule #11).
+        std::wstring _sessRenamingId; // the row whose Title cell is currently an editable TextBox ("" = none)
+        winrt::Windows::UI::Xaml::Controls::TextBox _sessRenameBox{ nullptr }; // the live editor; while it exists a re-render is suppressed so a background tick can't tear it out
+        std::wstring _sessRenamePendingId; // the row armed for slow-double-click rename (consumed by the next selected-row click or disarmed by a double-tap)
+        winrt::Windows::UI::Xaml::DispatcherTimer _sessRenameArmTimer{ nullptr }; // disambiguates the slow second click from a fast double-click (interval = GetDoubleClickTime); a row double-tap disarms it (a double-click resumes, never renames)
+
         // Agentmaster: a ROW-LEVEL filter set from a session row's right-click "Filter \xBB" submenu —
         // narrows the visible set to rows matching the clicked ("anchor") row in one or more
         // dimensions. It COMPOSES with the search text + the scope/Open/Hidden toggles as AND (it is
@@ -817,6 +830,13 @@ namespace winrt::TerminalApp::implementation
         void _UnhideSessionFromList(const std::wstring& sessionId); // Sessions-page row right-click "Unhide" (shown on a revealed hidden row): remove from AppSettings.hiddenSessionIds (freshest-disk RMW) + re-render so it returns to the list normally
         void _ResetHiddenSessions(); // Settings cog "Reset hidden sessions" (via SetResetHiddenSessionsHandler): clear AppSettings.hiddenSessionIds (RMW) + re-render so every hidden session reappears
         void _ToggleSessionFavorite(const std::wstring& sessionId); // FAVORITES.md: flip the durable star (SessionStore "favorite" key), update _sessionsFavorites, re-render. Shared by the ★ column click, the row right-click "Favorite"/"Unfavorite", and the session tab's context menu.
+        // Agentmaster: in-place TITLE editing in the Sessions browser (the durable SessionStore title).
+        void _BeginSessionsRename(const std::wstring& sessionId); // "Edit Title" / slow-double-click: select the row + swap its Title cell for an in-place editor (the Manager's _OnRenameSession idiom)
+        void _CommitSessionsRename(); // commit the editor: persist the trimmed title (durable store + the live rename seam for a known session — Rule #11), update the in-memory rows/index, re-render. Idempotent (a deferred Enter-commit + the LostFocus that follows collapse to one). Blank keeps the old title.
+        void _CancelSessionsRename(); // abandon the editor (Escape) — re-render without writing
+        void _PersistEditedSessionTitle(const std::wstring& sessionId, const std::wstring& title); // the persistence core: SetStoredSessionTitle (pure on-disk row) or _RenameClaudeSession (registry-known: registry + tab + the Engine observer mirrors to the store), then reflect into _sessionsRows/_sessionsEntries
+        void _ArmSessionsRenameTimer(const std::wstring& sessionId); // (re)start the slow-double-click timer for this row
+        void _DisarmSessionsRenameTimer(); // stop the timer + clear the armed id (a fast double-tap / a different row / a key-nav move / page hide)
         // Agentmaster: the Sessions-page row right-click "Filter \xBB" submenu (composes AND with the
         // search text + the scope/Open/Hidden toggles — applied at the _RenderSessionsTable chokepoint).
         void _ApplySessionsRowFilter(int kind, const std::wstring& anchorId); // toggle the dimension's facet to the anchor row's value (or OFF if the anchor already matches it); re-renders

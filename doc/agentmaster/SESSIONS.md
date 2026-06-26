@@ -73,6 +73,20 @@
 - **Opened sessions get more:** a session that is currently OPEN in this app (live in the
   registry) renders enriched — its **per-working-dir tab color** chip, the live **state glyph**,
   and Jump-to-tab; see §6.6 for the full row-affordance matrix.
+- **Edit title (rename in place):** a row's **right-click → "Edit Title"** OR a **"slow double-click"**
+  (re-clicking the already-selected row — the Windows-Explorer rename gesture, disambiguated from a fast
+  double-click by an OS-`GetDoubleClickTime` timer that a `DoubleTapped`=resume disarms) swaps the row's
+  Title cell for an in-place `TextBox` (`_BeginSessionsRename` — a `ContentDialog` text box gets no
+  keypresses under XAML Islands, so editing is inline, the Manager's Explorer-tree rename idiom). Commit
+  on **Enter** / focus-loss, cancel on **Escape** (both deferred so the re-render can't tear the box out
+  mid-keystroke; a blank edit keeps the old title — a title never goes empty, Rule #11). The new title is
+  **persisted durably** (`_PersistEditedSessionTitle`): a session **known to the registry** (open OR
+  archived) routes through the live rename (`_RenameClaudeSession` → registry + the WT tab if open + the
+  Engine observer mirrors it to the **SessionStore** `title` key AND `sessions.json` — Rule #11, the title
+  is ONE value); a **pure on-disk** session (never managed) writes the SessionStore directly
+  (`SetStoredSessionTitle`) — exactly the overlay the browser reads for closed/historical rows
+  (`LoadAllStoredSessionTitles`). Either way the edit reflects instantly into the in-memory rows + search
+  index (no re-gather) and survives across windows/runs.
 - **Hide from list:** a row's **right-click → "Hide from list"** drops that session from the
   browser (`_HideSessionFromList`), persisted in `AppSettings.hiddenSessionIds` via a freshest-disk
   read-modify-write (the splitter/`treeSort` pattern), so it survives restarts. The render filters
@@ -316,7 +330,9 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
    - *As shipped*, every row's right-click menu carries the relationship-appropriate primary
      action (**Jump to tab** when OPEN, else **Resume here**) PLUS **Fork here** on EVERY row —
      including a live one, since a fork writes its OWN transcript so the two-writers hazard
-     doesn't apply (`_ForkSessionFromDisk`) — **Open New Session Here**, a **Filter ▸** submenu
+     doesn't apply (`_ForkSessionFromDisk`) — **Edit Title** (rename in place → the durable
+     SessionStore title; also the **slow-double-click** gesture — see "Edit title" in §1),
+     **Open New Session Here**, a **Filter ▸** submenu
      (By Same Directory / Branch / Day / Week / Month / Fork Family — the AND-stacking browse facets,
      §1), and **Hide from list**
      (§1). Resume / Fork / Open-New open in a BACKGROUND tab so the list stays up for bulk-open.
