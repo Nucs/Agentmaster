@@ -708,6 +708,7 @@ namespace Agentmaster
         o.Set(L"selectedSessionId", json::Value::MkStr(w.selectedSessionId)); // stable id of the focused Claude tab
         o.Set(L"selectedTabIndex", json::Value::MkNum(static_cast<double>(w.selectedTabIndex))); // fallback for a shell tab
         o.Set(L"manager", ToJson(w.manager));
+        o.Set(L"managerTabColor", json::Value::MkStr(w.managerTabColor)); // Agentmaster: the Manager tab's per-window color ("#RRGGBB"; "" => none)
         return o;
     }
 
@@ -731,6 +732,7 @@ namespace Agentmaster
         // preferred on restore; selectedTabIndex is the shell-tab fallback.
         w.selectedSessionId = v.StrAt(L"selectedSessionId");
         w.selectedTabIndex = static_cast<int>(v.I64At(L"selectedTabIndex", -1));
+        w.managerTabColor = v.StrAt(L"managerTabColor"); // empty when absent (a pre-feature record => no Manager-tab color)
         if (const auto* m = v.Find(L"manager"); m && m->type == json::Value::Type::Obj)
         {
             w.manager = ManagerStateFromJson(*m);

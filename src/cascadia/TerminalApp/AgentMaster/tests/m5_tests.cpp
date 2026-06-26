@@ -2031,6 +2031,7 @@ static void TestWindowRecord()
     // would otherwise mask a missing index).
     in.selectedSessionId = L"conv-abc";
     in.selectedTabIndex = 1;
+    in.managerTabColor = L"#3A6EA5"; // the pinned Manager tab's per-window color (non-default so a dropped field fails the round-trip)
 
     in.manager.selectedId = L"conv-abc";
     in.manager.scopeDir = L"K:/api";
@@ -2061,6 +2062,7 @@ static void TestWindowRecord()
 
     CHECK(out.selectedSessionId == L"conv-abc", "selected tab persisted by stable Claude id (round-trip)");
     CHECK(out.selectedTabIndex == 1, "selectedTabIndex shell fallback (round-trip)");
+    CHECK(out.managerTabColor == L"#3A6EA5", "managerTabColor (Manager tab's per-window color) round-trip");
 
     CHECK(out.manager.selectedId == L"conv-abc", "lens selectedId round-trip");
     CHECK(out.manager.scopeDir == L"K:/api", "lens scopeDir round-trip");
@@ -2078,6 +2080,7 @@ static void TestWindowRecord()
         // An older record (no treeScope key) and an out-of-range value both land on LOCAL (0).
         const auto legacy = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"selectedId\":\"s\"}}");
         CHECK(legacy.manager.treeScope == 0, "missing treeScope -> LOCAL (older record)");
+        CHECK(legacy.managerTabColor.empty(), "missing managerTabColor -> empty (older record, no Manager-tab color)");
         const auto outOfRange = DeserializeWindowRecord(L"{\"windowId\":\"w\",\"manager\":{\"treeScope\":7}}");
         CHECK(outOfRange.manager.treeScope == 0, "out-of-range treeScope clamps to LOCAL");
     }

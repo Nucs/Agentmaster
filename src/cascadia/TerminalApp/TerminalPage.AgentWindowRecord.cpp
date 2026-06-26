@@ -78,6 +78,17 @@ namespace winrt::TerminalApp::implementation
         return L"default";
     }
 
+    // Agentmaster: a WT tab color -> "#RRGGBB" (alpha dropped — tab colors are opaque). Mirrors
+    // AgentSessions.cpp's ClaudeColorToHex; kept TU-local like the codebase's other per-file color
+    // converters (HexToColor / SessHexToColor / ClaudeColorToHex). Used to persist the Manager tab's
+    // per-window color into the window record.
+    static std::wstring _WindowRecordColorToHex(const winrt::Windows::UI::Color& c)
+    {
+        wchar_t buf[8];
+        ::swprintf(buf, 8, L"#%02X%02X%02X", static_cast<unsigned>(c.R), static_cast<unsigned>(c.G), static_cast<unsigned>(c.B));
+        return buf;
+    }
+
     // Agentmaster: a shell (Other) tab's OSC-9;9 working dir (when shell integration reports one) +
     // its WT_SESSION id, walked from the tab's active terminal control. WT's BuildStartupActions
     // records WorkingDirectory() when present, else the profile's default StartingDirectory — so a tab
@@ -319,6 +330,20 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             rec.tabs.push_back(std::move(entry));
+        }
+
+        // --- Manager tab's per-window color ---
+        // The pinned Manager tab is a per-window singleton with no working dir, so its user-chosen color
+        // is persisted HERE in the window record (NOT the dir-color map — Rule #12 is dir-keyed). Read it
+        // LIVE like geometry; if the Manager tab is gone (a teardown flush has no live tab), keep the value
+        // already copied from _windowRecord rather than wiping a good color (the geometry-fallback idiom).
+        if (_managerTab)
+        {
+            if (const auto mgr = _GetTabImpl(_managerTab))
+            {
+                const auto c = mgr->GetRuntimeTabColor();
+                rec.managerTabColor = c ? _WindowRecordColorToHex(*c) : std::wstring{};
+            }
         }
 
         return rec;

@@ -193,6 +193,31 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster: "#RRGGBB" -> an opaque WT tab color. Mirrors AgentSessions.cpp's ClaudeHexToColor;
+    // kept TU-local like the codebase's other per-file color converters. Used to re-apply the Manager
+    // tab's persisted per-window color on reopen. nullopt on anything malformed.
+    static std::optional<winrt::Windows::UI::Color> _ManagerHexToColor(const std::wstring& hexIn)
+    {
+        std::wstring s = hexIn;
+        if (!s.empty() && s.front() == L'#')
+        {
+            s.erase(0, 1);
+        }
+        if (s.size() != 6)
+        {
+            return std::nullopt;
+        }
+        const auto byteAt = [&s](size_t i) {
+            return static_cast<uint8_t>(::wcstoul(s.substr(i, 2).c_str(), nullptr, 16));
+        };
+        winrt::Windows::UI::Color c{};
+        c.A = 255;
+        c.R = byteAt(0);
+        c.G = byteAt(2);
+        c.B = byteAt(4);
+        return c;
+    }
+
     // Agentmaster: open the always-present Manager tab, pinned at the leftmost
     // position (tab 0) and non-closable. Tracked in _managerTab.
     void TerminalPage::_OpenAgentManagerTab()
@@ -228,6 +253,19 @@ namespace winrt::TerminalApp::implementation
             {
                 tabImpl->DisableCloseAndMoveMenuItems();
                 tabImpl->DisableTabRename();
+
+                // Agentmaster: re-apply the Manager tab's per-window color from the claimed window record
+                // (windows/<id>.json). The Manager tab is a per-window singleton, so unlike a session tab
+                // (dir-keyed, Rule #12) its color lives in the window record; a claimed record with a saved
+                // color re-tints this window's home tab on reopen. SetRuntimeTabColor raises TabColorChanged,
+                // but _ScheduleWindowRecordSave no-ops pre-Initialized, so this can't spuriously re-save.
+                if (_windowRecordClaimed && !_windowRecord.managerTabColor.empty())
+                {
+                    if (const auto c = _ManagerHexToColor(_windowRecord.managerTabColor))
+                    {
+                        tabImpl->SetRuntimeTabColor(*c);
+                    }
+                }
             }
             // Non-movable by drag, too: CanDrag(false) stops the tab being dragged/torn out;
             // the drag/move seams additionally call _PinManagerTabFirst() to snap it back to

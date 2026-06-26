@@ -1853,6 +1853,16 @@ namespace winrt::TerminalApp::implementation
     // persisted it), so only a genuine NEW user pick gets through to a re-persist + re-fan.
     void TerminalPage::_OnClaudeTabColorChanged(const TerminalApp::Tab& tab)
     {
+        // Agentmaster: the pinned Manager tab persists its color PER WINDOW (in the window record), not in
+        // the dir-color map — it is a per-window singleton with no working dir (Rule #12 is dir-keyed). A
+        // color change on it just schedules a window-record save (the capture reads the live color); there
+        // is no dir to fan the color out to. Handled before the session-tab path (which would early-return
+        // anyway, since the Manager tab has no _ClaudeSessionForTab id).
+        if (_managerTab && tab == _managerTab)
+        {
+            _ScheduleWindowRecordSave();
+            return;
+        }
         if (!_sessionRegistry)
         {
             return;

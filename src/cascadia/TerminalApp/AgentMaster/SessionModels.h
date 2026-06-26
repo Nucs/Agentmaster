@@ -631,5 +631,11 @@ namespace Agentmaster
         std::wstring selectedSessionId; // selected Claude tab's conversation id (stable); empty otherwise
         int selectedTabIndex{ -1 }; // fallback for a non-Claude selected tab: index into `tabs`; -1 = Manager/none
         ManagerState manager;
+        // Agentmaster: the pinned Manager tab's user-chosen color ("#RRGGBB"; empty => none/default),
+        // persisted PER WINDOW. Unlike a session tab's color (ONE value per working directory, Rule #12,
+        // owned by dir-colors.json), the Manager tab is a per-window singleton with no dir — so its color
+        // rides here in the window record, letting each Agentmaster window's home tab be color-coded
+        // independently. Empty/absent (an older record) => no override (the default tab look).
+        std::wstring managerTabColor;
     };
 }
