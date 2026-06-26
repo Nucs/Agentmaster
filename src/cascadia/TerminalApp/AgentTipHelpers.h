@@ -82,6 +82,16 @@ namespace winrt::TerminalApp::implementation
         }
         winrt::Windows::UI::Xaml::Controls::ToolTip t;
         t.Content(winrt::box_value(tip));
+        // Agentmaster: make the tip CLICK-THROUGH. A ToolTip renders in a Popup whose content is
+        // hit-testable by default, and we OPEN it FAST (~133ms, below) with mouse-relative placement —
+        // so the tip routinely pops up right under where the user is about to click and EATS the click
+        // (it lands on the tip's popup, not the button/label/box beneath). Under XAML Islands the
+        // framework's move-off auto-dismiss is broken too (the very reason this helper exists), so the
+        // tip lingers exactly there. A tooltip is purely informational and never needs pointer input, so
+        // marking it hit-test-invisible is universally safe: hit-testing descends into the popup, finds
+        // nothing hit-testable, and the pointer/click falls THROUGH to the element below. IsHitTestVisible
+        // on the popup's root child makes the whole popup transparent to input.
+        t.IsHitTestVisible(false);
         // Agentmaster: every surface that uses AgentSetTip (the Manager tab + the Archive / Sessions
         // pages) is forced dark, but a ToolTip renders in the popup ROOT — it does NOT inherit the
         // host's RequestedTheme, and ToolTipService theme propagation is unreliable under XAML Islands
