@@ -1554,15 +1554,18 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (shift+home "home/back" toggle): jump to the pinned Manager tab from anywhere; pressing
-    // it again while ALREADY on the Manager tab returns to the tab you came from. "The tab I came from" is
-    // the most-recently-used non-Manager tab — WT bumps _mruTabs on every focus change (so selecting the
-    // Manager just now pushed the prior tab to the front of the non-Manager entries) and prunes a closed
-    // tab from it, so this needs no separate bookkeeping and never targets a dead tab. Works everywhere:
-    // over a focused terminal the chord is intercepted by TermControl's ActionMap lookup, and on the
-    // Manager tab's own text boxes it is tunneled in by _ManagerPaneNavPreviewKeyDown (which lists
-    // AgentToggleManagerTab in its allow-list). UI thread.
-    void TerminalPage::_HandleAgentToggleManagerTab(const winrt::Windows::Foundation::IInspectable& /*sender*/, const ActionEventArgs& args)
+    // Agentmaster (shift+home "home / jump-back" toggle): do EXACTLY what the tab-strip nav buttons do —
+    // they are the SOURCE OF TRUTH, so this routes through their click handlers instead of reinventing the
+    // logic (an earlier version used _mruTabs, which ignored the selected card). Off the Manager tab -> the
+    // "Home" button (_OnManagerHomeButtonClick): jump to the pinned Manager tab. On the Manager tab -> the
+    // "Jump Back" button (_OnManagerJumpBackButtonClick): return to the tab of the session SELECTED in the
+    // Manager lens (the card auto-selected when you came from it) via _ActivateClaudeSession — respecting
+    // the selected card, cross-window-safe, and a no-op when nothing is selected. Works everywhere: over a
+    // focused terminal the chord is intercepted by TermControl's ActionMap lookup, and on the Manager tab's
+    // own text boxes it is tunneled in by _ManagerPaneNavPreviewKeyDown (which lists AgentToggleManagerTab
+    // in its allow-list). UI thread. (nullptr for the RoutedEventArgs is idiomatic here — the handlers
+    // ignore both args, like TitleChanged.raise(*this, nullptr).)
+    void TerminalPage::_HandleAgentToggleManagerTab(const winrt::Windows::Foundation::IInspectable& sender, const ActionEventArgs& args)
     {
         // The Manager tab is pinned + non-closable, but it is null very early in startup and after a
         // window's last teardown — be defensive so the chord just no-ops then.
@@ -1572,37 +1575,17 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        const auto focused = _GetFocusedTab();
-        const bool onManager = focused && (focused == _managerTab);
-
-        if (!onManager)
+        if (_GetFocusedTab() == _managerTab)
         {
-            // Go HOME: jump to the pinned Manager tab (tab 0).
-            if (const auto idx = _GetTabIndex(_managerTab))
-            {
-                _SelectTab(*idx);
-                args.Handled(true);
-                return;
-            }
-            args.Handled(false);
-            return;
+            // On the Manager tab -> the "Jump Back" button's action: return to the SELECTED session's tab.
+            _OnManagerJumpBackButtonClick(sender, nullptr);
         }
-
-        // Already HOME: go BACK to the tab we came from — the most-recently-used non-Manager tab.
-        for (uint32_t i = 0; i < _mruTabs.Size(); ++i)
+        else
         {
-            const auto candidate = _mruTabs.GetAt(i);
-            if (candidate && candidate != _managerTab)
-            {
-                if (const auto idx = _GetTabIndex(candidate))
-                {
-                    _SelectTab(*idx);
-                }
-                break;
-            }
+            // Off the Manager tab -> the "Home" button's action: jump to the pinned Manager tab.
+            _OnManagerHomeButtonClick(sender, nullptr);
         }
-        // Consume the chord even when only the Manager tab is open (nothing to return to), so it never
-        // falls through to the terminal's select-to-line-start.
+        // Consume the chord either way so it never falls through to the terminal's select-to-line-start.
         args.Handled(true);
     }
 
