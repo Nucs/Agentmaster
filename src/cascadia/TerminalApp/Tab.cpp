@@ -2329,15 +2329,15 @@ namespace winrt::TerminalApp::implementation
         // Build the menu
         Controls::MenuFlyout contextMenuFlyout;
         Controls::MenuFlyoutSeparator menuSeparator;
-        contextMenuFlyout.Items().Append(chooseColorMenuItem);
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
         contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
-        contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets color/rename/session ops apart from the layout group
+        contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets rename/session ops apart from the layout group
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
+        contextMenuFlyout.Items().Append(chooseColorMenuItem); // Agentmaster: "Change tab color" moved below the "Move tab" submenu
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Export tab" — sets the split/move layout group apart from export/find
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
         contextMenuFlyout.Items().Append(_findMenuItem);
