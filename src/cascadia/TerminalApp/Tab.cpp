@@ -2335,10 +2335,13 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
         contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
+        contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets color/rename/session ops apart from the layout group
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
+        contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Export tab" — sets the split/move layout group apart from export/find
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
         contextMenuFlyout.Items().Append(_findMenuItem);
+        contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "New Session Here" — sets export/find apart from the session ops (new/restart/fork)
         contextMenuFlyout.Items().Append(_newSessionHereMenuItem); // Agentmaster: "New Session Here" directly above "Restart session"
         contextMenuFlyout.Items().Append(_restartConnectionMenuItem);
         // Agentmaster: place "Fork session" directly below "Restart session"

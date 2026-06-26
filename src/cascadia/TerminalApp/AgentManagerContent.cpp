@@ -5226,9 +5226,49 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(rename);
 
+        // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
+        // Placed directly below Rename (at the user's request). It routes through the SAME shared
+        // CopySessionField action the overlay's copy menu uses, so the two menus can never drift: Session
+        // Id / Path / Branch / the REAL Claude & Codex launch CLIs / the full Summary box / the whole
+        // Transcript. Each item is a pure clipboard write (cases 0-4) or an off-thread read that hops back
+        // to copy (Transcript/Summary) — none mutate the tree, so unlike the rename/spawn/archive items
+        // elsewhere in this menu they need no defer (matches the old single "Copy Session Id").
+        MenuFlyoutSubItem copySub;
+        copySub.Text(L"Copy");
+        copySub.Icon(glyphIcon(L"\xE8C8")); // Copy (matches the WT tab menu's "Copy >")
+        AgentSetTip(copySub, L"Copy this session's id, path, branch, launch command line, transcript, or full summary");
+        const auto addCopyItem = [&copySub, weak, id](const wchar_t* text, const wchar_t* tip, int which) {
+            MenuFlyoutItem item;
+            item.Text(text);
+            AgentSetTip(item, tip);
+            item.Click([weak, id, which](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    if (self->_registry)
+                    {
+                        // The Summary case renders with this window's GLOBAL summary-panel flags, so a
+                        // copied Summary matches what the panels show (wrap/truncate).
+                        CopySessionField(*self->_registry, id, which, self->_dispatcher,
+                                         self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate);
+                    }
+                }
+            });
+            copySub.Items().Append(item);
+        };
+        addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
+        addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
+        addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
+        addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+        addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
+        addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
+        menu.Items().Append(copySub);
+
         // The three WT-tab-menu session ops (mirrored here at the user's request): New Session Here /
         // Restart session / Fork session — kind-aware (a Codex card spawns + forks codex, a Claude card
         // claude). Uses the row's cwd captured at build time (a session's workingDir is fixed at launch).
+        // A separator sets these session ops apart from the Rename / Copy items above.
+        menu.Items().Append(MenuFlyoutSeparator{});
 
         // New Session Here — spawn a NEW, independent managed session in this row's working dir.
         MenuFlyoutItem openHere;
@@ -5313,43 +5353,6 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(fork);
-
-        // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
-        // It routes through the SAME shared CopySessionField action the overlay's copy menu uses, so the
-        // two menus can never drift: Session Id / Path / Branch / the REAL Claude & Codex launch CLIs /
-        // the full Summary box / the whole Transcript. Each item is a pure clipboard write (cases 0-4) or
-        // an off-thread read that hops back to copy (Transcript/Summary) — none mutate the tree, so unlike
-        // the rename/archive/spawn items above they need no defer (matches the old single "Copy Session Id").
-        MenuFlyoutSubItem copySub;
-        copySub.Text(L"Copy");
-        copySub.Icon(glyphIcon(L"\xE8C8")); // Copy (matches the WT tab menu's "Copy >")
-        AgentSetTip(copySub, L"Copy this session's id, path, branch, launch command line, transcript, or full summary");
-        const auto addCopyItem = [&copySub, weak, id](const wchar_t* text, const wchar_t* tip, int which) {
-            MenuFlyoutItem item;
-            item.Text(text);
-            AgentSetTip(item, tip);
-            item.Click([weak, id, which](const IInspectable&, const RoutedEventArgs&) {
-                if (auto self = weak.get())
-                {
-                    if (self->_registry)
-                    {
-                        // The Summary case renders with this window's GLOBAL summary-panel flags, so a
-                        // copied Summary matches what the panels show (wrap/truncate).
-                        CopySessionField(*self->_registry, id, which, self->_dispatcher,
-                                         self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate);
-                    }
-                }
-            });
-            copySub.Items().Append(item);
-        };
-        addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
-        addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
-        addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
-        addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
-        addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
-        addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
-        addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
-        menu.Items().Append(copySub);
 
         // Close — the LAST item, set apart by a separator and carrying the X glyph, exactly like the WT
         // tab's right-click menu (its terminal Close item, glyph \xE711). Close shuts the session down
