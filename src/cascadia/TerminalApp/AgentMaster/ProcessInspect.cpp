@@ -1766,9 +1766,21 @@ namespace Agentmaster
             commonDir = GitIsAbsolute(cd) ? cd : GitFullPath(gitDir + L"\\" + cd);
         }
 
-        // Which worktree CONTAINS the queried dir — the main worktree when we resolved a real ".git"
-        // dir, else the linked worktree we walked into (matched by path below). Only flags isCurrent.
-        const std::wstring currentWtPath = GitLeafEq(gitDir, L".git") ? GitParent(gitDir) : std::wstring{};
+        // Which worktree CONTAINS the queried dir (to flag isCurrent): the main worktree when we
+        // resolved a real ".git" DIR, else — when we walked into a LINKED worktree — that worktree's
+        // own path, read from its gitDir's "gitdir" breadcrumb (<common>\worktrees\<id>\gitdir ->
+        // <worktree>\.git). Without this second arm, a query from INSIDE a linked worktree left
+        // currentWtPath empty, so nothing was ever flagged current there (only from the main worktree).
+        std::wstring currentWtPath;
+        if (GitLeafEq(gitDir, L".git"))
+        {
+            currentWtPath = GitParent(gitDir); // the typed path is in the MAIN worktree
+        }
+        else if (std::wstring gd = GitTrim(Utf8ToWide(ReadFileHead(gitDir + L"\\gitdir", 4096))); !gd.empty())
+        {
+            GitFlipSeps(gd);
+            currentWtPath = GitLeafEq(gd, L".git") ? GitParent(gd) : gd; // strip the trailing \.git
+        }
 
         // MAIN worktree = the parent of the common ".git" dir (skipped for a bare repo). HEAD is there.
         if (GitLeafEq(commonDir, L".git"))
