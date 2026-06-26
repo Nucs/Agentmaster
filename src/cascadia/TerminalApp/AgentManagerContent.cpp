@@ -9345,7 +9345,7 @@ namespace winrt::TerminalApp::implementation
         return btn;
     }
 
-    // Agentmaster: a "GIT WORKTREES" row — "<name> — <path>", the worktree's branch in the tooltip.
+    // Agentmaster: a "GIT WORKTREES" row — "<name> — <path> — <branch>" (branch also in the tooltip).
     // Mirrors _MakePathRow (a transparent, focus-neutral row that must NOT steal focus from the cwd
     // box — or the box's LostFocus would race ahead and tear down the popup before the click lands)
     // and, like it, a click drills the launch box into the worktree path via _PickPath, so a session
@@ -9365,6 +9365,11 @@ namespace winrt::TerminalApp::implementation
         row.Children().Append(Text(winrt::hstring{ name }, 13, true, 1.0));
         row.Children().Append(Text(L"\x2014", 13, false, 0.35)); // em-dash separator: "<name> — <path>"
         row.Children().Append(Text(winrt::hstring{ fullPath }, 13, false, 0.55));
+        if (!branch.empty())
+        {
+            row.Children().Append(Text(L"\x2014", 13, false, 0.35)); // second separator: "<path> — <branch>"
+            row.Children().Append(Text(winrt::hstring{ branch }, 13, false, 0.7)); // the worktree's checked-out branch, at the end (a touch brighter than the path)
+        }
         if (isCurrent)
         {
             row.Children().Append(Text(L"(current)", 11, false, 0.45)); // the worktree the box already points into
