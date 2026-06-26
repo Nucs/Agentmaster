@@ -3329,19 +3329,32 @@ namespace winrt::TerminalApp::implementation
         // recreates the per-column ScrollViewers from scratch (a fresh ScrollViewer sits at offset 0),
         // so without this a mere _Refresh — a select, a state/title change, an observer enrichment —
         // would snap the board to the TOP, losing the card the user just clicked near the bottom of a
-        // tall column. Capture the live offsets now (the old scrollers are still valid); each new column
-        // re-applies its saved offset on Loaded (see _MakeBoardColumn). Keyed by column title.
-        std::unordered_map<std::wstring, double> savedOffsets;
+        // tall column. The remembered offsets live in the DURABLE member _boardColumnOffsets (keyed by
+        // column title), not a per-rebuild local: a refresh that lands before a PRIOR rebuild's
+        // restore-on-Loaded has fired would otherwise read that rebuild's fresh, not-yet-restored
+        // ScrollViewer sitting at 0 and PERMANENTLY lose the saved scroll — the "a click jumps the scroll
+        // to top" race when a background scanner/observer refresh coincides with the user's click. Capture
+        // the live offsets now (the old scrollers are still valid), but ONLY trust a LOADED ScrollViewer:
+        // a not-yet-loaded SV (IsLoaded == false) reports a meaningless 0 — keep the remembered offset
+        // rather than clobber it; a genuinely-scrolled-to-top LOADED column records its real 0. Each new
+        // column re-applies its remembered offset on Loaded (see _MakeBoardColumn).
         for (const auto& [key, sv] : _boardColumnScrollers)
         {
-            if (sv)
+            if (!sv)
             {
-                const auto off = sv.VerticalOffset();
-                if (off > 0.0)
-                {
-                    savedOffsets[key] = off;
-                }
+                continue;
             }
+            const auto off = sv.VerticalOffset();
+            if (off > 0.0)
+            {
+                _boardColumnOffsets[key] = off; // a real, restored scroll position
+            }
+            else if (sv.IsLoaded())
+            {
+                _boardColumnOffsets[key] = 0.0; // genuinely at the top (the SV has loaded, so 0 is real)
+            }
+            // else: a fresh / not-yet-restored SV reading 0 — preserve the remembered offset (its
+            // restore-on-Loaded is still pending), so a coincident refresh can't lose the user's scroll.
         }
         _boardColumnScrollers.clear(); // refilled by _MakeBoardColumn below
 
@@ -3469,10 +3482,10 @@ namespace winrt::TerminalApp::implementation
                 colStack.Children().Append(_MakeCard(*s));
             }
 
-            // Preserve this column's pre-rebuild scroll offset (keyed by its title).
+            // Preserve this column's remembered scroll offset (keyed by its title; durable across rebuilds).
             const std::wstring colKey{ col.title };
-            const auto savedIt = savedOffsets.find(colKey);
-            const double restore = (savedIt != savedOffsets.end()) ? savedIt->second : 0.0;
+            const auto savedIt = _boardColumnOffsets.find(colKey);
+            const double restore = (savedIt != _boardColumnOffsets.end()) ? savedIt->second : 0.0;
             _boardHost.Children().Append(_MakeBoardColumn(hdr, colStack, true, colKey, restore));
         }
 
@@ -3481,8 +3494,8 @@ namespace winrt::TerminalApp::implementation
         // unscoped (it is a global census, not part of the managed directory tree).
         if (!_externalClaudes.empty())
         {
-            const auto extIt = savedOffsets.find(L"External");
-            _boardHost.Children().Append(_MakeExternalColumn(extIt != savedOffsets.end() ? extIt->second : 0.0));
+            const auto extIt = _boardColumnOffsets.find(L"External");
+            _boardHost.Children().Append(_MakeExternalColumn(extIt != _boardColumnOffsets.end() ? extIt->second : 0.0));
         }
     }
 
@@ -3524,9 +3537,9 @@ namespace winrt::TerminalApp::implementation
 
             // Agentmaster: track this column's ScrollViewer so the NEXT _RebuildBoard can capture its
             // offset, and re-apply the offset this rebuild inherited. A fresh ScrollViewer sits at 0
-            // until restored; do it on Loaded (post-first-layout, when ScrollableHeight is valid) with
-            // animation disabled (an instant restore, no visible jump). Capture only the offset — the
-            // sender IS the ScrollViewer, never self-capture the element (that leaks it via the delegate).
+            // until restored; do it on Loaded with animation disabled (an instant restore, no visible
+            // jump). Capture only the offset — the sender IS the ScrollViewer, never self-capture the
+            // element (that leaks it via the delegate).
             if (!columnKey.empty())
             {
                 _boardColumnScrollers[columnKey] = cardsSv;
@@ -3535,6 +3548,18 @@ namespace winrt::TerminalApp::implementation
                     cardsSv.Loaded([restoreOffset](const IInspectable& sender, const RoutedEventArgs&) {
                         if (const auto sv = sender.try_as<ScrollViewer>())
                         {
+                            // Agentmaster (scroll-jump fix): when Loaded fires, a fresh ScrollViewer's
+                            // CONTENT extent often isn't realized yet — ScrollableHeight still reads 0 —
+                            // so a bare ChangeView(restoreOffset) CLAMPS to 0 and the column snaps to the
+                            // TOP. That is the "sometimes a click jumps the scroll to top" report:
+                            // _RebuildBoard recreates these ScrollViewers on EVERY refresh (a select, a
+                            // state/title change, an observer enrichment), and the restore raced the
+                            // content's first measure. Force the content to measure+arrange first so
+                            // ScrollableHeight reflects the real height, THEN restore — the same realize-
+                            // then-scroll recipe BringSelectedIntoView uses (UpdateLayout before the
+                            // scroll). UpdateLayout is synchronous + idempotent, so it is a no-op when the
+                            // extent is already valid.
+                            sv.UpdateLayout();
                             sv.ChangeView(nullptr, restoreOffset, nullptr, true);
                         }
                     });

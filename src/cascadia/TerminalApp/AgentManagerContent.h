@@ -586,6 +586,15 @@ namespace winrt::TerminalApp::implementation
         // select, a state/title change, an observer enrichment) would snap a scrolled column to the TOP
         // and lose the card the user just clicked. Captured before the clear, restored on Loaded.
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::ScrollViewer> _boardColumnScrollers;
+        // Agentmaster (scroll-jump fix): the DURABLE remembered scroll offset per column title — the
+        // authoritative restore source, persisted ACROSS rebuilds (unlike the per-rebuild local capture
+        // it replaced). Why a member: a refresh that lands before a PRIOR rebuild's restore-on-Loaded has
+        // fired would read that rebuild's fresh, not-yet-restored ScrollViewer sitting at 0 and PERMANENTLY
+        // lose the saved scroll (the "a click jumps the scroll to top" race when a background scanner/observer
+        // refresh coincides with the user's click). The capture in _RebuildBoard updates this map only from a
+        // LOADED ScrollViewer (FrameworkElement::IsLoaded) — a fresh SV's meaningless 0 never clobbers the
+        // remembered offset, while a genuinely-scrolled-to-top loaded column records its real 0.
+        std::unordered_map<std::wstring, double> _boardColumnOffsets;
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _planScroll{ nullptr }; // Agentmaster: hosts _planListHost — pinned to the bottom on first view of a subject (see _PinPlanToBottomOnSubjectChange)
