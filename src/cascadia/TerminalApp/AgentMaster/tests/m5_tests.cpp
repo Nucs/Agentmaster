@@ -4919,6 +4919,245 @@ static void TestPromptAnchor()
     }
 }
 
+// Agentmaster (SUMMARY_JUMP.md §5): every found span must be in-bounds of the haystack it was resolved
+// against — an OOB offset/length would AV when the adapter maps it back to a buffer row.
+static bool AnchorSpansValid(const std::wstring& hay, const std::vector<Agentmaster::AnchorMatch>& r)
+{
+    for (const auto& m : r)
+    {
+        if (!m.found)
+        {
+            continue;
+        }
+        if (m.offset > hay.size() || m.offset + m.length > hay.size())
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Agentmaster (SUMMARY_JUMP.md §5): edge-case + crash-safety fuzz for the prompt resolver with marker
+// validation ON. The resolver feeds alt-nav + jump on the UI thread, so a pathological haystack/needle must
+// never AV / read OOB / infinite-loop / throw -- a crash here takes the whole app. Each case asserts it
+// RETURNS, the result size matches the prompt count, and every found span is in-bounds.
+static void TestPromptAnchorEdgeCases()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"Prompt resolver edge cases + crash-safety (marker validation on):\n");
+    const std::wstring caret(1, static_cast<wchar_t>(0x276F)); // the U+276F prompt ornament
+    AnchorOptions mk;
+    mk.promptMarkers = std::wstring{ kClaudePromptMarkers };
+
+    // Empty haystack / empty prompt list / empty + whitespace-only prompts (slots preserved, not found).
+    CHECK(ResolvePromptAnchors(L"", { L"hello world here" }, mk).size() == 1, "edge: empty haystack -> one not-found slot");
+    CHECK(ResolvePromptAnchors(caret + L" hello world here\n", {}, mk).empty(), "edge: empty prompt list -> empty result");
+    {
+        const std::wstring hay = caret + L" hello world here\n";
+        auto r = ResolvePromptAnchors(hay, { L"", L"   \t  ", L"hello world here" }, mk);
+        CHECK(r.size() == 3 && !r[0].found && !r[1].found && r[2].found, "edge: empty/ws prompts keep their slot, not found");
+        CHECK(AnchorSpansValid(hay, r), "edge: spans valid with empty/ws prompts");
+    }
+
+    // A marker-only haystack; a prompt that IS a marker glyph; a needle longer than the whole haystack.
+    {
+        const std::wstring hay = caret + caret + caret;
+        CHECK(AnchorSpansValid(hay, ResolvePromptAnchors(hay, { caret }, mk)), "edge: all-marker haystack + marker-glyph prompt");
+    }
+    {
+        const std::wstring hay = caret + L" ab\n";
+        CHECK(AnchorSpansValid(hay, ResolvePromptAnchors(hay, { L"this needle is far longer than the whole tiny haystack xyz" }, mk)), "edge: needle longer than haystack");
+    }
+
+    // markerLookback extremes: 0 (no occurrence can ever be "marked" -> everything falls back to legacy) and
+    // huge (the lookback window is clamped to the string start, never reads before index 0).
+    {
+        const std::wstring hay = caret + L" do the thing now\n";
+        AnchorOptions z = mk;
+        z.markerLookback = 0;
+        auto r0 = ResolvePromptAnchors(hay, { L"do the thing now" }, z);
+        CHECK(r0[0].found && AnchorSpansValid(hay, r0), "edge: lookback=0 -> soft fallback still resolves");
+        AnchorOptions big = mk;
+        big.markerLookback = 100000;
+        auto rb = ResolvePromptAnchors(hay, { L"do the thing now" }, big);
+        CHECK(rb[0].found && AnchorSpansValid(hay, rb), "edge: huge lookback does not read before the buffer start");
+    }
+
+    // Embedded NUL + a lone (unpaired) UTF-16 surrogate, in BOTH haystack and needle (wstring holds them) —
+    // normalization + the marker scan must treat them as ordinary code units, never crash.
+    {
+        std::wstring hay = caret + L" abc";
+        hay.push_back(L'\0');
+        hay += L"def ghi jkl\n";
+        std::wstring needle = L"abc";
+        needle.push_back(L'\0');
+        needle += L"def ghi jkl";
+        CHECK(AnchorSpansValid(hay, ResolvePromptAnchors(hay, { needle }, mk)), "edge: embedded NUL + control chars no crash");
+    }
+    {
+        std::wstring hay = caret + L" pre ";
+        hay.push_back(static_cast<wchar_t>(0xD800)); // lone high surrogate
+        hay += L" post text here\n";
+        std::wstring needle = L"pre ";
+        needle.push_back(static_cast<wchar_t>(0xD800));
+        needle += L" post text here";
+        CHECK(AnchorSpansValid(hay, ResolvePromptAnchors(hay, { needle }, mk)), "edge: lone UTF-16 surrogate no crash");
+    }
+
+    // Huge marker-only haystack + a huge needle (the FindAcceptable inner loop / normalization must stay
+    // bounded and RETURN — a regression here would hang the UI thread, not crash, but is just as fatal).
+    {
+        const std::wstring hay(200000, static_cast<wchar_t>(0x276F)); // 200k markers, no text
+        const std::wstring needle(50000, L'z');
+        CHECK(AnchorSpansValid(hay, ResolvePromptAnchors(hay, { needle }, mk)), "edge: 200k-marker haystack + 50k needle returns");
+    }
+
+    // Thousands of UNMARKED duplicate occurrences before ONE marked render: the marker scan must skip every
+    // unmarked hit (the FindAcceptable forward loop) and terminate on the single marked one.
+    {
+        std::wstring hay;
+        for (int i = 0; i < 2000; ++i)
+        {
+            hay += L"assistant ctx repeat token here\n"; // 2000 UNMARKED occurrences
+        }
+        hay += caret + L" repeat token here\n"; // exactly one MARKED render (the last occurrence)
+        auto r = ResolvePromptAnchors(hay, { L"repeat token here" }, mk);
+        CHECK(r[0].found && AnchorSpansValid(hay, r), "edge: 2000 unmarked + 1 marked -> resolves, terminates");
+        CHECK(r[0].offset == hay.rfind(L"repeat token here"), "edge: skipped all unmarked, landed on the marked render");
+    }
+
+    // ValidatePromptAnchor crash-safety with marker opts passed (it ignores them, but must not choke).
+    {
+        const std::wstring hay = caret + L" validate me please\n";
+        CHECK(!ValidatePromptAnchor(hay, L"validate me please", hay.size() + 999, mk), "edge: validate past end is safe");
+        auto m = ResolveOnePromptAnchor(hay, L"validate me please", 0, mk);
+        CHECK(m.found && ValidatePromptAnchor(hay, L"validate me please", m.offset, mk), "edge: validate at the resolved offset");
+    }
+}
+
+// Agentmaster (SUMMARY_JUMP.md §5): exercise the resolver + marker validation against the REAL on-disk
+// Claude session corpus. For each session we extract its real sent prompts (the SAME list the panel /
+// alt-nav resolve) and synthesize a realistic rendered buffer -- each prompt as a MARKED `<U+276F> <prompt>`
+// render preceded by an UNMARKED assistant echo of its first line -- then resolve with markers AND legacy.
+// This stresses the marker code with real-world prompt strings (emoji, RTL, code, huge / multi-line prompts)
+// and verifies the two invariants that must ALWAYS hold: (1) every found span is in-bounds (no OOB -> the
+// adapter's offset->row map would AV otherwise), and (2) markers NEVER make a prompt that legacy resolved
+// disappear (the soft-fallback guarantee). Disambiguation (markers steering off the echo onto the real
+// render) is reported + asserted non-zero. Skips silently when no corpus is present (CI / other machines).
+static void TestPromptAnchorRealCorpus()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"Prompt resolver over the REAL session corpus (markers; crash + never-regress + disambiguation):\n");
+    const auto sessions = EnumerateTranscripts(NowMsTest() - 92LL * 24 * 3600 * 1000);
+    if (sessions.empty())
+    {
+        std::wprintf(L"  [info] no live corpus -> skipped\n");
+        return;
+    }
+    const std::wstring caret(1, static_cast<wchar_t>(0x276F));
+    AnchorOptions mk;
+    mk.promptMarkers = std::wstring{ kClaudePromptMarkers };
+
+    size_t sessionsUsed = 0, totalPrompts = 0, foundMk = 0, foundLegacy = 0;
+    size_t regressions = 0, oobSpans = 0, markedHit = 0, improvedByMarker = 0;
+    const size_t kMaxSessions = 120, kMaxPromptsPerSession = 40, kReadCapBytes = 2u * 1024 * 1024;
+
+    for (const auto& s : sessions)
+    {
+        if (sessionsUsed >= kMaxSessions)
+        {
+            break;
+        }
+        std::vector<std::wstring> prompts;
+        try
+        {
+            prompts = AnalyzeSessionTranscript(s.path, kReadCapBytes).userMsgs;
+        }
+        catch (...)
+        {
+            continue; // a parse throw here is itself a finding, but the never-throw wrappers should prevent it
+        }
+        if (prompts.empty())
+        {
+            continue;
+        }
+        if (prompts.size() > kMaxPromptsPerSession)
+        {
+            prompts.resize(kMaxPromptsPerSession);
+        }
+
+        // Build a realistic rendered buffer; track each prompt's MARKED render + UNMARKED echo offsets.
+        std::wstring hay;
+        std::vector<size_t> markedPos(prompts.size(), std::wstring::npos);
+        std::vector<size_t> echoPos(prompts.size(), std::wstring::npos);
+        for (size_t i = 0; i < prompts.size(); ++i)
+        {
+            const auto needle = PickAnchorNeedle(prompts[i], mk.maxNeedle);
+            if (needle.empty())
+            {
+                continue; // unbuildable (no non-trivial line) -> resolves not-found in BOTH (no regression)
+            }
+            hay += L"assistant ctx: "; // an UNMARKED echo of the first line (where legacy binds)
+            echoPos[i] = hay.size();
+            hay += needle;
+            hay += L"\n";
+            hay += caret; // the REAL marked render
+            hay += L" ";
+            markedPos[i] = hay.size();
+            hay += prompts[i];
+            hay += L"\n... assistant reply filler ...\n";
+        }
+
+        std::vector<AnchorMatch> rMk, rLeg;
+        try
+        {
+            rMk = ResolvePromptAnchors(hay, prompts, mk);
+            rLeg = ResolvePromptAnchors(hay, prompts); // legacy (no markers)
+        }
+        catch (...)
+        {
+            continue;
+        }
+
+        ++sessionsUsed;
+        for (size_t i = 0; i < prompts.size(); ++i)
+        {
+            ++totalPrompts;
+            if (rMk[i].found)
+            {
+                ++foundMk;
+            }
+            if (rLeg[i].found)
+            {
+                ++foundLegacy;
+            }
+            if (rMk[i].found && (rMk[i].offset > hay.size() || rMk[i].offset + rMk[i].length > hay.size()))
+            {
+                ++oobSpans;
+            }
+            if (rLeg[i].found && !rMk[i].found)
+            {
+                ++regressions; // markers made a legacy-found prompt vanish -> the soft fallback failed
+            }
+            if (markedPos[i] != std::wstring::npos && rMk[i].found && rMk[i].offset == markedPos[i])
+            {
+                ++markedHit;
+                if (rLeg[i].found && echoPos[i] != std::wstring::npos && rLeg[i].offset == echoPos[i])
+                {
+                    ++improvedByMarker; // legacy bound the echo; markers bound the real render
+                }
+            }
+        }
+    }
+
+    CHECK(oobSpans == 0, "real corpus: no out-of-bounds spans (offset+length <= haystack)");
+    CHECK(regressions == 0, "real corpus: markers never make a legacy-found prompt vanish (soft fallback holds)");
+    CHECK(sessionsUsed > 0, "real corpus: exercised at least one real session");
+    CHECK(totalPrompts == 0 || markedHit > 0, "real corpus: at least one real prompt binds its marked render");
+    std::wprintf(L"  [info] sessions=%zu prompts=%zu | found markers=%zu legacy=%zu | marked-hit=%zu improved-by-marker=%zu | oob=%zu regress=%zu\n",
+                 sessionsUsed, totalPrompts, foundMk, foundLegacy, markedHit, improvedByMarker, oobSpans, regressions);
+}
+
 // Build a synthetic Claude scrollback: `rows` lines of filler with `prompts` "> <prompt>" lines
 // evenly spaced. `present`==false makes each summary message carry an absent suffix (the pathological
 // all-miss case: every needle forces a full backoff + global rfind scan).
@@ -5134,6 +5373,8 @@ int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestPromptAnchor();
+    TestPromptAnchorEdgeCases();
+    TestPromptAnchorRealCorpus();
     TestSummaryUserMsgNoise();
     TestSummaryTableTrim();
     TestStateMachine();

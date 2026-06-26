@@ -1390,40 +1390,52 @@ namespace winrt::TerminalApp::implementation
     {
         auto strongThis{ get_strong() }; // keep the page alive across the co_awaits
 
-        // (UI thread) snapshot the cache KEY (path, mtime, whether we have prompts yet) — not the list,
-        // since we always navigate AFTER the refresh below.
-        std::wstring path;
-        int64_t mtime = 0;
-        bool hadPrompts = false;
-        if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+        // Agentmaster (extra-safe): this is a fire_and_forget — ANY exception that escapes it (a std::bad_alloc
+        // from the cache map/vector ops, or a teardown-race throw from a co_await resume when the dispatcher is
+        // shutting down) calls std::terminate and kills the whole app. The heavy steps already self-contain
+        // (ReadPromptNavIfGrown + _NavigateAdjacentPrompt each catch internally); this wraps the remaining
+        // synchronous map writes AND the suspension points so nothing on this path can ever crash the process.
+        try
         {
-            path = it->second.path;
-            mtime = it->second.mtime;
-            hadPrompts = !it->second.prompts.empty();
-        }
+            // (UI thread) snapshot the cache KEY (path, mtime, whether we have prompts yet) — not the list,
+            // since we always navigate AFTER the refresh below.
+            std::wstring path;
+            int64_t mtime = 0;
+            bool hadPrompts = false;
+            if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+            {
+                path = it->second.path;
+                mtime = it->second.mtime;
+                hadPrompts = !it->second.prompts.empty();
+            }
 
-        // (worker) re-read the prompt list when the transcript grew — BEFORE we navigate.
-        co_await winrt::resume_background();
-        std::vector<std::wstring> fresh;
-        const bool refreshed = ReadPromptNavIfGrown(sessionId, path, mtime, hadPrompts, fresh);
+            // (worker) re-read the prompt list when the transcript grew — BEFORE we navigate.
+            co_await winrt::resume_background();
+            std::vector<std::wstring> fresh;
+            const bool refreshed = ReadPromptNavIfGrown(sessionId, path, mtime, hadPrompts, fresh);
 
-        // (UI thread) store any refresh, then navigate with the FRESHEST prompt list (a fresh
-        // position resolve happens inside _NavigateAdjacentPrompt regardless).
-        co_await wil::resume_foreground(Dispatcher());
-        std::vector<std::wstring> prompts;
-        if (refreshed)
-        {
-            auto& e = _promptNavCache[sessionId];
-            e.path = path;
-            e.mtime = mtime;
-            e.prompts = fresh;
-            prompts = std::move(fresh);
+            // (UI thread) store any refresh, then navigate with the FRESHEST prompt list (a fresh
+            // position resolve happens inside _NavigateAdjacentPrompt regardless).
+            co_await wil::resume_foreground(Dispatcher());
+            std::vector<std::wstring> prompts;
+            if (refreshed)
+            {
+                auto& e = _promptNavCache[sessionId];
+                e.path = path;
+                e.mtime = mtime;
+                e.prompts = fresh;
+                prompts = std::move(fresh);
+            }
+            else if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+            {
+                prompts = it->second.prompts; // transcript unchanged -> the cached list is already current
+            }
+            _NavigateAdjacentPrompt(sessionId, prompts, up);
         }
-        else if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+        catch (...)
         {
-            prompts = it->second.prompts; // transcript unchanged -> the cached list is already current
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] _ScrollAdjacentPrompt: swallowed exception (no crash)\n");
         }
-        _NavigateAdjacentPrompt(sessionId, prompts, up);
     }
 
     // Agentmaster (alt+up / alt+down prompt nav, SUMMARY_JUMP.md §7): the 30 s focused refresh — re-read the
@@ -1434,33 +1446,43 @@ namespace winrt::TerminalApp::implementation
     {
         auto strongThis{ get_strong() };
 
-        std::wstring path;
-        int64_t mtime = 0;
-        bool hadPrompts = false;
-        if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+        // Agentmaster (extra-safe): fire_and_forget — contain any escaping exception (a cache-map bad_alloc, a
+        // teardown-race resume throw; see _ScrollAdjacentPrompt) so a background refresh can never
+        // std::terminate the app. RefreshJumpData re-resolves the buffer, which is already init-guarded.
+        try
         {
-            path = it->second.path;
-            mtime = it->second.mtime;
-            hadPrompts = !it->second.prompts.empty();
-        }
+            std::wstring path;
+            int64_t mtime = 0;
+            bool hadPrompts = false;
+            if (const auto it = _promptNavCache.find(sessionId); it != _promptNavCache.end())
+            {
+                path = it->second.path;
+                mtime = it->second.mtime;
+                hadPrompts = !it->second.prompts.empty();
+            }
 
-        co_await winrt::resume_background();
-        std::vector<std::wstring> fresh;
-        const bool refreshed = ReadPromptNavIfGrown(sessionId, path, mtime, hadPrompts, fresh);
+            co_await winrt::resume_background();
+            std::vector<std::wstring> fresh;
+            const bool refreshed = ReadPromptNavIfGrown(sessionId, path, mtime, hadPrompts, fresh);
 
-        co_await wil::resume_foreground(Dispatcher());
-        if (refreshed)
-        {
-            auto& e = _promptNavCache[sessionId];
-            e.path = path;
-            e.mtime = mtime;
-            e.prompts = std::move(fresh);
+            co_await wil::resume_foreground(Dispatcher());
+            if (refreshed)
+            {
+                auto& e = _promptNavCache[sessionId];
+                e.path = path;
+                e.mtime = mtime;
+                e.prompts = std::move(fresh);
+            }
+            // Re-resolve the summary panel's jump-icon eligibility against the live buffer (a no-op if the panel
+            // is closed / has no jump buttons). The position resolve is fresh; this only re-dims stale icons.
+            if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
+            {
+                it->second->RefreshJumpData();
+            }
         }
-        // Re-resolve the summary panel's jump-icon eligibility against the live buffer (a no-op if the panel
-        // is closed / has no jump buttons). The position resolve is fresh; this only re-dims stale icons.
-        if (const auto it = _claudeOverlays.find(sessionId); it != _claudeOverlays.end() && it->second)
+        catch (...)
         {
-            it->second->RefreshJumpData();
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[prompt-nav] _RefreshPromptNavCache: swallowed exception (no crash)\n");
         }
     }
 
