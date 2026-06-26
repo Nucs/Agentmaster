@@ -2213,6 +2213,42 @@ build **binlog uploads as an artifact** to diagnose the first run.
     endpoints (the shim, hooks-settings, the forwarder's `bridge.json` discovery) must be derived
     from the ACTIVE profile at engine init — a fixed `~/.agentmaster` literal in generated content
     is a cross-instance routing bug (the forwarder had exactly that).
+16. **Durability: never lose a window, tab, or session unless the user CLOSED IT DELIBERATELY — and
+    even then, demote to recoverable, never erase** (PERSISTENCE.md §13.5 / FAVORITES.md). The
+    workspace survives **every** exit — graceful close, app quit, AND a hard crash. "Closed slowly"
+    (deliberately, one window at a time) changes only whether a window is **auto-reopened** next
+    launch vs. **kept recoverable on demand** — closing NEVER deletes anything. Three durable layers
+    carry it, all under the ACTIVE profile (Rule #15): **`windows/<id>.json`** (one `WindowRecord`
+    per window — geometry + Manager lens + ORDERED tab refs + focused-tab identity; Option 1 *refs*,
+    never session copies), **`open-windows.json`** (the open-at-exit manifest = the live window-id
+    set), and **`sessions.json`** (the fleet — only ever GROWS, never pruned). The **"closed slowly"
+    distinction IS the manifest's SKIP-EMPTY rule** (`Engine::UnregisterLiveWindow`): each window
+    unregister rewrites the manifest EXCEPT a write that would EMPTY it is skipped — so closing
+    windows one-by-one prunes each (a deliberately-closed window won't auto-reopen) while the LAST
+    close leaves the final snapshot, and a hard shutdown that kills the threads before they
+    unregister leaves the FULL set (everything auto-reopens). A deliberately-closed window's
+    `WindowRecord` STAYS on disk → it is still offered by the Manager's **"Reopen Windows (N)"**
+    button (`RecoverableWindows` = records − live − content-less). On startup the Emperor reopens the
+    manifest∩records set (`WindowEmperor.cpp`), gated by the **decide-prompt** when >1; **No** still
+    loses nothing (one window claims the front record, the rest stay recoverable). **Session half**
+    (FAVORITES.md): **Close ALWAYS ARCHIVES** (`live=false`, keep the record + Flight Plan +
+    autopilot; the transcript `.jsonl` is NEVER touched) — there is no Delete; a closed session
+    leaves the Board and is resumable from the **Sessions browser** (the sole history view), the
+    recover button bringing back the WHOLE window. **Enforcement that must not regress:** the
+    **deterministic close/quit flush** captures the record BEFORE teardown clears `_claudeTabs`
+    (`CloseWindow` / `RequestQuit`, latched by `_windowRecordTeardownFlushed`) with an idempotent
+    `~TerminalPage` catch-all for the non-initiating windows on a quit-all; the **load barrier**
+    (`Engine::restoreMutex`) blocks a 2nd reopened window until the fleet is loaded so it can't flush
+    an EMPTY record over its workspace; **anti-clobber** refuses to overwrite a good record with a
+    pre-`Initialized` / no-tabs-AND-no-geometry capture; and the **reclaimable pool** re-claims a
+    this-session-closed record BY ID (real id + lens), so a recover/reopen never mints a lens-less
+    duplicate. **The ONLY two erasures**, both content-free by construction: a window emptied to just
+    the pinned Manager tab self-closes + deletes its (content-less) record (`_CloseWindowIfManager-
+    Only`, race-safe via `ReserveManagerOnlyClose` — the last window STAYS open, record discarded),
+    and a session whose transcript VANISHED from disk simply stops listing ("not found → don't show";
+    `cleanupPeriodDays` is seeded to ~never so Claude never sweeps). Never add a destructive close
+    path, a manifest write that can legitimately empty the file, a capture that runs AFTER
+    `_claudeTabs` is cleared, or a `sessions.json` prune that drops a record with a live transcript.
 
 ## Conventions
 
