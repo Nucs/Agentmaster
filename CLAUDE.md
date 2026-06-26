@@ -1185,7 +1185,13 @@ What works, by area:
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
   `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
-  carries the resulting ids); and (3) the **`[nav]` USER-NAVIGATION AUDIT TRAIL** — the user-INTENT layer
+  carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
+  `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
+  (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`
+  (each NAMED; a skip carries its reason — unknown / already-live / dedup) → `[rehome] window <id> resumed=N
+  shells=M skipped=K` (the end counts), with `[window-save]` the change-gated persisted tab set (what
+  re-homes next launch) and `[reopen]` the "Reopen Windows (N)" dispatch; and (3) the **`[nav]` USER-NAVIGATION
+  AUDIT TRAIL** — the user-INTENT layer
   ABOVE the mechanism tags (whose ids it references), so `grep '\[nav\]' hooks.log` reconstructs the whole
   journey. Helpers: `LogNav(msg)` writes `[nav] <msg>\n`; `ShortId(id)` = the first-8-char convention
   (`ClaudeSpawn.h/.cpp`). **Begin/end pairing (crash-resilient):** every action that LAUNCHES a process or

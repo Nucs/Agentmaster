@@ -383,6 +383,24 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Save-side trace, CHANGE-GATED: log the persisted tab set only when it differs from the last save
+        // (_windowRecord still holds the prior tabs until the move below). This shows the window's tab
+        // COMPOSITION evolving — i.e. what will re-home next launch, the answer to "was a bad restore saved
+        // wrong or loaded wrong?" — WITHOUT flooding on the geometry/lens-only autosaves that fire every
+        // ~750ms during a resize. Once-per-real-change, so it's cheap and quiet.
+        std::wstring newSig, oldSig;
+        for (const auto& e : rec.tabs)
+        {
+            newSig += (e.kind == ::Agentmaster::TabKind::Other) ? std::wstring{ L"sh," } : (::Agentmaster::ShortId(e.sessionId) + L",");
+        }
+        for (const auto& e : _windowRecord.tabs)
+        {
+            oldSig += (e.kind == ::Agentmaster::TabKind::Other) ? std::wstring{ L"sh," } : (::Agentmaster::ShortId(e.sessionId) + L",");
+        }
+        if (newSig != oldSig)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[window-save] " + _windowId + L" tabs=" + std::to_wstring(rec.tabs.size()) + L" [" + newSig + L"]\n");
+        }
         _windowRecord = std::move(rec);
         ::Agentmaster::SaveWindowRecord(_windowRecord);
     }
@@ -504,6 +522,32 @@ namespace winrt::TerminalApp::implementation
         // position. -1 => unresolved (the selected session couldn't be restored) => leave default focus.
         int targetAbs = wantManager ? 0 : -1;
 
+        // Restore-story trace (BEGIN): list every ref by kind + session id BEFORE re-homing, so a tab that
+        // later skips or mis-resumes is pinpointable — the [rehome] end line is only counts. Pairs with the
+        // [window-claim] line (same _windowId) and the per-tab [rehome] resume/skip lines below.
+        {
+            std::wstring refList;
+            for (const auto& e : tabs)
+            {
+                if (e.kind == ::Agentmaster::TabKind::Claude)
+                {
+                    refList += L" claude:" + ::Agentmaster::ShortId(e.sessionId);
+                }
+                else if (e.kind == ::Agentmaster::TabKind::Codex)
+                {
+                    refList += L" codex:" + ::Agentmaster::ShortId(e.sessionId);
+                }
+                else
+                {
+                    refList += L" shell";
+                }
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[rehome-begin] window " + _windowId + L" refs=" + std::to_wstring(tabs.size()) +
+                                              L" select=" + (selSessionId.empty() ? (selTabIndex >= 0 ? (L"#" + std::to_wstring(selTabIndex)) : std::wstring{ L"(manager/none)" }) : ::Agentmaster::ShortId(selSessionId)) +
+                                              L" |" + refList + L"\n");
+        }
+
         // Pass 1 — managed sessions (Claude + Codex), synchronously, in record order.
         for (const auto& entry : tabs)
         {
@@ -519,6 +563,9 @@ namespace winrt::TerminalApp::implementation
             const auto info = _sessionRegistry->Get(entry.sessionId);
             if (!info || info->live)
             {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[rehome] window " + _windowId + L" skip " + ::Agentmaster::ShortId(entry.sessionId) +
+                                                  (info ? std::wstring{ L" (already live elsewhere)" } : std::wstring{ L" (unknown \x2014 fleet not loaded / pruned)" }) + L"\n");
                 ++skipped; // unknown (fleet not loaded yet / pruned) or already open elsewhere
                 continue;
             }
@@ -534,6 +581,8 @@ namespace winrt::TerminalApp::implementation
                 : _LaunchClaudeSession(winrt::hstring{ info->workingDir }, winrt::hstring{ info->title }, *info);
             if (!homed)
             {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[rehome] window " + _windowId + L" skip " + ::Agentmaster::ShortId(entry.sessionId) + L" (dedup: conversation already hosted by an earlier ref)\n");
                 ++skipped;
                 continue;
             }
@@ -541,6 +590,8 @@ namespace winrt::TerminalApp::implementation
             {
                 targetAbs = 1 + static_cast<int>(resumed); // this managed tab's index (Manager occupies 0)
             }
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[rehome] window " + _windowId + L" resume " + (isCodex ? L"codex " : L"claude ") + ::Agentmaster::ShortId(entry.sessionId) + L" \"" + info->title + L"\"\n");
             ++resumed;
         }
 

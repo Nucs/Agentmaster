@@ -466,6 +466,39 @@ namespace winrt::TerminalApp::implementation
         }
         _windowId = _windowRecord.windowId;
 
+        // Restore-story trace (line 1): did this window CLAIM a saved record (geometry + lens + ordered tab
+        // refs) or start fresh? When claimed, count the refs by kind + name the focused session, so the
+        // [rehome-begin]/[rehome] lines that follow (in _RestoreWindowTabs) read as one coherent window
+        // restore story for THIS windowId. Once per window creation — never per-tick.
+        if (_windowRecordClaimed)
+        {
+            size_t cl = 0, cx = 0, sh = 0;
+            for (const auto& t : _windowRecord.tabs)
+            {
+                if (t.kind == ::Agentmaster::TabKind::Claude)
+                {
+                    ++cl;
+                }
+                else if (t.kind == ::Agentmaster::TabKind::Codex)
+                {
+                    ++cx;
+                }
+                else
+                {
+                    ++sh;
+                }
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[window-claim] " + _windowId + L" refs=" + std::to_wstring(_windowRecord.tabs.size()) +
+                                              L" (claude=" + std::to_wstring(cl) + L" codex=" + std::to_wstring(cx) + L" shell=" + std::to_wstring(sh) +
+                                              L") selected=" + ::Agentmaster::ShortId(_windowRecord.selectedSessionId) + L"\n");
+        }
+        else
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[window-fresh] " + _windowId + (_isContentWindow ? std::wstring{ L" (dragged-out content window)" } : std::wstring{ L" (new window \x2014 no saved record)" }) + L"\n");
+        }
+
         // M10 Increment 3 (open-at-exit manifest; PERSISTENCE.md §13.5): mark this window LIVE in the
         // process-wide set, which rewrites open-windows.json. Done here (not at WindowEmperor create
         // time) because _windowId is only resolved now — register early + correct so even a one-window
