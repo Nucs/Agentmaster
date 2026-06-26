@@ -325,6 +325,16 @@ namespace Agentmaster
     std::wstring ReadConversationText(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
 
     // ===== Session summary (TAB_OVERLAY.md summary panel) — the session-end.js analyzer, ported =====
+    // Agentmaster (conversation lineage): ONE segment of a multi-part conversation — the run of
+    // messages between two compaction boundaries (a `/compact` splits a transcript into segments;
+    // cross-file `/clear` / plan-restart joins prepend earlier files' segments). The summary panel
+    // renders a PREVIOUS segment exactly like the current Messages list, under a separator + `label`.
+    struct ConversationSegment
+    {
+        std::wstring label; // the compaction that ENDED this segment, e.g. "compacted · manual · 409k→5k"; empty for a plain (cross-file) join
+        std::vector<std::wstring> userMsgs; // the segment's REAL user prompts, in order (SAME filter as SessionSummary.userMsgs)
+    };
+
     // A faithful C++ port of ~/.claude/hooks/session-end.js parseTranscript + its field mapping, so the
     // per-tab summary panel renders the same box (Session / Parent / Plan / Dir / Folder / Resume /
     // Duration / Branch / Tasks / Messages / Files Read / Files Edited). One forward pass over the
@@ -355,6 +365,16 @@ namespace Agentmaster
         std::wstring parentSessionId; // from "read the full transcript at: <...>.jsonl" in the first msg
         std::wstring planFilePath; // a Write into a /plans/ dir (plan-end's plan file)
         std::vector<std::wstring> planFilesRead; // Reads from a /plans/ dir (full paths)
+        // Agentmaster (conversation lineage): true when a system/compact_boundary was seen (the
+        // conversation was `/compact`ed at least once). userMsgs above is the CURRENT (active,
+        // post-last-boundary) segment; previousSegments holds the EARLIER segments the compaction(s)
+        // summarized away — the "previous session(s)" — OLDEST FIRST, each with its own numbered prompts
+        // + a label. Empty (and compacted=false) for a never-compacted session. Gathered by file
+        // POSITION (the pre-compaction turns are off the active leaf chain — the boundary is a parentUuid
+        // root — so a leaf walk can't see them). Cross-file lineage (a /clear or plan-restart parent) is
+        // prepended here by the higher-level lineage resolver, not by AnalyzeSessionTranscript itself.
+        bool compacted{ false };
+        std::vector<ConversationSegment> previousSegments;
     };
 
     // Agentmaster: normalize a Claude Code "away_summary" recap body for display. Claude Code stores
@@ -390,7 +410,16 @@ namespace Agentmaster
 
     // Port of session-end.js parseTranscript: one forward pass over a Claude transcript .jsonl.
     // `maxBytes` 0 == the whole file. Filesystem only; `found` is false if the file can't be read.
+    // Fills SessionSummary.previousSegments + compacted for in-file `/compact` boundaries.
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes);
+
+    // Agentmaster (conversation lineage): split a transcript's COMPLETE text into segments at each
+    // in-file `/compact` boundary, each carrying its REAL user prompts (deduped within the segment) +
+    // the label of the compaction that ended it. File order — the LAST segment is the active
+    // conversation, the earlier ones are the "previous session(s)" /compact summarized away. Pure; the
+    // segment-collector AnalyzeSessionTranscript uses for SessionSummary.previousSegments (exposed for
+    // tests + the higher-level cross-file lineage resolver).
+    std::vector<ConversationSegment> CollectConversationSegments(std::wstring_view transcriptText);
 
     // Agentmaster: collapse-mode TABLE de-noiser. When a summary message is flattened to ONE line
     // (wrap-off — the panel escapes newlines to a literal "\n", or the Sessions-page detail box which

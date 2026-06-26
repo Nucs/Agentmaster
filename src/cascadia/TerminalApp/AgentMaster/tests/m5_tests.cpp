@@ -3485,6 +3485,70 @@ static void TestTranscriptResolve()
         std::filesystem::remove_all(std::filesystem::path{ projectsDir }, ecR);
     }
 
+    // --- Conversation lineage: in-file /compact splits into previous + current segments -----------
+    // A /compact writes a system/compact_boundary (parentUuid:null => a NEW root, so the active leaf
+    // chain STOPS there) + an isCompactSummary "continued from a previous conversation" bridge. The
+    // pre-compaction turns stay in the file but OFF the active chain. The current Messages list is the
+    // post-compaction segment (leaf-filtered, the summary bridge excluded); the pre-compaction segment
+    // surfaces as a numbered "previous session". Mirrors the real session 3751c455.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_compact_" + std::to_wstring(::GetCurrentProcessId());
+        const std::string compacted =
+            R"j({"type":"user","userType":"external","uuid":"o1","parentUuid":null,"message":{"content":"old prompt one"},"timestamp":"2026-06-26T09:00:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"o2","parentUuid":"o1","message":{"content":"old prompt two"},"timestamp":"2026-06-26T09:05:00.000Z"})j" "\n"
+            R"j({"type":"system","subtype":"compact_boundary","uuid":"B","parentUuid":null,"logicalParentUuid":"o2","compactMetadata":{"trigger":"manual","preTokens":409797,"postTokens":5012},"timestamp":"2026-06-26T09:06:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","isCompactSummary":true,"uuid":"S","parentUuid":"B","message":{"content":"This session is being continued from a previous conversation..."},"timestamp":"2026-06-26T09:06:01.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"n1","parentUuid":"S","message":{"content":"new prompt one"},"timestamp":"2026-06-26T09:10:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"n2","parentUuid":"n1","message":{"content":"new prompt two"},"timestamp":"2026-06-26T09:15:00.000Z"})j" "\n"
+            R"j({"type":"last-prompt","lastPrompt":"new prompt two","leafUuid":"n2"})j" "\n";
+
+        // (1) the pure segment collector: 2 segments; seg0 = pre-compaction (labeled), seg1 = current.
+        const auto segs = CollectConversationSegments(std::wstring{ compacted.begin(), compacted.end() });
+        CHECK(segs.size() == 2, "CollectConversationSegments: a /compact boundary splits into 2 segments");
+        CHECK(segs[0].userMsgs.size() == 2 && segs[0].userMsgs[0] == L"old prompt one" && segs[0].userMsgs[1] == L"old prompt two",
+              "CollectConversationSegments: segment 0 = the pre-compaction prompts");
+        CHECK(segs[0].label.find(L"compacted") != std::wstring::npos && segs[0].label.find(L"manual") != std::wstring::npos && segs[0].label.find(L"409k") != std::wstring::npos,
+              "CollectConversationSegments: segment 0's label carries trigger + token counts");
+        CHECK(segs[1].userMsgs.size() == 2 && segs[1].userMsgs[0] == L"new prompt one",
+              "CollectConversationSegments: segment 1 = the current (post-compaction) prompts");
+
+        // (2) AnalyzeSessionTranscript: current Messages = post-compaction only (leaf-filtered, summary
+        // bridge excluded); the pre-compaction segment surfaces as exactly one previous session.
+        const std::wstring pComp = base + L"_c.jsonl";
+        MakeJsonl(pComp, compacted, 2000, 1000);
+        const auto a = AnalyzeSessionTranscript(pComp, 0);
+        CHECK(a.compacted, "AnalyzeSessionTranscript: a /compact session is flagged compacted");
+        CHECK(a.userMsgs.size() == 2 && a.userMsgs[0] == L"new prompt one" && a.userMsgs[1] == L"new prompt two",
+              "AnalyzeSessionTranscript: current Messages = post-compaction only (leaf-filtered; isCompactSummary bridge excluded)");
+        bool leak = false;
+        for (const auto& m : a.userMsgs)
+        {
+            if (m.find(L"continued from a previous") != std::wstring::npos)
+            {
+                leak = true;
+            }
+        }
+        CHECK(!leak, "AnalyzeSessionTranscript: the isCompactSummary bridge does NOT leak into the Messages list");
+        CHECK(a.previousSegments.size() == 1 && a.previousSegments[0].userMsgs.size() == 2 && a.previousSegments[0].userMsgs[0] == L"old prompt one",
+              "AnalyzeSessionTranscript: the pre-compaction segment surfaces as one numbered previous session");
+
+        // (3) a non-compacted session: one segment, not flagged, no previous.
+        const std::string plain =
+            R"j({"type":"user","userType":"external","uuid":"p1","parentUuid":null,"message":{"content":"hello there"},"timestamp":"2026-06-26T09:00:00.000Z"})j" "\n"
+            R"j({"type":"last-prompt","leafUuid":"p1"})j" "\n";
+        CHECK(CollectConversationSegments(std::wstring{ plain.begin(), plain.end() }).size() == 1, "CollectConversationSegments: a non-compacted session is one segment");
+        const std::wstring pPlain = base + L"_p.jsonl";
+        MakeJsonl(pPlain, plain, 2000, 1000);
+        const auto ap = AnalyzeSessionTranscript(pPlain, 0);
+        CHECK(!ap.compacted && ap.previousSegments.empty(), "AnalyzeSessionTranscript: a non-compacted session has no previous segments");
+
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path{ pComp }, ec);
+        std::filesystem::remove(std::filesystem::path{ pPlain }, ec);
+    }
+
     // --- NormalizeRecapText: the one-true recap normalizer (shared by every recap reader) ----------
     CHECK(NormalizeRecapText(L"Did X. Next: Y. (disable recaps in /config)") == L"Did X. Next: Y.", "NormalizeRecapText: trailing disable hint + the space before it are stripped");
     CHECK(NormalizeRecapText(L"  spaced recap \n") == L"spaced recap", "NormalizeRecapText: surrounding whitespace/newlines trimmed");

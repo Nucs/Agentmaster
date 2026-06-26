@@ -2786,6 +2786,157 @@ namespace Agentmaster
         return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId);
     }
 
+    // Agentmaster (conversation lineage): the real human-prompt TEXT from a user line, or "" when it is
+    // NOT one (a tool-result turn, a slash-command/bash/notification noise marker, or whitespace-only).
+    // Mirrors the externalUser extraction in AnalyzeSessionTranscriptImpl (first text block / string
+    // content -> slash-command reconstruct -> strip leading whitespace -> SeIsCommandNoise), so the
+    // conversation-SEGMENT collector below can never drift from the live Messages list.
+    static std::wstring SeExtractRealUserPrompt(const json::Value& obj)
+    {
+        // isCompactSummary == the synthetic "This session is being continued… Summary: …" bridge a
+        // /compact writes; it is NOT a human prompt (session-end.js treats it as meta). It rides a
+        // userType:"external" user line that SeIsCommandNoise doesn't catch, so guard it explicitly.
+        if (obj.BoolAt(L"isCompactSummary") || obj.BoolAt(L"isMeta"))
+        {
+            return {};
+        }
+        const auto* msg = obj.Find(L"message");
+        if (!msg || msg->type != json::Value::Type::Obj)
+        {
+            return {};
+        }
+        std::wstring content;
+        if (const auto* c = msg->Find(L"content"))
+        {
+            if (c->type == json::Value::Type::Str)
+            {
+                content = c->str;
+            }
+            else if (c->type == json::Value::Type::Arr)
+            {
+                for (const auto& blk : c->arr)
+                {
+                    if (blk.type == json::Value::Type::Obj && blk.StrAt(L"type") == L"text")
+                    {
+                        content = blk.StrAt(L"text");
+                        break;
+                    }
+                }
+            }
+        }
+        if (!content.empty() && content.find(L"<command-name>") != std::wstring::npos)
+        {
+            if (std::wstring cmd = SeReconstructCommandPrompt(content); !cmd.empty())
+            {
+                content = std::move(cmd);
+            }
+        }
+        if (const size_t nb = content.find_first_not_of(L" \t\r\n"); nb == std::wstring::npos)
+        {
+            content.clear();
+        }
+        else if (nb > 0)
+        {
+            content.erase(0, nb);
+        }
+        if (content.empty() || SeAllWhitespace(content) || SeIsCommandNoise(content))
+        {
+            return {};
+        }
+        return content;
+    }
+
+    // Agentmaster (conversation lineage): a compact token count for a segment label (409797 -> "409k").
+    static std::wstring SeFormatTokens(int64_t n)
+    {
+        if (n <= 0)
+        {
+            return {};
+        }
+        if (n >= 1000000)
+        {
+            return std::to_wstring(n / 1000000) + L"M";
+        }
+        if (n >= 1000)
+        {
+            return std::to_wstring(n / 1000) + L"k";
+        }
+        return std::to_wstring(n);
+    }
+
+    // Agentmaster (conversation lineage): a human label for a compaction boundary's compactMetadata, e.g.
+    // "compacted · manual · 409k→5k" (trigger + pre/post token counts when present).
+    static std::wstring SeFormatCompactionLabel(const json::Value* md)
+    {
+        std::wstring label = L"compacted";
+        if (md && md->type == json::Value::Type::Obj)
+        {
+            if (const std::wstring trig = md->StrAt(L"trigger"); !trig.empty())
+            {
+                label += L" · " + trig;
+            }
+            const std::wstring pre = SeFormatTokens(md->I64At(L"preTokens"));
+            const std::wstring post = SeFormatTokens(md->I64At(L"postTokens"));
+            if (!pre.empty() && !post.empty())
+            {
+                label += L" · " + pre + L"→" + post;
+            }
+        }
+        return label;
+    }
+
+    std::vector<ConversationSegment> CollectConversationSegments(std::wstring_view transcriptText)
+    {
+        // Split a transcript's COMPLETE text into segments at each system/compact_boundary, collecting
+        // each segment's REAL user prompts (deduped WITHIN the segment, like the live Messages list).
+        // The boundary that ENDS a segment supplies its label. Segments are in file order — the LAST is
+        // the current/active conversation; the earlier ones are the "previous session(s)" /compact
+        // summarized away. By POSITION (not the leaf chain — a boundary's parentUuid is null, so the
+        // pre-compaction turns are unreachable by a leaf walk). Pure.
+        std::vector<ConversationSegment> segs(1);
+        std::unordered_set<std::wstring> seen; // dedup within the current segment; resets at each boundary
+        size_t start = 0;
+        for (size_t i = 0; i <= transcriptText.size(); ++i)
+        {
+            if (i < transcriptText.size() && transcriptText[i] != L'\n')
+            {
+                continue;
+            }
+            std::wstring_view line = transcriptText.substr(start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+            const std::wstring type = obj.StrAt(L"type");
+            if (type == L"system" && obj.StrAt(L"subtype") == L"compact_boundary")
+            {
+                segs.back().label = SeFormatCompactionLabel(obj.Find(L"compactMetadata"));
+                segs.emplace_back();
+                seen.clear();
+                continue;
+            }
+            if (type == L"user" && obj.StrAt(L"userType") == L"external")
+            {
+                if (std::wstring p = SeExtractRealUserPrompt(obj); !p.empty() && seen.insert(p).second)
+                {
+                    segs.back().userMsgs.push_back(std::move(p));
+                }
+            }
+        }
+        return segs;
+    }
+
     static SessionSummary AnalyzeSessionTranscriptImpl(std::wstring_view transcriptPath, size_t maxBytes);
     // Agentmaster (extra-safe): a transcript parser must NEVER throw into its caller. Most callers run on
     // a BACKGROUND thread inside a fire_and_forget coroutine (the summary panel, alt-nav, the Sessions
@@ -3028,7 +3179,12 @@ namespace Agentmaster
                     {
                         content.erase(0, nb);
                     }
-                    if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content))
+                    // isCompactSummary == the synthetic "This session is being continued… Summary: …"
+                    // bridge a /compact writes. It rides a userType:"external" user line and is NOT
+                    // caught by SeIsCommandNoise, so without this guard it leaked into the Messages list
+                    // as a fake "1st message" (session-end.js treats it as meta). The compaction is
+                    // surfaced instead by the `compacted` flag + the previous-session segments.
+                    if (!content.empty() && !SeAllWhitespace(content) && !SeIsCommandNoise(content) && !obj.BoolAt(L"isCompactSummary") && !obj.BoolAt(L"isMeta"))
                     {
                         // Track the LAST real user prompt's time (for the "last user msg" ago), even if
                         // the text dedups against an earlier identical prompt — recency is what matters.
@@ -3254,6 +3410,28 @@ namespace Agentmaster
                 else if (st == L"pending" || st == L"in_progress")
                 {
                     ++out.tasksPending;
+                }
+            }
+        }
+
+        // Agentmaster (conversation lineage): split by in-file compaction boundaries. The LAST segment
+        // is the active conversation (== out.userMsgs, leaf-filtered above); the EARLIER ones are the
+        // "previous session(s)" /compact summarized away — surfaced (oldest first) by the summary panel's
+        // previous-sessions toggle. Skipped on a truncated head read (a boundary may be cut off). Only
+        // non-empty previous segments are kept (an empty one — e.g. back-to-back compactions — is noise).
+        if (!truncated)
+        {
+            std::vector<ConversationSegment> segs = CollectConversationSegments(wide);
+            if (segs.size() > 1)
+            {
+                out.compacted = true;
+                segs.pop_back(); // drop the current/active segment (already in out.userMsgs)
+                for (auto& s : segs)
+                {
+                    if (!s.userMsgs.empty())
+                    {
+                        out.previousSegments.push_back(std::move(s));
+                    }
                 }
             }
         }
