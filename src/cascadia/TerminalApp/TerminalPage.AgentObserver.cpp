@@ -1496,6 +1496,58 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (shift+home "home/back" toggle): jump to the pinned Manager tab from anywhere; pressing
+    // it again while ALREADY on the Manager tab returns to the tab you came from. "The tab I came from" is
+    // the most-recently-used non-Manager tab — WT bumps _mruTabs on every focus change (so selecting the
+    // Manager just now pushed the prior tab to the front of the non-Manager entries) and prunes a closed
+    // tab from it, so this needs no separate bookkeeping and never targets a dead tab. Works everywhere:
+    // over a focused terminal the chord is intercepted by TermControl's ActionMap lookup, and on the
+    // Manager tab's own text boxes it is tunneled in by _ManagerPaneNavPreviewKeyDown (which lists
+    // AgentToggleManagerTab in its allow-list). UI thread.
+    void TerminalPage::_HandleAgentToggleManagerTab(const winrt::Windows::Foundation::IInspectable& /*sender*/, const ActionEventArgs& args)
+    {
+        // The Manager tab is pinned + non-closable, but it is null very early in startup and after a
+        // window's last teardown — be defensive so the chord just no-ops then.
+        if (!_managerTab)
+        {
+            args.Handled(false);
+            return;
+        }
+
+        const auto focused = _GetFocusedTab();
+        const bool onManager = focused && (focused == _managerTab);
+
+        if (!onManager)
+        {
+            // Go HOME: jump to the pinned Manager tab (tab 0).
+            if (const auto idx = _GetTabIndex(_managerTab))
+            {
+                _SelectTab(*idx);
+                args.Handled(true);
+                return;
+            }
+            args.Handled(false);
+            return;
+        }
+
+        // Already HOME: go BACK to the tab we came from — the most-recently-used non-Manager tab.
+        for (uint32_t i = 0; i < _mruTabs.Size(); ++i)
+        {
+            const auto candidate = _mruTabs.GetAt(i);
+            if (candidate && candidate != _managerTab)
+            {
+                if (const auto idx = _GetTabIndex(candidate))
+                {
+                    _SelectTab(*idx);
+                }
+                break;
+            }
+        }
+        // Consume the chord even when only the Manager tab is open (nothing to return to), so it never
+        // falls through to the terminal's select-to-line-start.
+        args.Handled(true);
+    }
+
     // Agentmaster (TAB_OVERLAY.md summary panel): the per-tab pencil button toggles the summary panel's
     // visibility, which is a GLOBAL setting (AppSettings::showSummaryPanel) so the choice is shared across
     // windows and survives restart. Mirror the treeSort / archiveSplitFraction pattern: a freshest-disk

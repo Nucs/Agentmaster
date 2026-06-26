@@ -104,6 +104,8 @@ static constexpr std::string_view OpenCWDKey{ "openCWD" };
 // Agentmaster: scroll the view to the nearest OFF-SCREEN sent prompt up/down (alt+up / alt+down).
 static constexpr std::string_view AgentScrollToPrevPromptKey{ "agentScrollToPrevPrompt" };
 static constexpr std::string_view AgentScrollToNextPromptKey{ "agentScrollToNextPrompt" };
+// Agentmaster: shift+home toggles to the pinned Manager tab; pressing it again on the Manager tab goes back.
+static constexpr std::string_view AgentToggleManagerTabKey{ "agentToggleManagerTab" };
 
 static constexpr std::string_view ActionKey{ "action" };
 

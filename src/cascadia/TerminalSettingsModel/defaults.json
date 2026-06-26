@@ -575,6 +575,10 @@
         // Bound to alt+up / alt+down (see the keybindings section).
         { "command": "agentScrollToPrevPrompt", "id": "Agentmaster.ScrollToPrevPrompt" },
         { "command": "agentScrollToNextPrompt", "id": "Agentmaster.ScrollToNextPrompt" },
+        // Agentmaster: shift+home jumps to the pinned Agent Manager tab (tab 0); pressing it again while
+        // already ON the Manager tab returns to the tab you came from (the home/back toggle). Bound to
+        // shift+home in the keybindings section.
+        { "command": "agentToggleManagerTab", "id": "Agentmaster.ToggleManagerTab" },
         { "command": { "action": "switchToTab", "index": 0 }, "id": "Terminal.SwitchToTab0" },
         { "command": { "action": "switchToTab", "index": 1 }, "id": "Terminal.SwitchToTab1" },
         { "command": { "action": "switchToTab", "index": 2 }, "id": "Terminal.SwitchToTab2" },
@@ -792,6 +796,9 @@
         { "keys": "alt+right", "id": "Agentmaster.NextTabImmediate" },
         { "keys": "alt+up", "id": "Agentmaster.ScrollToPrevPrompt" },
         { "keys": "alt+down", "id": "Agentmaster.ScrollToNextPrompt" },
+        // Agentmaster: shift+home is the Manager-tab home/back toggle (see Agentmaster.ToggleManagerTab
+        // above). It shadows the terminal's select-to-line-start; ctrl+shift+home (ScrollToTop) is unchanged.
+        { "keys": "shift+home", "id": "Agentmaster.ToggleManagerTab" },
         { "keys": "ctrl+alt+left", "id": "Terminal.MoveFocusPrevious" },
 
         // Clipboard Integration
