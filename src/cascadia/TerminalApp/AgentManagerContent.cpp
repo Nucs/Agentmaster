@@ -9294,6 +9294,49 @@ namespace winrt::TerminalApp::implementation
         return btn;
     }
 
+    // Agentmaster: a "GIT WORKTREES" row — "<name> — <path>", the worktree's branch in the tooltip.
+    // Mirrors _MakePathRow (a transparent, focus-neutral row that must NOT steal focus from the cwd
+    // box — or the box's LostFocus would race ahead and tear down the popup before the click lands)
+    // and, like it, a click drills the launch box into the worktree path via _PickPath, so a session
+    // launches THERE. The leaf name is the worktree's identity; the path follows dim so the launch
+    // destination is unambiguous (worktrees of one repo share a folder, differ by branch).
+    Button AgentManagerContent::_MakeWorktreeRow(const std::wstring& fullPath, const std::wstring& name, const std::wstring& branch, bool isCurrent)
+    {
+        auto row = StackPanel{};
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(8);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        {
+            auto glyph = Text(L"\xF1D3", 13, false, isCurrent ? 0.9 : 0.7); // Segoe Fluent Icons: BranchFork2
+            glyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            row.Children().Append(glyph);
+        }
+        row.Children().Append(Text(winrt::hstring{ name }, 13, true, 1.0));
+        row.Children().Append(Text(L"\x2014", 13, false, 0.35)); // em-dash separator: "<name> — <path>"
+        row.Children().Append(Text(winrt::hstring{ fullPath }, 13, false, 0.55));
+        if (isCurrent)
+        {
+            row.Children().Append(Text(L"(current)", 11, false, 0.45)); // the worktree the box already points into
+        }
+
+        auto btn = Button{};
+        btn.Content(row);
+        btn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        btn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        btn.Background(SolidColorBrush{ Colors::Transparent() });
+        btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        btn.Padding(Thickness{ 8, 5, 8, 5 });
+        btn.IsTabStop(false);
+        btn.AllowFocusOnInteraction(false);
+        const auto captured = fullPath;
+        const winrt::hstring tip = branch.empty() ?
+            (winrt::hstring{ L"Use this worktree \x2014 " } + winrt::hstring{ fullPath }) :
+            (winrt::hstring{ L"Worktree on branch " } + winrt::hstring{ branch } + winrt::hstring{ L" \x2014 " } + winrt::hstring{ fullPath });
+        AgentSetTip(btn, tip);
+        btn.Click([this, captured](const IInspectable&, const RoutedEventArgs&) { _PickPath(captured); });
+        return btn;
+    }
+
     void AgentManagerContent::_RebuildPathPicker()
     {
         if (!_pathListHost)
@@ -9348,6 +9391,25 @@ namespace winrt::TerminalApp::implementation
             for (const auto& d : recents)
             {
                 _pathListHost.Children().Append(_MakePathRow(d, L"\x21BB", winrt::hstring{}));
+            }
+        }
+
+        // GIT WORKTREES of the repo containing the typed path (if any). ListGitWorktrees mirrors
+        // ReadGitBranchForDir's pure-filesystem .git walk (a few small reads + one dir enum), so it is
+        // cheap enough for this per-keystroke rebuild. Shown only when the path resolves into a repo
+        // that has LINKED worktrees (size >= 2: the main worktree + at least one linked) — a plain repo
+        // with no extra worktrees adds no section. Clicking a row drills the launch box into that
+        // worktree exactly like picking a folder, so a session launches there.
+        if (!current.empty() && !queryMode)
+        {
+            const auto worktrees = ListGitWorktrees(NormPath(current));
+            if (worktrees.size() >= 2)
+            {
+                _pathListHost.Children().Append(sectionLabel(winrt::hstring{ L"GIT WORKTREES" }));
+                for (const auto& w : worktrees)
+                {
+                    _pathListHost.Children().Append(_MakeWorktreeRow(w.path, w.name, w.branch, w.isCurrent));
+                }
             }
         }
 

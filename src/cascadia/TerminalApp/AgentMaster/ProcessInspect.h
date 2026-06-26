@@ -461,6 +461,23 @@ namespace Agentmaster
     // working dir is on RIGHT NOW. Filesystem only (a tiny read) — safe off the UI thread.
     std::wstring ReadGitBranchForDir(const std::wstring& dir);
 
+    // Agentmaster: one worktree of a git repo (main or linked), for the Launch path-picker's
+    // "GIT WORKTREES" section. Filesystem only — populated by ListGitWorktrees.
+    struct GitWorktreeInfo
+    {
+        std::wstring path; // the worktree's working directory (absolute)
+        std::wstring name; // its folder leaf — the display "name"
+        std::wstring branch; // current branch (or short SHA when detached); empty if unreadable
+        bool isMain = false; // the primary worktree (the repo root, not under .git\worktrees\)
+        bool isCurrent = false; // the worktree that CONTAINS the queried `dir`
+    };
+
+    // Agentmaster: every worktree of the repo containing `dir` — the main worktree first, then the
+    // linked worktrees (.git\worktrees\<id>) alphabetized. Empty when `dir` is not inside a git repo.
+    // Pure filesystem (a few small reads + one directory enum), mirroring ReadGitBranchForDir — cheap
+    // enough to call inline on the path-picker's per-keystroke rebuild.
+    std::vector<GitWorktreeInfo> ListGitWorktrees(const std::wstring& dir);
+
     // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
     // Codex is the Claude analog with three divergences: its config home is CODEX_HOME (else
     // ~/.codex); it can't pin a session id at launch (the id is auto-minted, embedded in the

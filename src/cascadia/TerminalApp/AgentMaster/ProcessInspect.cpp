@@ -1591,86 +1591,255 @@ namespace Agentmaster
         return PickDisplayTitle(info.customTitle, info.aiTitle, info.summary, info.title);
     }
 
-    // Agentmaster: the CURRENT git branch of a working dir (see ProcessInspect.h). Out-of-band,
-    // filesystem only — reuses the anon-namespace ReadFileHead / Utf8ToWide primitives above.
-    std::wstring ReadGitBranchForDir(const std::wstring& dir)
+    // ---- git plumbing shared by ReadGitBranchForDir + ListGitWorktrees (Agentmaster) ----
+    // All filesystem-only, factored out of the original ReadGitBranchForDir so the worktree
+    // enumeration reuses the EXACT same .git-file / HEAD parsing. Internal linkage (anon namespace);
+    // they see the file's earlier ReadFileHead / Utf8ToWide primitives.
+    namespace
     {
-        if (dir.empty())
+        // Trim surrounding whitespace/newlines (the .git admin files are single short lines).
+        std::wstring GitTrim(const std::wstring& s)
         {
-            return {};
-        }
-        std::wstring cur = dir;
-        while (cur.size() > 1 && (cur.back() == L'\\' || cur.back() == L'/'))
-        {
-            cur.pop_back(); // strip trailing separators
+            const auto b = s.find_first_not_of(L" \t\r\n");
+            if (b == std::wstring::npos)
+            {
+                return {};
+            }
+            const auto e = s.find_last_not_of(L" \t\r\n");
+            return s.substr(b, e - b + 1);
         }
 
-        // Walk UP to the nearest .git: a directory is a normal repo root; a FILE is a worktree/
-        // submodule whose contents are "gitdir: <path>" (the real git dir), which we resolve.
-        std::wstring gitDir;
-        for (;;)
+        // Flip '/'->'\' (git writes forward slashes in .git admin files on Windows).
+        void GitFlipSeps(std::wstring& s)
         {
-            const std::wstring dot = cur + L"\\.git";
-            WIN32_FILE_ATTRIBUTE_DATA fad{};
-            if (::GetFileAttributesExW(dot.c_str(), GetFileExInfoStandard, &fad))
+            for (auto& ch : s)
             {
-                if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                if (ch == L'/')
                 {
-                    gitDir = dot; // normal repo root
-                    break;
+                    ch = L'\\';
                 }
-                std::wstring text = Utf8ToWide(ReadFileHead(dot, 4096)); // ".git" FILE: "gitdir: <path>"
-                const std::wstring key = L"gitdir:";
-                if (const auto k = text.find(key); k != std::wstring::npos)
-                {
-                    std::wstring g = text.substr(k + key.size());
-                    const auto b = g.find_first_not_of(L" \t\r\n");
-                    const auto e = g.find_last_not_of(L" \t\r\n");
-                    if (b != std::wstring::npos)
-                    {
-                        g = g.substr(b, e - b + 1);
-                        for (auto& ch : g)
-                        {
-                            if (ch == L'/')
-                            {
-                                ch = L'\\';
-                            }
-                        }
-                        const bool absolute = (g.size() >= 2 && g[1] == L':') || (g.size() >= 2 && g[0] == L'\\' && g[1] == L'\\');
-                        gitDir = absolute ? g : (cur + L"\\" + g); // relative gitdir is relative to .git's dir
-                    }
-                }
-                break;
             }
-            const auto slash = cur.find_last_of(L"\\/");
-            if (slash == std::wstring::npos || slash < 2)
-            {
-                break; // reached the drive root (e.g. "C:") -> not under a repo
-            }
-            cur = cur.substr(0, slash);
         }
+
+        bool GitIsAbsolute(const std::wstring& s)
+        {
+            return (s.size() >= 2 && s[1] == L':') || (s.size() >= 2 && s[0] == L'\\' && s[1] == L'\\');
+        }
+
+        // Lexically resolve '.'/'..' (NO filesystem touch) so a "commondir" like "../.." canonicalizes.
+        std::wstring GitFullPath(const std::wstring& p)
+        {
+            wchar_t buf[1024];
+            const DWORD n = ::GetFullPathNameW(p.c_str(), ARRAYSIZE(buf), buf, nullptr);
+            return (n > 0 && n < ARRAYSIZE(buf)) ? std::wstring{ buf, n } : p;
+        }
+
+        // The last path component, trailing separators stripped ("" for a bare root).
+        std::wstring GitLeaf(std::wstring s)
+        {
+            while (s.size() > 1 && (s.back() == L'\\' || s.back() == L'/'))
+            {
+                s.pop_back();
+            }
+            const auto pos = s.find_last_of(L"\\/");
+            return (pos == std::wstring::npos) ? s : s.substr(pos + 1);
+        }
+
+        // The parent directory (one component up), trailing separators stripped ("" if at a root).
+        std::wstring GitParent(std::wstring s)
+        {
+            while (s.size() > 1 && (s.back() == L'\\' || s.back() == L'/'))
+            {
+                s.pop_back();
+            }
+            const auto pos = s.find_last_of(L"\\/");
+            return (pos == std::wstring::npos || pos < 2) ? std::wstring{} : s.substr(0, pos);
+        }
+
+        bool GitLeafEq(const std::wstring& p, const wchar_t* leaf)
+        {
+            const std::wstring l = GitLeaf(p);
+            return ::CompareStringOrdinal(l.c_str(), -1, leaf, -1, TRUE) == CSTR_EQUAL;
+        }
+
+        bool GitPathEq(const std::wstring& a, const std::wstring& b)
+        {
+            return ::CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+        }
+
+        // Walk UP from `dir` to the nearest .git, returning the per-worktree git directory: a normal
+        // repo root's ".git" DIR, or — for a worktree/submodule ".git" FILE ("gitdir: <path>") — the
+        // path it names (a linked worktree's <common>\worktrees\<id>). "" when not under a repo.
+        std::wstring FindGitDirForPath(const std::wstring& dir)
+        {
+            if (dir.empty())
+            {
+                return {};
+            }
+            std::wstring cur = dir;
+            while (cur.size() > 1 && (cur.back() == L'\\' || cur.back() == L'/'))
+            {
+                cur.pop_back();
+            }
+            for (;;)
+            {
+                const std::wstring dot = cur + L"\\.git";
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (::GetFileAttributesExW(dot.c_str(), GetFileExInfoStandard, &fad))
+                {
+                    if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    {
+                        return dot; // normal repo root
+                    }
+                    std::wstring text = Utf8ToWide(ReadFileHead(dot, 4096)); // ".git" FILE: "gitdir: <path>"
+                    const std::wstring key = L"gitdir:";
+                    if (const auto k = text.find(key); k != std::wstring::npos)
+                    {
+                        std::wstring g = GitTrim(text.substr(k + key.size()));
+                        if (!g.empty())
+                        {
+                            GitFlipSeps(g);
+                            return GitIsAbsolute(g) ? g : GitFullPath(cur + L"\\" + g); // relative gitdir is relative to .git's dir
+                        }
+                    }
+                    return {};
+                }
+                const auto slash = cur.find_last_of(L"\\/");
+                if (slash == std::wstring::npos || slash < 2)
+                {
+                    return {}; // reached the drive root (e.g. "C:") -> not under a repo
+                }
+                cur = cur.substr(0, slash);
+            }
+        }
+
+        // Parse a .git/HEAD body -> branch name (slashes kept: feature/issue123), a non-branch ref's
+        // leaf, or a short SHA for a detached HEAD. "" only for empty input.
+        std::wstring ParseGitHead(const std::wstring& raw)
+        {
+            const std::wstring head = GitTrim(raw);
+            const std::wstring branchPrefix = L"ref: refs/heads/";
+            if (head.rfind(branchPrefix, 0) == 0)
+            {
+                return head.substr(branchPrefix.size());
+            }
+            if (head.rfind(L"ref: ", 0) == 0)
+            {
+                const auto s = head.find_last_of(L'/'); // a non-branch ref (tag / note) -> its leaf
+                return (s != std::wstring::npos) ? head.substr(s + 1) : head.substr(5);
+            }
+            return head.size() >= 7 ? head.substr(0, 7) : head; // detached HEAD: a short SHA, not "HEAD"
+        }
+    }
+
+    // Agentmaster: the CURRENT git branch of a working dir (see ProcessInspect.h). Out-of-band,
+    // filesystem only — reuses the shared .git walk (FindGitDirForPath) + HEAD parse (ParseGitHead).
+    std::wstring ReadGitBranchForDir(const std::wstring& dir)
+    {
+        const std::wstring gitDir = FindGitDirForPath(dir);
         if (gitDir.empty())
         {
             return {};
         }
+        return ParseGitHead(Utf8ToWide(ReadFileHead(gitDir + L"\\HEAD", 4096)));
+    }
 
-        std::wstring head = Utf8ToWide(ReadFileHead(gitDir + L"\\HEAD", 4096));
-        while (!head.empty() && (head.back() == L'\n' || head.back() == L'\r' || head.back() == L' ' || head.back() == L'\t'))
+    // Agentmaster: every worktree of the repo containing `dir` (see ProcessInspect.h). The main
+    // worktree (the repo root) first, then each linked worktree under <common>\worktrees\<id>,
+    // alphabetized. Pure filesystem — mirrors ReadGitBranchForDir's reads.
+    std::vector<GitWorktreeInfo> ListGitWorktrees(const std::wstring& dir)
+    {
+        std::vector<GitWorktreeInfo> out;
+        const std::wstring gitDir = FindGitDirForPath(dir);
+        if (gitDir.empty())
         {
-            head.pop_back();
+            return out;
         }
-        const std::wstring branchPrefix = L"ref: refs/heads/";
-        if (head.rfind(branchPrefix, 0) == 0)
+
+        // Resolve the COMMON git dir (the main repo's .git). A linked worktree's gitDir is
+        // <common>\worktrees\<id> and carries a "commondir" file (usually "../.."); the main
+        // worktree's gitDir already IS the common dir (it has no commondir file).
+        std::wstring commonDir = gitDir;
+        if (std::wstring cd = GitTrim(Utf8ToWide(ReadFileHead(gitDir + L"\\commondir", 4096))); !cd.empty())
         {
-            return head.substr(branchPrefix.size()); // keep slashes: e.g. feature/issue123
+            GitFlipSeps(cd);
+            commonDir = GitIsAbsolute(cd) ? cd : GitFullPath(gitDir + L"\\" + cd);
         }
-        if (head.rfind(L"ref: ", 0) == 0)
+
+        // Which worktree CONTAINS the queried dir — the main worktree when we resolved a real ".git"
+        // dir, else the linked worktree we walked into (matched by path below). Only flags isCurrent.
+        const std::wstring currentWtPath = GitLeafEq(gitDir, L".git") ? GitParent(gitDir) : std::wstring{};
+
+        // MAIN worktree = the parent of the common ".git" dir (skipped for a bare repo). HEAD is there.
+        if (GitLeafEq(commonDir, L".git"))
         {
-            const auto s = head.find_last_of(L'/'); // a non-branch ref (tag / note) -> its leaf
-            return (s != std::wstring::npos) ? head.substr(s + 1) : head.substr(5);
+            if (std::wstring root = GitParent(commonDir); !root.empty())
+            {
+                GitWorktreeInfo w;
+                w.path = root;
+                w.name = GitLeaf(root);
+                w.branch = ParseGitHead(Utf8ToWide(ReadFileHead(commonDir + L"\\HEAD", 4096)));
+                w.isMain = true;
+                out.push_back(std::move(w));
+            }
         }
-        // Detached HEAD: a raw commit SHA. Show a short SHA, not the bare word "HEAD".
-        return head.size() >= 7 ? head.substr(0, 7) : head;
+
+        // LINKED worktrees: each <commonDir>\worktrees\<id>\ names its working tree via a "gitdir"
+        // file (-> <worktree>\.git) and its checked-out ref via HEAD.
+        const std::wstring wtRoot = commonDir + L"\\worktrees";
+        WIN32_FIND_DATAW fd{};
+        const HANDLE h = ::FindFirstFileW((wtRoot + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    continue;
+                }
+                const std::wstring id = fd.cFileName;
+                if (id == L"." || id == L"..")
+                {
+                    continue;
+                }
+                const std::wstring admin = wtRoot + L"\\" + id;
+                std::wstring gd = GitTrim(Utf8ToWide(ReadFileHead(admin + L"\\gitdir", 4096)));
+                if (gd.empty())
+                {
+                    continue;
+                }
+                GitFlipSeps(gd);
+                const std::wstring wtPath = GitLeafEq(gd, L".git") ? GitParent(gd) : gd; // strip the trailing \.git
+                if (wtPath.empty())
+                {
+                    continue;
+                }
+                GitWorktreeInfo w;
+                w.path = wtPath;
+                w.name = GitLeaf(wtPath);
+                if (w.name.empty())
+                {
+                    w.name = id;
+                }
+                w.branch = ParseGitHead(Utf8ToWide(ReadFileHead(admin + L"\\HEAD", 4096)));
+                out.push_back(std::move(w));
+            } while (::FindNextFileW(h, &fd));
+            ::FindClose(h);
+        }
+
+        // Main worktree pinned first; linked worktrees alphabetized by name (case-insensitive).
+        std::sort(out.begin(), out.end(), [](const GitWorktreeInfo& a, const GitWorktreeInfo& b) {
+            if (a.isMain != b.isMain)
+            {
+                return a.isMain;
+            }
+            return ::CompareStringOrdinal(a.name.c_str(), -1, b.name.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+        });
+        for (auto& w : out)
+        {
+            w.isCurrent = !currentWtPath.empty() && GitPathEq(w.path, currentWtPath);
+        }
+        return out;
     }
 
     // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====

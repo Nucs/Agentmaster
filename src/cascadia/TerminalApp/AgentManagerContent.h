@@ -321,6 +321,9 @@ namespace winrt::TerminalApp::implementation
         // closeness (closest first); an empty query keeps the historical MRU order.
         std::vector<std::wstring> _CollectRecentDirs(const std::wstring& current, const std::wstring& query) const;
         winrt::Windows::UI::Xaml::Controls::Button _MakePathRow(const std::wstring& fullPath, const winrt::hstring& glyph, const winrt::hstring& displayText);
+        // Agentmaster: a "GIT WORKTREES" row — "<name> — <path>" (branch in the tooltip). Mirrors
+        // _MakePathRow (transparent + focus-neutral); a click drills the launch box into the worktree.
+        winrt::Windows::UI::Xaml::Controls::Button _MakeWorktreeRow(const std::wstring& fullPath, const std::wstring& name, const std::wstring& branch, bool isCurrent);
         // Agentmaster: the "Browse…" row pinned to the TOP of the path-picker (the first option) — a
         // native folder dialog whose pick both fills the box AND joins the recents (_BrowseForLaunchDir).
         winrt::Windows::UI::Xaml::Controls::Button _MakeBrowseRow();
