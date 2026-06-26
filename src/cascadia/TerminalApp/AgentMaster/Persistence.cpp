@@ -213,6 +213,24 @@ namespace Agentmaster
         return TabRenameCommitMode::ClickAwayOrShiftEnter;
     }
 
+    std::wstring ToString(FavoriteIcon i)
+    {
+        switch (i)
+        {
+        case FavoriteIcon::Star:
+            return L"star";
+        case FavoriteIcon::Crown:
+        default:
+            return L"crown";
+        }
+    }
+    FavoriteIcon FavoriteIconFromString(std::wstring_view s)
+    {
+        if (s == L"star")
+            return FavoriteIcon::Star;
+        return FavoriteIcon::Crown; // default + unknown token -> Crown (the prior behavior)
+    }
+
     std::wstring ToString(PromptStatus s)
     {
         switch (s)
@@ -466,6 +484,7 @@ namespace Agentmaster
         o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
+        o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
@@ -517,6 +536,7 @@ namespace Agentmaster
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
+        s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)

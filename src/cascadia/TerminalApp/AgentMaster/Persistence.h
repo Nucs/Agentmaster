@@ -37,6 +37,8 @@ namespace Agentmaster
     ExplorerSort ExplorerSortFromString(std::wstring_view s);
     std::wstring ToString(TabRenameCommitMode m);
     TabRenameCommitMode TabRenameCommitModeFromString(std::wstring_view s);
+    std::wstring ToString(FavoriteIcon i);
+    FavoriteIcon FavoriteIconFromString(std::wstring_view s);
 
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);

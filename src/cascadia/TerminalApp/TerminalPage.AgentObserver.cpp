@@ -266,9 +266,11 @@ namespace winrt::TerminalApp::implementation
         CATCH_LOG();
     }
 
-    // Agentmaster (FAVORITES.md): show/hide the gold FAVORITE crown over a tab's status dot. Low-level
-    // setter (mirrors _SetTabAgentDot): the WINRT_OBSERVABLE_PROPERTY no-ops when the value is unchanged,
-    // so re-asserting the same state is free. UI thread only.
+    // Agentmaster (FAVORITES.md §5a): show/hide the FAVORITE marker over a tab's status dot — the CROWN
+    // or the STAR, per the GLOBAL AppSettings::favoriteIcon. Low-level setter (mirrors _SetTabAgentDot):
+    // the WINRT_OBSERVABLE_PROPERTY no-ops when the value is unchanged, so re-asserting the same state is
+    // free. The two markers are MUTUALLY EXCLUSIVE — at most one is ever visible — so a switch between
+    // them (or to unfavorited) always drives both observables. UI thread only.
     void TerminalPage::_SetTabAgentFavorite(const TerminalApp::Tab& tab, bool on)
     {
         if (!tab)
@@ -279,7 +281,9 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto status = tab.TabStatus())
             {
-                status.AgentFavoriteVisible(on);
+                const bool star = on && (_appSettings.favoriteIcon == ::Agentmaster::FavoriteIcon::Star);
+                status.AgentFavoriteVisible(on && !star); // Crown is the default/else marker
+                status.AgentFavoriteStarVisible(star);
             }
         }
         CATCH_LOG();
@@ -306,6 +310,23 @@ namespace winrt::TerminalApp::implementation
         if (const auto tab = it->second.get())
         {
             _SetTabAgentFavorite(tab, ::Agentmaster::IsSessionFavorite(sessionId));
+        }
+    }
+
+    // Agentmaster (FAVORITES.md §5a): re-assert the favorite marker on EVERY tab this window hosts —
+    // used when the GLOBAL AppSettings::favoriteIcon flips (Crown <-> Star) via the cog Save or a
+    // cross-window broadcast, since IsSessionFavorite is unchanged but the GLYPH must switch live.
+    // _SetTabAgentFavorite re-reads _appSettings.favoriteIcon and drives both observables, so this just
+    // re-derives the on/off from the durable store for each hosted session. Cheap + idempotent (the
+    // observable no-ops when unchanged); a non-favorite tab is re-cleared harmlessly.
+    void TerminalPage::_RefreshAllFavoriteIcons()
+    {
+        for (const auto& [sessionId, weakTab] : _claudeTabs)
+        {
+            if (const auto tab = weakTab.get())
+            {
+                _SetTabAgentFavorite(tab, ::Agentmaster::IsSessionFavorite(sessionId));
+            }
         }
     }
 

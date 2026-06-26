@@ -159,27 +159,46 @@ Favorite (per the chosen surfaces). The per-tab overlay HUD is unchanged (no sta
 
 ---
 
-## 5a. The tab-strip FAVORITE crown (the visible "keeper" marker on a LIVE tab)
+## 5a. The tab-strip FAVORITE marker (the visible "keeper" marker on a LIVE tab)
 
 Favorite was *write-mostly* on open sessions — you could star a tab, but the only place the star
 rendered was the Sessions page's ★ column; a favorited **open** session showed nothing on its Triage
 Board card, Explorer tree row, **tab strip**, or per-tab overlay. The tab strip now carries the
-marker: a **small gold crown** (`#F5C242`, matching the Sessions ★) perched at the **north-west** of
-the status dot, peak tilted toward NW.
+marker, in one of **two user-selectable glyphs** (the Settings cog's **TABS ▸ Favorite marker**
+dropdown, a GLOBAL `AppSettings::favoriteIcon`, default **Crown**):
 
-- **Render** (`TabHeaderControl.xaml`): a `Path` crown drawn as the LAST child of the status-dot wrap
-  Grid (so it sits ON TOP of the dot), `HorizontalAlignment=Left`/`VerticalAlignment=Top` within the
-  14px wrap (kept inside it — the wrap's overflow is clipped by the tab header), `RotateTransform`
-  `Angle=-20` so the peak faces NW, `IsHitTestVisible=False` (decorative). Bound to the new
-  `TerminalTabStatus.AgentFavoriteVisible` observable (mirrors the status dot / flash ring / selection
-  pill). Tune knobs in the XAML: `Width`/`Height` (size), `RotateTransform.Angle` (tilt), `Margin`
-  (NW offset).
-- **Drive** (`TerminalPage`): `_SetTabAgentFavorite(tab, on)` (low-level setter, idempotent) +
-  `_RefreshTabFavoriteCrown(sid)` (re-reads `IsSessionFavorite(sid)` and asserts the crown on the tab
-  THIS window hosts; map-miss = no-op). Called where a managed tab is set up — `_LaunchClaudeSession`
-  (launch/restore) and `_BindClaudeSessionToTab` (adopt) — so a favorited session shows its crown the
-  instant its tab appears, and from `_ToggleSessionFavorite` so a same-window toggle (tab menu /
-  same-window Sessions page) updates instantly.
+- **Crown** (default): a **small gold crown** (`#F5C242`, matching the Sessions ★) perched at the
+  **north-west** of the status dot, peak tilted toward NW.
+- **Star**: the state-colored **status dot becomes the FOREGROUND of a white, golden-tipped star** —
+  a 5-point star drawn BEHIND the dot, so its points radiate AROUND the dot (white fill, a gold
+  `#F5C242` stroke whose miter joins make the sharp tips read golden).
+
+The two are **mutually exclusive** — at most one renders per tab — and the choice applies **live**
+(cog Save + the cross-window settings broadcast re-assert every hosted favorited tab; same-window
+instant, other windows on the next broadcast/bind).
+
+- **Render** (`TabHeaderControl.xaml`): two elements in the status-dot wrap Grid, each
+  `IsHitTestVisible=False` (decorative), gated on its own visibility observable.
+  - the **crown** `Path` is the LAST child (sits ON TOP of the dot), `HorizontalAlignment=Left`/
+    `VerticalAlignment=Top` within the 14px wrap (kept inside it — the wrap's overflow is clipped by
+    the tab header), `RotateTransform Angle=-20` so the peak faces NW; bound to
+    `TerminalTabStatus.AgentFavoriteVisible`. Tune knobs: `Width`/`Height` (size),
+    `RotateTransform.Angle` (tilt), `Margin` (NW offset).
+  - the **star** `Path` is drawn BEFORE the dot (so it sits BEHIND it, the dot as its foreground),
+    after the flash ring; `Stretch=Fill` centres it on the dot, white `Fill` + gold `#F5C242`
+    `Stroke` (`StrokeLineJoin=Miter`); bound to `TerminalTabStatus.AgentFavoriteStarVisible`. Kept
+    inside the 14px wrap (13px box + thin stroke leaves a sub-pixel margin so the tips aren't
+    clipped). Tune knobs: `Width`/`Height` (size relative to the 10px dot), `StrokeThickness` (tip
+    gold weight), the `Data` geometry (star proportions).
+- **Drive** (`TerminalPage`): `_SetTabAgentFavorite(tab, on)` (low-level setter, idempotent) reads
+  the GLOBAL `AppSettings::favoriteIcon` and drives **both** observables (crown vs star vs neither),
+  so the markers can never both show; `_RefreshTabFavoriteCrown(sid)` re-reads `IsSessionFavorite(sid)`
+  and asserts the marker on the tab THIS window hosts (map-miss = no-op); `_RefreshAllFavoriteIcons()`
+  re-asserts every hosted tab when the glyph setting flips. Called where a managed tab is set up —
+  `_LaunchClaudeSession` (launch/restore) and `_BindClaudeSessionToTab` (adopt) — so a favorited
+  session shows its marker the instant its tab appears, from `_ToggleSessionFavorite` so a same-window
+  toggle (tab menu / same-window Sessions page) updates instantly, and from the cog Save /
+  `_ApplyBroadcastSettings` so a Crown↔Star change switches the glyph live.
 - **Known gap (cross-window live toggle):** favorite lives in `SessionStore` (disk), not the registry,
   so there's no observer fan-out — toggling a session's star from a DIFFERENT window than the one
   hosting its tab won't move the crown until that tab's next bind (relaunch/restore). Rare; documented.
@@ -231,6 +250,20 @@ Explorer tree (a closed session simply leaves the board → appears in Sessions)
 | `TerminalPage.h`, `TerminalAppLib.vcxproj` | drop archive declarations + the TU registration; add the favorite members |
 | `AgentMaster/tests/m5_tests.cpp` | add SessionStore favorite tests; fix the Archive/Delete-string asserts |
 | `doc/agentmaster/SESSIONS.md`, `CLAUDE.md` | document Favorite; retire Archive |
+
+**§5a Crown/Star marker (follow-on):**
+
+| File | Change |
+|---|---|
+| `AgentMaster/SessionModels.h` | add `enum class FavoriteIcon { Crown=0, Star=1 }` + `AppSettings::favoriteIcon{ Crown }` |
+| `AgentMaster/Persistence.{h,cpp}` | `ToString(FavoriteIcon)` / `FavoriteIconFromString` (tokens `crown`/`star`) + (de)serialize `favoriteIcon` (absent ⇒ Crown) |
+| `TerminalTabStatus.{h,idl}` | add the `AgentFavoriteStarVisible` observable (beside `AgentFavoriteVisible`, mutually exclusive) |
+| `TabHeaderControl.xaml` | add the star `Path` behind the status dot (white fill, gold `#F5C242` stroke), bound to `AgentFavoriteStarVisible` |
+| `TerminalPage.AgentObserver.cpp` | `_SetTabAgentFavorite` reads `favoriteIcon` → drives both observables; add `_RefreshAllFavoriteIcons()` |
+| `TerminalPage.AgentEngine.cpp` | call `_RefreshAllFavoriteIcons()` on cog Save + `_ApplyBroadcastSettings` (live Crown↔Star) |
+| `TerminalPage.h` | declare `_RefreshAllFavoriteIcons` |
+| `AgentManagerContent.{h,cpp}` | the cog's **TABS ▸ Favorite marker** dropdown (`_setFavoriteIcon`: build/populate/save) |
+| `AgentMaster/tests/m5_tests.cpp` | `favoriteIcon` round-trip + default-on-empty + token-parse |
 
 ---
 

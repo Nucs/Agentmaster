@@ -128,6 +128,31 @@
                      IsHitTestVisible="False"
                      Fill="Red"
                      Visibility="{x:Bind TabStatus.AgentFlashRingVisible, Mode=OneWay}" />
+            <!--  Agentmaster (FAVORITES.md §5a): the STAR favorite marker — the alternative to the crown
+                  below, chosen by the GLOBAL AppSettings.favoriteIcon (Crown default / Star). Drawn HERE,
+                  BEFORE the status dot, so it sits BEHIND the dot: the state-colored dot becomes the
+                  FOREGROUND of a white, golden-tipped star whose points radiate AROUND the dot (the
+                  requested look — "the status indicator as a foreground to a white star with golden
+                  tips"). A 5-point star Path, white Fill with a gold (#F5C242, the Sessions ★ / crown
+                  gold) Stroke whose miter joins make the sharp TIPS read golden; Stretch=Fill centres it
+                  on the dot. Kept INSIDE the 14px wrap (overflow is clipped by the tab header) — 13px box
+                  + a thin stroke leaves a sub-pixel margin so the tips aren't clipped. Mutually exclusive
+                  with the crown (TerminalPage::_SetTabAgentFavorite asserts exactly one). IsHitTestVisible
+                  =False: decorative. Tune knobs: Width/Height (size relative to the 10px dot), StrokeThickness
+                  (tip gold weight), the Data geometry (star proportions).  -->
+            <Path x:Name="HeaderAgentFavoriteStar"
+                  Width="13"
+                  Height="13"
+                  HorizontalAlignment="Center"
+                  VerticalAlignment="Center"
+                  Stretch="Fill"
+                  IsHitTestVisible="False"
+                  Data="M7,0 L8.65,4.74 L13.66,4.84 L9.66,7.87 L11.11,12.66 L7,9.8 L2.89,12.66 L4.34,7.87 L0.34,4.84 L5.35,4.74 Z"
+                  Fill="White"
+                  Stroke="#F5C242"
+                  StrokeThickness="0.8"
+                  StrokeLineJoin="Miter"
+                  Visibility="{x:Bind TabStatus.AgentFavoriteStarVisible, Mode=OneWay}" />
             <Ellipse x:Name="HeaderAgentStatusDot"
                      Width="10"
                      Height="10"

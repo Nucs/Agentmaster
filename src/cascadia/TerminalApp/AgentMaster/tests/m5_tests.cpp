@@ -2131,6 +2131,7 @@ static void TestAppSettings()
         in.pauseOnHumanInput = false;
         in.confirmBeforeKill = false;
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
+        in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
@@ -2157,6 +2158,7 @@ static void TestAppSettings()
         CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
+        CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
         CHECK(out.summaryPanelWidthFraction > 0.399 && out.summaryPanelWidthFraction < 0.401, "settings summaryPanelWidthFraction round-trip");
@@ -2190,6 +2192,7 @@ static void TestAppSettings()
         CHECK(out.waitingForYouTimeoutMinutes == 60u, "settings waitingForYouTimeoutMinutes default 60 (1h Waiting-for-you timeout) on empty");
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
+        CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.flightPlanShowsSummary == true, "settings flightPlanShowsSummary default (Summary) on empty");
@@ -2232,6 +2235,17 @@ static void TestAppSettings()
         CHECK(se.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode 'shiftEnter' honored");
         const auto bad = DeserializeAppSettings(L"{\"settings\":{\"tabRenameCommitMode\":\"bogus\"}}");
         CHECK(bad.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode unknown -> default (Shift+Enter)");
+    }
+
+    // favoriteIcon (FAVORITES.md §5a): each token parses to its glyph; an unknown/absent token falls
+    // back to Crown (the prior behavior).
+    {
+        const auto crown = DeserializeAppSettings(L"{\"settings\":{\"favoriteIcon\":\"crown\"}}");
+        CHECK(crown.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon 'crown' honored");
+        const auto star = DeserializeAppSettings(L"{\"settings\":{\"favoriteIcon\":\"star\"}}");
+        CHECK(star.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon 'star' honored");
+        const auto bad = DeserializeAppSettings(L"{\"settings\":{\"favoriteIcon\":\"bogus\"}}");
+        CHECK(bad.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon unknown -> default (Crown)");
     }
 
     // A present subset is honored; the rest keep defaults.

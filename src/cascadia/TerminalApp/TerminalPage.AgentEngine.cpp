@@ -949,6 +949,9 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) "Always display Home button" setting to THIS window's
                 // tab-strip nav buttons immediately; other windows get it via the broadcast.
                 self->_UpdateManagerNavButtons();
+                // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every
+                // hosted favorited tab so a glyph change takes effect now; other windows get it via the broadcast.
+                self->_RefreshAllFavoriteIcons();
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -1109,6 +1112,9 @@ namespace winrt::TerminalApp::implementation
         _updateAllTabCloseButtons();
         // Agentmaster: "Always display Home button" is GLOBAL too — re-evaluate this window's nav buttons.
         _UpdateManagerNavButtons();
+        // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every hosted
+        // favorited tab so a change made in another window switches the glyph live here too.
+        _RefreshAllFavoriteIcons();
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))

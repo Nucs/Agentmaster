@@ -38,10 +38,14 @@ namespace TerminalApp
         Boolean AgentSelectionVisible { get; set; };
         Windows.UI.Xaml.Media.Brush AgentSelectionBrush { get; set; };
 
-        // Agentmaster (FAVORITES.md): the FAVORITE crown — a small gold crown perched at the
-        // north-west of the status dot (bound by TabHeaderControl.xaml), shown when the hosted
-        // session is starred (the durable SessionStore "favorite" key). The one visible "this is a
-        // keeper" marker on a LIVE session's tab; TerminalPage drives it via Tab.TabStatus().
+        // Agentmaster (FAVORITES.md §5a): the FAVORITE marker over the status dot (bound by
+        // TabHeaderControl.xaml), shown when the hosted session is starred (the durable SessionStore
+        // "favorite" key) — the one visible "this is a keeper" marker on a LIVE session's tab.
+        // TerminalPage drives these via Tab.TabStatus() from the GLOBAL AppSettings::favoriteIcon, and
+        // they are mutually exclusive (at most one true at a time): AgentFavoriteVisible == the CROWN
+        // (a gold crown at the dot's north-west, the default); AgentFavoriteStarVisible == the STAR
+        // (a white, golden-tipped star drawn BEHIND the dot, the status dot as its foreground).
         Boolean AgentFavoriteVisible { get; set; };
+        Boolean AgentFavoriteStarVisible { get; set; };
     }
 }

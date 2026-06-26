@@ -1187,7 +1187,10 @@ What works, by area:
   value [tuned for the old 5-min cache window] is **invalidated** → existing installs fall back to the 1h
   default; the old key is ignored + dropped on next save), `serverCacheMinutes` (Claude's server-side
   prompt-cache lifetime, default **5**, drives ONLY the Triage-Board card's **⚡ "still cached"** hint shown to
-  the right of `⚙ sent/total`), and `recentDirsLimit` (the path-picker MRU size, default 10).
+  the right of `⚙ sent/total`), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
+  section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
+  favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
+  broadcast).
   A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
   deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored
@@ -1482,8 +1485,10 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `TabColorChanged` event + `GetRuntimeTabColor`), `TabManagement.cpp` (incl. the generic
     `_DismissAgentPageOverlays` tab-switch seam), `TabHeaderControl.xaml` +
     `TerminalTabStatus.{h,idl}` (the tab-strip status dot: an `AgentStatusVisible`/
-    `AgentStatusBrush`-bound Ellipse in the indicator row, plus the `AgentFavoriteVisible`-bound gold
-    **FAVORITE crown** `Path` at the dot's north-west — FAVORITES.md §5a); registrations in
+    `AgentStatusBrush`-bound Ellipse in the indicator row, plus the **FAVORITE marker** `Path`s — the
+    `AgentFavoriteVisible`-bound gold **crown** at the dot's NW *or* the `AgentFavoriteStarVisible`-bound
+    white, golden-tipped **star** behind the dot, mutually exclusive, chosen by the cog's
+    `AppSettings::favoriteIcon` — FAVORITES.md §5a); registrations in
     `TerminalAppLib.vcxproj`.
   - `src/cascadia/wt/shim.cpp` + `wt.vcxproj` (the `agentmaster <verb>` overload, CLI.md §2): the
     alias-target launcher shim is now **console-subsystem + dual-mode** (`SubSystem=Console`) — it

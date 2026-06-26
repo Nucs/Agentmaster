@@ -68,6 +68,21 @@ namespace Agentmaster
         ClickAwayOrEnter = 2 // Enter commits; Shift+Enter inserts a newline
     };
 
+    // Agentmaster (FAVORITES.md §5a): which glyph marks a FAVORITE (starred) session on its LIVE
+    // tab strip, drawn over/around the state-colored status dot. Crown = the original — a small gold
+    // crown perched at the dot's north-west. Star = the status dot becomes the FOREGROUND of a white,
+    // golden-tipped star (the star is drawn BEHIND the dot, so its points radiate around the dot).
+    // GLOBAL app setting (AppSettings::favoriteIcon), persisted to settings.json so the choice is
+    // shared by every window and survives restart; applied live (cog Save + cross-window broadcast
+    // re-assert every hosted favorited tab). Serialized as a string token (Persistence ToString /
+    // FavoriteIconFromString); a missing key => Crown (the prior behavior). Tab-strip ONLY — the
+    // board card / tree row / overlay HUD carry no favorite glyph.
+    enum class FavoriteIcon
+    {
+        Crown = 0, // default: a gold crown at the status dot's north-west
+        Star = 1 // the status dot as the foreground of a white, golden-tipped star (drawn behind the dot)
+    };
+
     // When a queued prompt is allowed to fire.
     enum class PromptGate
     {
@@ -455,6 +470,12 @@ namespace Agentmaster
         // edge). Either way it hides while the Manager tab itself is active. GLOBAL across windows;
         // applied live on Save + cross-window broadcast. A missing key => true (checked by default).
         bool alwaysShowHomeButton{ true };
+        // Agentmaster (FAVORITES.md §5a): the FAVORITE marker glyph on a live session's tab — Crown
+        // (default, a gold crown at the status dot's north-west) or Star (the status dot foregrounded
+        // on a white, golden-tipped star drawn behind it). GLOBAL across windows; applied live on Save
+        // + cross-window broadcast (every hosted favorited tab is re-asserted). A missing key => Crown
+        // (the prior behavior). Tab-strip ONLY — see FavoriteIcon.
+        FavoriteIcon favoriteIcon{ FavoriteIcon::Crown };
 
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +

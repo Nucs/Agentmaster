@@ -6254,6 +6254,15 @@ namespace winrt::TerminalApp::implementation
         _setAlwaysShowHomeButton.Header(winrt::box_value(L"Always display Home button"));
         AgentSetTip(_setAlwaysShowHomeButton, L"Keep the tab-strip \x201CHome\x201D button (jump to the pinned Agent Manager tab) visible whenever you're on another tab. When off, it appears only once the Manager tab has scrolled out of view. Default on.");
         panel.Children().Append(_setAlwaysShowHomeButton);
+        // FAVORITES.md §5a: which glyph marks a FAVORITE (starred) session on its live tab — Crown
+        // (default, a gold crown at the status dot's NW) or Star (the status dot foregrounded on a white,
+        // golden-tipped star). GLOBAL across windows; applied live on Save + cross-window broadcast.
+        _setFavoriteIcon = ComboBox{};
+        _setFavoriteIcon.Header(winrt::box_value(L"Favorite marker"));
+        _setFavoriteIcon.Items().Append(winrt::box_value(L"Crown")); // index 0 == FavoriteIcon::Crown (default)
+        _setFavoriteIcon.Items().Append(winrt::box_value(L"Star")); // index 1 == FavoriteIcon::Star
+        AgentSetTip(_setFavoriteIcon, L"The marker shown on a favorited (\x2605) session's live tab, over its status dot \x2014 Crown (default, a small gold crown at the dot's corner) or Star (the status dot becomes the centre of a white, golden-tipped star).");
+        panel.Children().Append(_setFavoriteIcon);
 
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
@@ -6439,6 +6448,11 @@ namespace winrt::TerminalApp::implementation
         if (_setAlwaysShowHomeButton)
         {
             _setAlwaysShowHomeButton.IsOn(_appSettings.alwaysShowHomeButton);
+        }
+        if (_setFavoriteIcon)
+        {
+            // Items: 0 == Crown (default), 1 == Star.
+            _setFavoriteIcon.SelectedIndex(_appSettings.favoriteIcon == FavoriteIcon::Star ? 1 : 0);
         }
         if (_setResetHidden)
         {
@@ -6694,6 +6708,11 @@ namespace winrt::TerminalApp::implementation
         if (_setAlwaysShowHomeButton)
         {
             _appSettings.alwaysShowHomeButton = _setAlwaysShowHomeButton.IsOn();
+        }
+        if (_setFavoriteIcon)
+        {
+            // Items: 0 == Crown (default), 1 == Star.
+            _appSettings.favoriteIcon = _setFavoriteIcon.SelectedIndex() == 1 ? FavoriteIcon::Star : FavoriteIcon::Crown;
         }
         if (_setAllowPrerelease)
         {
