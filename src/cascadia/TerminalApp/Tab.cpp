@@ -2168,6 +2168,24 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Move to Idle/Done" / "Move to Waiting-for-you" (Agentmaster, Waiting-for-you triage) — a
+            // status-adaptive manual state move: the tab-menu twin of the Triage Board card's "Move to
+            // Idle/Done", plus its reverse. Built COLLAPSED with a placeholder label; the page shows it and
+            // sets the direction-specific text + icon at flyout-open (SetAgentTriageMoveState) only on a
+            // managed agent-session tab that is currently Waiting-for-you or Idle/Done. EXPLICITLY separate
+            // from "Mark Unread": the promote direction is a plain column move (no sticky flag, no ring
+            // flash). Raises TriageMoveRequested; the page re-derives the direction from the LIVE state.
+            _triageMoveMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->TriageMoveRequested.raise();
+                }
+            });
+            _triageMoveMenuItem.Text(L"Move to Idle/Done"); // placeholder; the page overwrites text + icon by direction
+            _triageMoveMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab in a triage state (page-driven)
+        }
+
+        {
             // "Favorite" / "Unfavorite" (Agentmaster, FAVORITES.md) — toggle this tab's session star
             // (the SessionStore "favorite" key), the SAME durable star the Sessions page's ★ column sets.
             // Built COLLAPSED — the page shows it + sets its label (Favorite vs Unfavorite) only on a
@@ -2315,6 +2333,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
+        contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
@@ -2443,6 +2462,37 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _markUnreadMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster (Waiting-for-you triage): show/hide the status-adaptive triage-move item AND set its
+    // label + icon by direction. toIdle == this session is Waiting-for-you (offer "Move to Idle/Done", the
+    // demote); else it is Idle/Done (offer "Move to Waiting-for-you", the plain promote). Page-driven at
+    // flyout-open — the page owns the registry state lookup and re-derives the direction from the LIVE
+    // state on click. Hidden for any non-triage state (Running / NeedsApproval / Error).
+    void Tab::SetAgentTriageMoveState(bool visible, bool toIdle)
+    {
+        ASSERT_UI_THREAD();
+
+        _triageMoveMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        if (!visible)
+        {
+            return;
+        }
+        Controls::FontIcon icon;
+        icon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+        if (toIdle)
+        {
+            _triageMoveMenuItem.Text(L"Move to Idle/Done");
+            icon.Glyph(L"\xE73E"); // CheckMark — "I've handled this; stop waiting on me" (matches the board card)
+            WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Dismiss this \x201CWaiting-for-you\x201D session to Idle / Done (it returns to Waiting-for-you on its next turn)" }));
+        }
+        else
+        {
+            _triageMoveMenuItem.Text(L"Move to Waiting-for-you");
+            icon.Glyph(L"\xE823"); // Clock — put it back in the Waiting-for-you column (a plain move)
+            WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Move this session into the \x201CWaiting-for-you\x201D column \x2014 a plain move (no red-ring flash; unlike \x201CMark Unread\x201D it decays normally)" }));
+        }
+        _triageMoveMenuItem.Icon(icon);
     }
 
     // Agentmaster (FAVORITES.md): show/hide the "Favorite" item AND set its label to match the

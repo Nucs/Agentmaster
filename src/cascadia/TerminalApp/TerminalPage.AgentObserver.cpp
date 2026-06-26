@@ -695,6 +695,64 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (Waiting-for-you triage): the tab context-menu's status-adaptive triage move — the
+    // tab-menu twin of the Manager board card's "Move to Idle/Done", plus its reverse. EXPLICITLY separate
+    // from "Mark Unread": neither direction sets the sticky manualUnread flag or flashes the red ring. The
+    // direction is re-derived HERE from the session's LIVE state (the menu label was fixed at flyout-open),
+    // and each registry mutation re-checks the state under the lock, so a turn that advanced since the menu
+    // opened simply no-ops rather than mis-moving.
+    void TerminalPage::_MoveSessionTriageState(const std::wstring& sessionId)
+    {
+        if (sessionId.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        const auto info = _sessionRegistry->Get(sessionId);
+        if (!info)
+        {
+            return;
+        }
+        using ::Agentmaster::SessionState;
+        if (info->state == SessionState::WaitingForInput)
+        {
+            // Demote Waiting-for-you -> Idle/Done. Mirror the board card's mutator (stamp read + clear the
+            // sticky manualUnread) and ALSO drop this tab's flash ring (manual + automatic) — "Move to
+            // Idle/Done" is an explicit "I've handled this", so it acknowledges the attention without a tab
+            // visit. The Update guard re-checks the live state, so a race to Running never demotes.
+            _ClearSessionUnread(sessionId); // drop the manual mark (+ ring if not auto-flashing)
+            _StopAgentFlash(sessionId); // drop the automatic "left Running" flash too
+            _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
+                if (s.state == SessionState::WaitingForInput)
+                {
+                    s.state = SessionState::Idle;
+                    s.manualUnread = false;
+                    s.readUnixMs = TtNowMs();
+                }
+            });
+            ::Agentmaster::LogNav(L"triage-move " + ::Agentmaster::ShortId(sessionId) + L" -> idle/done");
+        }
+        else if (info->state == SessionState::Idle || info->state == SessionState::Done)
+        {
+            // Promote Idle/Done -> Waiting-for-you. A PLAIN move (the whole point of keeping it separate
+            // from Mark Unread): manualUnread stays false (so the normal time-decay still applies) and no
+            // ring flashes (Idle->Waiting is a target->target edge, which _EvaluateAgentFlash never flashes).
+            // Refresh the decay anchor + leave it unread so it behaves like a fresh turn-complete (waits the
+            // FULL Waiting-for-you timeout, then decays once read) instead of instantly decaying off an
+            // ancient lastActivity.
+            _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
+                if (s.state == SessionState::Idle || s.state == SessionState::Done)
+                {
+                    s.state = SessionState::WaitingForInput;
+                    s.manualUnread = false;
+                    s.lastActivityUnixMs = TtNowMs(); // restart the Waiting-for-you window (don't instant-decay)
+                    s.readUnixMs = 0; // unread for this "turn", like a real turn-complete
+                }
+            });
+            ::Agentmaster::LogNav(L"triage-move " + ::Agentmaster::ShortId(sessionId) + L" -> waiting");
+        }
+        // else: not a triage state (Running / NeedsApproval / Error) — nothing to move (the item is hidden).
+    }
+
     // Agentmaster (Mark Unread): drop a session's manual unread mark + hide its ring UNLESS the automatic
     // flash is also active for it. Called from _VisitTabClearFlash (a visit) and the archive path.
     void TerminalPage::_ClearSessionUnread(const std::wstring& sessionId)
