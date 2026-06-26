@@ -533,7 +533,7 @@ namespace
     //    the value-add: Parent/Plan, Duration, Tasks, Messages, Files Read/Edited.
     //  - full=true (the COPYABLE "Summary" — copy menu): the COMPLETE box, including everything trimmed
     //    above (id + resume CLI + Dir + Folder + Branch + the state header), so a copy loses nothing.
-    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
+    std::wstring RenderSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate, bool showPrevious)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
@@ -598,6 +598,30 @@ namespace
         // messages — the "where we are / what's next" header over the prompt history. Honors the wrap /
         // truncate toggles like a message body. Present in the displayed panel (full=false) and the
         // copyable Summary (full=true).
+        // Agentmaster (conversation lineage): the PREVIOUS session(s) — the pre-compaction segment(s) a
+        // /compact summarized away — rendered ABOVE the recap + current Messages, OLDEST FIRST, each under
+        // its own separator + a "Previous session N · <label>" header, with ITS prompts numbered 1.. (an
+        // INDEPENDENT count per session). Shown only when the toggle is on (display) — the full copyable box
+        // passes showPrevious=true — and only when the session actually has a previous segment.
+        if (showPrevious && !a.previousSegments.empty())
+        {
+            int segNo = 1;
+            for (const auto& seg : a.previousSegments)
+            {
+                sep();
+                std::wstring hdr = L"Previous session " + std::to_wstring(segNo++);
+                if (!seg.label.empty())
+                {
+                    hdr += L" · " + seg.label;
+                }
+                line(hdr);
+                int i = 1;
+                for (const auto& m : seg.userMsgs)
+                {
+                    line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
+                }
+            }
+        }
         if (!a.awaySummary.empty())
         {
             sep();
@@ -799,7 +823,7 @@ namespace
                     planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                 }
             }
-            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true, wrapNewlines, truncate);
+            text = RenderSummaryBox(a, id, cwd, path, resumeCmd, glyph, label, planFile, /*full*/ true, wrapNewlines, truncate, /*showPrevious*/ true); // the COMPLETE copyable box always carries the previous session(s)
         }
         if (text.empty() || !disp)
         {
@@ -1693,6 +1717,43 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (conversation lineage): the PREVIOUS-SESSION toggle, LEFTMOST in the strip (left of
+        // truncate). Collapsed by default — shown only when the loaded summary has a pre-/compact segment.
+        // ON renders the previous session(s) above the current Messages. A GLOBAL setting
+        // (AppSettings::summaryPanelShowPrevious) flipped via the page (_onToggleSummaryPrevious) so it
+        // broadcasts to every linked overlay. Same glyph size + scale as the wrap/truncate toggles.
+        _summaryPrevIcon = FontIcon{};
+        _summaryPrevIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // carries U+23EE (the previous-track double-bar glyph)
+        _summaryPrevIcon.Glyph(L"\x23EE"); // ⏮ — "previous session(s)" (before /compact)
+        _summaryPrevIcon.FontSize(11);
+        _summaryPrevIcon.FontWeight(FontWeights::SemiBold());
+        {
+            ScaleTransform prevScale{};
+            prevScale.ScaleX(1.18);
+            prevScale.ScaleY(1.18);
+            _summaryPrevIcon.RenderTransform(prevScale);
+            _summaryPrevIcon.RenderTransformOrigin(Point{ 0.5f, 0.5f });
+        }
+        _summaryPrevBtn = Button{};
+        _summaryPrevBtn.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable + hover highlight
+        _summaryPrevBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        _summaryPrevBtn.Padding(ThicknessHelper::FromLengths(3, 0, 1, 0));
+        _summaryPrevBtn.MinWidth(0);
+        _summaryPrevBtn.MinHeight(0);
+        _summaryPrevBtn.IsTabStop(false); // never pull keyboard focus off the ConPTY
+        _summaryPrevBtn.VerticalAlignment(VerticalAlignment::Top);
+        _summaryPrevBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        _summaryPrevBtn.Content(_summaryPrevIcon);
+        _summaryPrevBtn.Visibility(Visibility::Collapsed); // shown only when the loaded summary has a previous segment
+        AgentSetTip(_summaryPrevBtn, winrt::hstring{
+            L"Show previous session(s): the pre-/compact conversation, numbered separately above the current messages" });
+        _summaryPrevBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_ToggleSummaryPrevious();
+            }
+        });
+
         Grid timesRow{};
         {
             ColumnDefinition cStar{};
@@ -1707,6 +1768,7 @@ namespace winrt::TerminalApp::implementation
         toggles.Orientation(Orientation::Horizontal);
         toggles.VerticalAlignment(VerticalAlignment::Top);
         toggles.HorizontalAlignment(HorizontalAlignment::Right);
+        toggles.Children().Append(_summaryPrevBtn); // leftmost: previous-session (shown only when compacted)
         toggles.Children().Append(truncBtn);
         toggles.Children().Append(wrapBtn);
         Grid::SetColumn(_summaryTimesText, 0);
@@ -1739,6 +1801,7 @@ namespace winrt::TerminalApp::implementation
 
         _UpdateSummaryWrapButtonVisual(); // seed the wrap toggle's color from _summaryWrapNewlines (default: dim/off)
         _UpdateSummaryTruncateButtonVisual(); // seed the truncate toggle's color from _summaryTruncate (default: lighter/on)
+        _UpdateSummaryPrevButtonVisual(); // seed the previous-session toggle's color from _summaryShowPrevious (default: dim/off)
 
         // The padded content sits in its own inner border so the resize grips (siblings below) can hug
         // the TRUE panel edges (outside the content's 8/6px inset) while the text keeps its padding.
@@ -2541,6 +2604,63 @@ namespace winrt::TerminalApp::implementation
         _onToggleSummaryTruncate = std::move(handler);
     }
 
+    void AgentTabOverlay::_ToggleSummaryPrevious()
+    {
+        // The previous-session icon flips the GLOBAL setting (AppSettings::summaryPanelShowPrevious), not
+        // per-session state: hand off to the page, which does the freshest-disk read-modify-write of
+        // settings.json AND applies it live to every linked overlay in the window (SetSummaryShowPrevious).
+        if (_onToggleSummaryPrevious)
+        {
+            _onToggleSummaryPrevious();
+        }
+    }
+
+    // Recolor the previous-session icon to reflect the toggle: a dim gray when OFF (previous sessions
+    // hidden), a clearly lighter shade when ON (shown) — matching the wrap/truncate toggles.
+    void AgentTabOverlay::_UpdateSummaryPrevButtonVisual()
+    {
+        if (!_summaryPrevIcon)
+        {
+            return;
+        }
+        _summaryPrevIcon.Foreground(_summaryShowPrevious ? Fill(0xFF, 0xE6, 0xE6, 0xE6)  // ON: lighter (active)
+                                                         : Fill(0xFF, 0x8C, 0x8C, 0x8C)); // OFF: dim (inactive)
+    }
+
+    void AgentTabOverlay::SetSummaryShowPrevious(bool on)
+    {
+        // The show-previous mode is a GLOBAL setting (AppSettings::summaryPanelShowPrevious), mirrored into
+        // the overlay here by the page — on attach (seed) and on every toggle (broadcast to every linked
+        // overlay in the window). The flag is BAKED into the rendered text (RenderSummaryBox), so a real
+        // change must force a re-analyze+render: reset the mtime gate and re-pull from the freshest
+        // snapshot. Always refresh the icon color (the seed may match the default but still needs painting).
+        const bool changed = (_summaryShowPrevious != on);
+        _summaryShowPrevious = on;
+        _UpdateSummaryPrevButtonVisual();
+        if (!changed)
+        {
+            return; // seed with the same value — nothing baked differently, no reload
+        }
+        _summaryMtime = 0; // invalidate the mtime gate so _LoadSummaryAsync re-renders with the new flag
+        if (_summaryLoading)
+        {
+            _summaryPrevDirty = true; // a load is in flight with the OLD flag; re-render on completion (else the toggle wouldn't take until the transcript next grew)
+            return;
+        }
+        if (_summaryEnabled && _registry && !_sessionId.empty())
+        {
+            if (const auto info = _registry->Get(_sessionId))
+            {
+                _UpdateSummary(*info);
+            }
+        }
+    }
+
+    void AgentTabOverlay::SetSummaryPreviousToggleHandler(std::function<void()> handler)
+    {
+        _onToggleSummaryPrevious = std::move(handler);
+    }
+
     void AgentTabOverlay::_ToggleSummaryTruncate()
     {
         // The truncate icon flips the GLOBAL setting (AppSettings::summaryPanelTruncate), not per-session
@@ -2636,10 +2756,10 @@ namespace winrt::TerminalApp::implementation
         std::wstring liveGlyph{ StateGlyph(s.state) };
         std::wstring liveLabel{ StateLabel(s.state) };
         _summaryLoading = true;
-        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate);
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowPrevious);
     }
 
-    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate)
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
         co_await winrt::resume_background();
@@ -2658,6 +2778,7 @@ namespace winrt::TerminalApp::implementation
         int64_t mtime = prevMtime;
         int64_t createdMs = 0, lastUserMs = 0, lastActivityMs = 0; // times-line instants (computed on reload)
         bool timesComputed = false;
+        bool hasPrevious = false; // Agentmaster (conversation lineage): the analyzed session has a previous (pre-/compact) segment => reveal the toggle button
         if (!path.empty())
         {
             // Cheap stat: only do the heavy read+analyze when the transcript grew (mtime advanced) or
@@ -2687,6 +2808,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
                     userMsgs = a.userMsgs; // the prompts, in order — aligns with the rendered " N. " jump rows
+                    hasPrevious = !a.previousSegments.empty(); // a /compact'ed session => the previous-session toggle is meaningful
                     createdMs = IsoToUnixMs(a.firstTs);
                     lastUserMs = IsoToUnixMs(a.lastUserTs);
                     lastActivityMs = IsoToUnixMs(a.lastTs);
@@ -2701,7 +2823,7 @@ namespace winrt::TerminalApp::implementation
                             planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                         }
                     }
-                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false, wrapNewlines, truncate);
+                    text = RenderSummaryBox(a, sessionId, cwd, path, L"", liveGlyph, liveLabel, planFile, /*full*/ false, wrapNewlines, truncate, showPrevious);
                 }
                 timesComputed = true;
             }
@@ -2710,12 +2832,20 @@ namespace winrt::TerminalApp::implementation
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
-            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed]() {
+            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious]() {
                 if (auto self = weak.get())
                 {
                     if (timesComputed)
                     {
                         self->_summaryUserMsgs = userMsgs; // set BEFORE _SetSummaryContent so jump rows resolve the right prompt
+                        // Agentmaster (conversation lineage): reveal the previous-session toggle ONLY when this
+                        // (freshly analyzed) session actually has a pre-/compact segment; hide it otherwise. Only
+                        // touched on a real re-analyze, so a quiet mtime-gated reload keeps the last visibility.
+                        if (self->_summaryPrevBtn)
+                        {
+                            self->_summaryPrevBtn.Visibility(hasPrevious ? winrt::Windows::UI::Xaml::Visibility::Visible
+                                                                         : winrt::Windows::UI::Xaml::Visibility::Collapsed);
+                        }
                     }
                     if (!text.empty())
                     {
@@ -2731,12 +2861,13 @@ namespace winrt::TerminalApp::implementation
                     self->_summaryMtime = mtime;
                     self->_summaryLoading = false;
                     self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
-                    if (self->_summaryWrapDirty || self->_summaryTruncateDirty)
+                    if (self->_summaryWrapDirty || self->_summaryTruncateDirty || self->_summaryPrevDirty)
                     {
-                        // The wrap and/or truncate mode flipped mid-load: this render used the OLD flag(s).
-                        // Re-render now with the current flags (invalidate the mtime gate so it isn't skipped).
+                        // The wrap / truncate / show-previous mode flipped mid-load: this render used the OLD
+                        // flag(s). Re-render now with the current flags (invalidate the mtime gate so it isn't skipped).
                         self->_summaryWrapDirty = false;
                         self->_summaryTruncateDirty = false;
+                        self->_summaryPrevDirty = false;
                         self->_summaryMtime = 0;
                         if (self->_summaryEnabled && self->_registry && !self->_sessionId.empty())
                         {

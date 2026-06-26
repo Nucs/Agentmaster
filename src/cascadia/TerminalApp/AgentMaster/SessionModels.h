@@ -511,6 +511,12 @@ namespace Agentmaster
         // written by the truncate toggle (left of the wrap toggle) in the panel's times bar, a freshest-
         // disk RMW, broadcast live to every linked overlay. Default true (truncate long messages).
         bool summaryPanelTruncate{ true };
+        // Agentmaster (conversation lineage): SHOW PREVIOUS SESSION(S) in the summary panel — when a
+        // session was `/compact`ed, the earlier (pre-compaction) segments are rendered ABOVE the current
+        // Messages, each numbered + labeled. GLOBAL like the wrap/truncate toggles (written by the
+        // previous-session toggle in the panel's times bar, freshest-disk RMW, broadcast live). Default
+        // false (hidden; the toggle only appears when the session actually has a previous segment).
+        bool summaryPanelShowPrevious{ false };
         // Agentmaster: Explorer Tree sort order (the toggle after the scope toggle). GLOBAL — it
         // applies to every window's tree and persists here. Default Newest. See ExplorerSort.
         ExplorerSort treeSort{ ExplorerSort::Newest };

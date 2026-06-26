@@ -106,6 +106,15 @@ namespace winrt::TerminalApp::implementation
         // AppSettings, so it calls this handler (wired by the page) for the freshest-disk RMW + broadcast.
         void SetSummaryTruncateToggleHandler(std::function<void()> handler);
 
+        // Agentmaster (conversation lineage): SHOW PREVIOUS SESSION(S) — a GLOBAL setting
+        // (AppSettings::summaryPanelShowPrevious), mirrored in by the page (seed on attach, broadcast on
+        // toggle). When ON, a /compact'ed session renders its pre-compaction segment(s) ABOVE the current
+        // Messages. Re-renders the panel (the flag is baked into the rendered text). Call on the UI thread.
+        void SetSummaryShowPrevious(bool on);
+        // The previous-session toggle (leftmost in the times-bar strip) flips the GLOBAL setting; the
+        // overlay can't reach AppSettings, so it calls this page-wired handler for the RMW + broadcast.
+        void SetSummaryPreviousToggleHandler(std::function<void()> handler);
+
         // Agentmaster (TAB_OVERLAY.md summary panel resize): the panel SIZE is a GLOBAL setting
         // (AppSettings::summaryPanelWidthFraction/HeightFraction), stored as FRACTIONS of the pane so it
         // scales with the window. The page seeds this overlay (on attach) and broadcasts (when ANY tab
@@ -175,8 +184,10 @@ namespace winrt::TerminalApp::implementation
         void _UpdateSummaryWrapButtonVisual(); // recolor the wrap-line icon: dim (off) / lighter (on), per _summaryWrapNewlines
         void _ToggleSummaryTruncate(); // truncate button: invoke the page handler (flips the GLOBAL summaryPanelTruncate)
         void _UpdateSummaryTruncateButtonVisual(); // recolor the truncate icon: dim (off) / lighter (on), per _summaryTruncate
+        void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
+        void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
-        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message), set text on the UI thread
+        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showPrevious); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showPrevious: render pre-compaction previous session(s)), set text on the UI thread
 
         std::wstring _sessionId;
         bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
@@ -207,6 +218,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _summaryTimesText{ nullptr }; // pinned top (left): the live "ago" times line
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryWrapIcon{ nullptr }; // pinned top (right): the wrap-line toggle glyph — recolored by _UpdateSummaryWrapButtonVisual
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryTruncateIcon{ nullptr }; // pinned top (right, LEFT of the wrap toggle): the truncate toggle glyph — recolored by _UpdateSummaryTruncateButtonVisual
+        winrt::Windows::UI::Xaml::Controls::FontIcon _summaryPrevIcon{ nullptr }; // pinned top (right, LEFTMOST): the previous-session toggle glyph — recolored by _UpdateSummaryPrevButtonVisual
+        winrt::Windows::UI::Xaml::Controls::Button _summaryPrevBtn{ nullptr }; // the previous-session toggle button — Collapsed unless the loaded summary has a previous segment (a /compact'ed session)
         winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
         // Right-click "Copy Summary" context menu — built once (_BuildSummaryPanel) and shared as the
         // ContextFlyout of the panel root AND every selectable text block it renders (title / times line /
@@ -222,12 +235,15 @@ namespace winrt::TerminalApp::implementation
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
         bool _summaryWrapDirty{ false }; // a wrap-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryTruncateDirty{ false }; // a truncate-mode toggle landed while a load was in flight — re-render when it completes
+        bool _summaryPrevDirty{ false }; // a previous-session toggle landed while a load was in flight — re-render when it completes
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
         bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
         bool _summaryTruncate{ true }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven, default ON): ON=cap each message (6 lines if wrapped, else 500 chars); OFF=show every message in full
+        bool _summaryShowPrevious{ false }; // mirror of the GLOBAL AppSettings::summaryPanelShowPrevious (page-driven, default OFF): ON=render pre-compaction previous session(s) above the current Messages
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
         std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
         std::function<void()> _onToggleSummaryTruncate; // truncate icon -> page (flip the global truncate setting + broadcast)
+        std::function<void()> _onToggleSummaryPrevious; // previous-session icon -> page (flip the global show-previous setting + broadcast)
 
         // Summary panel RESIZE (TAB_OVERLAY.md): the panel is anchored top-right; left/bottom/corner
         // grips drag it bigger (left=width, bottom=height, corner=both). Size is kept as FRACTIONS of

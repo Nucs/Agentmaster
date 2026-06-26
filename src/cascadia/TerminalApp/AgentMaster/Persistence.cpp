@@ -489,6 +489,7 @@ namespace Agentmaster
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
         o.Set(L"summaryPanelTruncate", json::Value::MkBool(s.summaryPanelTruncate));
+        o.Set(L"summaryPanelShowPrevious", json::Value::MkBool(s.summaryPanelShowPrevious));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
         o.Set(L"flightPlanShowsSummary", json::Value::MkBool(s.flightPlanShowsSummary));
@@ -541,6 +542,7 @@ namespace Agentmaster
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
+        s.summaryPanelShowPrevious = v.BoolAt(L"summaryPanelShowPrevious", false); // conversation lineage: show pre-compaction previous session(s) (absent => OFF)
         s.treeSort = ExplorerSortFromString(v.StrAt(L"treeSort", L"newest"));
         // Triage Board sort (a separate global from treeSort). Absent => the board's MostActive default
         // (most-recently-active first). A stored "pid" would deserialize fine but the board never
