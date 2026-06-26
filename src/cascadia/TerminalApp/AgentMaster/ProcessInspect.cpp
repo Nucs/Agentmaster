@@ -1369,6 +1369,13 @@ namespace Agentmaster
         const bool truncated = (maxBytes != 0); // a head read may end mid-line -> skip the last segment
         const std::wstring wide = Utf8ToWide(bytes);
 
+        // Agentmaster (revert-aware DISPLAY): exclude rewound-away branches so the title + prompt
+        // list reflect only the LIVE conversation (the chain from the current leaf to root). Empty
+        // on a truncated HEAD read (the tail leaf marker is absent — and an early in-window marker
+        // would name a stale leaf), so a head-read title degrades to the legacy first-in-file prompt.
+        // SEARCH does NOT filter — TranscriptStore::ActiveBranchUuids.
+        const std::unordered_set<std::wstring> activeBranch = truncated ? std::unordered_set<std::wstring>{} : ActiveBranchUuids(wide);
+
         std::wstring firstPrompt;
         size_t start = 0;
         for (size_t i = 0; i <= wide.size(); ++i)
@@ -1430,6 +1437,17 @@ namespace Agentmaster
                     info.summary = FirstLineTrim(sm);
                 }
                 continue;
+            }
+            // Agentmaster (revert-aware): a user line on a rewound-away branch is not part of the
+            // live conversation — skip it so a discarded prompt never becomes the title or a list
+            // entry. The title lines handled above (custom/ai/summary) carry no uuid and so are
+            // never filtered (a user's chosen title persists across a rewind). Empty set => keep all.
+            if (!activeBranch.empty())
+            {
+                if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && activeBranch.count(uuid) == 0)
+                {
+                    continue;
+                }
             }
             // isCompactSummary == the synthetic post-compaction recap; isSidechain == an inline
             // subagent line (old strata wrote them into the main file) — neither is a human prompt.
@@ -2878,6 +2896,16 @@ namespace Agentmaster
         const bool truncated = (maxBytes != 0);
         const std::wstring wide = Utf8ToWide(bytes);
 
+        // Agentmaster (revert-aware DISPLAY): a Claude double-ESC rewind orphans the abandoned
+        // branch's message lines — they stay in the file, INTERLEAVED with the live ones — so the
+        // summary panel must show ONLY the live branch (the chain from the current leaf to root).
+        // Build that uuid set ONCE and skip any node not on it. Computed on a FULL read only: a
+        // truncated head read's tail leaf marker is absent (and an EARLY in-window `last-prompt`
+        // marker would name a stale leaf), so `truncated` forces the empty set == keep-all. An
+        // empty set also covers pre-marker strata. SEARCH/index deliberately does NOT filter (a
+        // reverted message stays findable) — see TranscriptStore::ActiveBranchUuids.
+        const std::unordered_set<std::wstring> activeBranch = truncated ? std::unordered_set<std::wstring>{} : ActiveBranchUuids(wide);
+
         std::unordered_set<std::wstring> seenMsgs, seenRead, seenEdit, seenCreated;
         // A Write's created-vs-overwrote verdict is in its tool_result ("File created successfully at:"
         // for a NEW file, "...has been updated successfully" otherwise), which arrives in a later user
@@ -2921,6 +2949,18 @@ namespace Agentmaster
                 continue;
             }
             const auto& obj = *parsed;
+
+            // Agentmaster (revert-aware): drop a line belonging to a rewound-away branch. Only
+            // uuid-bearing lines are tree nodes; uuid-less state/marker lines (mode / permission-mode
+            // / last-prompt / file-history-snapshot) pass through. Done BEFORE the timestamp capture
+            // so a discarded turn never sets first/last activity. Empty activeBranch => keep all.
+            if (!activeBranch.empty())
+            {
+                if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && activeBranch.count(uuid) == 0)
+                {
+                    continue;
+                }
+            }
 
             const std::wstring ts = obj.StrAt(L"timestamp");
             if (!ts.empty())

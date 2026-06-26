@@ -3345,6 +3345,86 @@ static void TestTranscriptResolve()
         std::filesystem::remove(std::filesystem::path{ pBash }, ec2);
     }
 
+    // --- Revert-aware DISPLAY: a double-ESC rewind orphans a branch; summary/title must skip it -----
+    // Claude stores a conversation as a TREE (each message line carries uuid + parentUuid; a root's
+    // parentUuid is null). A double-ESC REWIND (or /rewind) repoints the trailing `leafUuid` marker to
+    // an EARLIER node, ORPHANING the abandoned branch — whose lines STAY in the .jsonl, INTERLEAVED
+    // with the live ones (in-flight tool results land AFTER the new branch starts, so the discarded set
+    // is NOT a contiguous prefix). DISPLAY surfaces (summary panel + title/prompt list) must show only
+    // the chain from the current leaf to root; SEARCH/index keeps every line (a reverted message stays
+    // findable). Mirrors the real session 1adaa37c, where a typed "test" + a follow-up were rewound away.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring base = std::wstring{ tmp } + L"am_revert_" + std::to_wstring(::GetCurrentProcessId());
+
+        // File order: a discarded "test" branch, then the LIVE branch, with a discarded follow-up
+        // ("u_orphan") INTERLEAVED *after* the live root — so a naive file-order parser keeps it.
+        const std::string revert =
+            R"j({"type":"user","userType":"external","uuid":"u_test","parentUuid":null,"message":{"content":"test"},"timestamp":"2026-06-26T10:00:00.000Z"})j" "\n"
+            R"j({"type":"assistant","uuid":"u_a1","parentUuid":"u_test","message":{"content":[{"type":"text","text":"hi"}]},"timestamp":"2026-06-26T10:00:01.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"u_live1","parentUuid":null,"message":{"content":"What if my window lags"},"timestamp":"2026-06-26T10:05:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"u_orphan","parentUuid":"u_a1","message":{"content":"ORPHANED follow-up"},"timestamp":"2026-06-26T10:05:30.000Z"})j" "\n"
+            R"j({"type":"assistant","uuid":"u_a2","parentUuid":"u_live1","message":{"content":[{"type":"text","text":"here is how"}]},"timestamp":"2026-06-26T10:06:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"u_live2","parentUuid":"u_a2","message":{"content":"audit b and then a"},"timestamp":"2026-06-26T10:10:00.000Z"})j" "\n"
+            R"j({"type":"last-prompt","lastPrompt":"audit b and then a","leafUuid":"u_live2"})j" "\n";
+
+        // (1) the pure resolver: active == the leaf->root chain; both discarded roots AND the
+        // interleaved orphan are excluded.
+        const auto active = ActiveBranchUuids(std::wstring{ revert.begin(), revert.end() });
+        CHECK(active.size() == 3 && active.count(L"u_live1") && active.count(L"u_a2") && active.count(L"u_live2"),
+              "ActiveBranchUuids: exactly the 3 live leaf->root nodes are included");
+        CHECK(active.count(L"u_test") == 0 && active.count(L"u_a1") == 0 && active.count(L"u_orphan") == 0,
+              "ActiveBranchUuids: the rewound-away branch (incl. the INTERLEAVED orphan after the live root) is excluded");
+
+        // (2) the summary panel (AnalyzeSessionTranscript, full read): only the live typed prompts; the
+        // discarded "test" + the interleaved "ORPHANED follow-up" are gone, and first-activity is the
+        // LIVE root's time (the discarded earlier turn never sets it).
+        const std::wstring pRevert = base + L"_summary.jsonl";
+        MakeJsonl(pRevert, revert, 2000, 1000);
+        const auto a = AnalyzeSessionTranscript(pRevert, 0);
+        CHECK(a.userMsgs.size() == 2 && a.userMsgs[0] == L"What if my window lags" && a.userMsgs[1] == L"audit b and then a",
+              "AnalyzeSessionTranscript: only the LIVE branch's typed prompts (discarded 'test' + interleaved orphan excluded)");
+        CHECK(a.firstTs == L"2026-06-26T10:05:00.000Z",
+              "AnalyzeSessionTranscript: first activity is the live root's time, not the rewound-away earlier turn");
+
+        // (3) the title + prompt list (ReadTranscriptInfoIn, full read): title is the live first
+        // prompt, not the discarded "test"; the prompt list excludes the orphan.
+        const std::wstring projectsDir = base + L"_proj";
+        const std::wstring cwd = L"K:\\some\\where";
+        const std::wstring sub = projectsDir + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ecMk;
+        std::filesystem::create_directories(std::filesystem::path{ sub }, ecMk);
+        const std::wstring sid = L"11111111-2222-3333-4444-555555555555";
+        MakeJsonl(sub + L"\\" + sid + L".jsonl", revert, 2000, 1000);
+        const auto ti = ReadTranscriptInfoIn(projectsDir, cwd, sid, 0, 1000);
+        CHECK(TranscriptDisplayTitle(ti) == L"What if my window lags",
+              "ReadTranscriptInfoIn: the title is the LIVE first prompt, not the rewound-away 'test'");
+        CHECK(ti.userPrompts.size() == 2 && ti.userPrompts[0] == L"What if my window lags" && ti.userPrompts[1] == L"audit b and then a",
+              "ReadTranscriptInfoIn: the prompt list is the live branch only (no 'test', no interleaved orphan)");
+
+        // (4) backward-compat: a transcript with NO leaf marker => empty set => EVERY line kept (the
+        // legacy all-messages behavior); and a leaf naming an ABSENT node likewise degrades to keep-all
+        // (never orphan the whole file off a bad pointer).
+        const std::string noMarker =
+            R"j({"type":"user","userType":"external","uuid":"x1","parentUuid":null,"message":{"content":"alpha"},"timestamp":"2026-06-26T11:00:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"x2","parentUuid":"x1","message":{"content":"beta"},"timestamp":"2026-06-26T11:01:00.000Z"})j" "\n";
+        CHECK(ActiveBranchUuids(std::wstring{ noMarker.begin(), noMarker.end() }).empty(),
+              "ActiveBranchUuids: no leafUuid marker => empty (caller keeps every line)");
+        const std::string badLeaf = noMarker + R"j({"type":"last-prompt","leafUuid":"NONEXISTENT"})j" "\n";
+        CHECK(ActiveBranchUuids(std::wstring{ badLeaf.begin(), badLeaf.end() }).empty(),
+              "ActiveBranchUuids: a leaf naming an absent node => empty (never orphan the whole file)");
+        const std::wstring pNoMarker = base + L"_nomarker.jsonl";
+        MakeJsonl(pNoMarker, noMarker, 2000, 1000);
+        const auto an = AnalyzeSessionTranscript(pNoMarker, 0);
+        CHECK(an.userMsgs.size() == 2, "AnalyzeSessionTranscript: with no leaf marker, every message is kept (legacy all-messages behavior)");
+
+        std::error_code ecR;
+        std::filesystem::remove(std::filesystem::path{ pRevert }, ecR);
+        std::filesystem::remove(std::filesystem::path{ pNoMarker }, ecR);
+        std::filesystem::remove_all(std::filesystem::path{ projectsDir }, ecR);
+    }
+
     // --- NormalizeRecapText: the one-true recap normalizer (shared by every recap reader) ----------
     CHECK(NormalizeRecapText(L"Did X. Next: Y. (disable recaps in /config)") == L"Did X. Next: Y.", "NormalizeRecapText: trailing disable hint + the space before it are stripped");
     CHECK(NormalizeRecapText(L"  spaced recap \n") == L"spaced recap", "NormalizeRecapText: surrounding whitespace/newlines trimmed");

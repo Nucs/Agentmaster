@@ -11,6 +11,7 @@
 #include <time.h> // _mkgmtime64 (ISO timestamp -> Unix epoch)
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "ClaudeSpawn.h" // ClaudeProjectsDir() — the live Claude transcript root
@@ -695,6 +696,74 @@ namespace Agentmaster
             f.kind = TranscriptLineKind::FileHistorySnapshot;
         }
         return f;
+    }
+
+    // ===== active-branch (revert-aware) reconstruction =======================================
+
+    std::unordered_set<std::wstring> ActiveBranchUuids(std::wstring_view transcriptText)
+    {
+        // Pass 1: index every tree node's uuid -> parentUuid edge, and track the LAST `leafUuid`
+        // marker (file order => the authoritative current leaf). EVERY uuid-bearing line is a node,
+        // INCLUDING attachment lines (skill_listing / file snippets injected mid-turn) — they are
+        // pass-through hops in the chain, so omitting them would break the walk at the first one.
+        std::unordered_map<std::wstring, std::wstring> parentOf;
+        std::wstring leaf;
+        size_t start = 0;
+        for (size_t i = 0; i <= transcriptText.size(); ++i)
+        {
+            if (i < transcriptText.size() && transcriptText[i] != L'\n')
+            {
+                continue;
+            }
+            std::wstring_view line = transcriptText.substr(start, i - start);
+            start = i + 1;
+            while (!line.empty() && line.back() == L'\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            const auto parsed = json::Parse(line);
+            if (!parsed || parsed->type != json::Value::Type::Obj)
+            {
+                continue;
+            }
+            const auto& obj = *parsed;
+            if (const std::wstring lu = obj.StrAt(L"leafUuid"); !lu.empty())
+            {
+                leaf = lu; // a `last-prompt` (or bare leafUuid) line advances the current leaf
+            }
+            if (const std::wstring u = obj.StrAt(L"uuid"); !u.empty())
+            {
+                // parentUuid "" (StrAt returns "" for a JSON null/absent) == a conversation ROOT.
+                parentOf[u] = obj.StrAt(L"parentUuid");
+            }
+        }
+
+        std::unordered_set<std::wstring> active;
+        // No leaf marker, OR the leaf names a node that isn't present (a truncated read, or a
+        // stratum that never wrote markers) => return EMPTY so the caller keeps every line. NEVER
+        // return a partial set built from an unknown leaf — that would wrongly orphan the whole file.
+        if (leaf.empty() || parentOf.find(leaf) == parentOf.end())
+        {
+            return active;
+        }
+        // Pass 2: walk leaf -> root via parentUuid. The `active.insert().second` test is the cycle
+        // guard (a malformed self/loop reference stops instead of spinning); a parent that isn't a
+        // known node terminates the walk (the chain reached the root, whose parentUuid is "").
+        std::wstring cur = leaf;
+        while (!cur.empty() && active.insert(cur).second)
+        {
+            const auto it = parentOf.find(cur);
+            if (it == parentOf.end())
+            {
+                break;
+            }
+            cur = it->second;
+        }
+        return active;
     }
 
     // ===== streaming scan + stats ============================================================

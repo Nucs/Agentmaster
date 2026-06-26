@@ -40,6 +40,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace Agentmaster
@@ -135,6 +136,28 @@ namespace Agentmaster
 
     // Classify + extract ONE transcript line (any stratum; tolerant of unknown types). Pure.
     TranscriptLineFacts ClassifyTranscriptLine(std::wstring_view line, size_t maxUserTextChars = 0, size_t maxAgentTextChars = 0);
+
+    // ===== active-branch (revert-aware) reconstruction =======================================
+    // A Claude conversation is an append-only TREE: every message line carries `uuid` +
+    // `parentUuid` (a root's parentUuid is null/absent). A double-ESC REWIND (or `/rewind`)
+    // repoints the conversation's LEAF to an earlier node — it does NOT delete the abandoned
+    // branch's lines, which stay in the .jsonl INTERLEAVED with the live ones (in-flight tool
+    // results from the dead branch keep landing AFTER the new branch starts, so the discarded set
+    // is NOT a contiguous prefix). Claude records the current leaf in the trailing `leafUuid` of
+    // its `last-prompt` markers (the LAST one in file order is authoritative).
+    //
+    // DISPLAY surfaces (the summary panel, a session's prompt list/title) must show ONLY the live
+    // branch — the chain from the current leaf back to the root. SEARCH/index surfaces deliberately
+    // DO NOT use this (the sidecar index + content scan keep indexing EVERY line, so a reverted
+    // message stays findable — we just never DISPLAY it).
+    //
+    // Given a transcript's COMPLETE text, return the set of message `uuid`s on the active branch.
+    // Returns EMPTY when the text carries no `leafUuid` marker (a pre-leaf-marker stratum, or a
+    // truncated HEAD read whose tail markers are absent) OR when the leaf names a node that isn't
+    // present — callers MUST treat an empty set as "no revert info => keep every line" (the legacy,
+    // all-messages behavior), and MUST NOT call this on a truncated/head read (an early in-window
+    // `last-prompt` marker would name a STALE leaf). Pure; no file IO; cycle-safe.
+    std::unordered_set<std::wstring> ActiveBranchUuids(std::wstring_view transcriptText);
 
     // ===== streaming scan + stats (the incremental-index primitives) =========================
 
