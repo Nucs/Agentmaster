@@ -104,21 +104,25 @@
               dips the dot 1px below slot-center (dead-center reads optically HIGH against the
               title) while the consumed height stays 10px (no header-row growth).  -->
         <!--  Agentmaster (RED FLASH RING): the status dot wrapped so a red ring can flash AROUND it.
-              The wrap Grid is 14px (bigger than the 10px dot) so the red ring is fully CONTAINED — an
-              earlier 10px wrap let the ring overflow and the tab header CLIPPED it to a truncated SQUARE
-              (the edge-clipping the dot comment above warns about). The ring is a 13px red ellipse drawn
-              FIRST (behind), sitting inside the 14px wrap with ~0.5px clearance (no clip); the 10px dot,
-              centred on top, covers its centre so only a ~1.5px red ring peeks out AROUND the dot's black
-              stroke — reading outside-in: red ring, then black stroke, then the status-colour fill. The dot stays 10px
-              (a 2px transparent inset within the wrap at rest); the wider 14px slot shifts the title
-              ~4px (right margin trimmed 6->4 to keep the dot->title gap). The ring shows only while the
-              shared flash timer toggles AgentFlashRingVisible (every 600ms) on an unvisited
-              Running->resting tab; the dot's own black stroke + status fill never change.
-              IsHitTestVisible=False: decorative, never eats a tab click.  -->
+              The wrap Grid is the CONTAINER that bounds every status glyph — anything overflowing it is
+              CLIPPED by the tab header (an earlier 10px wrap let the 13px ring overflow and the header
+              clipped it to a truncated SQUARE; the edge-clipping the dot comment above warns about), so
+              each glyph must FIT INSIDE the wrap. It is sized 18px — large enough to contain the 17px
+              FAVORITE STAR (FAVORITES.md §5a), comfortably bigger than the 10px dot + the 13px ring. To
+              avoid widening the tab strip, the wrap's RIGHT margin is trimmed to 0 so the total
+              horizontal footprint (wrap + margin) is unchanged from the prior 14px-wrap + 4px-margin
+              (= 18px either way) — the title does NOT shift; only the centred dot sits ~2px further right
+              within the slot. 18px stays under the ~19px title line height, so tabs don't grow taller.
+              The ring is a 13px red ellipse drawn FIRST (behind), centred with ~2.5px clearance in the
+              18px wrap; the 10px dot, centred on top, covers its centre so only a ~1.5px red ring peeks
+              out AROUND the dot's black stroke — reading outside-in: red ring, then black stroke, then
+              the status-colour fill. The ring shows only while the shared flash timer toggles
+              AgentFlashRingVisible (every 600ms) on an unvisited Running->resting tab; the dot's own
+              black stroke + status fill never change. IsHitTestVisible=False: decorative.  -->
         <Grid x:Name="HeaderAgentStatusDotWrap"
-              Width="14"
-              Height="14"
-              Margin="0,1,4,-1"
+              Width="18"
+              Height="18"
+              Margin="0,1,0,-1"
               VerticalAlignment="Center">
             <Ellipse x:Name="HeaderAgentStatusFlashRing"
                      Width="13"
@@ -135,14 +139,16 @@
                   requested look — "the status indicator as a foreground to a white star with golden
                   tips"). A 5-point star Path, white Fill with a gold (#F5C242, the Sessions ★ / crown
                   gold) Stroke whose miter joins make the sharp TIPS read golden; Stretch=Fill centres it
-                  on the dot. Kept INSIDE the 14px wrap (overflow is clipped by the tab header) — 13px box
-                  + a thin stroke leaves a sub-pixel margin so the tips aren't clipped. Mutually exclusive
-                  with the crown (TerminalPage::_SetTabAgentFavorite asserts exactly one). IsHitTestVisible
-                  =False: decorative. Tune knobs: Width/Height (size relative to the 10px dot), StrokeThickness
-                  (tip gold weight), the Data geometry (star proportions).  -->
+                  on the dot. Kept INSIDE the 18px wrap (overflow is clipped by the tab header) — a 17px
+                  box + a thin stroke leaves a sub-pixel margin so the tips aren't clipped. At 17px the
+                  points reach ~3.5px beyond the 10px dot (2px further than the prior 13px star, per the
+                  request). Mutually exclusive with the crown (TerminalPage::_SetTabAgentFavorite asserts
+                  exactly one). IsHitTestVisible=False: decorative. Tune knobs: Width/Height (size relative
+                  to the 10px dot; must stay <= the wrap), StrokeThickness (tip gold weight), the Data
+                  geometry (star proportions).  -->
             <Path x:Name="HeaderAgentFavoriteStar"
-                  Width="13"
-                  Height="13"
+                  Width="17"
+                  Height="17"
                   HorizontalAlignment="Center"
                   VerticalAlignment="Center"
                   Stretch="Fill"
