@@ -1251,6 +1251,26 @@ namespace winrt::TerminalApp::implementation
 
         _BuildLayout();
 
+        // Agentmaster: an INVISIBLE, caret-less keyboard-focus SINK, parked-on by Focus() when this pane
+        // is activated. The Manager pane's key handlers (_KeyDownHandler / _ManagerPaneNavPreviewKeyDown —
+        // alt+left/right, ctrl+tab, shift+home) are routed events on the pane ROOT and only fire when
+        // keyboard focus is INSIDE the pane subtree; Focus() used to leave focus untouched (to avoid a
+        // blinking caret in the cwd box), which left focus on the tab HEADER after a tab switch, so those
+        // chords did nothing until you clicked an element in the pane. A 1x1, opacity-0, no-focus-visual
+        // Button gives the pane keyboard focus with NO visible caret and NO path-picker popup (the popup
+        // keys off the cwd box's OWN focus, not this). Appended AFTER _BuildLayout so it is not cleared.
+        _focusSink = winrt::Windows::UI::Xaml::Controls::Button{};
+        _focusSink.Width(1.0);
+        _focusSink.Height(1.0);
+        _focusSink.MinWidth(0.0);
+        _focusSink.MinHeight(0.0);
+        _focusSink.Opacity(0.0);
+        _focusSink.IsTabStop(true);
+        _focusSink.UseSystemFocusVisuals(false);
+        _focusSink.HorizontalAlignment(winrt::Windows::UI::Xaml::HorizontalAlignment::Left);
+        _focusSink.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Top);
+        _root.Children().Append(_focusSink);
+
         // Agentmaster (Waiting-for-you "unread" model): a low-frequency board refresh so TIME-derived
         // adornments stay current without a hook event — the card's ⚡ "still cached" hint (a few-minute
         // window) and the "-2h30m" timing text. _Refresh() recomputes them from the live snapshot; it is
@@ -1607,14 +1627,30 @@ namespace winrt::TerminalApp::implementation
     }
     void AgentManagerContent::Focus(FocusState /*reason*/)
     {
-        // Agentmaster: deliberately DO NOT move focus here. The host calls IPaneContent::Focus
-        // whenever the Manager pane is activated (app open, tab open, tab switch) — auto-focusing
-        // the cwd (Launch path) box put a blinking caret in it on every open, which the user did
-        // not want. Leave focus untouched so NOTHING in the Manager is focused until the user
-        // actually interacts: clicking the cwd box, a board card, a tree row, etc. focuses that
-        // element directly (and the path-picker drop-down still opens then, since it triggers on
-        // Pointer/Keyboard focus). (If we ever focus anything here it must be a real Control —
-        // _root is a Grid with no Focus(FocusState) — but here we intentionally focus nothing.)
+        // Agentmaster: park keyboard focus on the INVISIBLE, caret-less sink (built in the ctor) — NOT the
+        // cwd box. The host calls IPaneContent::Focus whenever the Manager pane is activated (app open, tab
+        // open, tab switch). We must put focus SOMEWHERE inside the pane subtree, or the pane-root routed
+        // key handlers (_KeyDownHandler / _ManagerPaneNavPreviewKeyDown — alt+left/right, ctrl+tab,
+        // shift+home) never fire (focus stays on the tab header), the bug where those chords did nothing
+        // until you clicked an element. Focusing the cwd box was the ORIGINAL behavior but it put a blinking
+        // caret in it on every open (and popped the path-picker) — which the user disliked — so we focus a
+        // 1x1, opacity-0, no-focus-visual Button instead: keyboard works immediately, NOTHING looks focused,
+        // and the path-picker (which keys off the cwd box's own focus) stays shut. Programmatic focus shows
+        // no focus visual; if the sink isn't focusable yet (pre-layout on first realize) retry once next tick.
+        if (!_focusSink)
+        {
+            return;
+        }
+        if (!_focusSink.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic) && _dispatcher)
+        {
+            auto sink = _focusSink;
+            _dispatcher.TryEnqueue([sink]() {
+                if (sink)
+                {
+                    sink.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+                }
+            });
+        }
     }
     void AgentManagerContent::Close()
     {
