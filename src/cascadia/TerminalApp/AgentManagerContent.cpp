@@ -3092,6 +3092,21 @@ namespace winrt::TerminalApp::implementation
                     const bool isLocal = localIds.find(id) != localIds.end();
                     _SetTreeScope(isLocal ? TreeScope::Local : TreeScope::Global, /*refresh*/ true);
                 }
+                // Agentmaster (double-click fix): _SelectSession (+ the scope sync above) just TORE
+                // DOWN and rebuilt this board — every card Button is cleared + recreated from scratch
+                // (_RebuildBoard: _boardHost.Children().Clear() then _MakeCard per session). The
+                // replacement card for THIS id is in the tree but NOT yet arranged (a fresh element
+                // has 0x0 bounds until the next async layout pass), so a second mouse-down arriving
+                // microseconds later (the user double-clicking to Activate) hit-tests to nothing and
+                // its Click never fires — a double-click on an UNSELECTED card silently did nothing
+                // ("if it's not selected it doesn't work"), while an already-selected card worked (its
+                // _SelectSession early-outs, no rebuild). Force a synchronous layout so the replacement
+                // card has real bounds NOW and the follow-up click lands on it. Only this not-selected
+                // path rebuilds, so it is the only one that needs it; cheap (a card click is rare).
+                if (_boardHost)
+                {
+                    _boardHost.UpdateLayout();
+                }
             }
         });
         // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
@@ -4270,6 +4285,17 @@ namespace winrt::TerminalApp::implementation
                     else
                     {
                         _SelectSession(id);
+                        // Agentmaster (double-click fix): _SelectSession rebuilt the tree — every row
+                        // Button is cleared + recreated (_RebuildTree), so this row's replacement isn't
+                        // arranged until the next async layout pass and a follow-up second click (a
+                        // double-click to Activate) would miss it. Force a synchronous layout so the
+                        // replacement row has real bounds immediately and the second click lands — the
+                        // board-card twin above. (An already-selected re-click early-outs in
+                        // _SelectSession with no rebuild, so only this not-selected path needs it.)
+                        if (_treeHost)
+                        {
+                            _treeHost.UpdateLayout();
+                        }
                     }
                 });
                 // Enter = Activate (jump to live tab) — NEVER inject (Correctness Rule #2).
