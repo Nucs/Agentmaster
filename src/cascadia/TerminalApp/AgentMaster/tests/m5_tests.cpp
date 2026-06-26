@@ -3438,6 +3438,16 @@ static void TestTranscriptResolve()
         CHECK(a.firstTs == L"2026-06-26T10:05:00.000Z",
               "AnalyzeSessionTranscript: first activity is the live root's time, not the rewound-away earlier turn");
 
+        // (2b) the "Transcript" COPY (ReadConversationText, full read): the copied conversation is the
+        // LIVE branch only — the discarded "test" turn + its reply + the interleaved orphan are excluded.
+        const std::wstring convo = ReadConversationText(pRevert, false, 0);
+        CHECK(convo.find(L"What if my window lags") != std::wstring::npos &&
+                  convo.find(L"here is how") != std::wstring::npos &&
+                  convo.find(L"audit b and then a") != std::wstring::npos,
+              "ReadConversationText: the live User+Assistant turns are present in the copied transcript");
+        CHECK(convo.find(L"test") == std::wstring::npos && convo.find(L"ORPHANED") == std::wstring::npos,
+              "ReadConversationText: the rewound-away 'test' branch + the interleaved orphan are excluded");
+
         // (3) the title + prompt list (ReadTranscriptInfoIn, full read): title is the live first
         // prompt, not the discarded "test"; the prompt list excludes the orphan.
         const std::wstring projectsDir = base + L"_proj";

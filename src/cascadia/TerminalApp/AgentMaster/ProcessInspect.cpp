@@ -2370,6 +2370,13 @@ namespace Agentmaster
         const bool truncated = (maxBytes != 0); // a head read may end mid-line -> skip the last segment
         const std::wstring wide = Utf8ToWide(bytes);
 
+        // Agentmaster (revert-aware DISPLAY): the COPIED transcript must be the LIVE conversation only —
+        // the chain from the current leaf to root — so a double-ESC rewind's abandoned (interleaved)
+        // branch is excluded. Claude only: a Codex rollout is linear (no parentUuid tree), and
+        // ActiveBranchUuids returns empty for it anyway. Empty on a truncated head read (no tail leaf
+        // marker). SEARCH is a separate path (it keeps every line). See TranscriptStore::ActiveBranchUuids.
+        const std::unordered_set<std::wstring> activeBranch = (!codex && !truncated) ? ActiveBranchUuids(wide) : std::unordered_set<std::wstring>{};
+
         std::wstring out;
         const auto emit = [&out](const wchar_t* who, std::wstring t) {
             // Trim surrounding whitespace/newlines so blocks pack cleanly.
@@ -2456,6 +2463,16 @@ namespace Agentmaster
                 continue;
             }
 
+            // Agentmaster (revert-aware): skip a Claude line on a rewound-away branch (its uuid isn't on
+            // the active leaf->root chain), so the copied transcript reflects the live conversation only.
+            // Empty activeBranch (head read / no leaf marker) => keep all.
+            if (!activeBranch.empty())
+            {
+                if (const std::wstring uuid = obj.StrAt(L"uuid"); !uuid.empty() && activeBranch.count(uuid) == 0)
+                {
+                    continue;
+                }
+            }
             // Claude transcript: type user/assistant only; drop meta/compact/sidechain turns.
             const std::wstring lineType = obj.StrAt(L"type");
             const bool isUser = (lineType == L"user");
