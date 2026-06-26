@@ -350,19 +350,17 @@ namespace
     //  - truncate == false: show the WHOLE message, no cap.
     std::wstring SummaryEscapeMsg(const std::wstring& m, bool wrapNewlines, bool truncate)
     {
-        // When collapsing to ONE line (wrap off), first collapse an embedded table — drop its horizontal
+        // Collapse an embedded table in BOTH wrap modes — drop its horizontal
         // rule rows ("├────┼────┤" / "|---|---|") and de-frame its data rows ("│ Name │ Age │" ->
         // "Name · Age") — so the box-drawing noise doesn't bury the content (ProcessInspect::
-        // StripSummaryTableRules). Wrap ON keeps the table verbatim: a real multi-line table renders
-        // aligned in the monospace panel, so its bars + rules are meaningful there.
-        std::wstring collapsed;
-        if (!wrapNewlines)
-        {
-            collapsed = ::Agentmaster::StripSummaryTableRules(m);
-        }
-        const std::wstring& src = wrapNewlines ? m : collapsed;
+        // StripSummaryTableRules). The panel is narrow (~20% pane width by default), so a wide table
+        // can't render aligned there even in wrap-ON; it just wraps into noise, and de-framing is
+        // strictly more readable. Wrap mode now only governs how the de-framed rows' newlines render:
+        // real multi-line (wrapNewlines) vs a literal "\n" on one line. Non-table prose passes
+        // through StripSummaryTableRules verbatim, so wrap-ON's multi-line prose is unaffected.
+        const std::wstring stripped = ::Agentmaster::StripSummaryTableRules(m);
         std::wstring esc;
-        for (const wchar_t ch : src)
+        for (const wchar_t ch : stripped)
         {
             if (ch == L'\n')
                 esc += wrapNewlines ? L"\n" : L"\\n";
