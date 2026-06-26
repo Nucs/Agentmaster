@@ -4447,7 +4447,7 @@ static void TestContinuationChain()
 static void TestConversationLineage()
 {
     std::wprintf(L"ConversationLineage (cross-file /clear + plan-restart previous sessions — disk walk):\n");
-    const auto narrow = [](const std::wstring& w) { return std::string(w.begin(), w.end()); }; // ASCII ids only
+    const auto narrow = [](const std::wstring& w) { std::string s; s.reserve(w.size()); for (wchar_t c : w) { s.push_back(static_cast<char>(c)); } return s; }; // ASCII ids only (explicit cast => no C4244)
 
     wchar_t tmp[MAX_PATH]{};
     ::GetTempPathW(MAX_PATH, tmp);
@@ -4489,27 +4489,41 @@ static void TestConversationLineage()
         CHECK(CollectConversationLineage(idA, cwd, 16).empty(), "lineage/disk: the origin session A has no previous session");
     }
 
-    // --- (2) plan-restart parent: child C links to plan parent P via "read the full transcript at:" ---
+    // --- (2) plan-restart parent in a DIFFERENT dir, which itself has a /clear predecessor ---
+    // C (child dir) --plan--> P (parent dir) --/clear--> Q (parent dir). The plan hop is cwd-independent
+    // (resolved by id), but reaching Q requires the walk to ADVANCE curCwd to P's REAL dir — so this
+    // exercises both the plan link AND the cross-dir cwd advance (a plan parent's own /clear lineage).
     {
-        const std::wstring cwd = L"K:\\am_lin\\plancase";
-        const std::wstring dir = projects + L"\\" + EncodeCwdToProjectDir(cwd);
+        const std::wstring childCwd = L"K:\\am_lin\\planchild";
+        const std::wstring parentCwd = L"K:\\am_lin\\planparent";
+        const std::wstring childDir = projects + L"\\" + EncodeCwdToProjectDir(childCwd);
+        const std::wstring parentDir = projects + L"\\" + EncodeCwdToProjectDir(parentCwd);
         std::error_code ec;
-        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
-        const std::wstring idP = L"cccccccc-3333-4ccc-8ccc-cccccccccccc"; // plan parent
-        const std::wstring idC = L"dddddddd-4444-4ddd-8ddd-dddddddddddd"; // plan child
+        std::filesystem::create_directories(std::filesystem::path{ childDir }, ec);
+        std::filesystem::create_directories(std::filesystem::path{ parentDir }, ec);
+        const std::wstring idQ = L"eeeeeeee-5555-4eee-8eee-eeeeeeeeeeee"; // P's /clear predecessor (parent dir)
+        const std::wstring idP = L"cccccccc-3333-4ccc-8ccc-cccccccccccc"; // plan parent (parent dir)
+        const std::wstring idC = L"dddddddd-4444-4ddd-8ddd-dddddddddddd"; // plan child (child dir)
+        const std::string qJson =
+            R"j({"type":"user","userType":"external","uuid":"q1","parentUuid":null,"cwd":"K:\\am_lin\\planparent","message":{"content":"earlier groundwork"},"timestamp":"2026-06-26T09:50:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"q2","parentUuid":"q1","cwd":"K:\\am_lin\\planparent","message":{"content":"more groundwork"},"timestamp":"2026-06-26T09:58:00.000Z"})j" "\n";
         const std::string pJson =
-            R"j({"type":"user","userType":"external","uuid":"p1","parentUuid":null,"cwd":"K:\\am_lin\\plancase","message":{"content":"plan the feature"},"timestamp":"2026-06-26T10:00:00.000Z"})j" "\n";
+            R"j({"type":"user","userType":"external","uuid":"p1","parentUuid":null,"cwd":"K:\\am_lin\\planparent","message":{"content":"plan the feature"},"timestamp":"2026-06-26T10:00:00.000Z"})j" "\n";
         // The breadcrumb only needs a token whose basename is "<idP>.jsonl" — the parent is then resolved
-        // by GLOB on that id (forward slashes keep the embedded path valid JSON).
+        // by GLOB on that id (forward slashes keep the embedded path valid JSON), so the link spans dirs.
         const std::string cJson =
-            std::string(R"j({"type":"user","userType":"external","uuid":"c1","parentUuid":null,"cwd":"K:\\am_lin\\plancase","message":{"content":"read the full transcript at: /plans/x/)j") +
+            std::string(R"j({"type":"user","userType":"external","uuid":"c1","parentUuid":null,"cwd":"K:\\am_lin\\planchild","message":{"content":"read the full transcript at: /plans/x/)j") +
             narrow(idP) + R"j(.jsonl and continue"},"timestamp":"2026-06-26T10:10:00.000Z"})j" "\n";
-        MakeJsonl(dir + L"\\" + idP + L".jsonl", pJson, 100000, 90000);
-        MakeJsonl(dir + L"\\" + idC + L".jsonl", cJson, 200000, 190000);
+        MakeJsonl(parentDir + L"\\" + idQ + L".jsonl", qJson, 100000, 80000);
+        MakeJsonl(parentDir + L"\\" + idP + L".jsonl", pJson, 110000, 90000);
+        MakeJsonl(childDir + L"\\" + idC + L".jsonl", cJson, 200000, 190000);
 
-        const auto lin = CollectConversationLineage(idC, cwd, 16);
-        CHECK(lin.size() == 1 && lin[0].userMsgs.size() == 1 && lin[0].userMsgs[0] == L"plan the feature",
-              "lineage/disk: a plan-restart child surfaces the PLAN PARENT's prompt as the previous session");
+        const auto lin = CollectConversationLineage(idC, childCwd, 16);
+        CHECK(lin.size() == 2, "lineage/disk: plan parent (other dir) + its /clear predecessor both surface");
+        CHECK(lin.size() == 2 && lin[0].userMsgs.size() == 2 && lin[0].userMsgs[0] == L"earlier groundwork",
+              "lineage/disk: OLDEST first — P's /clear predecessor Q leads (cwd advanced to P's real dir)");
+        CHECK(lin.size() == 2 && lin[1].userMsgs.size() == 1 && lin[1].userMsgs[0] == L"plan the feature",
+              "lineage/disk: the plan PARENT P follows Q, before the current session");
     }
 
     ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());

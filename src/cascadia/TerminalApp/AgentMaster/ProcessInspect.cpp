@@ -3036,11 +3036,17 @@ namespace Agentmaster
             // Prepend the whole contribution BEFORE everything gathered so far — this parent is older.
             lineage.insert(lineage.begin(), contribution.begin(), contribution.end());
 
-            // Advance: the predecessor becomes `cur`. Its parentSessionId comes from the SAME read; its
-            // cwd from the continuation resolver when that branch was taken (a plan parent keeps cur's
-            // cwd as the best available — plan parents are same-cwd in practice).
+            // Advance: the predecessor becomes `cur`. Its parentSessionId comes from the SAME read. Its
+            // cwd advances to the predecessor's REAL dir so the NEXT hop's continuation scan looks in the
+            // right project dir: the continuation branch already resolved it (predCwd); a plan-parent hop
+            // (predCwd empty) may land in a DIFFERENT dir, so read it from the transcript (one cheap head
+            // read, plan hops are rare) — else a plan parent's OWN /clear predecessor would be missed.
             curId = predId;
             curParentId = pa.parentSessionId;
+            if (predCwd.empty())
+            {
+                predCwd = ReadTranscriptQuickFacts(predPath, 0).cwd;
+            }
             if (!predCwd.empty())
             {
                 curCwd = predCwd;
