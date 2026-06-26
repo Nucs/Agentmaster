@@ -421,6 +421,20 @@ namespace Agentmaster
     // tests + the higher-level cross-file lineage resolver).
     std::vector<ConversationSegment> CollectConversationSegments(std::wstring_view transcriptText);
 
+    // Agentmaster (cross-file conversation lineage): walk `sessionId`'s PREDECESSOR chain backwards —
+    // a plan-restart PARENT (the "read the full transcript at: <parent>.jsonl" link) or a /clear
+    // continuation predecessor (a NEW same-cwd session minted when the user /cleared) — reading each
+    // parent transcript, and return EVERY parent's segments OLDEST FIRST, ready to PREPEND to the
+    // current session's SessionSummary.previousSegments. Each parent contributes its own in-file
+    // /compact previousSegments followed by a segment for its active (leaf) messages, so the panel's
+    // "Previous session N" list spans files seamlessly. Read-only; filesystem (it resolves + reads the
+    // parent transcripts). `maxDepth` bounds the walk (cycle-safe via a visited set). Empty when there
+    // is no cross-file parent. Composes with AnalyzeSessionTranscript's IN-FILE previousSegments — the
+    // higher-level lineage layer the SessionSummary header refers to. [Agentmaster]
+    std::vector<ConversationSegment> CollectConversationLineage(const std::wstring& sessionId,
+                                                                const std::wstring& cwd,
+                                                                int maxDepth = 16);
+
     // Agentmaster: collapse-mode TABLE de-noiser. When a summary message is flattened to ONE line
     // (wrap-off — the panel escapes newlines to a literal "\n", or the Sessions-page detail box which
     // is always one-line), an embedded table buries the one-liner in a wall of ─/┼/│/| noise. This does

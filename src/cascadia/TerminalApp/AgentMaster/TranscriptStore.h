@@ -353,4 +353,27 @@ namespace Agentmaster
     // {sessionId, cwd, "", 0} when there's no newer continuation, the dir is unreadable, or the
     // session isn't present. Read-only.
     ContinuationTail ResolveContinuationTailOnDisk(const std::wstring& sessionId, const std::wstring& cwd);
+
+    // Pure: the DIRECT continuation PREDECESSOR of `targetId` among `nodes` (the A in A->targetId), or
+    // empty — the EXACT inverse of ResolveContinuationChainTail's forward edge (both share the single
+    // ContinuationNext hop, so reverse lineage can't drift from forward redirect). Empty when no node
+    // continues into targetId, or when MORE THAN ONE does (ambiguous — never guess). Drives cross-file
+    // conversation LINEAGE (the summary panel's "previous session(s)" across a /clear or plan-restart
+    // join — CollectConversationLineage). [Agentmaster]
+    std::wstring ResolveContinuationPredecessor(const std::vector<SessionChainNode>& nodes,
+                                                const std::wstring& targetId,
+                                                int64_t gapMaxMs = kContinuationGapMaxMs,
+                                                int64_t skewMs = kContinuationSkewMs);
+
+    struct ContinuationPredecessor
+    {
+        std::wstring predId;  // the session that continues INTO the queried one (empty == none / ambiguous)
+        std::wstring predCwd; // the predecessor's own cwd (for recursing the lineage walk)
+    };
+
+    // Filesystem: enumerate `sessionId`'s project dir (the encoding of `cwd`), build the chain nodes,
+    // and resolve the DIRECT predecessor (the inverse of ResolveContinuationTailOnDisk — "where did
+    // this conversation COME FROM?"). Read-only; {empty,empty} when there's no unambiguous predecessor,
+    // the dir is unreadable, or only one session is present. [Agentmaster]
+    ContinuationPredecessor ResolveContinuationPredecessorOnDisk(const std::wstring& sessionId, const std::wstring& cwd);
 }

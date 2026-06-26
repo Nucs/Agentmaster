@@ -812,7 +812,16 @@ namespace
         }
         else
         {
-            const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+            auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+            // Cross-file lineage: the COMPLETE copyable box carries the /clear + plan-restart parents too
+            // (a one-shot click — walked fresh, no memo needed). Prepended oldest-first, like the panel.
+            {
+                auto lineage = ::Agentmaster::CollectConversationLineage(claudeId, cwd, 16);
+                if (!lineage.empty())
+                {
+                    a.previousSegments.insert(a.previousSegments.begin(), lineage.begin(), lineage.end());
+                }
+            }
             times = FormatTimesLine(IsoToUnixMs(a.firstTs), IsoToUnixMs(a.lastUserTs), IsoToUnixMs(a.lastTs));
             std::wstring planFile = a.planFilePath;
             if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
@@ -2756,10 +2765,13 @@ namespace winrt::TerminalApp::implementation
         std::wstring liveGlyph{ StateGlyph(s.state) };
         std::wstring liveLabel{ StateLabel(s.state) };
         _summaryLoading = true;
-        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowPrevious);
+        // Cross-file lineage memo: reuse the already-resolved parents when they were computed for THIS
+        // conv id (parentage is immutable); a rebind to a new id recomputes. Avoids a per-write dir scan.
+        const bool lineageCached = (_summaryLineageId == convId);
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowPrevious, lineageCached, _summaryLineage);
     }
 
-    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious)
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
         co_await winrt::resume_background();
@@ -2778,7 +2790,12 @@ namespace winrt::TerminalApp::implementation
         int64_t mtime = prevMtime;
         int64_t createdMs = 0, lastUserMs = 0, lastActivityMs = 0; // times-line instants (computed on reload)
         bool timesComputed = false;
-        bool hasPrevious = false; // Agentmaster (conversation lineage): the analyzed session has a previous (pre-/compact) segment => reveal the toggle button
+        bool hasPrevious = false; // Agentmaster (conversation lineage): the analyzed session has a previous (pre-/compact OR cross-file) segment => reveal the toggle button
+        // Agentmaster (cross-file lineage): the /clear + plan-restart parents. Reuse the memo when it was
+        // computed for this session (lineageCached), else walk + memoize below (lineageComputed flags the
+        // writeback). Immutable per session, so a quiet reload never re-walks.
+        std::vector<::Agentmaster::ConversationSegment> lineage = std::move(cachedLineage);
+        bool lineageComputed = false;
         if (!path.empty())
         {
             // Cheap stat: only do the heavy read+analyze when the transcript grew (mtime advanced) or
@@ -2806,9 +2823,20 @@ namespace winrt::TerminalApp::implementation
                 }
                 else
                 {
-                    const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                    auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                    // Cross-file lineage: PREPEND the /clear + plan-restart parents (oldest first), so the
+                    // panel's "Previous session N" list spans files. Computed once per session, then memoized.
+                    if (!lineageCached)
+                    {
+                        lineage = ::Agentmaster::CollectConversationLineage(sessionId, cwd, 16);
+                        lineageComputed = true; // cache it (even when empty) so a quiet reload won't re-walk
+                    }
+                    if (!lineage.empty())
+                    {
+                        a.previousSegments.insert(a.previousSegments.begin(), lineage.begin(), lineage.end());
+                    }
                     userMsgs = a.userMsgs; // the prompts, in order — aligns with the rendered " N. " jump rows
-                    hasPrevious = !a.previousSegments.empty(); // a /compact'ed session => the previous-session toggle is meaningful
+                    hasPrevious = !a.previousSegments.empty(); // a /compact'ed OR cross-file-continued session => the previous-session toggle is meaningful
                     createdMs = IsoToUnixMs(a.firstTs);
                     lastUserMs = IsoToUnixMs(a.lastUserTs);
                     lastActivityMs = IsoToUnixMs(a.lastTs);
@@ -2832,15 +2860,23 @@ namespace winrt::TerminalApp::implementation
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
-            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious]() {
+            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious, sessionId, lineage, lineageComputed]() {
                 if (auto self = weak.get())
                 {
                     if (timesComputed)
                     {
                         self->_summaryUserMsgs = userMsgs; // set BEFORE _SetSummaryContent so jump rows resolve the right prompt
+                        // Agentmaster (cross-file lineage): memoize the resolved parents so a quiet mtime-gated
+                        // reload OR a show-previous toggle reuses them (no re-walk). Keyed by conv id — a rebind
+                        // recomputes. Stored even when empty (a "no parents" verdict is also worth caching).
+                        if (lineageComputed)
+                        {
+                            self->_summaryLineageId = sessionId;
+                            self->_summaryLineage = lineage;
+                        }
                         // Agentmaster (conversation lineage): reveal the previous-session toggle ONLY when this
-                        // (freshly analyzed) session actually has a pre-/compact segment; hide it otherwise. Only
-                        // touched on a real re-analyze, so a quiet mtime-gated reload keeps the last visibility.
+                        // (freshly analyzed) session actually has a previous (pre-/compact OR cross-file) segment;
+                        // hide it otherwise. Only touched on a real re-analyze, so a quiet reload keeps the last state.
                         if (self->_summaryPrevBtn)
                         {
                             self->_summaryPrevBtn.Visibility(hasPrevious ? winrt::Windows::UI::Xaml::Visibility::Visible

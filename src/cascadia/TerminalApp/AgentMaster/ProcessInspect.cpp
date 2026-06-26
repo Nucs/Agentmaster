@@ -2958,6 +2958,97 @@ namespace Agentmaster
             return {};
         }
     }
+
+    std::vector<ConversationSegment> CollectConversationLineage(const std::wstring& sessionId,
+                                                                const std::wstring& cwd,
+                                                                int maxDepth)
+    {
+        std::vector<ConversationSegment> lineage;
+        if (sessionId.empty())
+        {
+            return lineage;
+        }
+        // Cycle-safe: every id we touch (the start + each resolved parent) goes in `seen`, so a
+        // pathological loop (a self-pointing parentSessionId, a continuation graph cycle) can't spin.
+        std::unordered_set<std::wstring> seen;
+        seen.insert(sessionId);
+
+        // State carried hop-to-hop. The FIRST hop needs the CURRENT session's parentSessionId (the
+        // plan-restart "read the full transcript at: <parent>.jsonl" link) — read it once here (whole
+        // file: the marker rides the first external-user message, but that message can be a large plan
+        // paste, so don't risk truncating it). Each later hop gets its parentSessionId from the same
+        // read that yields its segments (no extra IO).
+        std::wstring curId = sessionId;
+        std::wstring curCwd = cwd;
+        std::wstring curParentId;
+        {
+            const std::wstring curPath = ResolveClaudeTranscriptPath(curId);
+            if (!curPath.empty())
+            {
+                curParentId = AnalyzeSessionTranscript(curPath, 0 /* whole file */).parentSessionId;
+            }
+        }
+
+        for (int depth = 0; depth < maxDepth; ++depth)
+        {
+            // Resolve cur's predecessor: a plan-restart PARENT wins (an explicit cross-file link), else
+            // a /clear continuation predecessor (structural — a NEW same-cwd session minted at /clear).
+            std::wstring predId;
+            std::wstring predCwd;
+            if (!curParentId.empty() && curParentId != curId && !seen.count(curParentId) &&
+                !ResolveClaudeTranscriptPath(curParentId).empty())
+            {
+                predId = curParentId; // plan-restart parent
+            }
+            else if (!curCwd.empty())
+            {
+                const auto pre = ResolveContinuationPredecessorOnDisk(curId, curCwd);
+                if (!pre.predId.empty() && !seen.count(pre.predId))
+                {
+                    predId = pre.predId;
+                    predCwd = pre.predCwd;
+                }
+            }
+            if (predId.empty())
+            {
+                break; // no (unambiguous) cross-file parent — the lineage ends here
+            }
+            seen.insert(predId);
+
+            const std::wstring predPath = ResolveClaudeTranscriptPath(predId);
+            if (predPath.empty())
+            {
+                break; // the parent's transcript is gone — stop rather than guess past it
+            }
+            const auto pa = AnalyzeSessionTranscript(predPath, 0 /* whole file */);
+
+            // The predecessor contributes, OLDEST FIRST: its OWN in-file /compact history, then a
+            // segment for its active (leaf) messages — the part its own file did NOT summarize away.
+            // So the panel's "previous session N" list spans files seamlessly (a parent that was itself
+            // /compact'ed surfaces as several numbered sessions).
+            std::vector<ConversationSegment> contribution = pa.previousSegments;
+            if (!pa.userMsgs.empty())
+            {
+                ConversationSegment leaf;
+                leaf.userMsgs = pa.userMsgs; // a plain cross-file join => no compaction label (header reads "Previous session N")
+                contribution.push_back(std::move(leaf));
+            }
+            // Prepend the whole contribution BEFORE everything gathered so far — this parent is older.
+            lineage.insert(lineage.begin(), contribution.begin(), contribution.end());
+
+            // Advance: the predecessor becomes `cur`. Its parentSessionId comes from the SAME read; its
+            // cwd from the continuation resolver when that branch was taken (a plan parent keeps cur's
+            // cwd as the best available — plan parents are same-cwd in practice).
+            curId = predId;
+            curParentId = pa.parentSessionId;
+            if (!predCwd.empty())
+            {
+                curCwd = predCwd;
+            }
+        }
+        return lineage;
+    }
+
     static SessionSummary AnalyzeSessionTranscriptImpl(std::wstring_view transcriptPath, size_t maxBytes)
     {
         SessionSummary out;

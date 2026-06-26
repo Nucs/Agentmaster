@@ -4398,6 +4398,123 @@ static void TestContinuationChain()
         CHECK(ResolveContinuationChainTail(v, L"ghost").tailId == L"ghost", "chain: unknown start id => returns itself");
         CHECK(ResolveContinuationChainTail({}, L"a").tailId == L"a", "chain: empty nodes => returns the start id");
     }
+
+    // --- ResolveContinuationPredecessor: the EXACT inverse of the forward edge (cross-file lineage) ---
+    // The reverse walk ("where did this conversation COME FROM?") must agree with the forward redirect
+    // hop-for-hop — they share the single ContinuationNext edge.
+    {
+        // The same head -> mid -> tail chain, queried BACKWARDS.
+        std::vector<SessionChainNode> v{
+            N(L"head", L"K:\\proj\\a", 0, 1000000),
+            N(L"mid", L"K:\\proj\\a", 1024000, 2000000),
+            N(L"tail", L"K:\\proj\\a", 2660000, 3000000),
+        };
+        CHECK(ResolveContinuationPredecessor(v, L"tail") == L"mid", "predecessor: tail's predecessor is mid (inverse of mid->tail)");
+        CHECK(ResolveContinuationPredecessor(v, L"mid") == L"head", "predecessor: mid's predecessor is head");
+        CHECK(ResolveContinuationPredecessor(v, L"head").empty(), "predecessor: the origin (head) has no predecessor");
+        CHECK(ResolveContinuationPredecessor(v, L"ghost").empty(), "predecessor: an unknown id has no predecessor");
+        CHECK(ResolveContinuationPredecessor({}, L"x").empty(), "predecessor: empty nodes => empty");
+    }
+
+    // Ambiguity: TWO sessions both forward-continue into the same target (their timelines don't see
+    // each OTHER as candidates, but both see T) => the predecessor is ambiguous => empty (never guess).
+    {
+        std::vector<SessionChainNode> v{
+            N(L"A", L"K:\\proj\\a", 0, 990000), // ends just before T; created too early to be B's candidate
+            N(L"B", L"K:\\proj\\a", 0, 995000), // ends just before T; created too early to be A's candidate
+            N(L"T", L"K:\\proj\\a", 1000000, 1100000),
+        };
+        CHECK(ResolveContinuationPredecessor(v, L"A").empty() && ResolveContinuationPredecessor(v, L"B").empty(),
+              "predecessor: A and B are origins (nothing continues into them)");
+        CHECK(ResolveContinuationPredecessor(v, L"T").empty(), "predecessor: two sessions continue into T => ambiguous => empty (no silent merge)");
+    }
+
+    // A fork target has no continuation predecessor (a fork is a BRANCH, never a continuation).
+    {
+        std::vector<SessionChainNode> v{
+            N(L"a", L"K:\\proj\\a", 0, 1000000),
+            N(L"forked", L"K:\\proj\\a", 1024000, 2000000, /*fork*/ true),
+        };
+        CHECK(ResolveContinuationPredecessor(v, L"forked").empty(), "predecessor: a fork has no continuation predecessor");
+    }
+}
+
+// Cross-file conversation lineage on disk: CollectConversationLineage walks a session's predecessors
+// — a /clear continuation (a NEW same-cwd session) and a plan-restart parent (the "read the full
+// transcript at:" link) — and returns each parent's prompts as a "previous session" segment. Stages a
+// throwaway CLAUDE_CONFIG_DIR so the resolvers (ResolveClaudeTranscriptPath / the predecessor scan)
+// find the fixtures. [Agentmaster]
+static void TestConversationLineage()
+{
+    std::wprintf(L"ConversationLineage (cross-file /clear + plan-restart previous sessions — disk walk):\n");
+    const auto narrow = [](const std::wstring& w) { return std::string(w.begin(), w.end()); }; // ASCII ids only
+
+    wchar_t tmp[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, tmp);
+    const std::wstring cfg = std::wstring{ tmp } + L"am_lineage_cfg_" + std::to_wstring(::GetCurrentProcessId());
+    const std::wstring projects = cfg + L"\\projects";
+
+    // Point Claude's transcript root at our temp dir for the duration of this test, restore after.
+    wchar_t prevBuf[2048]{};
+    const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+    const std::wstring prevCfg{ prevBuf, prevN };
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+
+    // --- (1) /clear continuation: B continues A (same cwd, B created shortly after A ended) ---
+    {
+        const std::wstring cwd = L"K:\\am_lin\\clearcase";
+        const std::wstring dir = projects + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        const std::wstring idA = L"aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa";
+        const std::wstring idB = L"bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb";
+        const std::string aJson =
+            R"j({"type":"user","userType":"external","uuid":"a1","parentUuid":null,"cwd":"K:\\am_lin\\clearcase","message":{"content":"alpha one"},"timestamp":"2026-06-26T09:00:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"a2","parentUuid":"a1","cwd":"K:\\am_lin\\clearcase","message":{"content":"alpha two"},"timestamp":"2026-06-26T09:05:00.000Z"})j" "\n";
+        const std::string bJson =
+            R"j({"type":"user","userType":"external","uuid":"b1","parentUuid":null,"cwd":"K:\\am_lin\\clearcase","message":{"content":"beta one"},"timestamp":"2026-06-26T09:06:00.000Z"})j" "\n"
+            R"j({"type":"user","userType":"external","uuid":"b2","parentUuid":"b1","cwd":"K:\\am_lin\\clearcase","message":{"content":"beta two"},"timestamp":"2026-06-26T09:10:00.000Z"})j" "\n";
+        MakeJsonl(dir + L"\\" + idA + L".jsonl", aJson, 100000, 90000);
+        MakeJsonl(dir + L"\\" + idB + L".jsonl", bJson, 200000, 190000);
+
+        const auto pre = ResolveContinuationPredecessorOnDisk(idB, cwd);
+        CHECK(pre.predId == idA, "lineage/disk: B's continuation predecessor is A");
+
+        const auto lin = CollectConversationLineage(idB, cwd, 16);
+        CHECK(lin.size() == 1, "lineage/disk: the /clear case yields ONE previous session (A)");
+        CHECK(lin.size() == 1 && lin[0].userMsgs.size() == 2 && lin[0].userMsgs[0] == L"alpha one" && lin[0].userMsgs[1] == L"alpha two",
+              "lineage/disk: the previous session carries A's prompts in order");
+        CHECK(lin.size() == 1 && lin[0].label.empty(), "lineage/disk: a plain cross-file join has no /compact label");
+
+        CHECK(CollectConversationLineage(idA, cwd, 16).empty(), "lineage/disk: the origin session A has no previous session");
+    }
+
+    // --- (2) plan-restart parent: child C links to plan parent P via "read the full transcript at:" ---
+    {
+        const std::wstring cwd = L"K:\\am_lin\\plancase";
+        const std::wstring dir = projects + L"\\" + EncodeCwdToProjectDir(cwd);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path{ dir }, ec);
+        const std::wstring idP = L"cccccccc-3333-4ccc-8ccc-cccccccccccc"; // plan parent
+        const std::wstring idC = L"dddddddd-4444-4ddd-8ddd-dddddddddddd"; // plan child
+        const std::string pJson =
+            R"j({"type":"user","userType":"external","uuid":"p1","parentUuid":null,"cwd":"K:\\am_lin\\plancase","message":{"content":"plan the feature"},"timestamp":"2026-06-26T10:00:00.000Z"})j" "\n";
+        // The breadcrumb only needs a token whose basename is "<idP>.jsonl" — the parent is then resolved
+        // by GLOB on that id (forward slashes keep the embedded path valid JSON).
+        const std::string cJson =
+            std::string(R"j({"type":"user","userType":"external","uuid":"c1","parentUuid":null,"cwd":"K:\\am_lin\\plancase","message":{"content":"read the full transcript at: /plans/x/)j") +
+            narrow(idP) + R"j(.jsonl and continue"},"timestamp":"2026-06-26T10:10:00.000Z"})j" "\n";
+        MakeJsonl(dir + L"\\" + idP + L".jsonl", pJson, 100000, 90000);
+        MakeJsonl(dir + L"\\" + idC + L".jsonl", cJson, 200000, 190000);
+
+        const auto lin = CollectConversationLineage(idC, cwd, 16);
+        CHECK(lin.size() == 1 && lin[0].userMsgs.size() == 1 && lin[0].userMsgs[0] == L"plan the feature",
+              "lineage/disk: a plan-restart child surfaces the PLAN PARENT's prompt as the previous session");
+    }
+
+    ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+    std::error_code ecCleanup;
+    std::filesystem::remove_all(std::filesystem::path{ cfg }, ecCleanup);
 }
 
 static void TestSessionSearch()
@@ -5609,6 +5726,7 @@ int wmain()
     TestCodexObserve();
     TestTranscriptStore();
     TestContinuationChain();
+    TestConversationLineage();
     TestSessionSearch();
     TestProcessInspectLive();
     TestBringToFrontHeuristics();

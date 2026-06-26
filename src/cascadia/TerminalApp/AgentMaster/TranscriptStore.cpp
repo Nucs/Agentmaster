@@ -1256,6 +1256,96 @@ namespace Agentmaster
 
     // ===== continuation-chain lineage ========================================================
 
+    // Pure single-hop continuation edge: the DIRECT successor of `cur` among `nodes` (the B in
+    // cur->B), or nullptr. `visited` excludes ids already on a walked chain (pass an empty set for a
+    // standalone query). Edge: B same cwd (NormDirKey), !B.fork, B created in [cur.lastActivity - skew,
+    // cur.lastActivity + gap], B the EARLIEST such; BAILS (nullptr) on AMBIGUITY — a 2nd candidate
+    // whose lifetime overlaps B (parallel same-dir sessions), Rule #14 spirit. Factored out of
+    // ResolveContinuationChainTail so the REVERSE resolver (ResolveContinuationPredecessor) is the
+    // EXACT inverse of the forward edge and the two can never drift. [Agentmaster]
+    static const SessionChainNode* ContinuationNext(const std::vector<SessionChainNode>& nodes,
+                                                    const SessionChainNode* cur,
+                                                    const std::unordered_set<std::wstring>& visited,
+                                                    int64_t gapMaxMs,
+                                                    int64_t skewMs)
+    {
+        const std::wstring curKey = NormDirKey(cur->cwd);
+        // Candidates that could continue `cur`: same cwd, not a fork, unvisited, and created at/after
+        // cur ended (within skew). The chain successor is the EARLIEST of these.
+        std::vector<const SessionChainNode*> cands;
+        for (const auto& n : nodes)
+        {
+            if (n.sessionId == cur->sessionId || n.fork || visited.count(n.sessionId))
+            {
+                continue;
+            }
+            if (n.createdMs < cur->lastActivityMs - skewMs)
+            {
+                continue; // started before cur finished — a parallel/earlier session, not a continuation
+            }
+            if (NormDirKey(n.cwd) != curKey)
+            {
+                continue;
+            }
+            cands.push_back(&n);
+        }
+        if (cands.empty())
+        {
+            return nullptr;
+        }
+        std::sort(cands.begin(), cands.end(), [](const SessionChainNode* a, const SessionChainNode* b) {
+            if (a->createdMs != b->createdMs)
+            {
+                return a->createdMs < b->createdMs;
+            }
+            return a->sessionId < b->sessionId; // deterministic tiebreak
+        });
+        const SessionChainNode* next = cands.front();
+        if (next->createdMs - cur->lastActivityMs > gapMaxMs)
+        {
+            return nullptr; // the next session starts too long after — a NEW conversation, not a continuation
+        }
+        // Ambiguity guard: if a SECOND candidate's lifetime overlaps `next` (it started at/before
+        // `next`'s last activity), two same-dir sessions ran in parallel — we can't say which one
+        // continues `cur`, so stop here rather than silently pick one (Rule #14 spirit).
+        if (cands.size() >= 2 && cands[1]->createdMs <= next->lastActivityMs)
+        {
+            return nullptr;
+        }
+        return next;
+    }
+
+    std::wstring ResolveContinuationPredecessor(const std::vector<SessionChainNode>& nodes,
+                                                const std::wstring& targetId,
+                                                int64_t gapMaxMs,
+                                                int64_t skewMs)
+    {
+        if (targetId.empty())
+        {
+            return {};
+        }
+        static const std::unordered_set<std::wstring> kNoVisited;
+        std::wstring pred;
+        int count = 0;
+        for (const auto& a : nodes)
+        {
+            if (a.sessionId == targetId)
+            {
+                continue;
+            }
+            const SessionChainNode* nx = ContinuationNext(nodes, &a, kNoVisited, gapMaxMs, skewMs);
+            if (nx && nx->sessionId == targetId)
+            {
+                if (++count > 1)
+                {
+                    return {}; // two sessions continue into the target — ambiguous, don't guess
+                }
+                pred = a.sessionId;
+            }
+        }
+        return pred;
+    }
+
     SessionChainResult ResolveContinuationChainTail(const std::vector<SessionChainNode>& nodes,
                                                     const std::wstring& startId,
                                                     int64_t gapMaxMs,
@@ -1287,48 +1377,10 @@ namespace Agentmaster
         constexpr int kMaxHops = 64; // a chain this long never happens; a hard backstop vs. a pathological loop
         while (res.hops < kMaxHops)
         {
-            const std::wstring curKey = NormDirKey(cur->cwd);
-            // Candidates that could continue `cur`: same cwd, not a fork, unvisited, and created
-            // at/after cur ended (within skew). The chain successor is the EARLIEST of these.
-            std::vector<const SessionChainNode*> cands;
-            for (const auto& n : nodes)
+            const SessionChainNode* next = ContinuationNext(nodes, cur, visited, gapMaxMs, skewMs);
+            if (!next)
             {
-                if (n.sessionId == cur->sessionId || n.fork || visited.count(n.sessionId))
-                {
-                    continue;
-                }
-                if (n.createdMs < cur->lastActivityMs - skewMs)
-                {
-                    continue; // started before cur finished — a parallel/earlier session, not a continuation
-                }
-                if (NormDirKey(n.cwd) != curKey)
-                {
-                    continue;
-                }
-                cands.push_back(&n);
-            }
-            if (cands.empty())
-            {
-                break;
-            }
-            std::sort(cands.begin(), cands.end(), [](const SessionChainNode* a, const SessionChainNode* b) {
-                if (a->createdMs != b->createdMs)
-                {
-                    return a->createdMs < b->createdMs;
-                }
-                return a->sessionId < b->sessionId; // deterministic tiebreak
-            });
-            const SessionChainNode* next = cands.front();
-            if (next->createdMs - cur->lastActivityMs > gapMaxMs)
-            {
-                break; // the next session starts too long after — a NEW conversation, not a continuation
-            }
-            // Ambiguity guard: if a SECOND candidate's lifetime overlaps `next` (it started at/before
-            // `next`'s last activity), two same-dir sessions ran in parallel — we can't say which one
-            // continues `cur`, so stop here rather than silently pick one (Rule #14 spirit).
-            if (cands.size() >= 2 && cands[1]->createdMs <= next->lastActivityMs)
-            {
-                break;
+                break; // no further continuation edge (none, too-late, or ambiguous — see ContinuationNext)
             }
             cur = next;
             visited.insert(cur->sessionId);
@@ -1338,13 +1390,13 @@ namespace Agentmaster
         return res;
     }
 
-    ContinuationTail ResolveContinuationTailOnDisk(const std::wstring& sessionId, const std::wstring& cwd)
+    // Filesystem: the <uuid>.jsonl refs DIRECTLY in `cwd`'s project dir (<claude>/projects/<encoded>).
+    // The shared enumeration behind both continuation resolvers (tail + predecessor). Scans the files
+    // at projDir's TOP (EnumerateTranscriptsIn walks the SUBDIRS of a root — wrong level here). Empty
+    // when the projects root / dir is unreadable or has no transcripts. [Agentmaster]
+    static std::vector<TranscriptRef> EnumerateProjectDirRefs(const std::wstring& cwd)
     {
-        ContinuationTail out{ sessionId, cwd, L"", 0 };
-        if (sessionId.empty() || cwd.empty())
-        {
-            return out;
-        }
+        std::vector<TranscriptRef> refs;
         std::wstring projRoot = ClaudeProjectsDir();
         while (!projRoot.empty() && (projRoot.back() == L'\\' || projRoot.back() == L'/'))
         {
@@ -1352,54 +1404,52 @@ namespace Agentmaster
         }
         if (projRoot.empty())
         {
-            return out;
+            return refs;
         }
         const std::wstring leaf = EncodeCwdToProjectDir(cwd);
         const std::wstring projDir = projRoot + L"\\" + leaf;
-
-        // Scan the <uuid>.jsonl files DIRECTLY in this one project dir (EnumerateTranscriptsIn walks
-        // the SUBDIRS of a root — wrong level here; these files sit at projDir's top).
-        std::vector<TranscriptRef> refs;
+        static const std::wstring ext = L".jsonl";
+        WIN32_FIND_DATAW ff{};
+        const HANDLE hf = ::FindFirstFileW((projDir + L"\\*.jsonl").c_str(), &ff);
+        if (hf == INVALID_HANDLE_VALUE)
         {
-            static const std::wstring ext = L".jsonl";
-            WIN32_FIND_DATAW ff{};
-            const HANDLE hf = ::FindFirstFileW((projDir + L"\\*.jsonl").c_str(), &ff);
-            if (hf == INVALID_HANDLE_VALUE)
+            return refs; // unknown dir / no transcripts
+        }
+        do
+        {
+            if (ff.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             {
-                return out; // unknown dir / no transcripts — no redirect
+                continue;
             }
-            do
+            const std::wstring name = ff.cFileName;
+            if (name.size() <= ext.size())
             {
-                if (ff.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                {
-                    continue;
-                }
-                const std::wstring name = ff.cFileName;
-                if (name.size() <= ext.size())
-                {
-                    continue;
-                }
-                const std::wstring stem = name.substr(0, name.size() - ext.size());
-                if (!IsSessionIdStem(stem))
-                {
-                    continue;
-                }
-                TranscriptRef r;
-                r.sessionId = stem;
-                r.path = projDir + L"\\" + name;
-                r.projectDirLeaf = leaf;
-                r.sizeBytes = (static_cast<int64_t>(ff.nFileSizeHigh) << 32) | static_cast<int64_t>(ff.nFileSizeLow);
-                r.mtimeMs = FileTimeToUnixMs(ff.ftLastWriteTime);
-                r.birthMs = FileTimeToUnixMs(ff.ftCreationTime);
-                refs.push_back(std::move(r));
-            } while (::FindNextFileW(hf, &ff));
-            ::FindClose(hf);
-        }
-        if (refs.size() < 2)
-        {
-            return out; // a lone session can't have a continuation
-        }
+                continue;
+            }
+            const std::wstring stem = name.substr(0, name.size() - ext.size());
+            if (!IsSessionIdStem(stem))
+            {
+                continue;
+            }
+            TranscriptRef r;
+            r.sessionId = stem;
+            r.path = projDir + L"\\" + name;
+            r.projectDirLeaf = leaf;
+            r.sizeBytes = (static_cast<int64_t>(ff.nFileSizeHigh) << 32) | static_cast<int64_t>(ff.nFileSizeLow);
+            r.mtimeMs = FileTimeToUnixMs(ff.ftLastWriteTime);
+            r.birthMs = FileTimeToUnixMs(ff.ftCreationTime);
+            refs.push_back(std::move(r));
+        } while (::FindNextFileW(hf, &ff));
+        ::FindClose(hf);
+        return refs;
+    }
 
+    // Filesystem: the chain nodes for `refs` — ReadTranscriptQuickFacts each (timing / fork / cwd).
+    // `cwd` is the fallback for a node whose own cwd can't be read. Skips unreadable files. The shared
+    // node-build behind both continuation resolvers. [Agentmaster]
+    static std::vector<SessionChainNode> ChainNodesFromRefs(const std::vector<TranscriptRef>& refs,
+                                                            const std::wstring& cwd)
+    {
         std::vector<SessionChainNode> nodes;
         nodes.reserve(refs.size());
         for (const auto& r : refs)
@@ -1417,6 +1467,50 @@ namespace Agentmaster
             n.fork = qf.fork;
             nodes.push_back(std::move(n));
         }
+        return nodes;
+    }
+
+    ContinuationPredecessor ResolveContinuationPredecessorOnDisk(const std::wstring& sessionId, const std::wstring& cwd)
+    {
+        ContinuationPredecessor out;
+        if (sessionId.empty() || cwd.empty())
+        {
+            return out;
+        }
+        const std::vector<TranscriptRef> refs = EnumerateProjectDirRefs(cwd);
+        if (refs.size() < 2)
+        {
+            return out; // a lone session (or unknown dir) has no predecessor
+        }
+        const std::vector<SessionChainNode> nodes = ChainNodesFromRefs(refs, cwd);
+        out.predId = ResolveContinuationPredecessor(nodes, sessionId);
+        if (!out.predId.empty())
+        {
+            for (const auto& n : nodes)
+            {
+                if (n.sessionId == out.predId)
+                {
+                    out.predCwd = n.cwd;
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    ContinuationTail ResolveContinuationTailOnDisk(const std::wstring& sessionId, const std::wstring& cwd)
+    {
+        ContinuationTail out{ sessionId, cwd, L"", 0 };
+        if (sessionId.empty() || cwd.empty())
+        {
+            return out;
+        }
+        const std::vector<TranscriptRef> refs = EnumerateProjectDirRefs(cwd);
+        if (refs.size() < 2)
+        {
+            return out; // a lone session (or unknown dir) can't have a continuation
+        }
+        const std::vector<SessionChainNode> nodes = ChainNodesFromRefs(refs, cwd);
 
         const auto chain = ResolveContinuationChainTail(nodes, sessionId);
         out.tailId = chain.tailId;

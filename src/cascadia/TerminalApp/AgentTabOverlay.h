@@ -46,6 +46,7 @@ namespace Agentmaster
 {
     class SessionRegistry;
     struct SessionInfo; // _UpdateSummary takes a const& (full type in the .cpp via SessionRegistry.h)
+    struct ConversationSegment; // cross-file lineage parents (full type in the .cpp via ProcessInspect.h)
 }
 
 namespace winrt::TerminalApp::implementation
@@ -187,7 +188,7 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
         void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
-        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showPrevious); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showPrevious: render pre-compaction previous session(s)), set text on the UI thread
+        winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showPrevious: render pre-compaction previous session(s)), set text on the UI thread. lineageCached/cachedLineage: reuse the memoized cross-file (/clear + plan-restart) parents instead of re-walking
 
         std::wstring _sessionId;
         bool _pending{ false }; // registry-less "observe" badge (a shell / unresolved claude — no linked session)
@@ -240,6 +241,13 @@ namespace winrt::TerminalApp::implementation
         bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
         bool _summaryTruncate{ true }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven, default ON): ON=cap each message (6 lines if wrapped, else 500 chars); OFF=show every message in full
         bool _summaryShowPrevious{ false }; // mirror of the GLOBAL AppSettings::summaryPanelShowPrevious (page-driven, default OFF): ON=render pre-compaction previous session(s) above the current Messages
+        // Agentmaster (cross-file lineage): the resolved /clear + plan-restart PARENT segments
+        // (oldest-first), MEMOIZED — parentage is immutable, so compute once per bound session then
+        // reuse on every quiet mtime-gated reload + show-previous toggle (no per-write dir scan).
+        // _summaryLineageId is the conv id _summaryLineage was computed for ("" == not yet); a rebind
+        // to a new conv id recomputes. Folded into SessionSummary.previousSegments before render.
+        std::wstring _summaryLineageId;
+        std::vector<::Agentmaster::ConversationSegment> _summaryLineage;
         std::function<void()> _onToggleSummary; // pencil -> page (flip the global setting + broadcast)
         std::function<void()> _onToggleSummaryWrap; // wrap-line icon -> page (flip the global newline setting + broadcast)
         std::function<void()> _onToggleSummaryTruncate; // truncate icon -> page (flip the global truncate setting + broadcast)
