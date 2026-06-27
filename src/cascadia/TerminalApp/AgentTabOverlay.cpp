@@ -2149,6 +2149,19 @@ namespace winrt::TerminalApp::implementation
             });
             _summaryContextMenu.Items().Append(wrapItem);
 
+            // Refresh — the SAME action as the times-bar ↻ button, offered here too (its neighbor toggles
+            // are in this menu, so it belongs alongside them). Re-reads the transcript + rebuilds the panel.
+            MenuFlyoutItem refreshItem{};
+            refreshItem.Text(L"Refresh Summary");
+            AgentSetTip(refreshItem, winrt::hstring{ L"Re-read the transcript and rebuild this panel now." });
+            refreshItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_RefreshSummary();
+                }
+            });
+            _summaryContextMenu.Items().Append(refreshItem);
+
             // Refresh the dynamic bits each time the menu opens: gate + CAPTURE the live selection, and set
             // the toggle Enable/Disable labels from the live mirror flags. (FlyoutBase::Opening fires before
             // the menu lays out; it's distinct from Opened below, which handles the dim/bright opacity.)
