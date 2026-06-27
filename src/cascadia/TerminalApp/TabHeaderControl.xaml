@@ -158,7 +158,14 @@
                   Stroke="#F5C242"
                   StrokeThickness="0.8"
                   StrokeLineJoin="Miter"
-                  Visibility="{x:Bind TabStatus.AgentFavoriteStarVisible, Mode=OneWay}" />
+                  Visibility="{x:Bind TabStatus.AgentFavoriteStarVisible, Mode=OneWay}">
+                <!--  Nudge the star up 1px (the wrap's Margin dips its content 1px down; this lifts the
+                      star back toward optical centre). Safe: the downward dip leaves room above, so the
+                      top tip isn't clipped. Tune knob: TranslateTransform.Y.  -->
+                <Path.RenderTransform>
+                    <TranslateTransform Y="-1" />
+                </Path.RenderTransform>
+            </Path>
             <Ellipse x:Name="HeaderAgentStatusDot"
                      Width="10"
                      Height="10"
