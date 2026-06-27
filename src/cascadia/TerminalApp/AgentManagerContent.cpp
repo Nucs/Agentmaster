@@ -539,6 +539,51 @@ namespace
         return e;
     }
 
+    // Agentmaster (eager-init / "Activate Tab"): the DORMANT half-hollow twin of StateDot — for a live
+    // session whose claude hasn't STARTED yet (a window-restored / re-homed tab the user never clicked;
+    // ConnectionState == NotConnected, SessionInfo::started == false). It reads as "not initialized;
+    // Activate to wake it". Same 10x10 geometry as StateDot so the dormant<->started swap is seamless;
+    // identical to the tab strip's half-hollow dot (TabHeaderControl.xaml): a HALF-FILL (a state-colored
+    // ellipse CLIPPED to its right half) under a RING (transparent fill + black stroke = the full outline,
+    // so the unfilled half reads as hollow). Returns a Grid composing the two layers; callers append it
+    // exactly like StateDot's Ellipse (both are UIElement).
+    winrt::Windows::UI::Xaml::Controls::Grid StateDotDormant(Color fill)
+    {
+        winrt::Windows::UI::Xaml::Controls::Grid g{};
+        g.Width(10);
+        g.Height(10);
+        g.VerticalAlignment(VerticalAlignment::Center);
+        // Half-fill: a state-colored ellipse clipped to its RIGHT half (x in [5,10]).
+        winrt::Windows::UI::Xaml::Shapes::Ellipse half{};
+        half.Width(10);
+        half.Height(10);
+        half.Fill(SolidColorBrush{ fill });
+        winrt::Windows::UI::Xaml::Media::RectangleGeometry clip{};
+        clip.Rect(winrt::Windows::Foundation::Rect{ 5, 0, 5, 10 });
+        half.Clip(clip);
+        g.Children().Append(half);
+        // Ring: the full outline (so the unfilled half reads as a hollow circle, not a half-disc). The
+        // ring is the STATE COLOR (not black): the Manager is ALWAYS dark and a board card's title band is
+        // an arbitrary dir color, so a black ring would vanish; the status hue reads on both. The filled
+        // half is the same color, so the dot reads as "half solid, half outline" in one hue.
+        winrt::Windows::UI::Xaml::Shapes::Ellipse ring{};
+        ring.Width(10);
+        ring.Height(10);
+        ring.Fill(SolidColorBrush{ Colors::Transparent() });
+        ring.Stroke(SolidColorBrush{ fill });
+        ring.StrokeThickness(1);
+        g.Children().Append(ring);
+        return g;
+    }
+
+    // Agentmaster (eager-init): a live MANAGED session whose ConPTY/claude hasn't started yet — the
+    // half-hollow-dot / "Activate" gate. External (observe-only) sessions are never "dormant" (we host
+    // no control). Mirrors the tab-strip dormant predicate in TerminalPage.
+    bool IsSessionDormant(const SessionInfo& s)
+    {
+        return s.live && !s.started && !s.external;
+    }
+
     winrt::hstring PromptGlyph(PromptStatus s)
     {
         switch (s)
@@ -1348,6 +1393,14 @@ namespace winrt::TerminalApp::implementation
     {
         _activateHandler = std::move(handler);
     }
+    void AgentManagerContent::SetActivateDormantHandler(std::function<void(winrt::hstring)> handler)
+    {
+        _activateDormantHandler = std::move(handler);
+    }
+    void AgentManagerContent::SetActivateAllHandler(std::function<void(bool)> handler)
+    {
+        _activateAllHandler = std::move(handler);
+    }
     void AgentManagerContent::SetHoverSessionHandler(std::function<void(winrt::hstring, bool)> handler)
     {
         _hoverSessionHandler = std::move(handler);
@@ -1967,6 +2020,18 @@ namespace winrt::TerminalApp::implementation
             AgentSetTip(_reopenBtn, L"Reopen saved windows that aren't currently open \x2014 restores each window's tabs, layout, and sessions.");
             _reopenBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnReopenWindows(); });
             bar.Children().Append(_reopenBtn);
+
+            // Agentmaster (eager-init): "Activate All Tabs (N)" — wake every DORMANT managed tab in this
+            // window (a window-restored / re-homed tab spawns its claude lazily, only when first shown; this
+            // starts them all IN PLACE without switching tabs). Hidden when N==0 (the hide-when-idle idiom,
+            // like Reopen Windows); _UpdateActivateAllButton (driven from _Refresh) maintains label + show.
+            // If OTHER windows also have dormant tabs, the click prompts to choose the scope (_OnActivateAllTabs).
+            _activateAllBtn = Button{};
+            _activateAllBtn.Content(winrt::box_value(L"Activate All Tabs"));
+            _activateAllBtn.Visibility(Visibility::Collapsed);
+            AgentSetTip(_activateAllBtn, L"Start every Claude session in this window that hasn't initialized yet (restored tabs you haven't opened) \x2014 in place, without switching tabs. Their half-hollow dots fill as they start.");
+            _activateAllBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnActivateAllTabs(); });
+            bar.Children().Append(_activateAllBtn);
 
             // Settings cog (opens the in-content settings overlay; built at the end of layout).
             // Lives in the compact actions row below the title — thinner, smaller font.
@@ -2691,6 +2756,7 @@ namespace winrt::TerminalApp::implementation
         _RebuildPlan(sessions);
         _RefreshSummaryTab(); // Agentmaster: refresh the Summary tab (cheap; no-op unless that tab is active)
         _UpdateReopenButton();
+        _UpdateActivateAllButton(); // Agentmaster (eager-init): recount this window's dormant tabs -> label + show/hide
         _RefreshKeepAwakeHold(&sessions); // Agentmaster: WhileRunning mode tracks the fleet live (no-op for Off/Always)
 
         // Re-focus the same card/row if a tagged one held focus and still exists post-rebuild (it may
@@ -2817,7 +2883,25 @@ namespace winrt::TerminalApp::implementation
         band.Background(bandColor ? SolidColorBrush{ *bandColor } : Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
         band.CornerRadius(CornerRadius{ 4, 4, 0, 0 }); // rounded top (matches the card), straight bottom edge
         band.Padding(Thickness{ 8, 4, 8, 4 });
-        band.Child(titleText);
+        // Agentmaster (eager-init / "Activate Tab"): a DORMANT card (live but its claude hasn't started —
+        // a restored tab the user never opened) leads its title band with the half-hollow state dot, so the
+        // board flags which cards still need waking (the card has no always-on state dot otherwise — its
+        // column conveys state). A started card is unchanged (no dot). Right-click / "Activate All Tabs (N)"
+        // wakes them; the dot fills once the control starts.
+        if (IsSessionDormant(s))
+        {
+            auto bandRow = StackPanel{};
+            bandRow.Orientation(Orientation::Horizontal);
+            bandRow.Spacing(6);
+            bandRow.VerticalAlignment(VerticalAlignment::Center);
+            bandRow.Children().Append(StateDotDormant(StateColor(s.state)));
+            bandRow.Children().Append(titleText);
+            band.Child(bandRow);
+        }
+        else
+        {
+            band.Child(titleText);
+        }
         // Agentmaster: hovering the title band (the card's "top label") shows the FULL title \x2014 the
         // band trims with an ellipsis on a narrow card and OneLine() collapses a multi-line title for
         // the dense card, so the complete name is otherwise unreadable here. When Claude Code has written
@@ -4313,7 +4397,15 @@ namespace winrt::TerminalApp::implementation
                 row.Spacing(6);
                 // State dot — the SAME filled Ellipse as the tab strip (StateDot == HeaderAgentStatusDot),
                 // not the old per-state glyph, so the tree and the tab speak one visual language. The
-                // StateLabel text appended below still names the state.
+                // StateLabel text appended below still names the state. A DORMANT session (live but its
+                // claude hasn't started — a restored tab you haven't opened) shows the half-hollow twin.
+                if (IsSessionDormant(s))
+                {
+                    auto dot = StateDotDormant(StateColor(s.state));
+                    AgentSetTip(dot, L"Not started yet \x2014 the half-hollow dot means this session's claude hasn't initialized (a restored tab you haven't opened). Right-click \x2192 Activate Tab (or open the tab) to start it.");
+                    row.Children().Append(dot);
+                }
+                else
                 {
                     auto dot = StateDot(StateColor(s.state));
                     AgentSetTip(dot, L"Session state \x2014 the dot color matches the Triage Board column; the label to the right names it.");
@@ -5220,6 +5312,46 @@ namespace winrt::TerminalApp::implementation
         // which would otherwise yank focus out of the freshly-shown rename editor / dialog (and the
         // spawn / tree rebuild for Open New Session Here).
 
+        // Agentmaster (eager-init): Activate Tab — start a DORMANT session's claude IN PLACE (no focus
+        // change), shown only when this session hasn't initialized yet (a window-restored / re-homed tab
+        // the user never opened; SessionInfo::started == false) AND it is hosted in THIS window (a
+        // single-session start can only target the window owning the control; a remote dormant session in
+        // GLOBAL scope is woken via "Jump to Tab" or "Activate All Tabs"). FIRST item when present —
+        // distinct from "Jump to Tab" (which switches to it + starts it as a side effect); this wakes it
+        // where you are. Disappears once it starts.
+        bool dormantLocal = false;
+        if (info && IsSessionDormant(*info))
+        {
+            if (_localScopeProvider)
+            {
+                const auto localIds = _localScopeProvider(); // bind ONCE — find()/end() must be the same container
+                dormantLocal = localIds.find(id) != localIds.end();
+            }
+            else
+            {
+                dormantLocal = true; // no provider wired => treat as local
+            }
+        }
+        if (dormantLocal)
+        {
+            MenuFlyoutItem activate;
+            activate.Text(L"Activate Tab");
+            activate.Icon(glyphIcon(L"\xE768")); // Play — "start it"
+            AgentSetTip(activate, L"Start this session's claude now, in place \x2014 it hasn't initialized yet (a restored tab you never opened). The view doesn't switch; use Jump to Tab for that.");
+            activate.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, id]() { if (auto self = weak.get()) { if (self->_activateDormantHandler) { self->_activateDormantHandler(winrt::hstring{ id }); } } };
+                if (disp)
+                {
+                    disp.TryEnqueue(act);
+                }
+                else
+                {
+                    act();
+                }
+            });
+            menu.Items().Append(activate);
+        }
+
         // Jump to Tab — Activate: switch to this session's live terminal tab (the page fans out to the
         // hosting WINDOW when the tab lives in another one). The menu twin of a double-click on the
         // card / tree row (and Enter on a tree row). First item — it's the most common action; a
@@ -5941,6 +6073,77 @@ namespace winrt::TerminalApp::implementation
         {
             PaintHoldButton(_keepAwakeBtn, 0xFF8A6D1B, 0xFFA8851F, 0xFF6B5414); // amber = armed (WhileRunning), nothing running
         }
+    }
+
+    std::pair<int, int> AgentManagerContent::_DormantCounts() const
+    {
+        int thisWindow = 0, fleet = 0;
+        if (!_registry)
+        {
+            return { 0, 0 };
+        }
+        std::unordered_set<std::wstring> localIds;
+        const bool haveLocal = static_cast<bool>(_localScopeProvider);
+        if (haveLocal)
+        {
+            localIds = _localScopeProvider();
+        }
+        for (const auto& s : _registry->Snapshot())
+        {
+            if (!IsSessionDormant(s))
+            {
+                continue;
+            }
+            ++fleet;
+            if (!haveLocal || localIds.find(s.id) != localIds.end())
+            {
+                ++thisWindow;
+            }
+        }
+        return { thisWindow, fleet };
+    }
+
+    void AgentManagerContent::_UpdateActivateAllButton()
+    {
+        if (!_activateAllBtn)
+        {
+            return;
+        }
+        // Headline = THIS window's dormant count (the default, no-prompt action scope). The button hides
+        // at 0; cross-window escalation is offered by the click prompt only when other windows also have
+        // dormant tabs. Reads SessionInfo::started (maintained by the page from ConnectionState()).
+        const auto [thisWindow, fleet] = _DormantCounts();
+        (void)fleet;
+        _activateAllBtn.Content(winrt::box_value(winrt::hstring{ L"Activate All Tabs (" } + winrt::to_hstring(thisWindow) + L")"));
+        _activateAllBtn.Visibility(thisWindow > 0 ? Visibility::Visible : Visibility::Collapsed);
+    }
+
+    void AgentManagerContent::_OnActivateAllTabs()
+    {
+        const auto [thisWindow, fleet] = _DormantCounts();
+        if (thisWindow <= 0 && fleet <= 0)
+        {
+            return; // nothing dormant anywhere
+        }
+        const int other = fleet - thisWindow;
+        if (other <= 0)
+        {
+            // Only this window has dormant tabs (or it's the only window) -> just wake them, no prompt.
+            if (_activateAllHandler)
+            {
+                _activateAllHandler(false);
+            }
+            return;
+        }
+        // Other windows ALSO have dormant tabs -> let the user choose the scope (the user's design:
+        // "prompt for choice; if 1 window then automatically just that window").
+        _ConfirmChoice(
+            L"Activate dormant tabs",
+            winrt::hstring{ std::wstring{ L"Start the Claude sessions that haven't initialized yet (restored tabs you haven't opened).\n\nThis window: " } + std::to_wstring(thisWindow) + L"   \x2022   All windows: " + std::to_wstring(fleet) + L"." },
+            winrt::hstring{ std::wstring{ L"This window (" } + std::to_wstring(thisWindow) + L")" },
+            winrt::hstring{ std::wstring{ L"All windows (" } + std::to_wstring(fleet) + L")" },
+            [weak = get_weak()]() { if (auto self = weak.get()) { if (self->_activateAllHandler) { self->_activateAllHandler(false); } } },
+            [weak = get_weak()]() { if (auto self = weak.get()) { if (self->_activateAllHandler) { self->_activateAllHandler(true); } } });
     }
 
     void AgentManagerContent::_UpdateReopenButton()

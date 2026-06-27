@@ -2449,6 +2449,21 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (eager-init): context-menu "Activate Tab" -> start this tab's DORMANT session's
+        // claude IN PLACE (no focus change). _ActivateDormantSession is a no-op if it already started.
+        hostingTab.ActivateSessionRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                page->_ActivateDormantSession(sid);
+            }
+        });
+
         // Agentmaster: context-menu "Close > Close tabs to the left" -> close every tab to the left
         // of this one. The mirror of the upstream "Close tabs to the right" (CloseTabsAfter) action,
         // routed through _CloseTabsBefore -> _RemoveTabs so it shares the aggregate confirmation, the
@@ -2521,6 +2536,18 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentCopyMenuVisible(isSession);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
+                    // Agentmaster (eager-init): "Activate Tab" — shown ONLY when this session is DORMANT (its
+                    // claude hasn't started: the control is still NotConnected). Read the live control state
+                    // (the authority), so a tab that started since the last reconcile stops offering it.
+                    bool dormant = false;
+                    if (isSession)
+                    {
+                        if (const auto ctrl = page->_ControlForSession(sid))
+                        {
+                            dormant = ctrl.ConnectionState() == winrt::Microsoft::Terminal::TerminalConnection::ConnectionState::NotConnected;
+                        }
+                    }
+                    tab->SetAgentActivateVisible(dormant);
                     // Agentmaster (Waiting-for-you triage): the status-adaptive "Move to Idle/Done" /
                     // "Move to Waiting-for-you" item — shown only when this session is in a triage state.
                     // Waiting-for-you -> offer the demote ("Move to Idle/Done"); Idle/Done -> offer the plain

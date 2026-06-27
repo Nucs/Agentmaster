@@ -391,11 +391,17 @@ namespace winrt::TerminalApp::implementation
             _AttachClaudeOverlay(tab, spec.sessionId);
             // Tab status dot: seed the strip dot from the (just-upserted) session's state — Idle
             // gray for a fresh launch/restore; the registry observer recolors it live from here.
+            // Agentmaster (eager-init): a just-created tab's control is NotConnected, so the session is
+            // DORMANT until it starts — seed the HALF-HOLLOW dot (a window-restored background tab stays
+            // dormant; a focused new/resumed tab flips to the full dot the instant its control inits, via
+            // _TrackSessionStarted below). The bind path never runs for a dormant tab (no claude process to
+            // correlate), so this seed is the ONLY thing that marks a restored tab dormant on the strip.
             if (const auto s = _sessionRegistry->Get(spec.sessionId))
             {
-                _SetTabAgentDot(tab, AgentStatusColorFor(s->state));
+                _SetTabAgentDot(tab, AgentStatusColorFor(s->state), !s->started && !s->external);
             }
             _RefreshTabFavoriteCrown(spec.sessionId); // FAVORITES.md: show the gold crown if this session is starred
+            _TrackSessionStarted(spec.sessionId); // Agentmaster (eager-init): flip SessionInfo::started true the instant this control initializes (focused tab => no half-hollow flash)
         }
 
         const std::wstring tag = !forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] "));

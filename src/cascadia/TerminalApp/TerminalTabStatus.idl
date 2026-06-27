@@ -23,6 +23,12 @@ namespace TerminalApp
         Boolean AgentStatusVisible { get; set; };
         Windows.UI.Xaml.Media.Brush AgentStatusBrush { get; set; };
 
+        // Agentmaster (eager-init / "Activate Tab"): the DORMANT half-hollow variant of the status dot —
+        // one half AgentStatusBrush, one half hollow (outline only) — shown for a live-but-not-yet-started
+        // (ConnectionState::NotConnected) managed tab. Mutually exclusive with AgentStatusVisible (the full
+        // dot); _SetTabAgentDot drives exactly one. Shares AgentStatusBrush.
+        Boolean AgentStatusHalfVisible { get; set; };
+
         // Agentmaster (status-dot RED FLASH RING): when a hosted session goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval) while its tab is unvisited, TerminalPage's
         // shared 600ms timer toggles this so a RED RING — a separate ellipse drawn BEHIND the dot, its

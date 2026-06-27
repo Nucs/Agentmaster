@@ -168,6 +168,38 @@
                      Stroke="Black"
                      StrokeThickness="1"
                      Visibility="{x:Bind TabStatus.AgentStatusVisible, Mode=OneWay}" />
+            <!--  Agentmaster (eager-init / "Activate Tab"): the DORMANT half-hollow dot — shown INSTEAD of
+                  the full dot above when this session is live but its claude hasn't started yet (a window-
+                  restored / re-homed tab the user never clicked; ConnectionState == NotConnected). It reads
+                  as "not initialized; Activate to wake it". Two elements, both bound to AgentStatusHalfVisible
+                  (mutually exclusive with the full dot's AgentStatusVisible — _SetTabAgentDot drives exactly
+                  one): a RING (10px ellipse, transparent fill + black stroke) = the full outline / the hollow
+                  half; and a HALF-FILL (the same 10px ellipse filled with AgentStatusBrush, CLIPPED to its
+                  right half via the RectangleGeometry) = the status-coloured half. Same 10px geometry + black
+                  stroke as the full dot, so the dormant<->started swap is seamless. IsHitTestVisible=False:
+                  decorative. To flip which half fills, move the clip Rect to the left half (Rect 0,0,5,10).  -->
+            <Ellipse x:Name="HeaderAgentStatusDotHalfFill"
+                     Width="10"
+                     Height="10"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     IsHitTestVisible="False"
+                     Fill="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
+                     Visibility="{x:Bind TabStatus.AgentStatusHalfVisible, Mode=OneWay}">
+                <Ellipse.Clip>
+                    <RectangleGeometry Rect="5,0,5,10" />
+                </Ellipse.Clip>
+            </Ellipse>
+            <Ellipse x:Name="HeaderAgentStatusDotRing"
+                     Width="10"
+                     Height="10"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     IsHitTestVisible="False"
+                     Fill="Transparent"
+                     Stroke="{x:Bind TabStatus.AgentStatusBrush, Mode=OneWay}"
+                     StrokeThickness="1"
+                     Visibility="{x:Bind TabStatus.AgentStatusHalfVisible, Mode=OneWay}" />
             <!--  Agentmaster (FAVORITES.md): the FAVORITE crown. A small gold crown perched at the
                   NORTH-WEST of the status dot to mark a starred (favorited) session on its LIVE tab —
                   the one visible "keeper" marker on the strip (the Sessions page has its ★ column;

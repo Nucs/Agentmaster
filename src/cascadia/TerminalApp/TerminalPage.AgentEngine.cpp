@@ -799,17 +799,14 @@ namespace winrt::TerminalApp::implementation
             }
         });
         // Agentmaster (eager-init): "Activate Tab" — start a dormant session's claude IN PLACE (no focus
-        // change). The session is hosted in SOME window; the activate-dormant fan-out reaches it (this
-        // window's own tabs start locally, others via the fleet sink). Here we wake it if it lives here,
-        // else fan out (a board/tree row in GLOBAL scope can target another window's dormant tab).
+        // change). LOCAL only: the content offers the item solely for a session this window hosts (a
+        // single-session start can only target the window owning that control). A no-op if it isn't ours
+        // (e.g. it started since the menu was built); a remote dormant session is woken via "Jump to Tab"
+        // or "Activate All Tabs".
         content->SetActivateDormantHandler([weakThis](winrt::hstring id) {
             if (auto self = weakThis.get())
             {
-                if (!self->_ActivateDormantSession(std::wstring{ id }))
-                {
-                    // Not hosted here (or already started): fan out so the hosting window wakes it.
-                    ::Agentmaster::ActivateAllDormantInOtherWindows(self->_windowId);
-                }
+                self->_ActivateDormantSession(std::wstring{ id });
             }
         });
         // Agentmaster (eager-init): "Activate All Tabs" — wake this window's dormant tabs; if allWindows,

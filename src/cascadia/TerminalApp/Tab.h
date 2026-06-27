@@ -130,6 +130,7 @@ namespace winrt::TerminalApp::implementation
         void SetAgentMarkUnreadVisible(bool visible); // Agentmaster: show/hide the "Mark Unread" item (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentTriageMoveState(bool visible, bool toIdle); // Agentmaster (Waiting-for-you triage): show/hide the status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" item + set its label/icon by direction (toIdle == this session is Waiting-for-you, so offer the demote; else it is Idle/Done, so offer the plain promote). Managed agent-session tabs only; page-driven at flyout-open
         void SetAgentFavoriteState(bool visible, bool isFavorite); // Agentmaster (FAVORITES.md): show/hide the "Favorite"/"Unfavorite" item + set its label by the session's current star (managed agent-session tabs only; page-driven at flyout-open)
+        void SetAgentActivateVisible(bool visible); // Agentmaster (eager-init): show/hide the "Activate Tab" item (shown only when this tab's managed session is DORMANT — its claude hasn't started; page-driven at flyout-open from ConnectionState())
         void SetFavoriteAndCloseAllVisible(bool visible); // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item (shown only when the window hosts >=1 managed session; page-driven at flyout-open)
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
@@ -149,6 +150,7 @@ namespace winrt::TerminalApp::implementation
         til::event<winrt::delegate<>> MarkUnreadRequested; // Agentmaster: context-menu "Mark Unread" -> page flashes this tab's red ring until visited (even if it's the focused tab)
         til::event<winrt::delegate<>> TriageMoveRequested; // Agentmaster (Waiting-for-you triage): context-menu "Move to Idle/Done" / "Move to Waiting-for-you" -> page moves this tab's managed session between WaitingForInput and Idle/Done (direction re-derived from the live state); EXPLICITLY separate from "Mark Unread" (no sticky flag, no ring flash)
         til::event<winrt::delegate<>> FavoriteRequested; // Agentmaster (FAVORITES.md): context-menu "Favorite"/"Unfavorite" -> page toggles this tab's session star (SessionStore), the same toggle as the Sessions page's ★ column
+        til::event<winrt::delegate<>> ActivateSessionRequested; // Agentmaster (eager-init): context-menu "Activate Tab" -> page starts this tab's DORMANT session's claude IN PLACE (TermControl::InitializeWithSize), no focus change
         til::event<winrt::delegate<>> CloseTabsBeforeRequested; // Agentmaster: context-menu "Close > Close tabs to the left" -> page closes every tab left of this one (skipping the pinned Manager tab)
         til::event<winrt::delegate<>> CloseAllTabsRequested; // Agentmaster: context-menu "Close > Close all tabs" -> page closes every tab in this window (skipping the pinned Manager tab)
         til::event<winrt::delegate<>> FavoriteAndCloseAllTabsRequested; // Agentmaster (FAVORITES.md): context-menu "Close > ★ Favorite & close all tabs" -> page stars every managed session, then closes every tab
@@ -190,6 +192,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _markUnreadMenuItem{}; // Agentmaster: "Mark Unread" — flash this tab's red ring until visited; kept as a member so the page can show/hide it per managed-session-tab (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _triageMoveMenuItem{}; // Agentmaster (Waiting-for-you triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — member so the page sets its visibility + label/icon per the session's state at flyout-open (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _favoriteMenuItem{}; // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — toggle this tab's session star; member so the page sets visibility + label per managed-session-tab (collapsed by default)
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _activateSessionMenuItem{}; // Agentmaster (eager-init): "Activate Tab" — start this tab's DORMANT session in place; member so the page shows it only when the session's claude hasn't started (collapsed by default)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeOtherTabsMenuItem{};
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsBeforeMenuItem{}; // Agentmaster: "Close tabs to the left" (the left-hand twin of _closeTabsAfterMenuItem)
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _closeTabsAfterMenuItem{};

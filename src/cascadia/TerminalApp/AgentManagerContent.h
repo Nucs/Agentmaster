@@ -44,6 +44,12 @@ namespace winrt::TerminalApp::implementation
         void SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry);
         void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (workingDir, title)
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
+        // Agentmaster (eager-init / "Activate Tab"): (sessionId) -> start a DORMANT session's claude IN
+        // PLACE (no focus change) — distinct from SetActivateHandler ("Jump to Tab", which switches to it).
+        void SetActivateDormantHandler(std::function<void(winrt::hstring)> handler);
+        // Agentmaster (eager-init / "Activate All Tabs"): (allWindows) -> wake every dormant managed tab.
+        // allWindows=false => this window only; true => this window + fan out to every other window.
+        void SetActivateAllHandler(std::function<void(bool)> handler);
         // Agentmaster (Linked Lenses): report a pointer enter/leave on a managed session's board card
         // / tree row (id, entering). The PAGE owns the effective-hover bookkeeping (so it can't desync
         // from a missed PointerExited on a keyboard tab-switch) and pills that session's terminal tab
@@ -457,6 +463,16 @@ namespace winrt::TerminalApp::implementation
         // confirms, then fires _reopenWindowsHandler (the page reopens every not-currently-open record).
         void _UpdateReopenButton();
         void _OnReopenWindows();
+        // Agentmaster (eager-init / "Activate All Tabs (N)"): set the button's label to THIS window's
+        // dormant managed-tab count and show it only when N>0 (the hide-when-idle idiom, like the reopen
+        // button); refreshed on the _Refresh cadence. _OnActivateAllTabs decides the scope: if other
+        // windows ALSO have dormant tabs it prompts (This window / All windows), else it just wakes this
+        // window's. Both counts come from _DormantCounts (snapshot + the local-scope provider).
+        void _UpdateActivateAllButton();
+        void _OnActivateAllTabs();
+        // {thisWindowDormant, fleetDormant} — live MANAGED sessions whose claude hasn't started yet
+        // (IsSessionDormant), split by whether they are hosted in THIS window (per _localScopeProvider).
+        std::pair<int, int> _DormantCounts() const;
         // A buttons-only confirm (XAML-Islands-safe) for consequential actions; runs onYes on accept.
         void _Confirm(const winrt::hstring& title, const winrt::hstring& body, const winrt::hstring& primary, std::function<void()> onYes);
         // Agentmaster: a buttons-only THREE-way choice (XAML-Islands-safe): primary / secondary / Cancel.
@@ -496,6 +512,8 @@ namespace winrt::TerminalApp::implementation
 
         std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
         std::function<void(winrt::hstring)> _activateHandler;
+        std::function<void(winrt::hstring)> _activateDormantHandler; // Agentmaster (eager-init): "Activate Tab" -> start a dormant session's claude in place (no focus change)
+        std::function<void(bool)> _activateAllHandler; // Agentmaster (eager-init): "Activate All Tabs" -> wake every dormant tab (allWindows=false this window only / true + fan out)
         std::function<void(winrt::hstring, bool)> _hoverSessionHandler; // Agentmaster (Linked Lenses): push a managed card/row pointer enter/leave (id, entering) so the page pills its tab
         std::function<void(winrt::hstring)> _archiveHandler;
         std::function<void(winrt::hstring)> _restoreHandler;
@@ -652,6 +670,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _settingsBtn{ nullptr }; // the cog (next to Pause)
         winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" -> the global on-disk sessions browser (the sole history view; FAVORITES.md)
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
+        winrt::Windows::UI::Xaml::Controls::Button _activateAllBtn{ nullptr }; // Agentmaster (eager-init): "Activate All Tabs (N)" -> wake this window's dormant tabs (shown only when N>0)
         winrt::Windows::UI::Xaml::Controls::Button _keepAwakeBtn{ nullptr }; // Agentmaster: tri-mode "Keep Awake" button -> SetThreadExecutionState keeps the PC + display from sleeping
         // Agentmaster: the user-selected keep-awake mode. Off = sleep normally; Always = always hold the
         // execution-state flag; WhileRunning = hold ONLY while a live session is actively Running (so the

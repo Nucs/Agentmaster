@@ -1377,6 +1377,43 @@ namespace winrt::TerminalApp::implementation
         return woke;
     }
 
+    // Agentmaster (eager-init): flip SessionInfo::started true the moment this session's control STARTS its
+    // connection (leaves NotConnected). A just-created tab's control is NotConnected, so the dot/board seed
+    // it DORMANT (half-hollow); a FOCUSED tab initializes within a frame, and the ~2s liveness sweep is too
+    // slow to clear the half-hollow before the user notices. TermControl.Initialized fires once, exactly
+    // when _InitializeTerminal completes (right after conn.Start()), so a one-shot handler clears it
+    // promptly. A background (never-shown) tab never initializes, so it correctly STAYS dormant until
+    // activated. The handler holds a WEAK page ref (leak-free; the control owns the subscription for its
+    // lifetime). The liveness sweep remains the backstop if the event is somehow missed.
+    void TerminalPage::_TrackSessionStarted(const std::wstring& sessionId)
+    {
+        if (sessionId.empty() || !_sessionRegistry)
+        {
+            return;
+        }
+        const auto control = _ControlForSession(sessionId);
+        if (!control)
+        {
+            return;
+        }
+        if (control.ConnectionState() != TerminalConnection::ConnectionState::NotConnected)
+        {
+            _sessionRegistry->SetStarted(sessionId, true); // already started (e.g. a focused tab that laid out before we got here)
+            return;
+        }
+        auto weakThis = get_weak();
+        const std::wstring id = sessionId;
+        control.Initialized([weakThis, id](const auto& /*sender*/, const auto& /*args*/) {
+            if (auto self = weakThis.get())
+            {
+                if (self->_sessionRegistry)
+                {
+                    self->_sessionRegistry->SetStarted(id, true);
+                }
+            }
+        });
+    }
+
     static winrt::Windows::Foundation::Collections::IVector<winrt::hstring> _PromptsToVector(const std::vector<std::wstring>& msgs)
     {
         std::vector<winrt::hstring> hv;
@@ -2151,6 +2188,7 @@ namespace winrt::TerminalApp::implementation
         {
             _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state), !s->started && !s->external);
         }
+        _TrackSessionStarted(id); // Agentmaster (eager-init): clear the dormant flag once this control's connection starts
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
         _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());

@@ -25,6 +25,12 @@ namespace winrt::TerminalApp::implementation
         // registry observer / bind paths via Tab.TabStatus(); rendered by TabHeaderControl.xaml.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentStatusVisible, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentStatusBrush, PropertyChanged.raise, nullptr);
+        // Agentmaster (eager-init / "Activate Tab"): the DORMANT half-hollow dot. A window-restored /
+        // re-homed managed tab whose claude hasn't STARTED yet (ConnectionState == NotConnected) shows a
+        // HALF circle — one half filled with AgentStatusBrush (the current state colour), one half hollow
+        // (just the outline) — to read as "not initialized; Activate to wake it". MUTUALLY EXCLUSIVE with
+        // AgentStatusVisible (the full dot): _SetTabAgentDot drives exactly one true. Shares AgentStatusBrush.
+        WINRT_OBSERVABLE_PROPERTY(bool, AgentStatusHalfVisible, PropertyChanged.raise);
         // Agentmaster (status-dot RED FLASH RING): a separate red ring (an ellipse behind the dot,
         // peeking out around its constant black outline) that the TerminalPage shared timer blinks
         // on/off when a hosted session goes from Running to a resting state (Idle / WaitingForInput /

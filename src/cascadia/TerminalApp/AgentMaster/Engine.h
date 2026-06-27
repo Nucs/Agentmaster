@@ -204,6 +204,23 @@ namespace Agentmaster
         std::mutex settingsMutex;
         std::vector<SettingsSink> settingsSinks;
         uint64_t nextSettingsToken{ 1 };
+
+        // Agentmaster (eager-init / "Activate All Tabs"): per-window "wake all your DORMANT managed tabs"
+        // sinks. A dormant tab (window-restored / re-homed, never focused) can only be started in the
+        // window that HOSTS it (its TermControl lives on that window's UI thread). The Manager's "Activate
+        // All Tabs (N)" can target the whole fleet (its board shows every window's sessions), so the
+        // request must reach every window: each TerminalPage registers a sink at engine init ("eager-init
+        // all of YOUR dormant controls") and detaches it at teardown (Rule #10). Same shape + lifetime as
+        // activateSinks; snapshot-under-lock / invoke-outside-it (each sink hops to its own UI thread).
+        struct ActivateAllSink
+        {
+            uint64_t token{ 0 };
+            std::wstring windowId;
+            std::function<void()> fn;
+        };
+        std::mutex activateAllMutex;
+        std::vector<ActivateAllSink> activateAllSinks;
+        uint64_t nextActivateAllToken{ 1 };
     };
 
     // The one process-wide engine. The FIRST call constructs it (creates the registry, wires
@@ -277,6 +294,16 @@ namespace Agentmaster
     uint64_t RegisterWindowActivateHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler);
     void UnregisterWindowActivateHandler(uint64_t token);
     void ActivateSessionInOtherWindows(const std::wstring& sessionId, const std::wstring& sourceWindowId);
+
+    // Agentmaster (eager-init / "Activate All Tabs"): register THIS window's "wake all dormant tabs" sink
+    // (monotonic token; detach with UnregisterActivateAllDormantHandler — removing a stale token is a
+    // no-op, the registry-token pattern). ActivateAllDormantInOtherWindows fans the request out to every
+    // registered sink EXCEPT `sourceWindowId`'s (the caller already woke its own tabs), so the Manager's
+    // fleet-wide "Activate All Tabs" reaches every other open window; each sink hops to its own UI thread
+    // and eager-inits its dormant controls. Snapshot-under-lock / invoke-outside, like the activate sink.
+    uint64_t RegisterActivateAllDormantHandler(const std::wstring& windowId, std::function<void()> handler);
+    void UnregisterActivateAllDormantHandler(uint64_t token);
+    void ActivateAllDormantInOtherWindows(const std::wstring& sourceWindowId);
 
     // Agentmaster (cross-window restart): register THIS window's restart sink (monotonic token; detach
     // with UnregisterWindowRestartHandler — removing a stale token is a no-op, the registry-token

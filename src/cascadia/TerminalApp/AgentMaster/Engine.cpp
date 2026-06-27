@@ -502,6 +502,60 @@ namespace Agentmaster
         }
     }
 
+    uint64_t RegisterActivateAllDormantHandler(const std::wstring& windowId, std::function<void()> handler)
+    {
+        if (!handler)
+        {
+            return 0;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.activateAllMutex);
+        const auto token = e.nextActivateAllToken++;
+        e.activateAllSinks.push_back({ token, windowId, std::move(handler) });
+        return token;
+    }
+
+    void UnregisterActivateAllDormantHandler(uint64_t token)
+    {
+        if (token == 0)
+        {
+            return;
+        }
+        auto& e = SharedEngine();
+        std::lock_guard<std::mutex> lk(e.activateAllMutex);
+        for (auto it = e.activateAllSinks.begin(); it != e.activateAllSinks.end(); ++it)
+        {
+            if (it->token == token)
+            {
+                e.activateAllSinks.erase(it);
+                return;
+            }
+        }
+    }
+
+    void ActivateAllDormantInOtherWindows(const std::wstring& sourceWindowId)
+    {
+        auto& e = SharedEngine();
+        // Snapshot under the lock, invoke outside it (the ActivateSessionInOtherWindows pattern): each
+        // sink hops into its own window's dispatcher to eager-init that window's dormant controls.
+        std::vector<std::function<void()>> sinks;
+        {
+            std::lock_guard<std::mutex> lk(e.activateAllMutex);
+            sinks.reserve(e.activateAllSinks.size());
+            for (const auto& s : e.activateAllSinks)
+            {
+                if (s.fn && s.windowId != sourceWindowId)
+                {
+                    sinks.push_back(s.fn);
+                }
+            }
+        }
+        for (const auto& fn : sinks)
+        {
+            fn(); // fire-and-forget; each other window wakes its own dormant tabs
+        }
+    }
+
     uint64_t RegisterWindowRestartHandler(const std::wstring& windowId, std::function<void(const std::wstring& sessionId)> handler)
     {
         if (!handler)
