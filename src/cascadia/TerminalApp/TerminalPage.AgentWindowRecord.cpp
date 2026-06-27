@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — per-window workspace persistence (M10; doc/agentmaster/PERSISTENCE.md):
 // capture this window's WindowRecord from LIVE state (geometry via the PersistState

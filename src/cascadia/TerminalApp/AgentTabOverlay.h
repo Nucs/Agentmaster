@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster: the per-tab "link badge" overlay (see doc/agentmaster/TAB_OVERLAY.md). A small,
 // compact HUD pinned to the top-right of a Claude session's terminal, summarizing the tab <->

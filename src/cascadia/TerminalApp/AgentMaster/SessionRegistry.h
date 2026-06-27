@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — SessionRegistry: the single source of truth for all Claude Code
 // sessions (DESIGN §6). The UI (M6) binds to it; the hooks bridge (HooksBridge) feeds it

@@ -1,6 +1,8 @@
 # Agentmaster
 _By developers, for developers - Never lose a session again - feel like Windows Terminal so you forget you are vibing_
 
+> **License:** Agentmaster is licensed under the **GNU AGPL-3.0-or-later** ([`LICENSE`](LICENSE)) — use, modify, and distribute it under those terms, which require that any work you distribute or offer as a network service based on it is also released under the AGPL. **Commercial license:** if that doesn't fit (e.g. a closed-source product or a hosted service), a commercial license is available — see [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md) or contact `elibelash@gmail.com`. As a fork of MIT-licensed [Windows Terminal](https://github.com/microsoft/terminal), the upstream base and bundled OSS stay under their original permissive licenses ([`LICENSE-MIT`](LICENSE-MIT) / [`NOTICE.md`](NOTICE.md)). Contributions require signing the [CLA](CLA.md).
+
 [Microsoft Windows Terminal](https://github.com/microsoft/terminal) but pumped up with observability, persistence and all the tools you need to scale up your parallel context management.<br/> Coding fast is no longer about typing faster but about holding and manuvering around and between 10 coding contextes.
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
@@ -94,7 +96,9 @@ Our code is additive and marked `Agentmaster`: the Manager UI in `AgentManagerCo
 
 ## 🔗 Relationship to Windows Terminal & License
 
-A fork of [`microsoft/terminal`](https://github.com/microsoft/terminal) at `v1.24.2372` — pristine upstream on `main`, the fork's work on `agentmaster`; upstream code, docs, and notices are retained ([`NOTICE.md`](NOTICE.md)). Licensed [MIT](LICENSE), same as upstream, with the original `Copyright (c) Microsoft Corporation` notice kept alongside the fork author's. For Windows Terminal itself, see [aka.ms/terminal-docs](https://aka.ms/terminal-docs).
+A fork of [`microsoft/terminal`](https://github.com/microsoft/terminal) at `v1.24.2372` — pristine upstream on `main`, the fork's work on `agentmaster`; upstream code, docs, and notices are retained ([`NOTICE.md`](NOTICE.md)).
+
+**License — dual.** The Agentmaster combined work is licensed under the **GNU [AGPL-3.0-or-later](LICENSE)**, with a **[commercial license](LICENSE-COMMERCIAL.md)** available for uses the AGPL doesn't fit (closed-source, or offered as a network service). Because Agentmaster forks **MIT-licensed** Windows Terminal, the upstream Microsoft code and the bundled OSS components remain under their original permissive licenses — the original `Copyright (c) Microsoft Corporation` MIT notice is retained in [`LICENSE-MIT`](LICENSE-MIT), with third-party attributions in [`NOTICE.md`](NOTICE.md). "Agentmaster" is a trademark of the project ([`TRADEMARKS.md`](TRADEMARKS.md)); this is an independent fork, not affiliated with or endorsed by Microsoft. Contributions require signing the [CLA](CLA.md). For Windows Terminal itself, see [aka.ms/terminal-docs](https://aka.ms/terminal-docs).
 
 ---
 

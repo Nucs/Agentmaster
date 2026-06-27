@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Plain C++ engine TU — no WinRT, no precompiled header (the vcxproj marks it NotUsing). The
 // S-lane: a heartbeat survey that reads claude PEBs out-of-band and feeds the registry. See

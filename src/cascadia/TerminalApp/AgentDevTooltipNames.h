@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster (DEV ONLY) — append a unique element ID as the FIRST ROW of every tooltip, so the
 // user can hover ANY control, read its id, and tell the assistant exactly which control they mean.

@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Agentmaster — the in-app auto-updater (header-only, plain Win32; no WinRT, no engine-lib deps,
 // exactly like ProfileBootstrap.h). It checks the GitHub Releases of Nucs/Agentmaster for a newer

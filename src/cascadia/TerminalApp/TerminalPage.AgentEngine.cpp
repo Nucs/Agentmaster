@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — TerminalPage's engine wiring + Manager-tab hosting (M9 / M6; see
 // doc/agentmaster/DESIGN.md and IMPLEMENTATION.md): consume the ONE process-wide

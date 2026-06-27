@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — a tiny, dependency-free JSON value + recursive-descent parser/printer for
 // persistence (DESIGN §13). The engine deliberately keeps no JSON dependency on the hot

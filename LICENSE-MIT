@@ -1,0 +1,37 @@
+MIT License — upstream Windows Terminal base and bundled OSS components
+
+This project (Agentmaster) is a fork of Microsoft's Windows Terminal
+(https://github.com/microsoft/terminal). The Agentmaster combined work is
+distributed under the GNU AGPL-3.0-or-later (see LICENSE). However, the large
+majority of the source in this repository originates from Windows Terminal and
+is licensed under the MIT License reproduced below. Per the MIT License, that
+copyright notice and permission notice are retained here and continue to govern
+the upstream Microsoft files and the bundled third-party OSS components (see
+NOTICE.md / THIRD-PARTY-NOTICES.txt). Nothing in the AGPL or commercial license
+removes the MIT rights in that upstream code. Eli Belash's own contributions —
+both the original Agentmaster files and the modifications to the upstream files —
+are licensed under the AGPL-3.0-or-later (see LICENSE), not under this MIT license.
+
+----------------------------------------------------------------------
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

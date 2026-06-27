@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the ONE session-state -> status color palette, shared by every surface that
 // renders a state dot: the per-tab link-badge overlay (AgentTabOverlay) and the tab strip's

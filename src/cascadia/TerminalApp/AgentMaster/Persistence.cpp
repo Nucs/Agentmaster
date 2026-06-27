@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Plain C++ engine TU — no WinRT, no precompiled header (vcxproj marks it NotUsing).
 #include "Persistence.h"
@@ -55,22 +55,59 @@ namespace
     bool WriteAllUtf8(const std::wstring& path, std::wstring_view content)
     {
         // The single chokepoint for EVERY persistence write (sessions.json, windows/<id>.json, templates,
-        // recent-dirs, open-windows, dir-colors). A failure here = state silently NOT saved (lost on next
-        // launch), so surface it — previously every failure path returned false with no trace. [persist-fail]
-        // is rare (disk full / permissions / a locked file), so it never floods steady state.
+        // recent-dirs, open-windows, dir-colors, dir-env, layout, settings). CRASH- AND POWER-LOSS-SAFE.
+        //
+        // A sudden shutdown must never leave a torn / truncated / zero-length file, because the loaders
+        // fail OPEN: a corrupt sessions.json deserializes to an EMPTY fleet, a corrupt windows/<id>.json to
+        // an empty record -- silently discarding state the user never closed (Correctness Rule #16). A
+        // truncate-in-place ofstream did exactly that on any write interrupted mid-flight. Instead:
+        //   1) write the FULL bytes to a sibling temp file,
+        //   2) force them to the platter (FlushFileBuffers) so a power loss can't commit the rename while
+        //      the data blocks are still unwritten (which would swap in a zero/garbage file),
+        //   3) ATOMICALLY swap the temp over the real file (MoveFileExW REPLACE_EXISTING | WRITE_THROUGH --
+        //      on NTFS a same-directory rename is atomic, so a reader sees either the whole old file or the
+        //      whole new one, never a torn mix, and the old file is left FULLY INTACT if anything fails).
+        // Mirrors the engine's other atomic writers (SessionStore::AtomicWriteUtf8 /
+        // TranscriptStore::WriteFileUtf8), plus the flush + WRITE_THROUGH for power-loss durability.
+        //
+        // A failure here = state silently NOT saved, so surface it ([persist-fail]); rare (disk full /
+        // permissions / a sharing violation on the destination), so it never floods steady state.
         try
         {
-            std::ofstream f(std::filesystem::path{ path }, std::ios::binary | std::ios::trunc);
-            if (!f)
+            const auto bytes = Utf16ToUtf8(content);
+            // Per-thread temp name: SaveSessions fires from multiple engine threads (the registry
+            // observers), so two concurrent writes to the SAME file must not collide on one temp path. A
+            // leftover temp from a crashed write is harmless -- its extension is never ".json", so the
+            // windows/ scans (LoadWindowRecords + the Emperor reopen) skip it, and CREATE_ALWAYS reuses it.
+            // Same directory as the target, so the rename is a same-volume (atomic) metadata move.
+            const std::wstring tmp = path + L".tmp." + std::to_wstring(::GetCurrentThreadId());
+            const HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE)
             {
-                AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (open failed \x2014 state NOT saved)\n");
+                AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (temp open failed \x2014 state NOT saved)\n");
                 return false;
             }
-            const auto bytes = Utf16ToUtf8(content);
-            f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-            if (!f.good())
+            DWORD wrote = 0;
+            const BOOL ok = bytes.empty() ? TRUE : ::WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr);
+            // Flush the data to disk BEFORE the rename. Best-effort: a flush that fails (a quirky FS) must
+            // not discard an otherwise-good save -- the atomic rename below still guarantees no torn read.
+            if (ok)
+            {
+                ::FlushFileBuffers(h);
+            }
+            ::CloseHandle(h);
+            if (!ok || wrote != bytes.size())
             {
                 AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (write incomplete \x2014 state NOT saved)\n");
+                ::DeleteFileW(tmp.c_str());
+                return false;
+            }
+            // Atomic swap. REPLACE_EXISTING covers both "first write" and "overwrite"; WRITE_THROUGH flushes
+            // the rename metadata before returning. On failure the original file is untouched (never torn).
+            if (!::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            {
+                AppendStateLog(L"hooks.log", L"[persist-fail] " + path + L" (atomic replace failed \x2014 state NOT saved)\n");
+                ::DeleteFileW(tmp.c_str()); // don't leave the temp behind; the old file stays intact
                 return false;
             }
             return true;

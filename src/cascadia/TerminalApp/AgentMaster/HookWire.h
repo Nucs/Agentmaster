@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the wire contract between the PowerShell hook forwarder and the native
 // HooksBridge. Pure C++ (no Win32/WinRT) so it is shared verbatim by the bridge and the

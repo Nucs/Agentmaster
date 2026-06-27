@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — Claude session lifecycle on this window (M8 lifecycle + Rules #6/#11/#12):
 // spawn/launch (ConPTY wired for hooks), the process-once fleet load (startup ARCHIVES,

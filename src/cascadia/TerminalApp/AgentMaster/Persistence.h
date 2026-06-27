@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — persistence (DESIGN §13) + plan templates / apply-to-many (DESIGN §10).
 // Sessions (queue + autopilot + metadata) and plan templates serialize to JSON under the

@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Plain C++ engine TU — no WinRT, no precompiled header (vcxproj marks it NotUsing).
 #include "Scheduler.h"

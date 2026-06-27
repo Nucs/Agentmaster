@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — SessionSearch: the Sessions page's two-phase search over the on-disk Claude
 // sessions (SESSIONS.md §1/§6, answers Q1/Q2/Q6).

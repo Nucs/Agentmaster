@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the full-window Sessions page (SESSIONS.md): a browser over EVERY on-disk
 // Claude Code session in a selectable time window (default 1 month), opened by the Manager's

@@ -2338,7 +2338,12 @@ build **binlog uploads as an artifact** to diagnose the first run.
 
 ## Conventions
 
-- Mark our additions with `Agentmaster`. Keep the upstream MIT `LICENSE`/`NOTICE`.
+- Mark our additions with `Agentmaster`. The repo `LICENSE` is **AGPL-3.0-or-later**
+  (the combined-work license; paid escape hatch in `LICENSE-COMMERCIAL.md`); the upstream
+  Windows Terminal **MIT** license is retained in `LICENSE-MIT` and the third-party
+  attributions in `NOTICE.md` (the build's `NOTICE.html` source) + `THIRD-PARTY-NOTICES.txt`
+  — **never strip them** (MIT requires retaining the notice). External contributions require
+  signing `CLA.md` before merge (the dual-license depends on it).
 - Keep the diff against upstream minimal where practical (additive files, small touches at
   integration points) so rebasing onto `microsoft/terminal` stays cheap.
 - Build artifacts (`bin/`, `packages/`, `Generated Files/`) are gitignored — never commit them.

@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — the Fleet Observer's UI lane + bind machinery on this window
 // (OBSERVER.md §10/§11d; TAB_OVERLAY.md): publish this window's tab roster, bind

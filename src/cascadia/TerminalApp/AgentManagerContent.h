@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster: content for the pinned, leftmost "Agent Manager" tab — the C1 "Linked
 // Lenses" UI (DESIGN §9). Three regions over ONE shared model (the SessionRegistry):
@@ -327,6 +327,14 @@ namespace winrt::TerminalApp::implementation
         // repaints it from _launchCodex; clicking flips _launchCodex and re-validates (the Launch button text
         // + the session-id resume/fork affordances are Claude-only — Codex launches a directory only).
         void _UpdateLaunchAgentButton();
+        // Agentmaster (responsive launch bar): stage-collapse the toolbar's top row as the pane narrows —
+        // (A) full label -> (B) drop "launch a"/"session in" -> (C) shrink the cwd box to its floor -> (D)
+        // wrap the launch buttons (_launchBtns) onto their own line. Measures each piece's DesiredSize
+        // against the live pane width and picks the least-collapsed stage that fits. Called from _root's
+        // SizeChanged AND whenever a button's content/visibility changes (_ValidateLaunchBox /
+        // _UpdateReopenButton / _UpdateActivateAllButton / _UpdateLaunchAgentButton). No layout loop —
+        // every change is inside _root, whose size the pane (not its content) owns.
+        void _ReflowLaunchBar();
         void _OnForkFromBox(); // the Fork button (visible for a found session id) -> _forkSessionHandler
         bool _ResolveSessionDirTitle(const std::wstring& id, std::wstring& dir, std::wstring& title); // registry first, transcript cwd fallback
         void _PushRecentDir(const std::wstring& dir);
@@ -635,6 +643,22 @@ namespace winrt::TerminalApp::implementation
         std::wstring _planAutoScrolledFor; // Agentmaster: the subject key (session id / "x:<extId>") we last auto-scrolled the Flight Plan to bottom for; only a CHANGE re-pins (a same-subject _Refresh keeps the user's scroll)
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
+        // Agentmaster (responsive launch bar): the toolbar's top row + its collapsible pieces, promoted to
+        // members so _ReflowLaunchBar can stage-collapse them as the pane narrows. _toolbarCol is the
+        // vertical [title row | actions row] stack; _launchBar is the title+launch row; _launchBtns groups
+        // Launch/Fork/Reopen/Activate so wrapping moves ONE element to its own line. _agentmasterText/_dashText
+        // are always shown; _launchAText ("launch a") + _sessionInText ("session in") collapse first.
+        winrt::Windows::UI::Xaml::Controls::StackPanel _toolbarCol{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _launchBar{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::StackPanel _launchBtns{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _agentmasterText{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _dashText{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _launchAText{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBlock _sessionInText{ nullptr };
+        bool _launchBtnsWrapped{ false }; // true once _launchBtns has been moved to its own (2nd) line
+        double _lastRootWidth{ 0.0 }; // last _root width seen in SizeChanged (drives reflow off the hot path)
+        double _measLaunchA{ 56.0 }; // cached DesiredSize of "launch a" (read 0 once collapsed; kept from when visible)
+        double _measSessionIn{ 62.0 }; // cached DesiredSize of "session in"
         winrt::Windows::UI::Xaml::Controls::Button _launchAgentBtn{ nullptr }; // Agentmaster (Codex-launch): the Claude<->Codex agent toggle before the box
         bool _launchCodex{ false }; // Agentmaster (Codex-launch): false = launch a Claude (default, unchanged); true = launch a managed Codex in the typed dir
         winrt::Windows::UI::Xaml::Controls::Button _forkBtn{ nullptr }; // Agentmaster: "Fork" — visible only when the box holds a FOUND session id

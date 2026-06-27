@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Agentmaster (TAB_OVERLAY.md / DESIGN §9.7): the ONE shared "copy a session field to the
 // clipboard" action behind BOTH the per-tab link badge's copy menu (AgentTabOverlay) AND the

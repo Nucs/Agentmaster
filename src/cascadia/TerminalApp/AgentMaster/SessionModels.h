@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — core data model for the Manager tab (Design A / C1 / Flight Plan).
 // Plain C++ (no WinRT projection) so it compiles standalone; the XAML layer (M6) wraps

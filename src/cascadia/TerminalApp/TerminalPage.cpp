@@ -1,6 +1,7 @@
 
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
+// Modifications (c) 2026 Eli Belash (Agentmaster), licensed under AGPL-3.0-or-later. See LICENSE.
 
 #include "pch.h"
 #include "TerminalPage.h"

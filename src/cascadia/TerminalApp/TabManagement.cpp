@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
+// Modifications (c) 2026 Eli Belash (Agentmaster), licensed under AGPL-3.0-or-later. See LICENSE.
 //
 // This file contains much of the code related to tab management for the
 // TerminalPage. Things like opening new tabs, selecting different tabs,

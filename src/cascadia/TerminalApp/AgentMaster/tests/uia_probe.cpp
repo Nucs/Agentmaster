@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Agentmaster — ad-hoc diagnostic for Bring Window To Front (NOT part of the test suite).
 // 1) Census: every claude.exe with its cwd / WT_SESSION / AM_SESSION / resolved session id.
 // 2) Every visible WT-class (CASCADIA_HOSTING_WINDOW_CLASS) top-level window, its UIA TabItems,

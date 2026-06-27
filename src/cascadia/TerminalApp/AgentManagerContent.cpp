@@ -1,5 +1,5 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT license.
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 #include "pch.h"
 #include "AgentManagerContent.h"
@@ -691,6 +691,19 @@ namespace
         t.TextTrimming(TextTrimming::CharacterEllipsis);
         t.VerticalAlignment(VerticalAlignment::Center);
         return t;
+    }
+
+    // Agentmaster ("Activate Tab" via Shift+Click): is Shift currently held? Mirrors the rename box's
+    // CoreWindow::GetKeyState modifier check (XAML Islands-safe — CoreWindow may be null off the input
+    // thread, in which case we treat Shift as up). Lets a Shift+Click on a board card / tree row START a
+    // dormant session IN PLACE (no tab switch), the click twin of the "Activate Tab (Shift+Click)" menu item.
+    bool ShiftHeld()
+    {
+        if (const auto w = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread())
+        {
+            return WI_IsFlagSet(w.GetKeyState(winrt::Windows::System::VirtualKey::Shift), winrt::Windows::UI::Core::CoreVirtualKeyStates::Down);
+        }
+        return false;
     }
 
     // Agentmaster: collapse a (possibly multi-line) title to ONE line for the dense Explorer
@@ -3329,6 +3342,17 @@ namespace winrt::TerminalApp::implementation
         // tab lives in another one), mirroring the Explorer Tree rows. A Button swallows
         // DoubleTapped, so we time the successive clicks ourselves.
         card.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+            // Shift+Click = Activate Tab IN PLACE (start a dormant session's claude without switching to
+            // it) — the click twin of the "Activate Tab (Shift+Click)" menu item. _activateDormantHandler
+            // is a no-op when the session isn't dormant / isn't hosted here, so this is safe on any card.
+            if (ShiftHeld())
+            {
+                if (_activateDormantHandler)
+                {
+                    _activateDormantHandler(winrt::hstring{ id });
+                }
+                return; // don't select / jump / sync scope — Shift+Click is the in-place activate gesture
+            }
             const auto nowTick = ::GetTickCount64();
             const bool dbl = (id == _lastCardClickId) && (nowTick - _lastCardClickTick) <= ::GetDoubleClickTime();
             _lastCardClickId = id;
@@ -4532,7 +4556,7 @@ namespace winrt::TerminalApp::implementation
                 if (IsSessionDormant(s))
                 {
                     auto dot = StateDotDormant(StateColor(s.state));
-                    AgentSetTip(dot, L"Not started yet \x2014 the half-hollow dot means this session's claude hasn't initialized (a restored tab you haven't opened). Right-click \x2192 Activate Tab (or open the tab) to start it.");
+                    AgentSetTip(dot, L"Not started yet \x2014 the half-hollow dot means this session's claude hasn't initialized (a restored tab you haven't opened). Shift+Click the row (or right-click \x2192 Activate Tab, or open the tab) to start it.");
                     row.Children().Append(dot);
                 }
                 else
@@ -4595,6 +4619,17 @@ namespace winrt::TerminalApp::implementation
                 // (jump to the live tab). A Button swallows DoubleTapped, so we time the
                 // successive clicks ourselves.
                 rowBtn.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+                    // Shift+Click = Activate Tab IN PLACE (start a dormant session's claude without
+                    // switching to it) — the click twin of the "Activate Tab (Shift+Click)" menu item.
+                    // _activateDormantHandler no-ops when not dormant / not hosted here, so it's safe here.
+                    if (ShiftHeld())
+                    {
+                        if (_activateDormantHandler)
+                        {
+                            _activateDormantHandler(winrt::hstring{ id });
+                        }
+                        return; // don't select / jump — Shift+Click is the in-place activate gesture
+                    }
                     const auto nowTick = ::GetTickCount64();
                     const bool dbl = (id == _lastTreeClickId) && (nowTick - _lastTreeClickTick) <= ::GetDoubleClickTime();
                     _lastTreeClickId = id;
@@ -5465,9 +5500,9 @@ namespace winrt::TerminalApp::implementation
         if (dormantLocal)
         {
             MenuFlyoutItem activate;
-            activate.Text(L"Activate Tab");
+            activate.Text(L"Activate Tab (Shift+Click)");
             activate.Icon(glyphIcon(L"\xE768")); // Play — "start it"
-            AgentSetTip(activate, L"Start this session's claude now, in place \x2014 it hasn't initialized yet (a restored tab you never opened). The view doesn't switch; use Jump to Tab for that.");
+            AgentSetTip(activate, L"Start this session's claude now, in place \x2014 it hasn't initialized yet (a restored tab you never opened). The view doesn't switch; use Jump to Tab for that. You can also Shift+Click the card or tree row to do this.");
             activate.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
                 auto act = [weak, id]() { if (auto self = weak.get()) { if (self->_activateDormantHandler) { self->_activateDormantHandler(winrt::hstring{ id }); } } };
                 if (disp)
@@ -6278,7 +6313,7 @@ namespace winrt::TerminalApp::implementation
         constexpr double kGap = 8.0; // _launchBar.Spacing
         constexpr double kMargin = 24.0; // _toolbarCol Margin L(12)+R(12)
         constexpr double kSlack = 12.0; // right-edge breathing room (+ a touch of hysteresis)
-        constexpr double kFillSlack = 6.0; // wrapped: how far short of the content's padded end the FILLED box stops
+        constexpr double kWrapRightReserve = 17.0; // wrapped fill: the box ends this far from the window edge (12px _toolbarCol margin + a 5px gap)
         constexpr double kBoxPref = 504.0; // comfortable box width when there's room
         constexpr double kBoxFloor = 240.0; // smallest inline box (still shows the placeholder / a path tail)
         constexpr double kBoxHardMin = 160.0; // smallest box once the buttons have wrapped away
@@ -6322,9 +6357,24 @@ namespace winrt::TerminalApp::implementation
             // (D) Wrap the buttons onto their own line. Nothing follows the box on row 1 now, so it FILLS
             // the row to the padded end (an explicit width — a horizontal StackPanel won't stretch a child
             // along its axis, so the apply below pins Min==Max==fillW) rather than sit content-sized with a gap.
+            // Base the fill on the box's ACTUAL left edge (post-arrange transform, exact) instead of the
+            // summed measurements — a small prefix-measurement undershoot was letting the filled box exceed
+            // the window. When the words are still visible THIS pass (a direct A->D jump) subtract the width
+            // they're about to lose, so the fill is correct immediately (no one-frame over/undershoot).
             wrap = true;
-            const double rowPrefix = amW + dashW + togW + 3.0 * kGap; // [AM][dash][toggle] + the 3 gaps before the box
-            fillW = avail - rowPrefix - kFillSlack;
+            double boxLeft = kMargin / 2.0 + amW + dashW + togW + 3.0 * kGap; // fallback if the transform fails
+            try
+            {
+                boxLeft = _cwdBox.TransformToVisual(_root).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.0f }).X;
+                if (_launchAText && _launchAText.Visibility() == Visibility::Visible)
+                {
+                    boxLeft -= laW + siW + 2.0 * kGap; // the two words collapse this pass -> the box shifts left by that much
+                }
+            }
+            catch (...)
+            {
+            }
+            fillW = W - boxLeft - kWrapRightReserve; // box right edge lands at (W - 17): 5px inside the 12px right margin
             if (fillW < kBoxHardMin)
             {
                 fillW = kBoxHardMin; // pathologically narrow pane: floor it (may clip) rather than go invisible
