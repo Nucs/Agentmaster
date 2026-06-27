@@ -117,6 +117,19 @@ static void TestStateMachine()
 
     CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::SubagentStop)) == SessionState::Running, "SubagentStop leaves state");
     CHECK(NextSessionState(SessionState::WaitingForInput, Msg(L"a", HookEvent::SessionEnd)) == SessionState::Done, "SessionEnd -> Done");
+
+    // Agentmaster (API-error state): the engine-internal apiError flag -> Error, OVERRIDING the carrier
+    // event's normal mapping (the synthetic isApiErrorMessage line carries a terminal stop_reason).
+    HookMessage err = Msg(L"a", HookEvent::Notification);
+    err.apiError = true;
+    CHECK(NextSessionState(SessionState::Running, err) == SessionState::Error, "apiError -> Error (from Running)");
+    HookMessage errStop = Msg(L"a", HookEvent::Stop);
+    errStop.apiError = true;
+    CHECK(NextSessionState(SessionState::Running, errStop) == SessionState::Error, "apiError -> Error (overrides a Stop carrier, no WaitingForInput leak)");
+    // Recovery: the FIRST new turn event leaves Error — a real UserPromptSubmit (the user retrying) -> Running.
+    CHECK(NextSessionState(SessionState::Error, Msg(L"a", HookEvent::UserPromptSubmit)) == SessionState::Running, "Error + UserPromptSubmit -> Running (come out of Error on first change)");
+    CHECK(NextSessionState(SessionState::Error, Msg(L"a", HookEvent::PostToolUse)) == SessionState::Running, "Error + tool activity -> Running (resumed)");
+
     CHECK(ParseHookEvent(L"Stop") == HookEvent::Stop, "ParseHookEvent(Stop)");
     CHECK(ParseHookEvent(L"bogus") == HookEvent::Unknown, "ParseHookEvent(bogus) -> Unknown");
 }
@@ -201,6 +214,21 @@ static void TestOrderedStateMachine()
             NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 1000 + i), t);
         }
         CHECK(t.queuedPrompts == kMaxQueuedPrompts, "ordered: queuedPrompts capped");
+    }
+    { // API error: -> Error, settles type-ahead like a Stop, but is NOT a clean turn boundary
+      // (turnComplete stays false -> no autopilot advance off an error; the scheduler's stopOnError pauses).
+        TurnAccounting t;
+        NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
+        NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 2000), t); // queue one
+        CHECK(t.queuedPrompts == 1, "ordered: type-ahead recorded before the error");
+        HookMessage e = at(HookEvent::Notification, 3000);
+        e.apiError = true;
+        auto re = NextSessionStateOrdered(SessionState::Running, e, t);
+        CHECK(re.state == SessionState::Error && !re.turnComplete && !re.staleStop && t.queuedPrompts == 0,
+              "ordered: apiError -> Error, no turnComplete, queue voided");
+        // Recovery through the ordered machine: a fresh prompt from Error -> Running, no spurious queue bump.
+        auto rr = NextSessionStateOrdered(SessionState::Error, at(HookEvent::UserPromptSubmit, 4000), t);
+        CHECK(rr.state == SessionState::Running && t.queuedPrompts == 0, "ordered: Error + new prompt -> Running (fresh turn, not queued)");
     }
     { // Registry integration: the full OnHookEvent path applies the ordered machine + advance seam.
         SessionRegistry reg;
@@ -2464,6 +2492,18 @@ static void TestTranscriptScan()
         CHECK(!r.events.empty() && r.events[0].text == L"All done.", "assistant text collected");
         CHECK(!r.events.empty() && r.events[0].stopReason == L"end_turn", "assistant stop_reason captured");
         CHECK(r.consumed == line.size(), "consumed the full complete line");
+        CHECK(!r.events.empty() && !r.events[0].apiError, "normal assistant line is NOT an apiError");
+    }
+    // Agentmaster: the synthetic API-error turn-ender — top-level isApiErrorMessage:true, model
+    // "<synthetic>", a terminal stop_reason. The parser flags ev.apiError so the scanner can produce
+    // SessionState::Error instead of reading the terminal stop as a clean turn-complete. (Mirrors the
+    // real c66ec7c8 "Server is temporarily limiting requests" rate-limit shape.)
+    {
+        const std::wstring line = LR"j({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::Assistant, "apiError line -> 1 assistant event");
+        CHECK(!r.events.empty() && r.events[0].apiError, "isApiErrorMessage:true -> ev.apiError");
+        CHECK(!r.events.empty() && r.events[0].text.find(L"Rate limited") != std::wstring::npos, "apiError text captured (the reason)");
     }
     // assistant tool_use turn: stop_reason tool_use, no text (turn NOT complete -> no synth Stop)
     {
@@ -2587,7 +2627,14 @@ static void TestTranscriptScan()
         CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, true, L"", -200), "run-repair: future mtime (clock skew) counts as fresh");
         CHECK(!ShouldSynthesizeRunning(SessionState::Running, true, true, L"", 500), "run-repair: already Running -> no-op");
         CHECK(!ShouldSynthesizeRunning(SessionState::NeedsApproval, true, true, L"", 500), "run-repair: NeedsApproval never cleared by a transcript line");
-        CHECK(!ShouldSynthesizeRunning(SessionState::Error, true, true, L"", 500), "run-repair: Error never cleared by inference");
+        // Agentmaster (API-error recovery — the PULL half of "come out of Error on first change"): a
+        // fresh in-progress turn event after an API error IS the user retrying, so Error recovers to
+        // Running. But a TERMINAL tail (the error line's own stop_sequence) must NOT self-recover, an
+        // unprimed history replay must not, and a quiet pass (no new event) must keep it Error.
+        CHECK(ShouldSynthesizeRunning(SessionState::Error, true, true, L"", 500), "run-repair: Error + fresh in-progress turn event -> recovers to Running");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Error, true, true, L"end_turn", 500), "run-repair: Error + terminal tail -> NOT Running (the error's own stop_reason must not self-recover)");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Error, false, true, L"", 500), "run-repair: Error + no new event this pass -> stays Error");
+        CHECK(!ShouldSynthesizeRunning(SessionState::Error, true, false, L"", 500), "run-repair: Error + unprimed (history replay) -> no spurious recovery");
         CHECK(!ShouldSynthesizeRunning(SessionState::Done, true, true, L"", 500), "run-repair: Done never revived");
         CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, true, true, L"end_turn", 500), "run-repair: end_turn tail is missed-Stop territory, not Running");
         CHECK(!ShouldSynthesizeRunning(SessionState::WaitingForInput, false, true, L"", 500), "run-repair: no new turn event this pass -> no synthesis");
@@ -2611,6 +2658,21 @@ static void TestTranscriptScan()
         CHECK(!ShouldSynthesizeRunning(SessionState::Idle, true, true, L"refusal", 500), "run-repair: refusal tail ended the turn -> not Running");
         CHECK(ShouldSynthesizeRunning(SessionState::Idle, true, true, L"pause_turn", 500), "run-repair: an unknown stop_reason stays in-flight (old default)");
     }
+    // Agentmaster (API-error reconciliation — ShouldSynthesizeError): the tail is an unrecovered API
+    // error (lastWasApiError) and the transcript has settled -> Error. Idempotent (never re-fires from
+    // Error), never from Done, never without the error tail, and gated on the same quiescence as the
+    // missed-Stop (a fast retry clears the tail first). Fires defensively from Waiting/Idle too (the
+    // real Stop hook for the errored turn, or an earlier pass, may already have moved it there).
+    {
+        CHECK(ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs), "api-error: Running + error tail + quiet -> Error");
+        CHECK(ShouldSynthesizeError(SessionState::WaitingForInput, true, kScanStopQuiescenceMs), "api-error: Waiting (push Stop landed) + error tail -> Error");
+        CHECK(ShouldSynthesizeError(SessionState::Idle, true, kScanStopQuiescenceMs), "api-error: Idle + error tail -> Error (defensive)");
+        CHECK(ShouldSynthesizeError(SessionState::NeedsApproval, true, kScanStopQuiescenceMs), "api-error: NeedsApproval + error tail -> Error");
+        CHECK(!ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs - 1), "api-error: not quiet long enough -> wait (a fast retry clears the tail first)");
+        CHECK(!ShouldSynthesizeError(SessionState::Running, false, kScanStopQuiescenceMs), "api-error: no error tail -> no Error");
+        CHECK(!ShouldSynthesizeError(SessionState::Error, true, kScanStopQuiescenceMs), "api-error: already Error -> idempotent (never re-fires)");
+        CHECK(!ShouldSynthesizeError(SessionState::Done, true, kScanStopQuiescenceMs), "api-error: a cleanly-ended (Done) session never flips to Error");
+    }
     // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts
     // stamped (refreshes the decay anchor), EMPTY promptText (no Flight-Plan side effects — the
     // prompt back-fill stays NoteExternalPrompt's job).
@@ -2624,6 +2686,25 @@ static void TestTranscriptScan()
         CHECK(got && got->state == SessionState::Running, "synthesized UserPromptSubmit -> Running (one state machine)");
         CHECK(got && got->lastActivityUnixMs == 777, "synthesized ts stamps lastActivityUnixMs (decay anchor refreshed)");
         CHECK(got && got->queue.empty(), "empty promptText -> no Flight-Plan entry recorded");
+    }
+    // Agentmaster (API-error synth through the registry): the scanner's [recon-error] event (a
+    // Notification carrying apiError) lands SessionState::Error, and the session then COMES OUT of Error
+    // on the first new turn event (a UserPromptSubmit -> Running) — the full produce + recover cycle.
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"err1", SessionState::Running));
+        HookMessage synthErr = Msg(L"err1", HookEvent::Notification);
+        synthErr.apiError = true;
+        synthErr.ts = 1000;
+        reg.OnHookEvent(synthErr);
+        const auto errored = reg.Get(L"err1");
+        CHECK(errored && errored->state == SessionState::Error, "recon-error synth -> Error (through the one state machine)");
+        // First change: the user retries. UserPromptSubmit -> Running (come out of Error on first change).
+        HookMessage retry = Msg(L"err1", HookEvent::UserPromptSubmit);
+        retry.ts = 2000;
+        reg.OnHookEvent(retry);
+        const auto recovered = reg.Get(L"err1");
+        CHECK(recovered && recovered->state == SessionState::Running, "Error leaves on the first new turn event (UserPromptSubmit -> Running)");
     }
     // UpdateQuiet mutates the record (and, by contract, fires no observer — exercised here for the mutation)
     {

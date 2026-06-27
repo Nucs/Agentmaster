@@ -128,6 +128,15 @@ namespace Agentmaster
         // NOW": the ordered machine lands on WaitingForInput unconditionally — it is never
         // stale and never held Running for a type-ahead prompt (already consumed or canceled).
         bool quiescentStop{ false };
+        // Engine-internal (never on the wire): set ONLY by the SessionScanner's API-error
+        // reconciliation. Claude Code recorded a synthetic assistant message with
+        // isApiErrorMessage:true (the turn DIED — "API Error: …", a rate/usage limit, "Prompt is
+        // too long", a 4xx/5xx, a dropped connection) and it is still the transcript tail. Drives
+        // SessionState::Error through the ONE state machine, OVERRIDING the carrier event's normal
+        // mapping (the synthetic line carries a terminal stop_reason that would otherwise read as a
+        // clean turn-complete). The session leaves Error on the next real turn event (a
+        // UserPromptSubmit -> Running), so no wire hook ever needs this flag.
+        bool apiError{ false };
     };
 
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current
@@ -139,6 +148,14 @@ namespace Agentmaster
     // reading `lastMessageIsQuestion`, that Holds the next prompt.
     inline SessionState NextSessionState(SessionState current, const HookMessage& m) noexcept
     {
+        // Agentmaster: an API-error turn-ender (a synthetic isApiErrorMessage transcript line the
+        // SessionScanner surfaced) -> Error, regardless of the carrier event. Engine-internal: no wire
+        // hook ever sets m.apiError, so a real Claude hook can never take this path. The session leaves
+        // Error on the next real turn event (e.g. UserPromptSubmit -> Running, in the switch below).
+        if (m.apiError)
+        {
+            return SessionState::Error;
+        }
         switch (m.event)
         {
         case HookEvent::SessionStart:
@@ -200,6 +217,16 @@ namespace Agentmaster
     {
         OrderedTransition out;
         out.state = NextSessionState(current, m);
+        // Agentmaster: an API-error turn-ender ended the turn ABNORMALLY (no clean Stop). out.state is
+        // already Error (NextSessionState). Settle the type-ahead accounting like a Stop would (a queued
+        // prompt that never produced its turn is now void), but it is NOT a clean turn boundary: leave
+        // turnComplete false so no question-guard fires and Autopilot does NOT advance off an error (the
+        // scheduler's stopOnError backstop handles the autopilot pause on the Error state itself).
+        if (m.apiError)
+        {
+            turns.queuedPrompts = 0;
+            return out;
+        }
         switch (m.event)
         {
         case HookEvent::SessionStart:

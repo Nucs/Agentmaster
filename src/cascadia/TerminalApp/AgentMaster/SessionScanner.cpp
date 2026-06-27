@@ -201,6 +201,11 @@ namespace Agentmaster
                 TranscriptEvent ev;
                 ev.kind = TranscriptEvent::Kind::Assistant;
                 ev.stopReason = msg->StrAt(L"stop_reason");
+                // Agentmaster: the synthetic API-error turn-ender carries a TOP-LEVEL
+                // isApiErrorMessage:true (model "<synthetic>", content = the "API Error: …" text). The
+                // scanner turns this into SessionState::Error (ShouldSynthesizeError) instead of letting
+                // its terminal stop_reason read as a clean turn-complete.
+                ev.apiError = obj.BoolAt(L"isApiErrorMessage");
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
@@ -317,10 +322,12 @@ namespace Agentmaster
         {
             return false; // an old write surfacing late (stalled scan) — not a live turn
         }
-        // Only the two states a missed UserPromptSubmit strands a session in. Running needs no
-        // repair; NeedsApproval / Error / Done are "needs you / ended" states a mere transcript
-        // line must never clear (a real hook still can, through the state machine).
-        return state == SessionState::Idle || state == SessionState::WaitingForInput;
+        // The states a missed UserPromptSubmit strands a session in: Idle / WaitingForInput (Running
+        // needs no repair) PLUS Error — a fresh turn event after an API error is the user retrying, so
+        // this is the PULL half of "come out of Error on the first change" (the push half is a real
+        // UserPromptSubmit -> Running). NeedsApproval / Done stay excluded — "needs you / ended" states a
+        // mere transcript line must never clear (a real hook still can, through the state machine).
+        return state == SessionState::Idle || state == SessionState::WaitingForInput || state == SessionState::Error;
     }
 
     SessionScanner::SessionScanner(std::shared_ptr<SessionRegistry> registry) :
@@ -640,6 +647,47 @@ namespace Agentmaster
             }
         }
 
+        // API-error reconciliation: the turn DIED with an API error — Claude Code wrote a synthetic
+        // assistant message with isApiErrorMessage:true (a rate/usage limit, "Prompt is too long", a
+        // 4xx/5xx, a dropped connection, an overloaded server, …) and it is still the tail. That line
+        // carries a TERMINAL stop_reason, so WITHOUT this the missed-Stop backstop below would read it as
+        // a clean turn-complete and land WaitingForInput — hiding the failure. Synthesize Error INSTEAD,
+        // through the ONE state machine (the engine-internal apiError flag), and check it BEFORE recon-stop
+        // so it takes precedence. The early return keeps recon-stop / recon-idle from also firing this
+        // pass. The session LEAVES Error on the first new turn event: a real UserPromptSubmit (push) lands
+        // Running, and recon-run (ShouldSynthesizeRunning, which now includes Error) is the pull backstop —
+        // both keyed off the parser clearing st.lastWasApiError the instant a later turn event supersedes
+        // the error. The re-Get mirrors the other synths' freshest-state re-check (a real hook wins).
+        if (ShouldSynthesizeError(s.state, st.lastWasApiError, quietForMs))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && fresh->state != SessionState::Error && fresh->state != SessionState::Done)
+            {
+                HookMessage err;
+                err.event = HookEvent::Notification; // neutral carrier; the apiError flag drives the transition
+                err.apiError = true;
+                err.sessionId = s.id;
+                err.cwd = s.workingDir;
+                err.ts = NowMs();
+                _registry->OnHookEvent(err);
+                std::wstring why = st.lastAssistantText; // the "API Error: …" text (mirrored above)
+                for (auto& c : why)
+                {
+                    if (c == L'\r' || c == L'\n')
+                    {
+                        c = L' '; // keep the log a single line
+                    }
+                }
+                if (why.size() > 160)
+                {
+                    why.resize(160);
+                    why += L"…";
+                }
+                AppendStateLog(L"scanner.log", L"[recon-error] " + s.id + L" (" + why + L")\n");
+            }
+            return; // the errored turn owns this pass — don't let recon-stop / recon-idle also fire
+        }
+
         // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last
         // assistant message ended it (a TERMINAL stop_reason — end_turn / stop_sequence /
         // max_tokens / refusal) or the user INTERRUPTED it (Esc -> no clean Stop hook) — the file
@@ -813,6 +861,11 @@ namespace Agentmaster
                 consumedTurnEvent = true;
                 st.lastStopReason = ev.stopReason; // latest assistant line wins (tool_use -> not done)
                 st.interrupted = false; // fresh assistant output: the turn is progressing, not aborted
+                // API-error tail tracking: the synthetic isApiErrorMessage line sets this; ANY other
+                // (non-error) assistant line clears it — so it always reflects whether the NEWEST event
+                // is an unrecovered API error (-> ShouldSynthesizeError). A non-error assistant line
+                // appended after an error is the session resuming, which clears Error.
+                st.lastWasApiError = ev.apiError;
                 // The latest assistant block sets / clears the "blocked on the user" flag: an
                 // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
                 // a text / non-interactive-tool message means the agent moved on (clear it).
@@ -841,6 +894,7 @@ namespace Agentmaster
                 // ANSWERED. (Deliberately NOT a turn event for the run-repair: a bare tool_result
                 // never synthesized Running before — preserve that.)
                 st.pendingInteractiveTool.clear();
+                st.lastWasApiError = false; // activity past any error -> the tail is no longer that error
             }
             else // UserPrompt: a new human turn began, OR a turn-abort interrupt marker
             {
@@ -853,6 +907,7 @@ namespace Agentmaster
                 // ToolResult event above — so this only resets on a genuine human line.)
                 st.lastStopReason.clear();
                 st.pendingInteractiveTool.clear(); // a human line supersedes any pending question
+                st.lastWasApiError = false; // a new human turn supersedes a prior API error -> recovery (Error -> Running)
                 if (IsUserInterruptMarker(ev.text))
                 {
                     // The user hit Esc: NO clean Stop hook fires, and the marker clears the

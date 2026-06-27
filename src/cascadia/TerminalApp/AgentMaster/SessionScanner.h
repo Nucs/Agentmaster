@@ -75,6 +75,11 @@ namespace Agentmaster
         // (≈ the size of the request that produced it). 0 when no usage block. The NEWEST assistant
         // line wins -> SessionInfo.contextTokens -> the board card's context-% adornment.
         int64_t tokens{};
+        // Assistant only: this message is the synthetic API-error turn-ender — Claude Code wrote it
+        // with a top-level isApiErrorMessage:true ("API Error: …" / a rate or usage limit / "Prompt is
+        // too long" / a 4xx-5xx / a dropped connection). The turn DIED here; the scanner synthesizes
+        // SessionState::Error while this remains the transcript tail (ShouldSynthesizeError).
+        bool apiError{ false };
     };
 
     struct TranscriptParse
@@ -129,9 +134,11 @@ namespace Agentmaster
     // line cleared it / an assistant line is mid-turn; a terminal tail is the missed-Stop's
     // territory); the write is FRESH
     // (sinceWriteMs <= kScanRunRepairFreshMs — a stalled scan must not revive an old write); and
-    // the session sits in one of the two states a missed prompt strands it in (Idle /
-    // WaitingForInput — Running needs no repair, and NeedsApproval / Error / Done are "needs you /
-    // ended" states a mere transcript line must never clear).
+    // the session sits in one of the states a missed prompt strands it in: Idle / WaitingForInput
+    // (Running needs no repair) PLUS Error — a fresh turn event after an API error is the user
+    // retrying, so it is the pull half of "come out of Error on the first change" (the push half is a
+    // real UserPromptSubmit -> Running). NeedsApproval / Done are still excluded — "needs you / ended"
+    // states a mere transcript line must never clear (a real hook still can, through the state machine).
     bool ShouldSynthesizeRunning(SessionState state, bool consumedTurnEvent, bool primedBeforePass, std::wstring_view lastStopReason, int64_t sinceWriteMs) noexcept;
 
     // PURE: is this user-message text the Claude Code marker for a turn the user ABORTED (Esc)?
@@ -175,6 +182,34 @@ namespace Agentmaster
             return false; // not quiet long enough — could be a mid-turn pause
         }
         return interrupted || IsTerminalStopReason(lastStopReason);
+    }
+
+    // PURE + total: should the reconciler synthesize SessionState::Error? Claude Code records an API
+    // failure (a rate/usage limit, "Prompt is too long", a 4xx/5xx, a dropped connection, an
+    // overloaded server, …) as a SYNTHETIC assistant message with a top-level isApiErrorMessage:true:
+    // the turn DIED. It fires no clean Stop, and its TERMINAL stop_reason would otherwise make the
+    // missed-Stop backstop (ShouldSynthesizeStop) read it as a normal turn-complete -> WaitingForInput,
+    // HIDING the failure. This fires INSTEAD — and the caller checks it BEFORE recon-stop so it wins.
+    // `lastWasApiError` is the tail predicate: the parser sets it on the error line and CLEARS it the
+    // instant any later turn event supersedes the error, so a fast retry (whose new prompt line clears
+    // it) never reaches Error. Fires from any live non-Error state — Running is the usual one;
+    // WaitingForInput/Idle defensively (the real Stop hook for the errored turn, or an earlier pass,
+    // may already have moved it there) — while Done is left alone and Error is idempotent (never
+    // re-fires). Requires the SAME quiescence as the missed-Stop (a settle window). The session LEAVES
+    // Error on the first new turn event: a real UserPromptSubmit (push) lands Running, and
+    // ShouldSynthesizeRunning (which now includes Error among its recoverable states) is the pull
+    // backstop — together the "come out of Error on the first change" edge.
+    inline bool ShouldSynthesizeError(SessionState state, bool lastWasApiError, int64_t quietForMs) noexcept
+    {
+        if (!lastWasApiError)
+        {
+            return false; // the tail's latest event is not an (unrecovered) API error
+        }
+        if (state == SessionState::Error || state == SessionState::Done)
+        {
+            return false; // already Error (idempotent) / a cleanly-ended session never flips to Error
+        }
+        return quietForMs >= kScanStopQuiescenceMs;
     }
 
     // PURE + total: should the reconciler synthesize a "needs you" state (-> NeedsApproval) because
@@ -467,6 +502,13 @@ namespace Agentmaster
             // the missed-Stop backstop can't read either from stop_reason alone (HookEvents.h notes).
             std::wstring pendingInteractiveTool; // an UNANSWERED interactive tool_use (AskUserQuestion) is the latest assistant block; "" once answered / moved on
             bool interrupted{ false }; // the latest user line is a turn-abort marker (Esc) — treat as a turn-ender
+            // The latest consumed turn event was the synthetic API-error message (isApiErrorMessage),
+            // i.e. the transcript tail is CURRENTLY an UNRECOVERED API error. Set by an apiError
+            // assistant line; CLEARED by any later turn event (a new user prompt, a non-error assistant
+            // line, or a tool_result) — so it tracks "is the conversation's NEWEST event an error?".
+            // Drives ShouldSynthesizeError, and its clearing is the "come out of Error on first change"
+            // edge (a fresh prompt then re-derives Running via the push hook or ShouldSynthesizeRunning).
+            bool lastWasApiError{ false };
             int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
         };
 
