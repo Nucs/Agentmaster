@@ -955,7 +955,13 @@ namespace winrt::TerminalApp::implementation
         _stack.Children().Append(_promptLine); // row 3: the next-queued-prompt preview
 
         _root = Border{};
-        _root.Background(Fill(0xCC, 0x20, 0x20, 0x20)); // dark translucent so it reads on any terminal
+        // Dark, but FULLY OPAQUE: the badge's see-through-ness is owned SOLELY by _root.Opacity (the
+        // GLOBAL "Overlay opacity" setting — tabOverlayRestOpacity/Hover, applied via SetOverlayOpacities).
+        // A translucent background brush here (was 0xCC) would multiply with that Opacity, so the setting
+        // could never reach a truly opaque badge — at "100%" the badge still showed the terminal through
+        // its 80%-alpha fill. Opaque background => perceived opacity == the setting (100% = solid; the
+        // dark #202020 still gives text contrast, and the default rest 0.50 keeps it translucent by default).
+        _root.Background(Fill(0xFF, 0x20, 0x20, 0x20));
         _root.BorderBrush(Fill(0x40, 0xFF, 0xFF, 0xFF));
         _root.BorderThickness(ThicknessHelper::FromUniformLength(1));
         _root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
@@ -2041,7 +2047,10 @@ namespace winrt::TerminalApp::implementation
         layout.Children().Append(cornerGrip); // last == on top, so the corner wins over the edge grips
 
         _summaryRoot = Border{};
-        _summaryRoot.Background(Fill(0xE6, 0x20, 0x20, 0x20)); // near-opaque dark, matching the badge
+        // FULLY OPAQUE, matching the badge (_root) — its see-through-ness is owned SOLELY by
+        // _summaryRoot.Opacity (the same GLOBAL "Overlay opacity" setting). A translucent fill here
+        // (was 0xE6) would multiply with that Opacity, so "100%" could never be truly opaque.
+        _summaryRoot.Background(Fill(0xFF, 0x20, 0x20, 0x20));
         _summaryRoot.BorderBrush(Fill(0x40, 0xFF, 0xFF, 0xFF));
         _summaryRoot.BorderThickness(ThicknessHelper::FromUniformLength(1));
         _summaryRoot.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
