@@ -2320,10 +2320,20 @@ namespace winrt::TerminalApp::implementation
             g.ColumnDefinitions().Append(c1);
 
             Button jb{};
-            jb.Background(Fill(0, 0, 0, 0));
+            jb.Background(Fill(0, 0, 0, 0)); // a TRANSPARENT brush (not null) — the whole padding box is hit-testable
             jb.BorderThickness(ThicknessHelper::FromUniformLength(0));
-            jb.Padding(ThicknessHelper::FromLengths(0, 0, 4, 0));
-            jb.Margin(ThicknessHelper::FromLengths(0, 0, 0, 0));
+            // Agentmaster: the bare ~10px ▸ glyph was a tiny click target. Grow the (invisible) hit area
+            // into a SQUARE centered on the glyph via uniform padding, then absorb that growth with
+            // matching NEGATIVE margins so the LAYOUT footprint is byte-identical to before — the icon
+            // stays at column-0 left and the message text's start (column-0 width == 0+10+4 = 14px) does
+            // not move. Hit square = glyph + 2*kJumpHitPad; the box stays centered on the glyph because
+            // the padding is uniform (left==right==top==bottom). margin = (-pad, -pad, originalGap-pad, -pad)
+            // where originalGap (4px) was the old right padding (the icon->text gap), so column-0 width
+            // = -pad + (pad+10+pad) + (4-pad) = 14, unchanged; icon X = column0Left + (-pad) + pad = unchanged.
+            constexpr double kJumpHitPad = 8.0; // -> a 26px square (10px glyph + 8px each side)
+            constexpr double kJumpTextGap = 4.0; // the original icon->text gap (was the button's right padding)
+            jb.Padding(ThicknessHelper::FromLengths(kJumpHitPad, kJumpHitPad, kJumpHitPad, kJumpHitPad));
+            jb.Margin(ThicknessHelper::FromLengths(-kJumpHitPad, -kJumpHitPad, kJumpTextGap - kJumpHitPad, -kJumpHitPad));
             jb.VerticalAlignment(VerticalAlignment::Top);
             jb.Opacity(0.7);
             FontIcon ji{};
