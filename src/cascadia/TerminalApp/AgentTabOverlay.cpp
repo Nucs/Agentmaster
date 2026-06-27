@@ -2320,21 +2320,21 @@ namespace winrt::TerminalApp::implementation
             g.ColumnDefinitions().Append(c1);
 
             Button jb{};
-            jb.Background(Fill(0, 0, 0, 0)); // a TRANSPARENT brush (not null) — the whole padding box is hit-testable
+            jb.Background(Fill(0, 0, 0, 0)); // a TRANSPARENT brush (not null) — the whole content box is hit-testable
             jb.BorderThickness(ThicknessHelper::FromUniformLength(0));
-            // Agentmaster: the bare ~10px ▸ glyph was a tiny click target. Grow the (invisible) hit area
-            // into a SQUARE centered on the glyph via uniform padding, then absorb that growth with
-            // matching NEGATIVE margins so the LAYOUT footprint is byte-identical to before — the icon
-            // stays at column-0 left and the message text's start (column-0 width == 0+10+4 = 14px) does
-            // not move. Hit square = glyph + 2*kJumpHitPad; the box stays centered on the glyph because
-            // the padding is uniform (left==right==top==bottom). margin = (-pad, -pad, originalGap-pad, -pad)
-            // where originalGap (4px) was the old right padding (the icon->text gap), so column-0 width
-            // = -pad + (pad+10+pad) + (4-pad) = 14, unchanged; icon X = column0Left + (-pad) + pad = unchanged.
-            constexpr double kJumpHitPad = 8.0; // -> a 26px square (10px glyph + 8px each side)
-            constexpr double kJumpTextGap = 4.0; // the original icon->text gap (was the button's right padding)
-            jb.Padding(ThicknessHelper::FromLengths(kJumpHitPad, kJumpHitPad, kJumpHitPad, kJumpHitPad));
-            jb.Margin(ThicknessHelper::FromLengths(-kJumpHitPad, -kJumpHitPad, kJumpTextGap - kJumpHitPad, -kJumpHitPad));
-            jb.VerticalAlignment(VerticalAlignment::Top);
+            // Agentmaster: the bare ~10px ▸ glyph was a tiny click target. Enlarge the (invisible) hit
+            // area to the FULL HEIGHT OF ITS OWN ROW so the whole left gutter of the prompt is clickable —
+            // but it MUST be bounded BY the row. VerticalAlignment::Stretch fills the grid cell (whose
+            // height is driven by the message text) and CANNOT spill above/below it; an earlier attempt
+            // used a fixed "square" + negative top/bottom margins, which overflowed the row, so on short
+            // one-line prompts (tiny rows) adjacent buttons OVERLAPPED. Keep the glyph pinned to the row
+            // TOP (aligned with the first text line) via VerticalContentAlignment::Top, and keep the
+            // original horizontal layout (padding 0,0,4,0 => icon at column-0 left, 4px gap to the text,
+            // column-0 width 0+10+4 = 14) so NEITHER the icon position NOR the message-text start moves.
+            jb.Padding(ThicknessHelper::FromLengths(0, 0, 4, 0));
+            jb.Margin(ThicknessHelper::FromLengths(0, 0, 0, 0));
+            jb.VerticalAlignment(VerticalAlignment::Stretch); // fill THIS row's height, never overflow into neighbors
+            jb.VerticalContentAlignment(VerticalAlignment::Top); // glyph stays at the row top (its original Y)
             jb.Opacity(0.7);
             FontIcon ji{};
             ji.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // a text font carrying U+25B8 (the icon font would tofu it)
