@@ -2512,6 +2512,22 @@ static void TestTranscriptScan()
         const auto r = ParseTranscriptDelta(line);
         CHECK(!r.events.empty() && r.events[0].apiError && r.events[0].apiErrorStatus == 0, "client-side apiError -> status 0 (no HTTP code)");
     }
+    // Agentmaster (active-leaf tracking): a {"type":"last-prompt","leafUuid":…} marker -> a LeafMarker
+    // event carrying the leafUuid (the active branch head). NOT a turn event — it never affects the
+    // missed-Stop / run-repair logic; it lets the scanner tell that an API error rewound off the leaf.
+    {
+        const std::wstring line = LR"j({"type":"last-prompt","lastPrompt":"audit the diff","leafUuid":"cdb0b74e-d0ae-47b6-a060-fa389e4675e7"})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::LeafMarker, "last-prompt -> 1 LeafMarker event");
+        CHECK(!r.events.empty() && r.events[0].text == L"cdb0b74e-d0ae-47b6-a060-fa389e4675e7", "LeafMarker carries the leafUuid in text");
+    }
+    // A last-prompt with NO leafUuid (the trust-dialog prompt) carries no leaf -> emit nothing (so it
+    // never clobbers the tracked active leaf to empty).
+    {
+        const std::wstring line = LR"j({"type":"last-prompt","lastPrompt":"Accessing workspace: trust?","sessionId":"x"})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "last-prompt without leafUuid -> no LeafMarker event (never clobbers the leaf)");
+    }
     // assistant tool_use turn: stop_reason tool_use, no text (turn NOT complete -> no synth Stop)
     {
         const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}})j" L"\n";
@@ -2676,9 +2692,52 @@ static void TestTranscriptScan()
         CHECK(ShouldSynthesizeError(SessionState::Idle, true, kScanStopQuiescenceMs), "api-error: Idle + error tail -> Error (defensive)");
         CHECK(ShouldSynthesizeError(SessionState::NeedsApproval, true, kScanStopQuiescenceMs), "api-error: NeedsApproval + error tail -> Error");
         CHECK(!ShouldSynthesizeError(SessionState::Running, true, kScanStopQuiescenceMs - 1), "api-error: not quiet long enough -> wait (a fast retry clears the tail first)");
-        CHECK(!ShouldSynthesizeError(SessionState::Running, false, kScanStopQuiescenceMs), "api-error: no error tail -> no Error");
+        CHECK(!ShouldSynthesizeError(SessionState::Running, false, kScanStopQuiescenceMs), "api-error: not the active leaf -> no Error");
         CHECK(!ShouldSynthesizeError(SessionState::Error, true, kScanStopQuiescenceMs), "api-error: already Error -> idempotent (never re-fires)");
         CHECK(!ShouldSynthesizeError(SessionState::Done, true, kScanStopQuiescenceMs), "api-error: a cleanly-ended (Done) session never flips to Error");
+    }
+    // Agentmaster (active-leaf distinction — ApiErrorIsActiveLeaf): the error is "the last message" only
+    // when it is positionally newest (lastWasApiError) AND the active leaf has not moved since it
+    // appended (activeLeafUuid == errorEpochLeaf). The user's exact ask: a double-ESC REWIND past the
+    // error repoints the leaf (a last-prompt naming a different uuid) with NO turn event, so the error is
+    // off the active branch even though it stays physically last.
+    {
+        // Normal error tail: leaf unchanged since the error -> the active leaf.
+        CHECK(ApiErrorIsActiveLeaf(true, L"p", L"p"), "leaf: error is the active leaf (leaf unmoved since the error)");
+        // Rewind past the error: a later last-prompt repointed the leaf -> NOT the active leaf.
+        CHECK(!ApiErrorIsActiveLeaf(true, L"p0", L"p"), "leaf: rewind moved the leaf off the error -> not the active leaf");
+        // No turn-positional error at all -> never the active leaf (a later turn event cleared it).
+        CHECK(!ApiErrorIsActiveLeaf(false, L"p", L"p"), "leaf: positional flag cleared (a turn event) -> not the active leaf");
+        // No last-prompt marker ever seen (older/subagent transcript): both "" -> positional governs.
+        CHECK(ApiErrorIsActiveLeaf(true, L"", L""), "leaf: no marker seen -> falls back to positional (both empty)");
+        // The full ShouldSynthesizeError gate now keys on the leaf-refined bool: a rewound error never
+        // enters Error even when positionally newest + quiet.
+        CHECK(!ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"p0", L"p"), kScanStopQuiescenceMs),
+              "leaf: a rewound error (positionally newest but off-leaf) does NOT enter Error");
+        CHECK(ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"p", L"p"), kScanStopQuiescenceMs),
+              "leaf: an on-leaf error DOES enter Error");
+    }
+    // Agentmaster (Error RELEASE on a leaf move — ShouldReleaseErrorOnLeafMove): a session stuck in Error
+    // leaves when the leaf rewinds off the error WITHOUT a turn event (the pure rewind-and-sit). Distinct
+    // from recon-run / push (which own the user-RETRIED case, where lastWasApiError is already cleared).
+    {
+        // The rewind case: in Error, error still positionally last, but the leaf moved + quiet -> release.
+        CHECK(ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p0", L"p", kScanStopQuiescenceMs),
+              "release: Error + rewind (leaf moved) + quiet -> release to Waiting");
+        // Not quiet yet (the rewind just wrote the marker) -> wait for the settle window.
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p0", L"p", kScanStopQuiescenceMs - 1),
+              "release: not quiet long enough -> wait");
+        // Leaf has NOT moved (error still the active leaf) -> stay Error.
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p", L"p", kScanStopQuiescenceMs),
+              "release: error still the active leaf -> stay Error");
+        // Positional flag cleared (a turn event) -> recon-run / push owns recovery, not this path.
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, false, L"p0", L"p", kScanStopQuiescenceMs),
+              "release: positional cleared (turn event) -> recon-run/push owns it, not the leaf release");
+        // Only from Error: a non-Error state has nothing to release here.
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Running, true, L"p0", L"p", kScanStopQuiescenceMs),
+              "release: only from Error (a Running session is not stuck)");
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::WaitingForInput, true, L"p0", L"p", kScanStopQuiescenceMs),
+              "release: already left Error (Waiting) -> no-op (no re-fire)");
     }
     // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts
     // stamped (refreshes the decay anchor), EMPTY promptText (no Flight-Plan side effects — the
@@ -4314,9 +4373,9 @@ static void TestTranscriptStore()
             "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n"
             "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"cwd\":\"K:\\\\source\\\\AmStoreA\",\"gitBranch\":\"dev\",\"message\":{\"content\":\"Caveat: injected preamble\"}}\n"
             "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:05Z\",\"cwd\":\"K:\\\\source\\\\AmStoreA\",\"message\":{\"content\":\"build the thing\"}}\n"
-            "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:09Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"on it\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"build\"}}]}}\n"
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:09Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"on it\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"build\"}}],\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":10,\"cache_read_input_tokens\":500,\"output_tokens\":10}}}\n"
             "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:20Z\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n"
-            "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:30Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stop_reason\":\"end_turn\"}}\n"
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:30Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":2000,\"output_tokens\":30}}}\n"
             "{\"type\":\"system\",\"subtype\":\"away_summary\",\"timestamp\":\"2026-06-01T10:30:00Z\",\"content\":\"away note\"}\n"
             "{\"type\":\"custom-title\",\"customTitle\":\"store test A\"}\n"
             "{\"type\":\"permission-mode\",\"permissionMode\":\"bypassPermissions\"}\n";
@@ -4340,6 +4399,7 @@ static void TestTranscriptStore()
         CHECK(st.userPrompts == 1, "stats: ONE real prompt (Caveat + tool_result filtered)");
         CHECK(st.firstUserPrompt == L"build the thing", "stats: first REAL prompt captured");
         CHECK(st.assistantLines == 2 && st.toolUses == 1, "stats: assistant lines + tool uses counted");
+        CHECK(st.contextTokens == 2150, "stats: contextTokens = NEWEST assistant usage (100+20+2000+30), not the first (570)");
         CHECK(st.customTitle == L"store test A", "stats: custom title captured");
         CHECK(st.firstTimestampMs == 1780308000000LL, "stats: first timestamp (2026-06-01T10:00:00Z)");
         CHECK(st.lastTimestampMs == 1780308030000LL, "stats: last activity is the LAST MESSAGE (10:00:30), NOT the away_summary");
@@ -4365,6 +4425,7 @@ static void TestTranscriptStore()
             MakeJsonl(dirA + L"\\" + sidA + L".jsonl", "{\"type\":\"user\",\"timestamp\":\"2026-06-02T00:00:00Z\",\"message\":{\"content\":\"fresh\"}}\n", 9500, 9500);
             CHECK(AccumulateTranscriptStats(dirA + L"\\" + sidA + L".jsonl", st), "stats: shrink-rebuild ok");
             CHECK(st.userPrompts == 1 && st.firstUserPrompt == L"fresh", "stats: shrink resets and rebuilds from 0");
+            CHECK(st.contextTokens == 0, "stats: shrink-rebuild clears contextTokens (replaced file has no assistant usage)");
         }
         TranscriptStats gone;
         CHECK(!AccumulateTranscriptStats(dirA + L"\\missing.jsonl", gone) && !gone.found, "stats: vanished file -> found=false");
@@ -5027,6 +5088,43 @@ static void TestSessionSearch()
             ref.mtimeMs = 3000; // changed key
             auto e3 = LoadOrRefreshSessionIndexIn(idxDir, ref);
             CHECK(e3.valid && e3.stats.userPrompts == 2, "index: stale key resumes the accumulate incrementally");
+        }
+
+        // contextTokens: parsed from message.usage (newest assistant wins), round-trips the sidecar,
+        // and an OLD sidecar (written before the ctxTokens key existed) is one-time-backfilled on load.
+        {
+            const std::wstring sidC = L"ffffffff-ffff-4fff-8fff-ffffffffffff";
+            const std::string sessC =
+                "{\"type\":\"user\",\"timestamp\":\"2026-06-01T10:00:00Z\",\"message\":{\"content\":\"go\"}}\n"
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:05Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a\"}],\"usage\":{\"input_tokens\":50,\"cache_creation_input_tokens\":10,\"cache_read_input_tokens\":500,\"output_tokens\":10}}}\n"
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-06-01T10:00:20Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"b\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":2000,\"output_tokens\":30}}}\n";
+            const std::wstring pathC = projDir + L"\\" + sidC + L".jsonl";
+            MakeJsonl(pathC, sessC, 5000, 5000);
+            TranscriptRef rc;
+            rc.sessionId = sidC;
+            rc.path = pathC;
+            ::GetFileAttributesExW(pathC.c_str(), GetFileExInfoStandard, &fad);
+            rc.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            rc.mtimeMs = 5000;
+            rc.birthMs = 5000;
+            auto ecx1 = LoadOrRefreshSessionIndexIn(idxDir, rc);
+            CHECK(ecx1.valid && ecx1.stats.contextTokens == 2150, "index: contextTokens = newest assistant usage (2150), persisted to the sidecar");
+            auto ecx2 = LoadOrRefreshSessionIndexIn(idxDir, rc);
+            CHECK(ecx2.valid && ecx2.stats.contextTokens == 2150, "index: contextTokens round-trips a (size,mtime) cache hit");
+
+            // Overwrite the sidecar with an OLD-format one (no ctxTokens key) but a matching
+            // (size,mtime) cache key + assistantLines>0 -> the next load BACKFILLS from the transcript
+            // instead of trusting the hit with 0 context.
+            auto o = json::Value::MkObj();
+            o.Set(L"sid", json::Value::MkStr(sidC));
+            o.Set(L"size", json::Value::MkNum(static_cast<double>(rc.sizeBytes)));
+            o.Set(L"mtime", json::Value::MkNum(5000.0));
+            o.Set(L"parsedBytes", json::Value::MkNum(static_cast<double>(sessC.size())));
+            o.Set(L"assistantLines", json::Value::MkNum(2));
+            const std::wstring dumped = json::Dump(o); // ASCII content -> narrows to valid UTF-8
+            MakeJsonl(idxDir + L"\\" + sidC + L".json", std::string(dumped.begin(), dumped.end()), 5000, 5000);
+            auto ecx3 = LoadOrRefreshSessionIndexIn(idxDir, rc);
+            CHECK(ecx3.valid && ecx3.stats.contextTokens == 2150, "index: an old (no-ctxTokens) sidecar is backfilled from the transcript on load");
         }
 
         // pathsAccessed flow into the index + the file/dir scopes end-to-end.

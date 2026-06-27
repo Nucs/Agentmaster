@@ -295,6 +295,23 @@ namespace Agentmaster
                     out.recap = std::move(r);
                 }
             }
+            else if (type == L"last-prompt")
+            {
+                // Agentmaster: the ACTIVE-LEAF pointer. Claude writes {"type":"last-prompt","leafUuid":…}
+                // naming the conversation's current branch head whenever the active leaf moves — most
+                // importantly a double-ESC REWIND repoints it BACKWARD. Emitted as an ordered (non-turn)
+                // event so the scanner sees it relative to an API-error line and can tell the error is no
+                // longer the tail (the leaf moved off it) -> leave Error (ShouldReleaseErrorOnLeafMove).
+                // A last-prompt with no leafUuid (e.g. the trust-dialog prompt) carries no leaf — skip it
+                // so it never clobbers the tracked leaf to empty.
+                if (std::wstring leaf = obj.StrAt(L"leafUuid"); !leaf.empty())
+                {
+                    TranscriptEvent ev;
+                    ev.kind = TranscriptEvent::Kind::LeafMarker;
+                    ev.text = std::move(leaf);
+                    out.events.push_back(std::move(ev));
+                }
+            }
         }
         return out;
     }
@@ -659,7 +676,8 @@ namespace Agentmaster
         // Running, and recon-run (ShouldSynthesizeRunning, which now includes Error) is the pull backstop —
         // both keyed off the parser clearing st.lastWasApiError the instant a later turn event supersedes
         // the error. The re-Get mirrors the other synths' freshest-state re-check (a real hook wins).
-        if (ShouldSynthesizeError(s.state, st.lastWasApiError, quietForMs))
+        const bool errorIsActiveLeaf = ApiErrorIsActiveLeaf(st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf);
+        if (ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state != SessionState::Error && fresh->state != SessionState::Done)
@@ -691,6 +709,30 @@ namespace Agentmaster
                 AppendStateLog(L"scanner.log", L"[recon-error] " + s.id + L" (" + why + L")\n");
             }
             return; // the errored turn owns this pass — don't let recon-stop / recon-idle also fire
+        }
+
+        // Error RELEASE on a leaf move (double-ESC REWIND past the error): the error is still the
+        // physical tail (lastWasApiError true), but a later last-prompt repointed the active leaf OFF it
+        // (activeLeafUuid != errorEpochLeaf) — the user rewound and is back at an earlier prompt, so the
+        // error is no longer "the last message". No turn event fired (recon-run / push own the user-RETRIED
+        // case, which clears lastWasApiError -> Running), so release HERE to WaitingForInput. Quiescence-
+        // gated like recon-stop; early-returns so recon-stop/idle/block don't also fire this pass.
+        if (ShouldReleaseErrorOnLeafMove(s.state, st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, quietForMs))
+        {
+            const auto fresh = _registry->Get(s.id);
+            if (fresh && fresh->state == SessionState::Error)
+            {
+                HookMessage stop;
+                stop.event = HookEvent::Stop;
+                stop.sessionId = s.id;
+                stop.cwd = s.workingDir;
+                stop.ts = NowMs();
+                stop.quiescentStop = true; // settled: the ordered machine lands WaitingForInput unconditionally
+                stop.lastMessageIsQuestion = false; // the leaf moved off the error; there is no question to surface
+                _registry->OnHookEvent(stop);
+                AppendStateLog(L"scanner.log", L"[recon-error-release] " + s.id + L" (rewound past error -> Waiting)\n");
+            }
+            return; // handled this pass — don't let recon-stop / recon-idle also fire
         }
 
         // Missed/forced-Stop reconciliation: the turn is OVER — either the transcript's last
@@ -877,6 +919,12 @@ namespace Agentmaster
                     // mirror below skips an empty-text line) so the card never shows a stale message.
                     st.lastApiErrorMessage = ev.text;
                     st.lastApiErrorStatus = ev.apiErrorStatus;
+                    // Snapshot the ACTIVE LEAF as of the error (the last-prompt leaf seen up to this
+                    // point). The error is "the last message" only while the leaf stays here; a later
+                    // last-prompt naming a DIFFERENT leaf is a double-ESC rewind PAST the error, which
+                    // ApiErrorIsActiveLeaf / ShouldReleaseErrorOnLeafMove use to leave Error. "" when no
+                    // marker has been seen yet (positional lastWasApiError then governs).
+                    st.errorEpochLeaf = st.activeLeafUuid;
                 }
                 // The latest assistant block sets / clears the "blocked on the user" flag: an
                 // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
@@ -907,6 +955,14 @@ namespace Agentmaster
                 // never synthesized Running before — preserve that.)
                 st.pendingInteractiveTool.clear();
                 st.lastWasApiError = false; // activity past any error -> the tail is no longer that error
+            }
+            else if (ev.kind == TranscriptEvent::Kind::LeafMarker)
+            {
+                // The active branch head moved (a new prompt's anchor, or a double-ESC REWIND). NOT a
+                // turn event: it never sets consumedTurnEvent and never clears lastWasApiError (the error
+                // stays physically last). If this moves the leaf OFF the error epoch while the error is
+                // still positionally last, the reconciler releases Error (ShouldReleaseErrorOnLeafMove).
+                st.activeLeafUuid = ev.text;
             }
             else // UserPrompt: a new human turn began, OR a turn-abort interrupt marker
             {
