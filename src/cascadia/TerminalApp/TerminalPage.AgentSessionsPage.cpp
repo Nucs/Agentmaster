@@ -1827,6 +1827,11 @@ namespace winrt::TerminalApp::implementation
             // (Computed before the title/editor branch — the Directory cell below reuses this brush.)
             const uint8_t ulAlpha = live ? 0xFF : 0x99;
             auto underline = dirColor ? SessBrush(ulAlpha, dirColor->R, dirColor->G, dirColor->B) : SessBrush(ulAlpha, 0x60, 0x60, 0x60);
+            // The title cell, hoisted so the row's PointerPressed can tell whether a click landed over
+            // the TITLE column — the ONLY place the slow-double-click rename may start. Stays null on the
+            // row currently being renamed (its title slot is the editor box), but that row's handler
+            // returns early before this is used.
+            FrameworkElement titleCellEl{ nullptr };
             if (!_sessRenamingId.empty() && _sessRenamingId == r.id)
             {
                 // In-place TITLE editor (the Manager's Explorer-tree rename idiom; a ContentDialog is
@@ -1879,6 +1884,7 @@ namespace winrt::TerminalApp::implementation
                 titleWrap.IsHitTestVisible(false); // clickthrough -> the row Border is the one click target + tooltip
                 Grid::SetColumn(titleWrap, 2);
                 g.Children().Append(titleWrap);
+                titleCellEl = titleWrap; // the title column's bounds drive the rename gate (left edge..dir cell's left edge)
             }
 
             auto dir = SessText(winrt::hstring{ r.dir }, 11, false, 0.6);
@@ -2003,7 +2009,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 SessSetTip(rowB, winrt::hstring{ rowTip });
             }
-            rowB.PointerPressed([this](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
+            rowB.PointerPressed([this, titleCellEl, dirWrap](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
                 const auto b = s.try_as<Border>();
                 if (!b)
                 {
@@ -2022,9 +2028,27 @@ namespace winrt::TerminalApp::implementation
                 // _sessionsSelectedId synchronously here is correct for the slow case (the prior
                 // click's deferred select has long since run); a fast double-click disarms via
                 // DoubleTapped below regardless. Any other click disarms a stale pending arm first.
+                //
+                // Gate the arm tightly so an edit can ONLY begin from a LEFT click ON THE TITLE COLUMN:
+                //  - leftPress: never a right-click (that opens the context menu — the reported bug where
+                //    right-clicking the Directory column started a title edit) nor a middle-click.
+                //  - inTitleColumn: the press X is within the title cell's column span (its own left edge
+                //    .. the Directory cell's left edge), so clicking any OTHER column never starts an edit.
+                // Selection (the deferred block below) still runs for every click + button; only the arm
+                // is restricted. The right-click context-menu's "Edit Title" remains the keyboard-free path.
+                const auto pp = e.GetCurrentPoint(b);
+                const bool leftPress = pp.Properties().IsLeftButtonPressed();
+                bool inTitleColumn = false;
+                if (leftPress && titleCellEl && dirWrap)
+                {
+                    const double px = pp.Position().X;
+                    const double titleLeft = titleCellEl.TransformToVisual(b).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 }).X;
+                    const double dirLeft = dirWrap.TransformToVisual(b).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 }).X;
+                    inTitleColumn = (px >= titleLeft && px < dirLeft);
+                }
                 const bool wasSelected = (_sessionsSelectedId == id);
                 _DisarmSessionsRenameTimer();
-                if (wasSelected && _sessRenamingId.empty())
+                if (leftPress && inTitleColumn && wasSelected && _sessRenamingId.empty())
                 {
                     _ArmSessionsRenameTimer(id);
                 }
