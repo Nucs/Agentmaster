@@ -247,6 +247,49 @@ namespace
         CATCH_LOG();
     }
 
+    // Collect the user's live text selection across the summary panel (title / times line / body runs are
+    // IsTextSelectionEnabled). An unselected / non-selectable TextBlock returns an empty SelectedText, so a
+    // blind recursive collect picks up exactly what's selected; XAML selection can't span TextBlocks, but
+    // we newline-join defensively. Recurse Panels / Borders / ContentControls so the nested layout works.
+    void SummaryCollectSelectedText(const winrt::Windows::UI::Xaml::UIElement& el, std::wstring& out)
+    {
+        if (!el)
+        {
+            return;
+        }
+        if (const auto tb = el.try_as<TextBlock>())
+        {
+            const auto sel = tb.SelectedText();
+            if (!sel.empty())
+            {
+                if (!out.empty())
+                {
+                    out += L"\n";
+                }
+                out += std::wstring{ sel };
+            }
+            return;
+        }
+        if (const auto panel = el.try_as<Panel>())
+        {
+            for (const auto& child : panel.Children())
+            {
+                SummaryCollectSelectedText(child, out);
+            }
+            return;
+        }
+        if (const auto border = el.try_as<Border>())
+        {
+            SummaryCollectSelectedText(border.Child(), out);
+            return;
+        }
+        if (const auto cc = el.try_as<ContentControl>())
+        {
+            SummaryCollectSelectedText(cc.Content().try_as<winrt::Windows::UI::Xaml::UIElement>(), out);
+            return;
+        }
+    }
+
     // Open a directory via explorer.exe OFF the UI thread (ShellExecuteExW may block; SEE_MASK_NOASYNC
     // makes it safe off the main thread — the AppActionHandlers idiom). The user asked specifically for
     // explorer.exe, so launch it with the (quoted) path as its argument. Best-effort.
@@ -1970,6 +2013,27 @@ namespace winrt::TerminalApp::implementation
         // right-click menu is overridden, not SelectionFlyout).
         _summaryContextMenu = MenuFlyout{};
         {
+            // Copy Selected Text — shown ONLY when text is selected in the panel. This context menu
+            // OVERRIDES the built-in selection "Copy" on the panel's selectable text blocks, so without
+            // this item a right-click on a selection would offer no copy at all (only Ctrl+C worked). The
+            // live selection isn't known when the menu is built, so the item + its separator are gated in
+            // Opening (below), which also CAPTURES the text so the click copies exactly what was shown.
+            auto pendingSel = std::make_shared<std::wstring>();
+            MenuFlyoutItem copySelItem{};
+            copySelItem.Text(L"Copy Selected Text");
+            copySelItem.Visibility(Visibility::Collapsed);
+            AgentSetTip(copySelItem, winrt::hstring{ L"Copy the text you selected in this panel." });
+            copySelItem.Click([pendingSel](const IInspectable&, const RoutedEventArgs&) {
+                if (!pendingSel->empty())
+                {
+                    CopyTextToClipboard(*pendingSel);
+                }
+            });
+            MenuFlyoutSeparator copySelSep{};
+            copySelSep.Visibility(Visibility::Collapsed);
+            _summaryContextMenu.Items().Append(copySelItem);
+            _summaryContextMenu.Items().Append(copySelSep);
+
             MenuFlyoutItem copyItem{};
             copyItem.Text(L"Copy Summary");
             AgentSetTip(copyItem, winrt::hstring{
@@ -1981,6 +2045,48 @@ namespace winrt::TerminalApp::implementation
                 }
             });
             _summaryContextMenu.Items().Append(copyItem);
+
+            // View toggles — the SAME flips as the times-bar … / ↵ buttons, offered here for quick
+            // right-click access. The Enable/Disable label reflects the live mirror flags (set in Opening,
+            // seeded at build); _ToggleSummaryTruncate/Wrap invoke the page handler (global flip + broadcast).
+            _summaryContextMenu.Items().Append(MenuFlyoutSeparator{});
+            MenuFlyoutItem truncItem{};
+            truncItem.Text(_summaryTruncate ? L"Disable Truncate Long Messages" : L"Enable Truncate Long Messages");
+            AgentSetTip(truncItem, winrt::hstring{ L"Truncate long messages: cap each (6 lines when wrapping, else 500 chars), or show every message in full." });
+            truncItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_ToggleSummaryTruncate();
+                }
+            });
+            _summaryContextMenu.Items().Append(truncItem);
+            MenuFlyoutItem wrapItem{};
+            wrapItem.Text(_summaryWrapNewlines ? L"Disable Wrap Messages" : L"Enable Wrap Messages");
+            AgentSetTip(wrapItem, winrt::hstring{ L"Wrap messages: keep each message's real line breaks (multi-line) instead of collapsing them to a literal \\n." });
+            wrapItem.Click([weak](const IInspectable&, const RoutedEventArgs&) {
+                if (auto self = weak.get())
+                {
+                    self->_ToggleSummaryWrap();
+                }
+            });
+            _summaryContextMenu.Items().Append(wrapItem);
+
+            // Refresh the dynamic bits each time the menu opens: gate + CAPTURE the live selection, and set
+            // the toggle Enable/Disable labels from the live mirror flags. (FlyoutBase::Opening fires before
+            // the menu lays out; it's distinct from Opened below, which handles the dim/bright opacity.)
+            _summaryContextMenu.Opening([weak, copySelItem, copySelSep, truncItem, wrapItem, pendingSel](const IInspectable&, const IInspectable&) {
+                auto self = weak.get();
+                if (!self)
+                {
+                    return;
+                }
+                *pendingSel = self->_SummarySelectedText();
+                const bool hasSel = !pendingSel->empty();
+                copySelItem.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+                copySelSep.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+                truncItem.Text(self->_summaryTruncate ? winrt::hstring{ L"Disable Truncate Long Messages" } : winrt::hstring{ L"Enable Truncate Long Messages" });
+                wrapItem.Text(self->_summaryWrapNewlines ? winrt::hstring{ L"Disable Wrap Messages" } : winrt::hstring{ L"Enable Wrap Messages" });
+            });
             // Keep the panel bright while the menu is up: the right-tap moves the pointer onto the popup,
             // which fires the panel's PointerExited and would otherwise dim it (mirrors the badge copy
             // menu's pinned-while-open behaviour). Restore the dim rest state on close.
@@ -2561,6 +2667,15 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetSummaryWrapToggleHandler(std::function<void()> handler)
     {
         _onToggleSummaryWrap = std::move(handler);
+    }
+
+    // The text the user selected in the summary panel (title / times / body runs) — feeds + gates the
+    // context menu's "Copy Selected Text". Empty when nothing is selected. UI thread only.
+    std::wstring AgentTabOverlay::_SummarySelectedText()
+    {
+        std::wstring out;
+        SummaryCollectSelectedText(_summaryRoot, out);
+        return out;
     }
 
     void AgentTabOverlay::_ToggleSummaryWrap()

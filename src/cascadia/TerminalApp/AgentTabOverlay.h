@@ -185,6 +185,7 @@ namespace winrt::TerminalApp::implementation
         void _UpdateSummaryWrapButtonVisual(); // recolor the wrap-line icon: dim (off) / lighter (on), per _summaryWrapNewlines
         void _ToggleSummaryTruncate(); // truncate button: invoke the page handler (flips the GLOBAL summaryPanelTruncate)
         void _UpdateSummaryTruncateButtonVisual(); // recolor the truncate icon: dim (off) / lighter (on), per _summaryTruncate
+        std::wstring _SummarySelectedText(); // the text the user selected in the summary panel (title / times / body runs) — feeds + gates the context menu's "Copy Selected Text"
         void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
         void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown

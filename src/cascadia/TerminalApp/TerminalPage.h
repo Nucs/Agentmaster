@@ -846,7 +846,6 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _LoadSessionsSummary(std::wstring sessionId, std::wstring dir, int64_t mtime); // detail: off-thread whole-file analyze + RenderSessionSummaryBox(full) into _sessionsSummaryCache; on completion re-renders the detail IFF its id is the selected row (clears that row's spinner). Deduped via _sessionsSummaryLoading.
         void _PrefetchSessionsSummaries(const std::wstring& anchorId, int direction); // warm neighbors' summaries off-thread so navigation lands on a cache hit: +1 = the next 2 rows (Down look-ahead), -1 = the previous 2 (Up), 0 = the upper + lower neighbor (a click). No wrap at the ends; deduped + cheap when warm.
         void _InvalidateSessionsSummaryForToggle(); // a wrap/truncate toggle changed the rendered summary: drop _sessionsSummaryCache (it bakes the flags) + re-render the open detail
-        std::wstring _SessionsDetailSelectedText(); // the text the user selected in the detail/overlay pane (concat of every selectable TextBlock's SelectedText); empty when nothing is selected — gates + feeds the row menu's "Copy Selected Text"
         void _CycleSessionsWindow(); // [1 month] click: 1d -> 3d -> 7d -> 14d -> 1mo -> 3mo -> wrap (clears a custom range)
         void _ApplySessionsRange(); // the hover popup's Apply: parse From/To (YYYY-MM-DD) into a custom range
         int64_t _SessionsCutoffFromMs() const; // the active window's from-cutoff (custom range or preset)
