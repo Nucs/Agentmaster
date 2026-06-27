@@ -670,13 +670,12 @@ namespace Agentmaster
                 err.sessionId = s.id;
                 err.cwd = s.workingDir;
                 err.ts = NowMs();
-                // Preserve the failure reason for the Triage-Board Error card: the message is the error
-                // line's text (lastAssistantText, mirrored when the line was consumed), the code is the
-                // HTTP status captured alongside the error tail.
-                err.errorMessage = st.lastAssistantText;
+                // Preserve the failure reason for the Triage-Board Error card: the message + HTTP status,
+                // both captured DIRECTLY from the error line when it was consumed (st.lastApiError*).
+                err.errorMessage = st.lastApiErrorMessage;
                 err.errorStatus = st.lastApiErrorStatus;
                 _registry->OnHookEvent(err);
-                std::wstring why = st.lastAssistantText; // the "API Error: …" text (mirrored above)
+                std::wstring why = st.lastApiErrorMessage; // the "API Error: …" text, captured from the error line
                 for (auto& c : why)
                 {
                     if (c == L'\r' || c == L'\n')
@@ -872,7 +871,13 @@ namespace Agentmaster
                 // is an unrecovered API error (-> ShouldSynthesizeError). A non-error assistant line
                 // appended after an error is the session resuming, which clears Error.
                 st.lastWasApiError = ev.apiError;
-                st.lastApiErrorStatus = ev.apiError ? ev.apiErrorStatus : 0; // the code travels with the error tail
+                if (ev.apiError)
+                {
+                    // Capture the reason DIRECTLY from the error event (not via lastAssistantText, whose
+                    // mirror below skips an empty-text line) so the card never shows a stale message.
+                    st.lastApiErrorMessage = ev.text;
+                    st.lastApiErrorStatus = ev.apiErrorStatus;
+                }
                 // The latest assistant block sets / clears the "blocked on the user" flag: an
                 // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
                 // a text / non-interactive-tool message means the agent moved on (clear it).

@@ -513,10 +513,14 @@ namespace Agentmaster
             // Drives ShouldSynthesizeError, and its clearing is the "come out of Error on first change"
             // edge (a fresh prompt then re-derives Running via the push hook or ShouldSynthesizeRunning).
             bool lastWasApiError{ false };
-            // The HTTP status code of the error line that set lastWasApiError (0 when none). Captured
-            // at the same instant; carried into the recon-error synth as HookMessage.errorStatus ->
-            // SessionInfo.errorStatus. The error MESSAGE comes from lastAssistantText (the error line's
-            // text, already mirrored above), so no separate copy is kept.
+            // The MESSAGE + HTTP status code of the error line that set lastWasApiError (status 0 when
+            // none). BOTH captured DIRECTLY from the error event the instant it is consumed, and carried
+            // into the recon-error synth as HookMessage.errorMessage/errorStatus -> SessionInfo. The
+            // message is kept separately (NOT read back from lastAssistantText) precisely because that
+            // mirror skips an empty-text line — so a (hypothetical) empty-text error could otherwise
+            // surface a STALE prior assistant message under the error styling. Read only while
+            // lastWasApiError is true (set by that same event), so never stale when used.
+            std::wstring lastApiErrorMessage;
             int lastApiErrorStatus{ 0 };
             int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
         };
