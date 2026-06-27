@@ -6499,7 +6499,7 @@ namespace winrt::TerminalApp::implementation
         card.BorderThickness(Thickness{ 1, 1, 1, 1 });
         card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
         card.Padding(Thickness{ 20, 16, 20, 16 });
-        card.Width(460);
+        card.Width(560); // Agentmaster: wider so the six top-tab buttons fit on one row
         card.HorizontalAlignment(HorizontalAlignment::Center);
         card.VerticalAlignment(VerticalAlignment::Center);
         card.RequestedTheme(ElementTheme::Dark);
@@ -6507,9 +6507,82 @@ namespace winrt::TerminalApp::implementation
             e.Handled(true);
         });
 
-        auto panel = StackPanel{};
-        panel.Spacing(10);
-        panel.Children().Append(Text(L"Agentmaster Settings", 18, true, 1.0));
+        // Agentmaster: the cog is organized into TOP TABS — a horizontal button-tab strip swapping one
+        // scrollable panel per settings group (the _SwitchEnvTab idiom; deliberately NOT a Pivot, which
+        // themes unreliably under XAML Islands). Save/Cancel is a fixed footer OUTSIDE the tabs (always
+        // reachable). Each section below appends into one of the six group panels; the `panel` variable is
+        // RESEATED at every group boundary (a StackPanel is a ref-counted handle, so `panel = claudePanel`
+        // just re-points it) so the per-control creation code stays byte-for-byte identical to before.
+        auto outer = StackPanel{};
+        outer.Spacing(8);
+        outer.Children().Append(Text(L"Agentmaster Settings", 18, true, 1.0));
+
+        // The six group panels (built empty; filled by the sections below, in this label order).
+        auto sessionsPanel = StackPanel{};
+        sessionsPanel.Spacing(10);
+        auto autopilotPanel = StackPanel{};
+        autopilotPanel.Spacing(10);
+        auto behaviorPanel = StackPanel{};
+        behaviorPanel.Spacing(10);
+        auto tabsPanel = StackPanel{};
+        tabsPanel.Spacing(10);
+        auto claudePanel = StackPanel{};
+        claudePanel.Spacing(10);
+        auto aboutPanel = StackPanel{};
+        aboutPanel.Spacing(10);
+
+        // The tab strip + the content host (all six scrollers stacked in ONE Grid cell, overlapping; only
+        // the active one is Visible so there is no layout conflict). _settingsTabButtons / _settingsTabScrolls
+        // are parallel-indexed for _SwitchSettingsTab.
+        _settingsTabButtons.clear();
+        _settingsTabScrolls.clear();
+        auto tabStrip = StackPanel{};
+        tabStrip.Orientation(Orientation::Horizontal);
+        tabStrip.Spacing(0);
+        tabStrip.Margin(Thickness{ 0, 2, 0, 0 });
+        auto contentHost = Grid{};
+        const auto addSettingsTab = [&](const wchar_t* label, const wchar_t* tip, const StackPanel& body) {
+            const int index = static_cast<int>(_settingsTabButtons.size());
+            auto btn = Button{};
+            btn.Content(winrt::box_value(winrt::hstring{ label }));
+            btn.FontSize(12);
+            btn.Padding(Thickness{ 12, 3, 12, 3 });
+            btn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            AgentSetTip(btn, winrt::hstring{ tip });
+            btn.Click([this, index](const IInspectable&, const RoutedEventArgs&) { _SwitchSettingsTab(index); });
+            tabStrip.Children().Append(btn);
+            _settingsTabButtons.push_back(btn);
+
+            auto scroll = ScrollViewer{};
+            scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            scroll.MaxHeight(470);
+            scroll.Content(body);
+            scroll.Visibility(index == 0 ? Visibility::Visible : Visibility::Collapsed);
+            contentHost.Children().Append(scroll);
+            _settingsTabScrolls.push_back(scroll);
+        };
+        addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
+        addSettingsTab(L"Autopilot", L"Autopilot defaults stamped onto every new session \x2014 the starting mode and its backstops.", autopilotPanel);
+        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
+        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
+        addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
+        addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
+
+        outer.Children().Append(tabStrip);
+        // A thin divider under the strip so the active tab reads as connected to its content below.
+        {
+            auto sep = Border{};
+            sep.Height(1);
+            sep.Background(Fill(0x30, 0xFF, 0xFF, 0xFF));
+            sep.Margin(Thickness{ 0, 0, 0, 2 });
+            outer.Children().Append(sep);
+        }
+        outer.Children().Append(contentHost);
+
+        // The sections below run top-to-bottom; `panel` starts on About (the version + updates block leads
+        // it) and is reseated at each group boundary.
+        auto panel = aboutPanel;
 
         // Agentmaster: build identity line at the very top — the release VERSION (read live from the
         // package manifest; the release pipeline stamps Package-Rel.appxmanifest, a dev loose layout
@@ -6618,28 +6691,10 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setAllowPrerelease, L"When on, update checks also consider GitHub pre-releases (beta builds), not just stable releases. Off by default.");
         panel.Children().Append(_setAllowPrerelease);
 
-        // "Uninstall Agentmaster…" — removes THIS install (the current package family) via the same
-        // embedded am-update.ps1 (-Uninstall). Shown only for packaged installs (gated in _ShowSettings);
-        // per-user, no admin, and the profile data (~/.agentmaster) is kept. Confirms, then quits so the
-        // package isn't in use while it's removed.
-        _setUninstallBtn = Button{};
-        _setUninstallBtn.Content(winrt::box_value(L"Uninstall Agentmaster\x2026"));
-        _setUninstallBtn.Margin(Thickness{ 0, 10, 0, 0 });
-        AgentSetTip(_setUninstallBtn, L"Remove this Agentmaster install. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster closes to finish.");
-        _setUninstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-            _Confirm(L"Uninstall Agentmaster?",
-                     L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
-                     L"Uninstall",
-                     [this]() {
-                         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
-                         if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
-                         {
-                             _quitForUpdateHandler();
-                         }
-                     });
-        });
-        panel.Children().Append(_setUninstallBtn);
+        // (The "Uninstall Agentmaster…" button is built at the END of the About tab, after the Profile row.)
 
+        // === SESSIONS tab ===
+        panel = sessionsPanel;
         // CLAUDE SESSIONS
         panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
         _setSkipPermissions = ToggleSwitch{};
@@ -6659,6 +6714,8 @@ namespace winrt::TerminalApp::implementation
         // single ;-delimited box. Built in its own method to keep this builder readable + the diff local.
         _BuildEnvVarsArea(panel);
 
+        // === CLAUDE tab ===
+        panel = claudePanel;
         // CLAUDE HISTORY (ENV_VARS.md §8): cleanupPeriodDays lives in the user's GLOBAL ~/.claude/settings.json
         // (NOT an Agentmaster setting, NOT an env var). Read on open / written on save through the
         // ClaudeUserSettings repository (a managed layer that preserves every other key in that file). 36500
@@ -6694,6 +6751,8 @@ namespace winrt::TerminalApp::implementation
             panel.Children().Append(browse);
         }
 
+        // === AUTOPILOT tab ===
+        panel = autopilotPanel;
         // AUTOPILOT
         panel.Children().Append(Text(L"AUTOPILOT (defaults for new sessions)", 11, true, 0.6));
         _setDefaultMode = ComboBox{};
@@ -6717,6 +6776,8 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setPauseOnHuman, L"When on, typing into a session's terminal yourself pauses its Autopilot so a manual interruption isn't overwritten by the next queued send.");
         panel.Children().Append(_setPauseOnHuman);
 
+        // === BEHAVIOR tab ===
+        panel = behaviorPanel;
         // BEHAVIOR
         panel.Children().Append(Text(L"BEHAVIOR", 11, true, 0.6));
         _setConfirmKill = ToggleSwitch{};
@@ -6767,6 +6828,10 @@ namespace winrt::TerminalApp::implementation
         _setServerCache.PlaceholderText(L"5");
         AgentSetTip(_setServerCache, L"How long after a turn Claude's server-side prompt cache stays warm \x2014 drives the card's \x26A1 \x201Cstill cached\x201D hint (a follow-up within the window is cheaper & faster). Default 5.");
         panel.Children().Append(_setServerCache);
+
+        // The Launch box's directory settings belong with SESSIONS (they shape launching), so append them
+        // there even though they sit inside the BEHAVIOR section in source.
+        panel = sessionsPanel;
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
@@ -6778,6 +6843,8 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setRecentDirsLimit, L"How many recently-used directories the Launch box's path-picker keeps in its history. Blank or 0 resets to 10.");
         panel.Children().Append(_setRecentDirsLimit);
 
+        // (back to the BEHAVIOR tab)
+        panel = behaviorPanel;
         // Sessions browser: un-hide every session removed via the Sessions page's right-click
         // "Hide from list". The list lives in AppSettings.hiddenSessionIds, owned by the page
         // (TerminalPage), so this fires the handler there rather than reading a count the cog
@@ -6800,6 +6867,8 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(_setResetHidden);
 
+        // === TABS & OVERLAY tab ===
+        panel = tabsPanel;
         // TABS — close affordances on the terminal tab strip (GLOBAL across windows, applied live
         // on Save via TerminalPage::_updateAllTabCloseButtons + the cross-window broadcast).
         panel.Children().Append(Text(L"TABS", 11, true, 0.6));
@@ -7036,6 +7105,9 @@ namespace winrt::TerminalApp::implementation
             _LayoutOverlayOpacitySlider(); // seed positions from the defaults; _ShowSettings re-seeds from AppSettings
         }
 
+        // === ABOUT tab (continued) === — the version + UPDATES block led the About panel at the top of
+        // this builder; the PROFILE row + the Uninstall button finish it here.
+        panel = aboutPanel;
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
         // the choice file / env, never inside the profile it selects). Read-only display +
@@ -7086,7 +7158,30 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(changeProfile);
 
-        // Cancel / Save
+        // "Uninstall Agentmaster…" — removes THIS install (the current package family) via the same
+        // embedded am-update.ps1 (-Uninstall). Shown only for packaged installs (gated in _ShowSettings);
+        // per-user, no admin, and the profile data (~/.agentmaster) is kept. Confirms, then quits so the
+        // package isn't in use while it's removed. LAST item in About — a destructive action at the foot.
+        _setUninstallBtn = Button{};
+        _setUninstallBtn.Content(winrt::box_value(L"Uninstall Agentmaster\x2026"));
+        _setUninstallBtn.Margin(Thickness{ 0, 10, 0, 0 });
+        AgentSetTip(_setUninstallBtn, L"Remove this Agentmaster install. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster closes to finish.");
+        _setUninstallBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _Confirm(L"Uninstall Agentmaster?",
+                     L"This removes the installed Agentmaster package. Your data (sessions, settings, e.g. %USERPROFILE%\\.agentmaster) is kept. Agentmaster will close to finish uninstalling.",
+                     L"Uninstall",
+                     [this]() {
+                         const std::wstring stateDir = ::Agentmaster::Profiles::ResolveProfileDir();
+                         if (::Agentmaster::Updater::LaunchUninstaller(stateDir) && _quitForUpdateHandler)
+                         {
+                             _quitForUpdateHandler();
+                         }
+                     });
+        });
+        panel.Children().Append(_setUninstallBtn);
+
+        // Cancel / Save — a FIXED footer OUTSIDE the tabs (always reachable regardless of the active tab;
+        // each tab scrolls on its own, so the footer never scrolls away).
         auto buttons = StackPanel{};
         buttons.Orientation(Orientation::Horizontal);
         buttons.HorizontalAlignment(HorizontalAlignment::Right);
@@ -7102,17 +7197,43 @@ namespace winrt::TerminalApp::implementation
         save.Click([this](const IInspectable&, const RoutedEventArgs&) { _SaveSettings(); });
         buttons.Children().Append(cancel);
         buttons.Children().Append(save);
-        panel.Children().Append(buttons);
+        outer.Children().Append(buttons);
 
-        auto scroll = ScrollViewer{};
-        scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-        scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-        scroll.MaxHeight(560);
-        scroll.Content(panel);
-        card.Child(scroll);
+        card.Child(outer);
 
         _settingsOverlay.Children().Append(card);
         _root.Children().Append(_settingsOverlay);
+
+        _SwitchSettingsTab(0); // seed the strip styling + show the first tab
+    }
+
+    // Agentmaster: show one cog tab's content scroller + restyle the strip (the _SwitchEnvTab idiom —
+    // active = blue fill + white text, inactive = transparent + gray). Index out of range is a no-op.
+    void AgentManagerContent::_SwitchSettingsTab(int index)
+    {
+        if (index < 0 || index >= static_cast<int>(_settingsTabScrolls.size()))
+        {
+            return;
+        }
+        _settingsActiveTab = index;
+        for (size_t i = 0; i < _settingsTabScrolls.size(); ++i)
+        {
+            if (_settingsTabScrolls[i])
+            {
+                _settingsTabScrolls[i].Visibility(static_cast<int>(i) == index ? Visibility::Visible : Visibility::Collapsed);
+            }
+        }
+        for (size_t i = 0; i < _settingsTabButtons.size(); ++i)
+        {
+            const auto& b = _settingsTabButtons[i];
+            if (!b)
+            {
+                continue;
+            }
+            const bool active = static_cast<int>(i) == index;
+            b.Background(active ? Fill(0xFF, 0x0E, 0x63, 0x9C) : Fill(0x00, 0x00, 0x00, 0x00));
+            b.Foreground(active ? Fill(0xFF, 0xFF, 0xFF, 0xFF) : Fill(0xFF, 0xB0, 0xB0, 0xB0));
+        }
     }
 
     void AgentManagerContent::_ShowSettings()
@@ -7321,6 +7442,7 @@ namespace winrt::TerminalApp::implementation
                 _setUpdateStatus.Foreground(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x99, 0x99, 0x99) });
             }
         }
+        _SwitchSettingsTab(0); // always reopen on the first tab (Sessions)
         _settingsOverlay.Visibility(Visibility::Visible);
         // Updater: a silent check on open — if a newer release exists, the label next to "Check for
         // updates" reads "vX.Y.Z available!" in dark green. Quiet on no-update / no-network (the
