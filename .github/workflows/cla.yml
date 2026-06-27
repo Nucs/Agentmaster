@@ -57,7 +57,7 @@ jobs:
           path-to-signatures: 'signatures/version1/cla.json'
           path-to-document: 'https://github.com/Nucs/Agentmaster/blob/agentmaster/CLA.md'
           branch: 'cla-signatures'
-          allowlist: 'dependabot[bot],github-actions[bot]'
+          allowlist: 'Nucs,dependabot[bot],github-actions[bot]'
           lock-pullrequest-aftermerge: false
           custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
           custom-notsigned-prcomment: 'Thanks for your PR! Before we can merge it, please sign the [Contributor License Agreement](https://github.com/Nucs/Agentmaster/blob/agentmaster/CLA.md) by commenting on this PR with the exact line above.'

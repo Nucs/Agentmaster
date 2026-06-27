@@ -1,41 +1,43 @@
-<!-- BEGIN MICROSOFT SECURITY.MD V0.0.2 BLOCK -->
+# Security Policy
 
-## Security
+Agentmaster is an independent fork of
+[Microsoft Windows Terminal](https://github.com/microsoft/terminal) and is **not**
+maintained by or affiliated with Microsoft. Please do **not** report Agentmaster
+issues to Microsoft or the MSRC.
 
-Microsoft takes the security of our software products and services seriously, which includes all source code repositories managed through our GitHub organizations, which include [Microsoft](https://github.com/Microsoft), [Azure](https://github.com/Azure), [DotNet](https://github.com/dotnet), [AspNet](https://github.com/aspnet), [Xamarin](https://github.com/xamarin), and [many more](https://opensource.microsoft.com/).
-
-If you believe you have found a security vulnerability in any Microsoft-owned repository that meets Microsoft's [definition](https://docs.microsoft.com/en-us/previous-versions/tn-archive/cc751383(v=technet.10)) of a security vulnerability, please report it to us as described below.
-
-## Reporting Security Issues
+## Reporting a vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them to the Microsoft Security Response Center (MSRC) at [https://msrc.microsoft.com/create-report](https://msrc.microsoft.com/create-report).
+Instead, report privately via either:
 
-If you prefer to submit without logging in, send email to [secure@microsoft.com](mailto:secure@microsoft.com).  If possible, encrypt your message with our PGP key; please download it from the [Microsoft Security Response Center PGP Key page](https://www.microsoft.com/en-us/msrc/pgp-key-msrc).
+- **GitHub Security Advisories** (preferred) — open a private report at
+  <https://github.com/Nucs/Agentmaster/security/advisories/new>, or
+- **Email** — [elibelash@gmail.com](mailto:elibelash@gmail.com).
 
-You should receive a response within 24 hours. If for some reason you do not, please follow up via email to ensure we received your original message. Additional information can be found at [microsoft.com/msrc](https://www.microsoft.com/msrc). 
+Please include as much of the following as you can, to help triage:
 
-Please include the requested information listed below (as much as you can provide) to help us better understand the nature and scope of the possible issue:
+  * Type of issue (e.g. buffer overflow, injection, privilege escalation, etc.)
+  * Full path(s) of the source file(s) involved
+  * The affected version / commit (release tag, branch, or commit SHA)
+  * Any special configuration required to reproduce
+  * Step-by-step instructions to reproduce
+  * Proof-of-concept or exploit code, if available
+  * The impact, and how an attacker might exploit it
 
-  * Type of issue (e.g. buffer overflow, SQL injection, cross-site scripting, etc.)
-  * Full paths of source file(s) related to the manifestation of the issue
-  * The location of the affected source code (tag/branch/commit or direct URL)
-  * Any special configuration required to reproduce the issue
-  * Step-by-step instructions to reproduce the issue
-  * Proof-of-concept or exploit code (if possible)
-  * Impact of the issue, including how an attacker might exploit the issue
+You can expect an initial response within a few days. As a small project there is
+no paid bug-bounty program; credit is gladly given for responsibly-disclosed reports.
 
-This information will help us triage your report more quickly.
+## Scope
 
-If you are reporting for a bug bounty, more complete reports can contribute to a higher bounty award. Please visit our [Microsoft Bug Bounty Program](https://microsoft.com/msrc/bounty) page for more details about our active programs.
+This policy covers the **Agentmaster fork's own code** (the `Agentmaster`-marked
+additions). Report vulnerabilities in:
 
-## Preferred Languages
+- **upstream Windows Terminal** to the
+  [Windows Terminal project](https://github.com/microsoft/terminal/security/policy);
+- **Claude Code** or **Codex** to their respective vendors (Anthropic / OpenAI).
 
-We prefer all communications to be in English.
+## Supported versions
 
-## Policy
-
-Microsoft follows the principle of [Coordinated Vulnerability Disclosure](https://www.microsoft.com/en-us/msrc/cvd).
-
-<!-- END MICROSOFT SECURITY.MD BLOCK -->
+Security fixes target the latest
+[release](https://github.com/Nucs/Agentmaster/releases) and the `agentmaster` branch.
