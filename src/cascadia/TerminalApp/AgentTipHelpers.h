@@ -136,22 +136,28 @@ namespace winrt::TerminalApp::implementation
             }
             (*timer).Start();
         });
-        // Agentmaster: restore the native "the tip HIDES the moment the pointer MOVES" behavior that
-        // XAML Islands breaks. The framework's own move-dismiss keys on window-level pointer state the
-        // island input path never delivers (the same gap the PointerExited/Unloaded force-close patches),
-        // so a tip OPENS on hover and then LINGERS exactly where it appeared — sitting right over the
-        // button/label/box you were moving to click, so the click feels SWALLOWED (it lands on the tip's
-        // popup) even though the tip is hit-test-invisible. On every move we CLOSE the tip and RE-ARM the
-        // open timer, so it reappears only after the pointer RESTS again (~openDelay of stillness). Net
-        // effect = "show on rest, vanish as the mouse approaches a click" — the standard tooltip feel, and
-        // exactly the click-through-by-disappearing behavior asked for. t.IsOpen(false) is a no-op when
-        // already closed; (*timer).Start() after the one-shot Tick stopped it just restarts the interval.
+        // Agentmaster: open the tip only after the pointer comes to REST — without flickering once it is
+        // up. While the tip is still WAITING to open, a move means "not at rest yet", so RE-ARM the
+        // one-shot open timer (this is what keeps the dense-board 4s delay from flashing a tip over every
+        // card while you pan across them). Once the tip is OPEN, do NOTHING on move — it stays put until
+        // PointerExited/Unloaded close it.
+        //
+        // This is a FLICKER FIX. A previous version closed the tip and re-armed on EVERY move, to "vanish
+        // as the mouse approaches a click". But opening the tip — a mouse-relative popup right under the
+        // cursor — itself fires a SYNTHETIC PointerMoved (the input system re-hit-tests when the popup
+        // appears), which closed + re-armed it, which reopened it ~one openDelay later, which fired another
+        // synthetic move … a self-sustaining open/close flicker that ran even with the mouse perfectly
+        // STILL, and that any sub-pixel hand jitter also drove. Clicks already fall THROUGH the tip via the
+        // IsHitTestVisible(false) above (THAT, not move-dismiss, is the real click-through mechanism), so a
+        // lingering tip never swallows a click — which made the move-dismiss pure downside. Guarding on
+        // !IsOpen() breaks the loop: the post-open synthetic move (and all later jitter) see IsOpen()==true
+        // and no-op, so the tip is stable.
+        //
         // PointerMoved routes through the island input HWND like PointerEntered/Exited (which work), and
         // only the element currently under the pointer fires it — so this is cheap even on a dense board /
         // table. Capturing t + timer by value (never el) keeps the no-self-capture, no-leak invariant.
         el.PointerMoved([timer, t](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
-            t.IsOpen(false);
-            if (*timer)
+            if (!t.IsOpen() && *timer)
             {
                 (*timer).Start();
             }
