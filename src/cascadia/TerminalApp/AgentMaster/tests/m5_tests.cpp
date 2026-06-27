@@ -880,6 +880,30 @@ static void TestSpawnBuilders()
         CHECK(hasPipe, "restart spec env carries CCMGR_HOOK_PIPE = the bridge pipe");
     }
 
+    // BuildClaudeSpawn fork id selection (Agentmaster — restoring a never-messaged fork). A GENUINE
+    // fork mints a FRESH target id (!= the source); a RESTORE re-fork passes forkIntoSessionId so the
+    // fork branches back into its EXISTING id (preserving identity across a restart instead of churning
+    // a new id every reopen). Both emit the same `--resume <src> --fork-session --session-id <target>`
+    // shape — only the target id differs. (Materializes hook files in the active profile dir; we assert
+    // only the profile-independent parts.)
+    {
+        AppSettings fst;
+        fst.skipPermissions = true;
+        const std::wstring src = NewSessionId();
+        // Genuine fork: forkIntoSessionId omitted => a fresh, distinct id is minted as the target.
+        const auto genuine = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", L"", fst, src, L"C:\\bin\\claude.exe");
+        CHECK(genuine.sessionId != src && !genuine.sessionId.empty(), "genuine fork mints a fresh target id (!= source)");
+        CHECK(genuine.commandline.find(L"--resume " + src + L" --fork-session --session-id " + genuine.sessionId) != std::wstring::npos, "genuine fork commandline forks the source into the minted id");
+        // Re-fork: forkIntoSessionId == the fork's existing id => spec targets THAT id (no churn).
+        const std::wstring keep = NewSessionId();
+        const auto refork = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", L"", fst, src, L"C:\\bin\\claude.exe", keep);
+        CHECK(refork.sessionId == keep, "re-fork targets the fork's existing id (forkIntoSessionId), preserving identity");
+        CHECK(refork.commandline.find(L"--resume " + src + L" --fork-session --session-id " + keep) != std::wstring::npos, "re-fork commandline forks the source into the SAME id");
+        // forkIntoSessionId is honored only when forking: a plain resume ignores it (reuses the resume id).
+        const auto resumeIgnores = BuildClaudeSpawn(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", keep, fst, L"", L"C:\\bin\\claude.exe", L"some-other-id");
+        CHECK(resumeIgnores.sessionId == keep, "forkIntoSessionId is ignored on a non-fork (resume reuses its id)");
+    }
+
     // ResolveClaudeExeIn (native-exe-only policy): resolve a real claude.exe; a .cmd is only a
     // breadcrumb to its npm binary; a pure-Node .cmd (no binary) resolves to empty (gated). Temp fixture.
     {
@@ -1899,6 +1923,7 @@ static void TestPersistence()
         s.state = SessionState::WaitingForInput;
         s.lastActivityUnixMs = 123456789;
         s.external = true; // adopted session: must survive the round-trip
+        s.forkParentId = L"src-conv-7"; // a never-messaged fork remembers its source across restart (PERSISTED)
         QueuedPrompt a;
         a.id = L"p1";
         a.label = L"add tests";
@@ -1929,6 +1954,7 @@ static void TestPersistence()
             CHECK(r.id == L"sid-1" && r.title == L"My Task" && r.workingDir == L"K:/api", "session metadata");
             CHECK(r.state == SessionState::WaitingForInput, "session state");
             CHECK(r.external, "external flag preserved");
+            CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
             CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Flight, "prompt origin preserved (Typed vs Flight)");
@@ -1956,6 +1982,7 @@ static void TestPersistence()
             CHECK(back[0].kind == AgentKind::Codex, "codex session kind preserved");
             CHECK(back[0].codexSessionId == L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex resume uuid (codexSessionId) preserved");
             CHECK(back[1].kind == AgentKind::Claude && back[1].codexSessionId.empty(), "default session is Claude with no codex uuid");
+            CHECK(back[0].forkParentId.empty() && back[1].forkParentId.empty(), "a non-fork session carries no forkParentId (key omitted when empty)");
         }
     }
 
@@ -2174,6 +2201,7 @@ static void TestAppSettings()
         in.confirmBeforeKill = false;
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
+        in.flashRingColor = L"#8000FF00"; // non-default (default #FFFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
@@ -2201,6 +2229,7 @@ static void TestAppSettings()
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
+        CHECK(out.flashRingColor == L"#8000FF00", "settings flashRingColor round-trip");
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
         CHECK(out.summaryPanelWidthFraction > 0.399 && out.summaryPanelWidthFraction < 0.401, "settings summaryPanelWidthFraction round-trip");
@@ -2235,6 +2264,7 @@ static void TestAppSettings()
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
+        CHECK(out.flashRingColor == L"#FFFF0000", "settings flashRingColor default (opaque red) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.flightPlanShowsSummary == true, "settings flightPlanShowsSummary default (Summary) on empty");

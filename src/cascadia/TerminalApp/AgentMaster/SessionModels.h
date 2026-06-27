@@ -244,18 +244,29 @@ namespace Agentmaster
         // arrives (and after a fresh load, until the session re-emits one) — EXCEPT a Manager launch
         // stamps it eagerly from the connection's WT_SESSION (see the forkParentId note below).
         std::wstring tabToken;
-        // Agentmaster (Transient, NOT persisted): the SOURCE conversation id this session was FORKED
-        // from — set ONLY at launch when this is a fork (`claude --resume <src> --fork-session
-        // --session-id <this.id>`; the Sessions-page / duplicate-tab / adopt-external fork). It exists
-        // to absorb a Claude quirk: a `--fork-session` claude fires its FIRST SessionStart hook under
-        // the SOURCE id `<src>`, NOT the freshly-minted `<this.id>` we registered + bound at launch.
-        // Without this, the registry sees `<src>` as an unknown session and the bind/re-home path
-        // mistakes the echo for an in-session `/resume`, re-homing the fork's tab off `<this.id>` onto
-        // `<src>` — so the tab tracks the wrong (inactive, source) conversation while the real fork
-        // (`<this.id>`, which gets every later hook) is orphaned. SessionRegistry::OnHookEvent uses it
-        // (with the eagerly-stamped tabToken) to IGNORE that source-id startup echo. Empty for a
-        // non-fork; cleared after a restart (the resumed fork re-launches as a plain `--resume
-        // <this.id>`, so no source-id echo occurs — hence transient).
+        // Agentmaster (PERSISTED): the SOURCE conversation id this session was FORKED from — set at
+        // launch when this is a fork (`claude --resume <src> --fork-session --session-id <this.id>`; the
+        // Sessions-page / duplicate-tab / adopt-external fork). It serves TWO purposes:
+        //   (1) The --fork-session source-id ECHO GUARD. A `--fork-session` claude fires its FIRST
+        //       SessionStart hook under the SOURCE id `<src>`, NOT the freshly-minted `<this.id>` we
+        //       registered + bound at launch. Without this, the registry sees `<src>` as an unknown
+        //       session and the bind/re-home path mistakes the echo for an in-session `/resume`,
+        //       re-homing the fork's tab off `<this.id>` onto `<src>` — so the tab tracks the wrong
+        //       (inactive, source) conversation while the real fork (`<this.id>`, which gets every later
+        //       hook) is orphaned. SessionRegistry::OnHookEvent uses it (with the eagerly-stamped
+        //       tabToken) to IGNORE that source-id startup echo. The guard is ONE-SHOT — cleared on the
+        //       fork's FIRST own-id hook, so a LATER deliberate `/resume <src>` re-homes normally.
+        //   (2) Restoring a NEVER-MESSAGED fork — the reason this is now PERSISTED (it was transient
+        //       before). A fork's OWN transcript (`<this.id>.jsonl`) is written only on its FIRST turn,
+        //       so a fork the user created but never sent a message to has NO transcript on disk — and a
+        //       plain restore would transcript-gate to a brand-new EMPTY conversation, silently LOSING
+        //       the forked branch (and churning the id) on EVERY restart. With `<src>` persisted,
+        //       _LaunchClaudeSession re-forks from it into the SAME id when the fork's own transcript is
+        //       absent but the source's still exists — re-materializing the identical branch with its
+        //       identity (and the WindowRecord tab ref) intact. Gated on the fork being transcript-less,
+        //       so once the fork gets its own conversation, purpose (1)'s one-shot clear wipes this
+        //       (persisted on the next change) and it is never re-forked off a now-divergent source.
+        // Empty for a non-fork (and cleared once the fork has its own conversation).
         std::wstring forkParentId;
         // Transient runtime flag (NOT persisted): is this session OPEN (has a live tab +
         // claude.exe this run) or ARCHIVED (shut down but kept restorable)? The Triage Board /
@@ -513,6 +524,17 @@ namespace Agentmaster
         // + cross-window broadcast (every hosted favorited tab is re-asserted). A missing key => Crown
         // (the prior behavior). Tab-strip ONLY — see FavoriteIcon.
         FavoriteIcon favoriteIcon{ FavoriteIcon::Crown };
+        // Agentmaster (status-dot RED FLASH RING color): the COLOR — with OPACITY in the alpha byte —
+        // of the "unread" ring that pulses around a managed session's tab status dot when it leaves
+        // Running for a needs-you state (Idle / WaitingForInput / NeedsApproval) on an unvisited tab
+        // (TerminalPage::_EvaluateAgentFlash), and of the manual "Mark Unread" ring. Stored as an
+        // "#AARRGGBB" hex string — the leading ALPHA byte is the ring's opacity, so the Settings cog's
+        // color picker (alpha slider enabled) drives BOTH hue and opacity in one control; a legacy
+        // "#RRGGBB" (no alpha) is read as fully opaque. GLOBAL across windows; applied live on Save +
+        // cross-window broadcast (each window re-points its shared flash-ring brush). Default
+        // "#FFFF0000" == fully-opaque red, reproducing the prior hardcoded Fill="Red". A malformed /
+        // empty value falls back to that default at the (UI-layer) parse, never wedging the ring.
+        std::wstring flashRingColor{ L"#FFFF0000" };
 
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +

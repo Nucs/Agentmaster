@@ -250,13 +250,36 @@ namespace winrt::TerminalApp::implementation
         // Rule #6: restore == resume, never replay.)
         const bool wantResume = !resumeTargetId.empty() && ::Agentmaster::ClaudeConversationExists(resumeTargetId);
         const std::wstring resumeId = wantResume ? resumeTargetId : std::wstring{};
-        // forkFromId set (duplicate-tab -> fork) overrides resume/fresh: BuildClaudeSpawn mints a NEW id
-        // and the commandline forks the source conversation into it (the source transcript is untouched).
-        // Launch the NATIVE claude.exe by full path (resolved once at engine init; exe-only policy).
-        // CreateProcessW appends only ".exe" and ignores PATHEXT, so the full path is mandatory. This
-        // is reached ONLY when ClaudeAvailable() (the Manager gates launch/new/fork/resume otherwise),
-        // so claudeExePath is non-empty here; the empty bare-token fallback never executes.
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), forkFromId, ::Agentmaster::SharedEngine().claudeExePath);
+        // Agentmaster (restore a NEVER-MESSAGED fork): a fork's OWN transcript (<id>.jsonl) is written
+        // only on its FIRST turn, so a fork the user created but never sent a message to has NO transcript
+        // — wantResume is false and a plain restore would spawn a brand-new EMPTY conversation, silently
+        // LOSING the forked branch (the "(fork)" tab returns blank, with a churned id, on EVERY restart —
+        // observed live as one "(fork)" title hitting [restore-fresh] over and over). When the record
+        // remembers its fork SOURCE (the PERSISTED forkParentId) and that source still has a transcript,
+        // RE-FORK from it into the SAME id — re-materializing the identical branch, identity + the
+        // WindowRecord tab ref preserved (BuildClaudeSpawn forks into forkIntoId rather than minting).
+        // Gated on !wantResume, so a fork that LATER got its own transcript is always resumed, never
+        // re-forked off its now-divergent source; if the source ALSO vanished, fall through to a fresh
+        // launch (the best possible). A GENUINE in-progress fork (forkFromId) takes precedence — only a
+        // RESTORE (restored set) with no explicit fork can re-fork.
+        std::wstring effectiveForkFrom{ forkFromId };
+        std::wstring forkIntoId; // re-fork TARGET = the fork's existing id (preserve identity); empty => mint (genuine fork)
+        if (effectiveForkFrom.empty() && !wantResume && restored && !restored->forkParentId.empty() &&
+            ::Agentmaster::ClaudeConversationExists(restored->forkParentId))
+        {
+            effectiveForkFrom = restored->forkParentId;
+            forkIntoId = resumeTargetId; // == restored->id (a transcript-less fork has no continuation redirect)
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[restore->refork] " + resumeTargetId + L" has no transcript \x2014 re-forking from source " + effectiveForkFrom + L" into the same id (never-messaged fork; identity preserved)\n");
+        }
+        // forkFromId / a restore re-fork overrides resume/fresh: BuildClaudeSpawn forks the source
+        // conversation into the target id (the source transcript is untouched). A genuine fork mints a new
+        // id; a re-fork reuses the fork's existing id (forkIntoId). Launch the NATIVE claude.exe by full
+        // path (resolved once at engine init; exe-only policy). CreateProcessW appends only ".exe" and
+        // ignores PATHEXT, so the full path is mandatory. This is reached ONLY when ClaudeAvailable() (the
+        // Manager gates launch/new/fork/resume otherwise), so claudeExePath is non-empty here; the empty
+        // bare-token fallback never executes.
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId);
 
         // Build the ConPTY connection (commandline = claude + our hooks settings; child env = spec.env
         // [CCMGR_SESSION_ID + CCMGR_HOOK_PIPE + the cog's global env] plus this window's AM_SESSION
@@ -332,9 +355,19 @@ namespace winrt::TerminalApp::implementation
         // BEFORE this session's own first hook, so the fork must already know its tabToken for the guard
         // to recognize + drop that echo (else its tab is wrongly re-homed onto the source conversation).
         info.tabToken = ::Microsoft::Console::Utils::GuidToPlainString(connection.SessionId());
-        if (!forkFromId.empty())
+        // Remember the fork SOURCE (PERSISTED) when this launch is a (re-)fork — it drives BOTH the
+        // source-id echo guard above AND restoring this fork later if it is never messaged (a fork's own
+        // transcript isn't written until its first turn). Clear it otherwise so a plain resume / fresh
+        // launch never carries a stale source: a fork that already has its own conversation must be
+        // RESUMED, not re-forked off a now-divergent source (the registry's first-own-hook clear also
+        // retires it live the moment the fork produces content).
+        if (!effectiveForkFrom.empty())
         {
-            info.forkParentId = forkFromId; // remember the fork SOURCE for the echo guard (empty for a non-fork)
+            info.forkParentId = effectiveForkFrom;
+        }
+        else
+        {
+            info.forkParentId.clear();
         }
         if (!restored)
         {
@@ -363,7 +396,9 @@ namespace winrt::TerminalApp::implementation
         // transcript was gone, so a new conversation id was minted) and the continuation REDIRECT above
         // (we resumed the chain tail, an id distinct from the persisted ancestor). Either way the new
         // (live) record is keyed by the spawned id and the old archived record under restored->id is now
-        // stale — drop it so it doesn't linger in the Archived list as a duplicate/ancestor.
+        // stale — drop it so it doesn't linger in the Archived list as a duplicate/ancestor. A re-fork
+        // (forkIntoId) deliberately does NOT differ — it forks back into restored->id — so this is a
+        // no-op there and the fork keeps its identity (the whole point of re-forking into the same id).
         if (restored && !restored->id.empty() && restored->id != spec.sessionId)
         {
             _sessionRegistry->Remove(restored->id);
@@ -404,9 +439,12 @@ namespace winrt::TerminalApp::implementation
             _TrackSessionStarted(spec.sessionId); // Agentmaster (eager-init): flip SessionInfo::started true the instant this control initializes (focused tab => no half-hollow flash)
         }
 
-        const std::wstring tag = !forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] "));
+        // [refork] = a restore that re-materialized a never-messaged fork from its source into the same
+        // id (forkIntoId set); [fork] = a genuine new fork; else resume/restore-fresh/spawn. The suffix
+        // names the source for both fork kinds (effectiveForkFrom).
+        const std::wstring tag = !forkIntoId.empty() ? L"[refork] " : (!forkFromId.empty() ? L"[fork] " : (wantResume ? L"[resume] " : (restored ? L"[restore-fresh] " : L"[spawn] ")));
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      tag + spec.sessionId + (forkFromId.empty() ? L"" : (L" (forked from " + forkFromId + L")")) + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
+                                      tag + spec.sessionId + (effectiveForkFrom.empty() ? L"" : (L" (forked from " + effectiveForkFrom + L")")) + L" \"" + ttl + L"\" cwd=" + dir + L"\n");
         return tab;
     }
 

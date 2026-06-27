@@ -400,6 +400,16 @@ namespace Agentmaster
         {
             o.Set(L"codexSessionId", json::Value::MkStr(s.codexSessionId));
         }
+        // Agentmaster (never-messaged fork restore — SessionModels.h SessionInfo::forkParentId): the
+        // fork SOURCE id. A fork writes its OWN transcript only on its first turn, so a fork that was
+        // never messaged has none — persisting the source lets _LaunchClaudeSession re-fork from it
+        // (into the same id) on restore instead of minting a fresh empty conversation. Omitted when
+        // empty (a non-fork, or a fork that already has its own conversation), so a sessions.json with
+        // no pending forks is byte-unchanged.
+        if (!s.forkParentId.empty())
+        {
+            o.Set(L"forkParentId", json::Value::MkStr(s.forkParentId));
+        }
         auto q = json::Value::MkArr();
         for (const auto& p : s.queue)
         {
@@ -422,6 +432,7 @@ namespace Agentmaster
         s.external = v.BoolAt(L"external", false);
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
+        s.forkParentId = v.StrAt(L"forkParentId"); // PERSISTED: the fork SOURCE, for re-forking a never-messaged fork on restore (absent => "")
         if (const auto* q = v.Find(L"queue"); q && q->type == json::Value::Type::Arr)
         {
             for (const auto& pv : q->arr)
@@ -485,6 +496,7 @@ namespace Agentmaster
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
+        o.Set(L"flashRingColor", json::Value::MkStr(s.flashRingColor));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
@@ -538,6 +550,10 @@ namespace Agentmaster
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
         s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
+        // Status-dot flash-ring color (with opacity in the alpha byte). Absent => "#FFFF0000" (opaque
+        // red, the prior hardcoded Fill). Stored verbatim; the UI-layer parser (ParseArgbHexColor)
+        // falls back to red on a malformed value, so a hand-edited garbage string self-heals on next save.
+        s.flashRingColor = v.StrAt(L"flashRingColor", L"#FFFF0000");
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)

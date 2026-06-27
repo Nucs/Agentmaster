@@ -406,9 +406,14 @@ same dot at its 3-state floor: Running blue · Waiting goldenrod · Idle gray); 
 tab (pwsh / cmd / unprompted-claude / external codex) a **dim gray** dot; the Manager tab none. A
 **red-flash alert** rides the dot too: when a session leaves **Running** for a *needs-you* state —
 `Running → {Idle · WaitingForInput · NeedsApproval}` (NOT `→Done` / `→Error`) — on a tab that is **not
-the currently-focused one**, that tab's dot grows a **red ring** (a separate Ellipse drawn behind the
-dot — red ring · the dot's black stroke · its status fill, `TerminalTabStatus.AgentFlashRingVisible`; a
-ring, NOT a stroke-color change) until you switch to it
+the currently-focused one**, that tab's dot grows a **flash ring** (a separate Ellipse drawn behind the
+dot — ring · the dot's black stroke · its status fill, `TerminalTabStatus.AgentFlashRingVisible`; a
+ring, NOT a stroke-color change) until you switch to it. The ring's **color AND opacity are
+user-configurable** (the Settings cog's **TABS ▸ Status flashing color** picker — a `muxc::ColorPicker`
+with its alpha slider enabled — a GLOBAL `AppSettings::flashRingColor` stored `#AARRGGBB`, **default
+fully-opaque red** `#FFFF0000` == the prior hardcoded look; painted via the per-window shared
+`_flashRingBrush` bound to `TerminalTabStatus.AgentFlashRingBrush`, applied live on Save + cross-window
+broadcast — `_RefreshFlashRingBrush`)
 (`_EvaluateAgentFlash` — the active tab counts as visited so it never flashes; visiting it clears the
 flash via `_VisitTabClearFlash` from `_OnTabSelectionChanged`). ONE shared per-window `DispatcherTimer`
 toggles `_agentFlashPhase` every **600 ms** so all flashing tabs blink in **lockstep** (a tab joining
@@ -1214,7 +1219,11 @@ What works, by area:
   the right of `⚙ sent/total`), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
-  broadcast).
+  broadcast), and (TABS section) **`flashRingColor`** (the **Status flashing color** picker — a
+  `muxc::ColorPicker` with its **alpha slider enabled**, so one control sets both the hue AND the
+  **opacity** of the tab status-dot **"unread" flash ring**; stored `#AARRGGBB`, **default fully-opaque
+  red** `#FFFF0000` == the prior hardcoded ring; GLOBAL, applied live on Save + cross-window broadcast via
+  `_RefreshFlashRingBrush` re-pointing each window's shared `_flashRingBrush`).
   A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
   deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored
@@ -2072,13 +2081,35 @@ build **binlog uploads as an artifact** to diagnose the first run.
   The real fork (`45f96288`, still getting every later hook + observer enrichment) was orphaned: the
   tab/overlay/state dot tracked `ec794664` (no observer pid → its copy→Launch-CLI synthesized a plain
   `--resume ec794664`, the symptom that surfaced this — it didn't match the actual `45f96288`). **Fix:**
-  a fork records `SessionInfo::forkParentId = <src>` (transient) AND its ConPTY's `tabToken` is stamped
+  a fork records `SessionInfo::forkParentId = <src>` (**persisted** — see the never-messaged-fork note
+  below) AND its ConPTY's `tabToken` is stamped
   **eagerly at launch** (not lazily on the first hook — the echo arrives BEFORE any own-id hook).
   `SessionRegistry::OnHookEvent` then IGNORES a `SessionStart` for `<src>` whose `tabToken` matches a
   live fork carrying `forkParentId == <src>` (`[fork-echo] ignored …`); `_BindClaudeSessionToTab` has the
   same backstop. The guard is **one-shot** — cleared on the fork's first own-id hook — so a LATER
   deliberate `/resume <src>` in the fork's tab still re-homes normally. (Mirrors the observer's id
   resolution, which already prefers `--session-id` over `--resume`; the push side needed the same.)
+- **A `--fork-session` fork writes NO transcript until its FIRST turn — so a never-messaged fork must be
+  RE-FORKED (not restore-freshed) on reopen, or its branch is lost.** Empirically (live, both profiles):
+  forking `claude --resume <src> --fork-session --session-id <new>` does **not** create `<new>.jsonl`
+  until the fork's first message — a fork the user created but never prompted has the SOURCE transcript
+  on disk and **none** for `<new>`. The restore path is transcript-gated (`ClaudeConversationExists`),
+  so on every window restart such a fork failed `wantResume`, fell to **`[restore-fresh]`**, and came
+  back as a brand-new EMPTY conversation with the same `"(fork)"` title but a **churned id** — the
+  forked context silently gone (observed as one `"(fork)"` title hitting `[restore-fresh]` dozens of
+  times across restarts). **Fix:** `SessionInfo::forkParentId` is now **persisted** (Persistence.cpp
+  `ToJson`/`SessionFromJson`, omitted when empty), and `_LaunchClaudeSession` detects the case — when a
+  restored record has `!wantResume` (the fork's own transcript is absent) AND a `forkParentId` whose
+  source transcript still exists, it **re-forks from the source into the SAME id** (`[restore->refork]`):
+  `BuildClaudeSpawn`'s new `forkIntoSessionId` param forks back into the fork's existing id instead of
+  minting, so the fork keeps its identity (and its `WindowRecord` tab ref) across restarts. Gated on
+  `!wantResume`, so a fork that LATER got its own transcript is always resumed, never re-forked off a
+  now-divergent source (the registry's one-shot first-own-hook clear also wipes `forkParentId` the
+  moment the fork produces content, persisted on the next change); if the source ALSO vanished, it
+  falls through to a fresh launch. The re-fork's source-id echo is handled by the existing guard above
+  (the fork is live with `forkParentId == <src>` + the eager `tabToken`). Codex has the SAME class of
+  issue (a never-prompted Codex fork has no rollout) — **not yet fixed** (its source-rollout uuid isn't
+  persisted; tracked as a follow-up).
 - **Tab title — the mechanism + its traps (the MECHANISM behind Rule #11).** A tab carries TWO title
   channels: the user-rename **override** `Tab::_runtimeTabText`, and the active control's
   OSC/profile/`StartingTitle` title. `Tab::Title()`/`_GetActiveTitle()` returns the override when set,

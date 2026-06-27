@@ -330,7 +330,13 @@ namespace Agentmaster
     // is threaded to BuildClaudeCommandline so the spawn launches claude BY FULL PATH — the npm
     // `claude.cmd` via `cmd /c`, a native claude.exe directly — instead of a bare `claude` token that
     // ConPTY's CreateProcessW can only resolve as claude.exe (no PATHEXT). Empty => bare-token fallback.
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {});
+    // `forkIntoSessionId` (Agentmaster, fork only): the id the fork should target INSTEAD of a freshly
+    // minted one. A GENUINE fork leaves this empty (mint a new id). A RESTORE re-fork — re-materializing
+    // a NEVER-MESSAGED fork whose own `<id>.jsonl` was never written (its first turn never ran) — passes
+    // the fork's EXISTING id here so it forks back into the same id, preserving its identity (and the
+    // WindowRecord tab ref) across the restart rather than churning a new id every reopen. Collision-free
+    // because a transcript-less fork's id is unused on disk. Ignored unless forkFromSessionId is set.
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {});
 
     // Build a spec to RELAUNCH an existing managed conversation IN PLACE — the tab's connection died and
     // the user hit "Restart session" (WT's restartConnection). Unlike BuildClaudeSpawn it NEVER mints a
