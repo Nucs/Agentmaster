@@ -124,13 +124,19 @@
               Height="18"
               Margin="0,1,0,-1"
               VerticalAlignment="Center">
+            <!--  Agentmaster: the flash ring's Fill is the user-configurable "status flashing color"
+                  (Settings cog -> AppSettings.flashRingColor), bound to TabStatus.AgentFlashRingBrush
+                  (its alpha channel = the ring opacity). Was a hardcoded Fill="Red"; the brush defaults
+                  to fully-opaque red so the look is unchanged until the user picks another color. The
+                  brush is set just before AgentFlashRingVisible flips true (single chokepoint
+                  _SetTabFlashRing), so the ring is never momentarily shown with a null brush.  -->
             <Ellipse x:Name="HeaderAgentStatusFlashRing"
                      Width="13"
                      Height="13"
                      HorizontalAlignment="Center"
                      VerticalAlignment="Center"
                      IsHitTestVisible="False"
-                     Fill="Red"
+                     Fill="{x:Bind TabStatus.AgentFlashRingBrush, Mode=OneWay}"
                      Visibility="{x:Bind TabStatus.AgentFlashRingVisible, Mode=OneWay}" />
             <!--  Agentmaster (FAVORITES.md §5a): the STAR favorite marker — the alternative to the crown
                   below, chosen by the GLOBAL AppSettings.favoriteIcon (Crown default / Star). Drawn HERE,

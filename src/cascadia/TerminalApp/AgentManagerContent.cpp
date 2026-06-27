@@ -6,6 +6,7 @@
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
+#include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
@@ -6555,6 +6556,48 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setFavoriteIcon, L"The marker shown on a favorited (\x2605) session's live tab, over its status dot \x2014 Crown (default, a small gold crown at the dot's corner) or Star (the status dot becomes the centre of a white, golden-tipped star).");
         panel.Children().Append(_setFavoriteIcon);
 
+        // TABS: the "status flashing color" — the color (and OPACITY) of the unread FLASH RING that
+        // pulses around a managed session's tab status dot when it leaves Running for a needs-you state
+        // on an unvisited tab (and the manual "Mark Unread" ring). A muxc::ColorPicker with its ALPHA
+        // (opacity) slider enabled, so ONE control sets both hue and opacity — the opacity is just the
+        // chosen Color's alpha byte. GLOBAL across windows (AppSettings::flashRingColor, "#AARRGGBB");
+        // applied live on Save + cross-window broadcast (TerminalPage::_RefreshFlashRingBrush re-points
+        // every window's shared ring brush). Default fully-opaque red == the prior hardcoded ring.
+        panel.Children().Append(Text(L"Status flashing color", 12, false, 0.9));
+        {
+            auto hint = Text(L"Color \x2014 and opacity (the alpha slider) \x2014 of the \x201Cunread\x201D flash ring that pulses around a tab's status dot.", 11, false, 0.55);
+            hint.TextWrapping(TextWrapping::Wrap);
+            panel.Children().Append(hint);
+        }
+        _setFlashRingPicker = winrt::Microsoft::UI::Xaml::Controls::ColorPicker{};
+        _setFlashRingPicker.IsAlphaEnabled(true); // the OPACITY slider + alpha in the chosen Color (the "add opacity" ask)
+        _setFlashRingPicker.IsMoreButtonVisible(true); // compact: tuck the RGB / HSV / Hex / Alpha text inputs behind a "More" expander
+        _setFlashRingPicker.IsHexInputVisible(true);
+        _setFlashRingPicker.IsAlphaTextInputVisible(true);
+        _setFlashRingPicker.IsColorChannelTextInputVisible(true);
+        _setFlashRingPicker.HorizontalAlignment(HorizontalAlignment::Left);
+        _setFlashRingPicker.MaxWidth(400); // keep it inside the 460-wide cog card
+        // Default to opaque red at build; the seed pass (_ShowSettings) sets the real saved color.
+        _setFlashRingPicker.Color(ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00));
+        AgentSetTip(_setFlashRingPicker, L"Pick the color the tab status-dot \x201Cunread\x201D flash ring pulses in. The alpha slider sets its opacity. Default: fully-opaque red.");
+        panel.Children().Append(_setFlashRingPicker);
+        {
+            // A clear way back to the default (the picker has no built-in "default"); sets the picker to
+            // fully-opaque red — Save then writes "#FFFF0000".
+            auto reset = HyperlinkButton{};
+            reset.Content(winrt::box_value(L"Reset to default (red)"));
+            reset.Padding(Thickness{ 4, 2, 4, 2 });
+            reset.FontSize(12);
+            AgentSetTip(reset, L"Reset the status flashing color back to the default fully-opaque red.");
+            reset.Click([this](const IInspectable&, const RoutedEventArgs&) {
+                if (_setFlashRingPicker)
+                {
+                    _setFlashRingPicker.Color(ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00));
+                }
+            });
+            panel.Children().Append(reset);
+        }
+
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
         // the choice file / env, never inside the profile it selects). Read-only display +
@@ -6744,6 +6787,11 @@ namespace winrt::TerminalApp::implementation
         {
             // Items: 0 == Crown (default), 1 == Star.
             _setFavoriteIcon.SelectedIndex(_appSettings.favoriteIcon == FavoriteIcon::Star ? 1 : 0);
+        }
+        if (_setFlashRingPicker)
+        {
+            // The status flashing color (with opacity in the alpha byte). Malformed/empty -> opaque red.
+            _setFlashRingPicker.Color(ParseArgbHexColor(_appSettings.flashRingColor, ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00)));
         }
         if (_setResetHidden)
         {
@@ -7004,6 +7052,11 @@ namespace winrt::TerminalApp::implementation
         {
             // Items: 0 == Crown (default), 1 == Star.
             _appSettings.favoriteIcon = _setFavoriteIcon.SelectedIndex() == 1 ? FavoriteIcon::Star : FavoriteIcon::Crown;
+        }
+        if (_setFlashRingPicker)
+        {
+            // The picker always yields a valid Color; store it as "#AARRGGBB" (opacity in the alpha byte).
+            _appSettings.flashRingColor = FormatArgbHexColor(_setFlashRingPicker.Color());
         }
         if (_setAllowPrerelease)
         {

@@ -385,6 +385,13 @@ namespace winrt::TerminalApp::implementation
         std::unordered_set<std::wstring> _manualUnreadSessions;
         winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
         bool _agentFlashPhase{ false };
+        // Agentmaster (status-dot flash-ring COLOR): the ONE brush every flashing tab in THIS window
+        // shares as its ring Fill — the user-configurable "status flashing color" (Settings cog ->
+        // AppSettings::flashRingColor; its alpha channel = the ring opacity). Built lazily on the first
+        // flash from the current setting (_EnsureFlashRingBrush); a settings Save / cross-window
+        // broadcast mutates its Color in place (_RefreshFlashRingBrush), which live-updates every tab
+        // bound to it. Null until the first flash (the ring is collapsed until then). UI thread only.
+        winrt::Windows::UI::Xaml::Media::SolidColorBrush _flashRingBrush{ nullptr };
         // Agentmaster (alt+up/down prompt nav, SUMMARY_JUMP.md §7): while a managed Claude tab is focused,
         // re-read its sent prompts (mtime-gated) + re-resolve the summary panel's jump eligibility every
         // 30 s, so the jump data stays in sync with the live buffer without a keypress. Free-running; each
@@ -713,7 +720,10 @@ namespace winrt::TerminalApp::implementation
         void _StopAgentFlashTimer(); // stop the shared flash timer (no flashing tabs remain)
         void _OnAgentFlashTick(); // shared-timer tick: toggle the phase + show/hide every flashing tab's red RING together (the synchronized blink)
         void _ApplyAgentFlashRingForSession(const std::wstring& sessionId); // show/hide one flashing session's red ring at the CURRENT shared phase (used when it joins mid-flash)
-        void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's RED FLASH RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible; the dot's own black stroke + fill stay constant
+        void _SetTabFlashRing(const TerminalApp::Tab& tab, bool on); // show/hide a tab's flash RING (the ellipse behind the dot) via Tab.TabStatus().AgentFlashRingVisible, painting it with the shared _flashRingBrush when shown; the dot's own black stroke + fill stay constant
+        winrt::Windows::UI::Color _FlashRingColorFromSettings() const; // Agentmaster: parse AppSettings::flashRingColor ("#AARRGGBB", alpha = opacity) -> Color, falling back to opaque red on a malformed value
+        void _EnsureFlashRingBrush(); // Agentmaster: lazily build the per-window shared flash-ring brush (_flashRingBrush) from the current setting, on the first flash
+        void _RefreshFlashRingBrush(); // Agentmaster: re-point the shared flash-ring brush at the (possibly changed) AppSettings::flashRingColor — mutates its Color in place so every tab sharing it updates live (cog Save / cross-window broadcast)
         void _MarkSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): force the red ring on this session's tab until VISITED — even if it is the focused tab (no active-tab skip); sticky vs automatic state changes; ALSO sets the engine manualUnread + promotes Idle/Done -> WaitingForInput (board state, every window)
         void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive); ALSO clears the engine manualUnread
         void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab)

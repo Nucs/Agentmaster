@@ -946,10 +946,14 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (tab status-dot red flash): show/hide a tab's RED FLASH RING — the ellipse behind the
-    // dot (TabHeaderControl.xaml, bound to AgentFlashRingVisible) whose edge peeks out as a red ring
-    // around the dot's black stroke. The dot's own stroke + fill are untouched. Idempotent (the
-    // WINRT_OBSERVABLE_PROPERTY no-ops on an unchanged value). UI thread only.
+    // Agentmaster (tab status-dot flash): show/hide a tab's FLASH RING — the ellipse behind the dot
+    // (TabHeaderControl.xaml, bound to AgentFlashRingVisible) whose edge peeks out as a colored ring
+    // around the dot's black stroke. The dot's own stroke + fill are untouched. When SHOWING it, the
+    // ring is painted with this window's shared flash-ring brush — the user-configurable "status
+    // flashing color" (Settings cog -> AppSettings::flashRingColor; its alpha = opacity) — BEFORE the
+    // ring becomes visible, so it is never shown with a null Fill; the same brush instance is reused
+    // across tabs + the 600ms blink, so the observable no-ops after the first set (no binding churn).
+    // Idempotent (the WINRT_OBSERVABLE_PROPERTY no-ops on an unchanged value). UI thread only.
     void TerminalPage::_SetTabFlashRing(const TerminalApp::Tab& tab, bool on)
     {
         if (!tab)
@@ -963,9 +967,54 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
+            if (on)
+            {
+                _EnsureFlashRingBrush();
+                status.AgentFlashRingBrush(_flashRingBrush);
+            }
             status.AgentFlashRingVisible(on);
         }
         CATCH_LOG();
+    }
+
+    // Agentmaster (status-dot flash-ring color): parse the GLOBAL AppSettings::flashRingColor
+    // ("#AARRGGBB"; the leading alpha byte is the ring opacity) into a Color, falling back to
+    // fully-opaque red (the prior hardcoded Fill="Red") on a malformed / empty value. ParseArgbHexColor
+    // (AgentStatusColors.h) is the ONE parser shared with the Settings cog's color picker, so the
+    // on-disk string and the rendered ring can never drift.
+    winrt::Windows::UI::Color TerminalPage::_FlashRingColorFromSettings() const
+    {
+        return ParseArgbHexColor(_appSettings.flashRingColor,
+                                 winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00));
+    }
+
+    // Agentmaster (status-dot flash-ring color): lazily build this window's ONE shared flash-ring brush
+    // from the current setting, on the first flash. Every flashing tab in the window is then pointed at
+    // this instance (see _SetTabFlashRing), so a later color change updates them all at once.
+    void TerminalPage::_EnsureFlashRingBrush()
+    {
+        if (!_flashRingBrush)
+        {
+            _flashRingBrush = Media::SolidColorBrush{ _FlashRingColorFromSettings() };
+        }
+    }
+
+    // Agentmaster (status-dot flash-ring color): re-point the shared brush at the (possibly changed)
+    // AppSettings::flashRingColor. Mutating the existing instance's Color live-updates EVERY tab whose
+    // ring Fill is bound to it — no per-tab re-assert needed — so a settings change recolors the live
+    // flash instantly; builds the brush if no tab has flashed yet. Called from the Settings cog Save
+    // handler and the cross-window settings broadcast (each window owns its own brush).
+    void TerminalPage::_RefreshFlashRingBrush()
+    {
+        const auto color = _FlashRingColorFromSettings();
+        if (!_flashRingBrush)
+        {
+            _flashRingBrush = Media::SolidColorBrush{ color };
+        }
+        else
+        {
+            _flashRingBrush.Color(color);
+        }
     }
 
     // Agentmaster (Linked Lenses): show/hide the "selected/active" pill behind a tab's header — the

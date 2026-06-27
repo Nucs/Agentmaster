@@ -17,6 +17,7 @@
 
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h> // Popup (the path-picker drop-down)
+#include <winrt/Microsoft.UI.Xaml.Controls.h> // muxc::ColorPicker (the cog's "status flashing color" picker)
 
 #include <vector>
 
@@ -716,6 +717,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAlwaysShowHomeButton{ nullptr }; // TABS: always show the strip "Home" button (OFF => only when the Manager tab is scrolled off); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ComboBox _setFavoriteIcon{ nullptr }; // TABS: the FAVORITE marker glyph on a live session's tab — Crown (default) / Star (FAVORITES.md §5a); GLOBAL
+        winrt::Microsoft::UI::Xaml::Controls::ColorPicker _setFlashRingPicker{ nullptr }; // TABS: the "status flashing color" — the tab status-dot unread flash ring; alpha channel = opacity (IsAlphaEnabled). Stored as AppSettings::flashRingColor ("#AARRGGBB"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ENV area: GLOBAL multi-line NAME=VALUE editor (one per line)

@@ -1014,6 +1014,10 @@ namespace winrt::TerminalApp::implementation
                 // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every
                 // hosted favorited tab so a glyph change takes effect now; other windows get it via the broadcast.
                 self->_RefreshAllFavoriteIcons();
+                // Status-dot flash-ring color is GLOBAL — re-point this window's shared flash-ring brush at the
+                // (possibly changed) color/opacity so any currently-flashing tab recolors live; other windows
+                // pick it up via the broadcast below.
+                self->_RefreshFlashRingBrush();
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -1177,6 +1181,9 @@ namespace winrt::TerminalApp::implementation
         // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every hosted
         // favorited tab so a change made in another window switches the glyph live here too.
         _RefreshAllFavoriteIcons();
+        // Status-dot flash-ring color is GLOBAL — re-point this window's shared flash-ring brush so a change
+        // made in another window recolors this window's live flash too.
+        _RefreshFlashRingBrush();
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))

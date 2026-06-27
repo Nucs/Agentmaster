@@ -31,10 +31,20 @@ namespace TerminalApp
 
         // Agentmaster (status-dot RED FLASH RING): when a hosted session goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval) while its tab is unvisited, TerminalPage's
-        // shared 600ms timer toggles this so a RED RING — a separate ellipse drawn BEHIND the dot, its
+        // shared 600ms timer toggles this so a RING — a separate ellipse drawn BEHIND the dot, its
         // edge peeking out AROUND the dot's black outline — blinks on and off for attention. The dot
         // itself keeps its constant black outline + status-colour fill; only the ring flashes.
         Boolean AgentFlashRingVisible { get; set; };
+
+        // Agentmaster (status-dot flash-ring COLOR): the brush the flash ring is painted with — the
+        // user-configurable "status flashing color" (Settings cog), GLOBAL across windows. Its alpha
+        // channel carries the ring's OPACITY (the cog's color picker has its alpha slider enabled), so
+        // a translucent ring is just a brush whose Color.A < 0xFF. TerminalPage drives this via
+        // Tab.TabStatus() from AppSettings::flashRingColor (default fully-opaque red, == the prior
+        // hardcoded Fill="Red"); all flashing tabs in a window share ONE brush instance, so a settings
+        // change re-points every ring at once. Null until the tab first flashes (the ring is collapsed
+        // until then, so the null brush is never seen).
+        Windows.UI.Xaml.Media.Brush AgentFlashRingBrush { get; set; };
 
         // Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background drawn
         // BEHIND the tab header (bound by TabHeaderControl.xaml), shown ONLY while the Agent Manager

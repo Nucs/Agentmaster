@@ -31,12 +31,18 @@ namespace winrt::TerminalApp::implementation
         // (just the outline) — to read as "not initialized; Activate to wake it". MUTUALLY EXCLUSIVE with
         // AgentStatusVisible (the full dot): _SetTabAgentDot drives exactly one true. Shares AgentStatusBrush.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentStatusHalfVisible, PropertyChanged.raise);
-        // Agentmaster (status-dot RED FLASH RING): a separate red ring (an ellipse behind the dot,
+        // Agentmaster (status-dot RED FLASH RING): a separate ring (an ellipse behind the dot,
         // peeking out around its constant black outline) that the TerminalPage shared timer blinks
         // on/off when a hosted session goes from Running to a resting state (Idle / WaitingForInput /
         // NeedsApproval) on an unvisited tab. The dot keeps its black outline + status fill; only this
         // ring flashes.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentFlashRingVisible, PropertyChanged.raise);
+        // Agentmaster (status-dot flash-ring COLOR): the brush the ring is painted with — the
+        // user-configurable "status flashing color" (Settings cog -> AppSettings::flashRingColor),
+        // GLOBAL across windows, its alpha channel == the ring's opacity. TerminalPage points this at a
+        // per-window shared SolidColorBrush via _SetTabFlashRing; null until the tab first flashes (the
+        // ring is collapsed until then). Replaces the previously hardcoded Fill="Red".
+        WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentFlashRingBrush, PropertyChanged.raise, nullptr);
         // Agentmaster (Linked Lenses): the "selected/active" pill behind the header (see the idl
         // note) — driven by TerminalPage::_SetTabSelectionPill via Tab.TabStatus().
         WINRT_OBSERVABLE_PROPERTY(bool, AgentSelectionVisible, PropertyChanged.raise);
