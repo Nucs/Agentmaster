@@ -6801,7 +6801,7 @@ namespace winrt::TerminalApp::implementation
         // the full picker is huge inline, so it only appears on demand (the Windows Terminal tab-color
         // idiom). The picker's ALPHA slider IS the OPACITY control (one control sets hue + opacity).
         // GLOBAL (AppSettings::flashRingColor, "#AARRGGBB"); applied live on Save + cross-window
-        // broadcast (TerminalPage::_RefreshFlashRingBrush). Default fully-opaque red == the prior ring.
+        // broadcast (TerminalPage::_RefreshFlashRingBrush). Default red at 80% opacity (#CCFF0000).
         {
             auto row = StackPanel{};
             row.Orientation(Orientation::Horizontal);
@@ -6820,7 +6820,7 @@ namespace winrt::TerminalApp::implementation
             _flashRingSwatch.CornerRadius(CornerRadius{ 3, 3, 3, 3 });
             _flashRingSwatch.BorderThickness(Thickness{ 1, 1, 1, 1 });
             _flashRingSwatch.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x90, 0xFF, 0xFF, 0xFF) });
-            _flashRingSwatch.Background(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00) });
+            _flashRingSwatch.Background(SolidColorBrush{ ColorHelper::FromArgb(0xCC, 0xFF, 0x00, 0x00) });
 
             // The picker lives INSIDE the flyout (built once, opened on demand). Reading its Color() at
             // Save works whether or not the flyout was ever opened.
@@ -6830,7 +6830,7 @@ namespace winrt::TerminalApp::implementation
             _setFlashRingPicker.IsHexInputVisible(true);
             _setFlashRingPicker.IsAlphaTextInputVisible(true);
             _setFlashRingPicker.IsColorChannelTextInputVisible(true);
-            _setFlashRingPicker.Color(ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00)); // seed pass (_ShowSettings) sets the real saved color
+            _setFlashRingPicker.Color(ColorHelper::FromArgb(0xCC, 0xFF, 0x00, 0x00)); // seed pass (_ShowSettings) sets the real saved color
             // Live-preview the swatch as the user drags the picker.
             _setFlashRingPicker.ColorChanged([this](auto&&, const winrt::Microsoft::UI::Xaml::Controls::ColorChangedEventArgs& e) {
                 if (_flashRingSwatch)
@@ -6845,7 +6845,7 @@ namespace winrt::TerminalApp::implementation
             pickerPanel.Children().Append(_setFlashRingPicker);
             {
                 // A clear way back to the default (the picker has no built-in "default") — sets the
-                // picker to fully-opaque red; Save then writes "#FFFF0000".
+                // picker to red at 80% opacity; Save then writes "#CCFF0000".
                 auto reset = HyperlinkButton{};
                 reset.Content(winrt::box_value(L"Reset to default (red)"));
                 reset.Padding(Thickness{ 4, 2, 4, 2 });
@@ -6853,7 +6853,7 @@ namespace winrt::TerminalApp::implementation
                 reset.Click([this](const IInspectable&, const RoutedEventArgs&) {
                     if (_setFlashRingPicker)
                     {
-                        _setFlashRingPicker.Color(ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00));
+                        _setFlashRingPicker.Color(ColorHelper::FromArgb(0xCC, 0xFF, 0x00, 0x00));
                     }
                 });
                 pickerPanel.Children().Append(reset);
@@ -6866,7 +6866,7 @@ namespace winrt::TerminalApp::implementation
             swatchBtn.Padding(Thickness{ 4, 3, 4, 3 });
             swatchBtn.Content(_flashRingSwatch);
             swatchBtn.Flyout(flyout);
-            AgentSetTip(swatchBtn, L"Pick the tab status-dot \x201Cunread\x201D flash-ring color. The picker's alpha slider sets its opacity. Default: fully-opaque red.");
+            AgentSetTip(swatchBtn, L"Pick the tab status-dot \x201Cunread\x201D flash-ring color. The picker's alpha slider sets its opacity. Default: red at 80% opacity.");
             row.Children().Append(swatchBtn);
 
             panel.Children().Append(row);
@@ -7064,8 +7064,8 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setFlashRingPicker)
         {
-            // The status flashing color (with opacity in the alpha byte). Malformed/empty -> opaque red.
-            const auto c = ParseArgbHexColor(_appSettings.flashRingColor, ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00));
+            // The status flashing color (with opacity in the alpha byte). Malformed/empty -> default (80% red).
+            const auto c = ParseArgbHexColor(_appSettings.flashRingColor, ColorHelper::FromArgb(0xCC, 0xFF, 0x00, 0x00));
             _setFlashRingPicker.Color(c); // also raises ColorChanged -> updates the swatch preview
             if (_flashRingSwatch)
             {

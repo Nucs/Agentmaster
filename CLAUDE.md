@@ -411,7 +411,7 @@ dot — ring · the dot's black stroke · its status fill, `TerminalTabStatus.Ag
 ring, NOT a stroke-color change) until you switch to it. The ring's **color AND opacity are
 user-configurable** (the Settings cog's **TABS ▸ Status flashing color** picker — a `muxc::ColorPicker`
 with its alpha slider enabled — a GLOBAL `AppSettings::flashRingColor` stored `#AARRGGBB`, **default
-fully-opaque red** `#FFFF0000` == the prior hardcoded look; painted via the per-window shared
+red at 80% opacity** `#CCFF0000`; painted via the per-window shared
 `_flashRingBrush` bound to `TerminalTabStatus.AgentFlashRingBrush`, applied live on Save + cross-window
 broadcast — `_RefreshFlashRingBrush`)
 (`_EvaluateAgentFlash` — the active tab counts as visited so it never flashes; visiting it clears the
@@ -1229,8 +1229,8 @@ What works, by area:
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
   broadcast), and (TABS section) **`flashRingColor`** (the **Status flashing color** picker — a
   `muxc::ColorPicker` with its **alpha slider enabled**, so one control sets both the hue AND the
-  **opacity** of the tab status-dot **"unread" flash ring**; stored `#AARRGGBB`, **default fully-opaque
-  red** `#FFFF0000` == the prior hardcoded ring; GLOBAL, applied live on Save + cross-window broadcast via
+  **opacity** of the tab status-dot **"unread" flash ring**; stored `#AARRGGBB`, **default red at 80%
+  opacity** `#CCFF0000`; GLOBAL, applied live on Save + cross-window broadcast via
   `_RefreshFlashRingBrush` re-pointing each window's shared `_flashRingBrush`).
   A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —

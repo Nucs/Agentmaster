@@ -2208,7 +2208,7 @@ static void TestAppSettings()
         in.confirmBeforeKill = false;
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
-        in.flashRingColor = L"#8000FF00"; // non-default (default #FFFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
+        in.flashRingColor = L"#8000FF00"; // non-default (default #CCFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
@@ -2271,7 +2271,7 @@ static void TestAppSettings()
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
-        CHECK(out.flashRingColor == L"#FFFF0000", "settings flashRingColor default (opaque red) on empty");
+        CHECK(out.flashRingColor == L"#CCFF0000", "settings flashRingColor default (80% red) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.flightPlanShowsSummary == true, "settings flightPlanShowsSummary default (Summary) on empty");

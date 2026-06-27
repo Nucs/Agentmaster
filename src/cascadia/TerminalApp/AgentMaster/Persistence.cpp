@@ -550,10 +550,10 @@ namespace Agentmaster
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
         s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
-        // Status-dot flash-ring color (with opacity in the alpha byte). Absent => "#FFFF0000" (opaque
-        // red, the prior hardcoded Fill). Stored verbatim; the UI-layer parser (ParseArgbHexColor)
-        // falls back to red on a malformed value, so a hand-edited garbage string self-heals on next save.
-        s.flashRingColor = v.StrAt(L"flashRingColor", L"#FFFF0000");
+        // Status-dot flash-ring color (with opacity in the alpha byte). Absent => "#CCFF0000" (red at
+        // 80% opacity). Stored verbatim; the UI-layer parser (ParseArgbHexColor) falls back to that
+        // default on a malformed value, so a hand-edited garbage string self-heals on next save.
+        s.flashRingColor = v.StrAt(L"flashRingColor", L"#CCFF0000");
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)

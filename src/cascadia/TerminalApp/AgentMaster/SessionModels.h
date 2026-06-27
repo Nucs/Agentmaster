@@ -532,9 +532,10 @@ namespace Agentmaster
         // color picker (alpha slider enabled) drives BOTH hue and opacity in one control; a legacy
         // "#RRGGBB" (no alpha) is read as fully opaque. GLOBAL across windows; applied live on Save +
         // cross-window broadcast (each window re-points its shared flash-ring brush). Default
-        // "#FFFF0000" == fully-opaque red, reproducing the prior hardcoded Fill="Red". A malformed /
-        // empty value falls back to that default at the (UI-layer) parse, never wedging the ring.
-        std::wstring flashRingColor{ L"#FFFF0000" };
+        // "#CCFF0000" == red at 80% opacity (alpha 0xCC) — a slightly softer ring than a fully-opaque
+        // one. A malformed / empty value falls back to that default at the (UI-layer) parse, never
+        // wedging the ring.
+        std::wstring flashRingColor{ L"#CCFF0000" };
 
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +

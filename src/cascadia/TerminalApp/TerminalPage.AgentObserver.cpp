@@ -997,14 +997,14 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (status-dot flash-ring color): parse the GLOBAL AppSettings::flashRingColor
-    // ("#AARRGGBB"; the leading alpha byte is the ring opacity) into a Color, falling back to
-    // fully-opaque red (the prior hardcoded Fill="Red") on a malformed / empty value. ParseArgbHexColor
+    // ("#AARRGGBB"; the leading alpha byte is the ring opacity) into a Color, falling back to the
+    // default red at 80% opacity (alpha 0xCC) on a malformed / empty value. ParseArgbHexColor
     // (AgentStatusColors.h) is the ONE parser shared with the Settings cog's color picker, so the
     // on-disk string and the rendered ring can never drift.
     winrt::Windows::UI::Color TerminalPage::_FlashRingColorFromSettings() const
     {
         return ParseArgbHexColor(_appSettings.flashRingColor,
-                                 winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xFF, 0x00, 0x00));
+                                 winrt::Windows::UI::ColorHelper::FromArgb(0xCC, 0xFF, 0x00, 0x00));
     }
 
     // Agentmaster (status-dot flash-ring color): lazily build this window's ONE shared flash-ring brush
