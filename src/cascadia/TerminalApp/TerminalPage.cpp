@@ -2943,18 +2943,11 @@ namespace winrt::TerminalApp::implementation
                 TextBlock msg;
                 msg.Text(winrt::hstring{ body });
                 msg.TextWrapping(TextWrapping::WrapWholeWords);
-                CheckBox dontAsk;
-                dontAsk.Content(box_value(L"Don't ask me again"));
-                dontAsk.IsChecked(false);
-                StackPanel panel;
-                panel.Spacing(12);
-                panel.Children().Append(msg);
-                panel.Children().Append(dontAsk);
 
                 ContentDialog dialog;
                 dialog.Tag(box_value(L"agentmaster-dark")); // force the Agent-Manager dark theme (TerminalWindow::ShowDialog)
                 dialog.Title(box_value(L"Close this window?"));
-                dialog.Content(panel);
+                dialog.Content(msg);
                 dialog.PrimaryButtonText(L"Close Window");
                 dialog.SecondaryButtonText(L"Close All Windows");
                 dialog.CloseButtonText(L"Cancel");
@@ -2985,13 +2978,7 @@ namespace winrt::TerminalApp::implementation
                     RequestQuit();
                     co_return;
                 }
-                // Primary ("Close Window"): honor the inline "don't ask again" exactly like the shared
-                // _ShowConfirmCloseDialog does, then fall through to the non-destructive close below.
-                if (const auto c = dontAsk.IsChecked(); c && c.Value())
-                {
-                    _settings.GlobalSettings().ConfirmOnClose(ConfirmOnClose::Never);
-                    _settings.WriteSettingsToDisk();
-                }
+                // Primary ("Close Window") -> fall through to the non-destructive close below.
             }
         }
 
