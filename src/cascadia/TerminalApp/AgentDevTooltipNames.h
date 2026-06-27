@@ -1,53 +1,55 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Agentmaster (DEV ONLY) — append a unique element identifier as the FIRST ROW of every
-// tooltip, so the user can hover ANY control, read a short token, and tell the assistant
-// exactly which control they mean (then the assistant greps the codebase for it in seconds).
+// Agentmaster (DEV ONLY) — append a unique element ID as the FIRST ROW of every tooltip, so the
+// user can hover ANY control, read its id, and tell the assistant exactly which control they mean.
 //
-// GATING: runtime, to the AgentmasterDev package identity ONLY (Profiles::IsDevPackage()).
-// The shipped release package is "Agentmaster" (no "Dev" prefix), so InstallDevTooltipNames
-// returns immediately there — the feature is invisible in release exactly as required. This
-// matches the project's other dev-vs-release seams (e.g. _AgentmasterReopenTarget), which
-// branch on the identity at runtime rather than on a compile flag.
+// GATING: runtime, to the AgentmasterDev package identity ONLY (Profiles::IsDevPackage()). The
+// shipped release package is "Agentmaster" (no "Dev" prefix), so InstallDevTooltipNames returns
+// immediately there — invisible in release, as required. Matches the project's other dev/release
+// seams (e.g. _AgentmasterReopenTarget).
 //
-// MECHANISM: ONE bubbling PointerMoved handler on the window's Root grid (TerminalPage.xaml's
-// x:Name="Root") — title bar, tab strip, toolbar, Manager tab, settings, and the terminal
-// panes all live under it. On a hover over a NEW leaf we walk up from args.OriginalSource and:
-//   * find the NEAREST tooltip-bearing ancestor — the element whose tooltip the framework will
-//     actually show — and prepend our first row to ITS tooltip (so we AUGMENT real tooltips,
-//     never shadow them with a new one on a closer child); else
-//   * find the nearest interactive (Control) or x:Named element and attach a name-only tip.
-// The injected first row is idempotent (a marker sentinel begins it; we strip + rebuild from
-// the recovered original, and skip when already correct), so re-renders / re-hovers never
-// stack it.
+// WHAT IT SHOWS (the id of the element you are POINTING AT — not its tooltip text):
+//   * x:Name when the element has one      -> e.g.  "⟦id⟧ ReopenButton · Button"   (grep x:Name)
+//   * otherwise a deterministic generated id -> e.g. "⟦id⟧ am-7f3a2c · Button"
+// The generated id is a stable hash of the element's TYPE + structural tree-path + content +
+// automation id (NOT its tooltip text — that was the earlier "duplicate" bug). Because a runtime
+// hash isn't greppable, each newly-seen generated id is written ONCE to a dev log in the active
+// profile (devtooltip-ids.log) mapping  id -> {type, tooltip, content, automationId, ancestor
+// path}. So when the user reads "am-7f3a2c" off a control and names it, the assistant greps that
+// log to recover the control's real identity. (Elements that already have an x:Name need no log —
+// the name itself is greppable.)
 //
-// THE NAME (optimized for "identify in a matter of seconds"):
-//   * x:Name when set            -> e.g.  "⟦id⟧ ReopenButton  (Button)"   [grep x:Name / member]
-//   * else AutomationId / AutomationName
-//   * else  Type «text-hint» ◂ <nearest x:Named ancestor>
-//            e.g. "⟦id⟧ Button «Reopen Windows» ◂ TabContent"   [grep the literal tooltip text]
-// Most Agentmaster controls are created in C++ without an x:Name, but they DO carry a
-// descriptive tooltip (via AgentSetTip) — and that text is a source string literal, so the
-// synthesized form stays trivially greppable.
+// MECHANISM: ONE bubbling PointerMoved handler on the window's Root grid — covers the whole window
+// tree (title bar, tab strip, toolbar, Manager tab, Settings editor, terminal panes). On a hover
+// we resolve the MEANINGFUL element under the pointer (the nearest Control / x:Named / tooltip-
+// bearing ancestor — i.e. "the thing you're pointing at", never an inner TextBlock/Border), then:
+//   * augment its existing tooltip with the id first row, or add an id-only tip if it had none.
+// Anti-flicker: (a) we throttle on the RESOLVED TARGET, so jiggling within one control does no
+// work; (b) every tip we touch/create is made IsHitTestVisible(false), so the pointer never lands
+// on the tip popup (the pointer-enters-tip -> element-exits -> tip-hides -> reopens flicker loop).
+// Idempotent (a marker sentinel begins our row; we rebuild from the recovered original and skip
+// when already correct).
 //
-// WinRT XAML types, so this lives in TerminalApp (not the plain-C++ AgentMaster/ engine dir)
-// and is included from .cpp TUs only — it relies on the pch projections, like AgentTipHelpers.h.
+// WinRT XAML types, so this lives in TerminalApp (not the plain-C++ AgentMaster/ engine dir) and is
+// included from .cpp TUs only — it relies on the pch projections, like AgentTipHelpers.h.
 
 #pragma once
 
-#include <memory> // shared_ptr holder for the per-handler "last leaf" throttle
+#include <filesystem> // dev-log path
+#include <fstream> // dev-log append
+#include <memory> // shared_ptr holders (throttle + logged-id set)
+#include <mutex> // once_flag for the log header
 #include <string>
+#include <unordered_set> // log each generated id once per session
 
-#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the dev-vs-release gate
+#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage (gate) + ResolveProfileDir (log) + Fnv1a64 (id hash)
 
 namespace winrt::TerminalApp::implementation
 {
     namespace devtip
     {
-        // Visible marker that BEGINS our injected first row, and doubles as the idempotency
-        // sentinel (no real tooltip starts with it). U+27E6/U+27E7 = mathematical white square
-        // brackets: "⟦id⟧ ".
+        // Visible marker that BEGINS our injected first row + the idempotency sentinel ("⟦id⟧ ").
         inline constexpr std::wstring_view kMarker{ L"⟦id⟧ " };
 
         inline bool StartsWith(std::wstring_view s, std::wstring_view p) noexcept
@@ -55,17 +57,15 @@ namespace winrt::TerminalApp::implementation
             return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
         }
 
-        // The leaf class segment of a runtime class name, e.g.
         // "Windows.UI.Xaml.Controls.Button" -> "Button".
-        inline std::wstring LastTypeSegment(const winrt::hstring& full)
+        inline std::wstring ClassLeaf(const winrt::hstring& full)
         {
             const std::wstring_view s{ full };
             const auto pos = s.rfind(L'.');
             return std::wstring{ pos == std::wstring_view::npos ? s : s.substr(pos + 1) };
         }
 
-        // Collapse whitespace runs to single spaces, trim, and cap at n chars (…-elided). Used
-        // for the text hint so a multi-line tooltip / content stays a single tidy first-row tail.
+        // Collapse whitespace runs to single spaces, trim, cap at n (…-elided). For log tidiness.
         inline std::wstring Tidy(std::wstring_view in, size_t n)
         {
             std::wstring out;
@@ -88,38 +88,44 @@ namespace winrt::TerminalApp::implementation
             if (out.size() > n)
             {
                 out.resize(n);
-                out.push_back(L'…'); // …
+                out.push_back(L'…');
             }
             return out;
         }
 
-        // Unwrap a tooltip value to its string, if it is one (a boxed hstring). Empty otherwise.
+        // 6 lowercase-hex chars of a 64-bit value (low 24 bits) — the generated-id suffix.
+        inline std::wstring Hex6(uint64_t h)
+        {
+            static constexpr wchar_t d[] = L"0123456789abcdef";
+            std::wstring s(6, L'0');
+            for (int i = 5; i >= 0; --i)
+            {
+                s[static_cast<size_t>(i)] = d[h & 0xF];
+                h >>= 4;
+            }
+            return s;
+        }
+
+        inline std::string Utf8(const std::wstring& w)
+        {
+            if (w.empty())
+            {
+                return {};
+            }
+            const int len = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+            std::string s(static_cast<size_t>(len), '\0');
+            ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), len, nullptr, nullptr);
+            return s;
+        }
+
+        // Boxed-string tooltip value -> its text, else "".
         inline winrt::hstring AsString(const winrt::Windows::Foundation::IInspectable& o)
         {
             return o ? winrt::unbox_value_or<winrt::hstring>(o, L"") : winrt::hstring{};
         }
 
-        // The nearest x:Named ancestor's name (for disambiguating an un-named leaf), or "".
-        inline std::wstring NamedAncestor(winrt::Windows::UI::Xaml::DependencyObject node)
-        {
-            namespace WUX = winrt::Windows::UI::Xaml;
-            for (int i = 0; i < 24 && node; ++i)
-            {
-                node = WUX::Media::VisualTreeHelper::GetParent(node);
-                if (const auto fe = node.try_as<WUX::FrameworkElement>())
-                {
-                    if (!fe.Name().empty())
-                    {
-                        return std::wstring{ fe.Name() };
-                    }
-                }
-            }
-            return {};
-        }
-
-        // A greppable content hint for an un-named element: its TextBlock text or a stringy
-        // ContentControl content. The caller prefers the element's existing tooltip text first
-        // (the most descriptive thing for an Agentmaster button), falling back to this.
+        // The element's OWN content/text (NOT its tooltip) — a hash + log input, never displayed
+        // as the id (that was the duplicate bug).
         inline std::wstring TextHint(const winrt::Windows::UI::Xaml::FrameworkElement& fe)
         {
             namespace WUXC = winrt::Windows::UI::Xaml::Controls;
@@ -134,51 +140,92 @@ namespace winrt::TerminalApp::implementation
             return {};
         }
 
-        // Build the first-row identifier (WITHOUT the marker). hintFallback is the element's
-        // recovered original tooltip text (preferred hint when the element has no x:Name).
-        inline std::wstring ComputeName(const winrt::Windows::UI::Xaml::FrameworkElement& fe,
-                                        std::wstring_view hintFallback)
+        // The child-index path from a stable point down to the element ("3/1/0/2") — makes the
+        // generated id unique per tree position even for content-identical siblings (board cards).
+        inline std::wstring StructuralPath(winrt::Windows::UI::Xaml::DependencyObject node)
         {
-            namespace WUXA = winrt::Windows::UI::Xaml::Automation;
-            const auto type = LastTypeSegment(winrt::get_class_name(fe));
+            using VTH = winrt::Windows::UI::Xaml::Media::VisualTreeHelper;
+            std::wstring path;
+            for (int i = 0; i < 24 && node; ++i)
+            {
+                const auto parent = VTH::GetParent(node);
+                if (!parent)
+                {
+                    break;
+                }
+                int idx = -1;
+                const int n = VTH::GetChildrenCount(parent);
+                for (int c = 0; c < n; ++c)
+                {
+                    if (VTH::GetChild(parent, c) == node)
+                    {
+                        idx = c;
+                        break;
+                    }
+                }
+                path = std::to_wstring(idx) + (path.empty() ? std::wstring{} : (L"/" + path));
+                node = parent;
+            }
+            return path;
+        }
 
-            // 1. x:Name — the ideal: short, unique, directly greppable as x:Name="…" / a member.
-            if (const auto name = fe.Name(); !name.empty())
+        // Human-readable ancestor chain ("Root>TabContent>Grid>Button") for the dev log, so the
+        // assistant can place a generated id without an x:Name.
+        inline std::wstring AncestorChain(winrt::Windows::UI::Xaml::DependencyObject node)
+        {
+            namespace WUX = winrt::Windows::UI::Xaml;
+            using VTH = WUX::Media::VisualTreeHelper;
+            std::wstring chain;
+            for (int i = 0; i < 24 && node; ++i)
             {
-                return std::wstring{ name } + L"  (" + type + L")";
+                if (const auto fe = node.try_as<WUX::FrameworkElement>())
+                {
+                    const auto nm = fe.Name();
+                    const auto seg = nm.empty() ? ClassLeaf(winrt::get_class_name(fe)) : std::wstring{ nm };
+                    chain = chain.empty() ? seg : (seg + L">" + chain);
+                }
+                node = VTH::GetParent(node);
             }
+            return chain;
+        }
 
-            // 2/3. automation id/name, then the tooltip/content text, as the disambiguating hint.
-            std::wstring hint{ WUXA::AutomationProperties::GetAutomationId(fe) };
-            if (hint.empty())
-            {
-                hint = std::wstring{ WUXA::AutomationProperties::GetName(fe) };
-            }
-            if (hint.empty())
-            {
-                hint = Tidy(hintFallback, 48);
-            }
-            if (hint.empty())
-            {
-                hint = Tidy(TextHint(fe), 48);
-            }
+        inline const std::wstring& LogPath()
+        {
+            static const std::wstring p = ::Agentmaster::Profiles::ResolveProfileDir() + L"\\devtooltip-ids.log";
+            return p;
+        }
 
-            std::wstring res = type;
-            if (!hint.empty())
+        // Truncate + header ONCE per process, so the log reflects the current run's id assignments.
+        inline void EnsureLogHeader()
+        {
+            static std::once_flag once;
+            std::call_once(once, []() {
+                try
+                {
+                    std::ofstream o(std::filesystem::path{ LogPath() }, std::ios::trunc | std::ios::binary);
+                    o << "# Agentmaster dev tooltip id-map: id\\ttype\\ttip\\tcontent\\taid\\tpath\n";
+                }
+                catch (...)
+                {
+                }
+            });
+        }
+
+        inline void LogId(const std::wstring& id, const std::wstring& type, const std::wstring& tip, const std::wstring& content, const std::wstring& aid, const std::wstring& path)
+        {
+            try
             {
-                res += L" «" + hint + L"»"; // «hint»
+                std::ofstream o(std::filesystem::path{ LogPath() }, std::ios::app | std::ios::binary);
+                o << Utf8(id) << '\t' << Utf8(type) << "\ttip=" << Utf8(Tidy(tip, 200)) << "\tcontent=" << Utf8(Tidy(content, 120)) << "\taid=" << Utf8(aid) << "\tpath=" << Utf8(path) << '\n';
             }
-            if (const auto anc = NamedAncestor(fe); !anc.empty())
+            catch (...)
             {
-                res += L" ◂ " + anc; // ◂ ancestor
             }
-            return res;
         }
     }
 
-    // Install the dev-only tooltip-name injector on a window's Root element. No-op outside the
-    // AgentmasterDev package, and no-op on a null root. Idempotent per element + cheap at rest
-    // (one identity compare per pointer move, real work only on a new leaf).
+    // Install the dev-only tooltip-id injector on a window's Root element. No-op outside the
+    // AgentmasterDev package / on a null root.
     inline void InstallDevTooltipNames(const winrt::Windows::UI::Xaml::FrameworkElement& root)
     {
         if (!::Agentmaster::Profiles::IsDevPackage() || !root)
@@ -188,65 +235,64 @@ namespace winrt::TerminalApp::implementation
 
         namespace WUX = winrt::Windows::UI::Xaml;
         namespace WUXC = WUX::Controls;
+        namespace WUXA = WUX::Automation;
         using winrt::Windows::Foundation::IInspectable;
         using winrt::Windows::Foundation::IReference;
 
-        // The leaf we last processed — an identity throttle so a still / dragging pointer (e.g. a
-        // terminal selection) does no work after the first move over it. The desired== guard
-        // below is the real idempotency; this is only an optimization. (operator== on two
-        // IInspectables is COM-identity, per cppwinrt's operator==(IUnknown, IUnknown).)
-        auto lastLeaf = std::make_shared<IInspectable>(nullptr);
+        devtip::EnsureLogHeader();
 
-        root.PointerMoved([lastLeaf](const IInspectable& /*sender*/, const WUX::Input::PointerRoutedEventArgs& args) {
+        // Throttle on the RESOLVED TARGET (not the raw leaf), so jiggling within one control does
+        // nothing. Plus a per-session set so each generated id is logged once.
+        auto lastTarget = std::make_shared<WUX::FrameworkElement>(nullptr);
+        auto logged = std::make_shared<std::unordered_set<std::wstring>>();
+
+        root.PointerMoved([lastTarget, logged](const IInspectable& /*sender*/, const WUX::Input::PointerRoutedEventArgs& args) {
             const auto src = args.OriginalSource();
             if (!src)
             {
                 return;
             }
-            if (*lastLeaf && *lastLeaf == src)
-            {
-                return; // same leaf as the previous move
-            }
-            *lastLeaf = src;
 
-            // Walk leaf -> up: stop at the FIRST tooltip-bearing element (whose tip the framework
-            // shows — we augment THAT, never a closer child), remembering the first interactive /
-            // x:Named element as the fallback for the no-tooltip-anywhere case.
+            // Resolve the meaningful element being pointed at: the nearest ancestor (incl. the leaf)
+            // that is a Control, OR is x:Named, OR already owns a tooltip — i.e. the control, never
+            // an inner TextBlock/Border. Bail if we somehow land inside a ToolTip popup.
             WUX::DependencyObject node = src.try_as<WUX::DependencyObject>();
-            WUX::FrameworkElement ttOwner{ nullptr };
+            WUX::FrameworkElement target{ nullptr };
             IInspectable existing{ nullptr };
-            WUX::FrameworkElement fallback{ nullptr };
             for (int i = 0; i < 24 && node; ++i)
             {
+                if (node.try_as<WUXC::ToolTip>())
+                {
+                    return;
+                }
                 if (const auto fe = node.try_as<WUX::FrameworkElement>())
                 {
-                    if (const auto tip = WUXC::ToolTipService::GetToolTip(fe))
+                    const auto tip = WUXC::ToolTipService::GetToolTip(fe);
+                    if (tip || fe.try_as<WUXC::Control>() || !fe.Name().empty())
                     {
-                        ttOwner = fe;
+                        target = fe;
                         existing = tip;
                         break;
-                    }
-                    if (!fallback && (fe.try_as<WUXC::Control>() || !fe.Name().empty()))
-                    {
-                        fallback = fe;
                     }
                 }
                 node = WUX::Media::VisualTreeHelper::GetParent(node);
             }
-
-            const auto target = ttOwner ? ttOwner : fallback;
             if (!target)
             {
-                return; // pure layout chrome with no tooltip and nothing nameable — leave it
+                return;
             }
+            if (*lastTarget && *lastTarget == target)
+            {
+                return; // same control as last move
+            }
+            *lastTarget = target;
 
-            // Recover the element's CURRENT tooltip text + the writable handle to it. We support
-            // the three shapes used across the app: a boxed-string tip, a ToolTip whose Content
-            // is a boxed string (AgentSetTip), and a ToolTip whose Content is a TextBlock (Tab).
+            // Recover the target's CURRENT tooltip text + the writable handle. Three shapes:
+            // a boxed-string tip, a ToolTip with boxed-string Content (AgentSetTip), a ToolTip with
+            // a TextBlock Content (Tab).
             winrt::hstring origText;
             WUXC::ToolTip ttObj{ nullptr };
             WUXC::TextBlock ttText{ nullptr };
-            bool stringTip = false;
             if (existing)
             {
                 if ((ttObj = existing.try_as<WUXC::ToolTip>()))
@@ -264,11 +310,10 @@ namespace winrt::TerminalApp::implementation
                 else
                 {
                     origText = devtip::AsString(existing);
-                    stringTip = true;
                 }
             }
 
-            // Strip a previously-injected first row to recover the TRUE original text.
+            // Strip a previously-injected id row to recover the TRUE original tooltip text.
             std::wstring original{ origText };
             if (devtip::StartsWith(original, devtip::kMarker))
             {
@@ -276,8 +321,31 @@ namespace winrt::TerminalApp::implementation
                 original = (nl == std::wstring::npos) ? std::wstring{} : original.substr(nl + 1);
             }
 
+            const auto type = devtip::ClassLeaf(winrt::get_class_name(target));
+
+            // The id: real x:Name (greppable) OR a deterministic generated id (logged for lookup).
+            std::wstring id;
+            if (const auto nm = target.Name(); !nm.empty())
+            {
+                id = std::wstring{ nm };
+            }
+            else
+            {
+                const std::wstring aid{ WUXA::AutomationProperties::GetAutomationId(target) };
+                const auto content = devtip::TextHint(target);
+                const auto path = devtip::StructuralPath(target);
+                const auto sig = type + L"|" + aid + L"|" + content + L"|" + original + L"|" + path;
+                id = L"am-" + devtip::Hex6(::Agentmaster::Profiles::detail::Fnv1a64(sig));
+                if (logged->insert(id).second)
+                {
+                    devtip::LogId(id, type, original, content, aid, devtip::AncestorChain(target));
+                }
+            }
+
             std::wstring desired{ devtip::kMarker };
-            desired += devtip::ComputeName(target, original);
+            desired += id;
+            desired += L" · ";
+            desired += type;
             if (!original.empty())
             {
                 desired += L'\n';
@@ -286,17 +354,13 @@ namespace winrt::TerminalApp::implementation
 
             if (std::wstring{ origText } == desired)
             {
-                return; // already correct — nothing to write
+                return; // already correct
             }
 
             const winrt::hstring boxed{ desired };
-            if (!existing)
+            if (ttObj)
             {
-                // No tooltip anywhere above: add a name-only tip to the interactive/named element.
-                WUXC::ToolTipService::SetToolTip(target, winrt::box_value(boxed));
-            }
-            else if (ttObj)
-            {
+                ttObj.IsHitTestVisible(false); // anti-flicker: the tip popup never eats the pointer
                 if (ttText)
                 {
                     ttText.Text(boxed);
@@ -305,11 +369,16 @@ namespace winrt::TerminalApp::implementation
                 {
                     ttObj.Content(winrt::box_value(boxed));
                 }
-                // else: a ToolTip with non-text content — leave it untouched (rare).
+                // else: a ToolTip with non-text content — leave content, the hit-test fix still applies
             }
-            else if (stringTip)
+            else
             {
-                WUXC::ToolTipService::SetToolTip(target, winrt::box_value(boxed));
+                // No tooltip object (a boxed-string tip, or none at all): give the target a fresh
+                // hit-test-invisible ToolTip so it shows the id without flicker (theme inherited).
+                WUXC::ToolTip tt;
+                tt.Content(winrt::box_value(boxed));
+                tt.IsHitTestVisible(false);
+                WUXC::ToolTipService::SetToolTip(target, tt);
             }
         });
     }
