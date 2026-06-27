@@ -279,7 +279,7 @@ namespace winrt::TerminalApp::implementation
         // The page's table columns (FAVORITES.md adds the leftmost ★ column, shifting the rest +1):
         // 0=★ favorite · 1=color/live chip · 2=Title · 3=Directory · 4=Branch · 5=Created ·
         // 6=Active · 7=Msgs·Tools · 8=Ctx (context tokens) · 9=Hits (populated while searching).
-        void SessAddColumns(Grid& g, bool searching)
+        void SessAddColumns(Grid& g, bool showHits)
         {
             const auto col = [&](double v, GridUnitType t) {
                 ColumnDefinition c;
@@ -295,9 +295,9 @@ namespace winrt::TerminalApp::implementation
             col(58, GridUnitType::Pixel); // active
             col(74, GridUnitType::Pixel); // msgs·tools
             col(40, GridUnitType::Pixel); // ctx (context tokens — compact: "182K" / "1.05M"); snug, fits the max value + the sort arrow
-            // hits: reserve its width ONLY while searching — otherwise it would sit empty at the far
-            // right as trailing dead space after Ctx (the rightmost meaningful column when not searching).
-            col(searching ? 48.0 : 0.0, GridUnitType::Pixel); // hits
+            // hits: reserve its width ONLY when shown (a content 👤/🤖 search) — otherwise it would sit
+            // empty at the far right as trailing dead space after Ctx (the rightmost column otherwise).
+            col(showHits ? 48.0 : 0.0, GridUnitType::Pixel); // hits
         }
 
         // Agentmaster: the compact context-token count for the "Ctx" column — "182K", "8.3K",
@@ -1464,11 +1464,29 @@ namespace winrt::TerminalApp::implementation
         }
         const int64_t now = SessNowMs();
         const bool searching = !_sessionsQueryText.empty();
+        // The Hits column counts CONTENT matches (the slow 👤/🤖 phase). Those scopes default OFF, so a
+        // plain title/dir/path search runs the fast phase only and produces NO hit counts — leaving the
+        // column header with empty cells under it ("Hits appears not working"). So show the Hits column
+        // ONLY when a content scope is active (== the only time it has data); otherwise it's hidden and
+        // Ctx is the rightmost column.
+        const bool contentScope =
+            (_sessScopeUserBtn && _sessScopeUserBtn.IsChecked() && _sessScopeUserBtn.IsChecked().Value()) ||
+            (_sessScopeAgentBtn && _sessScopeAgentBtn.IsChecked() && _sessScopeAgentBtn.IsChecked().Value());
+        const bool showHits = searching && contentScope;
+        // Relevance-tier ranking (name match on top) is the DEFAULT-VIEW behavior — it must NOT override
+        // an EXPLICIT column sort, or clicking a header while searching appears to do nothing ("sorting
+        // stopped working"). So apply tiers only while the sort is on the DEFAULT column (Active, col 6 —
+        // either direction); the moment the user picks ANY other column (Created/Msgs/Ctx/Title/…), the
+        // pure column sort governs. Active is the default sort, so a fresh search still ranks the best
+        // match first (the case the tiers were added for) while every other column sorts as asked. Tying
+        // it to the column (not its asc/desc) avoids a flip-flop where toggling Active's arrow also
+        // toggled the tiers.
+        const bool rankByRelevance = searching && _sessionsSortColumn == 6;
 
         // --- sortable header ---
         _sessionsHeaderRow.Children().Clear();
         _sessionsHeaderRow.ColumnDefinitions().Clear();
-        SessAddColumns(_sessionsHeaderRow, searching);
+        SessAddColumns(_sessionsHeaderRow, showHits);
         _sessionsHeaderRow.Margin(Thickness{ 8, 0, 8, 4 });
         const auto addHeader = [this](int col, winrt::hstring label, bool sortable, winrt::hstring tip = L"") {
             if (!sortable)
@@ -1526,7 +1544,7 @@ namespace winrt::TerminalApp::implementation
         addHeader(6, L"Active", true, L"When the session was last active. Click to sort.");
         addHeader(7, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
         addHeader(8, L"Ctx", true, L"Context \x2014 tokens in the session's newest turn (input + cache + output), the same value the Triage Board shows as \x201C" L"ctx N\x201D. Blank until the first assistant reply. Click to sort.");
-        addHeader(9, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, searching ? winrt::hstring{ L"Number of search matches in this session" } : winrt::hstring{ L"" });
+        addHeader(9, showHits ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, showHits ? winrt::hstring{ L"Number of content matches (\U0001F464/\U0001F916 scopes) in this session" } : winrt::hstring{ L"" });
 
         // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
         // minus the user's "Hide from list" set. This render is the single chokepoint both the
@@ -1606,7 +1624,7 @@ namespace winrt::TerminalApp::implementation
         // SAME match primitives the fast phase uses (ParseSessionQuery / MatchesQueryText / the guid
         // identity rule), restricted to the name fields, so "found it by name" lands on top.
         std::unordered_map<std::wstring, int> relevance;
-        if (searching)
+        if (rankByRelevance)
         {
             const auto terms = ::Agentmaster::ParseSessionQuery(_sessionsQueryText);
             const bool qFuzzy = _sessFuzzyBtn && _sessFuzzyBtn.IsChecked() && _sessFuzzyBtn.IsChecked().Value();
@@ -1648,13 +1666,15 @@ namespace winrt::TerminalApp::implementation
 
         const int sortCol = _sessionsSortColumn;
         const bool asc = _sessionsSortAscending;
-        std::sort(view.begin(), view.end(), [sortCol, asc, searching, &relevance](const _SessionsRow* a, const _SessionsRow* b) {
-            if (searching)
+        std::sort(view.begin(), view.end(), [sortCol, asc, rankByRelevance, &relevance](const _SessionsRow* a, const _SessionsRow* b) {
+            if (rankByRelevance)
             {
                 // Relevance tier dominates the column sort (more-relevant tier first, independent of
                 // the column's asc/desc) so the name match the user searched for can't be buried
                 // under a recently-active incidental content match. Within a tier, the column sort
                 // below decides order. A row missing from the map (shouldn't happen) sorts last.
+                // Only while the sort is the pristine default (rankByRelevance) — an explicit column
+                // click drops the tiers so the chosen sort governs purely (the "sorting stopped" fix).
                 const auto ra = relevance.find(a->id);
                 const auto rb = relevance.find(b->id);
                 const int ta = ra != relevance.end() ? ra->second : 3;
@@ -1723,7 +1743,7 @@ namespace winrt::TerminalApp::implementation
             const auto& r = *rp;
             _sessionsVisibleOrder.push_back(r.id);
             Grid g;
-            SessAddColumns(g, searching);
+            SessAddColumns(g, showHits);
             g.Padding(Thickness{ 6, 4, 6, 4 });
 
             // chip: the per-dir color (the SAME color the session's tab wears — answer "color
@@ -1908,7 +1928,9 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(ctx, 8);
             g.Children().Append(ctx);
 
-            if (searching)
+            // Hits (col 9): the content-match count — shown only when a content scope (👤/🤖) is active
+            // (showHits), the only time the column is reserved + populated.
+            if (showHits)
             {
                 const auto hit = _sessionsHitCounts.find(r.id);
                 if (hit != _sessionsHitCounts.end())
