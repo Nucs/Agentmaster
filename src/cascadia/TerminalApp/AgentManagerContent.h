@@ -719,6 +719,21 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ComboBox _setFavoriteIcon{ nullptr }; // TABS: the FAVORITE marker glyph on a live session's tab — Crown (default) / Star (FAVORITES.md §5a); GLOBAL
         winrt::Microsoft::UI::Xaml::Controls::ColorPicker _setFlashRingPicker{ nullptr }; // TABS: the "status flashing color" — the tab status-dot unread flash ring; alpha channel = opacity (IsAlphaEnabled). Lives in a Flyout opened by the swatch button (compact); stored as AppSettings::flashRingColor ("#AARRGGBB"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::Border _flashRingSwatch{ nullptr }; // TABS: the compact color-preview swatch (Flyout opener content) — updated on seed + the picker's ColorChanged
+        // TABS: "Overlay opacity" — the per-tab overlay's REST + HOVER opacities (TAB_OVERLAY.md), on ONE
+        // dual-thumb gradient track (transparent left -> solid right). Left dot = rest, right dot = hover;
+        // they can't cross (rest <= hover). Drag-driven (CapturePointer + PointerMoved, the resize-grip
+        // idiom). Seeded from AppSettings on open; read into tabOverlayRest/HoverOpacity on Save. GLOBAL.
+        winrt::Windows::UI::Xaml::Controls::Canvas _overlayOpacityTrack{ nullptr };
+        winrt::Windows::UI::Xaml::Shapes::Ellipse _overlayRestThumb{ nullptr }; // left dot — rest opacity (the more-transparent end)
+        winrt::Windows::UI::Xaml::Shapes::Ellipse _overlayHoverThumb{ nullptr }; // right dot — hover opacity (the more-solid end)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _overlayOpacityLabel{ nullptr }; // live "Rest N%  ·  Hover M%" readout
+        double _overlayRestVal{ 0.50 }; // current slider value (0..1) — rest opacity
+        double _overlayHoverVal{ 1.0 }; // current slider value (0..1) — hover opacity
+        bool _overlayDragRest{ false }; // a drag of the rest dot is in flight
+        bool _overlayDragHover{ false }; // a drag of the hover dot is in flight
+        double _overlayDragStartX{ 0.0 }; // window-X at PointerPressed (delta-accumulation, the grip idiom)
+        double _overlayDragStartVal{ 0.0 }; // the dragged dot's value at PointerPressed
+        void _LayoutOverlayOpacitySlider(); // position both dots + refresh the label from _overlayRest/HoverVal (no layout dependency — fixed track width)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setProfileDir{ nullptr }; // the ACTIVE per-install profile dir (read-only; Change… applies on restart)
         winrt::Windows::UI::Xaml::Controls::Button _setResetHidden{ nullptr }; // BEHAVIOR: "Reset hidden sessions" — clears the Sessions browser's "Hide from list" set (fires _resetHiddenSessionsHandler; relabeled per open)
         winrt::Windows::UI::Xaml::Controls::TextBox _setEnv{ nullptr }; // ENV area: GLOBAL multi-line NAME=VALUE editor (one per line)

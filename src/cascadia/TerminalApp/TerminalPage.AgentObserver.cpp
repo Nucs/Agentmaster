@@ -1036,6 +1036,31 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (TAB_OVERLAY.md): apply the GLOBAL per-tab overlay rest/hover opacities
+    // (AppSettings::tabOverlayRestOpacity / tabOverlayHoverOpacity) to every overlay this window hosts —
+    // the LINKED badges (_claudeOverlays) AND the registry-less observe badges (_pendingOverlays), so a
+    // pwsh/cmd/unprompted-claude badge dims/brightens the same as a managed one. Called on a cog Save +
+    // the cross-window broadcast (the _RefreshFlashRingBrush idiom). UI thread only.
+    void TerminalPage::_RefreshOverlayOpacities()
+    {
+        const double rest = _appSettings.tabOverlayRestOpacity;
+        const double hover = _appSettings.tabOverlayHoverOpacity;
+        for (const auto& [id, ov] : _claudeOverlays)
+        {
+            if (ov)
+            {
+                ov->SetOverlayOpacities(rest, hover);
+            }
+        }
+        for (const auto& [wt, ov] : _pendingOverlays)
+        {
+            if (ov)
+            {
+                ov->SetOverlayOpacities(rest, hover);
+            }
+        }
+    }
+
     // Agentmaster (Linked Lenses): show/hide the "selected/active" pill behind a tab's header — the
     // filled accent background TabHeaderControl.xaml binds to TerminalTabStatus.AgentSelectionVisible
     // / AgentSelectionBrush. It makes a session's tab read as the active tab while you stay on the
@@ -1215,6 +1240,10 @@ namespace winrt::TerminalApp::implementation
         // (AppSettings::summaryPanelShowPrevious) — seed this overlay; the previous-session toggle
         // (leftmost in the times bar, shown only when /compact'ed) flips it via the handler below.
         overlay->SetSummaryShowPrevious(_appSettings.summaryPanelShowPrevious);
+        // Per-tab overlay REST/HOVER opacities (TAB_OVERLAY.md): GLOBAL settings
+        // (AppSettings::tabOverlayRestOpacity / tabOverlayHoverOpacity) — seed this overlay; the cog's
+        // "Overlay opacity" slider re-applies them live via _RefreshOverlayOpacities (Save + broadcast).
+        overlay->SetOverlayOpacities(_appSettings.tabOverlayRestOpacity, _appSettings.tabOverlayHoverOpacity);
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {
@@ -2018,6 +2047,7 @@ namespace winrt::TerminalApp::implementation
         }
         auto overlay = winrt::make_self<implementation::AgentTabOverlay>();
         overlay->ShowActivity(kind);
+        overlay->SetOverlayOpacities(_appSettings.tabOverlayRestOpacity, _appSettings.tabOverlayHoverOpacity); // honor the GLOBAL overlay opacities (TAB_OVERLAY.md) like a linked badge
         if (const auto impl = winrt::get_self<implementation::TerminalPaneContent>(termContent))
         {
             impl->SetAgentOverlay(overlay->Root());

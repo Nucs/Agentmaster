@@ -63,6 +63,14 @@ using winrt::TerminalApp::implementation::AgentSetTip;
 
 namespace
 {
+    // Agentmaster (cog "Overlay opacity" dual-thumb slider): the track + dot geometry, shared by the build
+    // and the layout/drag helpers so the value<->pixel mapping can't drift. A FIXED track width keeps the
+    // mapping layout-independent (no SizeChanged needed). A dot's value v in [0,1] maps to Canvas.Left =
+    // v * (kOverlayTrackW - kOverlayThumb), so a dot stays fully inside the rail at both ends.
+    constexpr double kOverlayTrackW = 240.0;
+    constexpr double kOverlayThumb = 16.0;
+    constexpr double kOverlayTrackH = 22.0;
+
     // Agentmaster: Triage-Board cards hold their hover tooltips back to a deliberate 4s (vs the
     // global ~1/3-system-hover-time fast open used on every other surface), so panning the mouse
     // across a dense board doesn't flash a tip over every card. Passed as AgentSetTip's optional
@@ -3580,6 +3588,29 @@ namespace winrt::TerminalApp::implementation
         e.Handled(true);
     }
 
+    // Agentmaster (cog "Overlay opacity" slider): position both dots from their current values + refresh the
+    // "Rest N% · Hover M%" readout. A FIXED track width makes this layout-independent, so it is correct
+    // before first layout too (seed on _ShowSettings) and on every drag move. Values are already clamped
+    // [0,1] + rest<=hover by the drag handler / seed.
+    void AgentManagerContent::_LayoutOverlayOpacitySlider()
+    {
+        const double usable = kOverlayTrackW - kOverlayThumb;
+        if (_overlayRestThumb)
+        {
+            Canvas::SetLeft(_overlayRestThumb, _overlayRestVal * usable);
+        }
+        if (_overlayHoverThumb)
+        {
+            Canvas::SetLeft(_overlayHoverThumb, _overlayHoverVal * usable);
+        }
+        if (_overlayOpacityLabel)
+        {
+            const int rp = static_cast<int>(_overlayRestVal * 100.0 + 0.5);
+            const int hp = static_cast<int>(_overlayHoverVal * 100.0 + 0.5);
+            _overlayOpacityLabel.Text(winrt::hstring{ L"Rest " + std::to_wstring(rp) + L"%   \x00B7   Hover " + std::to_wstring(hp) + L"%" });
+        }
+    }
+
     void AgentManagerContent::_RebuildBoard(const std::vector<SessionInfo>& sessions)
     {
         // Agentmaster: preserve each column's vertical scroll offset across this rebuild. _RebuildBoard
@@ -6872,6 +6903,139 @@ namespace winrt::TerminalApp::implementation
             panel.Children().Append(row);
         }
 
+        // TABS: "Overlay opacity" — the per-tab overlay's REST (dim, idle) and HOVER (bright, on
+        // pointer-over) opacities on ONE track with TWO dots. The rail is a transparent->solid gradient
+        // (left = transparent, right = solid — the requested visual); the LEFT dot is rest, the RIGHT is
+        // hover, and they CAN'T CROSS (rest <= hover, enforced in the drag). Dragged with the splitter
+        // idiom (CapturePointer + root-relative delta — Islands-safe). GLOBAL (AppSettings::
+        // tabOverlayRestOpacity / tabOverlayHoverOpacity); applied live on Save + cross-window broadcast.
+        {
+            auto headerRow = StackPanel{};
+            headerRow.Orientation(Orientation::Horizontal);
+            headerRow.Spacing(10);
+            auto oLabel = Text(L"Overlay opacity", 13, false, 0.9);
+            oLabel.VerticalAlignment(VerticalAlignment::Center);
+            headerRow.Children().Append(oLabel);
+            _overlayOpacityLabel = Text(L"Rest 50%   \x00B7   Hover 100%", 12, false, 0.6);
+            _overlayOpacityLabel.VerticalAlignment(VerticalAlignment::Center);
+            headerRow.Children().Append(_overlayOpacityLabel);
+            panel.Children().Append(headerRow);
+
+            _overlayOpacityTrack = Canvas{};
+            _overlayOpacityTrack.Width(kOverlayTrackW);
+            _overlayOpacityTrack.Height(kOverlayTrackH);
+            _overlayOpacityTrack.Margin(Thickness{ 0, 4, 0, 4 });
+            _overlayOpacityTrack.HorizontalAlignment(HorizontalAlignment::Left);
+            AgentSetTip(_overlayOpacityTrack, L"Drag the two dots to set how visible the per-tab overlay badge is \x2014 the LEFT dot is its REST opacity (idle; the transparent end), the RIGHT dot its HOVER opacity (on pointer-over; the solid end). The dots can't cross.");
+
+            // The gradient rail (transparent left -> solid white right). Non-hit-test so only the dots
+            // capture the pointer; a faint outline keeps the transparent end visible on the dark card.
+            auto rail = Border{};
+            rail.Width(kOverlayTrackW);
+            rail.Height(8);
+            rail.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+            rail.IsHitTestVisible(false);
+            rail.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            rail.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x30, 0xFF, 0xFF, 0xFF) });
+            {
+                auto grad = winrt::Windows::UI::Xaml::Media::LinearGradientBrush{};
+                grad.StartPoint(winrt::Windows::Foundation::Point{ 0.0f, 0.5f });
+                grad.EndPoint(winrt::Windows::Foundation::Point{ 1.0f, 0.5f });
+                auto s0 = winrt::Windows::UI::Xaml::Media::GradientStop{};
+                s0.Color(ColorHelper::FromArgb(0x00, 0xFF, 0xFF, 0xFF)); // transparent (left = low opacity)
+                s0.Offset(0.0);
+                auto s1 = winrt::Windows::UI::Xaml::Media::GradientStop{};
+                s1.Color(ColorHelper::FromArgb(0xFF, 0xFF, 0xFF, 0xFF)); // solid (right = full opacity)
+                s1.Offset(1.0);
+                grad.GradientStops().Append(s0);
+                grad.GradientStops().Append(s1);
+                rail.Background(grad);
+            }
+            Canvas::SetLeft(rail, 0.0);
+            Canvas::SetTop(rail, (kOverlayTrackH - 8.0) / 2.0);
+            _overlayOpacityTrack.Children().Append(rail);
+
+            // Build one dot. isRest picks which value it drives + the cross-constraint direction.
+            const auto makeDot = [this](bool isRest) {
+                winrt::Windows::UI::Xaml::Shapes::Ellipse dot{};
+                dot.Width(kOverlayThumb);
+                dot.Height(kOverlayThumb);
+                dot.Fill(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0xFF, 0xFF, 0xFF) });
+                dot.Stroke(SolidColorBrush{ ColorHelper::FromArgb(0xFF, 0x20, 0x20, 0x20) }); // dark ring -> visible on any part of the gradient
+                dot.StrokeThickness(1.5);
+                Canvas::SetTop(dot, (kOverlayTrackH - kOverlayThumb) / 2.0);
+                // Drag (the splitter idiom): pin the root-relative X + this dot's value at press, derive
+                // the new value from the delta on move, clamp to [0,1] AND to the other dot (no crossing).
+                dot.PointerPressed([this, isRest](const IInspectable& s, const PointerRoutedEventArgs& e) {
+                    if (!_root)
+                    {
+                        return;
+                    }
+                    if (isRest)
+                    {
+                        _overlayDragRest = true;
+                    }
+                    else
+                    {
+                        _overlayDragHover = true;
+                    }
+                    _overlayDragStartX = e.GetCurrentPoint(_root).Position().X;
+                    _overlayDragStartVal = isRest ? _overlayRestVal : _overlayHoverVal;
+                    if (const auto el = s.try_as<UIElement>())
+                    {
+                        el.CapturePointer(e.Pointer());
+                    }
+                    e.Handled(true);
+                });
+                dot.PointerMoved([this, isRest](const IInspectable&, const PointerRoutedEventArgs& e) {
+                    if ((isRest && !_overlayDragRest) || (!isRest && !_overlayDragHover) || !_root)
+                    {
+                        return;
+                    }
+                    const double cur = e.GetCurrentPoint(_root).Position().X;
+                    double v = _overlayDragStartVal + (cur - _overlayDragStartX) / (kOverlayTrackW - kOverlayThumb);
+                    v = std::clamp(v, 0.0, 1.0);
+                    if (isRest)
+                    {
+                        _overlayRestVal = std::min(v, _overlayHoverVal); // rest can't pass hover
+                    }
+                    else
+                    {
+                        _overlayHoverVal = std::max(v, _overlayRestVal); // hover can't drop below rest
+                    }
+                    _LayoutOverlayOpacitySlider();
+                    e.Handled(true);
+                });
+                const auto endDrag = [this, isRest](const IInspectable& s, const PointerRoutedEventArgs& e) {
+                    if (isRest)
+                    {
+                        _overlayDragRest = false;
+                    }
+                    else
+                    {
+                        _overlayDragHover = false;
+                    }
+                    if (const auto el = s.try_as<UIElement>())
+                    {
+                        el.ReleasePointerCaptures();
+                    }
+                    e.Handled(true);
+                };
+                dot.PointerReleased(endDrag);
+                dot.PointerCaptureLost(endDrag);
+                return dot;
+            };
+            _overlayRestThumb = makeDot(true);
+            _overlayHoverThumb = makeDot(false);
+            AgentSetTip(_overlayRestThumb, L"REST opacity \x2014 how visible the overlay badge is when idle (drag left for more transparent). Can't go past the hover dot.");
+            AgentSetTip(_overlayHoverThumb, L"HOVER opacity \x2014 how visible the overlay becomes on pointer-over (drag right for more solid). Can't drop below the rest dot.");
+            // Hover dot LAST so it sits on top + stays grabbable when the two dots coincide.
+            _overlayOpacityTrack.Children().Append(_overlayRestThumb);
+            _overlayOpacityTrack.Children().Append(_overlayHoverThumb);
+            panel.Children().Append(_overlayOpacityTrack);
+            _LayoutOverlayOpacitySlider(); // seed positions from the defaults; _ShowSettings re-seeds from AppSettings
+        }
+
         // PROFILE — the per-install state folder (NOT an AppSettings field: it is the pointer
         // TO settings.json, resolved by ProfileBootstrap BEFORE any state loads, so it lives in
         // the choice file / env, never inside the profile it selects). Read-only display +
@@ -7071,6 +7235,28 @@ namespace winrt::TerminalApp::implementation
             {
                 _flashRingSwatch.Background(SolidColorBrush{ c }); // set directly too (don't rely on a programmatic ColorChanged firing)
             }
+        }
+        if (_overlayOpacityTrack)
+        {
+            // Seed the overlay-opacity dots from the saved rest/hover (clamped + ordered, so a hand-edited
+            // settings.json can't place a dot off-track or crossed).
+            double rest = _appSettings.tabOverlayRestOpacity;
+            double hover = _appSettings.tabOverlayHoverOpacity;
+            if (!(rest > 0.0 && rest <= 1.0))
+            {
+                rest = 0.50;
+            }
+            if (!(hover > 0.0 && hover <= 1.0))
+            {
+                hover = 1.0;
+            }
+            if (rest > hover)
+            {
+                rest = hover;
+            }
+            _overlayRestVal = rest;
+            _overlayHoverVal = hover;
+            _LayoutOverlayOpacitySlider();
         }
         if (_setResetHidden)
         {
@@ -7336,6 +7522,12 @@ namespace winrt::TerminalApp::implementation
         {
             // The picker always yields a valid Color; store it as "#AARRGGBB" (opacity in the alpha byte).
             _appSettings.flashRingColor = FormatArgbHexColor(_setFlashRingPicker.Color());
+        }
+        if (_overlayOpacityTrack)
+        {
+            // The dual-thumb slider already keeps rest <= hover (drag clamps); store both verbatim.
+            _appSettings.tabOverlayRestOpacity = _overlayRestVal;
+            _appSettings.tabOverlayHoverOpacity = _overlayHoverVal;
         }
         if (_setAllowPrerelease)
         {

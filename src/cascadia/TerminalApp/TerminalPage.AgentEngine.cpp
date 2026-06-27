@@ -1018,6 +1018,10 @@ namespace winrt::TerminalApp::implementation
                 // (possibly changed) color/opacity so any currently-flashing tab recolors live; other windows
                 // pick it up via the broadcast below.
                 self->_RefreshFlashRingBrush();
+                // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — push the (possibly
+                // changed) pair to every hosted overlay so the badge/summary dim<->bright updates live; other
+                // windows pick it up via the broadcast below.
+                self->_RefreshOverlayOpacities();
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -1184,6 +1188,9 @@ namespace winrt::TerminalApp::implementation
         // Status-dot flash-ring color is GLOBAL — re-point this window's shared flash-ring brush so a change
         // made in another window recolors this window's live flash too.
         _RefreshFlashRingBrush();
+        // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — apply a change made in another
+        // window to this window's overlays live too.
+        _RefreshOverlayOpacities();
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))

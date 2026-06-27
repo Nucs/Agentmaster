@@ -71,10 +71,11 @@ namespace
     constexpr double kSummaryMaxHFrac = 0.75; // never taller than THREE-QUARTERS of the pane
     constexpr double kSummaryDefMaxH = 480.0; // the original auto-height cap (px), still capped at 0.75*pane
 
-    // Summary-panel opacity: EXACTLY the badge's values + mechanism (the overlay panel above —
-    // _root.Opacity / _SetExpanded): dim at rest, full (bright) on hover.
-    constexpr double kSummaryRestOpacity = 0.50; // == the badge's rest opacity (_root.Opacity dim)
-    constexpr double kSummaryHoverOpacity = 1.0; // == the badge's hovered opacity (_SetExpanded bright)
+    // Summary-panel opacity uses EXACTLY the badge's values + mechanism (the overlay panel above —
+    // _root.Opacity / _SetExpanded): dim at REST, bright on HOVER. Both are now per-instance members
+    // (_restOpacity / _hoverOpacity), seeded from the GLOBAL AppSettings::tabOverlayRestOpacity /
+    // tabOverlayHoverOpacity by the page (SetOverlayOpacities) — so the badge and its summary panel
+    // always share the same configurable pair.
 
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
     {
@@ -959,7 +960,7 @@ namespace winrt::TerminalApp::implementation
         _root.BorderThickness(ThicknessHelper::FromUniformLength(1));
         _root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         _root.Padding(ThicknessHelper::FromLengths(7, 2, 7, 2));
-        _root.Opacity(0.50); // dim at rest; full on hover (the chosen interaction)
+        _root.Opacity(_restOpacity); // dim at rest; brightens to _hoverOpacity on hover (the chosen interaction)
         _root.Child(_stack);
 
         // Hover handlers are wired in _WireHover() (from Initialize / first ShowActivity), NOT here:
@@ -1345,7 +1346,38 @@ namespace winrt::TerminalApp::implementation
         // pinned open.
         if (_root)
         {
-            _root.Opacity(on ? 1.0 : 0.50);
+            _root.Opacity(on ? _hoverOpacity : _restOpacity);
+        }
+    }
+
+    // Agentmaster (TAB_OVERLAY.md): adopt the GLOBAL rest/hover opacities (cog slider; seeded on attach,
+    // broadcast on Save). Enforce rest <= hover defensively (the slider already does), then re-apply live:
+    // the badge to its CURRENT expanded state (_hovering / copy-menu _pinned), and the summary panel to
+    // rest (its own pointer-over handlers re-brighten it on the next move — and in practice nothing is
+    // hovered when a cog Save lands, since the modal covers the window).
+    void AgentTabOverlay::SetOverlayOpacities(double rest, double hover)
+    {
+        if (!(rest > 0.0 && rest <= 1.0))
+        {
+            rest = 0.50;
+        }
+        if (!(hover > 0.0 && hover <= 1.0))
+        {
+            hover = 1.0;
+        }
+        if (rest > hover)
+        {
+            rest = hover;
+        }
+        _restOpacity = rest;
+        _hoverOpacity = hover;
+        if (_root)
+        {
+            _SetExpanded(_hovering || _pinned);
+        }
+        if (_summaryRoot)
+        {
+            _summaryRoot.Opacity(_restOpacity);
         }
     }
 
@@ -1979,7 +2011,7 @@ namespace winrt::TerminalApp::implementation
         // Padding now lives on contentBorder (so the grips reach the panel edges).
         _summaryRoot.Child(layout);
         _summaryRoot.Visibility(Visibility::Collapsed); // shown only while the GLOBAL showSummaryPanel is ON
-        _summaryRoot.Opacity(kSummaryRestOpacity); // dim at rest — same value as the badge (_root.Opacity)
+        _summaryRoot.Opacity(_restOpacity); // dim at rest — same value as the badge (_root.Opacity)
         // Same hover MECHANISM as the badge (_WireHover/_SetExpanded): brighten to full on pointer-over,
         // back to dim on exit. The panel is text-heavy (selectable title / times / body runs) + has resize
         // grips, all hit-testable children whose bubbled PointerExited would otherwise dim the panel WHILE
@@ -1988,7 +2020,7 @@ namespace winrt::TerminalApp::implementation
         _summaryRoot.PointerEntered([weak](const IInspectable&, const PointerRoutedEventArgs&) {
             if (const auto self = weak.get())
             {
-                self->_summaryRoot.Opacity(kSummaryHoverOpacity);
+                self->_summaryRoot.Opacity(self->_hoverOpacity);
             }
         });
         _summaryRoot.PointerExited([weak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
@@ -1998,7 +2030,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (const auto self = weak.get())
             {
-                self->_summaryRoot.Opacity(kSummaryRestOpacity);
+                self->_summaryRoot.Opacity(self->_restOpacity);
             }
         });
 
@@ -2093,13 +2125,13 @@ namespace winrt::TerminalApp::implementation
             _summaryContextMenu.Opened([weak](const IInspectable&, const IInspectable&) {
                 if (const auto self = weak.get(); self && self->_summaryRoot)
                 {
-                    self->_summaryRoot.Opacity(kSummaryHoverOpacity);
+                    self->_summaryRoot.Opacity(self->_hoverOpacity);
                 }
             });
             _summaryContextMenu.Closed([weak](const IInspectable&, const IInspectable&) {
                 if (const auto self = weak.get(); self && self->_summaryRoot)
                 {
-                    self->_summaryRoot.Opacity(kSummaryRestOpacity);
+                    self->_summaryRoot.Opacity(self->_restOpacity);
                 }
             });
         }

@@ -541,6 +541,14 @@ namespace Agentmaster
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +
         // link state). Default ON; a missing key => true (a no-op default, like the rest).
         bool showTabOverlay{ true };
+        // Agentmaster (TAB_OVERLAY.md): the per-tab overlay (badge + its summary panel) sits dim at REST
+        // and brightens to HOVER opacity on pointer-over / while the copy menu is open. Both are
+        // user-configurable via the cog's TABS "Overlay opacity" dual-thumb slider (rest = left/transparent
+        // dot, hover = right/solid dot). GLOBAL across windows, applied live on Save + cross-window
+        // broadcast. INVARIANT: rest <= hover (the slider can't cross the dots; enforced again at load).
+        // Defaults reproduce the prior hardcoded look (rest 0.50, hover 1.0).
+        double tabOverlayRestOpacity{ 0.50 };
+        double tabOverlayHoverOpacity{ 1.0 };
         // Agentmaster (TAB_OVERLAY.md summary panel): whether the per-tab SUMMARY PANEL (the 2nd
         // overlay, toggled by the badge's pencil button) is shown. GLOBAL across windows — like
         // showTabOverlay/treeSort it lives here in settings.json, NOT per-session: the pencil on any

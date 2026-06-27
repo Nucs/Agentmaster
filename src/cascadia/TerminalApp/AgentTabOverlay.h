@@ -87,6 +87,13 @@ namespace winrt::TerminalApp::implementation
         // broadcast. Set by _AttachClaudeOverlay.
         void SetSummaryToggleHandler(std::function<void()> handler);
 
+        // Agentmaster (TAB_OVERLAY.md): the badge + summary panel REST (dim, at rest) and HOVER (bright,
+        // on pointer-over / copy-menu-open) opacities are GLOBAL settings (AppSettings::tabOverlayRestOpacity
+        // / tabOverlayHoverOpacity), mirrored in by the page — on attach (seed) and on cog Save / cross-
+        // window broadcast. Re-applies live to the badge (at its current expanded state) + the summary panel.
+        // Enforces rest <= hover defensively. Call on the UI thread.
+        void SetOverlayOpacities(double rest, double hover);
+
         // Agentmaster (TAB_OVERLAY.md summary panel): whether the panel preserves a message's real
         // newlines (true) or collapses each message to one line with a literal "\n" (false, the default
         // session-end.js look). A GLOBAL setting (AppSettings::summaryPanelWrapNewlines), mirrored in here
@@ -196,6 +203,8 @@ namespace winrt::TerminalApp::implementation
         bool _hovering{ false }; // pointer is currently over the badge
         bool _pinned{ false }; // the copy menu is open — keep expanded even after the pointer leaves
         bool _hoverWired{ false }; // _WireHover ran once (Initialize / first ShowActivity)
+        double _restOpacity{ 0.50 }; // GLOBAL AppSettings::tabOverlayRestOpacity mirror (dim, at rest) — page-driven (seed + Save/broadcast)
+        double _hoverOpacity{ 1.0 }; // GLOBAL AppSettings::tabOverlayHoverOpacity mirror (bright, on hover / copy-menu-open) — page-driven
         std::wstring _lastActivitySig; // last kind rendered by ShowActivity (skip redundant re-renders)
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         uint64_t _observerToken{ 0 }; // ::Agentmaster::ObserverToken (uint64_t; avoid the header here)

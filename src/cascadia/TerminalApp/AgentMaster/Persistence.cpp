@@ -498,6 +498,8 @@ namespace Agentmaster
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
         o.Set(L"flashRingColor", json::Value::MkStr(s.flashRingColor));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
+        o.Set(L"tabOverlayRestOpacity", json::Value::MkNum(s.tabOverlayRestOpacity));
+        o.Set(L"tabOverlayHoverOpacity", json::Value::MkNum(s.tabOverlayHoverOpacity));
         o.Set(L"showSummaryPanel", json::Value::MkBool(s.showSummaryPanel));
         o.Set(L"summaryPanelWrapNewlines", json::Value::MkBool(s.summaryPanelWrapNewlines));
         o.Set(L"summaryPanelTruncate", json::Value::MkBool(s.summaryPanelTruncate));
@@ -555,6 +557,28 @@ namespace Agentmaster
         // default on a malformed value, so a hand-edited garbage string self-heals on next save.
         s.flashRingColor = v.StrAt(L"flashRingColor", L"#CCFF0000");
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
+        {
+            // The per-tab overlay REST/HOVER opacities (TAB_OVERLAY.md): clamp each to (0, 1] and enforce
+            // the rest <= hover invariant (the dual-thumb slider can't cross them; a hand-edit that does is
+            // corrected here — keep hover, clamp rest down to it). A degenerate/absent value falls back to
+            // the default look (rest 0.50, hover 1.0).
+            double rest = v.NumAt(L"tabOverlayRestOpacity", 0.50);
+            double hover = v.NumAt(L"tabOverlayHoverOpacity", 1.0);
+            if (!(rest > 0.0 && rest <= 1.0))
+            {
+                rest = 0.50;
+            }
+            if (!(hover > 0.0 && hover <= 1.0))
+            {
+                hover = 1.0;
+            }
+            if (rest > hover)
+            {
+                rest = hover; // crossed -> clamp rest down to hover (preserve the hover intent)
+            }
+            s.tabOverlayRestOpacity = rest;
+            s.tabOverlayHoverOpacity = hover;
+        }
         s.showSummaryPanel = v.BoolAt(L"showSummaryPanel", true); // TAB_OVERLAY.md summary panel toggle (absent => ON by default)
         s.summaryPanelWrapNewlines = v.BoolAt(L"summaryPanelWrapNewlines", false); // TAB_OVERLAY.md: preserve message newlines (absent => OFF, the literal-\n look)
         s.summaryPanelTruncate = v.BoolAt(L"summaryPanelTruncate", true); // TAB_OVERLAY.md: truncate long messages (absent => ON by default, cap each message)
