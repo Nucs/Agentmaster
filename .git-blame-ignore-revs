@@ -13,3 +13,6 @@ d07546a6fef73fa4e1fb1c2f01535843d1fcc212
 
 # UTF-8 BOM changes
 ddae2a1d49d604487d3c963e5eacbeb73861d986
+
+# Agentmaster: AGPL-3.0 relicensing + per-file SPDX/license-header sweep
+4069ecfa1451292f046d6f8949c7e8ad1a4c4161
