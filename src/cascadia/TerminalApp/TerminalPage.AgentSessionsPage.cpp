@@ -279,7 +279,7 @@ namespace winrt::TerminalApp::implementation
         // The page's table columns (FAVORITES.md adds the leftmost ★ column, shifting the rest +1):
         // 0=★ favorite · 1=color/live chip · 2=Title · 3=Directory · 4=Branch · 5=Created ·
         // 6=Active · 7=Msgs·Tools · 8=Ctx (context tokens) · 9=Hits (populated while searching).
-        void SessAddColumns(Grid& g)
+        void SessAddColumns(Grid& g, bool searching)
         {
             const auto col = [&](double v, GridUnitType t) {
                 ColumnDefinition c;
@@ -294,8 +294,10 @@ namespace winrt::TerminalApp::implementation
             col(58, GridUnitType::Pixel); // created
             col(58, GridUnitType::Pixel); // active
             col(74, GridUnitType::Pixel); // msgs·tools
-            col(46, GridUnitType::Pixel); // ctx (context tokens — compact: "182K" / "1.05M")
-            col(48, GridUnitType::Pixel); // hits
+            col(40, GridUnitType::Pixel); // ctx (context tokens — compact: "182K" / "1.05M"); snug, fits the max value + the sort arrow
+            // hits: reserve its width ONLY while searching — otherwise it would sit empty at the far
+            // right as trailing dead space after Ctx (the rightmost meaningful column when not searching).
+            col(searching ? 48.0 : 0.0, GridUnitType::Pixel); // hits
         }
 
         // Agentmaster: the compact context-token count for the "Ctx" column — "182K", "8.3K",
@@ -1466,7 +1468,7 @@ namespace winrt::TerminalApp::implementation
         // --- sortable header ---
         _sessionsHeaderRow.Children().Clear();
         _sessionsHeaderRow.ColumnDefinitions().Clear();
-        SessAddColumns(_sessionsHeaderRow);
+        SessAddColumns(_sessionsHeaderRow, searching);
         _sessionsHeaderRow.Margin(Thickness{ 8, 0, 8, 4 });
         const auto addHeader = [this](int col, winrt::hstring label, bool sortable, winrt::hstring tip = L"") {
             if (!sortable)
@@ -1488,7 +1490,7 @@ namespace winrt::TerminalApp::implementation
             b.Padding(Thickness{ 0, 0, 0, 0 });
             b.MinWidth(0);
             b.MinHeight(0);
-            const bool leftAlign = (col == 2 || col == 3); // Title, Directory (after the ★ shift, FAVORITES.md)
+            const bool leftAlign = (col == 2 || col == 3 || col == 4); // Title, Directory, Branch (left, matching their left-rendered data cells; after the ★ shift, FAVORITES.md)
             b.HorizontalAlignment(HorizontalAlignment::Stretch);
             b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(SessText(label + arrow, 11, true, 0.7));
@@ -1721,7 +1723,7 @@ namespace winrt::TerminalApp::implementation
             const auto& r = *rp;
             _sessionsVisibleOrder.push_back(r.id);
             Grid g;
-            SessAddColumns(g);
+            SessAddColumns(g, searching);
             g.Padding(Thickness{ 6, 4, 6, 4 });
 
             // chip: the per-dir color (the SAME color the session's tab wears — answer "color
