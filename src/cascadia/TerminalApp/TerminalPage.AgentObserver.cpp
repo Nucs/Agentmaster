@@ -2560,7 +2560,17 @@ namespace winrt::TerminalApp::implementation
                     {
                         firstLine = firstLine.substr(0, 80) + L"...";
                     }
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" draft (chars=" + std::to_wstring(effectiveDraft.size()) + L"): " + firstLine + L"\n");
+                    // Diagnostic: the leading code points (hex) of the draft. If an EMPTY box ever still
+                    // appears as "pending" (a cursor/placeholder glyph the detector didn't strip), this
+                    // names the exact culprit char from the log — no extra deploy needed to diagnose.
+                    std::wstring cp;
+                    for (size_t i = 0; i < firstLine.size() && i < 6; ++i)
+                    {
+                        wchar_t b[8];
+                        ::swprintf(b, 8, L"%04X ", static_cast<unsigned>(firstLine[i]));
+                        cp += b;
+                    }
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" draft (chars=" + std::to_wstring(effectiveDraft.size()) + L" cp: " + cp + L"): " + firstLine + L"\n");
                 }
             }
         }

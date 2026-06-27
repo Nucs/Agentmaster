@@ -6038,6 +6038,28 @@ static void TestPendingInput()
         const auto d = DetectPendingInput(std::vector<std::wstring>{});
         CHECK(!d.boxFound, "pending empty-rows: nothing");
     }
+    // 14. CURSOR ARTIFACTS — a focused EMPTY box renders the block/space cursor right after "> "; it must
+    // NOT read as a draft (the live false-positive: "... appeared" on an empty box). A non-empty draft
+    // carries the cursor at its tail too, which must be stripped without eating the real text.
+    {
+        const wchar_t BLOCK = static_cast<wchar_t>(0x2588); // full block █ (a common cursor glyph)
+        const wchar_t NBSP = static_cast<wchar_t>(0x00A0); // no-break space (a non-ASCII space cursor/pad)
+        // empty box, block cursor
+        auto d1 = DetectPendingInput(V({ rule, std::wstring(1, MARK) + L" " + std::wstring(1, BLOCK), rule }));
+        CHECK(d1.boxFound && d1.text.empty(), "pending cursor: empty box + block cursor -> no draft");
+        // empty box, NBSP cursor/pad
+        auto d2 = DetectPendingInput(V({ rule, std::wstring(1, MARK) + L" " + std::wstring(1, NBSP), rule }));
+        CHECK(d2.boxFound && d2.text.empty(), "pending cursor: empty box + NBSP -> no draft");
+        // real draft with a trailing block cursor -> keep the text, drop the cursor
+        auto d3 = DetectPendingInput(V({ rule, marker + L"hello" + std::wstring(1, BLOCK), rule }));
+        CHECK(d3.text == L"hello", "pending cursor: draft + trailing block cursor stripped");
+        // a lone block on the line (just the cursor, no space) -> empty
+        auto d4 = DetectPendingInput(V({ rule, std::wstring(1, MARK) + L" " + std::wstring(2, BLOCK), rule }));
+        CHECK(d4.boxFound && d4.text.empty(), "pending cursor: a run of block glyphs is the cursor -> empty");
+        // the rule classifier must NOT treat a block cursor as a rule (it is not a U+2500-range char... it
+        // IS in 2580-259F which IS box-drawing) — but a single block on the caret line isn't a rule row
+        // (it has < kMinRuleRun box chars), so the box detection above still holds.
+    }
 }
 
 int wmain()

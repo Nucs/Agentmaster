@@ -62,9 +62,18 @@ the row's visible (non-space) chars. The 80% floor rejects a *labeled* divider (
 elsewhere by Claude) while accepting a plain or corner-framed rule.
 
 **Extraction**: the body rows `[caret, bottomRule)` — strip the `❯` marker (+ one following space) from the
-first line and the 2-space continuation indent from the rest, join with `\n`, drop trailing blank lines.
-An empty box (`❯ ` + cursor) yields empty text → **no pending draft**. (Reconstruction is best-effort for
-display; the load-bearing output is "is there any non-whitespace content".)
+first line and the 2-space continuation indent from the rest, join with `\n`, drop trailing blank lines,
+and **strip the trailing CURSOR**. The last step matters: a focused input box renders its cursor as a
+**block glyph** in the cell after `❯ ` (the "white box" you see) — and a non-empty draft carries the cursor
+at its tail too — which the buffer holds as a real character, so without stripping it an **empty box reads
+as a draft** (a false "pending"). `IsIgnorable` = whitespace (incl. non-ASCII spaces like NBSP, in case the
+cursor/padding is one) **+ a block-element glyph** (U+2580–U+259F, the cursor); the trailing ignorable run
+is stripped, so an empty box collapses to `""` while a real draft keeps its text (its content sits to the
+*left* of its trailing cursor). The block range is **outside** the rule's box-drawing range (U+2500–U+257F),
+so a lone block cursor is never mistaken for a rule. An empty box (`❯ ` + cursor) ⇒ empty text → **no pending
+draft**. (Reconstruction is best-effort for display; the load-bearing output is "is there any content".)
+If a future build's cursor is some other glyph, the `[pending] … cp: <hex> …` log names it (the appear-log
+prints the draft's leading code points), so the strip set can be widened without guessing.
 
 The buffer position is independent of the user's **scroll**: Claude renders inline, so the box always sits
 at the bottom of the buffer (`GetLastNonSpaceCharacter`), and the adapter reads a bounded window of the

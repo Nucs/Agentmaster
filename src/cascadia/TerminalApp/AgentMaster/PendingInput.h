@@ -79,7 +79,34 @@ namespace Agentmaster
 
         inline constexpr bool IsWs(wchar_t c) noexcept
         {
-            return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'\f' || c == L'\v';
+            // ASCII whitespace + the common INVISIBLE Unicode spaces. The latter matter because a focused
+            // input box's cursor / its padding can be a non-ASCII space (e.g. NBSP U+00A0) rather than a
+            // plain space — without trimming those, an EMPTY box reads as a draft (a false "pending").
+            return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L'\f' || c == L'\v' ||
+                   c == 0x00A0 || // no-break space
+                   c == 0x1680 || // ogham space mark
+                   (c >= 0x2000 && c <= 0x200A) || // en quad .. hair space
+                   c == 0x2028 || c == 0x2029 || // line / paragraph separator
+                   c == 0x202F || c == 0x205F || // narrow no-break space, medium math space
+                   c == 0x3000 || // ideographic space
+                   c == 0x200B || c == 0x200C || c == 0x200D || // zero-width space / non-joiner / joiner
+                   c == 0xFEFF; // zero-width no-break space / BOM
+        }
+
+        // A focused terminal renders its CURSOR as a block, which Claude Code's Ink input box emits into
+        // the cell under the cursor — so the "white box" after "❯ " in an EMPTY box, and the glyph at the
+        // tail of a non-empty draft, is the CURSOR, not typed text. Treat the block-element glyphs
+        // (U+2580..U+259F — full block █ U+2588, the shade blocks U+2591..U+2593, the half blocks, etc.)
+        // as a cursor artifact so a lone trailing block doesn't read as content. (A real draft's text
+        // sits to the LEFT of its trailing cursor; only the trailing run is stripped.)
+        inline constexpr bool IsCursorArtifact(wchar_t c) noexcept
+        {
+            return c >= 0x2580 && c <= 0x259F;
+        }
+
+        inline constexpr bool IsIgnorable(wchar_t c) noexcept
+        {
+            return IsWs(c) || IsCursorArtifact(c);
         }
 
         // Right-trim trailing whitespace (rows arrive padded to the buffer width).
@@ -265,9 +292,15 @@ namespace Agentmaster
             }
             text += lines[i];
         }
-        if (AllWhitespace(text))
+        // Strip the trailing CURSOR (+ any trailing whitespace): an EMPTY focused box renders the block/
+        // space cursor right after "> " (the "white box" the user sees), and a non-empty draft carries
+        // the cursor at its very tail too — neither is real content. Stripping the trailing ignorable run
+        // makes an empty box collapse to "" (no false "pending"), while a real draft keeps its text (its
+        // content sits to the LEFT of the cursor). IsIgnorable = whitespace (incl. non-ASCII spaces) + a
+        // block-element cursor glyph.
+        while (!text.empty() && IsIgnorable(text.back()))
         {
-            text.clear(); // an empty box (just "> " + cursor) => no pending draft
+            text.pop_back();
         }
         out.text = std::move(text);
         return out;
