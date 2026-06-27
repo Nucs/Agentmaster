@@ -2499,11 +2499,18 @@ static void TestTranscriptScan()
     // SessionState::Error instead of reading the terminal stop as a clean turn-complete. (Mirrors the
     // real c66ec7c8 "Server is temporarily limiting requests" rate-limit shape.)
     {
-        const std::wstring line = LR"j({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}]}})j" L"\n";
+        const std::wstring line = LR"j({"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"}]}})j" L"\n";
         const auto r = ParseTranscriptDelta(line);
         CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::Assistant, "apiError line -> 1 assistant event");
         CHECK(!r.events.empty() && r.events[0].apiError, "isApiErrorMessage:true -> ev.apiError");
+        CHECK(!r.events.empty() && r.events[0].apiErrorStatus == 429, "apiErrorStatus captured (the HTTP code)");
         CHECK(!r.events.empty() && r.events[0].text.find(L"Rate limited") != std::wstring::npos, "apiError text captured (the reason)");
+    }
+    // A client-side error (no HTTP status, e.g. "Prompt is too long") -> apiError true, status 0.
+    {
+        const std::wstring line = LR"j({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"Prompt is too long"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(!r.events.empty() && r.events[0].apiError && r.events[0].apiErrorStatus == 0, "client-side apiError -> status 0 (no HTTP code)");
     }
     // assistant tool_use turn: stop_reason tool_use, no text (turn NOT complete -> no synth Stop)
     {
@@ -2695,16 +2702,23 @@ static void TestTranscriptScan()
         reg.Upsert(MakeSession(L"err1", SessionState::Running));
         HookMessage synthErr = Msg(L"err1", HookEvent::Notification);
         synthErr.apiError = true;
+        synthErr.errorMessage = L"API Error: Server is temporarily limiting requests · Rate limited";
+        synthErr.errorStatus = 429;
         synthErr.ts = 1000;
         reg.OnHookEvent(synthErr);
         const auto errored = reg.Get(L"err1");
         CHECK(errored && errored->state == SessionState::Error, "recon-error synth -> Error (through the one state machine)");
+        // The reason is PRESERVED on the record for the Triage-Board Error card (message + HTTP code).
+        CHECK(errored && errored->errorMessage.find(L"Rate limited") != std::wstring::npos && errored->errorStatus == 429,
+              "Error preserves errorMessage + errorStatus for the card");
         // First change: the user retries. UserPromptSubmit -> Running (come out of Error on first change).
         HookMessage retry = Msg(L"err1", HookEvent::UserPromptSubmit);
         retry.ts = 2000;
         reg.OnHookEvent(retry);
         const auto recovered = reg.Get(L"err1");
         CHECK(recovered && recovered->state == SessionState::Running, "Error leaves on the first new turn event (UserPromptSubmit -> Running)");
+        // Recovery CLEARS the preserved reason, so a recovered card never shows a stale error.
+        CHECK(recovered && recovered->errorMessage.empty() && recovered->errorStatus == 0, "recovery clears errorMessage + errorStatus");
     }
     // UpdateQuiet mutates the record (and, by contract, fires no observer — exercised here for the mutation)
     {

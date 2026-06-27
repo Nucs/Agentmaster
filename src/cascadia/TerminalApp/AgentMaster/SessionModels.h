@@ -310,6 +310,17 @@ namespace Agentmaster
         // the registry's QUIET path so streaming text never triggers a persist/UI/scheduler
         // cascade. Empty until the scanner reads a transcript line.
         std::wstring lastAssistantText;
+        // Agentmaster (API-error triage — Transient, NOT persisted; Persistence.cpp must not write
+        // them): the reason a turn DIED, preserved while state == Error so the Triage-Board Error card
+        // (and any other surface) can show WHAT failed, not just a crimson dot. errorMessage is the
+        // synthetic isApiErrorMessage line's text ("API Error: Server is temporarily limiting requests
+        // … Rate limited" / "Prompt is too long" / "Credit balance is too low" / …); errorStatus is the
+        // companion HTTP code from the transcript's apiErrorStatus (429 / 529 / 500 / 404 / 401), or 0
+        // for a client-side error that carries none. Set by the SessionScanner's recon-error synth when
+        // it produces Error, and CLEARED the moment the session leaves Error (recovery), both through
+        // SessionRegistry::OnHookEvent. Empty/0 whenever the session is not in Error.
+        std::wstring errorMessage;
+        int errorStatus{ 0 };
         // Transient (NOT persisted; Persistence.cpp must not write it): the Claude Code idle RECAP —
         // the latest {"type":"system","subtype":"away_summary"} body the SessionScanner tailed from this
         // session's transcript, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint

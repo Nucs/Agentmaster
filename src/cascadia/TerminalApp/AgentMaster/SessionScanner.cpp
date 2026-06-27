@@ -206,6 +206,7 @@ namespace Agentmaster
                 // scanner turns this into SessionState::Error (ShouldSynthesizeError) instead of letting
                 // its terminal stop_reason read as a clean turn-complete.
                 ev.apiError = obj.BoolAt(L"isApiErrorMessage");
+                ev.apiErrorStatus = static_cast<int>(obj.I64At(L"apiErrorStatus")); // top-level HTTP code (429/529/…); 0 when none
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
@@ -669,6 +670,11 @@ namespace Agentmaster
                 err.sessionId = s.id;
                 err.cwd = s.workingDir;
                 err.ts = NowMs();
+                // Preserve the failure reason for the Triage-Board Error card: the message is the error
+                // line's text (lastAssistantText, mirrored when the line was consumed), the code is the
+                // HTTP status captured alongside the error tail.
+                err.errorMessage = st.lastAssistantText;
+                err.errorStatus = st.lastApiErrorStatus;
                 _registry->OnHookEvent(err);
                 std::wstring why = st.lastAssistantText; // the "API Error: …" text (mirrored above)
                 for (auto& c : why)
@@ -866,6 +872,7 @@ namespace Agentmaster
                 // is an unrecovered API error (-> ShouldSynthesizeError). A non-error assistant line
                 // appended after an error is the session resuming, which clears Error.
                 st.lastWasApiError = ev.apiError;
+                st.lastApiErrorStatus = ev.apiError ? ev.apiErrorStatus : 0; // the code travels with the error tail
                 // The latest assistant block sets / clears the "blocked on the user" flag: an
                 // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
                 // a text / non-interactive-tool message means the agent moved on (clear it).

@@ -2851,6 +2851,44 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(dirText);
         }
 
+        // Agentmaster (API-error triage): when this card is in the Error state, show WHY the turn died
+        // \x2014 the preserved error message + its HTTP status code (SessionInfo.errorMessage/errorStatus,
+        // set by the scanner's recon-error). So the Error column is actionable at a glance ("\x26A0 429:
+        // API Error: Server is temporarily limiting requests \x2026 Rate limited") instead of a bare
+        // crimson dot. The code is prefixed so it stays visible if the line wraps/clips; the FULL,
+        // untruncated message is in the hover tooltip. Crimson, matching the column + the state dot.
+        if (s.state == SessionState::Error && !s.errorMessage.empty())
+        {
+            std::wstring shown = s.errorMessage;
+            for (auto& c : shown)
+            {
+                if (c == L'\r' || c == L'\n' || c == L'\t')
+                {
+                    c = L' '; // a tidy card line; the tooltip keeps the original
+                }
+            }
+            if (shown.size() > 200)
+            {
+                shown.resize(200);
+                shown += L"\x2026"; // bound the card height; full text in the tip
+            }
+            std::wstring prefix = L"\x26A0 "; // ⚠
+            if (s.errorStatus > 0)
+            {
+                prefix += std::to_wstring(s.errorStatus) + L": ";
+            }
+            auto errText = Text(winrt::hstring{ prefix + shown }, 11, false, 1.0);
+            errText.Foreground(SolidColorBrush{ StateColor(SessionState::Error) });
+            errText.TextWrapping(TextWrapping::Wrap); // show the reason fully (up to the 200-char bound)
+            std::wstring tip = s.errorMessage;
+            if (s.errorStatus > 0)
+            {
+                tip = L"HTTP " + std::to_wstring(s.errorStatus) + L"\n\n" + tip;
+            }
+            AgentSetTip(errText, winrt::hstring{ tip }, kCardTipDelay);
+            stack.Children().Append(errText);
+        }
+
         // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
         {
             const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;

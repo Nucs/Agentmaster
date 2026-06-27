@@ -80,6 +80,10 @@ namespace Agentmaster
         // too long" / a 4xx-5xx / a dropped connection). The turn DIED here; the scanner synthesizes
         // SessionState::Error while this remains the transcript tail (ShouldSynthesizeError).
         bool apiError{ false };
+        // Assistant only: the API error's HTTP status code from the transcript's top-level
+        // apiErrorStatus (429 / 529 / 500 / 404 / 401), or 0 for a client-side error that carries
+        // none ("Prompt is too long"). Preserved onto SessionInfo.errorStatus for the Error card.
+        int apiErrorStatus{ 0 };
     };
 
     struct TranscriptParse
@@ -509,6 +513,11 @@ namespace Agentmaster
             // Drives ShouldSynthesizeError, and its clearing is the "come out of Error on first change"
             // edge (a fresh prompt then re-derives Running via the push hook or ShouldSynthesizeRunning).
             bool lastWasApiError{ false };
+            // The HTTP status code of the error line that set lastWasApiError (0 when none). Captured
+            // at the same instant; carried into the recon-error synth as HookMessage.errorStatus ->
+            // SessionInfo.errorStatus. The error MESSAGE comes from lastAssistantText (the error line's
+            // text, already mirrored above), so no separate copy is kept.
+            int lastApiErrorStatus{ 0 };
             int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
         };
 

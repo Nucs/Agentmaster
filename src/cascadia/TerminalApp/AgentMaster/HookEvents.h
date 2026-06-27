@@ -137,6 +137,12 @@ namespace Agentmaster
         // clean turn-complete). The session leaves Error on the next real turn event (a
         // UserPromptSubmit -> Running), so no wire hook ever needs this flag.
         bool apiError{ false };
+        // Engine-internal (never on the wire): the API-error REASON, carried alongside apiError so
+        // OnHookEvent can preserve it onto SessionInfo.errorMessage/errorStatus for the Triage-Board
+        // Error card. errorMessage = the synthetic line's text; errorStatus = its apiErrorStatus HTTP
+        // code (0 when none). Meaningful only when apiError is set.
+        std::wstring errorMessage;
+        int errorStatus{ 0 };
     };
 
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current

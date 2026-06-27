@@ -332,6 +332,20 @@ namespace Agentmaster
             // NO further UserPromptSubmit — both used to wrongly land WaitingForInput mid-turn.
             const auto ordered = NextSessionStateOrdered(s.state, msg, s.turns);
             s.state = ordered.state;
+            // Agentmaster (API-error triage): preserve the failure reason WHILE in Error so the
+            // Triage-Board Error card can show what died (the scanner's recon-error synth carries it on
+            // the apiError message); clear it the instant the session leaves Error (recovery), so a
+            // recovered/normal card never shows a stale error. Only the apiError synth sets these.
+            if (msg.apiError)
+            {
+                s.errorMessage = msg.errorMessage;
+                s.errorStatus = msg.errorStatus;
+            }
+            else if (s.state != SessionState::Error)
+            {
+                s.errorMessage.clear();
+                s.errorStatus = 0;
+            }
             if (msg.ts > s.lastActivityUnixMs)
             {
                 s.lastActivityUnixMs = msg.ts; // monotonic: a stale event must not regress the decay anchor
