@@ -158,6 +158,50 @@ namespace winrt::TerminalApp::implementation
             flush();
         }
 
+        // Collect the user's live text selection across the detail/overlay pane: only the summary-box
+        // TextBlocks are IsTextSelectionEnabled, and an unselected / non-selectable TextBlock returns an
+        // empty SelectedText, so a blind recursive collect picks up exactly what's selected. XAML
+        // selection can't span TextBlocks (one block carries it), but we newline-join defensively. Recurse
+        // through Panels / Borders / ContentControls so a future nested layout still works.
+        void SessCollectSelectedText(const UIElement& el, std::wstring& out)
+        {
+            if (!el)
+            {
+                return;
+            }
+            if (const auto tb = el.try_as<TextBlock>())
+            {
+                const auto sel = tb.SelectedText();
+                if (!sel.empty())
+                {
+                    if (!out.empty())
+                    {
+                        out += L"\n";
+                    }
+                    out += std::wstring{ sel };
+                }
+                return;
+            }
+            if (const auto panel = el.try_as<Panel>())
+            {
+                for (const auto& child : panel.Children())
+                {
+                    SessCollectSelectedText(child, out);
+                }
+                return;
+            }
+            if (const auto border = el.try_as<Border>())
+            {
+                SessCollectSelectedText(border.Child(), out);
+                return;
+            }
+            if (const auto cc = el.try_as<ContentControl>())
+            {
+                SessCollectSelectedText(cc.Content().try_as<UIElement>(), out);
+                return;
+            }
+        }
+
         // "now" / "5m" / "3h" / "2d" / "3mo" / "1y" (the Archive page's compact-ago shape).
         std::wstring SessAgo(int64_t unixMs, int64_t nowMs)
         {
@@ -2335,6 +2379,81 @@ namespace winrt::TerminalApp::implementation
                     });
                 }
                 rowMenu.Items().Append(hideItem);
+
+                // --- detail/overlay view actions (the "overlay" = the right-hand summary pane) ---
+                // Copy Selected Text: shown ONLY when text is selected in the detail pane (its summary
+                // TextBlocks are selectable). The selection isn't known when the menu is BUILT, so the item
+                // + its leading separator are gated in the flyout's Opening (below), where the selection is
+                // also CAPTURED so the click copies exactly what was shown. Enable/Disable Truncate / Wrap
+                // flip the GLOBAL summary toggles (the same ones the per-tab summary panel exposes), and the
+                // Sessions detail re-renders to honor them; their Enable/Disable labels reflect the LIVE
+                // state, also set in Opening so a re-open after a toggle reads correctly.
+                auto copySep = MenuFlyoutSeparator{};
+                copySep.Visibility(Visibility::Collapsed);
+                auto copySel = MenuFlyoutItem{};
+                copySel.Text(L"Copy Selected Text");
+                copySel.Visibility(Visibility::Collapsed);
+                SessSetTip(copySel, L"Copy the text you selected in the detail pane on the right.");
+                auto pendingSel = std::make_shared<std::wstring>(); // captured at Opening; read on click
+                copySel.Click([pendingSel](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    if (pendingSel->empty())
+                    {
+                        return;
+                    }
+                    winrt::Windows::ApplicationModel::DataTransfer::DataPackage pkg;
+                    pkg.SetText(winrt::hstring{ *pendingSel });
+                    try
+                    {
+                        winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
+                        winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush(); // survive the app losing focus
+                    }
+                    catch (...)
+                    {
+                    }
+                });
+
+                rowMenu.Items().Append(copySep);
+                rowMenu.Items().Append(copySel);
+                rowMenu.Items().Append(MenuFlyoutSeparator{});
+
+                auto truncItem = MenuFlyoutItem{};
+                truncItem.Text(_appSettings.summaryPanelTruncate ? L"Disable Truncate Long Messages" : L"Enable Truncate Long Messages"); // refreshed live in Opening
+                SessSetTip(truncItem, L"Cap long messages in the summary to a short preview, or show them in full. Applies wherever the summary box renders (this detail pane + the per-tab summary panel).");
+                truncItem.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_ToggleSummaryTruncate();
+                        }
+                    });
+                });
+                rowMenu.Items().Append(truncItem);
+
+                auto wrapItem = MenuFlyoutItem{};
+                wrapItem.Text(_appSettings.summaryPanelWrapNewlines ? L"Disable Wrap Messages" : L"Enable Wrap Messages"); // refreshed live in Opening
+                SessSetTip(wrapItem, L"Keep each message's real line breaks (multi-line) instead of collapsing them to a literal \\n. Applies wherever the summary box renders.");
+                wrapItem.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_ToggleSummaryWrap();
+                        }
+                    });
+                });
+                rowMenu.Items().Append(wrapItem);
+
+                // Refresh the dynamic bits every time THIS row's menu opens: the live detail selection
+                // gates Copy Selected Text (+ captures the text), and the toggle labels reflect the CURRENT
+                // global state. (FlyoutBase::Opening, inherited by MenuFlyout.)
+                rowMenu.Opening([this, copySel, copySep, truncItem, wrapItem, pendingSel](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
+                    *pendingSel = _SessionsDetailSelectedText();
+                    const bool hasSel = !pendingSel->empty();
+                    copySel.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+                    copySep.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+                    truncItem.Text(_appSettings.summaryPanelTruncate ? winrt::hstring{ L"Disable Truncate Long Messages" } : winrt::hstring{ L"Enable Truncate Long Messages" });
+                    wrapItem.Text(_appSettings.summaryPanelWrapNewlines ? winrt::hstring{ L"Disable Wrap Messages" } : winrt::hstring{ L"Enable Wrap Messages" });
+                });
+
                 rowB.ContextFlyout(rowMenu);
             }
             _sessionsRowsHost.Children().Append(rowB);
@@ -2532,6 +2651,19 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // The text the user selected in the detail/overlay pane (the summary box's selectable TextBlocks) —
+    // feeds + gates the row menu's "Copy Selected Text". Empty when nothing is selected.
+    std::wstring TerminalPage::_SessionsDetailSelectedText()
+    {
+        if (!_sessionsDetailHost)
+        {
+            return {};
+        }
+        std::wstring out;
+        SessCollectSelectedText(_sessionsDetailHost, out);
+        return out;
+    }
+
     // Off-thread: resolve the transcript, run the WHOLE-FILE session-end.js analyzer, and render the
     // FULL summary box (full=true) — the SAME RenderSessionSummaryBox the per-tab overlay's summary
     // panel uses, so the two renderings can never drift. An EMPTY live glyph/label means the box's
@@ -2553,6 +2685,11 @@ namespace winrt::TerminalApp::implementation
             co_return; // already warm (a prior view or a completed prefetch)
         }
         _sessionsSummaryLoading.insert(sessionId);
+        // Capture the GLOBAL summary toggles on the UI thread (the detail honors them like the per-tab
+        // overlay's summary panel): wrap = real newlines vs literal "\n"; truncate = cap long messages.
+        // A change to either clears _sessionsSummaryCache (the toggle handlers), so the next load re-renders.
+        const bool wrapNewlines = _appSettings.summaryPanelWrapNewlines;
+        const bool truncate = _appSettings.summaryPanelTruncate;
         auto weakThis{ get_weak() };
         co_await winrt::resume_background();
 
@@ -2571,7 +2708,7 @@ namespace winrt::TerminalApp::implementation
                     planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
                 }
             }
-            text = ::Agentmaster::RenderSessionSummaryBox(a, sessionId, dir, path, L"claude --resume " + sessionId, L"" /* no live glyph */, L"" /* empty label => header only for plan */, planFile, /*full*/ true);
+            text = ::Agentmaster::RenderSessionSummaryBox(a, sessionId, dir, path, L"claude --resume " + sessionId, L"" /* no live glyph */, L"" /* empty label => header only for plan */, planFile, /*full*/ true, wrapNewlines, truncate);
         }
 
         co_await winrt::resume_foreground(Dispatcher());

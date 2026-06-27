@@ -1871,6 +1871,7 @@ namespace winrt::TerminalApp::implementation
                 ov->SetSummaryWrapNewlines(next);
             }
         }
+        _InvalidateSessionsSummaryForToggle(); // the Sessions detail renders the same box, honoring this flag
     }
 
     // Agentmaster (TAB_OVERLAY.md summary panel): the truncate toggle (left of the wrap toggle in the
@@ -1890,6 +1891,20 @@ namespace winrt::TerminalApp::implementation
             {
                 ov->SetSummaryTruncate(next);
             }
+        }
+        _InvalidateSessionsSummaryForToggle(); // the Sessions detail renders the same box, honoring this flag
+    }
+
+    // Agentmaster: a wrap/truncate toggle changed how the summary box renders, but the Sessions page caches
+    // the RENDERED text per (id, mtime) — which now bakes the wrap/truncate flags. Drop the cache so the
+    // next view re-renders with the new flags, and re-render the open detail in place if the page is up.
+    // (Cheap: the cache is per-session rendered text; the re-analyze is off-thread + only for the viewed row.)
+    void TerminalPage::_InvalidateSessionsSummaryForToggle()
+    {
+        _sessionsSummaryCache.clear();
+        if (_sessionsPageVisible.load(std::memory_order_relaxed) && !_sessionsSelectedId.empty())
+        {
+            _ShowSessionsDetail(_sessionsSelectedId);
         }
     }
 

@@ -482,7 +482,11 @@ namespace Agentmaster
     //    caller with no live state (the Sessions page) can pass an empty label to suppress the
     //    otherwise-redundant header while STILL surfacing the plan signal.
     constexpr wchar_t kSummarySepMark = L'\x1F'; // ASCII Unit Separator — never occurs in transcript content
-    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full);
+    // Agentmaster: `wrapNewlines` / `truncate` are the GLOBAL summary-panel toggles (AppSettings:
+    // summaryPanelWrapNewlines / summaryPanelTruncate). The defaults reproduce the prior session-end.js
+    // look (collapse newlines to a literal "\n"; cap each numbered message at ~240 chars) so existing
+    // callers are unchanged; the Sessions page passes the live values so its detail honors the toggles.
+    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines = false, bool truncate = true);
 
     // Port of session-end.js formatDuration: "2h 12m (20:21 -> 22:33)" from two ISO timestamps, the
     // HH:MM shown in LOCAL time (like the hook). Empty if either timestamp is missing/unparseable.

@@ -4486,22 +4486,30 @@ namespace Agentmaster
         // wrap-off behaviour the overlay panel applies conditionally) — StripSummaryTableRules.
         // `maxChars` caps the escaped result (default 240 for the numbered messages); pass 0 for NO
         // cap — the recap is rendered in FULL.
-        std::wstring SummaryEscapeMsg(const std::wstring& mIn, size_t maxChars = 240)
+        // Agentmaster: `wrapNewlines` (the GLOBAL summaryPanelWrapNewlines toggle) — false (default, the
+        // session-end.js look) collapses a message's newlines/tabs to a literal "\n"/"\t"; true PRESERVES
+        // them so a multi-line prompt reads as multiple lines. `truncate` (summaryPanelTruncate) — true
+        // (default) caps at maxChars (the historic 240) with a trailing "..."; false shows the WHOLE
+        // message. The defaults reproduce the prior behavior, so existing callers (the Manager Flight-Plan
+        // summary, the tests) are unchanged; the Sessions page passes the live toggles. (Mirrors
+        // AgentTabOverlay's SummaryEscapeMsg — the two copies are the documented "converge on a quiet day"
+        // duplication, like the StateColor table.)
+        std::wstring SummaryEscapeMsg(const std::wstring& mIn, bool wrapNewlines = false, bool truncate = true, size_t maxChars = 240)
         {
             const std::wstring m = StripSummaryTableRules(mIn);
             std::wstring esc;
             for (const wchar_t ch : m)
             {
                 if (ch == L'\n')
-                    esc += L"\\n";
+                    esc += wrapNewlines ? L"\n" : L"\\n";
                 else if (ch == L'\r')
                     ; // dropped
                 else if (ch == L'\t')
-                    esc += L"\\t";
+                    esc += wrapNewlines ? L"\t" : L"\\t";
                 else
                     esc += ch;
             }
-            if (maxChars != 0 && esc.size() > maxChars)
+            if (truncate && maxChars != 0 && esc.size() > maxChars)
             {
                 esc = esc.substr(0, maxChars - 3) + L"...";
             }
@@ -4753,7 +4761,7 @@ namespace Agentmaster
         return out;
     }
 
-    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full)
+    std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
@@ -4820,7 +4828,7 @@ namespace Agentmaster
         if (!a.awaySummary.empty())
         {
             sep();
-            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, /*maxChars*/ 0)); // label INLINE; the recap is shown in FULL (no length cap, unlike the numbered messages)
+            line(L"Recap: " + SummaryEscapeMsg(a.awaySummary, wrapNewlines, /*truncate*/ false)); // label INLINE; the recap is ALWAYS shown in FULL (never capped by the truncate toggle — only the numbered messages honor it)
         }
         if (!a.userMsgs.empty())
         {
@@ -4828,7 +4836,7 @@ namespace Agentmaster
             int i = 1;
             for (const auto& m : a.userMsgs)
             {
-                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m));
+                line(L" " + std::to_wstring(i++) + L". " + SummaryEscapeMsg(m, wrapNewlines, truncate));
             }
         }
         if (!a.filesRead.empty())
