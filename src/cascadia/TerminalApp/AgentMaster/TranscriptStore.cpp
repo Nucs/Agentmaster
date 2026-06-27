@@ -613,6 +613,21 @@ namespace Agentmaster
         {
             f.kind = TranscriptLineKind::Assistant;
             const auto* msg = obj.Find(L"message");
+            // Context occupancy from message.usage (input + cache_creation + cache_read + output) ≈
+            // the size of the request that produced this line; cache_read carries the whole
+            // conversation forward, so one assistant block reflects the current context size. The
+            // NEWEST assistant line wins downstream (AccumulateTranscriptStats). Mirrors the scanner's
+            // ParseTranscriptDelta (SessionScanner.cpp) so the board card + this on-disk index agree.
+            if (msg && msg->type == json::Value::Type::Obj)
+            {
+                if (const auto* usage = msg->Find(L"usage"); usage && usage->type == json::Value::Type::Obj)
+                {
+                    f.contextTokens = usage->I64At(L"input_tokens") +
+                                      usage->I64At(L"cache_creation_input_tokens") +
+                                      usage->I64At(L"cache_read_input_tokens") +
+                                      usage->I64At(L"output_tokens");
+                }
+            }
             const auto* content = (msg && msg->type == json::Value::Type::Obj) ? msg->Find(L"content") : nullptr;
             if (content && content->type == json::Value::Type::Arr)
             {
@@ -905,6 +920,14 @@ namespace Agentmaster
             {
                 ++stats.assistantLines;
                 stats.toolUses += f.toolUses;
+                // Context occupancy: the NEWEST assistant usage wins. The forward scan means the
+                // last assistant line with a usage block survives — i.e. the current context size.
+                // A usage-less line (oldest strata) leaves the prior value intact. (Subagent lines
+                // are sidechain-filtered above, so this never jumps to a subagent's context.)
+                if (f.contextTokens > 0)
+                {
+                    stats.contextTokens = f.contextTokens;
+                }
             }
             // Deduped union of tool-touched paths (case-insensitive — Windows paths), capped.
             for (const auto& p : f.toolPaths)
@@ -1161,6 +1184,7 @@ namespace Agentmaster
         // Load the prior sidecar (if any) — its (size, mtime) is the invalidation key, its
         // stats.parsedBytes the resume cursor.
         int64_t cachedSize = -1, cachedMtime = -1;
+        int64_t cachedCtx = -1; // ctxTokens read from the sidecar; -1 == the key was ABSENT (a pre-contextTokens sidecar — see the backfill below)
         {
             const std::string bytes = ReadFileWhole(sidecar, 4 << 20);
             if (!bytes.empty())
@@ -1185,6 +1209,8 @@ namespace Agentmaster
                     e.stats.forkedFromId = o.StrAt(L"forkedFromId");
                     e.stats.cwd = o.StrAt(L"cwd");
                     e.stats.gitBranch = o.StrAt(L"gitBranch");
+                    cachedCtx = o.I64At(L"ctxTokens", -1); // -1 == absent (an old sidecar): triggers the one-time backfill below
+                    e.stats.contextTokens = cachedCtx < 0 ? 0 : cachedCtx;
                     if (const auto* paths = o.Find(L"paths"); paths && paths->type == json::Value::Type::Arr)
                     {
                         for (const auto& p : paths->arr)
@@ -1199,12 +1225,23 @@ namespace Agentmaster
                 }
             }
         }
-        if (cachedSize == ref.sizeBytes && cachedMtime == ref.mtimeMs && e.stats.found)
+        // One-time migration: a sidecar written BEFORE contextTokens existed lacks the `ctxTokens`
+        // key (cachedCtx == -1). If the session has assistant turns there's a real context value to
+        // recover, so force a single rebuild-from-0 to fill it; the rewritten sidecar then carries
+        // the key (>= 0) and never re-triggers. A genuinely usage-less session writes ctxTokens=0 and
+        // is a normal cache hit next time. (Same one-time full read the index already paid when first
+        // built — paid once more, only for in-window sessions, only on the first open after this ships.)
+        const bool needsCtxBackfill = cachedCtx < 0 && e.stats.assistantLines > 0;
+        if (cachedSize == ref.sizeBytes && cachedMtime == ref.mtimeMs && e.stats.found && !needsCtxBackfill)
         {
             e.sizeBytes = cachedSize;
             e.mtimeMs = cachedMtime;
             e.valid = true;
             return e; // cache hit: the sidecar IS current — zero transcript IO
+        }
+        if (needsCtxBackfill)
+        {
+            e.stats = {}; // rebuild from offset 0 so contextTokens is filled (every other field recomputes identically)
         }
 
         // Stale / absent: resume the accumulate (only the appended suffix is read; a shrink
@@ -1230,6 +1267,7 @@ namespace Agentmaster
         o.Set(L"userPrompts", json::Value::MkNum(e.stats.userPrompts));
         o.Set(L"assistantLines", json::Value::MkNum(e.stats.assistantLines));
         o.Set(L"toolUses", json::Value::MkNum(e.stats.toolUses));
+        o.Set(L"ctxTokens", json::Value::MkNum(static_cast<double>(e.stats.contextTokens))); // context occupancy (≤ a few M — exact in a double)
         o.Set(L"customTitle", json::Value::MkStr(e.stats.customTitle));
         o.Set(L"aiTitle", json::Value::MkStr(e.stats.aiTitle));
         o.Set(L"summary", json::Value::MkStr(e.stats.summary));

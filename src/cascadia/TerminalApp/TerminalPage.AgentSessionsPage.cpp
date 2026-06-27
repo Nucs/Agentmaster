@@ -278,7 +278,7 @@ namespace winrt::TerminalApp::implementation
 
         // The page's table columns (FAVORITES.md adds the leftmost ★ column, shifting the rest +1):
         // 0=★ favorite · 1=color/live chip · 2=Title · 3=Directory · 4=Branch · 5=Created ·
-        // 6=Active · 7=Msgs·Tools · 8=Hits (populated while searching).
+        // 6=Active · 7=Msgs·Tools · 8=Ctx (context tokens) · 9=Hits (populated while searching).
         void SessAddColumns(Grid& g)
         {
             const auto col = [&](double v, GridUnitType t) {
@@ -294,7 +294,39 @@ namespace winrt::TerminalApp::implementation
             col(58, GridUnitType::Pixel); // created
             col(58, GridUnitType::Pixel); // active
             col(74, GridUnitType::Pixel); // msgs·tools
+            col(46, GridUnitType::Pixel); // ctx (context tokens — compact: "182K" / "1.05M")
             col(48, GridUnitType::Pixel); // hits
+        }
+
+        // Agentmaster: the compact context-token count for the "Ctx" column — "182K", "8.3K",
+        // "1.05M". A faithful copy of AgentManagerContent.cpp's FormatTokenCount (the Triage-Board
+        // "ctx N" formatter) so the two surfaces read identically; kept TU-local (that one lives in
+        // an anonymous namespace) — converge into a shared header on a quiet day, like the StateColor
+        // duplication noted in CLAUDE.md. Whole-K past 10K, one decimal below, two-decimal M past 1M.
+        std::wstring SessFormatTokens(int64_t n)
+        {
+            if (n < 0)
+            {
+                n = 0;
+            }
+            wchar_t buf[32];
+            if (n >= 1000000)
+            {
+                swprintf_s(buf, L"%.2fM", static_cast<double>(n) / 1000000.0);
+            }
+            else if (n >= 10000)
+            {
+                swprintf_s(buf, L"%lldK", static_cast<long long>((n + 500) / 1000)); // rounded whole-K
+            }
+            else if (n >= 1000)
+            {
+                swprintf_s(buf, L"%.1fK", static_cast<double>(n) / 1000.0);
+            }
+            else
+            {
+                swprintf_s(buf, L"%lld", static_cast<long long>(n));
+            }
+            return buf;
         }
 
         // Hover tooltips with working dismissal — TU-local names over the ONE shared recipe
@@ -1219,6 +1251,7 @@ namespace winrt::TerminalApp::implementation
             r.sizeBytes = ref.sizeBytes;
             r.msgs = e.stats.userPrompts;
             r.tools = e.stats.toolUses;
+            r.contextTokens = e.stats.contextTokens; // the compact "Ctx" column (the sidecar index carries it for EVERY on-disk session)
             // The custom To bound filters on last activity (the From bound rode the enumeration).
             if (toMs > 0 && r.lastActivityMs > toMs)
             {
@@ -1490,7 +1523,8 @@ namespace winrt::TerminalApp::implementation
         addHeader(5, L"Created", true, L"When the session was first created. Click to sort.");
         addHeader(6, L"Active", true, L"When the session was last active. Click to sort.");
         addHeader(7, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
-        addHeader(8, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, searching ? winrt::hstring{ L"Number of search matches in this session" } : winrt::hstring{ L"" });
+        addHeader(8, L"Ctx", true, L"Context \x2014 tokens in the session's newest turn (input + cache + output), the same value the Triage Board shows as \x201C" L"ctx N\x201D. Blank until the first assistant reply. Click to sort.");
+        addHeader(9, searching ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, searching ? winrt::hstring{ L"Number of search matches in this session" } : winrt::hstring{ L"" });
 
         // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
         // minus the user's "Hide from list" set. This render is the single chokepoint both the
@@ -1653,6 +1687,9 @@ namespace winrt::TerminalApp::implementation
                 break;
             case 7:
                 c = cmpI(a->msgs, b->msgs);
+                break;
+            case 8:
+                c = cmpI(a->contextTokens, b->contextTokens);
                 break;
             default:
                 break;
@@ -1860,6 +1897,15 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(w, 7);
             g.Children().Append(w);
 
+            // Ctx (col 8): the compact context-token count (the board's "ctx N" value, without the
+            // prefix). Blank until an assistant turn carries usage (0), matching the board card. The
+            // cell is clickthrough — the whole-row Border owns the one tooltip + click target.
+            auto ctx = SessText(winrt::hstring{ r.contextTokens > 0 ? SessFormatTokens(r.contextTokens) : L"" }, 11, false, 0.6);
+            ctx.HorizontalAlignment(HorizontalAlignment::Center);
+            ctx.IsHitTestVisible(false);
+            Grid::SetColumn(ctx, 8);
+            g.Children().Append(ctx);
+
             if (searching)
             {
                 const auto hit = _sessionsHitCounts.find(r.id);
@@ -1868,7 +1914,7 @@ namespace winrt::TerminalApp::implementation
                     auto h = SessText(winrt::hstring{ std::to_wstring(hit->second) }, 11, true, 0.9);
                     h.HorizontalAlignment(HorizontalAlignment::Center);
                     h.IsHitTestVisible(false);
-                    Grid::SetColumn(h, 8);
+                    Grid::SetColumn(h, 9);
                     g.Children().Append(h);
                 }
             }
@@ -1920,6 +1966,10 @@ namespace winrt::TerminalApp::implementation
                     rowTip += L"\nLast active " + aabs;
                 }
                 rowTip += L"\n" + std::to_wstring(r.msgs) + L" messages \x00B7 " + std::to_wstring(r.tools) + L" tool calls \x00B7 " + std::to_wstring(r.sizeBytes / 1024) + L" KB";
+                if (r.contextTokens > 0)
+                {
+                    rowTip += L"\nContext: " + SessFormatTokens(r.contextTokens) + L" (" + std::to_wstring(r.contextTokens) + L" tokens, newest turn)";
+                }
                 rowTip += L"\n";
                 rowTip += live ? L"Open in this app now" : (reg ? L"Closed \x2014 resume from here" : L"On disk \x2014 not opened in this app");
                 rowTip += L"\nDot color = working-directory color (matches its tab)";

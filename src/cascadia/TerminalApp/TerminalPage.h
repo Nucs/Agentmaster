@@ -462,6 +462,7 @@ namespace winrt::TerminalApp::implementation
             int64_t sizeBytes{ 0 };
             int msgs{ 0 }; // REAL user prompts
             int tools{ 0 }; // assistant tool_use blocks
+            int64_t contextTokens{ 0 }; // newest assistant turn's usage (≈ context occupancy); the compact "Ctx" column — the same value the Triage Board shows as "ctx N"
             bool fork{ false };
             std::wstring forkedFromId;
         };

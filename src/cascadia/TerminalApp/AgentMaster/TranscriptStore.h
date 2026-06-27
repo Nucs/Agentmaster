@@ -129,6 +129,7 @@ namespace Agentmaster
         bool sidechain{}; // isSidechain:true (inline subagent lines, old strata) — never main-chain state/stats
         bool meta{}; // isMeta / isCompactSummary / a noise prompt — not a human message
         int toolUses{}; // # of assistant tool_use blocks on this line
+        int64_t contextTokens{}; // Assistant only: message.usage sum (input + cache_creation + cache_read + output) ≈ this turn's context size; 0 when no usage block
         std::wstring userText; // UserPrompt only (REAL prompts only), capped
         std::wstring agentText; // Assistant / UserToolResult / System searchable text, capped
         std::wstring title; // CustomTitle / AiTitle / Summary payload (collapsed to one line)
@@ -200,6 +201,7 @@ namespace Agentmaster
         int userPrompts{}; // REAL human prompts (noise/meta/sidechain filtered)
         int assistantLines{}; // assistant lines (NOT turns — one turn can span several lines)
         int toolUses{}; // total assistant tool_use blocks
+        int64_t contextTokens{}; // context occupancy: the NEWEST assistant line's message.usage sum (≈ tokens in the session right now); 0 until an assistant turn carries a usage block — the same value the Triage-Board card shows as "ctx N"
         std::wstring customTitle; // last custom-title (newer retitles win)
         std::wstring aiTitle; // last ai-title
         std::wstring summary; // last legacy summary
