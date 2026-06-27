@@ -94,6 +94,22 @@ namespace Agentmaster
         // scheduler cascade on every byte of streamed output. No-op if the id is unknown.
         void UpdateQuiet(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);
 
+        // Agentmaster (eager-init / "Activate Tab"): set SessionInfo::started — "has this session's
+        // control left ConnectionState::NotConnected" (claude actually running) vs. live-but-dormant.
+        // CHANGE-GATED: notifies observers ONLY when the value actually flips, so the ~2s liveness
+        // tick that re-asserts it for every hosted tab is free in steady state (it would otherwise
+        // churn the persist / UI / scheduler cascade every tick). No-op for an unknown id. Maintained
+        // exclusively by TerminalPage (the controls' owner). Thread-safe.
+        void SetStarted(const std::wstring& id, bool started);
+
+        // Agentmaster (PENDING_INPUT.md): record the session's UNSENT input-box DRAFT (read out-of-band
+        // from the rendered buffer by the UI lane — TerminalPage::_ScanPendingInput). CHANGE-GATED and
+        // QUIET: it does NOT _notify — the draft changes as the user types, so (like UpdateQuiet's
+        // streamed-text fields) it must never trigger the persist / UI / scheduler cascade. Returns true
+        // iff the stored value changed (so the caller can log only on a real change). Transient (never
+        // persisted). No-op for an unknown id. Thread-safe.
+        bool SetPendingInput(const std::wstring& id, const std::wstring& text);
+
         // Record a human message the interval reconciler (SessionScanner) found in the transcript
         // that the UserPromptSubmit hook dropped. IDEMPOTENT by text: if an identical message is
         // already recorded (any prompt with status Sent — covers our injected Flight echoes AND

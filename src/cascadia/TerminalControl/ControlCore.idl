@@ -167,6 +167,10 @@ namespace Microsoft.Terminal.Control
         // screen). Drives the summary panel's per-icon "eligibility" dimming with a single linearize+resolve.
         Windows.Foundation.Collections.IVector<Int32> ResolveConversationPromptRows(Windows.Foundation.Collections.IVector<String> messages);
 
+        // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box, read from the bottom of
+        // the rendered buffer (the bottom-most prompt line wrapped by rules). Read-only; "" => no draft.
+        String ReadPendingInputDraft();
+
         Microsoft.Terminal.Core.Color ForegroundColor { get; };
         Microsoft.Terminal.Core.Color BackgroundColor { get; };
 

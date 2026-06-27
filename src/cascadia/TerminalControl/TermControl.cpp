@@ -1400,10 +1400,25 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             return false;
         }
 
-        const auto panelWidth = static_cast<float>(SwapChainPanel().ActualWidth());
-        const auto panelHeight = static_cast<float>(SwapChainPanel().ActualHeight());
-        const auto panelScaleX = SwapChainPanel().CompositionScaleX();
-        const auto panelScaleY = SwapChainPanel().CompositionScaleY();
+        // Read the real size off the laid-out SwapChainPanel and delegate. The normal (layout-driven)
+        // init path. Agentmaster: the eager-init path (InitializeWithSize) calls the helper directly
+        // with a placeholder size for a background tab whose panel is off-tree and reads 0.
+        return _InitializeTerminalWithSize(reason,
+                                           SwapChainPanel().ActualWidth(),
+                                           SwapChainPanel().ActualHeight(),
+                                           SwapChainPanel().CompositionScaleX(),
+                                           SwapChainPanel().CompositionScaleY());
+    }
+
+    bool TermControl::_InitializeTerminalWithSize(const InitializeReason reason, const double panelWidthDip, const double panelHeightDip, const float panelScaleX, const float panelScaleY)
+    {
+        if (_initializedTerminal)
+        {
+            return false;
+        }
+
+        const auto panelWidth = static_cast<float>(panelWidthDip);
+        const auto panelHeight = static_cast<float>(panelHeightDip);
 
         const auto windowWidth = panelWidth * panelScaleX;
         const auto windowHeight = panelHeight * panelScaleY;
@@ -1504,6 +1519,37 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // be reentrant)
         Initialized.raise(*this, nullptr);
         return true;
+    }
+
+    // Agentmaster (eager-init): see TermControl.idl. Initialize the terminal + start its connection
+    // NOW with an explicit placeholder size, instead of waiting for the SwapChainPanel's first non-zero
+    // layout (which a background/restored tab — off the visual tree — never gets, so its claude.exe
+    // never spawns until the tab is clicked). Used by the "Activate Tab" / "Activate All Tabs" actions
+    // to wake a dormant tab IN PLACE without changing focus.
+    bool TermControl::InitializeWithSize(double width, double height, float scale)
+    {
+        if (_initializedTerminal || width <= 0 || height <= 0)
+        {
+            return false;
+        }
+        if (scale <= 0)
+        {
+            scale = 1.0f; // RasterizationScale should be >0; guard so the core's non-zero-size check passes
+        }
+        // Always Create: a never-laid-out tab's ControlCore was never initialized, so it must build the
+        // render engine + buffer + state machine and Start() its connection (the AV-safe order — output
+        // can only reach the buffer after Initialize built it). InitializeReason::Reattach assumes a prior
+        // window already initialized the core, which is not the case here.
+        const bool ok = _InitializeTerminalWithSize(InitializeReason::Create, width, height, scale, scale);
+        if (ok)
+        {
+            // The layout-driven init is now redundant: revoke it so a later LayoutUpdated (when the tab is
+            // finally shown) doesn't re-enter _InitializeTerminal every pass. The real on-screen size then
+            // self-corrects through _SwapChainSizeChanged -> _core.SizeChanged (gated on _initializedTerminal,
+            // now true), so the placeholder size we used here is replaced the moment the tab is laid out.
+            _layoutUpdatedRevoker.revoke();
+        }
+        return ok;
     }
 
     safe_void_coroutine TermControl::_restoreInBackground()
@@ -2796,6 +2842,13 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     winrt::Windows::Foundation::Collections::IVector<int32_t> TermControl::ResolveConversationPromptRows(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages)
     {
         return _core.ResolveConversationPromptRows(messages);
+    }
+
+    // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box, read from the bottom of the
+    // buffer (read-only — a transient draft fact, not state). Empty => no pending draft. Pure passthrough.
+    winrt::hstring TermControl::ReadPendingInputDraft()
+    {
+        return _core.ReadPendingInputDraft();
     }
 
     // Agentmaster (alt+up / alt+down prompt nav): scroll to the nearest SENT prompt that is currently

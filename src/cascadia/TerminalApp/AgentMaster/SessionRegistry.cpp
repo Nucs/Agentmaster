@@ -635,6 +635,39 @@ namespace Agentmaster
         // cascade for transient, high-frequency fields (e.g. streamed assistant text).
     }
 
+    void SessionRegistry::SetStarted(const std::wstring& id, bool started)
+    {
+        SessionInfo snapshot;
+        {
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end() || it->second.started == started)
+            {
+                return; // unknown id, or no change -> no observer churn on the re-assert tick
+            }
+            it->second.started = started;
+            snapshot = it->second;
+        }
+        _notify(snapshot, HookEvent::Unknown);
+    }
+
+    // Agentmaster (PENDING_INPUT.md): record the UNSENT input-box draft, CHANGE-GATED and QUIET (no
+    // _notify). The draft is high-frequency (it changes as the user types), so — exactly like the
+    // UpdateQuiet streamed-text fields — it must never run the persist / UI / scheduler cascade. The
+    // LOCAL window drives any per-tab indicator straight from the UI lane (it holds the tab); the field
+    // exists so cross-window / CLI consumers can read it from a Snapshot. Returns whether it changed.
+    bool SessionRegistry::SetPendingInput(const std::wstring& id, const std::wstring& text)
+    {
+        std::lock_guard guard{ _mtx };
+        const auto it = _sessions.find(id);
+        if (it == _sessions.end() || it->second.pendingInput == text)
+        {
+            return false; // unknown id, or no change
+        }
+        it->second.pendingInput = text;
+        return true;
+    }
+
     void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text)
     {
         if (text.empty())

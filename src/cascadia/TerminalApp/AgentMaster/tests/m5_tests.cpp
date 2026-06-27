@@ -33,6 +33,7 @@
 #include "../HooksBridge.h"
 #include "../Json.h"
 #include "../Persistence.h"
+#include "../PendingInput.h" // the unsent-draft detector (PENDING_INPUT.md) — pure, header-only
 #include "../ProcessInspect.h" // SnapshotProcesses / ReadClaudeFacts / ResolveSessionId (Observer O1)
 #include "../PromptAnchor.h" // the summary-panel JUMP resolver (SUMMARY_JUMP.md) — pure, benchmarked here
 #include "../ProfileBootstrap.h" // the per-install state PROFILE (choice file / resolution / migrate)
@@ -415,6 +416,19 @@ static void TestRegistry()
     CHECK(!reg.Inject(L"s2-unbound", L"x"), "inject false when unbound");
 
     CHECK(observed.load() > 0, "observer fired");
+
+    // Agentmaster (PENDING_INPUT.md): SetPendingInput is CHANGE-GATED + QUIET (no _notify), so a draft
+    // that moves as the user types never runs the persist / UI / scheduler cascade.
+    {
+        const int before = observed.load();
+        CHECK(reg.SetPendingInput(L"s1", L"draft text"), "pending: first set changes");
+        CHECK(reg.Get(L"s1")->pendingInput == L"draft text", "pending: stored on the record");
+        CHECK(!reg.SetPendingInput(L"s1", L"draft text"), "pending: identical set is a no-op");
+        CHECK(reg.SetPendingInput(L"s1", L""), "pending: clearing changes");
+        CHECK(reg.Get(L"s1")->pendingInput.empty(), "pending: cleared");
+        CHECK(!reg.SetPendingInput(L"nope", L"x"), "pending: unknown id no-op");
+        CHECK(observed.load() == before, "pending: QUIET -- no observer notify");
+    }
 
     reg.Remove(L"s1");
     CHECK(!reg.Get(L"s1").has_value(), "remove s1");
@@ -5704,9 +5718,102 @@ static void TestSummaryUserMsgNoise()
     CHECK(SeIsCommandNoise(L"<command-name>/clear</command-name>"), "command echo still noise");
 }
 
+// Agentmaster (PENDING_INPUT.md): the pure unsent-draft detector. Marker/rule glyphs are built from
+// code points (this TU compiles without /utf-8, so the source stays pure-ASCII -- no raw glyph, no \u
+// in a literal). Covers box identification, single/multi-line extraction, the empty box, a sent
+// prompt vs the live box, menu-selection rejection, and the rule classifier.
+static void TestPendingInput()
+{
+    std::wprintf(L"-- PendingInput (draft detection) --\n");
+    const wchar_t MARK = static_cast<wchar_t>(0x276F); // the heavy right-angle prompt ornament
+    const wchar_t MARK2 = static_cast<wchar_t>(0x203A); // the secondary single right-angle quote
+    const wchar_t DASH = static_cast<wchar_t>(0x2500); // box-drawing light horizontal (the rule char)
+    const std::wstring NL(1, static_cast<wchar_t>(10)); // a literal newline, sans a \n escape in source
+    const std::wstring rule(60, DASH);
+    const std::wstring marker = std::wstring(1, MARK) + L" "; // "> "
+    auto V = [](std::initializer_list<std::wstring> r) { return std::vector<std::wstring>(r); };
+
+    // 1. single-line draft
+    {
+        const auto d = DetectPendingInput(V({ rule, marker + L"hello world", rule }));
+        CHECK(d.boxFound, "pending single: box found");
+        CHECK(d.text == L"hello world", "pending single: text extracted");
+    }
+    // 2. multi-line draft -- continuation indent stripped, an internal blank line preserved
+    {
+        const auto d = DetectPendingInput(V({ rule, marker + L"line one", L"  line two", L"", L"  123", rule }));
+        CHECK(d.boxFound, "pending multi: box found");
+        CHECK(d.text == (L"line one" + NL + L"line two" + NL + NL + L"123"), "pending multi: lines joined + indent stripped + blank kept");
+    }
+    // 3. empty box -> box found, no draft
+    {
+        const auto d = DetectPendingInput(V({ rule, marker, rule }));
+        CHECK(d.boxFound, "pending empty: box found");
+        CHECK(d.text.empty(), "pending empty: no draft text");
+    }
+    // 4. no box at all
+    {
+        const auto d = DetectPendingInput(V({ L"assistant text", L"more output" }));
+        CHECK(!d.boxFound, "pending none: no box");
+    }
+    // 5. a SENT prompt in scrollback + an empty input box below -> only the bottom box (empty)
+    {
+        const auto d = DetectPendingInput(V({ std::wstring(1, MARK) + L" previously sent", L"assistant replied", rule, marker, rule }));
+        CHECK(d.boxFound, "pending sent+empty: box found");
+        CHECK(d.text.empty(), "pending sent+empty: scrollback prompt ignored, box empty");
+        CHECK(d.caretRow == 3, "pending sent+empty: caret is the bottom box, not the scrollback prompt");
+    }
+    // 6. menu selection (question directly above the marker) -> NOT the input box
+    {
+        const auto d = DetectPendingInput(V({ L"Do you want to proceed?", marker + L"1. Yes", L"  2. No" }));
+        CHECK(!d.boxFound, "pending menu: not detected as input box");
+    }
+    // 7. menu wrapped in rules but with a question line above the marker -> still NOT detected
+    {
+        const auto d = DetectPendingInput(V({ rule, L"Select an option:", marker + L"1. Yes", L"  2. No", rule }));
+        CHECK(!d.boxFound, "pending menu-in-rules: question above marker rejects false box");
+    }
+    // 8. rule-row classification
+    {
+        CHECK(IsPendingRuleRow(rule), "pending rule: pure rule is a rule");
+        CHECK(!IsPendingRuleRow(std::wstring(3, DASH) + L" 3 files " + std::wstring(3, DASH)), "pending rule: labeled divider is NOT a rule");
+        CHECK(!IsPendingRuleRow(L"just some text here"), "pending rule: text is not a rule");
+        CHECK(!IsPendingRuleRow(std::wstring(3, DASH)), "pending rule: <6 box chars is not a rule");
+    }
+    // 9. marker with no following space
+    {
+        const auto d = DetectPendingInput(V({ rule, std::wstring(1, MARK) + L"text", rule }));
+        CHECK(d.boxFound, "pending no-space: box found");
+        CHECK(d.text == L"text", "pending no-space: marker stripped without a trailing space");
+    }
+    // 10. secondary marker U+203A
+    {
+        const auto d = DetectPendingInput(V({ rule, std::wstring(1, MARK2) + L" hi there", rule }));
+        CHECK(d.boxFound, "pending marker2: U+203A recognized");
+        CHECK(d.text == L"hi there", "pending marker2: text extracted");
+    }
+    // 11. trailing blank lines inside the box are trimmed
+    {
+        const auto d = DetectPendingInput(V({ rule, marker + L"only line", L"", L"", rule }));
+        CHECK(d.text == L"only line", "pending trailing-blank: trimmed");
+    }
+    // 12. one blank row between the top rule and the marker -> still detected
+    {
+        const auto d = DetectPendingInput(V({ rule, L"", marker + L"padded", rule }));
+        CHECK(d.boxFound, "pending blank-after-top-rule: detected");
+        CHECK(d.text == L"padded", "pending blank-after-top-rule: text extracted");
+    }
+    // 13. empty rows
+    {
+        const auto d = DetectPendingInput(std::vector<std::wstring>{});
+        CHECK(!d.boxFound, "pending empty-rows: nothing");
+    }
+}
+
 int wmain()
 {
     std::wprintf(L"=== Agentmaster engine tests ===\n");
+    TestPendingInput();
     TestPromptAnchor();
     TestPromptAnchorEdgeCases();
     TestPromptAnchorRealCorpus();

@@ -234,7 +234,7 @@ namespace winrt::TerminalApp::implementation
     // Independent of AppSettings.showTabOverlay (that toggle is the in-terminal HUD). Idempotent on
     // an unchanged color (a new SolidColorBrush per call would re-raise the INPC binding every
     // observer tick), so the per-tick badge path can re-assert it for free. UI thread only.
-    void TerminalPage::_SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color)
+    void TerminalPage::_SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant)
     {
         if (!tab)
         {
@@ -250,18 +250,33 @@ namespace winrt::TerminalApp::implementation
             if (!color)
             {
                 status.AgentStatusVisible(false); // WINRT_OBSERVABLE_PROPERTY no-ops when already false
+                status.AgentStatusHalfVisible(false);
                 return;
             }
-            if (status.AgentStatusVisible())
+            // The full dot (started) and the half-hollow dot (dormant) are MUTUALLY EXCLUSIVE — exactly
+            // one is visible. Short-circuit only when the color AND the presentation both already match.
+            const bool wantFull = !dormant;
+            const bool wantHalf = dormant;
+            if (status.AgentStatusVisible() == wantFull && status.AgentStatusHalfVisible() == wantHalf)
             {
                 if (const auto cur = status.AgentStatusBrush().try_as<Media::SolidColorBrush>();
                     cur && cur.Color() == *color)
                 {
-                    return; // already showing exactly this color — don't churn the binding
+                    return; // already showing exactly this color + presentation — don't churn the binding
                 }
             }
             status.AgentStatusBrush(Media::SolidColorBrush{ *color });
-            status.AgentStatusVisible(true);
+            // Clear the off variant FIRST so a started<->dormant swap never momentarily shows both.
+            if (dormant)
+            {
+                status.AgentStatusVisible(false);
+                status.AgentStatusHalfVisible(true);
+            }
+            else
+            {
+                status.AgentStatusHalfVisible(false);
+                status.AgentStatusVisible(true);
+            }
         }
         CATCH_LOG();
     }
@@ -335,7 +350,7 @@ namespace winrt::TerminalApp::implementation
     // place; live=false hides it (the liveness sweep also hides explicitly before it drops the
     // _claudeTabs entry — whichever lands first wins, both are idempotent). A session this window
     // doesn't host is a cheap map-miss no-op (every window's observer sees every fleet event).
-    void TerminalPage::_UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live)
+    void TerminalPage::_UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant)
     {
         const auto it = _claudeTabs.find(sessionId);
         if (it == _claudeTabs.end())
@@ -344,7 +359,7 @@ namespace winrt::TerminalApp::implementation
         }
         if (const auto tab = it->second.get())
         {
-            _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt);
+            _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt, dormant);
             _EvaluateAgentFlash(sessionId, tab, state, live); // start/stop the unvisited "left Running" red flash
             _UpdateTabAgentToolTip(tab, sessionId); // refresh the rich hover tooltip (reverts to default when !live)
         }
@@ -1276,6 +1291,92 @@ namespace winrt::TerminalApp::implementation
         return control;
     }
 
+    // Agentmaster (eager-init / "Activate Tab"): start a DORMANT session's claude IN PLACE — without
+    // switching to its tab. A WT background/restored tab spawns its child lazily, only on the
+    // SwapChainPanel's first non-zero layout (when first SHOWN), so a window-restored / re-homed managed
+    // tab the user never clicked never resumes (no claude, no hooks, no autopilot). TermControl::
+    // InitializeWithSize forces the AV-safe Initialize()->Start() with a placeholder size (the laid-out
+    // tab-content area; it self-corrects when the tab is later shown). Returns true if it woke one (false:
+    // not hosted here / no terminal / already started). UI thread only.
+    bool TerminalPage::_ActivateDormantSession(const std::wstring& sessionId)
+    {
+        const auto control = _ControlForSession(sessionId);
+        if (!control)
+        {
+            return false; // not hosted in this window (or no terminal pane) — nothing to wake here
+        }
+        if (control.ConnectionState() != TerminalConnection::ConnectionState::NotConnected)
+        {
+            return false; // already started (Connecting/Connected) or ended (Closed) — not dormant
+        }
+        // Placeholder size = the laid-out shared tab-content area (the Manager tab is showing, so this is
+        // the size a terminal tab gets). A non-positive size would make InitializeWithSize no-op, so fall
+        // back to a sane default; the control resizes to its true size via _SwapChainSizeChanged when shown.
+        double w = _tabContent ? _tabContent.ActualWidth() : 0.0;
+        double h = _tabContent ? _tabContent.ActualHeight() : 0.0;
+        if (w <= 0.0 || h <= 0.0)
+        {
+            w = 1200.0;
+            h = 800.0;
+        }
+        float scale = 1.0f;
+        try
+        {
+            if (const auto xr = _tabContent ? _tabContent.XamlRoot() : nullptr)
+            {
+                if (const auto rs = xr.RasterizationScale(); rs > 0)
+                {
+                    scale = static_cast<float>(rs);
+                }
+            }
+        }
+        CATCH_LOG();
+        bool ok = false;
+        try
+        {
+            ok = control.InitializeWithSize(w, h, scale);
+        }
+        CATCH_LOG();
+        if (ok && _sessionRegistry)
+        {
+            _sessionRegistry->SetStarted(sessionId, true); // instant: the half-hollow dot fills + the "Activate" count drops (the liveness tick would also reconcile)
+            ::Agentmaster::LogNav(L"activate-dormant " + ::Agentmaster::ShortId(sessionId));
+        }
+        return ok;
+    }
+
+    // Agentmaster (eager-init / "Activate All Tabs"): eager-init every dormant managed tab hosted in THIS
+    // window. Returns the count woken. The local actuator behind the Manager's "Activate All Tabs (N)"
+    // button AND the receiving half of the cross-window fan-out (ActivateAllDormantInOtherWindows).
+    int TerminalPage::_ActivateAllDormantTabsLocal()
+    {
+        if (_claudeTabs.empty())
+        {
+            return 0;
+        }
+        // Snapshot the ids first — _ActivateDormantSession doesn't mutate _claudeTabs, but iterate a copy
+        // so a concurrent bind/erase can't invalidate the iterator.
+        std::vector<std::wstring> ids;
+        ids.reserve(_claudeTabs.size());
+        for (const auto& [id, weak] : _claudeTabs)
+        {
+            ids.push_back(id);
+        }
+        int woke = 0;
+        for (const auto& id : ids)
+        {
+            if (_ActivateDormantSession(id))
+            {
+                ++woke;
+            }
+        }
+        if (woke > 0)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[activate-all] window " + _windowId + L" woke " + std::to_wstring(woke) + L" dormant tab(s)\n");
+        }
+        return woke;
+    }
+
     static winrt::Windows::Foundation::Collections::IVector<winrt::hstring> _PromptsToVector(const std::vector<std::wstring>& msgs)
     {
         std::vector<winrt::hstring> hv;
@@ -2043,10 +2144,12 @@ namespace winrt::TerminalApp::implementation
         _ApplyDirColorToTab(hostTab, cwd); // per-directory tab color
         _AttachClaudeOverlay(hostTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
         // Tab status dot: managed now — seed the strip dot from the session's current state (the
-        // engine-init registry observer keeps it live from here on).
+        // engine-init registry observer keeps it live from here on). A re-homed restored tab whose
+        // claude hasn't started yet (started=false, not external) seeds the half-hollow dormant dot;
+        // the liveness tick reconciles started from ConnectionState() within one cadence.
         if (const auto s = _sessionRegistry->Get(id))
         {
-            _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state));
+            _SetTabAgentDot(hostTab, AgentStatusColorFor(s->state), !s->started && !s->external);
         }
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
         _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
@@ -2110,6 +2213,13 @@ namespace winrt::TerminalApp::implementation
             bool anyAlive = false;
             bool foundSessionConn = false;
             bool sessionConnAlive = false;
+            // Agentmaster (eager-init / "started" reconcile): has this session's control left
+            // ConnectionState::NotConnected (claude actually running) vs. live-but-dormant? Prefer the
+            // session's OWN connection (tabToken match); fall back to "any control started" when we
+            // can't pinpoint it. Reconciled into SessionInfo::started below (change-gated, so a steady
+            // re-assert is free) — the half-hollow dot + "Activate" gates read it.
+            bool anyStarted = false;
+            bool sessionStarted = false;
             tabImpl->GetRootPane()->WalkTree([&](auto&& pane) {
                 const auto content = pane->GetContent();
                 if (!content)
@@ -2128,8 +2238,11 @@ namespace winrt::TerminalApp::implementation
                 }
                 sawTerminal = true;
                 // < Closed == NotConnected / Connecting / Connected / Closing -> still alive.
-                const bool alive = ctrl.ConnectionState() < TerminalConnection::ConnectionState::Closed;
+                const auto connState = ctrl.ConnectionState();
+                const bool alive = connState < TerminalConnection::ConnectionState::Closed;
+                const bool startedThis = connState != TerminalConnection::ConnectionState::NotConnected;
                 anyAlive = anyAlive || alive;
+                anyStarted = anyStarted || startedThis;
                 if (!sessionWt.empty())
                 {
                     if (const auto cc = ctrl.Connection())
@@ -2146,10 +2259,22 @@ namespace winrt::TerminalApp::implementation
                         {
                             foundSessionConn = true;
                             sessionConnAlive = alive;
+                            sessionStarted = startedThis;
                         }
                     }
                 }
             });
+            // Reconcile the dormant/started flag. Prefer the pinpointed session connection; else use
+            // "any control started". Skip (leave the flag as-is) when we couldn't read any terminal, so
+            // an unreadable tab never spuriously flips a started session back to dormant.
+            if (foundSessionConn)
+            {
+                _sessionRegistry->SetStarted(id, sessionStarted);
+            }
+            else if (sawTerminal)
+            {
+                _sessionRegistry->SetStarted(id, anyStarted);
+            }
             bool isDead;
             if (!sessionWt.empty() && sawTerminal)
             {
@@ -2194,6 +2319,7 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->Update(id, [](::Agentmaster::SessionInfo& s) {
                 s.live = false;
                 s.pendingConfirmPromptId.clear();
+                s.pendingInput.clear(); // a dead session holds no live draft (PENDING_INPUT.md)
             });
             _sessionRegistry->SetInjector(id, nullptr);
             _claudeTabs.erase(id);
@@ -2201,6 +2327,85 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[liveness] dead -> archived " + id + L"\n");
         }
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
+        co_return;
+    }
+
+    // Agentmaster (PENDING_INPUT.md): once per scanner tick, read the BOTTOM of each bound, started
+    // CLAUDE session's terminal buffer and detect an UNSENT draft in Claude's input box — the
+    // bottom-most ❯ line wrapped by ── rules (PendingInput.h). This is the ONE session fact hooks can
+    // never carry: they fire on SUBMIT, but a draft is by definition not yet submitted, so the only
+    // way to know a tab holds an unsent message is to read the rendered buffer. Strictly READ-ONLY —
+    // a transient draft FACT, never SessionState (Rule #7/#13). BACKGROUND (unfocused) tabs are scanned
+    // too — the whole point is to notice a draft left in a tab the user switched away from. Stored via
+    // the registry's QUIET, change-gated SetPendingInput (the draft moves as the user types, so no
+    // persist / UI / scheduler cascade). The empty<->non-empty TRANSITION is logged ([pending]); the
+    // tab "unsent message" indicator is the deferred follow-up that reads SessionInfo::pendingInput.
+    // UI thread (the only place a control's buffer is readable).
+    winrt::fire_and_forget TerminalPage::_ScanPendingInput()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (!_sessionRegistry || _claudeTabs.empty())
+        {
+            co_return;
+        }
+        // Snapshot the ids first — never read controls while iterating _claudeTabs; SetPendingInput is
+        // quiet so it can't re-enter the map's mutation paths.
+        std::vector<std::wstring> ids;
+        ids.reserve(_claudeTabs.size());
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            ids.push_back(id);
+        }
+        for (const auto& id : ids)
+        {
+            const auto info = _sessionRegistry->Get(id);
+            if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
+            {
+                continue; // Codex's TUI has no ❯ input box — only Claude is monitored in v1
+            }
+            const auto control = _ControlForSession(id);
+            if (!control)
+            {
+                continue;
+            }
+            // The buffer exists only once the control has STARTED (left NotConnected). A dormant
+            // window-restored tab has no claude running -> no draft possible (and ControlCore guards the
+            // null buffer internally, but skip the no-op cross-ABI call here).
+            if (control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+            {
+                continue;
+            }
+            std::wstring draft;
+            try
+            {
+                const auto h = control.ReadPendingInputDraft();
+                draft.assign(h.c_str(), h.size());
+            }
+            catch (...)
+            {
+                continue; // a control torn down mid-tick — skip it
+            }
+            const bool wasEmpty = info->pendingInput.empty(); // `info` is a snapshot (pre-update value)
+            if (_sessionRegistry->SetPendingInput(id, draft) && wasEmpty != draft.empty())
+            {
+                // Log only the empty<->non-empty TRANSITION, not every keystroke-tick edit — a user
+                // actively typing produces one "appeared" line, not a stream.
+                if (draft.empty())
+                {
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" cleared\n");
+                }
+                else
+                {
+                    auto firstLine = draft.substr(0, draft.find(L'\n'));
+                    if (firstLine.size() > 80)
+                    {
+                        firstLine = firstLine.substr(0, 80) + L"...";
+                    }
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" draft (chars=" + std::to_wstring(draft.size()) + L"): " + firstLine + L"\n");
+                }
+            }
+        }
         co_return;
     }
 

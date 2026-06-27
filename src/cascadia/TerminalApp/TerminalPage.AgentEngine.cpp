@@ -173,6 +173,11 @@ namespace winrt::TerminalApp::implementation
         {
             ::Agentmaster::UnregisterWindowRestartHandler(_windowRestartToken);
         }
+        // Agentmaster (eager-init "Activate All Tabs"): drop this window's activate-all sink too (Rule #10).
+        if (_windowActivateAllToken)
+        {
+            ::Agentmaster::UnregisterActivateAllDormantHandler(_windowActivateAllToken);
+        }
         // Agentmaster (cross-window settings broadcast): drop this window's settings sink too (Rule #10).
         if (_settingsChangedToken)
         {
@@ -581,6 +586,23 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        // Cross-window "Activate All Tabs" sink (eager-init): the Manager's fleet-wide "Activate All Tabs"
+        // in ANOTHER window fans out here; this sink hops to this window's UI thread and eager-inits all of
+        // its OWN dormant tabs (a tab can only be started in the window that hosts its control). Detached in
+        // ~TerminalPage (Rule #10).
+        {
+            const auto weakThis = get_weak();
+            const auto dispatcher = Dispatcher(); // agile — safe to call into from any thread
+            _windowActivateAllToken = ::Agentmaster::RegisterActivateAllDormantHandler(_windowId, [weakThis, dispatcher]() {
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis]() {
+                    if (auto self = weakThis.get())
+                    {
+                        self->_ActivateAllDormantTabsLocal();
+                    }
+                });
+            });
+        }
+
         // Cross-window settings broadcast: a GLOBAL settings change in ANOTHER window (the cog Save, or
         // the Explorer-Tree / Triage-Board sort toggle) reaches here; this sink hops to this window's UI
         // thread and re-applies it live (this window's _appSettings + the sort toggles + a board/tree
@@ -667,10 +689,14 @@ namespace winrt::TerminalApp::implementation
                 const std::wstring id = s.id;
                 const auto state = s.state;
                 const bool live = s.live;
-                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live]() {
+                // Agentmaster (eager-init): a live MANAGED session whose ConPTY hasn't started yet (a
+                // window-restored / re-homed tab the user never clicked) shows the half-hollow dot. An
+                // external (observe-only) session has no control of ours, so it is never "dormant".
+                const bool dormant = live && !s.started && !s.external;
+                dispatcher.RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Low, [weakThis, id, state, live, dormant]() {
                     if (auto self = weakThis.get())
                     {
-                        self->_UpdateTabAgentDot(id, state, live);
+                        self->_UpdateTabAgentDot(id, state, live, dormant);
                         self->_SyncClaudeTabTitleFromRegistry(id); // reads the CURRENT registry title (no stale capture)
                     }
                 });
@@ -690,6 +716,7 @@ namespace winrt::TerminalApp::implementation
                     self->_ReconcileClaudeTabs(); // bind/attach + re-home hooked sessions (tabToken)
                     self->_ObserverProbe(); // Fleet Observer: publish this window's roster + bind via the correlation table (PULL; no hooks needed)
                     self->_SweepClaudeLiveness(); // then archive dead tabs (all self-marshal to the UI thread)
+                    self->_ScanPendingInput(); // PENDING_INPUT.md: record each live Claude tab's unsent input-box draft
                 }
             });
         }
@@ -769,6 +796,33 @@ namespace winrt::TerminalApp::implementation
             if (auto self = weakThis.get())
             {
                 self->_ActivateClaudeSession(id);
+            }
+        });
+        // Agentmaster (eager-init): "Activate Tab" — start a dormant session's claude IN PLACE (no focus
+        // change). The session is hosted in SOME window; the activate-dormant fan-out reaches it (this
+        // window's own tabs start locally, others via the fleet sink). Here we wake it if it lives here,
+        // else fan out (a board/tree row in GLOBAL scope can target another window's dormant tab).
+        content->SetActivateDormantHandler([weakThis](winrt::hstring id) {
+            if (auto self = weakThis.get())
+            {
+                if (!self->_ActivateDormantSession(std::wstring{ id }))
+                {
+                    // Not hosted here (or already started): fan out so the hosting window wakes it.
+                    ::Agentmaster::ActivateAllDormantInOtherWindows(self->_windowId);
+                }
+            }
+        });
+        // Agentmaster (eager-init): "Activate All Tabs" — wake this window's dormant tabs; if allWindows,
+        // fan out to every other window too (each eager-inits its own). The content decides the scope
+        // (prompting only when other windows also have dormant tabs).
+        content->SetActivateAllHandler([weakThis](bool allWindows) {
+            if (auto self = weakThis.get())
+            {
+                self->_ActivateAllDormantTabsLocal();
+                if (allWindows)
+                {
+                    ::Agentmaster::ActivateAllDormantInOtherWindows(self->_windowId);
+                }
             }
         });
         // Agentmaster (Linked Lenses): the Manager reports a pointer enter/leave on a managed

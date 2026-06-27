@@ -66,6 +66,7 @@ Observer-owned session state (the PULL state engine — design, pre-implementati
 Commandline introspection (the `agentmaster <verb>` CLI): [`doc/agentmaster/CLI.md`](doc/agentmaster/CLI.md).
 Summary-panel JUMP (transcript→buffer resolve + center the view on a prompt): [`doc/agentmaster/SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md).
 Favorite + Close refactor (Archive removed; Sessions is the sole history view): [`doc/agentmaster/FAVORITES.md`](doc/agentmaster/FAVORITES.md).
+Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
 
 ## Status
 
@@ -553,6 +554,29 @@ membership pre-check (~8× on a scrolled-off prompt), and a recent-window haysta
 (`kAnchorRecentWindowChars`) bounding cost regardless of scrollback depth. Deferred (non-blocking): a flash
 highlight on landing, a mutation-id epoch cache (repeat clicks → O(1)), "end of turn" jumps (neighbor-
 derived), Codex prompts, and a context-sensitive Ctrl+F reusing the same resolve+center path.
+
+**Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — detection core complete;
+pure detector unit-tested (engine harness 1291/1291) + the read method/UI-lane poll lib-compile green
+(TerminalControlLib + TerminalAppLib); the visible tab indicator is the deferred follow-up; runtime trace
+pends a deploy.** Detects an **UNSENT draft** in a Claude tab's input box — text the user typed but hasn't
+submitted. This is the **ONE session fact hooks can never carry** (they fire on SUBMIT; a draft is by
+definition not yet submitted), so it is the lone screen-**READ** fact: a transient draft FACT, analogous to
+the presence heartbeat, **never** `SessionState` (Rule #7/#13) and strictly read-only. A **pure, header-only
+detector** (`AgentMaster/PendingInput.h`, the `PromptAnchor.h` idiom — pure-ASCII source, `\u` escapes)
+finds the input box by the user's two cues — the **bottom-most `❯` prompt line** that is **wrapped by `─`
+rules** (a rule directly above + below) — which separates the live box from a SENT prompt (inline, no box)
+and a menu selection `❯` (the line above it is the question, not a rule); it extracts the single/multi-line
+draft (marker + 2-space continuation indent stripped, trailing blanks trimmed; empty box ⇒ no draft). A
+read-only `ControlCore::ReadPendingInputDraft()` (guarded on `_initializedTerminal`, reads the last ~120
+buffer rows under the read-lock — the box always sits at the buffer bottom regardless of scroll) →
+`TermControl` passthrough; the UI lane `TerminalPage::_ScanPendingInput()` (ticked by the scanner's liveness
+probe alongside `_SweepClaudeLiveness`/`_ObserverProbe`) reads each **bound, started, Claude** tab —
+**background tabs too** (the point is to notice a draft in a tab you switched away from) — and records it via
+the registry's **QUIET, change-gated** `SetPendingInput` (transient `SessionInfo::pendingInput`; never
+persisted; no persist/UI/scheduler cascade — it moves as you type). The empty↔non-empty **transition** logs
+`[pending] <id> draft (chars=N): <first line>` / `[pending] <id> cleared`. **Deferred:** the visible tab
+indicator (local window can drive it straight from the UI lane; cross-window board reads the field) +
+placeholder/dim-attribute filtering (PENDING_INPUT.md §4/§6).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -1215,7 +1239,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`
@@ -1429,7 +1453,11 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     location with whitespace-tolerant fuzzy matching, backoff, partial "match as much as possible"
     scoring, and an order-preserving greedy assignment for duplicate prompts; header-only so both
     the overlay path AND `ControlCore` (a separate DLL) share it. Unit-tested + benchmarked in
-    `tests/`), `Json.h`, `Persistence.{h,cpp}`,
+    `tests/`),
+    `PendingInput.h` (header-only, pure — the **pending-input detector**, PENDING_INPUT.md: given the
+    bottom region of the terminal buffer, finds Claude's input box by the bottom-most `❯` line wrapped
+    by `─` rules and extracts the UNSENT draft; the `PromptAnchor.h` idiom — pure-ASCII source, header-
+    only so `ControlCore` + `tests/` share it. Unit-tested in `tests/`), `Json.h`, `Persistence.{h,cpp}`,
     `ProfileBootstrap.h` (header-only, pure Win32 — the per-install state PROFILE: resolution
     [env > portable marker > saved choice > per-identity default], the `.agentmaster.profiles`
     choice file, the first-launch TaskDialog picker + folder Browse, legacy-data migration,

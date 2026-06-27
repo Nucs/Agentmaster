@@ -13,6 +13,7 @@
 
 #include "EventArgs.h"
 #include "../TerminalApp/AgentMaster/PromptAnchor.h" // Agentmaster (SUMMARY_JUMP.md): pure header-only jump resolver
+#include "../TerminalApp/AgentMaster/PendingInput.h" // Agentmaster (PENDING_INPUT.md): pure header-only unsent-draft detector
 #include "../../renderer/atlas/AtlasEngine.h"
 #include "../../renderer/base/renderer.hpp"
 #include "../../renderer/uia/UiaRenderer.hpp"
@@ -859,6 +860,44 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     {
         const auto rows = ResolveConversationPromptRows(messages);
         return index < rows.Size() ? rows.GetAt(index) : -1;
+    }
+
+    // Agentmaster (PENDING_INPUT.md): read the session's UNSENT input-box DRAFT out of the rendered
+    // buffer. Claude renders its input box at the BOTTOM of the buffer (it renders inline; the box is
+    // the bottom-most interactive element), so a bounded window of the LAST rows always contains it,
+    // independent of the user's scrollback position. The pure PendingInput detector finds the bottom-
+    // most prompt line wrapped by rules and extracts the text. Read-only -- a transient DRAFT fact,
+    // NOT session state (Rule #7/#13: state is hook/transcript-driven; a draft can't be, since it is
+    // by definition not yet submitted). Returns "" for an empty box, no box, or a not-yet-initialized
+    // terminal.
+    winrt::hstring ControlCore::ReadPendingInputDraft()
+    {
+        // Same guard as ResolveConversationPromptRows: a restored-but-never-shown tab has a live
+        // ControlCore whose TextBuffer isn't created yet (Initialize() is gated on the first non-zero
+        // layout), so GetTextBuffer()/GetSize() would AV. No buffer yet => no draft.
+        if (!_initializedTerminal.load(std::memory_order_relaxed))
+        {
+            return {};
+        }
+        const auto lock = _terminal->LockForReading();
+        const auto& tb = _terminal->GetTextBuffer();
+        const auto lastRow = tb.GetLastNonSpaceCharacter().y;
+        if (lastRow < 0)
+        {
+            return {};
+        }
+        // The input box + a little context above it is at most a viewport tall; 120 rows is generous and
+        // bounds the cost to a fixed cheap read regardless of scrollback depth.
+        constexpr til::CoordType kPendingScanRows = 120;
+        const auto startRow = (std::max)(static_cast<til::CoordType>(0), static_cast<til::CoordType>(lastRow + 1 - kPendingScanRows));
+        std::vector<std::wstring> rows;
+        rows.reserve(static_cast<size_t>(lastRow - startRow + 1));
+        for (til::CoordType y = startRow; y <= lastRow; ++y)
+        {
+            rows.emplace_back(tb.GetRowByOffset(y).GetText()); // GetText() => wstring_view; copied while the lock is held
+        }
+        const auto draft = ::Agentmaster::DetectPendingInput(rows);
+        return winrt::hstring{ draft.text };
     }
 
     void ControlCore::AdjustOpacity(const float adjustment)

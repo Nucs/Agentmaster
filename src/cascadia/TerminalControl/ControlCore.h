@@ -234,6 +234,9 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         // Agentmaster (SUMMARY_JUMP.md): a row per prompt (-1 if not on screen) in ONE linearize+resolve —
         // drives the summary panel's per-icon eligibility dimming.
         winrt::Windows::Foundation::Collections::IVector<int32_t> ResolveConversationPromptRows(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages);
+        // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box, read from the bottom of
+        // the buffer (read-only). Empty => no pending draft.
+        winrt::hstring ReadPendingInputDraft();
 
         void LeftClickOnTerminal(const til::point terminalPosition,
                                  const int numberOfClicks,

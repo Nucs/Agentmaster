@@ -332,6 +332,10 @@ namespace winrt::TerminalApp::implementation
         // hops to this window's UI thread and rebuilds its ConPTY connection in place. Detached in
         // ~TerminalPage (Rule #10).
         uint64_t _windowRestartToken{ 0 };
+        // Agentmaster (eager-init / "Activate All Tabs"): this window's "wake all dormant tabs" sink on
+        // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
+        // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
+        uint64_t _windowActivateAllToken{ 0 };
         // Agentmaster (cross-window settings broadcast): this window's settings sink on the shared
         // engine — a GLOBAL settings change in ANOTHER window (the cog Save, or the Explorer-Tree /
         // Triage-Board sort toggle) hops to this window's UI thread and re-applies it live (the sort
@@ -691,8 +695,8 @@ namespace winrt::TerminalApp::implementation
         void _ToggleSummaryPrevious(); // Agentmaster (conversation lineage): previous-session toggle (panel times bar) -> flip the GLOBAL AppSettings.summaryPanelShowPrevious (RMW settings.json) + apply live to every linked overlay in this window
         void _SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind); // Agentmaster (OBSERVER.md §4/§11d): attach-or-update a registry-less "○ <kind> · unlinked" badge (pwsh / cmd / claude / codex) on a non-bound tab
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
-        void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); idempotent on an unchanged color
-        void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; UI thread; no-op when this window doesn't host the session
+        void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant = false); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); dormant=true => the half-hollow "not started" variant; idempotent on unchanged color+presentation
+        void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; dormant => the half-hollow "not started" variant; UI thread; no-op when this window doesn't host the session
         void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + push the rich session hover tooltip (state·age·why / title / kind·model·perm / dir·branch / queue+next / autopilot / last reply / timing) onto a managed session's tab; clears it when the session is gone/archived; UI thread
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
@@ -719,6 +723,8 @@ namespace winrt::TerminalApp::implementation
         void _RefreshAllFavoriteIcons(); // Agentmaster (FAVORITES.md §5a): re-assert the favorite marker on every hosted tab — used when the GLOBAL favoriteIcon (Crown<->Star) changes (cog Save / cross-window broadcast) so the glyph switches live
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
+        bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.
+        int _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): eager-init every dormant managed tab hosted in THIS window; returns the count woken. The receiving half of the activate-all fan-out.
         bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _RestartClaudeSession(winrt::hstring sessionId); // Agentmaster (Triage Board / Explorer-tree "Restart session"): restart a managed session's connection in place — local first, then fan out to the hosting window (RestartSessionInOtherWindows), mirroring _ActivateClaudeSession
         bool _RestartClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window restart): restart the session's tab IN THIS WINDOW via _restartPaneConnection (the NotConnected guard + _RestartManagedSession); the receiving half of the restart sink. Returns false when this window doesn't host the session's tab.
@@ -771,6 +777,7 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)
         winrt::fire_and_forget _ReconcileClaudeTabs(); // Agentmaster: poll backstop — bind/attach + re-home claude tabs by stable WT_SESSION (scanner-ticked)
         winrt::fire_and_forget _ObserverProbe(); // Agentmaster: the Fleet Observer UI lane — publish this window's tab roster, then bind via the observer's correlation table (replaces _DiscoverClaudeTabsByCwd; OBSERVER.md §10)
+        winrt::fire_and_forget _ScanPendingInput(); // Agentmaster (PENDING_INPUT.md): read each bound Claude tab's unsent input-box draft from its buffer + record it on the session (scanner-ticked)
         winrt::fire_and_forget _RefreshObserverData(); // Agentmaster: the Explorer Tree "refresh" button's action — Wake the observer (force a survey now) + re-probe + force a Manager redraw once it lands
         void _BindClaudeSessionToTab(const TerminalApp::Tab& hostTab, const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn, const std::wstring& id, const std::wstring& cwd, const std::wstring& origin); // Agentmaster: shared bind tail for adoption + discovery
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster

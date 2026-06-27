@@ -265,6 +265,20 @@ namespace Agentmaster
         // false on load (Correctness Rule #6: startup re-opens NOTHING — every persisted session
         // comes back Archived, restorable as a whole), so it never needs to round-trip to JSON.
         bool live{ false };
+        // Agentmaster (eager-init / "Activate Tab"): has this session's ConPTY/claude actually
+        // STARTED, i.e. has its hosting TermControl left ConnectionState::NotConnected at least
+        // once? A WT background tab spawns its child lazily — only on the SwapChainPanel's first
+        // non-zero layout, which fires when the tab is first SHOWN — so a window-restored / re-homed
+        // managed tab that the user never clicked stays dormant (claude never resumes, no hooks, no
+        // autopilot). This flag is the UI's "needs activation" signal: false == live but dormant
+        // (the half-hollow status dot + the "Activate All Tabs (N)" count + the per-tab/menu
+        // "Activate Tab" gate); it flips true when the control starts (naturally on focus, or in
+        // place via TermControl::InitializeWithSize). Transient (NOT persisted) and maintained ONLY
+        // by TerminalPage (the single owner of the controls) from ConnectionState() each liveness
+        // tick + immediately on an Activate; always false on load (a restored session is dormant
+        // until opened), so it never round-trips to JSON. Meaningless for an `external` session
+        // (we host no control) — left false, and every consumer also gates on `!external`.
+        bool started{ false };
         // Transient runtime flag (not persisted): set from the most recent Stop hook's
         // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
@@ -308,6 +322,18 @@ namespace Agentmaster
         // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
         // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
         std::wstring pendingConfirmPromptId;
+        // Agentmaster (PENDING_INPUT.md): the session's UNSENT input-box DRAFT — text the user typed
+        // into Claude's input box but has NOT yet submitted. Read out-of-band from the rendered terminal
+        // buffer by the UI lane (TerminalPage::_ScanPendingInput -> ControlCore::ReadPendingInputDraft;
+        // the bottom-most ❯ prompt line wrapped by ── rules, PendingInput.h). This is the ONE session
+        // fact hooks can never carry — a draft is by definition not yet submitted, so no UserPromptSubmit
+        // ever fires for it — so it is the lone screen-READ fact (analogous to the presence heartbeat;
+        // never authoritative for SessionState, Rule #7/#13). Updated via the registry's QUIET,
+        // change-gated SetPendingInput (the draft changes as the user types — like lastAssistantText it
+        // must never trigger the persist / UI / scheduler cascade). Empty => no pending draft. Transient
+        // (NOT persisted — Persistence.cpp must not write it). The future tab "unsent message" indicator
+        // reads this.
+        std::wstring pendingInput;
 
         // --- Fleet Observer live enrichment (OBSERVER.md §5c) ---
         // ALL transient (NOT persisted — Persistence.cpp must not write them; PIDs / WT_SESSION /

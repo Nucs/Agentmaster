@@ -110,6 +110,17 @@ namespace Microsoft.Terminal.Control
         void PersistTo(Int64 handle);
         void OpenCWD();
         void Close();
+
+        // Agentmaster (eager-init): initialize the terminal + START its connection RIGHT NOW with an
+        // explicit size, instead of waiting for the SwapChainPanel's first non-zero layout (which only
+        // fires when the tab is first SHOWN). A WT background/restored tab is off the visual tree, so it
+        // never gets that layout and its claude.exe never spawns until clicked. This lets the app start a
+        // dormant tab IN PLACE (no focus change) — the "Activate Tab" / "Activate All Tabs" actions. The
+        // AV-safe Initialize()->Start() order is preserved (output can only reach the buffer after it is
+        // built); the supplied size is a placeholder that self-corrects via _SwapChainSizeChanged when the
+        // tab is eventually laid out. Returns true if it initialized (false if already initialized or the
+        // size is non-positive). UI thread only.
+        Boolean InitializeWithSize(Double width, Double height, Single scale);
         Windows.Foundation.Size CharacterDimensions { get; };
         Windows.Foundation.Size MinimumSize { get; };
         Single SnapDimensionToGrid(Boolean widthOrHeight, Single dimension);
@@ -131,6 +142,8 @@ namespace Microsoft.Terminal.Control
         // caller moves on silently and clears the highlight). At the UP end (nothing off-screen above) it
         // stops at the TOPMOST matched prompt — centers it and returns its index, -1 only once already there.
         Int32 ScrollToAdjacentConversationPrompt(Windows.Foundation.Collections.IVector<String> messages, Boolean up);
+        // Agentmaster (PENDING_INPUT.md): the UNSENT draft in Claude's input box (read-only); "" => none.
+        String ReadPendingInputDraft();
 
         void CreateSearchBoxControl();
         Boolean SearchBoxEditInFocus();

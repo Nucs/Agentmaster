@@ -72,6 +72,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         void PersistTo(int64_t handle) const;
         void OpenCWD();
         void Close();
+        bool InitializeWithSize(double width, double height, float scale); // Agentmaster (eager-init): see TermControl.idl
         Windows::Foundation::Size CharacterDimensions() const;
         Windows::Foundation::Size MinimumSize();
         float SnapDimensionToGrid(const bool widthOrHeight, const float dimension);
@@ -123,6 +124,7 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         int32_t JumpToConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, uint32_t index); // Agentmaster (SUMMARY_JUMP.md)
         winrt::Windows::Foundation::Collections::IVector<int32_t> ResolveConversationPromptRows(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages); // Agentmaster (SUMMARY_JUMP.md): icon eligibility
         int32_t ScrollToAdjacentConversationPrompt(const winrt::Windows::Foundation::Collections::IVector<winrt::hstring>& messages, bool up); // Agentmaster (alt+up/down): center on the nearest off-screen prompt up/down; returns its 0-based message index (for the summary highlight), -1 (boundary -> limit sound), or -2 (down past the last prompt -> bottom/live tail). At the up end it stops at the topmost matched prompt (returns its index).
+        winrt::hstring ReadPendingInputDraft(); // Agentmaster (PENDING_INPUT.md): the unsent input-box draft (read-only); empty => none
 
         void AdjustFontSize(float fontSizeDelta);
         void ResetFontSize();
@@ -366,6 +368,11 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             Reattach
         };
         bool _InitializeTerminal(const InitializeReason reason);
+        // Agentmaster (eager-init): the body of _InitializeTerminal with the size supplied explicitly
+        // instead of read off the SwapChainPanel. _InitializeTerminal reads the panel and delegates here;
+        // InitializeWithSize passes a placeholder size so a never-laid-out background tab can initialize
+        // + start its connection in place. Same AV-safe Initialize()->Start() order.
+        bool _InitializeTerminalWithSize(const InitializeReason reason, const double panelWidthDip, const double panelHeightDip, const float panelScaleX, const float panelScaleY);
         safe_void_coroutine _restoreInBackground();
         void _TappedHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::TappedRoutedEventArgs& e);
         void _KeyDownHandler(const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::KeyRoutedEventArgs& e);
