@@ -103,11 +103,12 @@ namespace Agentmaster
         void SetStarted(const std::wstring& id, bool started);
 
         // Agentmaster (PENDING_INPUT.md): record the session's UNSENT input-box DRAFT (read out-of-band
-        // from the rendered buffer by the UI lane — TerminalPage::_ScanPendingInput). CHANGE-GATED and
-        // QUIET: it does NOT _notify — the draft changes as the user types, so (like UpdateQuiet's
-        // streamed-text fields) it must never trigger the persist / UI / scheduler cascade. Returns true
-        // iff the stored value changed (so the caller can log only on a real change). Transient (never
-        // persisted). No-op for an unknown id. Thread-safe.
+        // from the rendered buffer by the UI lane — TerminalPage::_ScanPendingInput). The field updates
+        // every change, but _notify fires ONLY on the BOOLEAN hasPending FLIP (empty<->non-empty) — the
+        // "yes pending / no pending" transition the tab-strip + Triage-Board animations key on — at
+        // presence-heartbeat (turn) cadence, never per-keystroke (a text-only edit stays QUIET so it
+        // can't thrash the persist / board / scheduler cascade). Returns true iff the boolean flipped
+        // (== whether it notified). Transient (never persisted). No-op for an unknown id. Thread-safe.
         bool SetPendingInput(const std::wstring& id, const std::wstring& text);
 
         // Record a human message the interval reconciler (SessionScanner) found in the transcript

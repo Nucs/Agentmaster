@@ -242,6 +242,35 @@
                                      CenterY="3" />
                 </Path.RenderTransform>
             </Path>
+            <!--  Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" indicator. When the observer
+                  detects text typed but NOT yet submitted in this tab's Claude input box (the debounced
+                  SessionInfo.pendingInput -> TabStatus.AgentPendingVisible), a tiny goldenrod 3-dot
+                  cluster pulses at the BOTTOM of the status-dot wrap, just below the dot — a calm "you
+                  have a message waiting here" cue. The staggered opacity pulse storyboard is BUILT and
+                  started/stopped in code-behind (TabHeaderControl.cpp _UpdatePendingAnimation), so it
+                  runs ONLY while this tab is actually pending — an idle fleet never holds the compositor
+                  at 60fps. The dots are 2.5px on a 1.5px gap (~10px), centred, sitting in the ~4px band
+                  below the 10px dot inside the 18px wrap. IsHitTestVisible=False: decorative.  -->
+            <StackPanel x:Name="HeaderPendingDots"
+                        Orientation="Horizontal"
+                        Spacing="1.5"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        IsHitTestVisible="False"
+                        Visibility="{x:Bind TabStatus.AgentPendingVisible, Mode=OneWay}">
+                <Ellipse x:Name="HeaderPendingDot0"
+                         Width="2.5"
+                         Height="2.5"
+                         Fill="#E0A92B" />
+                <Ellipse x:Name="HeaderPendingDot1"
+                         Width="2.5"
+                         Height="2.5"
+                         Fill="#E0A92B" />
+                <Ellipse x:Name="HeaderPendingDot2"
+                         Width="2.5"
+                         Height="2.5"
+                         Fill="#E0A92B" />
+            </StackPanel>
         </Grid>
         <TextBlock x:Name="HeaderTextBlock"
                    Text="{x:Bind Title, Mode=OneWay}"

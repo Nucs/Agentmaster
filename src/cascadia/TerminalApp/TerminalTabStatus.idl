@@ -63,5 +63,12 @@ namespace TerminalApp
         // (a white, golden-tipped star drawn BEHIND the dot, the status dot as its foreground).
         Boolean AgentFavoriteVisible { get; set; };
         Boolean AgentFavoriteStarVisible { get; set; };
+
+        // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT indicator — true when the Fleet Observer
+        // detects the user has typed but not yet submitted a message in this tab's Claude input box
+        // (the debounced SessionInfo::pendingInput). TabHeaderControl.xaml shows a small animated "3
+        // dots" cluster pulsing below the status dot; driven by TerminalPage::_SetTabPending via
+        // Tab.TabStatus(). Collapsed (the default) when there is no draft.
+        Boolean AgentPendingVisible { get; set; };
     }
 }

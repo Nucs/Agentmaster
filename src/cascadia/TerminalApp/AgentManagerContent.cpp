@@ -75,6 +75,58 @@ namespace
         return SolidColorBrush{ ColorHelper::FromArgb(a, r, g, b) };
     }
 
+    // Agentmaster (PENDING_INPUT.md): a small animated "3 dots" cluster for a board card / row that has
+    // an UNSENT draft — three goldenrod dots pulsing their opacity 0.3<->1.0 in a 160ms-phase-shifted
+    // wave (the classic "typing"/waiting cue), mirroring the per-tab strip pulse. The storyboard targets
+    // the dots by ref (no name/resource lookup) and BEGINS on Loaded — so it runs only while the element
+    // is in the tree; a board rebuild drops the card and its storyboard. The Loaded closure keeps the
+    // storyboard alive. dotPx sizes the dots (cards: 5px).
+    StackPanel BuildPendingDots(double dotPx = 5.0)
+    {
+        namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
+        StackPanel row;
+        row.Orientation(Orientation::Horizontal);
+        row.Spacing(3);
+        row.VerticalAlignment(VerticalAlignment::Center);
+        const auto gold = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B);
+        std::vector<winrt::Windows::UI::Xaml::Shapes::Ellipse> dots;
+        for (int i = 0; i < 3; ++i)
+        {
+            winrt::Windows::UI::Xaml::Shapes::Ellipse e;
+            e.Width(dotPx);
+            e.Height(dotPx);
+            e.Fill(SolidColorBrush{ gold });
+            row.Children().Append(e);
+            dots.push_back(e);
+        }
+        MA::Storyboard sb;
+        for (int i = 0; i < 3; ++i)
+        {
+            MA::DoubleAnimation a;
+            a.From(0.3);
+            a.To(1.0);
+            a.Duration(Duration{ std::chrono::milliseconds(500) });
+            a.BeginTime(TimeSpan{ std::chrono::milliseconds(160 * i) });
+            a.AutoReverse(true);
+            MA::RepeatBehavior forever;
+            forever.Type = MA::RepeatBehaviorType::Forever; // a value struct — its members are fields, not setters
+            a.RepeatBehavior(forever);
+            MA::Storyboard::SetTarget(a, dots[i]);
+            MA::Storyboard::SetTargetProperty(a, L"Opacity");
+            sb.Children().Append(a);
+        }
+        row.Loaded([sb](auto&&, auto&&) {
+            try
+            {
+                sb.Begin();
+            }
+            catch (...)
+            {
+            }
+        });
+        return row;
+    }
+
     // Agentmaster: "#RRGGBB" -> opaque Color (the per-working-directory tab color, for the Triage
     // card's title band). Mirrors the Sessions page's SessHexToColor. nullopt on anything malformed.
     std::optional<Color> HexToColor(const std::wstring& hex)
@@ -1791,15 +1843,17 @@ namespace winrt::TerminalApp::implementation
             // the launch controls) over a compact ACTIONS row (Settings, Pause Autopilot, Sessions,
             // Keep Awake) tucked just below the title in the top-left. The actions buttons are
             // deliberately thinner (smaller font + slim padding), matching the header-toggle idiom.
-            auto toolbarCol = StackPanel{};
-            toolbarCol.Orientation(Orientation::Vertical);
-            toolbarCol.Spacing(6);
-            toolbarCol.Margin(Thickness{ 12, 8, 12, 0 });
+            _toolbarCol = StackPanel{};
+            _toolbarCol.Orientation(Orientation::Vertical);
+            _toolbarCol.Spacing(6);
+            _toolbarCol.Margin(Thickness{ 12, 8, 12, 0 });
+            auto& toolbarCol = _toolbarCol;
 
-            auto bar = StackPanel{}; // top row: the title + launch controls
-            bar.Orientation(Orientation::Horizontal);
-            bar.Spacing(8);
-            bar.VerticalAlignment(VerticalAlignment::Center);
+            _launchBar = StackPanel{}; // top row: the title + launch controls
+            _launchBar.Orientation(Orientation::Horizontal);
+            _launchBar.Spacing(8);
+            _launchBar.VerticalAlignment(VerticalAlignment::Center);
+            auto& bar = _launchBar;
 
             // The compact actions row, left-aligned directly under the title. Its buttons are
             // appended below as each is built; the row itself is added to toolbarCol at the end.
@@ -1809,8 +1863,15 @@ namespace winrt::TerminalApp::implementation
             actionsRow.HorizontalAlignment(HorizontalAlignment::Left);
             actionsRow.VerticalAlignment(VerticalAlignment::Center);
 
-            bar.Children().Append(Text(L"Agentmaster", 18, true, 1.0));
-            bar.Children().Append(Text(L"\x2014  launch a", 13, false, 0.6));
+            // Agentmaster (responsive launch bar): "Agentmaster" + "\x2014" stay; "launch a" / "session in"
+            // (below) collapse first when the pane narrows (_ReflowLaunchBar), leaving "Agentmaster \x2014
+            // [\x25CF Claude] [box]". Built as members so reflow can toggle their Visibility.
+            _agentmasterText = Text(L"Agentmaster", 18, true, 1.0);
+            bar.Children().Append(_agentmasterText);
+            _dashText = Text(L"\x2014", 13, false, 0.6); // em-dash, always shown
+            bar.Children().Append(_dashText);
+            _launchAText = Text(L"launch a", 13, false, 0.6); // collapsible
+            bar.Children().Append(_launchAText);
 
             // Agentmaster (Codex-launch): the agent toggle — Claude (default) <-> Codex. Click cycles it
             // (the scope/sort/autopilot toggle idiom). It retargets the SAME cwd box + Launch button, so a
@@ -1829,15 +1890,17 @@ namespace winrt::TerminalApp::implementation
             bar.Children().Append(_launchAgentBtn);
             _UpdateLaunchAgentButton();
 
-            bar.Children().Append(Text(L"session in", 13, false, 0.6));
+            _sessionInText = Text(L"session in", 13, false, 0.6); // collapsible (with "launch a")
+            bar.Children().Append(_sessionInText);
 
             _cwdBox = TextBox{};
-            // Agentmaster: 504 (the old fixed width) is now the MINIMUM; the box grows with its typed
-            // content — a NoWrap TextBox in the horizontal launch bar measures to its text — capped by a
-            // window-relative MaxWidth (set in _root's SizeChanged below) so a long path never pushes the
+            // Agentmaster: 504 (the old fixed width) is the COMFORTABLE width; the box grows with its typed
+            // content — a NoWrap TextBox in the horizontal launch bar measures to its text — between the
+            // live MinWidth/MaxWidth that _ReflowLaunchBar sets per stage (504 floor when there's room; a
+            // 240/160 floor once the pane narrows enough to shrink / wrap), so a long path never pushes the
             // Launch button off-screen. Left alignment keeps it content-sized rather than stretched-to-fill.
             _cwdBox.MinWidth(504);
-            _cwdBox.MaxWidth(504); // seed; widened to (window width - box-left - button reserve) on SizeChanged
+            _cwdBox.MaxWidth(504); // seed; _ReflowLaunchBar (re)computes Min/Max per stage on first layout
             _cwdBox.HorizontalAlignment(HorizontalAlignment::Left);
             _cwdBox.PlaceholderText(L"working directory (the M axis)");
             AgentSetTip(_cwdBox, L"Where to launch: a working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders."); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
@@ -1972,37 +2035,33 @@ namespace winrt::TerminalApp::implementation
             cwdCol.Children().Append(_cwdUnderline);
             bar.Children().Append(cwdCol);
 
-            // Agentmaster: cap the cwd box's growth so a long path can't push the Launch/Fork buttons off
-            // the right edge. The box grows with content between its 504 min and this max; the max is
-            // (window width) minus the box's live left offset (the "Agentmaster — launch a … session in"
-            // prefix, read via TransformToVisual so it tracks that text) minus a reserve for the Launch/Fork
-            // buttons on the right. Recomputed on every resize; setting the box's MaxWidth never resizes
-            // _root (the pane/window owns _root's size), so there's no layout loop.
+            // Agentmaster (responsive launch bar): the cwd box's width + the whole top row reflow as the
+            // pane narrows — _ReflowLaunchBar stages it (full label -> collapse "launch a"/"session in" ->
+            // shrink the box to its floor -> wrap the launch buttons to their own line). Driven off _root's
+            // SizeChanged; the box grows with its content between the live Min/Max the reflow sets. Setting
+            // a child's width / visibility / parent never resizes _root (the pane owns _root's size), so
+            // there's no layout loop.
             if (_root)
             {
                 _root.SizeChanged([this](const IInspectable&, const SizeChangedEventArgs& e) {
-                    if (!_cwdBox)
-                    {
-                        return;
-                    }
-                    double boxLeft = 360.0; // fallback if the box isn't arranged yet on the first pass
-                    try
-                    {
-                        boxLeft = _cwdBox.TransformToVisual(_root).TransformPoint(Point{ 0.0f, 0.0f }).X;
-                    }
-                    catch (...)
-                    {
-                    }
-                    const double maxW = e.NewSize().Width - boxLeft - 200.0; // 200 ~= Launch + Fork + spacing + margin
-                    _cwdBox.MaxWidth(std::max<double>(504.0, maxW));
+                    _lastRootWidth = e.NewSize().Width;
+                    _ReflowLaunchBar();
                 });
             }
+
+            // Agentmaster (responsive launch bar): the launch buttons (Launch / Fork / Reopen / Activate)
+            // live in their OWN panel so _ReflowLaunchBar can move the whole group to a 2nd line (below the
+            // title row) when the bar can no longer fit them inline beside a floored cwd box.
+            _launchBtns = StackPanel{};
+            _launchBtns.Orientation(Orientation::Horizontal);
+            _launchBtns.Spacing(8);
+            _launchBtns.VerticalAlignment(VerticalAlignment::Center);
 
             _launchBtn = Button{};
             _launchBtn.Content(winrt::box_value(L"Launch Claude"));
             AgentSetTip(_launchBtn, L"Start the selected agent in the working directory above \x2014 or resume the conversation when a session id is entered.");
             _launchBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnLaunch(); });
-            bar.Children().Append(_launchBtn);
+            _launchBtns.Children().Append(_launchBtn);
 
             // Fork — hidden unless the box holds a FOUND session id; forks that conversation into a
             // NEW one (the original transcript is untouched), mirroring the Sessions page's "Fork here".
@@ -2011,7 +2070,7 @@ namespace winrt::TerminalApp::implementation
             _forkBtn.Visibility(Visibility::Collapsed);
             AgentSetTip(_forkBtn, L"Fork the entered session into a NEW, independent conversation \x2014 the original transcript is left untouched.");
             _forkBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnForkFromBox(); });
-            bar.Children().Append(_forkBtn);
+            _launchBtns.Children().Append(_forkBtn);
 
             _ValidateLaunchBox(); // initial state for the seeded cwd (USERPROFILE -> neutral, enabled)
 
@@ -2024,7 +2083,7 @@ namespace winrt::TerminalApp::implementation
             _reopenBtn.Visibility(Visibility::Collapsed);
             AgentSetTip(_reopenBtn, L"Reopen saved windows that aren't currently open \x2014 restores each window's tabs, layout, and sessions.");
             _reopenBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnReopenWindows(); });
-            bar.Children().Append(_reopenBtn);
+            _launchBtns.Children().Append(_reopenBtn);
 
             // Agentmaster (eager-init): "Activate All Tabs (N)" — wake every DORMANT managed tab in this
             // window (a window-restored / re-homed tab spawns its claude lazily, only when first shown; this
@@ -2036,7 +2095,11 @@ namespace winrt::TerminalApp::implementation
             _activateAllBtn.Visibility(Visibility::Collapsed);
             AgentSetTip(_activateAllBtn, L"Start every Claude session in this window that hasn't initialized yet (restored tabs you haven't opened) \x2014 in place, without switching tabs. Their half-hollow dots fill as they start.");
             _activateAllBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _OnActivateAllTabs(); });
-            bar.Children().Append(_activateAllBtn);
+            _launchBtns.Children().Append(_activateAllBtn);
+
+            // The launch-buttons group sits inline at the end of the title row by default; _ReflowLaunchBar
+            // moves it to its own line (between the title row and the actions row) when the bar is too narrow.
+            bar.Children().Append(_launchBtns);
 
             // Settings cog (opens the in-content settings overlay; built at the end of layout).
             // Lives in the compact actions row below the title — thinner, smaller font.
@@ -2109,6 +2172,7 @@ namespace winrt::TerminalApp::implementation
             toolbarCol.Children().Append(actionsRow);
             Grid::SetRow(toolbarCol, 0);
             _root.Children().Append(toolbarCol);
+            _ReflowLaunchBar(); // initial pass (no-op until laid out — SizeChanged drives the first real reflow)
         }
 
         // ---- Triage Board (row 1) ----
@@ -2931,6 +2995,26 @@ namespace winrt::TerminalApp::implementation
             bandTip += s.recap;
         }
         AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
+
+        // Agentmaster (PENDING_INPUT.md): an UNSENT-DRAFT pulse at the top of the card body — when the
+        // Fleet Observer detects the user has typed but not yet submitted a message in this session's
+        // input box (the debounced SessionInfo::pendingInput), a goldenrod "3 dots" animation rides here,
+        // mirroring the tab-strip pulse. The card rebuilds on the pending flip notify (SetPendingInput
+        // notifies on the empty<->non-empty transition), so the dots appear/clear with the draft; a hover
+        // previews the draft's first line. (Claude-only — Codex sessions aren't draft-scanned in v1.)
+        if (!s.pendingInput.empty())
+        {
+            auto dots = BuildPendingDots();
+            std::wstring tip = L"Unsent draft \x2014 a message is typed into this session's input box but hasn't been sent yet.";
+            auto firstLine = s.pendingInput.substr(0, s.pendingInput.find(L'\n'));
+            if (firstLine.size() > 120)
+            {
+                firstLine = firstLine.substr(0, 120) + L"\x2026";
+            }
+            tip += L"\n\n\x201C" + firstLine + L"\x201D";
+            AgentSetTip(dots, winrt::hstring{ tip }, kCardTipDelay);
+            stack.Children().Append(dots);
+        }
 
         // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
         // from Claude (the implicit default — no pill, visuals unchanged).
@@ -6118,6 +6202,158 @@ namespace winrt::TerminalApp::implementation
         return { thisWindow, fleet };
     }
 
+    // Agentmaster (responsive launch bar): stage-collapse the toolbar's top row to the live pane width.
+    // Measures each piece's natural width (DesiredSize — DPI/theme-proof) and picks the LEAST-collapsed
+    // stage that fits: (A) full label + comfortable box -> (B) drop "launch a"/"session in" -> (C) shrink
+    // the cwd box toward its floor (buttons stay inline) -> (D) wrap the launch buttons onto their own line
+    // (the box reclaims the freed width). Idempotent + cheap; safe to call on every resize and whenever a
+    // button's content/visibility changes. No layout loop — nothing here resizes _root (the pane owns it).
+    void AgentManagerContent::_ReflowLaunchBar()
+    {
+        if (!_launchBar || !_launchBtns || !_cwdBox || !_toolbarCol)
+        {
+            return;
+        }
+        const double W = _lastRootWidth > 0.0 ? _lastRootWidth : (_root ? _root.ActualWidth() : 0.0);
+        if (W <= 1.0)
+        {
+            return; // not laid out yet — SizeChanged drives the first real reflow
+        }
+
+        // Natural width of an element (0 when collapsed). Measure with a large finite bound (NoWrap text /
+        // non-wrapping buttons treat it like infinity), so DesiredSize is the content width regardless of
+        // how the element is currently arranged (e.g. _launchBtns while it sits on the wrapped 2nd line).
+        const auto desired = [](const FrameworkElement& el) -> double {
+            if (!el || el.Visibility() == Visibility::Collapsed)
+            {
+                return 0.0;
+            }
+            el.Measure(winrt::Windows::Foundation::Size{ 100000.0f, 100000.0f });
+            return el.DesiredSize().Width;
+        };
+
+        // The two collapsible words read 0 once hidden, so cache their last visible width — we need it to
+        // decide when there's room to UN-collapse them again.
+        double laW = desired(_launchAText);
+        if (laW > 0.0) { _measLaunchA = laW; } else { laW = _measLaunchA; }
+        double siW = desired(_sessionInText);
+        if (siW > 0.0) { _measSessionIn = siW; } else { siW = _measSessionIn; }
+
+        const double amW = desired(_agentmasterText);
+        const double dashW = desired(_dashText);
+        const double togW = desired(_launchAgentBtn);
+        const double btnsW = desired(_launchBtns); // Launch + visible Fork/Reopen/Activate + their inner spacing
+
+        constexpr double kGap = 8.0; // _launchBar.Spacing
+        constexpr double kMargin = 24.0; // _toolbarCol Margin L(12)+R(12)
+        constexpr double kSlack = 12.0; // right-edge breathing room (+ a touch of hysteresis)
+        constexpr double kFillSlack = 6.0; // wrapped: how far short of the content's padded end the FILLED box stops
+        constexpr double kBoxPref = 504.0; // comfortable box width when there's room
+        constexpr double kBoxFloor = 240.0; // smallest inline box (still shows the placeholder / a path tail)
+        constexpr double kBoxHardMin = 160.0; // smallest box once the buttons have wrapped away
+
+        const double avail = W - kMargin;
+
+        // Row total = sum(child widths) + (childCount-1)*Spacing. Fixed (non-box) parts per config:
+        //   Full inline    : [AM][dash][launchA][toggle][sessionIn] <box> [btns]  -> 6 gaps
+        //   Collapsed inline: [AM][dash][toggle] <box> [btns]                     -> 4 gaps
+        //   Wrapped (row 1): [AM][dash][toggle] <box FILLS ->|                     -> 3 gaps (btns on row 2)
+        const double fullFixed = amW + dashW + laW + togW + siW + btnsW + 6.0 * kGap + kSlack;
+        const double collapsedFixed = amW + dashW + togW + btnsW + 4.0 * kGap + kSlack;
+
+        bool labelCollapsed = true;
+        bool wrap = false;
+        double boxMin = kBoxFloor; // non-wrap: content-grow bounds (the box sizes to its text between these)
+        double boxMax = kBoxFloor;
+        double fillW = 0.0; // wrap only: the explicit width that fills row 1 to the padded end
+
+        if (avail - fullFixed >= kBoxPref)
+        {
+            // (A) Full label, comfortable box, buttons inline.
+            labelCollapsed = false;
+            boxMin = kBoxPref;
+            boxMax = avail - fullFixed;
+        }
+        else if (avail - collapsedFixed >= kBoxPref)
+        {
+            // (B) Collapse the words; box still comfortable.
+            boxMin = kBoxPref;
+            boxMax = avail - collapsedFixed;
+        }
+        else if (avail - collapsedFixed >= kBoxFloor)
+        {
+            // (C) Shrink the box (floor..pref) but keep the buttons inline & visible.
+            boxMin = kBoxFloor;
+            boxMax = avail - collapsedFixed;
+        }
+        else
+        {
+            // (D) Wrap the buttons onto their own line. Nothing follows the box on row 1 now, so it FILLS
+            // the row to the padded end (an explicit width — a horizontal StackPanel won't stretch a child
+            // along its axis, so the apply below pins Min==Max==fillW) rather than sit content-sized with a gap.
+            wrap = true;
+            const double rowPrefix = amW + dashW + togW + 3.0 * kGap; // [AM][dash][toggle] + the 3 gaps before the box
+            fillW = avail - rowPrefix - kFillSlack;
+            if (fillW < kBoxHardMin)
+            {
+                fillW = kBoxHardMin; // pathologically narrow pane: floor it (may clip) rather than go invisible
+            }
+        }
+
+        if (boxMax < boxMin)
+        {
+            boxMax = boxMin;
+        }
+
+        // Apply: label visibility (B+ hides the two words), the box width, then the wrap state (move
+        // _launchBtns to / from its own line). Inline (A/B/C) the box is content-sized between Min/Max;
+        // wrapped (D) it's PINNED (Min==Max==fillW) so it stretches to fill row 1 to the padded end.
+        const auto vis = labelCollapsed ? Visibility::Collapsed : Visibility::Visible;
+        if (_launchAText && _launchAText.Visibility() != vis) { _launchAText.Visibility(vis); }
+        if (_sessionInText && _sessionInText.Visibility() != vis) { _sessionInText.Visibility(vis); }
+        if (wrap)
+        {
+            _cwdBox.MinWidth(fillW);
+            _cwdBox.MaxWidth(fillW);
+        }
+        else
+        {
+            _cwdBox.MinWidth(boxMin);
+            _cwdBox.MaxWidth(boxMax);
+        }
+
+        if (wrap != _launchBtnsWrapped)
+        {
+            if (wrap)
+            {
+                uint32_t idx = 0;
+                if (_launchBar.Children().IndexOf(_launchBtns, idx))
+                {
+                    _launchBar.Children().RemoveAt(idx);
+                }
+                _launchBtns.HorizontalAlignment(HorizontalAlignment::Left);
+                _launchBtns.VerticalAlignment(VerticalAlignment::Center);
+                // -2 top margin tightens _toolbarCol's 6px row Spacing to a 4px gap below the title row
+                // (without changing the shared Spacing, which also sets the gap above the actions row).
+                _launchBtns.Margin(Thickness{ 0, -2, 0, 0 });
+                _toolbarCol.Children().InsertAt(1, _launchBtns); // directly below the title row, above the actions row
+            }
+            else
+            {
+                uint32_t idx = 0;
+                if (_toolbarCol.Children().IndexOf(_launchBtns, idx))
+                {
+                    _toolbarCol.Children().RemoveAt(idx);
+                }
+                _launchBtns.Margin(Thickness{ 0, 0, 0, 0 });
+                _launchBtns.HorizontalAlignment(HorizontalAlignment::Left);
+                _launchBtns.VerticalAlignment(VerticalAlignment::Center);
+                _launchBar.Children().Append(_launchBtns); // back inline at the end of the title row
+            }
+            _launchBtnsWrapped = wrap;
+        }
+    }
+
     void AgentManagerContent::_UpdateActivateAllButton()
     {
         if (!_activateAllBtn)
@@ -6131,6 +6367,7 @@ namespace winrt::TerminalApp::implementation
         (void)fleet;
         _activateAllBtn.Content(winrt::box_value(winrt::hstring{ L"Activate All Tabs (" } + winrt::to_hstring(thisWindow) + L")"));
         _activateAllBtn.Visibility(thisWindow > 0 ? Visibility::Visible : Visibility::Collapsed);
+        _ReflowLaunchBar(); // the button just appeared/vanished/relabeled -> re-fit the row
     }
 
     void AgentManagerContent::_OnActivateAllTabs()
@@ -6173,6 +6410,7 @@ namespace winrt::TerminalApp::implementation
         const auto n = static_cast<int>(::Agentmaster::RecoverableWindows().size());
         _reopenBtn.Content(winrt::box_value(winrt::hstring{ L"Reopen Windows (" } + winrt::to_hstring(n) + L")"));
         _reopenBtn.Visibility(n > 0 ? Visibility::Visible : Visibility::Collapsed);
+        _ReflowLaunchBar(); // the button just appeared/vanished/relabeled -> re-fit the row
     }
 
     void AgentManagerContent::_OnReopenWindows()
@@ -8390,6 +8628,7 @@ namespace winrt::TerminalApp::implementation
         row.Children().Append(g);
         row.Children().Append(Text(codex ? L"Codex" : L"Claude", 11, false, 0.95));
         _launchAgentBtn.Content(row);
+        _ReflowLaunchBar(); // the toggle width changed (Claude<->Codex) -> re-fit the row
     }
 
     void AgentManagerContent::_OnLaunch()
@@ -8555,6 +8794,10 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Agentmaster (responsive launch bar): the launch button's text + the Fork button's visibility
+        // change below (Launch Claude / Create & Launch Claude / Resume session / +Fork / the Codex twins),
+        // which changes the launch-buttons group width — re-fit the row on EVERY exit path.
+        auto reflowOnExit = wil::scope_exit([this]() noexcept { _ReflowLaunchBar(); });
         std::wstring trimmed{ _cwdBox.Text() };
         const auto isws = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
         while (!trimmed.empty() && isws(trimmed.front()))

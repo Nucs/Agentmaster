@@ -55,6 +55,9 @@ namespace winrt::TerminalApp::implementation
         //                                status dot reads as its foreground).
         WINRT_OBSERVABLE_PROPERTY(bool, AgentFavoriteVisible, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, AgentFavoriteStarVisible, PropertyChanged.raise);
+        // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" indicator below the status dot (see
+        // the idl note) — driven by TerminalPage::_SetTabPending from the debounced SessionInfo::pendingInput.
+        WINRT_OBSERVABLE_PROPERTY(bool, AgentPendingVisible, PropertyChanged.raise);
     };
 }
 

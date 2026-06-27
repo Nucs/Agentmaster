@@ -560,10 +560,11 @@ membership pre-check (~8× on a scrolled-off prompt), and a recent-window haysta
 highlight on landing, a mutation-id epoch cache (repeat clicks → O(1)), "end of turn" jumps (neighbor-
 derived), Codex prompts, and a context-sensitive Ctrl+F reusing the same resolve+center path.
 
-**Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — detection core complete;
-pure detector unit-tested (engine harness 1291/1291) + the read method/UI-lane poll lib-compile green
-(TerminalControlLib + TerminalAppLib); the visible tab indicator is the deferred follow-up; runtime trace
-pends a deploy.** Detects an **UNSENT draft** in a Claude tab's input box — text the user typed but hasn't
+**Pending-input monitor ([`PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md)) — complete: detection +
+the "yes pending / no pending" observer NOTIFY + a "3 dots" animation on BOTH the tab strip and the
+Triage-Board cards. Pure detector + the registry notify-on-flip unit-tested (engine harness 1354/1354);
+full chain lib-compiles green (TerminalControlLib + TerminalAppLib); runtime pulse/trace pend a deploy.**
+Detects an **UNSENT draft** in a Claude tab's input box — text the user typed but hasn't
 submitted. This is the **ONE session fact hooks can never carry** (they fire on SUBMIT; a draft is by
 definition not yet submitted), so it is the lone screen-**READ** fact: a transient draft FACT, analogous to
 the presence heartbeat, **never** `SessionState` (Rule #7/#13) and strictly read-only. A **pure, header-only
@@ -576,12 +577,19 @@ read-only `ControlCore::ReadPendingInputDraft()` (guarded on `_initializedTermin
 buffer rows under the read-lock — the box always sits at the buffer bottom regardless of scroll) →
 `TermControl` passthrough; the UI lane `TerminalPage::_ScanPendingInput()` (ticked by the scanner's liveness
 probe alongside `_SweepClaudeLiveness`/`_ObserverProbe`) reads each **bound, started, Claude** tab —
-**background tabs too** (the point is to notice a draft in a tab you switched away from) — and records it via
-the registry's **QUIET, change-gated** `SetPendingInput` (transient `SessionInfo::pendingInput`; never
-persisted; no persist/UI/scheduler cascade — it moves as you type). The empty↔non-empty **transition** logs
-`[pending] <id> draft (chars=N): <first line>` / `[pending] <id> cleared`. **Deferred:** the visible tab
-indicator (local window can drive it straight from the UI lane; cross-window board reads the field) +
-placeholder/dim-attribute filtering (PENDING_INPUT.md §4/§6).
+**background tabs too** (the point is to notice a draft in a tab you switched away from) — and, after an
+**eager-show/lazy-hide clear DEBOUNCE** (2 consecutive empty reads to clear, so a mid-repaint frame can't
+flicker it off), records it via `SetPendingInput` (transient `SessionInfo::pendingInput`; never persisted).
+`SetPendingInput` updates the field every change but **`_notify`s ONLY on the boolean hasPending FLIP**
+(empty↔non-empty — the "yes/no pending" transition; a text-only edit stays quiet, so no per-keystroke
+persist/board/scheduler cascade — presence-heartbeat cadence). The flip logs `[pending] <id> draft (chars=N):
+<first line>` / `[pending] <id> cleared`. **The indicator** is a goldenrod **3-dot opacity pulse**: on the
+**tab strip** below the status dot (`TerminalTabStatus::AgentPendingVisible` ← `_SetTabPending` directly from
+the UI lane; `TabHeaderControl.xaml` `HeaderPendingDots`, its pulse storyboard started/stopped on the flag so
+idle tabs animate nothing), and on the **Triage-Board cards** (`AgentManagerContent::_MakeCard` →
+`BuildPendingDots`, driven by the flip notify rebuilding the board — **cross-window**: a draft in window A
+shows on window B's GLOBAL board). **Follow-ups:** an off-switch setting, placeholder/dim-attribute filtering,
+and a `pauseOnHumanInput` autopilot tie-in (PENDING_INPUT.md §4/§6).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single

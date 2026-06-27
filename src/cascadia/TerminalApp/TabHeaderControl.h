@@ -37,6 +37,17 @@ namespace winrt::TerminalApp::implementation
         WINRT_OBSERVABLE_PROPERTY(winrt::TerminalApp::TerminalTabStatus, TabStatus, PropertyChanged.raise);
 
     private:
+        // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" pulse below the status dot. Built
+        // imperatively in the constructor (so it targets the 3 named dot ellipses by ref — no resource
+        // lookup) and started ONLY while TabStatus.AgentPendingVisible is true, so an idle fleet never
+        // holds the compositor at 60fps. TabStatus is assigned by the Tab AFTER construction, so
+        // _HookTabStatusForPending (re)subscribes to its PropertyChanged whenever TabStatus changes.
+        void _HookTabStatusForPending();
+        void _UpdatePendingAnimation();
+        winrt::Windows::UI::Xaml::Media::Animation::Storyboard _pendingDotsStoryboard{ nullptr };
+        winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
+        winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
+
         bool _receivedKeyDown{ false };
         bool _renameCancelled{ false };
         // Agentmaster: set in PreviewKeyDown when the commit combo (Enter / Shift+Enter, per the

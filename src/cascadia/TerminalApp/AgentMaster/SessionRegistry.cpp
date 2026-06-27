@@ -665,21 +665,42 @@ namespace Agentmaster
         _notify(snapshot, HookEvent::Unknown);
     }
 
-    // Agentmaster (PENDING_INPUT.md): record the UNSENT input-box draft, CHANGE-GATED and QUIET (no
-    // _notify). The draft is high-frequency (it changes as the user types), so — exactly like the
-    // UpdateQuiet streamed-text fields — it must never run the persist / UI / scheduler cascade. The
-    // LOCAL window drives any per-tab indicator straight from the UI lane (it holds the tab); the field
-    // exists so cross-window / CLI consumers can read it from a Snapshot. Returns whether it changed.
+    // Agentmaster (PENDING_INPUT.md): record the UNSENT input-box draft. The field is always updated
+    // (change-gated), but a _notify fires ONLY on the BOOLEAN hasPending FLIP — empty<->non-empty —
+    // which is exactly "the observer can reliably say 'yes pending' then 'no pending'". This matches the
+    // presence heartbeat's "notify on a flip, not per-survey" cadence: a draft moves as the user types,
+    // so a per-keystroke notify would needlessly run the persist / board-rebuild / scheduler cascade,
+    // but the appear/clear TRANSITIONS are infrequent (turn-cadence) and are what the tab-strip + board
+    // animations key on. A text-only edit (still non-empty) updates the field QUIETLY. Returns true iff
+    // the boolean flipped (== whether it notified), so the caller logs/acts exactly on a transition.
+    // The UI-lane caller (TerminalPage::_ScanPendingInput) debounces the CLEAR so a single mis-read of a
+    // mid-repaint frame can't produce a spurious flip. No-op for an unknown id. Thread-safe; notify is
+    // raised OUTSIDE the lock (observers may re-enter), like every other _notify.
     bool SessionRegistry::SetPendingInput(const std::wstring& id, const std::wstring& text)
     {
-        std::lock_guard guard{ _mtx };
-        const auto it = _sessions.find(id);
-        if (it == _sessions.end() || it->second.pendingInput == text)
+        SessionInfo snapshot;
+        bool flipped = false;
         {
-            return false; // unknown id, or no change
+            std::lock_guard guard{ _mtx };
+            const auto it = _sessions.find(id);
+            if (it == _sessions.end() || it->second.pendingInput == text)
+            {
+                return false; // unknown id, or no change at all
+            }
+            const bool wasPending = !it->second.pendingInput.empty();
+            const bool nowPending = !text.empty();
+            it->second.pendingInput = text;
+            flipped = (wasPending != nowPending);
+            if (flipped)
+            {
+                snapshot = it->second; // capture for the notify; a text-only edit skips this (stays quiet)
+            }
         }
-        it->second.pendingInput = text;
-        return true;
+        if (flipped)
+        {
+            _notify(snapshot, HookEvent::Unknown);
+        }
+        return flipped;
     }
 
     void SessionRegistry::NoteExternalPrompt(const std::wstring& id, const std::wstring& text)

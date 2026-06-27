@@ -445,17 +445,24 @@ static void TestRegistry()
 
     CHECK(observed.load() > 0, "observer fired");
 
-    // Agentmaster (PENDING_INPUT.md): SetPendingInput is CHANGE-GATED + QUIET (no _notify), so a draft
-    // that moves as the user types never runs the persist / UI / scheduler cascade.
+    // Agentmaster (PENDING_INPUT.md): SetPendingInput updates the draft every change, but NOTIFIES only
+    // on the BOOLEAN hasPending FLIP (empty<->non-empty) — the "yes pending / no pending" transition the
+    // animations key on. A text-only edit (still non-empty) is QUIET; the flip return == the notify.
     {
-        const int before = observed.load();
-        CHECK(reg.SetPendingInput(L"s1", L"draft text"), "pending: first set changes");
-        CHECK(reg.Get(L"s1")->pendingInput == L"draft text", "pending: stored on the record");
-        CHECK(!reg.SetPendingInput(L"s1", L"draft text"), "pending: identical set is a no-op");
-        CHECK(reg.SetPendingInput(L"s1", L""), "pending: clearing changes");
+        const int base = observed.load();
+        CHECK(reg.SetPendingInput(L"s1", L"hello"), "pending: appear flips (empty -> non-empty)");
+        CHECK(reg.Get(L"s1")->pendingInput == L"hello", "pending: stored on the record");
+        CHECK(observed.load() == base + 1, "pending: appear NOTIFIES (boolean flip)");
+        CHECK(!reg.SetPendingInput(L"s1", L"hello world"), "pending: text-only edit does NOT flip");
+        CHECK(reg.Get(L"s1")->pendingInput == L"hello world", "pending: text updated quietly");
+        CHECK(observed.load() == base + 1, "pending: text-only edit is QUIET (no notify)");
+        CHECK(!reg.SetPendingInput(L"s1", L"hello world"), "pending: identical set is a no-op");
+        CHECK(observed.load() == base + 1, "pending: no-op does not notify");
+        CHECK(reg.SetPendingInput(L"s1", L""), "pending: clear flips (non-empty -> empty)");
         CHECK(reg.Get(L"s1")->pendingInput.empty(), "pending: cleared");
+        CHECK(observed.load() == base + 2, "pending: clear NOTIFIES (boolean flip)");
         CHECK(!reg.SetPendingInput(L"nope", L"x"), "pending: unknown id no-op");
-        CHECK(observed.load() == before, "pending: QUIET -- no observer notify");
+        CHECK(observed.load() == base + 2, "pending: unknown id does not notify");
     }
 
     reg.Remove(L"s1");

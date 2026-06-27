@@ -281,6 +281,25 @@ namespace winrt::TerminalApp::implementation
         CATCH_LOG();
     }
 
+    // Agentmaster (PENDING_INPUT.md): show/hide the unsent-draft "3 dots" pulse below a tab's status dot
+    // (TabStatus.AgentPendingVisible; TabHeaderControl starts/stops the pulse storyboard from it). The
+    // WINRT_OBSERVABLE_PROPERTY no-ops when unchanged, so re-asserting it every scan tick is free. UI thread.
+    void TerminalPage::_SetTabPending(const TerminalApp::Tab& tab, bool on)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            if (const auto status = tab.TabStatus())
+            {
+                status.AgentPendingVisible(on);
+            }
+        }
+        CATCH_LOG();
+    }
+
     // Agentmaster (FAVORITES.md §5a): show/hide the FAVORITE marker over a tab's status dot — the CROWN
     // or the STAR, per the GLOBAL AppSettings::favoriteIcon. Low-level setter (mirrors _SetTabAgentDot):
     // the WINRT_OBSERVABLE_PROPERTY no-ops when the value is unchanged, so re-asserting the same state is
@@ -2426,6 +2445,7 @@ namespace winrt::TerminalApp::implementation
             _sessionRegistry->SetInjector(id, nullptr);
             _claudeTabs.erase(id);
             _claudeOverlays.erase(id); // drop the per-tab overlay (detaches its registry observer)
+            _pendingClearStreak.erase(id); // PENDING_INPUT.md: drop the debounce counter with the tab
             ::Agentmaster::AppendStateLog(L"hooks.log", L"[liveness] dead -> archived " + id + L"\n");
         }
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
@@ -2438,11 +2458,16 @@ namespace winrt::TerminalApp::implementation
     // never carry: they fire on SUBMIT, but a draft is by definition not yet submitted, so the only
     // way to know a tab holds an unsent message is to read the rendered buffer. Strictly READ-ONLY —
     // a transient draft FACT, never SessionState (Rule #7/#13). BACKGROUND (unfocused) tabs are scanned
-    // too — the whole point is to notice a draft left in a tab the user switched away from. Stored via
-    // the registry's QUIET, change-gated SetPendingInput (the draft moves as the user types, so no
-    // persist / UI / scheduler cascade). The empty<->non-empty TRANSITION is logged ([pending]); the
-    // tab "unsent message" indicator is the deferred follow-up that reads SessionInfo::pendingInput.
-    // UI thread (the only place a control's buffer is readable).
+    // too — the whole point is to notice a draft left in a tab the user switched away from.
+    //
+    // The (debounced) draft is committed via SetPendingInput, which NOTIFIES on the empty<->non-empty
+    // FLIP — that drives the Triage-Board card's "3 dots" pulse (it rebuilds on the notify) and, cross-
+    // window, every other window's board. THIS window's tab-strip pulse is driven directly here
+    // (_SetTabPending — we hold the tab), every tick + idempotently, so a re-homed tab re-asserts. The
+    // flip is logged ([pending]). CLEAR DEBOUNCE (eager show / lazy hide): a non-empty read shows the
+    // dots immediately; an empty read only CLEARS after kPendingClearConfirmTicks consecutive empty
+    // scans, so a single mid-repaint frame (Claude's Ink TUI redraws the box constantly) can't flicker
+    // the indicator off. UI thread (the only place a control's buffer is readable).
     winrt::fire_and_forget TerminalPage::_ScanPendingInput()
     {
         auto strongThis{ get_strong() };
@@ -2451,30 +2476,34 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
-        // Snapshot the ids first — never read controls while iterating _claudeTabs; SetPendingInput is
-        // quiet so it can't re-enter the map's mutation paths.
+        // Snapshot the ids first — never read controls while iterating _claudeTabs.
         std::vector<std::wstring> ids;
         ids.reserve(_claudeTabs.size());
         for (const auto& [id, weakTab] : _claudeTabs)
         {
             ids.push_back(id);
         }
+        constexpr int kPendingClearConfirmTicks = 2; // consecutive empty reads required to CLEAR (anti-flicker)
         for (const auto& id : ids)
         {
             const auto info = _sessionRegistry->Get(id);
             if (!info || info->kind != ::Agentmaster::AgentKind::Claude)
             {
+                _pendingClearStreak.erase(id);
                 continue; // Codex's TUI has no ❯ input box — only Claude is monitored in v1
             }
-            const auto control = _ControlForSession(id);
-            if (!control)
+            // This session's tab (for the local tab-strip pulse) — a weak_ref in _claudeTabs.
+            TerminalApp::Tab hostTab{ nullptr };
+            if (const auto it = _claudeTabs.find(id); it != _claudeTabs.end())
             {
-                continue;
+                hostTab = it->second.get();
             }
+            const auto control = _ControlForSession(id);
             // The buffer exists only once the control has STARTED (left NotConnected). A dormant
             // window-restored tab has no claude running -> no draft possible (and ControlCore guards the
-            // null buffer internally, but skip the no-op cross-ABI call here).
-            if (control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
+            // null buffer internally, but skip the no-op cross-ABI call here). Leave the stored draft +
+            // streak untouched so a momentarily-unreadable tab doesn't drop a real pending state.
+            if (!control || control.ConnectionState() == TerminalConnection::ConnectionState::NotConnected)
             {
                 continue;
             }
@@ -2488,23 +2517,50 @@ namespace winrt::TerminalApp::implementation
             {
                 continue; // a control torn down mid-tick — skip it
             }
-            const bool wasEmpty = info->pendingInput.empty(); // `info` is a snapshot (pre-update value)
-            if (_sessionRegistry->SetPendingInput(id, draft) && wasEmpty != draft.empty())
+
+            // Clear debounce: decide what the registry should hold THIS tick.
+            std::wstring effectiveDraft;
+            if (!draft.empty())
             {
-                // Log only the empty<->non-empty TRANSITION, not every keystroke-tick edit — a user
-                // actively typing produces one "appeared" line, not a stream.
-                if (draft.empty())
+                _pendingClearStreak.erase(id);
+                effectiveDraft = draft; // a real draft takes effect immediately
+            }
+            else if (info->pendingInput.empty())
+            {
+                effectiveDraft.clear(); // already clear; nothing to do
+            }
+            else if (++_pendingClearStreak[id] >= kPendingClearConfirmTicks)
+            {
+                _pendingClearStreak.erase(id);
+                effectiveDraft.clear(); // empty confirmed over consecutive scans -> CLEAR
+            }
+            else
+            {
+                effectiveDraft = info->pendingInput; // keep showing during the confirm window
+            }
+
+            // Commit (SetPendingInput notifies only on the boolean flip — appear/clear) + drive the
+            // local tab-strip pulse every tick (idempotent).
+            const bool flipped = _sessionRegistry->SetPendingInput(id, effectiveDraft);
+            const bool hasPending = !effectiveDraft.empty();
+            if (hostTab)
+            {
+                _SetTabPending(hostTab, hasPending);
+            }
+            if (flipped)
+            {
+                if (!hasPending)
                 {
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" cleared\n");
                 }
                 else
                 {
-                    auto firstLine = draft.substr(0, draft.find(L'\n'));
+                    auto firstLine = effectiveDraft.substr(0, effectiveDraft.find(L'\n'));
                     if (firstLine.size() > 80)
                     {
                         firstLine = firstLine.substr(0, 80) + L"...";
                     }
-                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" draft (chars=" + std::to_wstring(draft.size()) + L"): " + firstLine + L"\n");
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" draft (chars=" + std::to_wstring(effectiveDraft.size()) + L"): " + firstLine + L"\n");
                 }
             }
         }

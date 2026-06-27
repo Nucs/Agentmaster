@@ -349,6 +349,12 @@ namespace winrt::TerminalApp::implementation
         // (the page builds + owns it); erased alongside _claudeTabs on archive/close/liveness so the
         // overlay's registry observer detaches. Type completed in AgentTabOverlay.h (TerminalPage.cpp).
         std::unordered_map<std::wstring, winrt::com_ptr<implementation::AgentTabOverlay>> _claudeOverlays;
+        // Agentmaster (PENDING_INPUT.md): per-session consecutive-empty-read counter for the unsent-draft
+        // scan's CLEAR debounce (eager show / lazy hide). A non-empty read shows the pending dots
+        // immediately (and zeroes this); an empty read only CLEARS once it has been empty for
+        // kPendingClearConfirmTicks consecutive scans, so a single mid-repaint frame can't flicker the
+        // indicator off. Keyed by sessionId; entries are pruned with their tab in the liveness sweep.
+        std::unordered_map<std::wstring, int> _pendingClearStreak;
         // Agentmaster (OBSERVER.md §11d): wtSession -> a registry-LESS "claude · unlinked" pending
         // overlay for a tab whose claude the observer correlated but can't resolve a conversation id
         // for yet (never prompted). Keyed by WT_SESSION (there is no sessionId). Replaced by the real
@@ -704,6 +710,7 @@ namespace winrt::TerminalApp::implementation
         void _SetTabActivityBadge(const TerminalApp::Tab& tab, const std::wstring& wtSession, const std::wstring& kind); // Agentmaster (OBSERVER.md §4/§11d): attach-or-update a registry-less "○ <kind> · unlinked" badge (pwsh / cmd / claude / codex) on a non-bound tab
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant = false); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); dormant=true => the half-hollow "not started" variant; idempotent on unchanged color+presentation
+        void _SetTabPending(const TerminalApp::Tab& tab, bool on); // Agentmaster (PENDING_INPUT.md): show/hide the unsent-draft "3 dots" pulse below a tab's status dot via Tab.TabStatus().AgentPendingVisible; idempotent (the observable no-ops when unchanged); UI thread
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; dormant => the half-hollow "not started" variant; UI thread; no-op when this window doesn't host the session
         void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + push the rich session hover tooltip (state·age·why / title / kind·model·perm / dir·branch / queue+next / autopilot / last reply / timing) onto a managed session's tab; clears it when the session is gone/archived; UI thread
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting

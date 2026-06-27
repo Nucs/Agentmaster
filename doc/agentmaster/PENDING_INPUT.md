@@ -1,10 +1,11 @@
 # Pending-input monitor — detect an UNSENT draft in a Claude tab's input box
 
-> Status: **detection core complete — pure detector unit-tested (engine harness, 1291 checks green),
-> `ControlCore`/`TermControl` read method + the UI-lane poll lib-compile green (TerminalControlLib +
-> TerminalAppLib).** The fact is recorded on the session and logged (`[pending]`); the visible **tab
-> indicator is the deferred follow-up** (§6). Runtime verification (the live `[pending]` trace) needs a
-> deploy — gated on the user's build/deploy permission.
+> Status: **complete — detection + the "yes pending / no pending" observer NOTIFY + the visible "3 dots"
+> animation on BOTH the tab strip and the Triage-Board cards.** Pure detector + the registry notify-on-flip
+> are unit-tested (engine harness, 1354 checks green); the full chain lib-compiles green
+> (TerminalControlLib + TerminalAppLib). The fact is recorded on the session, logged (`[pending]`), and
+> drives the indicator. Runtime verification (the live pulse + `[pending]` trace) needs a deploy — gated on
+> the user's build/deploy permission.
 
 ## 1. What this is & why it can't be a hook
 
@@ -74,12 +75,16 @@ at the bottom of the buffer (`GetLastNonSpaceCharacter`), and the adapter reads 
 ```
 TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the shared SessionScanner's
   └─ per bound, started CLAUDE tab:     liveness probe — alongside _SweepClaudeLiveness / _ObserverProbe)
-       └─ TermControl::ReadPendingInputDraft()                                     TerminalControl
-            └─ ControlCore::ReadPendingInputDraft()   (read-only, under the read-lock)
-                 ├─ copy the last ~120 buffer rows' text
-                 └─ Agentmaster::DetectPendingInput(rows)   ◄── PendingInput.h (PURE, header-only)
-       └─ SessionRegistry::SetPendingInput(id, draft)   (QUIET, change-gated → no persist/UI/sched cascade)
-       └─ log the empty<->non-empty TRANSITION as [pending]   (hooks.log)
+       ├─ TermControl::ReadPendingInputDraft()                                     TerminalControl
+       │    └─ ControlCore::ReadPendingInputDraft()   (read-only, under the read-lock)
+       │         ├─ copy the last ~120 buffer rows' text
+       │         └─ Agentmaster::DetectPendingInput(rows)   ◄── PendingInput.h (PURE, header-only)
+       ├─ clear-debounce (eager show / lazy hide) → effectiveDraft
+       ├─ SessionRegistry::SetPendingInput(id, effectiveDraft)
+       │    └─ _notify ONLY on the empty<->non-empty FLIP  ─► every window's board card rebuilds
+       │                                                       (AgentManagerContent::_MakeCard → "3 dots")
+       ├─ _SetTabPending(tab, hasPending)  ─► TabStatus.AgentPendingVisible ─► TabHeaderControl "3 dots"
+       └─ log the FLIP as [pending]   (hooks.log)
 ```
 
 - **`AgentMaster/PendingInput.h`** — the **pure, header-only** detector (no WinRT / TextBuffer / ICU).
@@ -95,22 +100,49 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
 - **`TermControl::ReadPendingInputDraft()`** (`TermControl.{idl,h,cpp}`) — a pure passthrough to the core.
 - **`SessionInfo::pendingInput`** (`SessionModels.h`) — the transient draft fact. **Never persisted**
   (`Persistence.cpp` writes an explicit field list that omits it; cleared when a session is archived).
-- **`SessionRegistry::SetPendingInput(id, text)`** — **change-gated + QUIET** (no `_notify`). The draft
-  moves as the user types, so — exactly like the `UpdateQuiet` streamed-text fields — it must never run
-  the persist / UI / scheduler cascade. Returns whether it changed (so the caller logs only on change).
+- **`SessionRegistry::SetPendingInput(id, text)`** — the field updates every change, but `_notify` fires
+  **only on the BOOLEAN hasPending FLIP** (empty↔non-empty) — the "yes pending / no pending" transition.
+  This is the **presence-heartbeat cadence**: a draft moves as the user types, so a per-keystroke notify
+  would needlessly run the persist / board-rebuild / scheduler cascade, but the appear/clear transitions
+  are infrequent (turn-cadence) and are exactly what the animations key on. A text-only edit (still
+  non-empty) updates the field **quietly**. Returns true iff the boolean flipped (== whether it notified).
+  Unit-tested (`TestRegistry`): appear notifies, a text-only edit is quiet, clear notifies.
 - **`TerminalPage::_ScanPendingInput()`** (`TerminalPage.AgentObserver.cpp`) — the **UI lane** (the only
   place a control's buffer is readable). Ticked once per scanner liveness pass. For each **bound, started,
-  Claude** session it reads the draft and records it. **Background (unfocused) tabs are scanned too** —
-  the whole point is to notice a draft left in a tab the user switched away from. It logs the
-  empty↔non-empty **transition** as `[pending] <id> draft (chars=N): <first line>` / `[pending] <id>
-  cleared` (the transition, not every keystroke-tick edit, so an actively-typing user produces one line).
+  Claude** session it reads the draft, applies the **clear debounce** (below), commits it via
+  `SetPendingInput`, and drives **this window's tab-strip pulse directly** (`_SetTabPending` — it holds the
+  tab) every tick + idempotently. **Background (unfocused) tabs are scanned too** — the whole point is to
+  notice a draft left in a tab the user switched away from. The flip is logged as `[pending] <id> draft
+  (chars=N): <first line>` / `[pending] <id> cleared`.
+- **The "3 dots" animation** (the visible indicator) rides two surfaces, both a phase-shifted goldenrod
+  opacity pulse:
+  - **Tab strip** — `TerminalTabStatus::AgentPendingVisible` (set by `_SetTabPending`) drives a tiny 3-dot
+    cluster at the bottom of the status-dot wrap in `TabHeaderControl.xaml` (below the dot). The pulse
+    storyboard is built imperatively and **started/stopped on the flag** (`TabHeaderControl::_UpdatePending-
+    Animation`, hooked to `TabStatus.PropertyChanged`) so an **idle fleet animates nothing** — no perpetual
+    60fps compositor wakeups.
+  - **Triage-Board cards** — `AgentManagerContent::_MakeCard` appends a 3-dot pulse (`BuildPendingDots`)
+    when `!s.pendingInput.empty()`. The board rebuilds on the flip `_notify` (the lens observer), so it
+    appears/clears with the draft, **cross-window** (a session hosted in window A animates on window B's
+    GLOBAL board too). The storyboard begins on `Loaded` (runs only while carded; a rebuild drops it).
+
+### Reliability — "can we reliably say yes then no?" (the clear debounce)
+
+Yes. The boolean is stable between polls (the box text persists until sent), so normal use is two clean
+flips per message — appear (you type), clear (you send). The only spurious-flip risk is a buffer read
+landing in a **mid-repaint frame** (Claude's Ink TUI redraws the box constantly) reading a momentarily
+empty box. `_ScanPendingInput` guards against it with **eager-show / lazy-hide** hysteresis: a non-empty
+read shows the dots **immediately**, but an empty read only **clears** after `kPendingClearConfirmTicks`
+(2) **consecutive** empty scans (`_pendingClearStreak`). So a one-frame mis-read can't flicker the
+indicator off; a real send clears within ~2 ticks (~4 s). Latency to *appear* is ≤ one tick (~2 s).
 
 ### Cost
 
 Steady state is cheap: once per ~2 s liveness tick, per **bound Claude tab**, a read of the **last ~120
 rows** (not the whole scrollback) under the read-lock → a linear scan of those rows. Microseconds per tab;
-Codex tabs and dormant/never-started tabs are skipped. No persist, no UI churn (the quiet setter), and the
-`[pending]` log is transition-gated.
+Codex tabs and dormant/never-started tabs are skipped. A text-only edit is quiet (no persist/UI churn); a
+`_notify` + board rebuild + a `[pending]` line happen **only on the appear/clear flip** (turn-cadence). The
+tab/board pulse storyboards run **only while a tab is actually pending** — an idle fleet animates nothing.
 
 ## 4. Scope (v1) & known limitations
 
@@ -136,27 +168,37 @@ Codex tabs and dormant/never-started tabs are skipped. No persist, no UI churn (
   internal blank line), empty box, no box, a sent prompt in scrollback + an empty box below (only the box
   is taken), menu rejection (bare + rule-wrapped-with-a-question-above), the rule classifier (pure rule
   vs labeled divider vs text vs too-short), marker-without-space, the secondary `›` marker, trailing-blank
-  trim, a blank row between the top rule and the marker. 1291/1291 checks pass.
-- ✅ **Registry**: `SetPendingInput` change-gate + quiet (no observer notify) + unknown-id no-op
-  (`TestRegistry`).
+  trim, a blank row between the top rule and the marker.
+- ✅ **Registry notify**: `SetPendingInput` — appear **notifies** (the boolean flip), a text-only edit is
+  **quiet**, clear **notifies**, unknown-id no-op (`TestRegistry`). 1354/1354 checks pass.
 - ✅ **Full chain compiles**: `TerminalControlLib` (IDL projection + `ControlCore` + `TermControl`) and
-  `TerminalAppLib` (the registry + `TerminalPage._ScanPendingInput`) both build green.
-- ⏳ **Runtime**: the live `[pending]` trace (a draft typed into a real session's box appears in
-  `hooks.log`; clears on send) needs a deploy (close → build → relaunch). Once deployed, verify: type a
-  multi-line draft in tab A, switch to tab B → `[pending] <A> draft …` logged; send it → `[pending] <A>
-  cleared`.
+  `TerminalAppLib` (the registry + `TerminalPage._ScanPendingInput` + `TerminalTabStatus.AgentPendingVisible`
+  + the `TabHeaderControl` pulse + the `AgentManagerContent` card pulse) both build green.
+- ⏳ **Runtime**: the live pulse + `[pending]` trace need a deploy (close → build → relaunch). Once
+  deployed, verify: type a multi-line draft in tab A → the tab-strip dots pulse + its board card shows the
+  pulse; switch to tab B → `[pending] <A> draft …` logged and the pulse persists (background tab); send it
+  → both pulses clear within ~2 ticks and `[pending] <A> cleared` is logged.
 
-## 6. The tab indicator (deferred — "later on")
+## 6. The "3 dots" indicator (built)
 
-The user asked for the detection **now** and the indicator **later**, which is also the right engineering
-order (design the indicator after seeing real draft data live). The fact + a clean seam are in place:
+The detection NOTIFIES reliably on both transitions (§3 "Reliability"), so the indicator is a goldenrod
+**3-dot opacity pulse** ("typing"/waiting cue) on two surfaces, both driven by the observer's detection:
 
-- The **local** window can drive a per-tab indicator straight from `_ScanPendingInput` (it holds the tab),
-  with **no registry notify** needed — e.g. a small `✎`/dot variant on the tab strip (mirroring
-  `_SetTabAgentDot`), or a row in the per-tab overlay (`AgentTabOverlay`).
-- A **cross-window** Manager board/tree marker (a session's card showing "has a draft" even from another
-  window) reads `SessionInfo::pendingInput` from the registry snapshot on its periodic rebuilds.
-- Natural tie-in: Autopilot's `pauseOnHumanInput` backstop could consult "has a pending draft" to suspend
-  auto-send while the user is mid-compose in the box.
+- **Tab strip** — a tiny cluster at the bottom of the status-dot wrap, **below** the dot
+  (`TabHeaderControl.xaml` `HeaderPendingDots`, bound to `TerminalTabStatus::AgentPendingVisible`). Driven
+  by `TerminalPage::_SetTabPending` straight from the UI-lane scan (the hosting window holds the tab). The
+  pulse storyboard is **started/stopped on the flag**, so idle tabs animate nothing.
+- **Triage-Board cards** — a pulse at the top of the card body (`AgentManagerContent::_MakeCard` →
+  `BuildPendingDots`), driven by the flip `_notify` rebuilding the board, so it works **cross-window**
+  (a draft in window A shows on window B's GLOBAL board). The storyboard begins on `Loaded` (runs only
+  while carded).
 
-When wired, the indicator should be **off-switchable** (an `AppSettings` flag, like `showTabOverlay`).
+### Follow-ups (non-blocking)
+
+- **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
+- **Placeholder/dim filtering** (§4) — read the cells' faint attribute so a dim placeholder never reads as
+  a draft.
+- **Autopilot tie-in**: `pauseOnHumanInput` could consult "has a pending draft" to suspend an auto-send
+  while the user is mid-compose — the draft fact is exactly the signal `pauseOnHumanInput` was waiting for.
+- **Explorer-tree row** + the per-tab overlay HUD could carry the same pulse (the board + tab cover the
+  primary surfaces).

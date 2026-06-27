@@ -9,6 +9,7 @@
 #include "AgentTipHelpers.h" // Agentmaster: islands-safe hover tooltip for the tab-strip status dot
 
 #include <atomic>
+#include <chrono>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -49,6 +50,44 @@ namespace winrt::TerminalApp::implementation
         // dot's wrap, set once here; only hoverable while a dot actually shows (the dot is collapsed
         // for tabs Agentmaster doesn't classify, so there's no stray tip on a plain tab).
         AgentSetTip(HeaderAgentStatusDotWrap(), L"Session status \x2014 the dot's color is the agent's Triage state: blue Running \xB7 goldenrod Waiting-for-you \xB7 orange-red Needs-approval \xB7 crimson Error \xB7 green Done \xB7 gray Idle. A dim gray dot marks an observed (unmanaged) tab; a flashing red ring means a background session needs you.");
+
+        // Agentmaster (PENDING_INPUT.md): build the unsent-draft "3 dots" pulse and wire it to run ONLY
+        // while this tab has a pending draft. The storyboard targets the 3 named dot ellipses directly
+        // (no name/resource lookup); each dot pulses its Opacity 0.3<->1.0 forever, phase-shifted by
+        // 160ms, for the classic "typing"/waiting wave. _HookTabStatusForPending (re)subscribes to
+        // TabStatus's PropertyChanged — TabStatus is assigned by the Tab AFTER construction — and
+        // starts/stops the storyboard on AgentPendingVisible, so idle tabs animate nothing (no perpetual
+        // compositor wakeups across the fleet).
+        {
+            namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
+            _pendingDotsStoryboard = MA::Storyboard{};
+            const winrt::Windows::UI::Xaml::UIElement dots[3]{ HeaderPendingDot0(), HeaderPendingDot1(), HeaderPendingDot2() };
+            for (int i = 0; i < 3; ++i)
+            {
+                MA::DoubleAnimation a{};
+                a.From(0.3);
+                a.To(1.0);
+                a.Duration(winrt::Windows::UI::Xaml::Duration{ std::chrono::milliseconds(500) });
+                a.BeginTime(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds(160 * i) });
+                a.AutoReverse(true);
+                MA::RepeatBehavior forever;
+                forever.Type = MA::RepeatBehaviorType::Forever; // a value struct — its members are fields, not setters
+                a.RepeatBehavior(forever);
+                MA::Storyboard::SetTarget(a, dots[i]);
+                MA::Storyboard::SetTargetProperty(a, L"Opacity");
+                _pendingDotsStoryboard.Children().Append(a);
+            }
+        }
+        PropertyChanged([weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
+            if (auto self = weakThis.get())
+            {
+                if (args.PropertyName() == L"TabStatus")
+                {
+                    self->_HookTabStatusForPending();
+                }
+            }
+        });
+        _HookTabStatusForPending();
 
         // We'll only process the KeyUp event if we received an initial KeyDown event first.
         // Avoids issue immediately closing the tab rename when we see the enter KeyUp event that was
@@ -142,6 +181,62 @@ namespace winrt::TerminalApp::implementation
     bool TabHeaderControl::InRename()
     {
         return Windows::UI::Xaml::Visibility::Visible == HeaderRenamerTextBox().Visibility();
+    }
+
+    // Agentmaster (PENDING_INPUT.md): (re)subscribe to the current TabStatus's PropertyChanged so the
+    // unsent-draft pulse starts/stops with AgentPendingVisible. TabStatus is set by the Tab AFTER this
+    // control is constructed (and could, in principle, be re-assigned), so this runs both from the
+    // control's own "TabStatus" change notification and once at construction. The auto-revoke revoker
+    // detaches from a superseded TabStatus; same-status re-hooks are a cheap no-op.
+    void TabHeaderControl::_HookTabStatusForPending()
+    {
+        const auto status = TabStatus();
+        if (status == _pendingHookedStatus)
+        {
+            _UpdatePendingAnimation();
+            return; // already hooked to this exact status (or both null)
+        }
+        _pendingStatusRevoker.revoke(); // detach the previous status (no-op if none)
+        _pendingHookedStatus = status;
+        if (status)
+        {
+            _pendingStatusRevoker = status.PropertyChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
+                if (auto self = weakThis.get())
+                {
+                    const auto n = args.PropertyName();
+                    if (n.empty() || n == L"AgentPendingVisible")
+                    {
+                        self->_UpdatePendingAnimation();
+                    }
+                }
+            });
+        }
+        _UpdatePendingAnimation();
+    }
+
+    // Agentmaster (PENDING_INPUT.md): run the 3-dot pulse iff this tab currently has a pending draft.
+    void TabHeaderControl::_UpdatePendingAnimation()
+    {
+        if (!_pendingDotsStoryboard)
+        {
+            return;
+        }
+        const auto status = TabStatus();
+        const bool on = status && status.AgentPendingVisible();
+        try
+        {
+            if (on)
+            {
+                _pendingDotsStoryboard.Begin();
+            }
+            else
+            {
+                _pendingDotsStoryboard.Stop();
+            }
+        }
+        catch (...)
+        {
+        }
     }
 
     // Method Description:
