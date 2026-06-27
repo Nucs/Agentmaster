@@ -20,7 +20,6 @@
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // _claudeOverlays.erase needs the complete com_ptr<AgentTabOverlay> type
 #include "AgentMaster/ClaudeSpawn.h" // BuildClaudeSpawn / ClaudeConversationExists / AppendStateLog
-#include "AgentMaster/TranscriptStore.h" // ResolveContinuationTailOnDisk (restore -> newest correlated session)
 #include "AgentMaster/Engine.h" // SharedEngine (AM_SESSION stamp; restoreMutex barrier)
 #include "AgentMaster/HooksBridge.h" // PipeName for the spawn spec
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / Save-LoadSessions / LoadAppSettings / dir colors
@@ -212,26 +211,15 @@ namespace winrt::TerminalApp::implementation
             ttl = ::Agentmaster::DeriveSessionTitle(dir);
         }
 
-        // Restore must resume the NEWEST conversation in this tab's continuation chain — never a stale
-        // persisted id. Claude mints a NEW session id on /clear, /compact, and the plan-mode->implement
-        // transition (a silent split — the new transcript carries no link back to its parent), so an
-        // archived record's id is frequently an ANCESTOR of the conversation actually on disk. Restoring
-        // the ancestor would resume an old, truncated transcript (or, post-/clear, an empty one) instead
-        // of where the work actually is. ResolveContinuationTailOnDisk correlates the chain by cwd +
-        // temporal adjacency (same dir, each link started right after the prior turn ended, not a fork, no
-        // parallel-session ambiguity) and walks to its tail. A tab hosts exactly ONE session — the tail.
-        std::wstring resumeTargetId = (restored && !restored->id.empty()) ? restored->id : std::wstring{};
-        if (!resumeTargetId.empty())
-        {
-            const std::wstring chainCwd = (restored && !restored->workingDir.empty()) ? restored->workingDir : dir;
-            const auto tail = ::Agentmaster::ResolveContinuationTailOnDisk(resumeTargetId, chainCwd);
-            if (!tail.tailId.empty() && tail.tailId != resumeTargetId)
-            {
-                ::Agentmaster::AppendStateLog(L"hooks.log",
-                                              L"[restore->continuation] " + resumeTargetId + L" -> " + tail.tailId + L" (" + std::to_wstring(tail.hops) + L" hop(s) of /clear,/compact,/plan; resume the newest correlated session)\n");
-                resumeTargetId = tail.tailId;
-            }
-        }
+        // Restore resumes the EXACT session this tab recorded — the WindowRecord stored its id, so we know
+        // it. We do NOT redirect to a heuristic "continuation tail". That inference was purely timing-based
+        // (a same-cwd session that merely started soon after) and is unsound: there is no solid on-disk
+        // signal for a /clear/compact/plan successor — /compact is IN-PLACE (no new id), /clear leaves NO
+        // link to its successor, and a plan-restart child references its PARENT (backward), never forward.
+        // So the old "tail" was really just the next INDEPENDENT session the user started in this busy dir,
+        // which merged unrelated conversations onto one tab. Resume what was recorded. (A tab hosts exactly
+        // ONE session.) [Agentmaster]
+        const std::wstring resumeTargetId = (restored && !restored->id.empty()) ? restored->id : std::wstring{};
         // One tab = one session (the conflict the chain creates): if this window already hosts a tab bound
         // to the conversation we'd resume, another archived ref chained to the SAME live conversation.
         // Don't spawn a second claude on it — two claude.exe appending one transcript corrupt each other —

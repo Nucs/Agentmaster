@@ -336,11 +336,14 @@ projects/K--source-X/  ◄── enc(cwd)                                 ┌─
      (By Same Directory / Branch / Day / Week / Month / Fork Family — the AND-stacking browse facets,
      §1), and **Hide from list**
      (§1). Resume / Fork / Open-New open in a BACKGROUND tab so the list stays up for bulk-open.
-     **Resume / Fork follow the `/clear`+plan continuation chain to its TAIL**
-     (`ResolveContinuationTailOnDisk`): because a `/clear`'d or plan-restarted conversation mints a
-     *new* id into an UNLINKED file, they hop forward to the latest same-cwd non-fork link — so you
-     land where you left off, not on a stale early one (logged `[resume->continuation]` /
-     `[sessions-page->fork]`; the edge rule + skew/gap bounds live in `TranscriptStore`).
+     **Resume / Fork open EXACTLY the picked id — no continuation-tail redirect.** The former
+     `ResolveContinuationTailOnDisk` "hop forward to the newest same-cwd link" was **removed**: it was
+     pure-timing (no solid signal — `/compact` is in-place, `/clear` leaves no successor link, a
+     plan-restart references its parent backward), so it chained the *next independent session* in a busy
+     dir onto the prior one (proven on the real corpus: 21/198 redirects, 5 targets each "continuing" 2–4
+     unrelated predecessors). Picking a row now resumes/forks THAT conversation. (The SOLID plan-restart
+     **parent** link — the explicit `"read the full transcript at: <parent>.jsonl"` reference — is kept,
+     driving only the summary panel's backward "previous session(s)" lineage.)
      **Double-click** an OPEN row jumps to its tab (`_ActivateClaudeSession`); on any other row it
      resumes (`_ResumeSessionFromDisk`).
 7. **Fork grouping:** dedupe search hits by line `uuid` (forks duplicate content verbatim);

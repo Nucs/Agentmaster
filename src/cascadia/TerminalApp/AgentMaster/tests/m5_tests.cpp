@@ -4547,143 +4547,15 @@ static void TestTranscriptStore()
     }
 }
 
-static void TestContinuationChain()
-{
-    std::wprintf(L"ContinuationChain (/clear + plan-restart tail resolution — pure resolver):\n");
-    // A node builder: (id, cwd, created, lastActivity, [fork]). Times in ms.
-    const auto N = [](const wchar_t* id, const wchar_t* cwd, int64_t created, int64_t last, bool fork = false) {
-        SessionChainNode n;
-        n.sessionId = id;
-        n.cwd = cwd;
-        n.createdMs = created;
-        n.lastActivityMs = last;
-        n.fork = fork;
-        return n;
-    };
-
-    // The real DwhGateway scenario: head (7b2eab70) -> mid (28b301d9, +24s) -> tail (aee7610f, +11min).
-    {
-        std::vector<SessionChainNode> v{
-            N(L"head", L"K:\\proj\\a", 0, 1000000),
-            N(L"mid", L"K:\\proj\\a", 1024000, 2000000), // +24s after head ended
-            N(L"tail", L"K:\\proj\\a", 2660000, 3000000), // +11min after mid ended
-        };
-        auto r = ResolveContinuationChainTail(v, L"head");
-        CHECK(r.tailId == L"tail" && r.hops == 2, "chain: head follows two /clear links to the tail");
-        CHECK(ResolveContinuationChainTail(v, L"mid").tailId == L"tail", "chain: from the MIDDLE link, still reach the tail");
-        CHECK(ResolveContinuationChainTail(v, L"mid").hops == 1, "chain: middle->tail is one hop");
-        auto t = ResolveContinuationChainTail(v, L"tail");
-        CHECK(t.tailId == L"tail" && t.hops == 0, "chain: the tail resolves to itself (no redirect)");
-    }
-
-    // Gap too large => a NEW conversation, not a continuation: tail link starts >15min after mid.
-    {
-        std::vector<SessionChainNode> v{
-            N(L"head", L"K:\\proj\\a", 0, 1000000),
-            N(L"mid", L"K:\\proj\\a", 1024000, 2000000),
-            N(L"far", L"K:\\proj\\a", 2000000 + 16 * 60 * 1000, 4000000), // 16min after mid ended
-        };
-        auto r = ResolveContinuationChainTail(v, L"head");
-        CHECK(r.tailId == L"mid" && r.hops == 1, "chain: a >15min gap stops the chain (mid is the tail)");
-    }
-
-    // Parallel/overlap => ambiguous => bail (never silently merge two same-dir claudes).
-    {
-        std::vector<SessionChainNode> v{
-            N(L"a", L"K:\\proj\\a", 0, 1000000),
-            N(L"b", L"K:\\proj\\a", 1024000, 2000000),
-            N(L"par", L"K:\\proj\\a", 1100000, 2200000), // started while 'b' was still active
-        };
-        auto r = ResolveContinuationChainTail(v, L"a");
-        CHECK(r.tailId == L"a" && r.hops == 0, "chain: overlapping parallel successors => no redirect");
-    }
-
-    // A fork is a BRANCH, never a continuation target.
-    {
-        std::vector<SessionChainNode> v{
-            N(L"a", L"K:\\proj\\a", 0, 1000000),
-            N(L"forked", L"K:\\proj\\a", 1024000, 2000000, /*fork*/ true),
-        };
-        CHECK(ResolveContinuationChainTail(v, L"a").tailId == L"a", "chain: a fork successor is skipped (branch, not continuation)");
-    }
-
-    // Different cwd is a different conversation; a case/slash-variant of the SAME dir still chains (Rule #8).
-    {
-        std::vector<SessionChainNode> v{
-            N(L"a", L"K:\\Proj\\A", 0, 1000000),
-            N(L"other", L"K:\\proj\\b", 1024000, 2000000), // different dir — must NOT chain
-            N(L"cont", L"k:/proj/a", 1100000, 2000000), // same dir, case+slash variant — MUST chain
-        };
-        auto r = ResolveContinuationChainTail(v, L"a");
-        CHECK(r.tailId == L"cont" && r.hops == 1, "chain: case/slash-variant same dir chains; a different dir does not");
-    }
-
-    // A custom (tighter) gapMax is honored.
-    {
-        std::vector<SessionChainNode> v{
-            N(L"head", L"K:\\proj\\a", 0, 1000000),
-            N(L"mid", L"K:\\proj\\a", 1024000, 2000000), // +24s (within 30s)
-            N(L"tail", L"K:\\proj\\a", 2660000, 3000000), // +11min (beyond 30s)
-        };
-        auto r = ResolveContinuationChainTail(v, L"head", /*gapMaxMs*/ 30000);
-        CHECK(r.tailId == L"mid" && r.hops == 1, "chain: a tight gapMax stops after the 24s link");
-    }
-
-    // Robustness: an unknown start id returns itself; an empty node set is safe.
-    {
-        std::vector<SessionChainNode> v{ N(L"a", L"K:\\proj\\a", 0, 1000000) };
-        CHECK(ResolveContinuationChainTail(v, L"ghost").tailId == L"ghost", "chain: unknown start id => returns itself");
-        CHECK(ResolveContinuationChainTail({}, L"a").tailId == L"a", "chain: empty nodes => returns the start id");
-    }
-
-    // --- ResolveContinuationPredecessor: the EXACT inverse of the forward edge (cross-file lineage) ---
-    // The reverse walk ("where did this conversation COME FROM?") must agree with the forward redirect
-    // hop-for-hop — they share the single ContinuationNext edge.
-    {
-        // The same head -> mid -> tail chain, queried BACKWARDS.
-        std::vector<SessionChainNode> v{
-            N(L"head", L"K:\\proj\\a", 0, 1000000),
-            N(L"mid", L"K:\\proj\\a", 1024000, 2000000),
-            N(L"tail", L"K:\\proj\\a", 2660000, 3000000),
-        };
-        CHECK(ResolveContinuationPredecessor(v, L"tail") == L"mid", "predecessor: tail's predecessor is mid (inverse of mid->tail)");
-        CHECK(ResolveContinuationPredecessor(v, L"mid") == L"head", "predecessor: mid's predecessor is head");
-        CHECK(ResolveContinuationPredecessor(v, L"head").empty(), "predecessor: the origin (head) has no predecessor");
-        CHECK(ResolveContinuationPredecessor(v, L"ghost").empty(), "predecessor: an unknown id has no predecessor");
-        CHECK(ResolveContinuationPredecessor({}, L"x").empty(), "predecessor: empty nodes => empty");
-    }
-
-    // Ambiguity: TWO sessions both forward-continue into the same target (their timelines don't see
-    // each OTHER as candidates, but both see T) => the predecessor is ambiguous => empty (never guess).
-    {
-        std::vector<SessionChainNode> v{
-            N(L"A", L"K:\\proj\\a", 0, 990000), // ends just before T; created too early to be B's candidate
-            N(L"B", L"K:\\proj\\a", 0, 995000), // ends just before T; created too early to be A's candidate
-            N(L"T", L"K:\\proj\\a", 1000000, 1100000),
-        };
-        CHECK(ResolveContinuationPredecessor(v, L"A").empty() && ResolveContinuationPredecessor(v, L"B").empty(),
-              "predecessor: A and B are origins (nothing continues into them)");
-        CHECK(ResolveContinuationPredecessor(v, L"T").empty(), "predecessor: two sessions continue into T => ambiguous => empty (no silent merge)");
-    }
-
-    // A fork target has no continuation predecessor (a fork is a BRANCH, never a continuation).
-    {
-        std::vector<SessionChainNode> v{
-            N(L"a", L"K:\\proj\\a", 0, 1000000),
-            N(L"forked", L"K:\\proj\\a", 1024000, 2000000, /*fork*/ true),
-        };
-        CHECK(ResolveContinuationPredecessor(v, L"forked").empty(), "predecessor: a fork has no continuation predecessor");
-    }
-}
-
-// Cross-file conversation lineage on disk: CollectConversationLineage walks a session's predecessors
-// — a /clear continuation (a NEW same-cwd session) and a plan-restart parent (the "read the full
-// transcript at:" link) — and returns each parent's prompts as a "previous session" segment. Stages a
-// throwaway CLAUDE_CONFIG_DIR so the resolvers (ResolveClaudeTranscriptPath / the predecessor scan)
-// find the fixtures. [Agentmaster]
+// Cross-file conversation lineage on disk: CollectConversationLineage walks a session's predecessors via
+// the SOLID plan-restart parent link ONLY — the explicit "read the full transcript at: <parent>.jsonl"
+// reference the child transcript itself carries. The former timing-based /clear predecessor was REMOVED
+// (no solid on-disk signal for a /clear successor — /clear leaves no link, /compact is in-place), so a
+// /clear successor now has NO traceable lineage. Stages a throwaway CLAUDE_CONFIG_DIR so the resolver
+// (ResolveClaudeTranscriptPath) finds the fixtures. [Agentmaster]
 static void TestConversationLineage()
 {
-    std::wprintf(L"ConversationLineage (cross-file /clear + plan-restart previous sessions — disk walk):\n");
+    std::wprintf(L"ConversationLineage (plan-restart parent link ONLY — /clear timing trace removed):\n");
     const auto narrow = [](const std::wstring& w) { std::string s; s.reserve(w.size()); for (wchar_t c : w) { s.push_back(static_cast<char>(c)); } return s; }; // ASCII ids only (explicit cast => no C4244)
 
     wchar_t tmp[MAX_PATH]{};
@@ -4697,7 +4569,9 @@ static void TestConversationLineage()
     const std::wstring prevCfg{ prevBuf, prevN };
     ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
 
-    // --- (1) /clear continuation: B continues A (same cwd, B created shortly after A ended) ---
+    // --- (1) a /clear successor has NO traceable lineage. B started shortly after A in the SAME dir —
+    // exactly what the old timing heuristic chained — but there is no solid on-disk link, so B must now
+    // stand ALONE (the false-positive that merged unrelated conversations is gone). ---
     {
         const std::wstring cwd = L"K:\\am_lin\\clearcase";
         const std::wstring dir = projects + L"\\" + EncodeCwdToProjectDir(cwd);
@@ -4714,22 +4588,14 @@ static void TestConversationLineage()
         MakeJsonl(dir + L"\\" + idA + L".jsonl", aJson, 100000, 90000);
         MakeJsonl(dir + L"\\" + idB + L".jsonl", bJson, 200000, 190000);
 
-        const auto pre = ResolveContinuationPredecessorOnDisk(idB, cwd);
-        CHECK(pre.predId == idA, "lineage/disk: B's continuation predecessor is A");
-
-        const auto lin = CollectConversationLineage(idB, cwd, 16);
-        CHECK(lin.size() == 1, "lineage/disk: the /clear case yields ONE previous session (A)");
-        CHECK(lin.size() == 1 && lin[0].userMsgs.size() == 2 && lin[0].userMsgs[0] == L"alpha one" && lin[0].userMsgs[1] == L"alpha two",
-              "lineage/disk: the previous session carries A's prompts in order");
-        CHECK(lin.size() == 1 && lin[0].label.empty(), "lineage/disk: a plain cross-file join has no /compact label");
-
+        CHECK(CollectConversationLineage(idB, cwd, 16).empty(), "lineage/disk: a /clear successor has NO lineage (timing trace removed — no false merge)");
         CHECK(CollectConversationLineage(idA, cwd, 16).empty(), "lineage/disk: the origin session A has no previous session");
     }
 
-    // --- (2) plan-restart parent in a DIFFERENT dir, which itself has a /clear predecessor ---
-    // C (child dir) --plan--> P (parent dir) --/clear--> Q (parent dir). The plan hop is cwd-independent
-    // (resolved by id), but reaching Q requires the walk to ADVANCE curCwd to P's REAL dir — so this
-    // exercises both the plan link AND the cross-dir cwd advance (a plan parent's own /clear lineage).
+    // --- (2) plan-restart parent in a DIFFERENT dir — the SOLID link is followed; the parent's OWN
+    // (timing) /clear predecessor Q is NOT. C (child dir) --plan--> P (parent dir); Q sits in P's dir as a
+    // would-be /clear predecessor of P. The plan hop C->P is an explicit cross-file reference (resolved by
+    // id, cwd-independent) and surfaces; Q has no solid link to P, so it must stay INVISIBLE. ---
     {
         const std::wstring childCwd = L"K:\\am_lin\\planchild";
         const std::wstring parentCwd = L"K:\\am_lin\\planparent";
@@ -4756,11 +4622,9 @@ static void TestConversationLineage()
         MakeJsonl(childDir + L"\\" + idC + L".jsonl", cJson, 200000, 190000);
 
         const auto lin = CollectConversationLineage(idC, childCwd, 16);
-        CHECK(lin.size() == 2, "lineage/disk: plan parent (other dir) + its /clear predecessor both surface");
-        CHECK(lin.size() == 2 && lin[0].userMsgs.size() == 2 && lin[0].userMsgs[0] == L"earlier groundwork",
-              "lineage/disk: OLDEST first — P's /clear predecessor Q leads (cwd advanced to P's real dir)");
-        CHECK(lin.size() == 2 && lin[1].userMsgs.size() == 1 && lin[1].userMsgs[0] == L"plan the feature",
-              "lineage/disk: the plan PARENT P follows Q, before the current session");
+        CHECK(lin.size() == 1, "lineage/disk: ONLY the solid plan parent P surfaces (Q's /clear timing link is gone)");
+        CHECK(lin.size() == 1 && lin[0].userMsgs.size() == 1 && lin[0].userMsgs[0] == L"plan the feature",
+              "lineage/disk: the plan PARENT P is the sole previous session; its would-be /clear predecessor Q stays invisible");
     }
 
     ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
@@ -6128,7 +5992,6 @@ int wmain()
     TestTranscriptResolve();
     TestCodexObserve();
     TestTranscriptStore();
-    TestContinuationChain();
     TestConversationLineage();
     TestSessionSearch();
     TestProcessInspectLive();

@@ -3026,27 +3026,22 @@ namespace Agentmaster
 
         for (int depth = 0; depth < maxDepth; ++depth)
         {
-            // Resolve cur's predecessor: a plan-restart PARENT wins (an explicit cross-file link), else
-            // a /clear continuation predecessor (structural — a NEW same-cwd session minted at /clear).
+            // Resolve cur's predecessor: ONLY a plan-restart PARENT — an EXPLICIT cross-file link the child
+            // transcript itself carries ("read the full transcript at: <parent>.jsonl"). The former /clear
+            // continuation predecessor (a same-cwd session that merely started shortly before) was REMOVED:
+            // there is no solid on-disk signal for a /clear successor (/clear leaves no link; /compact is
+            // IN-PLACE in the same file), so the timing heuristic merged unrelated conversations into a
+            // false lineage. Plan-restart, by contrast, is a real reference and stays. [Agentmaster]
             std::wstring predId;
             std::wstring predCwd;
             if (!curParentId.empty() && curParentId != curId && !seen.count(curParentId) &&
                 !ResolveClaudeTranscriptPath(curParentId).empty())
             {
-                predId = curParentId; // plan-restart parent
-            }
-            else if (!curCwd.empty())
-            {
-                const auto pre = ResolveContinuationPredecessorOnDisk(curId, curCwd);
-                if (!pre.predId.empty() && !seen.count(pre.predId))
-                {
-                    predId = pre.predId;
-                    predCwd = pre.predCwd;
-                }
+                predId = curParentId; // plan-restart parent (solid, explicit)
             }
             if (predId.empty())
             {
-                break; // no (unambiguous) cross-file parent — the lineage ends here
+                break; // no explicit cross-file parent — the lineage ends here
             }
             seen.insert(predId);
 
@@ -3072,10 +3067,9 @@ namespace Agentmaster
             lineage.insert(lineage.begin(), contribution.begin(), contribution.end());
 
             // Advance: the predecessor becomes `cur`. Its parentSessionId comes from the SAME read. Its
-            // cwd advances to the predecessor's REAL dir so the NEXT hop's continuation scan looks in the
-            // right project dir: the continuation branch already resolved it (predCwd); a plan-parent hop
-            // (predCwd empty) may land in a DIFFERENT dir, so read it from the transcript (one cheap head
-            // read, plan hops are rare) — else a plan parent's OWN /clear predecessor would be missed.
+            // cwd advances to the predecessor's REAL dir — a plan-parent hop may land in a DIFFERENT dir,
+            // so the NEXT hop's plan-parent resolution + segment read look in the right place. One cheap
+            // head read; plan hops are rare.
             curId = predId;
             curParentId = pa.parentSessionId;
             if (predCwd.empty())
