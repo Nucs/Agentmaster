@@ -4322,6 +4322,30 @@ static void TestTranscriptStore()
     CHECK(!IsNoiseUserPrompt(L"fix the build please"), "a real prompt is NOT noise");
     CHECK(!IsNoiseUserPrompt(L"explain <command-name> semantics"), "marker NOT at start is not noise");
 
+    // --- Teammate (multi-agent) protocol vs real teammate content (session b2da261d repro) ---
+    // Claude Code wraps a peer session's message as "Another Claude session sent a message:" + a
+    // <teammate-message> block. A PROTOCOL envelope ({"type":"idle_notification",...}) is machine
+    // signaling; a real REPORT (prose payload) is content. The two filters treat them differently:
+    //   - IsNoiseUserPrompt (titles / prompt-lists): NEITHER is a user prompt => BOTH are noise (the
+    //     preamble prefix makes this fire — the bare "<teammate-message" prefix never did, since the
+    //     content starts with the preamble).
+    //   - SeIsCommandNoise (summary digest): drops ONLY the protocol envelope, KEEPS the real report.
+    const std::wstring kTeammateIdle =
+        L"Another Claude session sent a message:\n"
+        L"<teammate-message teammate_id=\"audit-structure\" color=\"blue\">\n"
+        L"{\"type\":\"idle_notification\",\"from\":\"audit-structure\",\"timestamp\":\"2026-06-27T11:13:29.741Z\",\"idleReason\":\"available\"}\n"
+        L"</teammate-message>\n\nThis came from another Claude session - not typed by your user.";
+    const std::wstring kTeammateReport =
+        L"Another Claude session sent a message:\n"
+        L"<teammate-message teammate_id=\"audit-cla\" color=\"green\" summary=\"Full CLA audit report delivered\">\n"
+        L"# CLA Audit - Agentmaster\n\nThe draft is structurally sound for dual-licensing.\n"
+        L"</teammate-message>";
+    CHECK(SeIsCommandNoise(kTeammateIdle), "summary: a teammate idle_notification PROTOCOL envelope is noise");
+    CHECK(!SeIsCommandNoise(kTeammateReport), "summary: a real teammate REPORT (prose payload) is KEPT");
+    CHECK(!SeIsCommandNoise(L"here is json: {\"type\":\"x\"} thoughts?"), "summary: a plain prompt mentioning a JSON type (no teammate wrapper) is NOT noise");
+    CHECK(IsNoiseUserPrompt(kTeammateIdle), "prompt-list: the teammate preamble (idle_notification) is noise");
+    CHECK(IsNoiseUserPrompt(kTeammateReport), "prompt-list: the teammate preamble (report) is noise too - not a user prompt");
+
     // --- PickDisplayTitle precedence ---
     CHECK(PickDisplayTitle(L"c", L"a", L"s", L"f") == L"c", "customTitle wins");
     CHECK(PickDisplayTitle(L"", L"a", L"s", L"f") == L"a", "aiTitle second");

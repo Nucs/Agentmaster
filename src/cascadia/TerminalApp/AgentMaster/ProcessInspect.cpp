@@ -2608,6 +2608,37 @@ namespace Agentmaster
         return args.empty() ? name : (name + L" " + args);
     }
 
+    // True iff `c` is a teammate (multi-agent) PROTOCOL message. Claude Code auto-injects an
+    // "Another Claude session sent a message:" wrapper around a <teammate-message ...> block whenever a
+    // PEER session signals this one. When the block's PAYLOAD is a JSON machine envelope
+    // ({"type":"<x>_notification","from":...,"timestamp":...} — on disk today only idle_notification, but
+    // the SHAPE generalizes to the whole family: started / completed / error / ...), it is pure signaling,
+    // NOT a human prompt, so it must not be numbered in the summary. A FREE-TEXT teammate message (a real
+    // request, or a delivered REPORT — e.g. summary="Full CLA audit report") has a PROSE payload (it does
+    // NOT begin with {"type":"), so it stays VISIBLE — preserving the deliberate "show real teammate
+    // content" decision. Detect by SHAPE (robust to any future protocol `type`, zero false-positive on a
+    // prose report that merely mentions a notification): the first non-space char run after the
+    // <teammate-message ...> open tag is the JSON envelope `{"type":"`. Pure.
+    static bool SeIsTeammateProtocol(const std::wstring& c)
+    {
+        const size_t tag = c.find(L"<teammate-message");
+        if (tag == std::wstring::npos)
+        {
+            return false;
+        }
+        const size_t gt = c.find(L'>', tag); // end of the <teammate-message ...> open tag
+        if (gt == std::wstring::npos)
+        {
+            return false;
+        }
+        size_t p = gt + 1;
+        while (p < c.size() && (c[p] == L' ' || c[p] == L'\t' || c[p] == L'\r' || c[p] == L'\n'))
+        {
+            ++p;
+        }
+        return c.compare(p, 9, L"{\"type\":\"") == 0; // a JSON machine envelope (protocol) vs a prose message/report
+    }
+
     bool SeIsCommandNoise(const std::wstring& c)
     {
         const auto has = [&](const wchar_t* s) { return c.find(s) != std::wstring::npos; };
@@ -2634,7 +2665,11 @@ namespace Agentmaster
                // <task-notification> (carry <task-id>/<tool-use-id>/<output-file>); (b) finished
                // background-command results (<output-file>, or a <status>...</status> + <summary>...
                // block); (c) subagent token/timing telemetry footers (<usage>/<subagent_tokens>).
-               // Teammate messages (<teammate-message>) are intentionally NOT filtered.
+               // Teammate (multi-agent) PROTOCOL signaling — an "Another Claude session sent a message:"
+               // wrapper whose <teammate-message> payload is a JSON machine envelope (idle_notification &
+               // the rest of the {"type":...,"from":...} family) — is dropped (SeIsTeammateProtocol). A
+               // real teammate message / delivered REPORT (prose payload) is intentionally STILL KEPT.
+               SeIsTeammateProtocol(c) ||
                has(L"<task-notification>") ||
                has(L"<output-file>") || (has(L"<status>") && has(L"<summary>")) ||
                has(L"<usage>") || has(L"<subagent_tokens>") ||
