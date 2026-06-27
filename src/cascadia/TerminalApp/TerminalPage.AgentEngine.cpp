@@ -949,6 +949,17 @@ namespace winrt::TerminalApp::implementation
             }
             return ids;
         });
+        // Agentmaster (focus-steal fix): tell the content whether THIS window is the OS foreground
+        // window. The Manager's _Refresh restores keyboard focus to a board card after each rebuild,
+        // and in XAML Islands Control.Focus() escalates to Win32 activation of the island's host
+        // window — so a refresh firing on a BACKGROUND Manager window (the Triage Board sitting behind
+        // a Claude tab you're working in, in ANOTHER window) would steal the OS foreground on every
+        // ~2s observer/registry tick. Comparing GetForegroundWindow() to our HWND (the same real-time
+        // test _FocusClaudeSessionTab uses) gates the restore to the foreground case only.
+        content->SetWindowForegroundProvider([weakThis]() -> bool {
+            auto self = weakThis.get();
+            return self && self->_hostingHwnd && ::GetForegroundWindow() == *self->_hostingHwnd;
+        });
         content->SetPauseHandler([weakThis](bool paused) {
             if (auto self = weakThis.get())
             {

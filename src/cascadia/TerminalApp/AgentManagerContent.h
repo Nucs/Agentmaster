@@ -89,6 +89,14 @@ namespace winrt::TerminalApp::implementation
         // Used by the Explorer Tree's LOCAL scope to show only this window's sessions; GLOBAL
         // ignores it and shows every window's sessions (the whole process-wide registry).
         void SetLocalScopeProvider(std::function<std::unordered_set<std::wstring>()> provider);
+        // Agentmaster (focus-steal fix): returns true iff this Manager's hosting window is the OS
+        // FOREGROUND window. _Refresh re-focuses the keyboard-focused board card/row after a rebuild,
+        // and in XAML Islands Control.Focus() escalates to Win32 activation of the island's host window
+        // — so a refresh that fires on a BACKGROUND Manager window (the Triage Board sitting behind a
+        // Claude tab you're working in, in another window) would yank the OS foreground to the Manager
+        // on every ~2s observer/registry tick. The page wires this to GetForegroundWindow()==hwnd; when
+        // backgrounded the user isn't keyboard-navigating this board, so the focus-restore is skipped.
+        void SetWindowForegroundProvider(std::function<bool()> provider);
         void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
@@ -525,6 +533,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab
         std::function<void(uint32_t, winrt::hstring, bool, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex (pid, cwd, adopt, fork): Adopt (adopt=true; fork picks fork/resume) / Open-New-Codex (adopt=false)
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
+        std::function<bool()> _windowForegroundProvider; // Agentmaster (focus-steal fix): is this Manager's window the OS foreground window? Gates _Refresh's focus-restore so a background rebuild can't steal foreground.
         std::function<void(bool)> _pauseHandler;
         std::function<void(winrt::hstring, bool)> _confirmHandler;
         std::function<void(::Agentmaster::AppSettings)> _settingsSink;

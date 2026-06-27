@@ -1455,6 +1455,10 @@ namespace winrt::TerminalApp::implementation
         // cheap + idempotent.
         _Refresh();
     }
+    void AgentManagerContent::SetWindowForegroundProvider(std::function<bool()> provider)
+    {
+        _windowForegroundProvider = std::move(provider);
+    }
     void AgentManagerContent::SetPauseHandler(std::function<void(bool)> handler)
     {
         _pauseHandler = std::move(handler);
@@ -2727,9 +2731,19 @@ namespace winrt::TerminalApp::implementation
         // would otherwise drop keyboard focus off the card the user just clicked (the selection
         // highlight survives via _selectedId; the focused ELEMENT does not). Capture the focused
         // card/row's lens+id from its "b:<id>"/"t:<id>" Tag, then re-focus the rebuilt element after.
+        //
+        // Agentmaster (focus-steal fix): do this ONLY when this Manager's window is the OS FOREGROUND
+        // window. In XAML Islands, Control.Focus() escalates to Win32 activation of the island's host
+        // window — so re-focusing a card here while this window is in the BACKGROUND (the Triage Board
+        // window B sitting behind a Claude tab you're working in, in window A) would yank the OS
+        // foreground to B on every ~2s observer/registry tick (the reported "an interval steals focus
+        // to the triage board window"). When backgrounded the user isn't keyboard-navigating this
+        // board, so there is nothing to preserve — leave refocusTag empty and the restore block below
+        // no-ops. No provider (standalone/tests) ⇒ keep the original always-restore behavior.
+        const bool windowIsForeground = !_windowForegroundProvider || _windowForegroundProvider();
         std::wstring refocusTag;
         auto refocusState = FocusState::Unfocused;
-        if (const auto xr = _root.XamlRoot())
+        if (const auto xr = windowIsForeground ? _root.XamlRoot() : nullptr)
         {
             if (const auto fe = winrt::Windows::UI::Xaml::Input::FocusManager::GetFocusedElement(xr).try_as<FrameworkElement>())
             {
