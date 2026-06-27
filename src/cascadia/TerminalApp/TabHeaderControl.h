@@ -44,6 +44,7 @@ namespace winrt::TerminalApp::implementation
         // _HookTabStatusForPending (re)subscribes to its PropertyChanged whenever TabStatus changes.
         void _HookTabStatusForPending();
         void _UpdatePendingAnimation();
+        void _UpdatePendingDotsOffset(); // nudge the dots 3px lower when the STAR favorite marker is active (it overlaps them; the crown doesn't)
         winrt::Windows::UI::Xaml::Media::Animation::Storyboard _pendingDotsStoryboard{ nullptr };
         winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
         winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
