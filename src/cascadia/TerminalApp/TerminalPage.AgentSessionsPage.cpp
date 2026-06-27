@@ -2565,6 +2565,35 @@ namespace winrt::TerminalApp::implementation
             };
             toggleStrip.Children().Append(makeToggle(L"\x2026", _appSettings.summaryPanelTruncate, L"Truncate long messages \x2014 cap each to a short preview (on), or show them in full (off). Applies wherever the summary renders.", /*isWrap*/ false));
             toggleStrip.Children().Append(makeToggle(L"\x21B5", _appSettings.summaryPanelWrapNewlines, L"Wrap messages \x2014 keep each message's real line breaks (on), or collapse them to a literal \\n (off).", /*isWrap*/ true));
+            // Agentmaster: a REFRESH button (rightmost) -- drop this session's cached summary + re-render so
+            // the box re-reads the transcript NOW (the cache is keyed by mtime, which can lag a change, or you
+            // just want a fresh pull). Steady-colored (not a toggle); same transparent-button styling.
+            {
+                const std::wstring rid = row->id;
+                auto rg = SessText(L"\x21BB", 13, false, 0.7); // ↻ refresh / reload
+                rg.FontFamily(winrt::Windows::UI::Xaml::Media::FontFamily{ L"Segoe UI Symbol" });
+                Button rb;
+                rb.Background(SessBrush(0, 0, 0, 0));
+                rb.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                rb.Padding(Thickness{ 4, 0, 4, 0 });
+                rb.MinWidth(0);
+                rb.MinHeight(0);
+                rb.Content(rg);
+                SessSetTip(rb, L"Refresh the summary \x2014 re-read the transcript and rebuild it now");
+                rb.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_sessionsSummaryCache.erase(rid); // drop the cached render so _ShowSessionsDetail re-analyzes the transcript
+                            if (self->_sessionsSelectedId == rid)
+                            {
+                                self->_ShowSessionsDetail(rid);
+                            }
+                        }
+                    });
+                });
+                toggleStrip.Children().Append(rb);
+            }
             Grid::SetColumn(toggleStrip, 1);
             sumHdr.Children().Append(toggleStrip);
             _sessionsDetailHost.Children().Append(sumHdr);

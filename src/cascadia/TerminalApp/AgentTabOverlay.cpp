@@ -1838,6 +1838,42 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster: a REFRESH button (rightmost in the strip) — force a re-read of the transcript +
+        // rebuild of this panel NOW, bypassing the mtime gate (a transcript can change without its mtime
+        // advancing, or you simply want a fresh pull). Same glyph size + scale + transparent-button styling
+        // as the toggles, but steady-colored (not a toggle state).
+        FontIcon refreshIcon{};
+        refreshIcon.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // carries U+21BB (the clockwise reload arrow)
+        refreshIcon.Glyph(L"\x21BB"); // ↻ — refresh / reload
+        refreshIcon.FontSize(11);
+        refreshIcon.FontWeight(FontWeights::SemiBold());
+        refreshIcon.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0)); // steady mid-gray (matches the dim toggle shade)
+        {
+            ScaleTransform refreshScale{};
+            refreshScale.ScaleX(1.18);
+            refreshScale.ScaleY(1.18);
+            refreshIcon.RenderTransform(refreshScale);
+            refreshIcon.RenderTransformOrigin(Point{ 0.5f, 0.5f });
+        }
+        Button refreshBtn{};
+        refreshBtn.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable + hover highlight
+        refreshBtn.BorderThickness(ThicknessHelper::FromUniformLength(0));
+        refreshBtn.Padding(ThicknessHelper::FromLengths(3, 0, 1, 0));
+        refreshBtn.MinWidth(0);
+        refreshBtn.MinHeight(0);
+        refreshBtn.IsTabStop(false); // never pull keyboard focus off the ConPTY
+        refreshBtn.VerticalAlignment(VerticalAlignment::Top);
+        refreshBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        refreshBtn.Content(refreshIcon);
+        AgentSetTip(refreshBtn, winrt::hstring{
+            L"Refresh the summary \x2014 re-read the transcript and rebuild this panel now" });
+        refreshBtn.Click([weak = get_weak()](const IInspectable&, const RoutedEventArgs&) {
+            if (auto self = weak.get())
+            {
+                self->_RefreshSummary();
+            }
+        });
+
         Grid timesRow{};
         {
             ColumnDefinition cStar{};
@@ -1855,6 +1891,7 @@ namespace winrt::TerminalApp::implementation
         toggles.Children().Append(_summaryPrevBtn); // leftmost: previous-session (shown only when compacted)
         toggles.Children().Append(truncBtn);
         toggles.Children().Append(wrapBtn);
+        toggles.Children().Append(refreshBtn); // rightmost: re-read the transcript + rebuild now
         Grid::SetColumn(_summaryTimesText, 0);
         Grid::SetColumn(toggles, 1);
         timesRow.Children().Append(_summaryTimesText);
@@ -2768,6 +2805,29 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::SetSummaryTruncateToggleHandler(std::function<void()> handler)
     {
         _onToggleSummaryTruncate = std::move(handler);
+    }
+
+    // Agentmaster: the times-bar REFRESH button — force a re-analyze+render of the summary NOW, regardless
+    // of the transcript's mtime (which gates the automatic reload). Mirrors the toggle handlers' reload path:
+    // reset the mtime gate and re-pull from the freshest registry snapshot. A purely-local action (no global
+    // setting / no broadcast) — it just re-reads THIS panel's own transcript.
+    void AgentTabOverlay::_RefreshSummary()
+    {
+        _summaryMtime = 0; // invalidate the mtime gate so _LoadSummaryAsync re-reads the file
+        if (_summaryLoading)
+        {
+            // A load is already in flight; mark dirty so its completion re-renders (the dirty-flag path
+            // resets the gate again), instead of the in-flight load's result sticking.
+            _summaryWrapDirty = true;
+            return;
+        }
+        if (_summaryEnabled && _registry && !_sessionId.empty())
+        {
+            if (const auto info = _registry->Get(_sessionId))
+            {
+                _UpdateSummary(*info);
+            }
+        }
     }
 
     void AgentTabOverlay::_ToggleSummaryPrevious()

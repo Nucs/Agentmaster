@@ -195,6 +195,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _SummarySelectedText(); // the text the user selected in the summary panel (title / times / body runs) — feeds + gates the context menu's "Copy Selected Text"
         void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
         void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
+        void _RefreshSummary(); // refresh button: force a re-analyze+render NOW (reset the mtime gate + re-pull) — a local action, no global setting
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
         winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showPrevious: render pre-compaction previous session(s)), set text on the UI thread. lineageCached/cachedLineage: reuse the memoized cross-file (/clear + plan-restart) parents instead of re-walking
 
