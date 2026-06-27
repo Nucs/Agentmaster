@@ -73,7 +73,7 @@ namespace
 
     // Summary-panel opacity: EXACTLY the badge's values + mechanism (the overlay panel above —
     // _root.Opacity / _SetExpanded): dim at rest, full (bright) on hover.
-    constexpr double kSummaryRestOpacity = 0.55; // == the badge's rest opacity (_root.Opacity dim)
+    constexpr double kSummaryRestOpacity = 0.50; // == the badge's rest opacity (_root.Opacity dim)
     constexpr double kSummaryHoverOpacity = 1.0; // == the badge's hovered opacity (_SetExpanded bright)
 
     SolidColorBrush Fill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
@@ -916,7 +916,7 @@ namespace winrt::TerminalApp::implementation
         _root.BorderThickness(ThicknessHelper::FromUniformLength(1));
         _root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         _root.Padding(ThicknessHelper::FromLengths(7, 2, 7, 2));
-        _root.Opacity(0.55); // dim at rest; full on hover (the chosen interaction)
+        _root.Opacity(0.50); // dim at rest; full on hover (the chosen interaction)
         _root.Child(_stack);
 
         // Hover handlers are wired in _WireHover() (from Initialize / first ShowActivity), NOT here:
@@ -1302,7 +1302,7 @@ namespace winrt::TerminalApp::implementation
         // pinned open.
         if (_root)
         {
-            _root.Opacity(on ? 1.0 : 0.55);
+            _root.Opacity(on ? 1.0 : 0.50);
         }
     }
 
