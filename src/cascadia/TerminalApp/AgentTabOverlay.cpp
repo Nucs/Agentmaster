@@ -2195,6 +2195,19 @@ namespace winrt::TerminalApp::implementation
             {
                 self->_UpdateTimesLine();
                 self->_RefreshJumpEligibility(); // the gated interval (5 s, visible-only): re-dim stale icons
+                // Backstop: re-read the transcript CONTENT too, so the message list self-refreshes on the
+                // same cadence as the times line. The content otherwise reloads ONLY on a registry notify
+                // (_Refresh), but a turn's closing message (and any growth on a no-hook / quiet session) lands
+                // AFTER the final notify — then the session idles and no further _Refresh comes, leaving the
+                // list stale until a manual refresh. _UpdateSummary is mtime-gated inside _LoadSummaryAsync,
+                // so an unchanged transcript is a cheap stat with NO re-render (no flicker / scroll reset).
+                if (self->_summaryEnabled && self->_registry && !self->_sessionId.empty())
+                {
+                    if (const auto info = self->_registry->Get(self->_sessionId))
+                    {
+                        self->_UpdateSummary(*info);
+                    }
+                }
             }
             else if (const auto t = sender.try_as<DispatcherTimer>())
             {
@@ -2970,7 +2983,13 @@ namespace winrt::TerminalApp::implementation
         _ApplySummaryVisibility(); // show only if there's already something to render (else stay hidden until the load lands)
         if (_summaryLoading)
         {
-            return; // one analyze+render in flight; the next _Refresh picks up any growth
+            // One analyze+render is already in flight. Don't drop this request: the transcript may have
+            // grown since that load started its read, and relying on "the next _Refresh" loses the growth
+            // when this WAS the last refresh (a turn's closing message lands just after the final hook's
+            // _Refresh, then the session idles and no further notify comes). Mark it pending so the load's
+            // completion re-checks for growth (mtime-gated, so a no-growth re-check is a cheap no-op).
+            _summaryReloadPending = true;
+            return;
         }
         const bool codex = (s.kind == AgentKind::Codex);
         const std::wstring convId = codex ? (s.codexSessionId.empty() ? s.id : s.codexSessionId) : s.id;
@@ -3114,14 +3133,24 @@ namespace winrt::TerminalApp::implementation
                     self->_summaryMtime = mtime;
                     self->_summaryLoading = false;
                     self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
-                    if (self->_summaryWrapDirty || self->_summaryTruncateDirty || self->_summaryPrevDirty)
+                    const bool flagDirty = self->_summaryWrapDirty || self->_summaryTruncateDirty || self->_summaryPrevDirty;
+                    if (flagDirty || self->_summaryReloadPending)
                     {
-                        // The wrap / truncate / show-previous mode flipped mid-load: this render used the OLD
-                        // flag(s). Re-render now with the current flags (invalidate the mtime gate so it isn't skipped).
+                        // Re-run the load now. Two reasons can land here:
+                        //  • flagDirty: a wrap / truncate / show-previous toggle flipped mid-load, so this render
+                        //    used the OLD flag(s) — force a full re-render (invalidate the mtime gate).
+                        //  • _summaryReloadPending: a content refresh was requested while this load was in flight
+                        //    (the transcript may have grown) — re-check WITHOUT forcing, so the mtime gate makes a
+                        //    no-growth re-check a cheap no-op while real growth is picked up. This closes the
+                        //    "dropped final refresh" gap (a turn's closing message arriving after the last notify).
                         self->_summaryWrapDirty = false;
                         self->_summaryTruncateDirty = false;
                         self->_summaryPrevDirty = false;
-                        self->_summaryMtime = 0;
+                        self->_summaryReloadPending = false;
+                        if (flagDirty)
+                        {
+                            self->_summaryMtime = 0; // force re-render with the new flags
+                        }
                         if (self->_summaryEnabled && self->_registry && !self->_sessionId.empty())
                         {
                             if (const auto reinfo = self->_registry->Get(self->_sessionId))

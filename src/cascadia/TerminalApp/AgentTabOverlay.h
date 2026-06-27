@@ -248,6 +248,7 @@ namespace winrt::TerminalApp::implementation
         bool _summaryWrapDirty{ false }; // a wrap-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryTruncateDirty{ false }; // a truncate-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryPrevDirty{ false }; // a previous-session toggle landed while a load was in flight — re-render when it completes
+        bool _summaryReloadPending{ false }; // a content refresh was requested (the transcript may have grown) WHILE a load was in flight — re-check on completion so the growth isn't dropped (the early-return otherwise relies on a "next _Refresh" that may never come once the session goes idle)
         bool _summaryEnabled{ false }; // mirror of the GLOBAL AppSettings::showSummaryPanel (page-driven)
         bool _summaryWrapNewlines{ false }; // mirror of the GLOBAL AppSettings::summaryPanelWrapNewlines (page-driven): preserve message newlines vs literal \n
         bool _summaryTruncate{ true }; // mirror of the GLOBAL AppSettings::summaryPanelTruncate (page-driven, default ON): ON=cap each message (6 lines if wrapped, else 500 chars); OFF=show every message in full
