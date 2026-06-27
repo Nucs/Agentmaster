@@ -71,5 +71,14 @@ namespace TerminalApp
         // dots" cluster pulsing below the status dot; driven by TerminalPage::_SetTabPending via
         // Tab.TabStatus(). Collapsed (the default) when there is no draft.
         Boolean AgentPendingVisible { get; set; };
+
+        // Agentmaster (PENDING_INPUT.md): the brush the "3 dots" are painted with — the user-configurable
+        // pending-dots color, picked LIGHT-on-dark / DARK-on-light from the session's per-directory tab
+        // color so the dots are never invisible (AppSettings::pendingDotsLightColor / pendingDotsDarkColor
+        // via PendingDotsColorFor). TerminalPage::_SetTabPending sets it just before AgentPendingVisible
+        // flips true, so the dots are never momentarily shown with a null/stale brush. Null until the tab
+        // first shows a draft (the dots are collapsed until then). Replaces the previously hardcoded
+        // Fill="#E0A92B".
+        Windows.UI.Xaml.Media.Brush AgentPendingBrush { get; set; };
     }
 }

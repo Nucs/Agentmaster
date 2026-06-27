@@ -88,22 +88,23 @@ namespace
     // wave (the classic "typing"/waiting cue), mirroring the per-tab strip pulse. The storyboard targets
     // the dots by ref (no name/resource lookup) and BEGINS on Loaded — so it runs only while the element
     // is in the tree; a board rebuild drops the card and its storyboard. The Loaded closure keeps the
-    // storyboard alive. dotPx sizes the dots (cards: 5px).
-    StackPanel BuildPendingDots(double dotPx = 5.0)
+    // storyboard alive. dotPx sizes the dots (cards: 5px). `color` is the contrast-picked pending-dots
+    // color (PendingDotsColorFor) — defaulting to the historical gold so a caller that doesn't care is
+    // unchanged.
+    StackPanel BuildPendingDots(double dotPx = 5.0, Color color = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B))
     {
         namespace MA = winrt::Windows::UI::Xaml::Media::Animation;
         StackPanel row;
         row.Orientation(Orientation::Horizontal);
         row.Spacing(3);
         row.VerticalAlignment(VerticalAlignment::Center);
-        const auto gold = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B);
         std::vector<winrt::Windows::UI::Xaml::Shapes::Ellipse> dots;
         for (int i = 0; i < 3; ++i)
         {
             winrt::Windows::UI::Xaml::Shapes::Ellipse e;
             e.Width(dotPx);
             e.Height(dotPx);
-            e.Fill(SolidColorBrush{ gold });
+            e.Fill(SolidColorBrush{ color });
             row.Children().Append(e);
             dots.push_back(e);
         }
@@ -3025,7 +3026,13 @@ namespace winrt::TerminalApp::implementation
         // previews the draft's first line. (Claude-only — Codex sessions aren't draft-scanned in v1.)
         if (!s.pendingInput.empty())
         {
-            auto dots = BuildPendingDots();
+            // Contrast-pick the dots' color for the card BODY background — the always-dark Manager fill
+            // (#2E2E2E) — so they read here (this yields the LIGHT pending color; the DARK one is what
+            // shows on a LIGHT tab strip). User-configurable via the Settings cog (pendingDots*).
+            const auto dotsColor = PendingDotsColorFor(ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E),
+                                                       _appSettings.pendingDotsLightColor,
+                                                       _appSettings.pendingDotsDarkColor);
+            auto dots = BuildPendingDots(5.0, dotsColor);
             std::wstring tip = L"Unsent draft \x2014 a message is typed into this session's input box but hasn't been sent yet.";
             auto firstLine = s.pendingInput.substr(0, s.pendingInput.find(L'\n'));
             if (firstLine.size() > 120)
@@ -7022,6 +7029,93 @@ namespace winrt::TerminalApp::implementation
             panel.Children().Append(row);
         }
 
+        // TABS: the unsent-draft "3 dots" color (PENDING_INPUT.md) — a LIGHT/DARK contrast PAIR. The dots
+        // (shown on a tab / board card when the user has typed but not sent a message) are painted the
+        // LIGHT color on a DARK tab background and the DARK color on a LIGHT one, auto-picked from the
+        // session's per-directory color, so they're never invisible. Same compact swatch-button-opens-a-
+        // ColorPicker-flyout idiom as the flash-ring row above (alpha slider enabled). GLOBAL
+        // (AppSettings::pendingDotsLightColor / pendingDotsDarkColor); applied live (the tab dots re-read on
+        // the next scan tick, board cards on the next rebuild). A local lambda builds both identical rows.
+        {
+            auto makeDotsColorRow = [&panel](const wchar_t* labelText,
+                                             const wchar_t* tipText,
+                                             const wchar_t* resetText,
+                                             Color defColor,
+                                             winrt::Microsoft::UI::Xaml::Controls::ColorPicker& pickerOut,
+                                             Border& swatchOut) {
+                auto row = StackPanel{};
+                row.Orientation(Orientation::Horizontal);
+                row.Spacing(10);
+                row.VerticalAlignment(VerticalAlignment::Center);
+
+                auto label = Text(labelText, 13, false, 0.9);
+                label.VerticalAlignment(VerticalAlignment::Center);
+                row.Children().Append(label);
+
+                // The swatch preview (a thin light border keeps a transparent pick visible as an outline).
+                Border swatch{};
+                swatch.Width(36);
+                swatch.Height(18);
+                swatch.CornerRadius(CornerRadius{ 3, 3, 3, 3 });
+                swatch.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                swatch.BorderBrush(SolidColorBrush{ ColorHelper::FromArgb(0x90, 0xFF, 0xFF, 0xFF) });
+                swatch.Background(SolidColorBrush{ defColor });
+                swatchOut = swatch;
+
+                // The picker lives INSIDE the flyout (built once, opened on demand); reading its Color() at
+                // Save works whether or not the flyout was ever opened.
+                winrt::Microsoft::UI::Xaml::Controls::ColorPicker picker{};
+                picker.IsAlphaEnabled(true);
+                picker.IsMoreButtonVisible(true);
+                picker.IsHexInputVisible(true);
+                picker.IsAlphaTextInputVisible(true);
+                picker.IsColorChannelTextInputVisible(true);
+                picker.Color(defColor); // the seed pass (_ShowSettings) sets the real saved color
+                picker.ColorChanged([swatch](auto&&, const winrt::Microsoft::UI::Xaml::Controls::ColorChangedEventArgs& e) {
+                    swatch.Background(SolidColorBrush{ e.NewColor() }); // live-preview the swatch as the user drags
+                });
+                pickerOut = picker;
+
+                auto pickerPanel = StackPanel{};
+                pickerPanel.Spacing(8);
+                pickerPanel.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark; the flyout renders in the popup root
+                pickerPanel.Children().Append(picker);
+                {
+                    auto reset = HyperlinkButton{};
+                    reset.Content(winrt::box_value(winrt::hstring{ resetText }));
+                    reset.Padding(Thickness{ 4, 2, 4, 2 });
+                    reset.FontSize(12);
+                    reset.Click([picker, defColor](const IInspectable&, const RoutedEventArgs&) {
+                        picker.Color(defColor);
+                    });
+                    pickerPanel.Children().Append(reset);
+                }
+
+                auto flyout = Flyout{};
+                flyout.Content(pickerPanel);
+
+                auto swatchBtn = Button{};
+                swatchBtn.Padding(Thickness{ 4, 3, 4, 3 });
+                swatchBtn.Content(swatch);
+                swatchBtn.Flyout(flyout);
+                AgentSetTip(swatchBtn, tipText);
+                row.Children().Append(swatchBtn);
+
+                panel.Children().Append(row);
+            };
+
+            makeDotsColorRow(L"Pending dots (on dark tabs)",
+                             L"Pick the color of the unsent-draft \x201C" L"3 dots\x201D shown on a DARK tab / card background. The picker's alpha slider sets its opacity. Default: gold.",
+                             L"Reset to default (gold)",
+                             ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B),
+                             _setPendingLightPicker, _pendingLightSwatch);
+            makeDotsColorRow(L"Pending dots (on light tabs)",
+                             L"Pick the color of the unsent-draft \x201C" L"3 dots\x201D shown on a LIGHT tab / card background. The picker's alpha slider sets its opacity. Default: deep amber.",
+                             L"Reset to default (amber)",
+                             ColorHelper::FromArgb(0xFF, 0x5A, 0x3E, 0x00),
+                             _setPendingDarkPicker, _pendingDarkSwatch);
+        }
+
         // TABS: "Overlay opacity" — the per-tab overlay's REST (dim, idle) and HOVER (bright, on
         // pointer-over) opacities on ONE track with TWO dots. The rail is a transparent->solid gradient
         // (left = transparent, right = solid — the requested visual); the LEFT dot is rest, the RIGHT is
@@ -7407,6 +7501,26 @@ namespace winrt::TerminalApp::implementation
                 _flashRingSwatch.Background(SolidColorBrush{ c }); // set directly too (don't rely on a programmatic ColorChanged firing)
             }
         }
+        if (_setPendingLightPicker)
+        {
+            // Pending "3 dots" color on a DARK background (PENDING_INPUT.md). Malformed/empty -> gold default.
+            const auto c = ParseArgbHexColor(_appSettings.pendingDotsLightColor, ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B));
+            _setPendingLightPicker.Color(c);
+            if (_pendingLightSwatch)
+            {
+                _pendingLightSwatch.Background(SolidColorBrush{ c });
+            }
+        }
+        if (_setPendingDarkPicker)
+        {
+            // Pending "3 dots" color on a LIGHT background (PENDING_INPUT.md). Malformed/empty -> amber default.
+            const auto c = ParseArgbHexColor(_appSettings.pendingDotsDarkColor, ColorHelper::FromArgb(0xFF, 0x5A, 0x3E, 0x00));
+            _setPendingDarkPicker.Color(c);
+            if (_pendingDarkSwatch)
+            {
+                _pendingDarkSwatch.Background(SolidColorBrush{ c });
+            }
+        }
         if (_overlayOpacityTrack)
         {
             // Seed the overlay-opacity dots from the saved rest/hover (clamped + ordered, so a hand-edited
@@ -7694,6 +7808,14 @@ namespace winrt::TerminalApp::implementation
         {
             // The picker always yields a valid Color; store it as "#AARRGGBB" (opacity in the alpha byte).
             _appSettings.flashRingColor = FormatArgbHexColor(_setFlashRingPicker.Color());
+        }
+        if (_setPendingLightPicker)
+        {
+            _appSettings.pendingDotsLightColor = FormatArgbHexColor(_setPendingLightPicker.Color()); // pending dots on a DARK bg
+        }
+        if (_setPendingDarkPicker)
+        {
+            _appSettings.pendingDotsDarkColor = FormatArgbHexColor(_setPendingDarkPicker.Color()); // pending dots on a LIGHT bg
         }
         if (_overlayOpacityTrack)
         {

@@ -314,13 +314,22 @@ here, dim = on-disk) with a **presence ring** when claude's own heartbeat report
 waiting. Detail = metadata + scope-tagged match snippets + the numbered prompt list (off-thread,
 (id,mtime)-cached); actions: **Jump** (OPEN here), **Resume here** (`_ResumeSessionFromDisk`: an
 unknown sid gets a minimal archived-shaped record, then the SAME transcript-gated `--resume` seam
-— title pinning, dir color, hook correlation all reused). **Resume / Fork (and Archive Restore) first
-follow the continuation CHAIN to its TAIL** (`ResolveContinuationTailOnDisk`): a `/clear`, a plan-mode
-parent→child, or an auto-continuation writes a NEW same-cwd session id, so they land where the user LEFT
-OFF — not on the earliest link recognizable by its first-prompt title. An A→B edge needs same cwd
-(`NormDirKey`) + B non-fork + B the earliest session created in `[A.lastActivity − 5s, +15min]`
-(`kContinuationSkewMs`/`kContinuationGapMaxMs`), and BAILS on ambiguity (parallel same-cwd sessions) so
-two claudes in one dir are never silently merged (Rule #14 spirit). **Fork here** (`_ForkSessionFromDisk` —
+— title pinning, dir color, hook correlation all reused). **Resume / Fork / window-restore open EXACTLY
+the picked/recorded session id — no "continuation tail" redirect.** The earlier `ResolveContinuationTailOnDisk`
+heuristic (follow a `/clear`/`/compact`/plan chain to its newest same-cwd link so you "land where you left
+off") was **REMOVED — it had no solid basis and produced systemic false positives.** There is NO solid
+on-disk signal for a `/clear`/`/compact`/plan SUCCESSOR: a `/compact` is **in-place** (one file, a
+`system/compact_boundary` line — proven 397/400 corpus-wide; it never mints a new id), a `/clear` leaves
+**no** link to its successor, and a plan-restart child references its **parent** (backward), never the
+parent its successor. The edge was therefore pure timing (same cwd + B non-fork + B created within
+`[A.lastActivity − 5s, +15min]`), which merely chains the **next independent session** the user started in
+a busy dir onto the prior one — proven on the real 198-session `K:\source\Agentmaster` corpus: it would
+redirect **21/198** sessions, **5 targets each "continuing" 2–4 unrelated predecessors** (e.g. one fresh
+`[spawn]`ed session claimed as the continuation of both an "observer screen-monitor" and a "settings-tabs"
+conversation — the exact reported "won't resume / jumps to a different tab" bug). The SOLID **plan-restart
+parent** link (the explicit `"read the full transcript at: <parent>.jsonl"` reference, 620 in the corpus)
+is **kept** — it still drives the summary panel's "previous session(s)" lineage (`CollectConversationLineage`,
+backward only). **Fork here** (`_ForkSessionFromDisk` —
 the duplicate-tab fork's recipe: `claude --resume <parent> --fork-session --session-id <new>`, the
 new id minted by us so hooks/registry correlate from the first event; offered on EVERY row
 **including a LIVE one** — a fork writes its OWN transcript, so the adopt path's two-writers
@@ -583,13 +592,22 @@ flicker it off), records it via `SetPendingInput` (transient `SessionInfo::pendi
 `SetPendingInput` updates the field every change but **`_notify`s ONLY on the boolean hasPending FLIP**
 (empty↔non-empty — the "yes/no pending" transition; a text-only edit stays quiet, so no per-keystroke
 persist/board/scheduler cascade — presence-heartbeat cadence). The flip logs `[pending] <id> draft (chars=N):
-<first line>` / `[pending] <id> cleared`. **The indicator** is a goldenrod **3-dot opacity pulse**: on the
+<first line>` / `[pending] <id> cleared`. **The indicator** is a **3-dot opacity pulse**: on the
 **tab strip** below the status dot (`TerminalTabStatus::AgentPendingVisible` ← `_SetTabPending` directly from
 the UI lane; `TabHeaderControl.xaml` `HeaderPendingDots`, its pulse storyboard started/stopped on the flag so
 idle tabs animate nothing), and on the **Triage-Board cards** (`AgentManagerContent::_MakeCard` →
 `BuildPendingDots`, driven by the flip notify rebuilding the board — **cross-window**: a draft in window A
-shows on window B's GLOBAL board). **Follow-ups:** an off-switch setting, placeholder/dim-attribute filtering,
-and a `pauseOnHumanInput` autopilot tie-in (PENDING_INPUT.md §4/§6).
+shows on window B's GLOBAL board). **The dots' COLOR is a user-configurable LIGHT/DARK contrast PAIR**
+(`AppSettings::pendingDotsLightColor` / `pendingDotsDarkColor`, GLOBAL, two cog `muxc::ColorPicker`s under
+TABS; defaults gold `#FFE0A92B` on dark / deep amber `#FF5A3E00` on light): the dots are auto-painted the
+DARK color on a LIGHT tab background and the LIGHT color on a DARK one, picked by the **WCAG luminance** of
+the session's per-directory tab color (`AgentStatusColors.h` `BackgroundIsLight` / `PendingDotsColorFor`, the
+~0.179 crossover the title-band `PreferDarkTextOn` uses) — so the dots are **never invisible** against the
+tab/card. The tab strip carries the picked brush on `TerminalTabStatus::AgentPendingBrush` (set by
+`_SetTabPending`, contrast-picked from the per-dir color each scan tick); the board card body is the always-
+dark Manager fill, so cards use the LIGHT color. Applied live + cross-window via the `flashRingColor` settings
+idiom. **Follow-ups:** an off-switch setting, placeholder/dim-attribute filtering, and a `pauseOnHumanInput`
+autopilot tie-in (PENDING_INPUT.md §4/§6).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -1231,7 +1249,12 @@ What works, by area:
   `muxc::ColorPicker` with its **alpha slider enabled**, so one control sets both the hue AND the
   **opacity** of the tab status-dot **"unread" flash ring**; stored `#AARRGGBB`, **default red at 80%
   opacity** `#CCFF0000`; GLOBAL, applied live on Save + cross-window broadcast via
-  `_RefreshFlashRingBrush` re-pointing each window's shared `_flashRingBrush`).
+  `_RefreshFlashRingBrush` re-pointing each window's shared `_flashRingBrush`), and (TABS section)
+  **`pendingDotsLightColor` / `pendingDotsDarkColor`** (the **Pending dots (on dark/light tabs)** picker
+  PAIR — two `muxc::ColorPicker`s for the unsent-draft "3 dots" color, painted LIGHT-on-dark / DARK-on-light
+  auto-picked by the tab background's WCAG luminance so the dots are never invisible; both `#AARRGGBB`,
+  defaults gold `#FFE0A92B` / amber `#FF5A3E00`; GLOBAL, applied live — tab dots re-read on the next scan
+  tick, board cards on the next rebuild; PENDING_INPUT.md).
   A **PROFILE row** (read-only path + **Change profile
   folder…**) shows the ACTIVE per-install profile dir and re-runs the ProfileBootstrap picker —
   deliberately NOT an `AppSettings` field (the profile is the pointer TO `settings.json`, stored
@@ -1502,7 +1525,10 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     GLOBAL `AppSettings.summaryPanelWrapNewlines`: preserve message newlines vs literal `\n`).
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
-    overlay's hand-synced palette copy).
+    overlay's hand-synced palette copy). Also the shared `#AARRGGBB` color parse/format
+    (`ParseArgbHexColor` / `FormatArgbHexColor`, for `flashRingColor` + the pending-dots colors) and the
+    pending-dots contrast pick (`BackgroundIsLight` / `PendingDotsColorFor` — WCAG luminance, used by the
+    tab strip + board card so the unsent-draft "3 dots" are never invisible; PENDING_INPUT.md).
   - `src/cascadia/TerminalApp/AgentTipHelpers.h` — the ONE islands-safe hover-tooltip recipe
     (`AgentSetTip` / `AgentCloseTipOn`, a fast-open `DispatcherTimer`; `ToolTipService`'s auto-dismiss
     is unreliable under XAML Islands), shared by `AgentManagerContent` + the Archive/Sessions pages

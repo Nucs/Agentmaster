@@ -59,6 +59,11 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (PENDING_INPUT.md): the UNSENT-DRAFT "3 dots" indicator below the status dot (see
         // the idl note) — driven by TerminalPage::_SetTabPending from the debounced SessionInfo::pendingInput.
         WINRT_OBSERVABLE_PROPERTY(bool, AgentPendingVisible, PropertyChanged.raise);
+        // Agentmaster (PENDING_INPUT.md): the brush the "3 dots" are painted with — the user-configurable
+        // pending-dots color, contrast-picked from the tab's per-dir color (AppSettings::pendingDots*),
+        // pointed here by TerminalPage::_SetTabPending just before AgentPendingVisible flips true; null
+        // until the tab first shows a draft (the dots are collapsed until then). Replaces Fill="#E0A92B".
+        WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentPendingBrush, PropertyChanged.raise, nullptr);
     };
 }
 

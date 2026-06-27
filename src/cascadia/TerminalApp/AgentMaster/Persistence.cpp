@@ -534,6 +534,8 @@ namespace Agentmaster
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
         o.Set(L"flashRingColor", json::Value::MkStr(s.flashRingColor));
+        o.Set(L"pendingDotsLightColor", json::Value::MkStr(s.pendingDotsLightColor));
+        o.Set(L"pendingDotsDarkColor", json::Value::MkStr(s.pendingDotsDarkColor));
         o.Set(L"showTabOverlay", json::Value::MkBool(s.showTabOverlay));
         o.Set(L"tabOverlayRestOpacity", json::Value::MkNum(s.tabOverlayRestOpacity));
         o.Set(L"tabOverlayHoverOpacity", json::Value::MkNum(s.tabOverlayHoverOpacity));
@@ -593,6 +595,11 @@ namespace Agentmaster
         // 80% opacity). Stored verbatim; the UI-layer parser (ParseArgbHexColor) falls back to that
         // default on a malformed value, so a hand-edited garbage string self-heals on next save.
         s.flashRingColor = v.StrAt(L"flashRingColor", L"#CCFF0000");
+        // Unsent-draft "3 dots" contrast pair (PENDING_INPUT.md). Absent => the historical gold on dark
+        // (#FFE0A92B) + a deep amber on light (#FF5A3E00). Stored verbatim; the UI-layer parser
+        // (ParseArgbHexColor) falls back to these defaults on a malformed value, so a hand-edit self-heals.
+        s.pendingDotsLightColor = v.StrAt(L"pendingDotsLightColor", L"#FFE0A92B");
+        s.pendingDotsDarkColor = v.StrAt(L"pendingDotsDarkColor", L"#FF5A3E00");
         s.showTabOverlay = v.BoolAt(L"showTabOverlay", true);
         {
             // The per-tab overlay REST/HOVER opacities (TAB_OVERLAY.md): clamp each to (0, 1] and enforce

@@ -537,6 +537,19 @@ namespace Agentmaster
         // wedging the ring.
         std::wstring flashRingColor{ L"#CCFF0000" };
 
+        // Agentmaster (PENDING_INPUT.md): the unsent-draft "3 dots" indicator color, kept as a CONTRAST
+        // PAIR so the dots are never invisible against the tab/card they ride on. The dots are painted the
+        // LIGHT color on a DARK background and the DARK color on a LIGHT one — the algorithm picks by the
+        // session's per-directory tab color (Rule #12) via BackgroundIsLight / PendingDotsColorFor
+        // (AgentStatusColors.h, the WCAG luminance crossover). Both "#AARRGGBB" (the alpha byte is honored,
+        // atop the dots' own opacity pulse); GLOBAL across windows, applied live on Save + the cross-window
+        // broadcast (the flashRingColor idiom — the tab-strip dots re-read these on the next scan tick, the
+        // board cards on the next rebuild). Defaults reproduce the prior single hardcoded gold shown on a
+        // dark background (light = #FFE0A92B) and add a deep amber that reads on a light one (dark =
+        // #FF5A3E00). A malformed/empty value falls back to its default at the (UI-layer) parse.
+        std::wstring pendingDotsLightColor{ L"#FFE0A92B" }; // shown on a DARK tab/card background
+        std::wstring pendingDotsDarkColor{ L"#FF5A3E00" }; // shown on a LIGHT tab/card background
+
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
         // top-right of each Claude session's terminal (status + autopilot mode + queued count +
         // link state). Default ON; a missing key => true (a no-op default, like the rest).

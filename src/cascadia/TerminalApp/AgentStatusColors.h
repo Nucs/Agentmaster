@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cmath>
 #include <string>
 #include <string_view>
 
@@ -111,5 +112,38 @@ namespace winrt::TerminalApp::implementation
             out.push_back(d[by & 0xF]);
         }
         return out;
+    }
+
+    // Agentmaster (PENDING_INPUT.md, pending-dots contrast pick): is `bg` a LIGHT color? Uses the same
+    // WCAG relative-luminance crossover (~0.179) AgentManagerContent's PreferDarkTextOn uses to ink the
+    // title band: ABOVE it the background is light (dark ink/dots read better against it), BELOW it dark
+    // (light ones do). Kept here, beside the color parse/format, as the ONE contrast helper the unsent-
+    // draft "3 dots" share across the tab strip (TerminalPage::_SetTabPending) and the Triage-Board card
+    // (AgentManagerContent::_MakeCard), so both surfaces pick the same way. (PreferDarkTextOn stays in
+    // AgentManagerContent for the title-band text — a different surface/concern; this one is dots-only.)
+    inline bool BackgroundIsLight(winrt::Windows::UI::Color bg)
+    {
+        const auto lin = [](uint8_t v) {
+            const double s = v / 255.0;
+            return s <= 0.03928 ? s / 12.92 : std::pow((s + 0.055) / 1.055, 2.4);
+        };
+        const double luminance = 0.2126 * lin(bg.R) + 0.7152 * lin(bg.G) + 0.0722 * lin(bg.B);
+        return luminance > 0.179;
+    }
+
+    // Agentmaster (PENDING_INPUT.md): pick the unsent-draft "3 dots" color for best contrast on a
+    // background `bg` — the user-configured DARK dots on a LIGHT background, the LIGHT dots on a DARK one
+    // — so the dots are never invisible against a tab/card whatever its working-directory color. lightHex/
+    // darkHex are the "#AARRGGBB" AppSettings strings (AppSettings::pendingDotsLightColor /
+    // pendingDotsDarkColor); each falls back to its built-in default (light = the historical gold
+    // #FFE0A92B that reads on a DARK tab; dark = a deep amber #FF5A3E00 that reads on a LIGHT tab) if
+    // malformed. The alpha byte is honored (the dots also pulse their Opacity 0.3<->1.0 atop it).
+    inline winrt::Windows::UI::Color PendingDotsColorFor(winrt::Windows::UI::Color bg,
+                                                         std::wstring_view lightHex,
+                                                         std::wstring_view darkHex)
+    {
+        const auto light = ParseArgbHexColor(lightHex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B));
+        const auto dark = ParseArgbHexColor(darkHex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x5A, 0x3E, 0x00));
+        return BackgroundIsLight(bg) ? dark : light;
     }
 }

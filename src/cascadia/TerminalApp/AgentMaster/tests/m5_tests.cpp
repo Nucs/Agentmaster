@@ -2209,6 +2209,8 @@ static void TestAppSettings()
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
         in.flashRingColor = L"#8000FF00"; // non-default (default #CCFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
+        in.pendingDotsLightColor = L"#FF112233"; // non-default (default #FFE0A92B) — pending "3 dots" shown on a DARK tab/card bg
+        in.pendingDotsDarkColor = L"#FF445566"; // non-default (default #FF5A3E00) — pending "3 dots" shown on a LIGHT tab/card bg
         in.defaultLaunchDir = L"K:/work";
         in.env = L"FOO=bar;BAZ=qux";
         in.archiveSplitFraction = 0.33;
@@ -2237,6 +2239,8 @@ static void TestAppSettings()
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
         CHECK(out.flashRingColor == L"#8000FF00", "settings flashRingColor round-trip");
+        CHECK(out.pendingDotsLightColor == L"#FF112233", "settings pendingDotsLightColor round-trip");
+        CHECK(out.pendingDotsDarkColor == L"#FF445566", "settings pendingDotsDarkColor round-trip");
         CHECK(out.defaultLaunchDir == L"K:/work", "settings defaultLaunchDir round-trip");
         CHECK(out.archiveSplitFraction > 0.329 && out.archiveSplitFraction < 0.331, "settings archiveSplitFraction round-trip");
         CHECK(out.summaryPanelWidthFraction > 0.399 && out.summaryPanelWidthFraction < 0.401, "settings summaryPanelWidthFraction round-trip");
@@ -2272,6 +2276,8 @@ static void TestAppSettings()
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
         CHECK(out.flashRingColor == L"#CCFF0000", "settings flashRingColor default (80% red) on empty");
+        CHECK(out.pendingDotsLightColor == L"#FFE0A92B", "settings pendingDotsLightColor default (gold, on dark) on empty");
+        CHECK(out.pendingDotsDarkColor == L"#FF5A3E00", "settings pendingDotsDarkColor default (amber, on light) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.flightPlanShowsSummary == true, "settings flightPlanShowsSummary default (Summary) on empty");

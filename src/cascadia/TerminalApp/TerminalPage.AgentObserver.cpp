@@ -282,9 +282,13 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (PENDING_INPUT.md): show/hide the unsent-draft "3 dots" pulse below a tab's status dot
-    // (TabStatus.AgentPendingVisible; TabHeaderControl starts/stops the pulse storyboard from it). The
-    // WINRT_OBSERVABLE_PROPERTY no-ops when unchanged, so re-asserting it every scan tick is free. UI thread.
-    void TerminalPage::_SetTabPending(const TerminalApp::Tab& tab, bool on)
+    // (TabStatus.AgentPendingVisible; TabHeaderControl starts/stops the pulse storyboard from it), painting
+    // them dotsColor — the contrast-picked pending color (LIGHT on a dark tab / DARK on a light one, from
+    // the session's per-dir color so they're never invisible). The brush is set BEFORE the visibility flips
+    // true (so the dots never show with a null/stale brush) and only when the color actually changed; the
+    // WINRT_OBSERVABLE_PROPERTY no-ops when unchanged, so re-asserting the same state every scan tick is
+    // free. _ScanPendingInput passes the computed color when on; off leaves the (hidden) brush as-is. UI thread.
+    void TerminalPage::_SetTabPending(const TerminalApp::Tab& tab, bool on, const std::optional<winrt::Windows::UI::Color>& dotsColor)
     {
         if (!tab)
         {
@@ -292,10 +296,21 @@ namespace winrt::TerminalApp::implementation
         }
         try
         {
-            if (const auto status = tab.TabStatus())
+            const auto status = tab.TabStatus();
+            if (!status)
             {
-                status.AgentPendingVisible(on);
+                return;
             }
+            if (on && dotsColor)
+            {
+                // Re-point the dots' brush only on a genuine color change (don't churn the binding every tick).
+                const auto cur = status.AgentPendingBrush().try_as<Media::SolidColorBrush>();
+                if (!(cur && cur.Color() == *dotsColor))
+                {
+                    status.AgentPendingBrush(Media::SolidColorBrush{ *dotsColor });
+                }
+            }
+            status.AgentPendingVisible(on);
         }
         CATCH_LOG();
     }
@@ -2575,7 +2590,21 @@ namespace winrt::TerminalApp::implementation
             const bool hasPending = !effectiveDraft.empty();
             if (hostTab)
             {
-                _SetTabPending(hostTab, hasPending);
+                // Contrast-pick the "3 dots" color from THIS session's per-directory tab color (Rule #12,
+                // the same color its tab header wears), so the dots are never invisible against a bright/
+                // light tab: the LIGHT pending color on a dark tab, the DARK one on a light tab. The per-dir
+                // color is the persisted pick if any, else the deterministic auto color (the card uses the
+                // same precedence); a dir with no resolvable color falls back to the dark Manager fill ->
+                // the LIGHT dots. Only computed when actually showing (cleared tabs don't need it).
+                std::optional<winrt::Windows::UI::Color> dotsColor;
+                if (hasPending)
+                {
+                    const auto dirHex = ::Agentmaster::GetDirColor(info->workingDir);
+                    const std::wstring hex = dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(info->workingDir);
+                    const auto bg = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
+                    dotsColor = PendingDotsColorFor(bg, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor);
+                }
+                _SetTabPending(hostTab, hasPending, dotsColor);
             }
             if (flipped)
             {

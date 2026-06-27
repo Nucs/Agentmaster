@@ -754,6 +754,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ComboBox _setFavoriteIcon{ nullptr }; // TABS: the FAVORITE marker glyph on a live session's tab — Crown (default) / Star (FAVORITES.md §5a); GLOBAL
         winrt::Microsoft::UI::Xaml::Controls::ColorPicker _setFlashRingPicker{ nullptr }; // TABS: the "status flashing color" — the tab status-dot unread flash ring; alpha channel = opacity (IsAlphaEnabled). Lives in a Flyout opened by the swatch button (compact); stored as AppSettings::flashRingColor ("#AARRGGBB"); GLOBAL
         winrt::Windows::UI::Xaml::Controls::Border _flashRingSwatch{ nullptr }; // TABS: the compact color-preview swatch (Flyout opener content) — updated on seed + the picker's ColorChanged
+        // PENDING_INPUT.md: the unsent-draft "3 dots" color, a LIGHT/DARK contrast pair (shown LIGHT-on-dark
+        // / DARK-on-light, auto-picked from the tab's per-dir color). Same swatch-button-opens-a-flyout idiom
+        // as the flash-ring row; stored as AppSettings::pendingDotsLightColor / pendingDotsDarkColor; GLOBAL.
+        winrt::Microsoft::UI::Xaml::Controls::ColorPicker _setPendingLightPicker{ nullptr }; // TABS: pending dots color shown on a DARK tab/card background
+        winrt::Windows::UI::Xaml::Controls::Border _pendingLightSwatch{ nullptr }; // TABS: its compact color-preview swatch
+        winrt::Microsoft::UI::Xaml::Controls::ColorPicker _setPendingDarkPicker{ nullptr }; // TABS: pending dots color shown on a LIGHT tab/card background
+        winrt::Windows::UI::Xaml::Controls::Border _pendingDarkSwatch{ nullptr }; // TABS: its compact color-preview swatch
         // TABS: "Overlay opacity" — the per-tab overlay's REST + HOVER opacities (TAB_OVERLAY.md), on ONE
         // dual-thumb gradient track (transparent left -> solid right). Left dot = rest, right dot = hover;
         // they can't cross (rest <= hover). Drag-driven (CapturePointer + PointerMoved, the resize-grip

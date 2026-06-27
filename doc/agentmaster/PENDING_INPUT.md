@@ -1,11 +1,12 @@
 # Pending-input monitor — detect an UNSENT draft in a Claude tab's input box
 
 > Status: **complete — detection + the "yes pending / no pending" observer NOTIFY + the visible "3 dots"
-> animation on BOTH the tab strip and the Triage-Board cards.** Pure detector + the registry notify-on-flip
-> are unit-tested (engine harness, 1354 checks green); the full chain lib-compiles green
-> (TerminalControlLib + TerminalAppLib). The fact is recorded on the session, logged (`[pending]`), and
-> drives the indicator. Runtime verification (the live pulse + `[pending]` trace) needs a deploy — gated on
-> the user's build/deploy permission.
+> animation on BOTH the tab strip and the Triage-Board cards, with a user-configurable LIGHT/DARK dot color
+> auto-picked by the tab background so the dots are never invisible.** Pure detector + the registry
+> notify-on-flip + the dot-color settings round-trip are unit-tested (engine harness green); the full chain
+> lib-compiles green (TerminalControlLib + TerminalAppLib). The fact is recorded on the session, logged
+> (`[pending]`), and drives the indicator. Runtime verification (the live pulse + `[pending]` trace) needs a
+> deploy — gated on the user's build/deploy permission.
 
 ## 1. What this is & why it can't be a hook
 
@@ -123,17 +124,41 @@ TerminalPage::_ScanPendingInput()      (TerminalApp; UI thread, ticked by the sh
   tab) every tick + idempotently. **Background (unfocused) tabs are scanned too** — the whole point is to
   notice a draft left in a tab the user switched away from. The flip is logged as `[pending] <id> draft
   (chars=N): <first line>` / `[pending] <id> cleared`.
-- **The "3 dots" animation** (the visible indicator) rides two surfaces, both a phase-shifted goldenrod
-  opacity pulse:
+- **The "3 dots" animation** (the visible indicator) rides two surfaces, both a phase-shifted opacity
+  pulse whose **color is a user-configurable LIGHT/DARK contrast PAIR** (see *Dots color* below) so the
+  dots are never invisible against the tab/card they sit on:
   - **Tab strip** — `TerminalTabStatus::AgentPendingVisible` (set by `_SetTabPending`) drives a tiny 3-dot
-    cluster at the bottom of the status-dot wrap in `TabHeaderControl.xaml` (below the dot). The pulse
-    storyboard is built imperatively and **started/stopped on the flag** (`TabHeaderControl::_UpdatePending-
-    Animation`, hooked to `TabStatus.PropertyChanged`) so an **idle fleet animates nothing** — no perpetual
-    60fps compositor wakeups.
-  - **Triage-Board cards** — `AgentManagerContent::_MakeCard` appends a 3-dot pulse (`BuildPendingDots`)
-    when `!s.pendingInput.empty()`. The board rebuilds on the flip `_notify` (the lens observer), so it
-    appears/clears with the draft, **cross-window** (a session hosted in window A animates on window B's
-    GLOBAL board too). The storyboard begins on `Loaded` (runs only while carded; a rebuild drops it).
+    cluster at the bottom of the status-dot wrap in `TabHeaderControl.xaml` (below the dot), painted with
+    `TerminalTabStatus::AgentPendingBrush` (the contrast-picked color, also set by `_SetTabPending`). The
+    pulse storyboard is built imperatively and **started/stopped on the flag** (`TabHeaderControl::_Update-
+    PendingAnimation`, hooked to `TabStatus.PropertyChanged`) so an **idle fleet animates nothing** — no
+    perpetual 60fps compositor wakeups.
+  - **Triage-Board cards** — `AgentManagerContent::_MakeCard` appends a 3-dot pulse (`BuildPendingDots`,
+    passed the picked color) when `!s.pendingInput.empty()`. The board rebuilds on the flip `_notify` (the
+    lens observer), so it appears/clears with the draft, **cross-window** (a session hosted in window A
+    animates on window B's GLOBAL board too). The storyboard begins on `Loaded` (runs only while carded; a
+    rebuild drops it).
+
+### Dots color — a LIGHT/DARK contrast pair, auto-picked by background
+
+The dots are painted from a **two-color pair** the user sets in the Settings cog (TABS section: *Pending
+dots (on dark tabs)* / *Pending dots (on light tabs)* — two `muxc::ColorPicker`s mirroring the flash-ring
+swatch idiom). GLOBAL, persisted as `AppSettings::pendingDotsLightColor` / `pendingDotsDarkColor`
+(`#AARRGGBB`; defaults gold `#FFE0A92B` on dark, deep amber `#FF5A3E00` on light — the gold preserves the
+prior single hardcoded look). The **algorithm** picks which of the pair to use by the **WCAG relative-
+luminance** of the background the dots ride on (`AgentStatusColors.h` — `BackgroundIsLight` /
+`PendingDotsColorFor`, the same ~0.179 crossover `PreferDarkTextOn` uses for the card title band): a LIGHT
+background ⇒ the DARK dots, a DARK background ⇒ the LIGHT dots — so the dots never wash out:
+  - **Tab strip** — the background is the tab header = the session's **per-directory tab color** (Rule #12;
+    `GetDirColor` ?? `AutoDirColorHex`). `_ScanPendingInput` computes the picked color each tick and hands
+    it to `_SetTabPending`, which re-points `AgentPendingBrush` only on a genuine color change (idempotent),
+    so a cog color change applies on the next scan tick (~2 s) with no extra plumbing.
+  - **Triage-Board card** — the dots sit on the card BODY, which is the always-dark Manager fill
+    (`#2E2E2E`), so the pick yields the LIGHT color there; it updates on the next board rebuild. (The DARK
+    color is what shows on a light tab strip.)
+Applied live + cross-window through the existing settings broadcast (the `flashRingColor` idiom):
+`_appSettings` is refreshed in every window's Save handler + `_ApplyBroadcastSettings`, and both surfaces
+re-read it on their next tick/rebuild.
 
 ### Reliability — "can we reliably say yes then no?" (the clear debounce)
 
@@ -190,17 +215,20 @@ tab/board pulse storyboards run **only while a tab is actually pending** — an 
 
 ## 6. The "3 dots" indicator (built)
 
-The detection NOTIFIES reliably on both transitions (§3 "Reliability"), so the indicator is a goldenrod
-**3-dot opacity pulse** ("typing"/waiting cue) on two surfaces, both driven by the observer's detection:
+The detection NOTIFIES reliably on both transitions (§3 "Reliability"), so the indicator is a
+**3-dot opacity pulse** ("typing"/waiting cue) on two surfaces, both driven by the observer's detection.
+Its color is a **user-configurable LIGHT/DARK pair** auto-picked by the background luminance so the dots are
+never invisible (see *Dots color* in §3):
 
 - **Tab strip** — a tiny cluster at the bottom of the status-dot wrap, **below** the dot
-  (`TabHeaderControl.xaml` `HeaderPendingDots`, bound to `TerminalTabStatus::AgentPendingVisible`). Driven
-  by `TerminalPage::_SetTabPending` straight from the UI-lane scan (the hosting window holds the tab). The
-  pulse storyboard is **started/stopped on the flag**, so idle tabs animate nothing.
+  (`TabHeaderControl.xaml` `HeaderPendingDots`, bound to `TerminalTabStatus::AgentPendingVisible`, painted
+  via `AgentPendingBrush`). Driven by `TerminalPage::_SetTabPending` straight from the UI-lane scan (the
+  hosting window holds the tab), which also contrast-picks the dots' color from the tab's per-dir color.
+  The pulse storyboard is **started/stopped on the flag**, so idle tabs animate nothing.
 - **Triage-Board cards** — a pulse at the top of the card body (`AgentManagerContent::_MakeCard` →
-  `BuildPendingDots`), driven by the flip `_notify` rebuilding the board, so it works **cross-window**
-  (a draft in window A shows on window B's GLOBAL board). The storyboard begins on `Loaded` (runs only
-  while carded).
+  `BuildPendingDots`, passed the picked color), driven by the flip `_notify` rebuilding the board, so it
+  works **cross-window** (a draft in window A shows on window B's GLOBAL board). The storyboard begins on
+  `Loaded` (runs only while carded).
 
 ### Follow-ups (non-blocking)
 
