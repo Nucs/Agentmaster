@@ -1,0 +1,1396 @@
+// SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Agentmaster Manager tab: the TRIAGE BOARD -- session/external cards, the state columns, the draggable splitters, and _RebuildBoard. Partial TU of AgentManagerContent.cpp.
+#include "pch.h"
+#include "AgentManagerContent.h"
+
+#include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
+#include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
+#include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
+#include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/Persistence.h" // templates: load/save/apply
+#include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
+#include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
+#include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
+
+// Agentmaster: the build-stamped git commit + branch (the Settings page header). Generated into
+// $(GeneratedFilesDir) by TerminalAppLib.vcxproj's AgentmasterGenerateBuildInfo target, which is
+// on the include path. The __has_include guard + fallback defines keep this file compilable if
+// the generator hasn't run yet (e.g. opened in an IDE before any build); a real build always
+// regenerates the header first (BeforeTargets ClCompile).
+#if __has_include("AgentmasterBuildInfo.g.h")
+#include "AgentmasterBuildInfo.g.h"
+#endif
+#ifndef AGENTMASTER_COMMIT_HASH
+#define AGENTMASTER_COMMIT_HASH L"unknown"
+#endif
+#ifndef AGENTMASTER_COMMIT_BRANCH
+#define AGENTMASTER_COMMIT_BRANCH L"unknown"
+#endif
+
+#include <algorithm>
+#include <chrono>
+#include <cmath> // std::pow — relative-luminance black/white contrast pick for the card title band
+#include <filesystem> // create_directories — the "Create & Launch" affordance for a not-yet-existing dir
+#include <system_error> // std::error_code — non-throwing create_directories
+#include <thread> // background transcript read for an external's read-only plan
+#include <shobjidl.h> // IFileOpenDialog — Browse for claude.exe (native-exe-only policy)
+
+using namespace winrt::Windows::Foundation;
+// Using-DECLARATIONS (not a directive) for the color helpers: a `using namespace
+// winrt::Windows::UI;` would also pull the nested `Text` namespace into scope and collide
+// with our Text() TextBlock helper below.
+using winrt::Windows::UI::Color;
+using winrt::Windows::UI::ColorHelper;
+using winrt::Windows::UI::Colors;
+using winrt::Windows::UI::Core::CoreCursor;
+using winrt::Windows::UI::Core::CoreCursorType;
+using winrt::Windows::UI::Core::CoreWindow;
+using namespace winrt::Windows::UI::Text; // FontWeights
+using namespace winrt::Windows::UI::Xaml;
+using namespace winrt::Windows::UI::Xaml::Controls;
+using namespace winrt::Windows::UI::Xaml::Input; // KeyRoutedEventArgs
+using namespace winrt::Windows::UI::Xaml::Media; // brushes
+using namespace winrt::Windows::System; // DispatcherQueue, VirtualKey
+using namespace winrt::Microsoft::Terminal::Settings::Model;
+using namespace Agentmaster;
+// The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
+// helpers below (e.g. TimingText) can call it unqualified too.
+using winrt::TerminalApp::implementation::AgentSetTip;
+#include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
+
+namespace winrt::TerminalApp::implementation
+{
+    void AgentManagerContent::_UpdateCardProgress()
+    {
+        if (_cardProgress.empty())
+        {
+            return;
+        }
+        const int64_t now = NowMs();
+        for (const auto& p : _cardProgress)
+        {
+            if (!p.bar || p.timeoutMs <= 0)
+            {
+                continue;
+            }
+            const auto st = p.bar.RenderTransform().try_as<ScaleTransform>();
+            if (!st)
+            {
+                continue;
+            }
+            double frac = 1.0 - static_cast<double>(now - p.lastActivityUnixMs) / static_cast<double>(p.timeoutMs);
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+            st.ScaleX(frac);
+        }
+    }
+
+    // Agentmaster (Waiting-for-you countdown bar): start the ~1s drainer iff any bar is tracked, else
+    // stop it (no Waiting-for-you cards -> no per-second work). Built lazily; weak self so a closed
+    // window never leaks a ticking timer. Called at the end of each board rebuild (from _Refresh).
+    void AgentManagerContent::_SyncProgressTimer()
+    {
+        if (_cardProgress.empty())
+        {
+            if (_progressTimer)
+            {
+                _progressTimer.Stop();
+            }
+            return;
+        }
+        if (!_progressTimer)
+        {
+            _progressTimer = DispatcherTimer{};
+            _progressTimer.Interval(std::chrono::seconds(1));
+            _progressTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_UpdateCardProgress();
+                }
+                else if (const auto t = sender.try_as<DispatcherTimer>())
+                {
+                    t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+                }
+            });
+        }
+        if (!_progressTimer.IsEnabled())
+        {
+            _progressTimer.Start();
+        }
+        _UpdateCardProgress(); // paint the correct fractions NOW (don't wait up to 1s for the first tick)
+    }
+
+    Button AgentManagerContent::_MakeCard(const SessionInfo& s)
+    {
+        const bool selected = (s.id == _selectedId);
+        const auto accent = StateColor(s.state);
+
+        // Agentmaster: the card BODY (everything below the colored title band) — codex pill,
+        // working dir, model·effort, timing, autopilot badge. The title itself lives in the band.
+        auto stack = StackPanel{};
+        stack.Spacing(2);
+
+        // Agentmaster: a colored TITLE BAND across the top of the card, painted the session's
+        // working-directory color — the SAME permanent color the dir's terminal TABS wear (Rule
+        // #12 / dir-colors.json) — so a card reads its folder at a glance and clusters with its
+        // siblings across the state columns. Its TOP corners follow the card's rounding while its
+        // BOTTOM is a straight edge (square corners) where it meets the neutral body: it covers
+        // ONLY the title. The title text flips black/white for contrast (PreferDarkTextOn) so it
+        // stays legible on a LIGHT or DARK band. Falls back to the neutral card fill (white text)
+        // if the dir has no resolvable color. Persisted color first (matches the tab exactly),
+        // else the deterministic auto color — the same precedence the Sessions-page chip uses.
+        std::optional<Color> bandColor;
+        {
+            const auto hex = ::Agentmaster::GetDirColor(s.workingDir);
+            bandColor = HexToColor(hex ? *hex : ::Agentmaster::AutoDirColorHex(s.workingDir));
+        }
+        const std::wstring_view fullTitle = s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title };
+        auto titleText = Text(OneLine(fullTitle), 14, true, 1.0);
+        if (bandColor)
+        {
+            const uint8_t ink = PreferDarkTextOn(*bandColor) ? 0x10 : 0xFF; // near-black on light, white on dark
+            titleText.Foreground(Fill(0xFF, ink, ink, ink));
+        }
+        Border band;
+        band.Background(bandColor ? SolidColorBrush{ *bandColor } : Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
+        band.CornerRadius(CornerRadius{ 4, 4, 0, 0 }); // rounded top (matches the card), straight bottom edge
+        band.Padding(Thickness{ 8, 4, 8, 4 });
+        // Agentmaster (eager-init / "Activate Tab"): a DORMANT card (live but its claude hasn't started —
+        // a restored tab the user never opened) leads its title band with the half-hollow state dot, so the
+        // board flags which cards still need waking (the card has no always-on state dot otherwise — its
+        // column conveys state). A started card is unchanged (no dot). Right-click / "Activate All Tabs (N)"
+        // wakes them; the dot fills once the control starts.
+        if (IsSessionDormant(s))
+        {
+            auto bandRow = StackPanel{};
+            bandRow.Orientation(Orientation::Horizontal);
+            bandRow.Spacing(6);
+            bandRow.VerticalAlignment(VerticalAlignment::Center);
+            bandRow.Children().Append(StateDotDormant(StateColor(s.state)));
+            bandRow.Children().Append(titleText);
+            band.Child(bandRow);
+        }
+        else
+        {
+            band.Child(titleText);
+        }
+        // Agentmaster: hovering the title band (the card's "top label") shows the FULL title \x2014 the
+        // band trims with an ellipsis on a narrow card and OneLine() collapses a multi-line title for
+        // the dense card, so the complete name is otherwise unreadable here. When Claude Code has written
+        // an idle RECAP for this session (the >5-min "what we did / what's next" away_summary, mirrored
+        // onto SessionInfo.recap by the scanner), append it below the title \x2014 so a hover tells the
+        // sessions apart at a glance (the whole point of the recap), not just by name. Shown in FULL \x2014
+        // never length-capped (the tooltip wraps / grows as needed).
+        std::wstring bandTip{ fullTitle };
+        if (!s.recap.empty())
+        {
+            bandTip += L"\n\n";
+            bandTip += s.recap;
+        }
+        AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
+
+        // Agentmaster (PENDING_INPUT.md): an UNSENT-DRAFT pulse at the top of the card body — when the
+        // Fleet Observer detects the user has typed but not yet submitted a message in this session's
+        // input box (the debounced SessionInfo::pendingInput), a goldenrod "3 dots" animation rides here,
+        // mirroring the tab-strip pulse. The card rebuilds on the pending flip notify (SetPendingInput
+        // notifies on the empty<->non-empty transition), so the dots appear/clear with the draft; a hover
+        // previews the draft's first line. (Claude-only — Codex sessions aren't draft-scanned in v1.)
+        if (!s.pendingInput.empty())
+        {
+            // Contrast-pick the dots' color for the card BODY background — the always-dark Manager fill
+            // (#2E2E2E) — so they read here (this yields the LIGHT pending color; the DARK one is what
+            // shows on a LIGHT tab strip). User-configurable via the Settings cog (pendingDots*).
+            const auto dotsColor = PendingDotsColorFor(ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E),
+                                                       _appSettings.pendingDotsLightColor,
+                                                       _appSettings.pendingDotsDarkColor);
+            auto dots = BuildPendingDots(5.0, dotsColor);
+            std::wstring tip = L"Unsent draft \x2014 a message is typed into this session's input box but hasn't been sent yet.";
+            auto firstLine = s.pendingInput.substr(0, s.pendingInput.find(L'\n'));
+            if (firstLine.size() > 120)
+            {
+                firstLine = firstLine.substr(0, 120) + L"\x2026";
+            }
+            tip += L"\n\n\x201C" + firstLine + L"\x201D";
+            AgentSetTip(dots, winrt::hstring{ tip }, kCardTipDelay);
+            stack.Children().Append(dots);
+        }
+
+        // Agentmaster (Codex-launch): a teal "codex" agent pill so a MANAGED Codex card reads distinct
+        // from Claude (the implicit default — no pill, visuals unchanged).
+        if (s.kind == AgentKind::Codex)
+        {
+            auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+            cp.Opacity(0.9);
+            cp.HorizontalAlignment(HorizontalAlignment::Left);
+            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.", kCardTipDelay);
+            stack.Children().Append(cp);
+        }
+        {
+            // The working dir reads as plain gray text under the title; name it AND explain the
+            // per-directory color (a non-obvious concept) in one tip.
+            auto dirText = Text(winrt::hstring{ s.workingDir }, 11, false, 0.6);
+            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.", kCardTipDelay);
+            stack.Children().Append(dirText);
+        }
+
+        // Agentmaster (API-error triage): when this card is in the Error state, show WHY the turn died
+        // \x2014 the preserved error message + its HTTP status code (SessionInfo.errorMessage/errorStatus,
+        // set by the scanner's recon-error). So the Error column is actionable at a glance ("\x26A0 429:
+        // API Error: Server is temporarily limiting requests \x2026 Rate limited") instead of a bare
+        // crimson dot. The code is prefixed so it stays visible if the line wraps/clips; the FULL,
+        // untruncated message is in the hover tooltip. Crimson, matching the column + the state dot.
+        if (s.state == SessionState::Error && !s.errorMessage.empty())
+        {
+            std::wstring shown = s.errorMessage;
+            for (auto& c : shown)
+            {
+                if (c == L'\r' || c == L'\n' || c == L'\t')
+                {
+                    c = L' '; // a tidy card line; the tooltip keeps the original
+                }
+            }
+            if (shown.size() > 200)
+            {
+                shown.resize(200);
+                shown += L"\x2026"; // bound the card height; full text in the tip
+            }
+            std::wstring prefix = L"\x26A0 "; // ⚠
+            if (s.errorStatus > 0)
+            {
+                prefix += std::to_wstring(s.errorStatus) + L": ";
+            }
+            auto errText = Text(winrt::hstring{ prefix + shown }, 11, false, 1.0);
+            errText.Foreground(SolidColorBrush{ StateColor(SessionState::Error) });
+            errText.TextWrapping(TextWrapping::Wrap); // show the reason fully (up to the 200-char bound)
+            std::wstring tip = s.errorMessage;
+            if (s.errorStatus > 0)
+            {
+                tip = L"HTTP " + std::to_wstring(s.errorStatus) + L"\n\n" + tip;
+            }
+            AgentSetTip(errText, winrt::hstring{ tip }, kCardTipDelay);
+            stack.Children().Append(errText);
+        }
+
+        // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
+        {
+            const int64_t last = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+            if (auto t = TimingText(s.convCreatedUnixMs, last))
+            {
+                stack.Children().Append(t);
+            }
+        }
+
+        // Agentmaster: context-window occupancy as a raw TOKEN COUNT (PR feedback, Eli). A % needs a
+        // context-window denominator, and the 200K-vs-1M window can't be reliably known from the model
+        // id (Opus 4.8 doesn't advertise its 1M variant), so a % gave misleading numbers — the raw
+        // token count is unambiguous and matches what Claude Code reports for the session. This is the
+        // newest assistant turn's usage (input + cache_creation + cache_read + output ≈ what's in the
+        // session's context right now), filled by the SessionScanner. Shown once usage exists.
+        if (s.contextTokens > 0)
+        {
+            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 10, false, 0.45);
+            const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
+                             L" tokens in the session (newest turn: input + cache + output).";
+            AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
+            stack.Children().Append(ctxText);
+        }
+
+        // autopilot badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
+        // right of ⚙ N/M). The ⚙ badge shows only when there's a queue; the ⚡ shows whenever the
+        // session is still inside Claude's server-side prompt-cache window (serverCacheMinutes).
+        {
+            auto metaRow = StackPanel{};
+            metaRow.Orientation(Orientation::Horizontal);
+            metaRow.Spacing(8);
+
+            if (!s.queue.empty())
+            {
+                int sent = 0;
+                for (const auto& p : s.queue)
+                {
+                    if (p.status == PromptStatus::Sent)
+                    {
+                        ++sent;
+                    }
+                }
+                const auto badge = winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size()));
+                auto bt = Text(badge, 11, false, 0.8);
+                if (s.autopilot.mode != AutopilotMode::Off)
+                {
+                    bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
+                }
+                AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.", kCardTipDelay);
+                metaRow.Children().Append(bt);
+            }
+
+            // Agentmaster (Waiting-for-you "unread" model): a ⚡ "still server-cached" hint. Claude's
+            // server-side prompt cache stays warm for ~serverCacheMinutes after the last turn, so a
+            // follow-up within the window reuses the cached prefix (cheaper & faster). Purely cosmetic;
+            // shown only while the card is inside that window. The board's periodic refresh (a 30s
+            // timer + every registry event) clears it once the window lapses.
+            {
+                const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
+                const int64_t effLast = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
+                if (s.live && effLast > 0 && (NowMs() - effLast) < static_cast<int64_t>(cacheMin) * 60000)
+                {
+                    auto cacheGlyph = Text(L"\x26A1", 11, false, 0.95); // ⚡ warm cache
+                    cacheGlyph.Foreground(Fill(0xFF, 0xFF, 0xC1, 0x07)); // amber
+                    AgentSetTip(cacheGlyph, winrt::hstring{ L"Still server-cached \x2014 Claude's prompt cache stays warm for ~" } + winrt::to_hstring(static_cast<int>(cacheMin)) + L" min after the last turn, so a follow-up now reuses the cached context (cheaper & faster).", kCardTipDelay);
+                    metaRow.Children().Append(cacheGlyph);
+                }
+            }
+
+            if (metaRow.Children().Size() > 0)
+            {
+                stack.Children().Append(metaRow);
+            }
+        }
+
+        // Agentmaster: a hover-revealed "\x22EF" more-button in the card's top-right corner — a
+        // discoverable twin of the right-click menu (some users never right-click). Wrap the content
+        // in a Grid so the dots float over the top-right; they carry the SAME session menu as a
+        // Button.Flyout (a click opens it). Hidden at rest, faded in on the card's hover (wired on
+        // PointerEntered/Exited below; OpacityTransition animates the Opacity change — no Storyboard
+        // to manage). IsHitTestVisible(false) at rest keeps the transparent corner from eating a card
+        // click. Built per-card; cheap.
+        auto dotsBtn = Button{};
+        {
+            FontIcon moreGlyph;
+            moreGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            moreGlyph.Glyph(L"\xE712"); // "More" — three dots
+            moreGlyph.FontSize(14);
+            dotsBtn.Content(moreGlyph);
+        }
+        dotsBtn.Padding(Thickness{ 4, 0, 4, 0 });
+        dotsBtn.MinWidth(26);
+        dotsBtn.Height(20);
+        dotsBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        dotsBtn.VerticalAlignment(VerticalAlignment::Top);
+        dotsBtn.Margin(Thickness{ 0, 4, 6, 0 }); // inset from the top-right corner (the card no longer pads its content); floats over the title band, clear of the rounded corner
+        dotsBtn.Background(Fill(0x66, 0x30, 0x30, 0x30)); // faint chip so the glyph reads over the title behind it
+        dotsBtn.Foreground(Fill(0xF0, 0xFF, 0xFF, 0xFF));
+        dotsBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        dotsBtn.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+        dotsBtn.Opacity(0.0); // hidden at rest; the card's hover fades it in
+        dotsBtn.IsHitTestVisible(false); // an invisible corner must not swallow a card click
+        dotsBtn.IsTabStop(false); // a hover affordance — keep the invisible button out of the keyboard tab order (the menu is reachable via right-click / the context-menu key)
+        {
+            ScalarTransition st;
+            st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
+            dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
+        }
+        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)", kCardTipDelay);
+        dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir)); // a click opens the session menu
+        const auto dotsWeak = winrt::make_weak(dotsBtn);
+
+        // Agentmaster: the body carries the inset the card used to own (card Padding is now 0 so
+        // the colored band can bleed to the card's rounded top corners + side edges); the outer
+        // StackPanel pins the band over the body with spacing 0 so the band's straight bottom sits
+        // flush against the body.
+        auto bodyBorder = Border{};
+        bodyBorder.Padding(Thickness{ 8, 6, 8, 6 });
+        bodyBorder.Child(stack);
+
+        auto outer = StackPanel{};
+        outer.Spacing(0);
+        outer.Children().Append(band);
+        outer.Children().Append(bodyBorder);
+
+        // Agentmaster: the hover/selection outline is drawn as an OVERLAY ring, NOT on the card
+        // Button's own border. A Button's BorderThickness is part of its layout box, so toggling it
+        // on hover grows the card (every card below shifts) AND insets the title band off its rounded
+        // corners (the content shifts in) — the visible "card jumps when I mouse over it" bug. This
+        // ring is a transparent Border layered in the same Grid cell (drawn ON TOP, IsHitTestVisible
+        // false), so changing its thickness redraws the outline inward over the card edges WITHOUT
+        // resizing the card or moving anything. 0 at rest, 1 on hover, 2 when selected. Its corners
+        // match the card so the outline rounds with the edge. (As a bonus this also stops a SELECTED
+        // card from being 2px larger than its unselected siblings — both are now the same size.)
+        auto ring = Border{};
+        ring.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // matches the card rounding
+        ring.BorderBrush(SolidColorBrush{ accent });
+        ring.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 0, 0, 0, 0 });
+        ring.IsHitTestVisible(false); // a decorative overlay must not eat card clicks/hover
+        ring.HorizontalAlignment(HorizontalAlignment::Stretch);
+        ring.VerticalAlignment(VerticalAlignment::Stretch);
+        const auto ringWeak = winrt::make_weak(ring);
+
+        auto grid = Grid{};
+        grid.Children().Append(outer);
+        grid.Children().Append(ring); // over the content, under the dots
+        grid.Children().Append(dotsBtn);
+
+        // Agentmaster (Waiting-for-you countdown bar): a 1px goldenrod bar pinned INSIDE the card's
+        // bottom edge that drains from full width (100% of the waiting window) to 0 as the
+        // Waiting-for-you timeout approaches. At empty the wait has expired — a READ card then decays to
+        // Idle / Done (an unread one keeps waiting until read). Shown only for a WaitingForInput card with
+        // a finite timeout that isn't manually held unread (a Mark-Unread / "Never" card never time-decays,
+        // so it has no countdown). Overlaid in the grid OVER the hover/selected ring so it stays visible,
+        // and IsHitTestVisible(false) so the 1px strip never eats a card click. ScaleX (origin LEFT) =
+        // fraction remaining; _progressTimer drains it live in place, and each _RebuildBoard re-seeds it.
+        if (s.state == SessionState::WaitingForInput && !s.manualUnread && _appSettings.waitingForYouTimeoutMinutes > 0 && s.lastActivityUnixMs > 0)
+        {
+            const int64_t timeoutMs = static_cast<int64_t>(_appSettings.waitingForYouTimeoutMinutes) * 60000;
+            double frac = 1.0 - static_cast<double>(NowMs() - s.lastActivityUnixMs) / static_cast<double>(timeoutMs);
+            frac = frac < 0.0 ? 0.0 : (frac > 1.0 ? 1.0 : frac);
+
+            auto barScale = ScaleTransform{};
+            barScale.ScaleX(frac);
+
+            auto bar = Border{};
+            bar.Height(1);
+            bar.VerticalAlignment(VerticalAlignment::Bottom);
+            bar.HorizontalAlignment(HorizontalAlignment::Stretch);
+            bar.Background(SolidColorBrush{ StateColor(SessionState::WaitingForInput) }); // goldenrod, matching the state
+            bar.RenderTransformOrigin(Point{ 0.0f, 0.0f }); // drain from the RIGHT (the left edge stays pinned)
+            bar.RenderTransform(barScale);
+            bar.IsHitTestVisible(false); // a decorative 1px overlay must never swallow a card click
+            grid.Children().Append(bar);
+
+            _cardProgress.push_back(CardProgress{ bar, s.lastActivityUnixMs, timeoutMs });
+        }
+
+        auto card = Button{};
+        card.Content(grid);
+        card.HorizontalAlignment(HorizontalAlignment::Stretch);
+        card.HorizontalContentAlignment(HorizontalAlignment::Stretch); // let the Grid fill so the band reaches the card edges + the dots reach the true top-right corner
+        card.Padding(Thickness{ 0, 0, 0, 0 }); // band + body own their insets now, so the title band can reach the rounded top corners
+        card.Margin(Thickness{ 0, 0, 0, 6 });
+        card.CornerRadius(CornerRadius{ 4, 4, 4, 4 }); // explicit, so the title band's top corners (4,4,0,0) line up with the card rounding
+        card.Background(Fill(selected ? 0x40 : 0x20, 0x80, 0x80, 0x80));
+        // Agentmaster: the state-colored outline lives on the `ring` OVERLAY above, NOT on this
+        // Button's own border — toggling a Button BorderThickness grows the card and nudges the
+        // title band, which is the shift we're avoiding. The card's own border stays a constant 0;
+        // only the overlay ring's thickness toggles (0 rest / 1 hover / 2 selected).
+        card.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        if (!selected)
+        {
+            // Grow the overlay ring on hover (a selected card keeps its fixed 2). ringWeak is a
+            // weak_ref so the card's handler never strong-captures a child that chains back to the
+            // card (the no-self-capture rule — a strong ring ref would cycle
+            // card -> handler -> ring -> grid -> card and leak the whole tree).
+            card.PointerEntered([ringWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+                if (const auto r = ringWeak.get())
+                {
+                    r.BorderThickness(Thickness{ 1, 1, 1, 1 });
+                }
+            });
+            card.PointerExited([ringWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+                if (PointerStillWithin(sender, e))
+                {
+                    return; // a child label's exit bubbled up — the pointer never left the card; don't flicker the ring
+                }
+                if (const auto r = ringWeak.get())
+                {
+                    r.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                }
+            });
+        }
+        const auto id = s.id;
+        // Agentmaster (Linked Lenses): report hover so the page pills THIS session's terminal tab
+        // while the Manager tab is active (a live preview that follows the mouse). Capture id by
+        // value + `this` (never the Button into its own handler — a self-capture leaks the element);
+        // fires for selected cards too, so hovering the selected card keeps its tab pilled.
+        // Also fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered;
+        // fade it out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button
+        // it lives under (the codebase's no-self-capture rule). Hovering the dots (a child) keeps the
+        // card "entered" — a child within the card's bounds doesn't raise the card's PointerExited —
+        // so the dots stay up while you aim for them.
+        card.PointerEntered([this, id, dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            _ReportHover(id, true);
+            if (const auto d = dotsWeak.get())
+            {
+                d.IsHitTestVisible(true);
+                d.Opacity(0.85);
+            }
+        });
+        card.PointerExited([this, id, dotsWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerStillWithin(sender, e))
+            {
+                return; // a child label's exit bubbled up — keep the tab pill + dots up (Linked-Lenses anti-flicker)
+            }
+            _ReportHover(id, false);
+            if (const auto d = dotsWeak.get())
+            {
+                d.Opacity(0.0);
+                d.IsHitTestVisible(false);
+            }
+        });
+        // Single click = select; double click (within the OS threshold) = Activate (jump to
+        // the session's live terminal tab — the page fans out to the hosting WINDOW when the
+        // tab lives in another one), mirroring the Explorer Tree rows. A Button swallows
+        // DoubleTapped, so we time the successive clicks ourselves.
+        card.Click([this, id](const IInspectable&, const RoutedEventArgs&) {
+            // Shift+Click = Activate Tab IN PLACE (start a dormant session's claude without switching to
+            // it) — the click twin of the "Activate Tab (Shift+Click)" menu item. _activateDormantHandler
+            // is a no-op when the session isn't dormant / isn't hosted here, so this is safe on any card.
+            if (ShiftHeld())
+            {
+                if (_activateDormantHandler)
+                {
+                    _activateDormantHandler(winrt::hstring{ id });
+                }
+                return; // don't select / jump / sync scope — Shift+Click is the in-place activate gesture
+            }
+            const auto nowTick = ::GetTickCount64();
+            const bool dbl = (id == _lastCardClickId) && (nowTick - _lastCardClickTick) <= ::GetDoubleClickTime();
+            _lastCardClickId = id;
+            _lastCardClickTick = nowTick;
+            if (dbl && _activateHandler)
+            {
+                _activateHandler(winrt::hstring{ id });
+            }
+            else
+            {
+                // Agentmaster (Linked Lenses): a managed board-card single-click syncs the Explorer
+                // Tree scope to where THIS session lives — LOCAL when this window hosts it, else
+                // GLOBAL (hosted by another window). The managed twin of an External card click
+                // switching the tree to EXTERNAL (_SelectExternal), so all three regions agree on the
+                // clicked card's lens. Select FIRST (aims the Launch box, sets the selection), THEN
+                // sync the scope LAST with its own refresh: _SetTreeScope no-ops (no refresh) when the
+                // scope is already correct, and refreshes when it changes — so a re-click of the
+                // already-selected card (where _SelectSession early-outs without refreshing) still
+                // repaints if the user toggled the scope away in between. Only when the locality is
+                // knowable: with no provider (mid-init / standalone tests) leave the scope as-is,
+                // exactly like the board's own LOCAL filter (see _RebuildBoard).
+                _SelectSession(id);
+                if (_localScopeProvider)
+                {
+                    const auto localIds = _localScopeProvider();
+                    const bool isLocal = localIds.find(id) != localIds.end();
+                    _SetTreeScope(isLocal ? TreeScope::Local : TreeScope::Global, /*refresh*/ true);
+                }
+                // Agentmaster (double-click fix): _SelectSession (+ the scope sync above) just TORE
+                // DOWN and rebuilt this board — every card Button is cleared + recreated from scratch
+                // (_RebuildBoard: _boardHost.Children().Clear() then _MakeCard per session). The
+                // replacement card for THIS id is in the tree but NOT yet arranged (a fresh element
+                // has 0x0 bounds until the next async layout pass), so a second mouse-down arriving
+                // microseconds later (the user double-clicking to Activate) hit-tests to nothing and
+                // its Click never fires — a double-click on an UNSELECTED card silently did nothing
+                // ("if it's not selected it doesn't work"), while an already-selected card worked (its
+                // _SelectSession early-outs, no rebuild). Force a synchronous layout so the replacement
+                // card has real bounds NOW and the follow-up click lands on it. Only this not-selected
+                // path rebuilds, so it is the only one that needs it; cheap (a card click is rare).
+                if (_boardHost)
+                {
+                    _boardHost.UpdateLayout();
+                }
+            }
+        });
+        // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
+        // row — Rename… / Archive… / Open New Session Here — one card/row, one action set
+        // (Linked Lenses). The menu acts on the captured id/cwd, never "the selected session".
+        card.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
+        // Agentmaster: tag + register the card so _Refresh can RESTORE keyboard focus onto it after
+        // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
+        // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
+        card.Tag(winrt::box_value(winrt::hstring{ L"b:" + s.id }));
+        _boardCardsById[s.id] = card;
+        return card;
+    }
+
+    // ---- Resizable splitters ------------------------------------------------
+
+    Border AgentManagerContent::_MakeSplitter(bool vertical)
+    {
+        // A thin grab-bar in its own auto-sized grid track. The near-transparent fill keeps
+        // the whole bar hit-testable; a centered grip line + hover highlight signal it is
+        // draggable, and the OS cursor flips to the resize arrow while the pointer is over it.
+        const auto idleGrip = Fill(0x40, 0x80, 0x80, 0x80);
+        const auto hotGrip = Fill(0x90, 0xC0, 0xC0, 0xC0);
+
+        auto grip = Border{};
+        grip.Background(idleGrip);
+        grip.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
+
+        auto bar = Border{};
+        if (vertical)
+        {
+            bar.Width(10);
+            bar.VerticalAlignment(VerticalAlignment::Stretch);
+            grip.Width(2);
+            grip.HorizontalAlignment(HorizontalAlignment::Center);
+            grip.VerticalAlignment(VerticalAlignment::Stretch);
+            grip.Margin(Thickness{ 0, 10, 0, 10 });
+        }
+        else
+        {
+            bar.Height(10);
+            bar.HorizontalAlignment(HorizontalAlignment::Stretch);
+            grip.Height(2);
+            grip.VerticalAlignment(VerticalAlignment::Center);
+            grip.HorizontalAlignment(HorizontalAlignment::Stretch);
+            grip.Margin(Thickness{ 10, 0, 10, 0 });
+        }
+        bar.Background(Fill(0x01, 0x80, 0x80, 0x80)); // ~invisible, yet hit-testable
+        bar.Child(grip);
+        // Agentmaster: the grab bar is draggable but easy to miss (it is near-invisible at rest);
+        // name what it resizes so the affordance is discoverable beyond the hover cursor change.
+        AgentSetTip(bar, vertical ?
+                             winrt::hstring{ L"Drag to resize \x2014 the Explorer Tree and the Flight Plan share this divider." } :
+                             winrt::hstring{ L"Drag to resize \x2014 the Triage Board and the panels below it share this divider." });
+
+        const auto cursorType = vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth;
+
+        bar.PointerEntered([this, grip, cursorType, hotGrip](const IInspectable&, const PointerRoutedEventArgs&) {
+            ApplyCursor(cursorType);
+            grip.Background(hotGrip);
+        });
+        bar.PointerExited([this, grip, idleGrip](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            // The grip is a hit-testable child filling the bar's center band, so moving off it onto the
+            // bar's own margin area bubbles the grip's PointerExited here — a false leave that would dim
+            // the grip (drop the "draggable" highlight) while the pointer is still on the divider. Swallow
+            // those; only a real leave (pointer outside the bar) resets. (PointerStillWithin, like the cards.)
+            if (PointerStillWithin(sender, e))
+            {
+                return;
+            }
+            if (_dragKind == DragKind::None) // mid-drag the pointer may leave the thin bar — keep it hot
+            {
+                ApplyCursor(CoreCursorType::Arrow);
+                grip.Background(idleGrip);
+            }
+        });
+        bar.PointerPressed([this, vertical, grip, hotGrip](const IInspectable& s, const PointerRoutedEventArgs& e) {
+            grip.Background(hotGrip);
+            _OnSplitterPressed(s, e, vertical);
+        });
+        bar.PointerMoved([this, vertical, cursorType](const IInspectable&, const PointerRoutedEventArgs& e) {
+            if (_dragKind == DragKind::None)
+            {
+                ApplyCursor(cursorType); // re-assert the resize cursor while hovering (covers post-release)
+                return;
+            }
+            _OnSplitterMoved(e, vertical);
+        });
+        bar.PointerReleased([this, grip, idleGrip](const IInspectable& s, const PointerRoutedEventArgs& e) {
+            _OnSplitterReleased(s, e);
+            grip.Background(idleGrip);
+        });
+        bar.PointerCaptureLost([this, grip, idleGrip](const IInspectable& s, const PointerRoutedEventArgs& e) {
+            _OnSplitterReleased(s, e);
+            grip.Background(idleGrip);
+        });
+        return bar;
+    }
+
+    void AgentManagerContent::_OnSplitterPressed(const IInspectable& sender, const PointerRoutedEventArgs& e, bool vertical)
+    {
+        if (!_root)
+        {
+            return;
+        }
+        _dragKind = vertical ? DragKind::Cols : DragKind::Rows;
+        // Pin the two tracks' sizes + the pointer's root-relative coord at press; the move
+        // handler derives everything from these fixed values, so the boundary tracks the
+        // cursor 1:1 with no feedback from the live re-layout. Track ActualWidth/Height is the
+        // exact star-space allotment, so star weights set to pixels land pixel-perfect.
+        const auto pos = e.GetCurrentPoint(_root).Position();
+        if (vertical)
+        {
+            _dragOrigin = pos.X;
+            _dragSizeA = _treeCol ? _treeCol.ActualWidth() : 0.0;
+            _dragSizeB = _planCol ? _planCol.ActualWidth() : 0.0;
+        }
+        else
+        {
+            _dragOrigin = pos.Y;
+            _dragSizeA = _boardRow ? _boardRow.ActualHeight() : 0.0;
+            _dragSizeB = _bottomRow ? _bottomRow.ActualHeight() : 0.0;
+        }
+        if (const auto el = sender.try_as<UIElement>())
+        {
+            el.CapturePointer(e.Pointer());
+        }
+        ApplyCursor(vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth);
+        e.Handled(true);
+    }
+
+    void AgentManagerContent::_OnSplitterMoved(const PointerRoutedEventArgs& e, bool vertical)
+    {
+        if (_dragKind == DragKind::None || !_root)
+        {
+            return;
+        }
+        const auto pos = e.GetCurrentPoint(_root).Position();
+        const double cur = vertical ? static_cast<double>(pos.X) : static_cast<double>(pos.Y);
+        const double total = _dragSizeA + _dragSizeB;
+        constexpr double minPx = 80.0; // never let a pane shrink below this
+        if (total < (minPx * 2.0) + 1.0)
+        {
+            return; // not enough room to split sensibly — leave the panes alone
+        }
+        const double newA = std::clamp(_dragSizeA + (cur - _dragOrigin), minPx, total - minPx);
+        const double newB = total - newA;
+        const auto star = [](double v) { return GridLengthHelper::FromValueAndType(v, GridUnitType::Star); };
+        if (vertical)
+        {
+            if (_treeCol)
+            {
+                _treeCol.Width(star(newA));
+            }
+            if (_planCol)
+            {
+                _planCol.Width(star(newB));
+            }
+        }
+        else
+        {
+            if (_boardRow)
+            {
+                _boardRow.Height(star(newA));
+            }
+            if (_bottomRow)
+            {
+                _bottomRow.Height(star(newB));
+            }
+        }
+        e.Handled(true);
+    }
+
+    void AgentManagerContent::_OnSplitterReleased(const IInspectable& sender, const PointerRoutedEventArgs& e)
+    {
+        if (_dragKind == DragKind::None)
+        {
+            return; // a capture-lost echo of our own release, or a stray event — nothing to do
+        }
+        const bool vertical = (_dragKind == DragKind::Cols);
+        _dragKind = DragKind::None; // clear BEFORE releasing capture so the re-entrant CaptureLost no-ops
+
+        if (const auto el = sender.try_as<UIElement>())
+        {
+            el.ReleasePointerCaptures();
+        }
+
+        // Persist the new split as a fraction read straight from the star weights we just
+        // applied (synchronous + exact, unlike ActualWidth which trails by a layout pass).
+        // a/t is correct whether the weights are the seed FRACTIONS (sum == 1.0, e.g. a stray
+        // click with no drag) or post-drag PIXELS (sum in the hundreds); guard only t == 0.
+        const auto fraction = [](double a, double b) {
+            const double t = a + b;
+            return t > 0.0 ? std::clamp(a / t, 0.1, 0.9) : 0.4;
+        };
+        if (vertical)
+        {
+            if (_treeCol && _planCol)
+            {
+                _layout.treeFraction = fraction(_treeCol.Width().Value, _planCol.Width().Value);
+            }
+        }
+        else
+        {
+            if (_boardRow && _bottomRow)
+            {
+                _layout.boardFraction = fraction(_boardRow.Height().Value, _bottomRow.Height().Value);
+            }
+        }
+        ::Agentmaster::SaveLayout(_layout);
+        _NotifyLensChanged(); // M10: splitter sizes ride in the per-window record too
+
+        ApplyCursor(CoreCursorType::Arrow);
+        e.Handled(true);
+    }
+
+    // Agentmaster (cog "Overlay opacity" slider): position both dots from their current values + refresh the
+    // "Rest N% · Hover M%" readout. A FIXED track width makes this layout-independent, so it is correct
+    // before first layout too (seed on _ShowSettings) and on every drag move. Values are already clamped
+    // [0,1] + rest<=hover by the drag handler / seed.
+    void AgentManagerContent::_LayoutOverlayOpacitySlider()
+    {
+        const double usable = kOverlayTrackW - kOverlayThumb;
+        if (_overlayRestThumb)
+        {
+            Canvas::SetLeft(_overlayRestThumb, _overlayRestVal * usable);
+        }
+        if (_overlayHoverThumb)
+        {
+            Canvas::SetLeft(_overlayHoverThumb, _overlayHoverVal * usable);
+        }
+        if (_overlayOpacityLabel)
+        {
+            const int rp = static_cast<int>(_overlayRestVal * 100.0 + 0.5);
+            const int hp = static_cast<int>(_overlayHoverVal * 100.0 + 0.5);
+            _overlayOpacityLabel.Text(winrt::hstring{ L"Rest " + std::to_wstring(rp) + L"%   \x00B7   Hover " + std::to_wstring(hp) + L"%" });
+        }
+    }
+
+    void AgentManagerContent::_RebuildBoard(const std::vector<SessionInfo>& sessions)
+    {
+        // Agentmaster: preserve each column's vertical scroll offset across this rebuild. _RebuildBoard
+        // recreates the per-column ScrollViewers from scratch (a fresh ScrollViewer sits at offset 0),
+        // so without this a mere _Refresh — a select, a state/title change, an observer enrichment —
+        // would snap the board to the TOP, losing the card the user just clicked near the bottom of a
+        // tall column. The remembered offsets live in the DURABLE member _boardColumnOffsets (keyed by
+        // column title), not a per-rebuild local: a refresh that lands before a PRIOR rebuild's
+        // restore-on-Loaded has fired would otherwise read that rebuild's fresh, not-yet-restored
+        // ScrollViewer sitting at 0 and PERMANENTLY lose the saved scroll — the "a click jumps the scroll
+        // to top" race when a background scanner/observer refresh coincides with the user's click. Capture
+        // the live offsets now (the old scrollers are still valid), but ONLY trust a LOADED ScrollViewer:
+        // a not-yet-loaded SV (IsLoaded == false) reports a meaningless 0 — keep the remembered offset
+        // rather than clobber it; a genuinely-scrolled-to-top LOADED column records its real 0. Each new
+        // column re-applies its remembered offset on Loaded (see _MakeBoardColumn).
+        for (const auto& [key, sv] : _boardColumnScrollers)
+        {
+            if (!sv)
+            {
+                continue;
+            }
+            const auto off = sv.VerticalOffset();
+            if (off > 0.0)
+            {
+                _boardColumnOffsets[key] = off; // a real, restored scroll position
+            }
+            else if (sv.IsLoaded())
+            {
+                _boardColumnOffsets[key] = 0.0; // genuinely at the top (the SV has loaded, so 0 is real)
+            }
+            // else: a fresh / not-yet-restored SV reading 0 — preserve the remembered offset (its
+            // restore-on-Loaded is still pending), so a coincident refresh can't lose the user's scroll.
+        }
+        _boardColumnScrollers.clear(); // refilled by _MakeBoardColumn below
+
+        _boardHost.Children().Clear();
+        _boardCardsById.clear(); // refilled by _MakeCard below (focus-restore map; see _Refresh)
+        _cardProgress.clear(); // Agentmaster: refilled by _MakeCard for each Waiting-for-you countdown bar (drained by _progressTimer)
+        if (_boardScope)
+        {
+            // The label exists only WHILE a directory is scoped (paired with "Show all"); unscoped
+            // it collapses — the old "[all directories]" placeholder was display-only noise.
+            _boardScope.Text(_scopeDir.empty() ? winrt::hstring{} : (winrt::hstring{ L"[scope: " } + winrt::hstring{ _scopeDir } + L"]"));
+            _boardScope.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
+        }
+        if (_showAllBtn)
+        {
+            // "Show all" disappears when we ARE showing all (no scope) and reappears once a dir is scoped.
+            _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
+        }
+        if (_clearSelBtn)
+        {
+            // "Clear" is shown only while something is selected (managed OR external), like "Show all".
+            const bool hasSel = !_selectedId.empty() || !_selectedExternalSessionId.empty();
+            _clearSelBtn.Visibility(hasSel ? Visibility::Visible : Visibility::Collapsed);
+        }
+
+        // Agentmaster: the board's LOCAL/GLOBAL scope (the toggle next to the title — ONE state
+        // with the Explorer Tree's; External there reads GLOBAL here). LOCAL keeps only THIS
+        // window's sessions (the page's _claudeTabs via _localScopeProvider), computed once for
+        // all five columns; with no provider (mid-init / standalone tests) everything counts as
+        // local — no filter — exactly like the tree. The External (N) census column below is NOT
+        // scoped by this: externals are not managed sessions of any window.
+        const bool boardLocal = (_treeScope == TreeScope::Local) && static_cast<bool>(_localScopeProvider);
+        std::unordered_set<std::wstring> boardLocalIds;
+        if (boardLocal)
+        {
+            boardLocalIds = _localScopeProvider();
+        }
+
+        struct Col
+        {
+            winrt::hstring title;
+            SessionState state;
+        };
+        const Col cols[] = {
+            { L"Running", SessionState::Running },
+            { L"Waiting-for-you", SessionState::WaitingForInput },
+            { L"Needs-approval", SessionState::NeedsApproval },
+            { L"Error", SessionState::Error },
+            { L"Idle / Done", SessionState::Idle },
+        };
+
+        for (const auto& col : cols)
+        {
+            auto colStack = StackPanel{};
+            colStack.Spacing(0);
+
+            // collect matching sessions (respecting the LOCAL/GLOBAL scope + the directory scope)
+            std::vector<const SessionInfo*> matches;
+            for (const auto& s : sessions)
+            {
+                if (!s.live)
+                {
+                    continue; // closed sessions live in the Sessions browser, not the board (FAVORITES.md)
+                }
+                if (boardLocal && boardLocalIds.find(s.id) == boardLocalIds.end())
+                {
+                    continue; // LOCAL scope: hosted by another window
+                }
+                if (!_scopeDir.empty() && !PathEq(s.workingDir, _scopeDir))
+                {
+                    continue;
+                }
+                const bool isIdleDone = (s.state == SessionState::Idle || s.state == SessionState::Done);
+                const bool match = (col.state == SessionState::Idle) ? isIdleDone : (s.state == col.state);
+                if (match)
+                {
+                    matches.push_back(&s);
+                }
+            }
+
+            // Agentmaster: the Error column is SPECIAL — it collapses out of the board entirely when
+            // it holds no cards and reappears in place (between Needs-approval and Idle / Done) the
+            // moment a session errors. Skipping the Append below means the horizontal StackPanel
+            // (_boardHost) reserves NO width — nor its 8px inter-column spacing — for it, so an empty
+            // Error column costs zero board space; and because the columns are appended in fixed order
+            // on every rebuild, it always returns to the SAME slot when it reappears. The other four
+            // states are always shown — they are the steady-state columns of the triage model.
+            if (col.state == SessionState::Error && matches.empty())
+            {
+                continue;
+            }
+
+            // Agentmaster: order the cards WITHIN this state column by the (global, persisted) board
+            // sort — default MostActive (most-recently-active first). stable_sort so equal keys keep
+            // their prior on-screen order across refreshes. The board reuses the SAME SortKey/SortKeyLess
+            // comparator as the Explorer Tree, just driven by _appSettings.boardSort (its own setting) and
+            // applied to the flat per-column list (no directory grouping — cards are grouped by STATE here).
+            std::stable_sort(matches.begin(), matches.end(), [&](const SessionInfo* a, const SessionInfo* b) {
+                return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
+            });
+
+            auto hdr = StackPanel{};
+            hdr.Orientation(Orientation::Horizontal);
+            hdr.Spacing(6);
+            hdr.Margin(Thickness{ 0, 0, 0, 6 });
+            auto dot = Text(L"\x25CF", 12, false, 1.0);
+            dot.Foreground(SolidColorBrush{ StateColor(col.state) });
+            hdr.Children().Append(dot);
+            hdr.Children().Append(Text(col.title, 12, true, 0.9));
+            hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(matches.size())), 12, false, 0.6));
+            // Agentmaster: explain what each Triage state means — the board's five columns ARE the
+            // state model, so naming them on hover is the core learning-curve aid.
+            const wchar_t* colTip =
+                col.state == SessionState::Running        ? L"Running \x2014 the agent is actively working on a turn." :
+                col.state == SessionState::WaitingForInput ? L"Waiting-for-you \x2014 the turn is complete; the agent is waiting for your next prompt. With Autopilot on, the next queued prompt sends automatically." :
+                col.state == SessionState::NeedsApproval  ? L"Needs-approval \x2014 the agent is paused on a tool-permission prompt or a question and needs your response to continue." :
+                col.state == SessionState::Error          ? L"Error \x2014 the agent's last turn ended in an error." :
+                                                            L"Idle / Done \x2014 no turn in progress: freshly launched, just resumed, or finished.";
+            AgentSetTip(hdr, colTip);
+            // colStack holds the cards only; _MakeBoardColumn pins the header above a vertically
+            // scrolling card list so a tall column scrolls within the board height instead of
+            // clipping past the bottom edge (the board ScrollViewer's vertical scroll is disabled).
+            for (const auto* s : matches)
+            {
+                colStack.Children().Append(_MakeCard(*s));
+            }
+
+            // Preserve this column's remembered scroll offset (keyed by its title; durable across rebuilds).
+            const std::wstring colKey{ col.title };
+            const auto savedIt = _boardColumnOffsets.find(colKey);
+            const double restore = (savedIt != _boardColumnOffsets.end()) ? savedIt->second : 0.0;
+            _boardHost.Children().Append(_MakeBoardColumn(hdr, colStack, true, colKey, restore));
+        }
+
+        // Agentmaster (O6): a trailing observe-only "External (N)" group for real-WindowsTerminal
+        // claudes the observer detected (NOT our tabs — no registry session, no Flight Plan). Shown
+        // unscoped (it is a global census, not part of the managed directory tree).
+        if (!_externalClaudes.empty())
+        {
+            const auto extIt = _boardColumnOffsets.find(L"External");
+            _boardHost.Children().Append(_MakeExternalColumn(extIt != _boardColumnOffsets.end() ? extIt->second : 0.0));
+        }
+    }
+
+    // Agentmaster: assemble one Triage Board column. When `fill` is true the column fills the board
+    // height with a pinned `header` (Grid row 0) over a vertically-scrolling `cards` list (row 1),
+    // so a tall column (e.g. a large External census) scrolls within the board instead of clipping
+    // past the bottom edge — the board's own ScrollViewer (BuildUI) has vertical scroll disabled.
+    // When `fill` is false the box hugs its content (a collapsed column: header only, no scroll).
+    // Shared by the per-state columns and the External group so they stay visually in lockstep.
+    Border AgentManagerContent::_MakeBoardColumn(const UIElement& header, const UIElement& cards, bool fill, const std::wstring& columnKey, double restoreOffset)
+    {
+        auto col_border = Border{};
+        col_border.Width(220);
+        col_border.Padding(Thickness{ 8, 8, 8, 8 });
+        col_border.CornerRadius(CornerRadius{ 6, 6, 6, 6 });
+        col_border.Background(Fill(0x14, 0x80, 0x80, 0x80));
+
+        if (fill)
+        {
+            auto grid = Grid{};
+            auto rdHeader = RowDefinition{};
+            rdHeader.Height(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            grid.RowDefinitions().Append(rdHeader);
+            auto rdCards = RowDefinition{};
+            rdCards.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            grid.RowDefinitions().Append(rdCards);
+
+            Grid::SetRow(header.as<FrameworkElement>(), 0); // Grid::SetRow takes a FrameworkElement; header is typed UIElement
+            grid.Children().Append(header);
+
+            auto cardsSv = ScrollViewer{};
+            cardsSv.VerticalScrollMode(ScrollMode::Enabled);
+            cardsSv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            cardsSv.HorizontalScrollMode(ScrollMode::Disabled);
+            cardsSv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            cardsSv.Content(cards);
+            Grid::SetRow(cardsSv, 1);
+            grid.Children().Append(cardsSv);
+
+            // Agentmaster: track this column's ScrollViewer so the NEXT _RebuildBoard can capture its
+            // offset, and re-apply the offset this rebuild inherited. A fresh ScrollViewer sits at 0
+            // until restored; do it on Loaded with animation disabled (an instant restore, no visible
+            // jump). Capture only the offset — the sender IS the ScrollViewer, never self-capture the
+            // element (that leaks it via the delegate).
+            if (!columnKey.empty())
+            {
+                _boardColumnScrollers[columnKey] = cardsSv;
+                if (restoreOffset > 0.0)
+                {
+                    cardsSv.Loaded([restoreOffset](const IInspectable& sender, const RoutedEventArgs&) {
+                        if (const auto sv = sender.try_as<ScrollViewer>())
+                        {
+                            // Agentmaster (scroll-jump fix): when Loaded fires, a fresh ScrollViewer's
+                            // CONTENT extent often isn't realized yet — ScrollableHeight still reads 0 —
+                            // so a bare ChangeView(restoreOffset) CLAMPS to 0 and the column snaps to the
+                            // TOP. That is the "sometimes a click jumps the scroll to top" report:
+                            // _RebuildBoard recreates these ScrollViewers on EVERY refresh (a select, a
+                            // state/title change, an observer enrichment), and the restore raced the
+                            // content's first measure. Force the content to measure+arrange first so
+                            // ScrollableHeight reflects the real height, THEN restore — the same realize-
+                            // then-scroll recipe BringSelectedIntoView uses (UpdateLayout before the
+                            // scroll). UpdateLayout is synchronous + idempotent, so it is a no-op when the
+                            // extent is already valid.
+                            sv.UpdateLayout();
+                            sv.ChangeView(nullptr, restoreOffset, nullptr, true);
+                        }
+                    });
+                }
+            }
+
+            // Stretch so the board's horizontal StackPanel gives the column the full viewport height
+            // (the board SV's vertical scroll is off, so the cross-axis is bounded) -> the inner
+            // ScrollViewer has a real height to scroll within.
+            col_border.VerticalAlignment(VerticalAlignment::Stretch);
+            col_border.Child(grid);
+        }
+        else
+        {
+            auto stack = StackPanel{};
+            stack.Spacing(0);
+            stack.Children().Append(header);
+            stack.Children().Append(cards);
+            col_border.VerticalAlignment(VerticalAlignment::Top);
+            col_border.Child(stack);
+        }
+        return col_border;
+    }
+
+    // Agentmaster (O6): the "External (N)" board column. Observe-only — each card is a real
+    // Windows Terminal claude the observer correlated out-of-band but will never bind (Rule #9/#13).
+    Border AgentManagerContent::_MakeExternalColumn(double restoreOffset)
+    {
+        auto colStack = StackPanel{};
+        colStack.Spacing(0);
+
+        auto hdr = StackPanel{};
+        hdr.Orientation(Orientation::Horizontal);
+        hdr.Spacing(6);
+        auto dot = Text(L"\x25CF", 12, false, 1.0);
+        dot.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
+        hdr.Children().Append(dot);
+        hdr.Children().Append(Text(L"External", 12, true, 0.9));
+        hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(_externalClaudes.size())), 12, false, 0.6));
+        hdr.Children().Append(Text(_externalCollapsed ? winrt::hstring{ L"\x25B8" } : winrt::hstring{ L"\x25BE" }, 11, false, 0.6)); // ▸ / ▾
+
+        // The header doubles as the collapse toggle (a Button styled to read like the other column
+        // headers — transparent, borderless, left-aligned).
+        auto hdrBtn = Button{};
+        hdrBtn.Content(hdr);
+        hdrBtn.Background(Fill(0x00, 0, 0, 0));
+        hdrBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        hdrBtn.Padding(Thickness{ 0, 0, 0, 0 });
+        hdrBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
+        hdrBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
+        hdrBtn.Margin(Thickness{ 0, 0, 0, 6 });
+        AgentSetTip(hdrBtn, L"Agents running outside Agentmaster (observe-only census) \x2014 click to collapse or expand this column.");
+        hdrBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
+            _externalCollapsed = !_externalCollapsed;
+            _Refresh();
+        });
+        // Collapsed: just the header in a hugging box (no card list to scroll). Expanded: the header
+        // pinned above a vertically-scrolling card list (fills the board height) so a large External
+        // census scrolls within the board instead of clipping past the bottom edge. colStack holds
+        // the cards only (the header is pinned by _MakeBoardColumn, not stacked above them).
+        if (_externalCollapsed)
+        {
+            return _MakeBoardColumn(hdrBtn, colStack, false);
+        }
+
+        // Agentmaster: order the External census cards by the same (global) board sort as the managed
+        // columns, so the whole board reads in one consistent order (the rows arrive pid-sorted from the
+        // observer; re-sort a pointer copy here, leaving _externalClaudes untouched). Externals carry no
+        // run-state (MakeSortKey sets active=false), so MostActive ranks them by recency only.
+        std::vector<const ::Agentmaster::ExternalClaudeRow*> exts;
+        exts.reserve(_externalClaudes.size());
+        for (const auto& ex : _externalClaudes)
+        {
+            exts.push_back(&ex);
+        }
+        std::stable_sort(exts.begin(), exts.end(), [&](const ::Agentmaster::ExternalClaudeRow* a, const ::Agentmaster::ExternalClaudeRow* b) {
+            return SortKeyLess(_appSettings.boardSort, MakeSortKey(*a), MakeSortKey(*b));
+        });
+        for (const auto* ex : exts)
+        {
+            colStack.Children().Append(_MakeExternalCard(*ex));
+        }
+        return _MakeBoardColumn(hdrBtn, colStack, true, L"External", restoreOffset);
+    }
+
+    winrt::Windows::UI::Xaml::Controls::Button AgentManagerContent::_MakeExternalCard(const ::Agentmaster::ExternalClaudeRow& ex)
+    {
+        auto stack = StackPanel{};
+        stack.Spacing(2);
+
+        // Title: the conversation's first prompt (from the transcript), else the cwd leaf, else
+        // "claude" (recent transcripts carry no summary — verified — so the first prompt is the title).
+        std::wstring title = ex.title;
+        if (title.empty())
+        {
+            std::wstring leaf = ex.cwd;
+            const auto slash = leaf.find_last_of(L"\\/");
+            if (slash != std::wstring::npos && slash + 1 < leaf.size())
+            {
+                leaf = leaf.substr(slash + 1);
+            }
+            title = leaf.empty() ? std::wstring{ L"claude" } : leaf;
+        }
+        if (title.size() > 64)
+        {
+            title = title.substr(0, 61) + L"\x2026";
+        }
+        // Phase C2: a Codex row leads its title with a state dot (rollout-derived turn state — blue
+        // running / gold waiting / gray idle). A Claude external carries no PULL state -> plain title.
+        if (ex.kind == AgentKind::Codex)
+        {
+            auto titleRow = StackPanel{};
+            titleRow.Orientation(Orientation::Horizontal);
+            titleRow.Spacing(6);
+            titleRow.VerticalAlignment(VerticalAlignment::Center);
+            auto sd = Text(L"\x25CF", 11, false, 1.0);
+            sd.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
+            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" }, kCardTipDelay);
+            titleRow.Children().Append(sd);
+            titleRow.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
+            stack.Children().Append(titleRow);
+        }
+        else
+        {
+            stack.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
+        }
+        // Agentmaster (Phase C1): a Codex row carries a teal "codex" agent pill so a mixed External
+        // group reads at a glance (Claude is the implicit default — no pill, visuals unchanged).
+        if (ex.kind == AgentKind::Codex)
+        {
+            auto p = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
+            p.Opacity(0.9);
+            p.HorizontalAlignment(HorizontalAlignment::Left);
+            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).", kCardTipDelay);
+            stack.Children().Append(p);
+        }
+        if (!ex.cwd.empty())
+        {
+            auto cwdText = Text(winrt::hstring{ ex.cwd }, 11, false, 0.55);
+            AgentSetTip(cwdText, L"Working directory of this external session.", kCardTipDelay);
+            stack.Children().Append(cwdText);
+        }
+
+        // host (the foreign terminal) · git branch
+        {
+            // The Fleet Observer resolves a clear host label by the hosting terminal's identity
+            // (package family / image path): "Windows Terminal" (real WT) vs "Agentmaster" /
+            // "Agentmaster Dev" (another of our instances) vs a shell leaf — see ResolveExternalHostLabel.
+            std::wstring hostLabel = ex.hostLabel;
+            if (hostLabel.empty())
+            {
+                // Fallback for an older/missing reading: the parent shell leaf, else generic.
+                if (!ex.hostImage.empty())
+                {
+                    hostLabel = ex.hostImage;
+                    const auto dot = hostLabel.rfind(L".exe");
+                    if (dot != std::wstring::npos)
+                    {
+                        hostLabel = hostLabel.substr(0, dot);
+                    }
+                }
+                else
+                {
+                    hostLabel = (ex.host == RunningApp::WindowsTerminal) ? L"Windows Terminal" : L"external";
+                }
+            }
+            std::wstring hb = L"via " + hostLabel;
+            if (!ex.gitBranch.empty())
+            {
+                hb += L"  \x00B7  [" + ex.gitBranch + L"]";
+            }
+            auto hbText = Text(winrt::hstring{ hb }, 10, false, 0.5);
+            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.", kCardTipDelay);
+            stack.Children().Append(hbText);
+        }
+
+        // model · effort · bg · pid
+        {
+            std::wstring me;
+            const auto addPart = [&](const std::wstring& part) {
+                if (part.empty())
+                {
+                    return;
+                }
+                if (!me.empty())
+                {
+                    me += L"  \x00B7  ";
+                }
+                me += part;
+            };
+            addPart(ex.model);
+            addPart(ex.effort);
+            addPart(ex.sandbox); // Codex only (empty for Claude) — model · effort · sandbox · approval
+            addPart(ex.approvalMode); // Codex only
+            if (ex.background)
+            {
+                addPart(L"bg");
+            }
+            me += (me.empty() ? L"pid " : L"  \x00B7  pid ") + std::to_wstring(ex.pid);
+            auto meText = Text(winrt::hstring{ me }, 10, false, 0.5);
+            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.", kCardTipDelay);
+            stack.Children().Append(meText);
+        }
+
+        // timing (created-ago / active-for / last-activity-ago)
+        {
+            const int64_t created = ex.createdUnixMs ? ex.createdUnixMs : ex.startUnixMs;
+            if (auto t = TimingText(created, ex.lastActivityUnixMs))
+            {
+                stack.Children().Append(t);
+            }
+        }
+
+        // The whole card is clickable — left-click SELECTS this external, EXACTLY like clicking its
+        // row in the Explorer Tree (_SelectExternal): the Flight Plan shows its conversation read-only
+        // and the tree syncs to EXTERNAL with this one highlighted (Linked Lenses). Right-click opens
+        // the SAME menu the tree row uses — Adopt / Open New Session Here / Bring Window To Front. (No
+        // inline "observe"/"Adopt" affordance: the card itself is the observe action; the rest lives
+        // on the right-click menu.)
+        const bool selected = !ex.sessionId.empty() && ex.sessionId == _selectedExternalSessionId;
+
+        // Agentmaster: the same hover-revealed "\x22EF" more-button as the managed cards (_MakeCard) —
+        // here it opens the EXTERNAL menu (Adopt / Open New Session Here / Bring Window To Front). Wrap
+        // the content in a Grid so the dots float top-right; faded in on the card's hover (wired below).
+        auto dotsBtn = Button{};
+        {
+            FontIcon moreGlyph;
+            moreGlyph.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
+            moreGlyph.Glyph(L"\xE712"); // "More" — three dots
+            moreGlyph.FontSize(14);
+            dotsBtn.Content(moreGlyph);
+        }
+        dotsBtn.Padding(Thickness{ 4, 0, 4, 0 });
+        dotsBtn.MinWidth(26);
+        dotsBtn.Height(20);
+        dotsBtn.HorizontalAlignment(HorizontalAlignment::Right);
+        dotsBtn.VerticalAlignment(VerticalAlignment::Top);
+        dotsBtn.Background(Fill(0x66, 0x30, 0x30, 0x30));
+        dotsBtn.Foreground(Fill(0xF0, 0xFF, 0xFF, 0xFF));
+        dotsBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
+        dotsBtn.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+        dotsBtn.Opacity(0.0); // hidden at rest; the card's hover fades it in
+        dotsBtn.IsHitTestVisible(false); // an invisible corner must not swallow a card click
+        dotsBtn.IsTabStop(false); // a hover affordance — keep the invisible button out of the keyboard tab order (the menu is reachable via right-click / the context-menu key)
+        {
+            ScalarTransition st;
+            st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
+            dotsBtn.OpacityTransition(st);
+        }
+        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)", kCardTipDelay);
+        dotsBtn.Flyout(_MakeExternalTreeMenu(ex)); // a click opens the external menu
+        const auto dotsWeak = winrt::make_weak(dotsBtn);
+
+        auto grid = Grid{};
+        grid.Children().Append(stack);
+        grid.Children().Append(dotsBtn);
+
+        auto card = Button{};
+        card.Content(grid);
+        card.HorizontalAlignment(HorizontalAlignment::Stretch);
+        card.HorizontalContentAlignment(HorizontalAlignment::Stretch); // let the Grid fill so the dots reach the true top-right corner
+        card.Padding(Thickness{ 8, 6, 8, 6 });
+        card.Margin(Thickness{ 0, 0, 0, 6 });
+        card.Background(Fill(selected ? 0x40 : 0x18, 0x80, 0x80, 0x80));
+        card.BorderBrush(Fill(selected ? 0xFF : 0x60, 0x9E, 0x9E, 0x9E)); // gray — external / observe-only
+        card.BorderThickness(selected ? Thickness{ 2, 2, 2, 2 } : Thickness{ 1, 1, 1, 1 });
+        card.ContextFlyout(_MakeExternalTreeMenu(ex));
+        const auto exId = ex.sessionId;
+        const auto exCwd = ex.cwd;
+        const auto exTitle = title;
+        const auto exKind = ex.kind; // Phase C1: Claude vs Codex selects the read-only-plan reader
+        const auto exRollout = ex.rolloutPath; // Codex rollout path (empty for Claude)
+        card.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
+            _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
+        });
+        // Agentmaster: when the Fleet Observer has tailed an idle RECAP (away_summary) for this external
+        // — read out-of-band from the SAME transcript-tail region a managed session's recap comes from
+        // (ExternalClaudeRow.recap; see ProcessObserver) — append it below the base hint so a hover tells
+        // the external sessions apart by what they were last doing, exactly like the managed card band
+        // tooltip does with SessionInfo.recap. Shown in FULL (the tooltip wraps); no recap == base hint only.
+        std::wstring cardTip{ L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward." };
+        if (!ex.recap.empty())
+        {
+            cardTip += L"\n\nRecap: " + ex.recap;
+        }
+        AgentSetTip(card, winrt::hstring{ cardTip }, kCardTipDelay);
+        // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
+        // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
+        // under. (No _ReportHover here — an external has no managed tab for the page to pill.)
+        card.PointerEntered([dotsWeak](const IInspectable&, const PointerRoutedEventArgs&) {
+            if (const auto d = dotsWeak.get())
+            {
+                d.IsHitTestVisible(true);
+                d.Opacity(0.85);
+            }
+        });
+        card.PointerExited([dotsWeak](const IInspectable& sender, const PointerRoutedEventArgs& e) {
+            if (PointerStillWithin(sender, e))
+            {
+                return; // a child label's exit bubbled up — the pointer is still on the card; keep the dots up
+            }
+            if (const auto d = dotsWeak.get())
+            {
+                d.Opacity(0.0);
+                d.IsHitTestVisible(false);
+            }
+        });
+        return card;
+    }
+
+    void AgentManagerContent::SetExternalClaudes(std::vector<::Agentmaster::ExternalClaudeRow> rows)
+    {
+        // Diff vs the current list (the observer pushes every probe tick) so an unchanged set is a
+        // no-op — no board rebuild churn. Rows arrive pid-sorted from the observer, a stable order.
+        bool same = (rows.size() == _externalClaudes.size());
+        for (size_t i = 0; same && i < rows.size(); ++i)
+        {
+            const auto& a = rows[i];
+            const auto& b = _externalClaudes[i];
+            // Include the enrichment fields (id/title/host/branch) so a row that gains its title or
+            // host a tick after first sight triggers one refresh. Timestamps are deliberately NOT
+            // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
+            if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
+                a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid ||
+                a.kind != b.kind || a.sandbox != b.sandbox || a.approvalMode != b.approvalMode || // Phase C1: a codex row gaining its model/sandbox a tick after first sight triggers one refresh
+                a.codexState != b.codexState || // Phase C2: a Codex turn flip (running<->waiting) repaints the row's state dot
+                a.recap != b.recap) // Agentmaster: a fresh idle recap (away_summary) the observer tailed repaints the card/tree tooltip + read-only plan
+            {
+                same = false;
+            }
+        }
+        if (same)
+        {
+            return;
+        }
+        _externalClaudes = std::move(rows);
+        _Refresh();
+    }
+
+}

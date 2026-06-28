@@ -330,6 +330,11 @@
     </ClCompile>
     <!-- Agentmaster -->
     <ClCompile Include="AgentManagerContent.cpp" />
+    <ClCompile Include="AgentManagerContent.Board.cpp" />
+    <ClCompile Include="AgentManagerContent.Tree.cpp" />
+    <ClCompile Include="AgentManagerContent.Settings.cpp" />
+    <ClCompile Include="AgentManagerContent.FlightPlan.cpp" />
+    <ClCompile Include="AgentManagerContent.Launch.cpp" />
     <ClCompile Include="AgentTabOverlay.cpp" />
     <!-- The engine is plain C++ (no WinRT): opt out of the WinRT precompiled header. -->
     <ClCompile Include="AgentMaster\SessionRegistry.cpp">
