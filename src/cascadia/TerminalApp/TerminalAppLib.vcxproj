@@ -336,6 +336,8 @@
     <ClCompile Include="AgentManagerContent.FlightPlan.cpp" />
     <ClCompile Include="AgentManagerContent.Launch.cpp" />
     <ClCompile Include="AgentTabOverlay.cpp" />
+    <ClCompile Include="AgentTabOverlay.Actions.cpp" />
+    <ClCompile Include="AgentTabOverlay.Summary.cpp" />
     <!-- The engine is plain C++ (no WinRT): opt out of the WinRT precompiled header. -->
     <ClCompile Include="AgentMaster\SessionRegistry.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
