@@ -222,9 +222,19 @@ never invisible (see *Dots color* in §3):
 
 - **Tab strip** — a tiny cluster **below** the status dot (`TabHeaderControl.xaml` `HeaderPendingDots`,
   bound to `TerminalTabStatus::AgentPendingVisible`, painted via `AgentPendingBrush`). Driven by
-  `TerminalPage::_SetTabPending` straight from the UI-lane scan (the hosting window holds the tab), which
-  also contrast-picks the dots' color from the tab's per-dir color. The pulse storyboard is
-  **started/stopped on the flag**, so idle tabs animate nothing.
+  `TerminalPage::_SetTabPending` straight from the UI-lane scan (the hosting window holds the tab). The
+  pulse storyboard is **started/stopped on the flag**, so idle tabs animate nothing.
+  **Contrast follows the SELECTED state, not just the dir color.** WT renders a colored tab very
+  differently by state (`Tab::_ApplyTabColorOnUIThread`): a **selected/focused** tab shows the full per-dir
+  color, but a **deselected/unfocused** tab shows it at **30% opacity over the dark tab-row color** — far
+  darker — and recomputes the tab's own black/white text for each. So the dots can't contrast against the
+  full color alone: on an unfocused colored tab they'd wash out. `TerminalPage::_PendingDotsColorForTab`
+  reads `Tab::CurrentEffectiveTabBackground(perDirColor)` — the actual header background *as rendered right
+  now* (selected ⇒ full color over row; deselected ⇒ 30% over row; mirrors `_ApplyTabColorOnUIThread`
+  exactly, using the real `_tabRowColor`) — and feeds it to the same `PendingDotsColorFor` luminance pick.
+  The per-tick scan does this when showing the dots, and `_RefreshPendingDotsContrast` (called from
+  `_OnTabSelectionChanged`, no buffer read) re-picks immediately on a tab switch so the now-deselected and
+  now-selected pending tabs flip light/dark without the ~2s scan lag.
   **Layout — a reserved band, not the old fixed wrap.** `HeaderAgentStatusDotWrap` is a 2-row Grid: an
   18px **glyph cell** (flash ring · favorite star · status dot · dormant half-dot · crown — geometry
   unchanged) over a **fixed 4px band** that holds the dots (total 22px, within the tab's content height so

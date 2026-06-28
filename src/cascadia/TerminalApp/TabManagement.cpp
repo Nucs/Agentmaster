@@ -1500,6 +1500,11 @@ namespace winrt::TerminalApp::implementation
                 // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
                 // tab is always considered visited, so stop any red flash on the now-focused tab.
                 _VisitTabClearFlash(tab);
+                // Agentmaster (PENDING_INPUT.md): a colored tab's effective background shifts on
+                // selection (WT draws a deselected tab at 30% over the tab row, much darker), so the
+                // now-deselected and now-selected pending tabs must re-pick their "3 dots" light/dark
+                // color immediately instead of waiting for the next ~2s scan tick. Cheap (no buffer read).
+                _RefreshPendingDotsContrast();
                 // Agentmaster (Linked Lenses): follow the switch into the Manager lens — select this
                 // tab's managed session so returning to the Manager tab shows the session you were just
                 // in. No-op for the Manager tab, a non-session tab, or before startup completes.

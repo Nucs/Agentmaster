@@ -20,6 +20,7 @@
 #include "AgentManagerContent.h" // push the External census / RefreshNow
 #include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
+#include "Tab.h" // get_self<Tab> -> CurrentEffectiveTabBackground (pending-dots contrast)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
@@ -313,6 +314,59 @@ namespace winrt::TerminalApp::implementation
             status.AgentPendingVisible(on);
         }
         CATCH_LOG();
+    }
+
+    // Agentmaster (PENDING_INPUT.md): the contrast-picked "3 dots" color for a tab — the LIGHT pending
+    // color on a dark effective background, the DARK one on a light one, so the dots are never invisible.
+    // The background is the tab's CURRENT effective header background (Tab::CurrentEffectiveTabBackground),
+    // which accounts for the selected/unselected light/dark shift (a deselected colored tab renders at 30%
+    // over the dark tab row); the session's per-dir color (Rule #12, the same precedence the board card
+    // uses) is the source/fallback. Shared by the per-tick scan and the focus-change refresh so both pick
+    // the same way. UI thread.
+    winrt::Windows::UI::Color TerminalPage::_PendingDotsColorForTab(const TerminalApp::Tab& tab, const std::wstring& workingDir)
+    {
+        const auto dirHex = ::Agentmaster::GetDirColor(workingDir);
+        const std::wstring hex = dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(workingDir);
+        const auto dirColor = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
+        const auto bg = winrt::get_self<Tab>(tab)->CurrentEffectiveTabBackground(dirColor);
+        return PendingDotsColorFor(bg, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor);
+    }
+
+    // Agentmaster (PENDING_INPUT.md): re-pick the "3 dots" color for every tab currently showing a draft,
+    // WITHOUT a buffer re-read. A tab's effective background — and so the dots' best-contrast color — SHIFTS
+    // when it goes selected<->unselected (WT renders a deselected colored tab at 30% over the dark tab row),
+    // so on a tab switch the now-deselected and now-selected pending tabs must re-contrast immediately
+    // instead of waiting for the next ~2s scan tick. Called from _OnTabSelectionChanged. Light: only
+    // iterates tabs whose session already holds a non-empty pendingInput (those actually showing the dots).
+    void TerminalPage::_RefreshPendingDotsContrast()
+    {
+        if (!_sessionRegistry || _claudeTabs.empty())
+        {
+            return;
+        }
+        std::vector<std::wstring> ids;
+        ids.reserve(_claudeTabs.size());
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            ids.push_back(id);
+        }
+        for (const auto& id : ids)
+        {
+            const auto info = _sessionRegistry->Get(id);
+            if (!info || info->kind != ::Agentmaster::AgentKind::Claude || info->pendingInput.empty())
+            {
+                continue; // only tabs actually showing the dots need re-contrast
+            }
+            TerminalApp::Tab hostTab{ nullptr };
+            if (const auto it = _claudeTabs.find(id); it != _claudeTabs.end())
+            {
+                hostTab = it->second.get();
+            }
+            if (hostTab)
+            {
+                _SetTabPending(hostTab, true, _PendingDotsColorForTab(hostTab, info->workingDir));
+            }
+        }
     }
 
     // Agentmaster (FAVORITES.md §5a): show/hide the FAVORITE marker over a tab's status dot — the CROWN
@@ -2590,19 +2644,17 @@ namespace winrt::TerminalApp::implementation
             const bool hasPending = !effectiveDraft.empty();
             if (hostTab)
             {
-                // Contrast-pick the "3 dots" color from THIS session's per-directory tab color (Rule #12,
-                // the same color its tab header wears), so the dots are never invisible against a bright/
-                // light tab: the LIGHT pending color on a dark tab, the DARK one on a light tab. The per-dir
-                // color is the persisted pick if any, else the deterministic auto color (the card uses the
-                // same precedence); a dir with no resolvable color falls back to the dark Manager fill ->
-                // the LIGHT dots. Only computed when actually showing (cleared tabs don't need it).
+                // Contrast-pick the "3 dots" color from the tab's CURRENT effective header background
+                // (_PendingDotsColorForTab), so the dots are never invisible: the LIGHT pending color on a
+                // dark background, the DARK one on a light one. The background is the per-dir tab color
+                // (Rule #12) AS RENDERED — which SHIFTS with the selected/unselected state (an unfocused
+                // colored tab draws at 30% over the dark tab row, much darker than its full color), so the
+                // dots re-pick on a focus change too (also refreshed eagerly from _OnTabSelectionChanged).
+                // Only computed when actually showing (cleared tabs don't need it).
                 std::optional<winrt::Windows::UI::Color> dotsColor;
                 if (hasPending)
                 {
-                    const auto dirHex = ::Agentmaster::GetDirColor(info->workingDir);
-                    const std::wstring hex = dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(info->workingDir);
-                    const auto bg = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
-                    dotsColor = PendingDotsColorFor(bg, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor);
+                    dotsColor = _PendingDotsColorForTab(hostTab, info->workingDir);
                 }
                 _SetTabPending(hostTab, hasPending, dotsColor);
             }

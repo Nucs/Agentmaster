@@ -3039,6 +3039,30 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (PENDING_INPUT.md): the tab's CURRENT effective header background. WT renders a colored
+    // tab very differently by state (_ApplyTabColorOnUIThread): a SELECTED tab uses the full color, a
+    // DESELECTED tab uses it at 30% opacity layered over the tab-row color (much darker), and it picks a
+    // contrasting text color for each. The pending-dots indicator reads THIS so its light/dark pick follows
+    // the same selected/unselected light/dark shift the tab itself has — otherwise the dots, always
+    // contrasted against the full color, wash out on an unfocused (deselected) colored tab.
+    winrt::Windows::UI::Color Tab::CurrentEffectiveTabBackground(const winrt::Windows::UI::Color& fallbackSource)
+    {
+        ASSERT_UI_THREAD();
+
+        const auto tabColor = GetTabColor();
+        const til::color source{ tabColor.has_value() ? til::color{ tabColor.value() } : til::color{ fallbackSource } };
+
+        const auto item = TabViewItem();
+        const bool selected = item && item.IsSelected();
+
+        // Mirror _ApplyTabColorOnUIThread: selected => the full color; deselected => the color at 30%
+        // (alpha 77) opacity. Both layered over the tab-row color, so the result is the actual lightness
+        // drawn behind the header (a transparent deselected tint reveals the darker row beneath).
+        const til::color effective = selected ? source.layer_over(_tabRowColor) :
+                                                source.with_alpha(77).layer_over(_tabRowColor);
+        return effective;
+    }
+
     // Method Description:
     // - Applies the given color to the background of this tab's TabViewItem.
     // - Sets the tab foreground color depending on the luminance of

@@ -84,6 +84,15 @@ namespace winrt::TerminalApp::implementation
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
         void SetRuntimeTabColor(const winrt::Windows::UI::Color& color);
         void ResetRuntimeTabColor();
+        // Agentmaster (PENDING_INPUT.md): the tab's CURRENT effective header background — what actually
+        // renders behind the header content right now, which SHIFTS with the selected/unselected state.
+        // Mirrors _ApplyTabColorOnUIThread exactly: a SELECTED tab shows the full tab color; a DESELECTED
+        // tab shows it at 30% opacity, both layered over the tab-row color (so the effective lightness
+        // matches what's drawn). With no custom tab color it falls back to `fallbackSource` (the session's
+        // per-dir color) over the row. The pending "3 dots" contrast-pick reads this so the dots stay
+        // legible whether the tab is focused or not (an unfocused colored tab is far darker than its full
+        // color). UI thread only; read-only.
+        winrt::Windows::UI::Color CurrentEffectiveTabBackground(const winrt::Windows::UI::Color& fallbackSource);
 
         void UpdateZoom(std::shared_ptr<Pane> newFocus);
         void ToggleZoom();
