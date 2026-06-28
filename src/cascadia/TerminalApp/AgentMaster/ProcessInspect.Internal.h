@@ -1,6 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
+// ======================================================================================
+// Agentmaster ProcessInspect -- Fleet Observer primitives (6 partial files)
+// Out-of-band process/transcript inspection (OBSERVER.md): PEB reads, transcript resolution +
+// content, Codex rollout, the session-end.js summary analyzer, and window activation. Plain C++
+// (no WinRT/PCH). Split from the former 4950-line ProcessInspect.cpp by section; all share the
+// ProcessInspect.Internal.h primitives. The public API is declared in ProcessInspect.h.
+//
+// Partial files in this group (★ marks THIS file):
+//   ProcessInspect.cpp             - CORE: process enumeration (Toolhelp) + PEB facts read/classify
+// ★ ProcessInspect.Internal.h      - shared file-local primitives: x64 PEB reads, string/file helpers, transcript globbing (anonymous namespace, a per-TU copy)
+//   ProcessInspect.Transcript.cpp  - Claude transcript resolution + timing/title/prompts + git plumbing + Codex (C1) facts/rollout
+//   ProcessInspect.Content.cpp     - conversation-text read + the session-end.js summary analyzer + Codex (C2) rollout-tail state
+//   ProcessInspect.Window.cpp      - Bring Window To Front (its own UIA-helper anon ns + the public window/tab-pick API)
+//   ProcessInspect.Summary.cpp     - the shared summary-box renderers (the per-tab overlay + the Sessions page)
+// ======================================================================================
+//
 // Agentmaster: ProcessInspect file-local low-level primitives (PEB / RTL_USER_PROCESS_PARAMETERS
 // reads, Toolhelp-free string/file helpers, transcript globbing). Factored out of ProcessInspect.cpp
 // so the by-section partial TUs (ProcessInspect.{cpp,Transcript,Content,Window,Summary}.cpp) all share

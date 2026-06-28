@@ -1,6 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
+// ======================================================================================
+// Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
+// former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
+//
+// Partial files in this group (★ marks THIS file):
+//   AgentManagerContent.cpp             - CORE: ctor/dtor, the Set* wiring, IPaneContent, the per-window lens, _BuildLayout, _Refresh
+//   AgentManagerContent.Internal.h      - the ~48 shared file-local helpers: StateColor/Pill/StateDot/Text/Fill + path/sort utils (anonymous namespace, a per-TU copy)
+//   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
+//   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
+//   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
+// ★ AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
+// ======================================================================================
+//
 // Agentmaster Manager tab: the FLIGHT PLAN -- plan rebuild + selection sync (managed + external read-only), prompt compose/history, the Autopilot toggle, the Summary tab, and plan templates. Partial TU of AgentManagerContent.cpp.
 #include "pch.h"
 #include "AgentManagerContent.h"

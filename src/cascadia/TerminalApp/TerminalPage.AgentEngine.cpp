@@ -1,6 +1,23 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
+// ======================================================================================
+// Agentmaster TerminalPage implementation (7 partial files)
+// The TerminalPage-side Agentmaster glue -- engine wiring + session lifecycle + observer +
+// window-record + the Sessions browser -- connecting the Manager engine to WT's TerminalPage.
+// Same class (TerminalPage, declared in TerminalPage.h), split across same-class partial TUs (the
+// upstream TabManagement.cpp pattern) so TerminalPage.cpp stays close to upstream.
+//
+// Partial files in this group (★ marks THIS file):
+// ★ TerminalPage.AgentEngine.cpp               - ~TerminalPage, _InitAgentmasterEngine (consume the process-wide SharedEngine), the Manager tab, _WireAgentManagerContent
+//   TerminalPage.AgentSessions.cpp             - spawn/launch/restore/close/adopt for Claude + Codex; tab-title sync; smart naming + per-dir tab color
+//   TerminalPage.AgentObserver.cpp             - the per-tab overlay/badge bind/reconcile/liveness (incl. managed-Codex) + the Fleet Observer UI lane (_ObserverProbe)
+//   TerminalPage.AgentWindowRecord.cpp         - M10 per-window record capture/flush/restore + reopen saved windows (Claude + Codex tab refs)
+//   TerminalPage.AgentSessionsPage.cpp         - the Sessions browser (SESSIONS.md): shell + list (search / _RenderSessionsTable / detail + off-thread summary)
+//   TerminalPage.AgentSessionsPageActions.cpp  - the Sessions browser row actions: resume/fork, selection nav, hide/unhide/reset, favorite, rename, row filter, overlay registry
+//   TerminalPage.AgentSessionsPage.Internal.h  - the Sessions-browser Sess* file-local helpers shared by the two SessionsPage TUs above (anonymous namespace)
+// ======================================================================================
+//
 // Agentmaster — TerminalPage's engine wiring + Manager-tab hosting (M9 / M6; see
 // doc/agentmaster/DESIGN.md and IMPLEMENTATION.md): consume the ONE process-wide
 // SharedEngine (registry / bridge / scheduler / scanner / observer), claim this

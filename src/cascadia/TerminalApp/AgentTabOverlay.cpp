@@ -1,6 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
+// ======================================================================================
+// Agentmaster per-tab link badge / overlay (4 partial files)
+// The top-right terminal HUD on every classified tab + its pencil-toggled summary panel
+// (TAB_OVERLAY.md). ONE class (AgentTabOverlay) split from the former 3221-line .cpp; all four
+// share AgentTabOverlay.Internal.h.
+//
+// Partial files in this group (★ marks THIS file):
+// ★ AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autopilot
+//   AgentTabOverlay.Internal.h   - shared file-local helpers: StateColor/Glyph/Label, the summary-box renderers, time formatting, launch-CLI + clipboard (anonymous namespace, a per-TU copy)
+//   AgentTabOverlay.Actions.cpp  - the hover action row: the folder (Open Path) button, the copy menu, and the shared CopySessionField action
+//   AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/previous, JUMP, copy-summary
+// ======================================================================================
+//
 // Agentmaster per-tab link badge / overlay (TAB_OVERLAY.md). CORE: ctor/dtor, Initialize/_Detach, ShowActivity (observe badge), _Refresh (the linked badge), hover/expand, opacities, Autopilot cycle. The action row + the summary panel live in sibling AgentTabOverlay.{Actions,Summary}.cpp TUs.
 #include "pch.h"
 #include "AgentTabOverlay.h"
