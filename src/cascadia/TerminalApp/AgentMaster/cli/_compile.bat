@@ -11,7 +11,7 @@ REM /D AGENTMASTER_DEV: this standalone build represents the DEV CLI — when ru
 REM outside any app (no inherited AGENTMASTER_PROFILE), it defaults to ~/.agentmaster-dev.
 cl /std:c++20 /EHsc /nologo /W3 /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
    ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ^
-   ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ^
+   ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ^
    ole32.lib user32.lib oleaut32.lib
 if errorlevel 1 (
   echo [error] compile failed
