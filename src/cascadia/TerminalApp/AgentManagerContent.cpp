@@ -6588,16 +6588,23 @@ namespace winrt::TerminalApp::implementation
         auto aboutPanel = StackPanel{};
         aboutPanel.Spacing(10);
 
-        // The tab strip + the content host (all six scrollers stacked in ONE Grid cell, overlapping; only
-        // the active one is Visible so there is no layout conflict). _settingsTabButtons / _settingsTabScrolls
-        // are parallel-indexed for _SwitchSettingsTab.
+        // The tab strip + the single content scroller. _settingsTabButtons / _settingsTabPanels are
+        // parallel-indexed for _SwitchSettingsTab, which swaps panel i into _settingsScroll.
         _settingsTabButtons.clear();
-        _settingsTabScrolls.clear();
+        _settingsTabPanels.clear();
         auto tabStrip = StackPanel{};
         tabStrip.Orientation(Orientation::Horizontal);
         tabStrip.Spacing(0);
         tabStrip.Margin(Thickness{ 0, 2, 0, 0 });
-        auto contentHost = Grid{};
+        // ONE scroller whose Content is SWAPPED to the selected tab's panel (the ContentPresenter-swap
+        // idiom the user asked for — not six overlapping ScrollViewers). _SwitchSettingsTab sets
+        // _settingsScroll.Content(panel), which cleanly detaches the previous panel (single parent) and
+        // re-projects the new one — so a panel is never double-parented and never renders as an empty
+        // ContentPresenter. Content is only ever set in _SwitchSettingsTab, AFTER the panels are populated.
+        _settingsScroll = ScrollViewer{};
+        _settingsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        _settingsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        _settingsScroll.MaxHeight(470);
         const auto addSettingsTab = [&](const wchar_t* label, const wchar_t* tip, const StackPanel& body) {
             const int index = static_cast<int>(_settingsTabButtons.size());
             auto btn = Button{};
@@ -6609,36 +6616,12 @@ namespace winrt::TerminalApp::implementation
             btn.Click([this, index](const IInspectable&, const RoutedEventArgs&) { _SwitchSettingsTab(index); });
             tabStrip.Children().Append(btn);
             _settingsTabButtons.push_back(btn);
-
-            auto scroll = ScrollViewer{};
-            scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-            scroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-            scroll.MaxHeight(470);
-            scroll.Content(body);
-            scroll.Visibility(index == 0 ? Visibility::Visible : Visibility::Collapsed);
-            contentHost.Children().Append(scroll);
-            _settingsTabScrolls.push_back(scroll);
+            _settingsTabPanels.push_back(body); // _SwitchSettingsTab swaps the selected panel into _settingsScroll
         };
-        addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
-        addSettingsTab(L"Autopilot", L"Autopilot defaults stamped onto every new session \x2014 the starting mode and its backstops.", autopilotPanel);
-        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
-        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
-        addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
-        addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
-
-        outer.Children().Append(tabStrip);
-        // A thin divider under the strip so the active tab reads as connected to its content below.
-        {
-            auto sep = Border{};
-            sep.Height(1);
-            sep.Background(Fill(0x30, 0xFF, 0xFF, 0xFF));
-            sep.Margin(Thickness{ 0, 0, 0, 2 });
-            outer.Children().Append(sep);
-        }
-        outer.Children().Append(contentHost);
 
         // The sections below run top-to-bottom; `panel` starts on About (the version + updates block leads
-        // it) and is reseated at each group boundary.
+        // it) and is reseated at each group boundary. The tab strip + scroller are assembled below, after
+        // the panels are filled (so the first _SwitchSettingsTab swaps in a populated panel).
         auto panel = aboutPanel;
 
         // Agentmaster: build identity line at the very top — the release VERSION (read live from the
@@ -7324,6 +7307,28 @@ namespace winrt::TerminalApp::implementation
         });
         panel.Children().Append(_setUninstallBtn);
 
+        // Every panel is now POPULATED — register the tabs (button + panel pairs) and slot the strip +
+        // the single content scroller into `outer` between the title and the footer
+        // (title -> tabs -> divider -> content -> Save/Cancel). _SwitchSettingsTab(0) below swaps the
+        // Sessions panel into the scroller.
+        addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
+        addSettingsTab(L"Autopilot", L"Autopilot defaults stamped onto every new session \x2014 the starting mode and its backstops.", autopilotPanel);
+        addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
+        addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
+        addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
+        addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
+
+        outer.Children().Append(tabStrip);
+        // A thin divider under the strip so the active tab reads as connected to its content below.
+        {
+            auto sep = Border{};
+            sep.Height(1);
+            sep.Background(Fill(0x30, 0xFF, 0xFF, 0xFF));
+            sep.Margin(Thickness{ 0, 0, 0, 2 });
+            outer.Children().Append(sep);
+        }
+        outer.Children().Append(_settingsScroll);
+
         // Cancel / Save — a FIXED footer OUTSIDE the tabs (always reachable regardless of the active tab;
         // each tab scrolls on its own, so the footer never scrolls away).
         auto buttons = StackPanel{};
@@ -7351,21 +7356,20 @@ namespace winrt::TerminalApp::implementation
         _SwitchSettingsTab(0); // seed the strip styling + show the first tab
     }
 
-    // Agentmaster: show one cog tab's content scroller + restyle the strip (the _SwitchEnvTab idiom —
-    // active = blue fill + white text, inactive = transparent + gray). Index out of range is a no-op.
+    // Agentmaster: swap the selected tab's (already-populated) panel into the single scroller + restyle the
+    // strip (the _SwitchEnvTab idiom — active = blue fill + white text, inactive = transparent + gray).
+    // Setting Content detaches the previous panel cleanly (a UIElement has one parent), so nothing is ever
+    // double-parented and no panel renders as an empty ContentPresenter. Index out of range is a no-op.
     void AgentManagerContent::_SwitchSettingsTab(int index)
     {
-        if (index < 0 || index >= static_cast<int>(_settingsTabScrolls.size()))
+        if (index < 0 || index >= static_cast<int>(_settingsTabPanels.size()) || !_settingsScroll)
         {
             return;
         }
         _settingsActiveTab = index;
-        for (size_t i = 0; i < _settingsTabScrolls.size(); ++i)
+        if (_settingsTabPanels[index])
         {
-            if (_settingsTabScrolls[i])
-            {
-                _settingsTabScrolls[i].Visibility(static_cast<int>(i) == index ? Visibility::Visible : Visibility::Collapsed);
-            }
+            _settingsScroll.Content(_settingsTabPanels[index]); // the ContentPresenter swap
         }
         for (size_t i = 0; i < _settingsTabButtons.size(); ++i)
         {

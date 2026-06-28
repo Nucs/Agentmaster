@@ -425,7 +425,7 @@ namespace winrt::TerminalApp::implementation
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
         // Agentmaster: the cog's TOP TAB strip — Sessions · Autopilot · Behavior · Tabs & Overlay ·
         // Claude · About. A button-tab swaps one scrollable panel per group (the _SwitchEnvTab idiom;
-        // NOT a Pivot — themes unreliably under XAML Islands). _settingsTabButtons / _settingsTabScrolls
+        // NOT a Pivot — themes unreliably under XAML Islands). _settingsTabButtons / _settingsTabPanels
         // are parallel-indexed; Save/Cancel is a fixed footer outside the tabs.
         void _SwitchSettingsTab(int index); // show one tab's content scroller + restyle the strip
 
@@ -728,11 +728,13 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
         // ---- Settings overlay (the cog dialog) ----
         winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
-        // Agentmaster: the cog's TOP TABS. The strip buttons + their content scrollers are parallel-indexed
-        // (button i <-> scroller i); _SwitchSettingsTab shows scroller i and restyles the strip. Each
-        // section in _BuildSettingsOverlay appends into one of the scrollers' panels.
+        // Agentmaster: the cog's TOP TABS. The strip buttons + their content panels are parallel-indexed
+        // (button i <-> panel i); _SwitchSettingsTab SWAPS panel i into the single _settingsScroll (the
+        // ContentPresenter-swap idiom) and restyles the strip. Each section in _BuildSettingsOverlay fills
+        // one of these panels.
         std::vector<winrt::Windows::UI::Xaml::Controls::Button> _settingsTabButtons;
-        std::vector<winrt::Windows::UI::Xaml::Controls::ScrollViewer> _settingsTabScrolls; // one per tab; only the active one is Visible
+        std::vector<winrt::Windows::UI::Xaml::Controls::StackPanel> _settingsTabPanels; // one content panel per tab
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _settingsScroll{ nullptr }; // single scroller; its Content is the active tab's panel
         int _settingsActiveTab{ 0 }; // index of the showing tab (reset to 0 on each _ShowSettings)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setModel{ nullptr };
