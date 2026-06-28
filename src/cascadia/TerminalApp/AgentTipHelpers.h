@@ -130,7 +130,23 @@ namespace winrt::TerminalApp::implementation
                     {
                         self.Stop(); // one-shot: open once, then idle until the next hover
                     }
-                    t.IsOpen(true);
+                    // The open timer can OUTLIVE its owner: a board / table / sort-header REBUILD
+                    // (Children().Clear()) detaches the element while this one-shot is still pending,
+                    // and the element's Unloaded — which Stop()s the timer (below) — is raised
+                    // ASYNCHRONOUSLY, so the timer can tick FIRST, on a now-detached element. Calling
+                    // IsOpen(true) on a ToolTip whose owner is gone is an "owner-less tooltip XAML can't
+                    // place" → a stowed fail-fast (0xC000027B) in Windows.UI.Xaml.dll — the exact crash
+                    // from rapidly clicking a sort header that rebuilds the very header row it sits on
+                    // (hover arms the timer, the click rebuilds before it fires). The idempotent re-call
+                    // guard above only covers the STACKED-handlers case; this covers the detached-owner
+                    // case. A tooltip that can't open is moot now — swallow it; never crash over a tip.
+                    try
+                    {
+                        t.IsOpen(true);
+                    }
+                    catch (...)
+                    {
+                    }
                 });
                 *timer = dt;
             }
