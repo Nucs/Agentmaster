@@ -3019,6 +3019,12 @@ namespace winrt::TerminalApp::implementation
         {
             return; // a codex not yet reconciled (no rollout uuid) — nothing to analyze
         }
+        // Agentmaster (never-messaged fork): a Claude fork has NO transcript of its own until its first
+        // message, so its summary panel would be empty (the "fork's summary toggle does nothing" report).
+        // Pass its fork-parent id so _LoadSummaryAsync can fall back to the parent's transcript — the fork
+        // inherits it verbatim until it diverges. Codex isn't covered (its source-rollout uuid isn't
+        // persisted; the analyze id is the rollout uuid, not s.id), so pass empty there.
+        std::wstring forkParent = codex ? std::wstring{} : s.forkParentId;
         std::wstring cwd = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
         std::wstring liveGlyph{ StateGlyph(s.state) };
         std::wstring liveLabel{ StateLabel(s.state) };
@@ -3026,10 +3032,10 @@ namespace winrt::TerminalApp::implementation
         // Cross-file lineage memo: reuse the already-resolved parents when they were computed for THIS
         // conv id (parentage is immutable); a rebind to a new id recomputes. Avoids a per-write dir scan.
         const bool lineageCached = (_summaryLineageId == convId);
-        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowPrevious, lineageCached, _summaryLineage);
+        _LoadSummaryAsync(_summaryPath, codex, convId, std::move(forkParent), std::move(cwd), std::move(liveGlyph), std::move(liveLabel), _summaryMtime, _summaryWrapNewlines, _summaryTruncate, _summaryShowPrevious, lineageCached, _summaryLineage);
     }
 
-    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage)
+    winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
         co_await winrt::resume_background();
@@ -3037,10 +3043,32 @@ namespace winrt::TerminalApp::implementation
         // Resolve the transcript path once (cached in _summaryPath across reloads). Claude: a shallow
         // glob by conversation id; Codex: a recursive date-sharded glob by rollout uuid (worth caching).
         std::wstring path = transcriptPath;
+        bool cachePath = true; // write the resolved path back into _summaryPath for the next reload
         if (path.empty())
         {
-            path = codex ? ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), sessionId)
-                         : ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+            if (codex)
+            {
+                path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), sessionId);
+            }
+            else
+            {
+                path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+                // Agentmaster (never-messaged fork): a fork has NO transcript of its own until its first
+                // message — Claude creates <forkId>.jsonl only then, copying the parent's lines verbatim.
+                // Until then its conversation IS the parent's, so summarize the PARENT's transcript instead
+                // of showing an empty panel (the "fork's summary toggle does nothing" report). Do NOT cache
+                // this path: re-resolve the fork's OWN id each reload so the panel switches to its own
+                // transcript the instant it appears (the mtime gate still skips a quiet re-resolve cheaply).
+                if (path.empty() && !forkParentId.empty())
+                {
+                    const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(forkParentId);
+                    if (!parentPath.empty())
+                    {
+                        path = parentPath;
+                        cachePath = false;
+                    }
+                }
+            }
         }
 
         std::wstring text;
@@ -3118,7 +3146,7 @@ namespace winrt::TerminalApp::implementation
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
         if (auto disp = _dispatcher)
         {
-            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious, sessionId, lineage, lineageComputed]() {
+            disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, cachePath, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious, sessionId, lineage, lineageComputed]() {
                 if (auto self = weak.get())
                 {
                     if (timesComputed)
@@ -3151,7 +3179,12 @@ namespace winrt::TerminalApp::implementation
                         self->_summaryLastUserMs = lastUserMs;
                         self->_summaryLastActivityMs = lastActivityMs;
                     }
-                    self->_summaryPath = path; // cache the resolved path for the next reload
+                    if (cachePath)
+                    {
+                        self->_summaryPath = path; // cache the resolved path for the next reload
+                    }
+                    // else: a never-messaged fork rendered from its PARENT's transcript — leave _summaryPath
+                    // empty so the next reload re-resolves the fork's OWN id and switches the instant it exists.
                     self->_summaryMtime = mtime;
                     self->_summaryLoading = false;
                     self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
