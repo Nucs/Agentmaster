@@ -32,6 +32,7 @@
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionScanner.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (FAVORITES.md): IsSessionFavorite for the tab context-menu Favorite item
+#include "AgentMaster/StartupTiming.h" // Agentmaster: [startup] phase timing for _OnFirstLayout
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -734,23 +735,44 @@ namespace winrt::TerminalApp::implementation
         {
             _startupState = StartupState::InStartup;
 
+            // Agentmaster ([startup] timing): bracket each first-layout phase + a TOTAL so a slow
+            // launch is attributable to a specific step. _swatch is reused per phase; _flStart times
+            // the whole block. Every line lands in <profile>\hooks.log — grep '[startup]' for the
+            // launch timeline (each line also carries +Nms-since-process-start, so the exe-side
+            // WindowEmperor lines and these dll-side lines read as one timeline).
+            const auto _flStart = ::GetTickCount64();
+            auto _swatch = _flStart;
+
             // Agentmaster: stand up the session engine (registry + hooks pipe) first, so the
-            // Manager tab — and any session it spawns — has it available.
+            // Manager tab — and any session it spawns — has it available. (On the FIRST window this
+            // also runs the process-once SharedEngine wiring — the ResolveClaudeExe/Codex/pwsh PATH
+            // scans + file materializations, themselves [startup]-timed inside Engine.cpp.)
             _InitAgentmasterEngine();
+            // _windowId is known now — tag every later phase with it so multi-window reopens don't
+            // blur together in the shared log.
+            const std::wstring _wid = L" [win " + ::Agentmaster::ShortId(_windowId) + L"]";
+            ::Agentmaster::Startup::Phase(L"engine-init" + _wid, ::GetTickCount64() - _swatch);
 
             // Agentmaster: the Manager tab is always present and leftmost (tab 0),
             // created before startup terminal tabs so they append after it.
+            _swatch = ::GetTickCount64();
             _OpenAgentManagerTab();
+            ::Agentmaster::Startup::Phase(L"manager-tab" + _wid, ::GetTickCount64() - _swatch);
 
             // Agentmaster: re-launch persisted sessions (claude --resume) so the app reopens
-            // to the exact state it was closed in (DESIGN §13).
+            // to the exact state it was closed in (DESIGN §13). (fire_and_forget, but its load runs
+            // synchronously to co_return under the restore barrier, so this times the fleet load.)
+            _swatch = ::GetTickCount64();
             _RestoreClaudeSessions();
+            ::Agentmaster::Startup::Phase(L"restore-sessions" + _wid, ::GetTickCount64() - _swatch);
 
             // Agentmaster (M10 window-grouped restore): if THIS window was reopened from a saved record,
             // re-home its persisted tabs — resume each Claude session + replay each shell tab, in order —
             // so closing and reopening a window brings its whole workspace back, not just geometry + lens.
             // No-op for a fresh window (nothing claimed). Runs after the fleet load so the sessions exist.
+            _swatch = ::GetTickCount64();
             _RestoreWindowTabs();
+            ::Agentmaster::Startup::Phase(L"restore-window-tabs" + _wid, ::GetTickCount64() - _swatch);
 
             if (_startupConnection)
             {
@@ -769,7 +791,9 @@ namespace winrt::TerminalApp::implementation
                 ProcessStartupActions(std::move(_startupActions));
             }
 
+            _swatch = ::GetTickCount64();
             _CompleteInitialization();
+            ::Agentmaster::Startup::Phase(L"complete-init" + _wid, ::GetTickCount64() - _swatch);
 
             // Agentmaster: the tab strip is laid out now — bind the nav buttons to the TabView's
             // horizontal scroller and set their initial (hidden) state. Later scroll/resize/tab/selection
@@ -783,6 +807,10 @@ namespace winrt::TerminalApp::implementation
             // package never shows it), so this is invisible in shipped builds. One bubbling
             // PointerMoved handler over the whole window tree (Root) — see AgentDevTooltipNames.h.
             InstallDevTooltipNames(Root());
+
+            // Agentmaster ([startup] timing): the whole first-layout cost for THIS window. Compare to
+            // the +Nms anchor to see how much launch time is window setup vs. the exe-side prelude.
+            ::Agentmaster::Startup::Phase(L"first-layout TOTAL" + _wid, ::GetTickCount64() - _flStart);
         }
     }
 

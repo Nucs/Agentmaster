@@ -36,6 +36,9 @@
 // Agentmaster: the in-app updater — the startup GitHub-release check + prompt, run BEFORE the
 // window-restoration prompt below. Header-only + pure Win32 for the same reason as ProfileBootstrap.
 #include "../TerminalApp/AgentMaster/Updater.h"
+// Agentmaster: [startup] phase timing — see where the (slow) launch spends its time. Header-only,
+// shares one process-creation clock with the dll-side TerminalPage/Engine lines in the same hooks.log.
+#include "../TerminalApp/AgentMaster/StartupTiming.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
@@ -434,6 +437,14 @@ void WindowEmperor::_setupAumid(const std::wstring& aumid)
 
 void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
 {
+    // Agentmaster ([startup] timing): time the exe-side launch prelude. We cannot WRITE a log line
+    // until the profile is resolved (Rule #15 — resolving the active <profile> dir early just to find
+    // the log file would cache it prematurely), so measure with stopwatches here and emit the lines
+    // just after EnsureProfileResolvedAtStartup below. _amStart anchors the whole prelude; _amSw is
+    // reused per later phase. (grep '[startup]' <profile>\hooks.log for the full launch timeline.)
+    const auto _amStart = ::GetTickCount64();
+    auto _amSw = _amStart;
+
     // When running without package identity, set an explicit AppUserModelID so
     // that toast notifications (and other shell features like taskbar grouping)
     // work correctly. We include...
@@ -548,6 +559,12 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         }
     }
 
+    // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the
+    // exe prelude (single-instance handoff + profile resolution) since process creation; the dll-side
+    // _OnFirstLayout lines (later, larger +Nms) continue the same timeline in the same hooks.log.
+    ::Agentmaster::Startup::Phase(L"exe prelude (single-instance + profile-resolve)", ::GetTickCount64() - _amStart);
+    _amSw = ::GetTickCount64();
+
     // Agentmaster (updater; Updater.h): with the profile resolved, check GitHub for a newer release
     // and prompt (Update now / Postpone 3·7·30 days / Skip this version / Not now) BEFORE the window-
     // restoration prompt further down — the requested ordering ("ask before the windows restoration
@@ -565,14 +582,19 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             __assume(false);
         }
     }
+    ::Agentmaster::Startup::Phase(L"update-check", ::GetTickCount64() - _amSw);
 
+    _amSw = ::GetTickCount64();
     _app = winrt::TerminalApp::App{};
     _app.Logic().ReloadSettings();
+    ::Agentmaster::Startup::Phase(L"App{} + ReloadSettings (WT settings parse)", ::GetTickCount64() - _amSw);
 
+    _amSw = ::GetTickCount64();
     _createMessageWindow(windowClassName.c_str());
     _setupGlobalHotkeys();
     _checkWindowsForNotificationIcon();
     _setupSessionPersistence(_app.Logic().Settings().GlobalSettings().ShouldUsePersistedLayout());
+    ::Agentmaster::Startup::Phase(L"window-setup (msg-window/hotkeys/notify-icon/persistence)", ::GetTickCount64() - _amSw);
 
     // When the settings change, we'll want to update our global hotkeys
     // and our notification icon based on the new settings.
@@ -621,6 +643,7 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         // trailing `_windows.empty()` guard below suppresses the extra default window on a bare launch.
         if (_app.Logic().Settings().GlobalSettings().FirstWindowPreference() == FirstWindowPreference::DefaultProfile)
         {
+            const auto _amScanSw = ::GetTickCount64();
             std::vector<uint32_t> reopenIdx;
             try
             {
@@ -704,6 +727,7 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
                 }
             }
             CATCH_LOG();
+            ::Agentmaster::Startup::Phase(L"reopen-scan (windows/*.json + open-windows manifest)", ::GetTickCount64() - _amScanSw);
 
             // Reopening MULTIPLE windows warrants a heads-up (the user asked for a "prompted warning to
             // decide"); a lone window restores silently (it's just remembering where it was). On "No" we
@@ -768,6 +792,12 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         });
         TerminalConnection::ConptyConnection::StartInboundListener();
     }
+
+    // Agentmaster ([startup] timing): the exe-side prelude is done; from here the message pump lays
+    // out each window, where the dll-side _OnFirstLayout [startup] lines take over. This +Nms anchor
+    // is the exe→dll handoff point — compare it to a window's "first-layout TOTAL" to split launch
+    // time into exe-prelude (incl. window dispatch) vs. per-window setup.
+    ::Agentmaster::Startup::Mark(L"exe prelude done — entering message loop");
 
     // Main message loop. It pumps all windows.
     bool loggedInteraction = false;

@@ -15,6 +15,7 @@
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
 #include "SessionStore.h"
+#include "StartupTiming.h" // [startup] phase timing — find where launch spends its time
 
 #include <windows.h>
 
@@ -30,6 +31,10 @@ namespace Agentmaster
         // window threads call SharedEngine() concurrently. Heap-allocated and never deleted on
         // purpose (process lifetime) — see Engine.h.
         static Engine* const g = []() -> Engine* {
+            // [startup] timing: this process-once wiring runs on the FIRST window's _InitAgentmaster-
+            // Engine, so its cost lands inside that window's "engine-init" phase. Break it down here —
+            // the Resolve* PATH scans + the file materializations are the usual launch-time hogs.
+            Startup::ScopedPhase _wiring{ L"shared-engine wiring (process-once)" };
             auto* e = new Engine{};
             e->registry = std::make_shared<SessionRegistry>();
 
@@ -39,6 +44,7 @@ namespace Agentmaster
             // AssignDirAutoColor), and the migration upgrades a v1 dir-colors.json (which mixed user
             // picks with the old colliding auto colors) to v2 = user picks only. Process-global state.
             {
+                Startup::ScopedPhase _t{ L"  seed+migrate dir-colors" };
                 std::random_device rd;
                 SeedDirColors((static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd()));
                 MigrateDirColorsToV2IfNeeded();
@@ -49,8 +55,11 @@ namespace Agentmaster
             // 36500 is written into the user's ~/.claude/settings.json (so Claude never purges global
             // history). Both are marker-gated, so a user who edits or deletes either keeps it gone.
             // Process-once, before any window seeds the cog or a session spawns.
-            SeedSessionEnvDefaults();
-            SeedClaudeCleanupPeriodDaysIfNeeded();
+            {
+                Startup::ScopedPhase _t{ L"  seed session/claude defaults" };
+                SeedSessionEnvDefaults();
+                SeedClaudeCleanupPeriodDaysIfNeeded();
+            }
 
             // Observer: record every state change to a log file (and the debugger). Runs on a
             // bridge thread, so it must touch no XAML.
@@ -176,30 +185,40 @@ namespace Agentmaster
 
                 WriteBridgeDiscovery(pipeName);
                 const auto stateDir = AgentmasterStateDir();
+                uint64_t _ts = ::GetTickCount64();
                 const auto hookFiles = MaterializeSharedHookFiles(stateDir, LoadAppSettings());
+                Startup::Phase(L"  materialize hook files", ::GetTickCount64() - _ts);
                 // Resolve the NATIVE claude.exe NOW (native-exe-only policy), while PATH is still
                 // un-mutated so a claude.cmd on PATH is followed to its REAL binary, not the adoption
                 // shim we author next. Honors the Settings override; ALWAYS a real claude.exe (or
                 // empty). Empty => "Claude not detected" and the Manager gates every claude
                 // interaction. Launched by full path (CreateProcessW appends only ".exe", ignores
                 // PATHEXT — a bare `claude` would miss the npm install, the 0x80070002 bug).
+                _ts = ::GetTickCount64();
                 e->claudeExePath = ResolveClaudeExe(LoadAppSettings().claudeExePath);
+                Startup::Phase(L"  ResolveClaudeExe (PATH scan)", ::GetTickCount64() - _ts);
                 AppendStateLog(L"hooks.log", L"[engine] claude.exe: " + (e->claudeExePath.empty() ? std::wstring{ L"<not detected>" } : e->claudeExePath) + L"\n");
                 // Resolve the codex launcher too (managed-Codex support), while PATH is still pristine.
                 // Same CreateProcessW/PATHEXT hazard as claude (a bare `codex` misses an npm codex.cmd ->
                 // 0x80070002), but Codex is NOT native-exe-only — the observer finds codex.exe as a
                 // descendant — so a .cmd/.bat launcher is accepted (BuildCodexCommandline runs it via
                 // `cmd /c`). Empty => not found; the spawn falls back to the bare token and surfaces the error.
+                _ts = ::GetTickCount64();
                 e->codexExePath = ResolveCodexLauncher();
+                Startup::Phase(L"  ResolveCodexLauncher (PATH scan)", ::GetTickCount64() - _ts);
                 AppendStateLog(L"hooks.log", L"[engine] codex: " + (e->codexExePath.empty() ? std::wstring{ L"<not detected>" } : e->codexExePath) + L"\n");
                 // Resolve the PowerShell host that wraps every managed agent session (so quitting the
                 // agent drops to a live pwsh prompt at the cwd — BuildPwshHostedCommandline). pwsh.exe
                 // (PS7) on PATH, else Windows PowerShell; empty => the spawn falls back to the bare token.
+                _ts = ::GetTickCount64();
                 e->pwshExePath = ResolvePwshLauncher();
+                Startup::Phase(L"  ResolvePwshLauncher (PATH scan)", ::GetTickCount64() - _ts);
                 AppendStateLog(L"hooks.log", L"[engine] pwsh host: " + (e->pwshExePath.empty() ? std::wstring{ L"<not detected>" } : e->pwshExePath) + L"\n");
                 // Author the adoption shim BEFORE touching PATH (so ResolveRealClaude inside it never
                 // finds our own shim), then prepend the shim dir for hand-typed `+`-tab self-wiring.
+                _ts = ::GetTickCount64();
                 const auto shimDir = MaterializeClaudeShim(stateDir, hookFiles.first);
+                Startup::Phase(L"  materialize claude shim", ::GetTickCount64() - _ts);
                 ::SetEnvironmentVariableW(L"CCMGR_HOOK_PIPE", pipeName.c_str());
                 if (!shimDir.empty())
                 {
@@ -226,8 +245,11 @@ namespace Agentmaster
             // correlates + feeds the registry — the always-correct floor beneath the lossy hook push.
             // Constructed AFTER the try block so it gets the real e->amSession (set at the top of the
             // try, before the throwing shim I/O). Never torn down (process lifetime), like the rest.
-            e->observer = std::make_shared<ProcessObserver>(e->registry, e->amSession);
-            e->observer->Start();
+            {
+                Startup::ScopedPhase _t{ L"  observer start (S-lane)" };
+                e->observer = std::make_shared<ProcessObserver>(e->registry, e->amSession);
+                e->observer->Start();
+            }
 
             AppendStateLog(L"hooks.log", L"[engine] bridge listening on " + pipeName + L"\n");
             return e;
