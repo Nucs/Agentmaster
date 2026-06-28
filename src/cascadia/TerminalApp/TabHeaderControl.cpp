@@ -195,7 +195,6 @@ namespace winrt::TerminalApp::implementation
         if (status == _pendingHookedStatus)
         {
             _UpdatePendingAnimation();
-            _UpdatePendingDotsOffset();
             return; // already hooked to this exact status (or both null)
         }
         _pendingStatusRevoker.revoke(); // detach the previous status (no-op if none)
@@ -210,18 +209,10 @@ namespace winrt::TerminalApp::implementation
                     {
                         self->_UpdatePendingAnimation();
                     }
-                    // The STAR favorite marker collides with the pending dots (it's drawn behind the
-                    // dot, points radiating down); a Crown<->Star switch (cog) flips this flag, so
-                    // re-evaluate the dots' vertical offset on it too.
-                    if (n.empty() || n == L"AgentFavoriteStarVisible")
-                    {
-                        self->_UpdatePendingDotsOffset();
-                    }
                 }
             });
         }
         _UpdatePendingAnimation();
-        _UpdatePendingDotsOffset();
     }
 
     // Agentmaster (PENDING_INPUT.md): run the 3-dot pulse iff this tab currently has a pending draft.
@@ -243,26 +234,6 @@ namespace winrt::TerminalApp::implementation
             {
                 _pendingDotsStoryboard.Stop();
             }
-        }
-        catch (...)
-        {
-        }
-    }
-
-    // Agentmaster (PENDING_INPUT.md): nudge the unsent-draft "3 dots" 3px LOWER when the STAR favorite
-    // marker is active (favorited tab + the cog's Star icon — AgentFavoriteStarVisible). The star is
-    // drawn BEHIND the status dot and its lower points radiate DOWN over the dots' band, so they'd
-    // collide; the CROWN sits at the dot's NW and never does, so the offset is star-only. A pure render
-    // transform (no layout reflow); re-applied whenever the favorite marker (or TabStatus) changes.
-    void TabHeaderControl::_UpdatePendingDotsOffset()
-    {
-        const auto status = TabStatus();
-        const bool star = status && status.AgentFavoriteStarVisible();
-        try
-        {
-            winrt::Windows::UI::Xaml::Media::TranslateTransform tt;
-            tt.Y(star ? 3.0 : 0.0);
-            HeaderPendingDots().RenderTransform(tt);
         }
         catch (...)
         {

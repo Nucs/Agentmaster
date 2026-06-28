@@ -220,11 +220,21 @@ The detection NOTIFIES reliably on both transitions (§3 "Reliability"), so the 
 Its color is a **user-configurable LIGHT/DARK pair** auto-picked by the background luminance so the dots are
 never invisible (see *Dots color* in §3):
 
-- **Tab strip** — a tiny cluster at the bottom of the status-dot wrap, **below** the dot
-  (`TabHeaderControl.xaml` `HeaderPendingDots`, bound to `TerminalTabStatus::AgentPendingVisible`, painted
-  via `AgentPendingBrush`). Driven by `TerminalPage::_SetTabPending` straight from the UI-lane scan (the
-  hosting window holds the tab), which also contrast-picks the dots' color from the tab's per-dir color.
-  The pulse storyboard is **started/stopped on the flag**, so idle tabs animate nothing.
+- **Tab strip** — a tiny cluster **below** the status dot (`TabHeaderControl.xaml` `HeaderPendingDots`,
+  bound to `TerminalTabStatus::AgentPendingVisible`, painted via `AgentPendingBrush`). Driven by
+  `TerminalPage::_SetTabPending` straight from the UI-lane scan (the hosting window holds the tab), which
+  also contrast-picks the dots' color from the tab's per-dir color. The pulse storyboard is
+  **started/stopped on the flag**, so idle tabs animate nothing.
+  **Layout — a reserved band, not the old fixed wrap.** `HeaderAgentStatusDotWrap` is a 2-row Grid: an
+  18px **glyph cell** (flash ring · favorite star · status dot · dormant half-dot · crown — geometry
+  unchanged) over a **fixed 4px band** that holds the dots (total 22px, within the tab's content height so
+  the strip doesn't grow). It used to be one fixed 18px Grid, which left **no room below the dot** — the
+  17px favorite **star** fills the cell, so a draft's dots overflowed the wrap and the tab header **clipped
+  them** (the worse, the lower they were pushed to clear the star). Reserving the band as a **fixed** row
+  (not `Auto`) means the glyph cell never reflows when a draft appears/clears, so the **status dot stays
+  stationary** and the dots just fade in/out in their band. Because the band sits strictly **below** the
+  glyph cell, the dots clear the star's lower points with **no per-favorite vertical offset** (an earlier
+  +3px star-only nudge is gone — it was what pushed the dots out of the wrap to begin with).
 - **Triage-Board cards** — a pulse at the top of the card body (`AgentManagerContent::_MakeCard` →
   `BuildPendingDots`, passed the picked color), driven by the flip `_notify` rebuilding the board, so it
   works **cross-window** (a draft in window A shows on window B's GLOBAL board). The storyboard begins on

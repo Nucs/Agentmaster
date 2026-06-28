@@ -107,7 +107,7 @@
               The wrap Grid is the CONTAINER that bounds every status glyph — anything overflowing it is
               CLIPPED by the tab header (an earlier 10px wrap let the 13px ring overflow and the header
               clipped it to a truncated SQUARE; the edge-clipping the dot comment above warns about), so
-              each glyph must FIT INSIDE the wrap. It is sized 18px — large enough to contain the 17px
+              each glyph must FIT INSIDE the glyph row. That row is sized 18px — large enough to contain the 17px
               FAVORITE STAR (FAVORITES.md §5a), comfortably bigger than the 10px dot + the 13px ring. To
               avoid widening the tab strip, the wrap's RIGHT margin is trimmed to 0 so the total
               horizontal footprint (wrap + margin) is unchanged from the prior 14px-wrap + 4px-margin
@@ -121,9 +121,27 @@
               black stroke + status fill never change. IsHitTestVisible=False: decorative.  -->
         <Grid x:Name="HeaderAgentStatusDotWrap"
               Width="18"
-              Height="18"
               Margin="0,1,0,-1"
               VerticalAlignment="Center">
+            <!--  Agentmaster (PENDING_INPUT.md): the wrap is a 2-ROW grid — an 18px GLYPH cell over a
+                  4px PENDING-dots band (total 22px). Previously a single fixed 18px Grid that clipped
+                  anything below the dot: the favorite STAR fills the 18px cell (its lower points reach
+                  wrap-y ~16.5), leaving NO room beneath it, so the pulsing draft "3 dots" overflowed the
+                  18px wrap and the tab header clipped them. The band is a FIXED row (not Auto) so the
+                  glyph cell never reflows when a draft appears/clears — the status dot stays STATIONARY,
+                  the dots merely fade in/out within their reserved band. This is the "stretch the
+                  indicator's height so the dots aren't truncated, while the dot stays put" fix. Because
+                  the band sits strictly BELOW the glyph cell, the dots clear the star's lower points with
+                  no per-favorite vertical offset (the old +3px STAR nudge is gone). 22px stays within the
+                  tab's content height, so the strip doesn't grow.  -->
+            <Grid.RowDefinitions>
+                <!--  Row 0: the status GLYPHS — the children below omit Grid.Row and default here, so
+                      the flash ring / favorite star / status dot / dormant half-dot+ring / favorite crown
+                      all live in this 18px cell exactly as before (geometry unchanged).  -->
+                <RowDefinition Height="18" />
+                <!--  Row 1: the reserved 4px band for the pending "3 dots".  -->
+                <RowDefinition Height="4" />
+            </Grid.RowDefinitions>
             <!--  Agentmaster: the flash ring's Fill is the user-configurable "status flashing color"
                   (Settings cog -> AppSettings.flashRingColor), bound to TabStatus.AgentFlashRingBrush
                   (its alpha channel = the ring opacity). Was a hardcoded Fill="Red"; the brush defaults
@@ -251,13 +269,15 @@
                   TerminalPage::_SetTabPending). The staggered opacity pulse storyboard is BUILT and
                   started/stopped in code-behind (TabHeaderControl.cpp _UpdatePendingAnimation), so it
                   runs ONLY while this tab is actually pending — an idle fleet never holds the compositor
-                  at 60fps. The dots are 2.5px on a 1.5px gap (~10px), centred, sitting in the ~4px band
-                  below the 10px dot inside the 18px wrap. IsHitTestVisible=False: decorative.  -->
+                  at 60fps. The dots are 2.5px on a 1.5px gap (~10px), centred in the reserved Row 1 band
+                  (strictly BELOW the 18px glyph cell, so they clear the dot AND the favorite star's lower
+                  points without any per-favorite offset). IsHitTestVisible=False: decorative.  -->
             <StackPanel x:Name="HeaderPendingDots"
+                        Grid.Row="1"
                         Orientation="Horizontal"
                         Spacing="1.5"
                         HorizontalAlignment="Center"
-                        VerticalAlignment="Bottom"
+                        VerticalAlignment="Center"
                         IsHitTestVisible="False"
                         Visibility="{x:Bind TabStatus.AgentPendingVisible, Mode=OneWay}">
                 <Ellipse x:Name="HeaderPendingDot0"
