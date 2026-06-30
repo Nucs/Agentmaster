@@ -567,7 +567,17 @@ coordinate gap: it linearizes the live ConPTY buffer (soft-wrap-continuous, like
 own haystack), then fuzzily matches each prompt with **whitespace tolerance**, **needle backoff**, a
 **partial "match as much as possible" quality score**, and an **order-preserving greedy assignment** so a
 **duplicate prompt** maps to the right on-screen occurrence (out-of-order falls back to the most-recent,
-flagged). The chain: overlay ▸ button → `TerminalPage::_JumpToPromptInSession` (resolves the tab's control
+flagged). A **prompt-marker preference** (`AnchorOptions::promptMarkers` = `kClaudePromptMarkers` ❯/›,
+injected by `ControlCore`) binds a match to the **real user-prompt render** — Claude prefixes a SENT prompt's
+line with the glyph — rather than an assistant **echo** of the same words; it is a *preference* with a legacy
+soft-fallback + a no-marker-present self-disable, so it **never regresses** (SUMMARY_JUMP.md §5). A
+**collision second pass** then de-conflicts the cases where several prompts resolve onto **one render** — a
+**prefix** (`deploy dev please` ⊂ `deploy dev please, fast mode`), a **suffix/substring** (`deploy dev`
+inside `Please deploy dev`), or a longer prompt that **backed off** onto a shorter sibling's render — by
+**region containment + a quality tiebreak**: the prompt the render actually shows owns it, the others **dim**
+(exact-duplicate texts are kept; the "(4) and (5) both jump to (5)" report; SUMMARY_JUMP.md §5b). Covered by
+`TestPromptAnchorCollisions` (20 checks) + the marker / edge-case / real-corpus suites
+(`tests/tests_summary_anchor.cpp`). The chain: overlay ▸ button → `TerminalPage::_JumpToPromptInSession` (resolves the tab's control
 live) → `TermControl::JumpToConversationPrompt` → `ControlCore::ResolveConversationPromptRow` (read-only:
 linearize a recent window → `ResolvePromptAnchors` → offset→row) → center via the scrollbar. **Performance
 (benchmarked in the 1005-check engine harness):** steady state **0** (resolves only on click); per-click
@@ -1500,9 +1510,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `PromptAnchor.h` (header-only, pure — the **summary-panel JUMP resolver**, SUMMARY_JUMP.md:
     given the linearized terminal buffer + the conversation's prompts, resolves each to a buffer
     location with whitespace-tolerant fuzzy matching, backoff, partial "match as much as possible"
-    scoring, and an order-preserving greedy assignment for duplicate prompts; header-only so both
-    the overlay path AND `ControlCore` (a separate DLL) share it. Unit-tested + benchmarked in
-    `tests/`),
+    scoring, an order-preserving greedy assignment for duplicate prompts, a **prompt-marker (❯/›)
+    preference** that binds a match to the real user-prompt render over an echo (§5, with a legacy
+    soft-fallback so it never regresses), and a **collision second pass** that de-conflicts prefix /
+    suffix / substring / backoff overlaps on one render by region containment + a quality tiebreak
+    (§5b); header-only so both the overlay path AND `ControlCore` (a separate DLL) share it.
+    Unit-tested + benchmarked in `tests/`),
     `PendingInput.h` (header-only, pure — the **pending-input detector**, PENDING_INPUT.md: given the
     bottom region of the terminal buffer, finds Claude's input box by the bottom-most `❯` line wrapped
     by `─` rules and extracts the UNSENT draft; the `PromptAnchor.h` idiom — pure-ASCII source, header-
