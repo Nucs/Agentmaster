@@ -73,11 +73,12 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (tab tooltip): a rich, session-aware hover tooltip pushed by TerminalPage — its
         // registry observer (a managed Claude/Codex session) or its activity probe (an unmanaged tab).
-        // While set it REPLACES the default title+keychord tooltip: a `stateLine` colored to match the
-        // tab-strip status dot, a bold `title`, and a plain multi-line `body` (lines separated by '\n').
-        // Idempotent — an identical push is a no-op (no XAML rebuild), so the per-change + per-tick
-        // callers are cheap. ClearAgentToolTip reverts to the default tooltip. UI thread only.
-        void SetAgentToolTip(winrt::hstring stateLine, const winrt::Windows::UI::Color& stateColor, winrt::hstring title, winrt::hstring body);
+        // TerminalPage builds the WHOLE tooltip body as a XAML element (a dark, summary-style card — see
+        // TerminalPage::_UpdateTabAgentToolTip) since it owns the SessionInfo + registry; the Tab just
+        // HOSTS it. While set it REPLACES the default title+keychord tooltip. `signature` is a cheap
+        // content fingerprint: an identical push is a no-op (no re-host), so the per-change + per-tick
+        // callers stay cheap. ClearAgentToolTip reverts to the default tooltip. UI thread only.
+        void SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature);
         void ClearAgentToolTip();
 
         std::optional<winrt::Windows::UI::Color> GetTabColor();
@@ -235,13 +236,12 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _keyChord{};
 
         // Agentmaster (tab tooltip): the rich, session-aware tooltip pushed by TerminalPage (see
-        // SetAgentToolTip). While _agentToolTipActive, _UpdateToolTip renders these instead of the
-        // default title+keychord; _agentToolTipSig guards rebuilding identical content each tick.
+        // SetAgentToolTip). TerminalPage builds the whole body element (a dark, summary-style card); the
+        // Tab only HOSTS it on the reused ToolTip. While _agentToolTipActive, _UpdateToolTip hosts
+        // _agentToolTipContent instead of the default title+keychord; _agentToolTipSig (a content
+        // fingerprint from the page) skips re-hosting identical content each tick.
         bool _agentToolTipActive{ false };
-        winrt::hstring _agentToolTipStateLine{};
-        winrt::Windows::UI::Color _agentToolTipStateColor{};
-        winrt::hstring _agentToolTipTitle{};
-        winrt::hstring _agentToolTipBody{};
+        winrt::Windows::UI::Xaml::UIElement _agentToolTipContent{ nullptr };
         winrt::hstring _agentToolTipSig{};
         // The ONE reused ToolTip object (swap its Content; re-creating + re-SetToolTip on each refresh
         // would replace — and so visibly close — an open tip while hovered). Configured once: pinned Dark

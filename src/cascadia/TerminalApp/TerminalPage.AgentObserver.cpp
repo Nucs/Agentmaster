@@ -42,9 +42,10 @@
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
-#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the tab tooltip's Tests Autorunner line is dev-only
+#include "AgentMaster/ProfileBootstrap.h" // Profiles:: profile-aware state paths (engine)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
+#include <winrt/Windows.UI.Xaml.Shapes.h> // Agentmaster (tab tooltip): the header state-dot Ellipse in the summary card
 
 #include <mmsystem.h> // PlaySoundW — the prompt-nav boundary sound (alt+up/down at the ends)
 #pragma comment(lib, "winmm.lib")
@@ -152,61 +153,6 @@ namespace
         }
     }
 
-    const wchar_t* TtModeLabel(::Agentmaster::AutorunnerMode m)
-    {
-        using ::Agentmaster::AutorunnerMode;
-        switch (m)
-        {
-        case AutorunnerMode::SemiAuto:
-            return L"Semi";
-        case AutorunnerMode::Full:
-            return L"Full";
-        case AutorunnerMode::Off:
-        default:
-            return L"Off";
-        }
-    }
-
-    // Collapse whitespace runs to single spaces, trim, truncate to maxLen with an ellipsis. For the
-    // queued-prompt / last-reply recall snippets.
-    std::wstring TtSnippet(const std::wstring& in, size_t maxLen)
-    {
-        std::wstring out;
-        out.reserve(in.size());
-        bool prevSpace = false;
-        for (const wchar_t c : in)
-        {
-            const bool ws = (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n');
-            if (ws)
-            {
-                if (!out.empty() && !prevSpace)
-                {
-                    out.push_back(L' ');
-                    prevSpace = true;
-                }
-            }
-            else
-            {
-                out.push_back(c);
-                prevSpace = false;
-            }
-        }
-        while (!out.empty() && out.back() == L' ')
-        {
-            out.pop_back();
-        }
-        if (out.size() > maxLen)
-        {
-            out.resize(maxLen);
-            while (!out.empty() && out.back() == L' ')
-            {
-                out.pop_back();
-            }
-            out += L"\x2026"; // …
-        }
-        return out;
-    }
-
     // Join non-empty parts with sep.
     std::wstring TtJoin(const std::vector<std::wstring>& parts, const wchar_t* sep)
     {
@@ -239,6 +185,235 @@ namespace
             }
         }
         return m.find(L"bypass") != std::wstring::npos;
+    }
+
+    // ---- Agentmaster (tab tooltip): the rich, summary-style hover card -------------------------------
+    // The tab tooltip is no longer a flat run of text: it is a dark, rounded card (the AgentTabOverlay
+    // summary-panel chrome) hosting a header (state dot + title on the left, folder/branch on the right),
+    // a state line, a dim kind/model/effort/perm line, then the session-end.js Summary box (NUMBERED
+    // messages + files), all in Cascadia Mono. These free helpers build the XAML; the page
+    // (_UpdateTabAgentToolTip) feeds them SessionInfo + the cached Summary text and hands the result to
+    // Tab::SetAgentToolTip. (No jump buttons / autorunner / queue: a tooltip is read-only.)
+    SolidColorBrush TtFill(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
+    {
+        return SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(a, r, g, b) };
+    }
+
+    // Render a Summary-box TEXT (RenderSessionSummaryBox output: a lone kSummarySepMark line = a section
+    // divider, " N. " = a numbered user message, "* " = a file row) into the tooltip BODY: a vertical
+    // StackPanel of monospace (Cascadia Mono) TextBlocks, each sentinel line a full-width hairline rule
+    // (the AgentTabOverlay::_SetSummaryContent display look, minus the jump buttons). Contiguous
+    // non-divider lines coalesce into one wrapping TextBlock.
+    winrt::Windows::UI::Xaml::Controls::StackPanel TtBuildSummaryBody(const std::wstring& text)
+    {
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+        StackPanel stack;
+        stack.Orientation(Orientation::Vertical);
+        std::wstring seg;
+        const auto flush = [&]() {
+            if (seg.empty())
+            {
+                return;
+            }
+            TextBlock tb;
+            tb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            tb.FontSize(11);
+            tb.TextWrapping(TextWrapping::Wrap);
+            tb.Foreground(TtFill(0xFF, 0xDC, 0xDC, 0xDC));
+            tb.Text(winrt::hstring{ seg });
+            stack.Children().Append(tb);
+            seg.clear();
+        };
+        size_t i = 0;
+        while (i <= text.size())
+        {
+            const size_t nl = text.find(L'\n', i);
+            const size_t end = (nl == std::wstring::npos) ? text.size() : nl;
+            const std::wstring lineStr = text.substr(i, end - i);
+            if (lineStr.size() == 1 && lineStr[0] == ::Agentmaster::kSummarySepMark)
+            {
+                flush();
+                Border rule;
+                rule.Height(1);
+                rule.HorizontalAlignment(HorizontalAlignment::Stretch);
+                rule.Background(TtFill(0x40, 0xFF, 0xFF, 0xFF));
+                rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
+                stack.Children().Append(rule);
+            }
+            else
+            {
+                if (!seg.empty())
+                {
+                    seg += L'\n';
+                }
+                seg += lineStr;
+            }
+            if (nl == std::wstring::npos)
+            {
+                break;
+            }
+            i = nl + 1;
+        }
+        flush();
+        return stack;
+    }
+
+    // Build the whole tab-tooltip card: a dark, rounded Border (summary-panel chrome) holding the header
+    // (state dot + title on the left, folder/branch on the right), a state line (colored to match the tab
+    // dot), a dim kind/model/effort/perm line, and -- once the Summary body has loaded -- a divider + the
+    // numbered Summary box, height-capped by a ScrollViewer so a long conversation can't make a
+    // screen-tall tooltip (the full, scrollable view is the pencil-toggled summary panel).
+    winrt::Windows::UI::Xaml::Controls::Border TtBuildTooltipCard(winrt::Windows::UI::Color accent,
+                                                                  const std::wstring& title,
+                                                                  const std::wstring& folderBranch,
+                                                                  const std::wstring& stateText,
+                                                                  const std::wstring& metaText,
+                                                                  const winrt::hstring& bodyText)
+    {
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+
+        StackPanel col;
+        col.Orientation(Orientation::Vertical);
+        col.Spacing(1);
+
+        Grid header;
+        {
+            ColumnDefinition c0;
+            c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            ColumnDefinition c1;
+            c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            header.ColumnDefinitions().Append(c0);
+            header.ColumnDefinitions().Append(c1);
+
+            StackPanel left;
+            left.Orientation(Orientation::Horizontal);
+            left.Spacing(6);
+            left.VerticalAlignment(VerticalAlignment::Center);
+            winrt::Windows::UI::Xaml::Shapes::Ellipse dot;
+            dot.Width(9);
+            dot.Height(9);
+            dot.Fill(SolidColorBrush{ accent });
+            dot.Stroke(TtFill(0xFF, 0x00, 0x00, 0x00));
+            dot.StrokeThickness(1);
+            dot.VerticalAlignment(VerticalAlignment::Center);
+            left.Children().Append(dot);
+            TextBlock titleTb;
+            titleTb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            titleTb.FontSize(13);
+            titleTb.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            titleTb.Foreground(TtFill(0xFF, 0xF2, 0xF2, 0xF2));
+            titleTb.TextWrapping(TextWrapping::NoWrap);
+            titleTb.TextTrimming(TextTrimming::CharacterEllipsis);
+            titleTb.VerticalAlignment(VerticalAlignment::Center);
+            titleTb.Text(winrt::hstring{ title });
+            left.Children().Append(titleTb);
+            Grid::SetColumn(left, 0);
+            header.Children().Append(left);
+
+            if (!folderBranch.empty())
+            {
+                TextBlock fb;
+                fb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+                fb.FontSize(11);
+                fb.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
+                fb.TextWrapping(TextWrapping::NoWrap);
+                fb.TextTrimming(TextTrimming::CharacterEllipsis);
+                fb.VerticalAlignment(VerticalAlignment::Center);
+                fb.Margin(ThicknessHelper::FromLengths(12, 0, 0, 0));
+                fb.Text(winrt::hstring{ folderBranch });
+                Grid::SetColumn(fb, 1);
+                header.Children().Append(fb);
+            }
+            col.Children().Append(header);
+        }
+
+        if (!stateText.empty())
+        {
+            TextBlock st;
+            st.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            st.FontSize(11);
+            st.TextWrapping(TextWrapping::Wrap);
+            st.Foreground(SolidColorBrush{ accent });
+            st.Text(winrt::hstring{ stateText });
+            col.Children().Append(st);
+        }
+        if (!metaText.empty())
+        {
+            TextBlock mt;
+            mt.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            mt.FontSize(11);
+            mt.TextWrapping(TextWrapping::Wrap);
+            mt.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
+            mt.Text(winrt::hstring{ metaText });
+            col.Children().Append(mt);
+        }
+        if (!bodyText.empty())
+        {
+            Border rule;
+            rule.Height(1);
+            rule.HorizontalAlignment(HorizontalAlignment::Stretch);
+            rule.Background(TtFill(0x40, 0xFF, 0xFF, 0xFF));
+            rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
+            col.Children().Append(rule);
+
+            ScrollViewer sv;
+            sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+            sv.VerticalScrollMode(ScrollMode::Auto);
+            sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
+            sv.MaxHeight(360);
+            sv.Content(TtBuildSummaryBody(std::wstring{ bodyText }));
+            col.Children().Append(sv);
+        }
+
+        Border root;
+        root.Background(TtFill(0xFF, 0x20, 0x20, 0x20));
+        root.BorderBrush(TtFill(0x40, 0xFF, 0xFF, 0xFF));
+        root.BorderThickness(ThicknessHelper::FromUniformLength(1));
+        root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+        root.Padding(ThicknessHelper::FromLengths(10, 8, 10, 8));
+        root.MaxWidth(460);
+        root.Child(col);
+        return root;
+    }
+
+    // The unmanaged/observe twin: a small dark card -- a "(o) <kind> . unlinked" line over the tab title.
+    winrt::Windows::UI::Xaml::Controls::Border TtBuildObserveCard(const std::wstring& kind, const std::wstring& title)
+    {
+        using namespace winrt::Windows::UI::Xaml;
+        using namespace winrt::Windows::UI::Xaml::Controls;
+        StackPanel col;
+        col.Orientation(Orientation::Vertical);
+        col.Spacing(1);
+        {
+            TextBlock l1;
+            l1.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            l1.FontSize(12);
+            l1.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
+            l1.Text(winrt::hstring{ std::wstring{ L"\x25CB " } + kind + L"  \x00B7  unlinked" });
+            col.Children().Append(l1);
+        }
+        if (!title.empty())
+        {
+            TextBlock l2;
+            l2.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            l2.FontSize(12);
+            l2.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            l2.Foreground(TtFill(0xFF, 0xE6, 0xE6, 0xE6));
+            l2.TextWrapping(TextWrapping::Wrap);
+            l2.Text(winrt::hstring{ title });
+            col.Children().Append(l2);
+        }
+        Border root;
+        root.Background(TtFill(0xFF, 0x20, 0x20, 0x20));
+        root.BorderBrush(TtFill(0x40, 0xFF, 0xFF, 0xFF));
+        root.BorderThickness(ThicknessHelper::FromUniformLength(1));
+        root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
+        root.Padding(ThicknessHelper::FromLengths(10, 6, 10, 6));
+        root.MaxWidth(420);
+        root.Child(col);
+        return root;
     }
 }
 
@@ -471,24 +646,6 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (tab tooltip): build + push the rich, session-aware hover tooltip onto a MANAGED
-    // session's hosting tab. The header already gives you the color dot + a (truncated) title; this
-    // tooltip EXPANDS that into what disambiguates 10+ tabs and tells you whether a tab needs you:
-    //   line 1  ● <state> · <last-activity ago> · <why> · <⚠ unread>     (colored to match the dot)
-    //   line 2  <full title>                                              (bold)
-    //   body    claude|codex · <model> · <effort> · <⚡ bypass>
-    //           <full working dir> · <branch>
-    //           ⏳ N queued · ⏸ M held · next: "…"
-    //           Autorunner: <mode> · <sent>/<total> sent
-    //           you: "<user's last message>"
-    //           agent: "<assistant's last reply>"
-    //           you replied <ago> · started <ago>
-    //           recap: <Claude Code's idle away_summary — FULL, no char limit; bottom block>
-    // Every body line is CONDITIONAL — emitted only when it carries signal — so a quiet running tab
-    // stays short while a blocked / queued one expands. All data is on the live SessionInfo (free, no
-    // transcript read). Reverts to the default tooltip when the session is gone or archived (!live).
-    // Idempotent on the Tab side (SetAgentToolTip's signature guard), so the per-change + per-tick
-    // callers are cheap. UI thread.
     void TerminalPage::_UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId)
     {
         if (!tab || !_sessionRegistry)
@@ -503,22 +660,22 @@ namespace winrt::TerminalApp::implementation
         const auto info = _sessionRegistry->Get(sessionId);
         if (!info || !info->live)
         {
-            impl->ClearAgentToolTip(); // archived / gone -> default title+keychord tooltip
+            impl->ClearAgentToolTip(); // archived / gone -> the default title+keychord tooltip
+            _tabTooltipSummary.erase(sessionId); // drop the cached summary + sig so a later relaunch reloads fresh
+            _tabTooltipSig.erase(sessionId);
             return;
         }
         const auto& s = *info;
-        using ::Agentmaster::AutorunnerMode;
-        using ::Agentmaster::PromptStatus;
         using ::Agentmaster::SessionState;
         const int64_t now = TtNowMs();
+        const auto accent = AgentStatusColorFor(s.state);
 
-        // ---- state line (colored to match the tab-strip dot) ----
-        std::wstring state = L"\x25CF "; // ●
-        state += TtStateLabel(s.state);
+        // Header line 2: the state, its last-activity age, and WHY it needs you (colored to match the dot).
+        std::wstring stateText = TtStateLabel(s.state);
         const int64_t lastAct = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
         if (lastAct > 0)
         {
-            state += L"  \x00B7  " + TtSpan(now - lastAct, true);
+            stateText += L"  \x00B7  " + TtSpan(now - lastAct, true);
         }
         std::wstring why;
         if (s.state == SessionState::NeedsApproval)
@@ -535,167 +692,175 @@ namespace winrt::TerminalApp::implementation
         }
         if (!why.empty())
         {
-            state += L"  \x00B7  " + why;
+            stateText += L"  \x00B7  " + why;
         }
         if (_flashingSessions.count(sessionId) || _manualUnreadSessions.count(sessionId))
         {
-            state += L"  \x00B7  \x26A0 unread"; // ⚠ — changed since you were last here
+            stateText += L"  \x00B7  \x26A0 unread"; // changed since you were last here
         }
 
-        // ---- body lines (each conditional) ----
-        std::vector<std::wstring> body;
-
-        // kind · model · effort · permission
+        // Header line 3: agent kind, model, effort, and the permission mode (a bypass tab is unsupervised).
+        std::vector<std::wstring> metaParts;
+        metaParts.push_back(s.kind == ::Agentmaster::AgentKind::Codex ? std::wstring{ L"codex" } : std::wstring{ L"claude" });
+        if (!s.model.empty())
         {
-            std::vector<std::wstring> parts;
-            parts.push_back(s.kind == ::Agentmaster::AgentKind::Codex ? std::wstring{ L"codex" } : std::wstring{ L"claude" });
-            if (!s.model.empty())
-            {
-                parts.push_back(s.model);
-            }
-            if (!s.effort.empty())
-            {
-                parts.push_back(s.effort);
-            }
-            if (TtPermIsBypass(s.permissionMode))
-            {
-                parts.push_back(L"\x26A1 bypass"); // ⚡ auto-approving everything (unsupervised)
-            }
-            else if (!s.permissionMode.empty() && s.permissionMode != L"default")
-            {
-                parts.push_back(s.permissionMode);
-            }
-            body.push_back(TtJoin(parts, L"  \x00B7  "));
+            metaParts.push_back(s.model);
         }
-
-        // working dir · branch — the FULL path (the strongest disambiguator across sibling repos/worktrees)
+        if (!s.effort.empty())
         {
-            std::wstring line = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
-            if (!s.branch.empty())
-            {
-                if (!line.empty())
-                {
-                    line += L"  \x00B7  ";
-                }
-                line += s.branch;
-            }
-            if (!line.empty())
-            {
-                body.push_back(line);
-            }
+            metaParts.push_back(s.effort);
+        }
+        if (TtPermIsBypass(s.permissionMode))
+        {
+            metaParts.push_back(L"\x26A1 bypass"); // auto-approving everything
+        }
+        else if (!s.permissionMode.empty() && s.permissionMode != L"default")
+        {
+            metaParts.push_back(s.permissionMode);
+        }
+        const std::wstring metaText = TtJoin(metaParts, L"  \x00B7  ");
+
+        // Header (right side): the leaf working-dir folder + "/" + git branch (the overlay subline) -- the
+        // full path is too long to read at a glance, so show only the folder name and the branch.
+        std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+        while (!dir.empty() && (dir.back() == L'/' || dir.back() == L'\\'))
+        {
+            dir.pop_back();
+        }
+        std::wstring leaf = dir;
+        if (const auto pos = dir.find_last_of(L"/\\"); pos != std::wstring::npos)
+        {
+            leaf = dir.substr(pos + 1);
+        }
+        std::wstring folderBranch = leaf;
+        if (!s.branch.empty())
+        {
+            folderBranch = folderBranch.empty() ? s.branch : (folderBranch + L"/" + s.branch);
         }
 
-        // queue + next prompt
-        int pending = 0, held = 0, sent = 0;
-        std::wstring nextText;
-        for (const auto& p : s.queue)
+        const std::wstring title = s.title.empty() ? std::wstring{ L"(untitled)" } : s.title;
+
+        // The Summary-box body (numbered messages + files), cached + loaded off-thread (see below).
+        winrt::hstring bodyText;
+        int64_t bodyMtime = 0;
+        if (const auto it = _tabTooltipSummary.find(sessionId); it != _tabTooltipSummary.end())
         {
-            if (p.status == PromptStatus::Pending)
-            {
-                if (pending == 0)
-                {
-                    nextText = p.text.empty() ? p.label : p.text;
-                }
-                ++pending;
-            }
-            else if (p.status == PromptStatus::Held)
-            {
-                ++held;
-            }
-            else if (p.status == PromptStatus::Sent)
-            {
-                ++sent;
-            }
-        }
-        if (pending > 0 || held > 0)
-        {
-            std::wstring line = L"\x23F3 " + std::to_wstring(pending) + L" queued"; // ⏳
-            if (held > 0)
-            {
-                line += L"  \x00B7  \x23F8 " + std::to_wstring(held) + L" held"; // ⏸
-            }
-            if (!nextText.empty())
-            {
-                line += L"  \x00B7  next: \x201C" + TtSnippet(nextText, 48) + L"\x201D"; // “ … ”
-            }
-            body.push_back(line);
+            bodyText = it->second.body;
+            bodyMtime = it->second.mtime;
         }
 
-        // Autorunner mode + plan progress (only when on, or a plan has already run). DEV ONLY: Auto
-        // Testing / Tests Autorunner is gated to the AgentmasterDev package (the autorunner never runs in
-        // a release build), so a release tab's tooltip never carries this line.
-        if (::Agentmaster::Profiles::IsDevPackage() && (s.autorunner.mode != AutorunnerMode::Off || sent > 0))
+        // Re-host only on a real content change. The signature folds the header strings + the body's mtime
+        // (the body itself changes only when the transcript grows, which bumps the mtime), so an unchanged
+        // idle tab is skipped; the "ago" ticking is what re-hosts an otherwise-quiet tab each sweep.
+        std::wstring sig = stateText;
+        sig += L'\x1f';
+        sig += title;
+        sig += L'\x1f';
+        sig += folderBranch;
+        sig += L'\x1f';
+        sig += metaText;
+        sig += L'\x1f';
+        sig += std::to_wstring(bodyMtime);
+        if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            std::wstring line = std::wstring{ L"Tests Autorunner: " } + TtModeLabel(s.autorunner.mode);
-            if (!s.queue.empty())
-            {
-                line += L"  \x00B7  " + std::to_wstring(sent) + L"/" + std::to_wstring(s.queue.size()) + L" sent";
-            }
-            body.push_back(line);
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText), winrt::hstring{ sig });
+            _tabTooltipSig[sessionId] = sig;
         }
 
-        // The conversation's two ends — the strongest recall cue. "you:" = the user's last message =
-        // the most-recently-SENT queue entry (the registry records EVERY message the session got: a
-        // Flight prompt we injected OR a Typed prompt the human entered straight into the terminal, both
-        // status Sent). "agent:" = the scanner-tailed last assistant text. Both free (no transcript read);
-        // each line conditional on having content.
+        // Keep the Summary body fresh off-thread (throttled + mtime-gated). First sight has no body yet, so
+        // this fills it in, then re-hosts the card (a recursive _UpdateTabAgentToolTip on completion).
+        auto& slot = _tabTooltipSummary[sessionId]; // default-creates an empty slot on first sight
+        const bool needCheck = slot.body.empty() || slot.mtime == 0 || (now - slot.lastCheckMs) > 4000;
+        if (needCheck && !_tabTooltipSummaryInFlight.count(sessionId))
         {
-            const std::wstring* lastUser = nullptr;
-            int64_t lastUserAt = -1;
-            for (const auto& p : s.queue)
+            slot.lastCheckMs = now;
+            const bool codex = (s.kind == ::Agentmaster::AgentKind::Codex);
+            _EnsureTabTooltipSummary(tab, winrt::hstring{ sessionId }, codex, winrt::hstring{ s.codexSessionId }, winrt::hstring{ dir });
+        }
+    }
+
+    // Agentmaster (tab tooltip): resolve + stat + analyze the session's transcript OFF the UI thread, and
+    // on a transcript growth render the session-end.js Summary box (full=false: numbered messages + files,
+    // NO header -- the card already shows state/title/dir) into the per-session cache, then re-host the
+    // card. mtime-gated (a quiet tab is one stat) + in-flight-guarded (one load per session at a time);
+    // mirrors the AgentTabOverlay summary panel's off-thread caching. Codex uses its rollout analog.
+    winrt::fire_and_forget TerminalPage::_EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd)
+    {
+        const std::wstring id{ sessionId };
+        if (id.empty() || _tabTooltipSummaryInFlight.count(id))
+        {
+            co_return; // already loading this session's summary
+        }
+        auto strongThis{ get_strong() };
+        _tabTooltipSummaryInFlight.insert(id);
+
+        // Snapshot the cached path/mtime + the display toggles on the UI thread, before going background.
+        std::wstring cachedPath;
+        int64_t cachedMtime = 0;
+        if (const auto it = _tabTooltipSummary.find(id); it != _tabTooltipSummary.end())
+        {
+            cachedPath = it->second.path;
+            cachedMtime = it->second.mtime;
+        }
+        const bool wrapNewlines = _appSettings.summaryPanelWrapNewlines;
+        const bool truncate = _appSettings.summaryPanelTruncate;
+        const std::wstring codexUuid{ codexId };
+        const std::wstring dir{ cwd };
+
+        co_await winrt::resume_background();
+
+        std::wstring path = cachedPath;
+        if (path.empty())
+        {
+            path = codex ? ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexUuid)
+                         : ::Agentmaster::ResolveClaudeTranscriptPath(id);
+        }
+        int64_t mtime = 0;
+        if (!path.empty())
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
             {
-                if (p.status == PromptStatus::Sent && p.sentAtUnixMs >= lastUserAt)
-                {
-                    lastUserAt = p.sentAtUnixMs;
-                    lastUser = p.text.empty() ? &p.label : &p.text; // pointer into s.queue (unmodified here)
-                }
-            }
-            if (lastUser && !lastUser->empty())
-            {
-                body.push_back(std::wstring{ L"you: \x201C" } + TtSnippet(*lastUser, 100) + L"\x201D");
+                ULARGE_INTEGER li{};
+                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                mtime = static_cast<int64_t>(li.QuadPart);
             }
         }
-        if (!s.lastAssistantText.empty())
+        std::wstring body;
+        bool rendered = false;
+        if (!path.empty() && (mtime != cachedMtime || cachedMtime == 0))
         {
-            body.push_back(std::wstring{ L"agent: \x201C" } + TtSnippet(s.lastAssistantText, 100) + L"\x201D");
+            if (codex)
+            {
+                const auto cinfo = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
+                body = ::Agentmaster::RenderCodexSummaryBox(cinfo, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, /*full*/ false);
+            }
+            else
+            {
+                auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                body = ::Agentmaster::RenderSessionSummaryBox(a, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, a.planFilePath, /*full*/ false, wrapNewlines, truncate);
+            }
+            rendered = true;
         }
 
-        // timing — when you last spoke + when it started
+        co_await wil::resume_foreground(Dispatcher());
+        _tabTooltipSummaryInFlight.erase(id);
+        if (path.empty())
         {
-            std::wstring t;
-            if (s.turns.lastPromptUnixMs > 0)
-            {
-                t += L"you replied " + TtSpan(now - s.turns.lastPromptUnixMs, false) + L" ago";
-            }
-            if (s.convCreatedUnixMs > 0)
-            {
-                if (!t.empty())
-                {
-                    t += L"  \x00B7  ";
-                }
-                t += L"started " + TtSpan(now - s.convCreatedUnixMs, false) + L" ago";
-            }
-            if (!t.empty())
-            {
-                body.push_back(t);
-            }
+            co_return; // no transcript yet (never prompted) -- leave the header-only card
         }
-
-        // Recap (the bottom block) — Claude Code's idle "what we did / what's next" away_summary, which
-        // the scanner mirrors onto SessionInfo.recap off the transcript tail (free, no IO; already
-        // normalized — the "(disable recaps in /config)" hint stripped). Shown in FULL: NO char limit
-        // (unlike the one-line you:/agent: snippets), so it wraps across as many lines as it needs — the
-        // ConPTY paragraph is the one thing worth the room. A leading blank line sets it apart from the
-        // dense one-liners above; its own newlines (if any) are preserved (the body splits on '\n').
-        if (!s.recap.empty())
+        auto& slot = _tabTooltipSummary[id];
+        slot.path = path;
+        slot.mtime = mtime;
+        if (rendered)
         {
-            body.push_back(std::wstring{ L"\nrecap: " } + s.recap);
+            slot.body = winrt::hstring{ body };
         }
-
-        impl->SetAgentToolTip(winrt::hstring{ state },
-                              AgentStatusColorFor(s.state),
-                              winrt::hstring{ s.title },
-                              winrt::hstring{ TtJoin(body, L"\n") });
+        // Re-host the card with the now-loaded / refreshed body. _UpdateTabAgentToolTip recomputes the
+        // signature (new mtime) so it re-hosts; the throttle (lastCheckMs, bumped by the caller) keeps it
+        // from immediately re-kicking us.
+        _UpdateTabAgentToolTip(tab, id);
     }
 
     // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session goes from
@@ -2090,11 +2255,8 @@ namespace winrt::TerminalApp::implementation
         // Tab side (signature guard), so the per-tick probe re-assert is free.
         if (const auto impl = _GetTabImpl(tab))
         {
-            const std::wstring stateLine = std::wstring{ L"\x25CB " } + kind + L"  \x00B7  unlinked"; // ○
-            impl->SetAgentToolTip(winrt::hstring{ stateLine },
-                                  winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xB0, 0xB0, 0xB0),
-                                  impl->Title(),
-                                  winrt::hstring{});
+            const std::wstring sig = std::wstring{ L"observe\x1f" } + kind + L"\x1f" + std::wstring{ impl->Title() };
+            impl->SetAgentToolTip(TtBuildObserveCard(kind, std::wstring{ impl->Title() }), winrt::hstring{ sig });
         }
         if (!_appSettings.showTabOverlay)
         {

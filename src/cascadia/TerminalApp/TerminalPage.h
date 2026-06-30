@@ -715,7 +715,23 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Color _PendingDotsColorForTab(const TerminalApp::Tab& tab, const std::wstring& workingDir); // Agentmaster (PENDING_INPUT.md): contrast-pick the "3 dots" color from the tab's CURRENT effective header background (selected/unselected aware) over the session's per-dir color; UI thread
         void _RefreshPendingDotsContrast(); // Agentmaster (PENDING_INPUT.md): re-pick the "3 dots" color for tabs currently showing a draft (no buffer read) so they re-contrast on a selected<->unselected shift; called from _OnTabSelectionChanged; UI thread
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; dormant => the half-hollow "not started" variant; UI thread; no-op when this window doesn't host the session
-        void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + push the rich session hover tooltip (state·age·why / title / kind·model·perm / dir·branch / queue+next / autorunner / last reply / timing) onto a managed session's tab; clears it when the session is gone/archived; UI thread
+        void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + host the rich session hover tooltip — a dark, summary-style card (● title · folder/branch header, state·age·why line, kind·model·perm line, then the session-end.js Summary box with NUMBERED messages + files, Cascadia Mono) — on a managed session's tab; clears it when the session is gone/archived; UI thread
+        // Agentmaster (tab tooltip): the summary-box BODY (RenderSessionSummaryBox text, \x1F-separated)
+        // backing the rich hover tooltip, cached per session + rebuilt off-thread by _EnsureTabTooltipSummary
+        // only when the transcript grows (mtime) — the AgentTabOverlay summary-panel caching pattern, so a
+        // quiet tab costs one stat. _tabTooltipSig skips re-hosting an unchanged card; the in-flight set
+        // collapses overlapping background loads for one session. (transient — never persisted.)
+        struct _AgentTooltipSummary
+        {
+            std::wstring path;        // resolved transcript / Codex rollout path (cached so we don't re-glob)
+            int64_t mtime{ 0 };       // transcript mtime when `body` was rendered (0 = not loaded yet)
+            int64_t lastCheckMs{ 0 }; // last time we kicked a background freshness check (throttle)
+            winrt::hstring body;      // RenderSessionSummaryBox(full=false) text, \x1F section sentinels
+        };
+        std::unordered_map<std::wstring, _AgentTooltipSummary> _tabTooltipSummary;
+        std::unordered_set<std::wstring> _tabTooltipSummaryInFlight;
+        std::unordered_map<std::wstring, std::wstring> _tabTooltipSig;
+        winrt::fire_and_forget _EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd); // Agentmaster (tab tooltip): off-thread resolve+stat+analyze the transcript; on mtime growth render the Summary box + re-host the card; mtime-cached + in-flight-guarded
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
         // RED RING around that tab's status dot (a separate ellipse behind the dot, peeking out around
