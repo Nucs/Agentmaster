@@ -699,7 +699,40 @@ What works, by area:
   (Rule #13: a pid-validated FACT) — the IDLE counterpart to the same `busy` reading that elsewhere only
   ever HELD Running; proved live (session `d271a31f`). `ParseTranscriptDelta` now also emits
   a `ToolResult` marker (a tool completed → it answers the pending question) that does NOT count as a
-  run-repair turn event. **Subagent / fork activity — the out-of-band `Running` mirror
+  run-repair turn event. **API-error turn → `Error` — the out-of-band failure capture (`recon-error`).**
+  A turn can DIE with an API failure: Claude Code writes a SYNTHETIC assistant line (`model:"<synthetic>"`,
+  top-level **`isApiErrorMessage:true`** + an `apiErrorStatus` HTTP code) for a rate/usage limit,
+  `"Prompt is too long"`, a 4xx/5xx, a dropped/overloaded connection, a model-not-found, an auth failure,
+  or a context-window overflow. The **flag is the signal, never the text** — `"API Error:"` is NOT always
+  prefixed (`"Prompt is too long"` / `"You've hit your limit…"` / model+auth errors lack it), so ALL seven
+  `error` categories are caught by one predicate. The error line carries a TERMINAL `stop_reason`
+  (`"stop_sequence"`), so without this the missed-Stop backstop (recon-stop) would read it as a clean
+  turn-complete → `WaitingForInput`, HIDING the failure; `ShouldSynthesizeError` fires INSTEAD and is checked
+  BEFORE recon-stop so it wins. Synthesized through the ONE state machine (`Notification{apiError=true}` →
+  `SessionState::Error`, `HookEvents.h`; no wire hook ever sets `apiError`, so the PULL scanner is the SOLE
+  Error source — Claude's hooks carry no error event), with the **message + HTTP status preserved** on
+  `SessionInfo.errorMessage/errorStatus` for the crimson `✕` Error card, and `Scheduler` **`stopOnError`**
+  pauses the Autorunner so no queued prompt is auto-sent into a broken session. Logged `[recon-error]`.
+  **Active-leaf-aware (the fix for an API error that fired NO Error state — reported live on `3751c455`
+  "API Error: Overloaded … not detected in error state").** The error is "the tail" only while it is the
+  ACTIVE LEAF — and Claude (≥ v2.1.x) appends post-error BOOKKEEPING (a `system/turn_duration` CHILD
+  parented to the error, then an `away_summary`) and rewrites the `{type:last-prompt,leafUuid}` marker to
+  name that turn_duration child, advancing the active leaf FORWARD onto the error's OWN descendant chain.
+  The scanner tracks that chain as a **descendant frontier** (`ScanState.errorBranchUuids` = the error uuid
+  ∪ every later bookkeeping line whose parent is already on it, fed by a new `ParseTranscriptDelta`
+  `Kind::Node` lineage event; `ApiErrorIsActiveLeaf`) so the forward advance reads as the error STILL being
+  the tail — NOT a double-ESC rewind. The prior exact-`errorEpochLeaf`-equality check MISSED this (it only
+  entered Error when no post-error marker happened to be written), suppressing the state on every
+  newer-Claude error that wrote one. The session **leaves Error on the first turn event** — a real
+  `UserPromptSubmit` (push) → `Running`, or `ShouldSynthesizeRunning` (pull) — and a GENUINE double-ESC
+  rewind to a leaf OFF the frontier releases to `WaitingForInput` (`ShouldReleaseErrorOnLeafMove`, logged
+  `[recon-error-release]`). Validated by replaying the NEW pipeline over all on-disk transcripts:
+  **503/503** API errors flag Error at their live-tail instant (was 498 — the leaf bug silently suppressed
+  5 across 3 projects), **0 false positives** (any turn event clears `lastWasApiError` + the frontier), **0
+  genuine rewinds** in 2906 transcripts. **NOT flagged Error (by design / structural):** a *tool* failure
+  (`tool_result.is_error`) stays Running (Claude usually continues); a process crash → `Done`
+  (clean-vs-crash is not yet distinguished); a managed **Codex** has NO Error — its rollout records no
+  error event (the 3-state floor, OBSERVER §11f / `Activity.h`). **Subagent / fork activity — the out-of-band `Running` mirror
   (`recon-subagent`).** A turn that delegates to a Task/Agent **subagent** leaves the tailed parent
   `<id>.jsonl` **quiescent** while the work streams to a SIDE file
   (`projects/<proj>/<id>/subagents/agent-<agentId>.jsonl` — shares the parent's `sessionId`,
