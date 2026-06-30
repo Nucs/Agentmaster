@@ -123,7 +123,7 @@ flag-gated and format-unstable — so it is at most an *optional accelerator*, n
 | **Starting** *(new)* | `◌` Gray-dim | process alive, **no transcript yet** — for a session that HAS a registry record before its transcript: Manager-**Launched** (we mint the id up front) or hook-`SessionStart`-adopted. (A hook-less external claude before its first prompt has **no record to hold any state** — `ObserveClaude` early-returns on an empty id, `SessionRegistry.cpp:304` — so it stays OBSERVER §11d's badge-only "ClaudeCode (starting…)" until the transcript appears.) Replaces the misuse of `Idle` for "just launched". |
 | **Idle** | `○` Gray | alive, transcript exists, but no turn has ever begun (rare — usually a session opens straight into Starting→Running). Kept for back-compat / resumed-but-untouched. |
 | **Running** | `●` DodgerBlue | latest main-chain event is an unfinished assistant (`tool_use`/`null`), a fresh user prompt, a `tool_result` being digested, or a live subagent. |
-| **WaitingForInput** | `◐` Goldenrod | latest main-chain assistant ended the turn (`end_turn`/`stop_sequence`) — **no quiescence gate**: `end_turn` is final for the turn, an mtime-quiet wait can be starved forever by background forks (§2), and the hook race the old synth's 2 s quiet debounced is the §6 precedence's job now (a Stop-hook *block* that makes claude continue just supersedes on its next line). Carries `lastMessageWasQuestion` (from `EndsWithQuestion(lastAssistantText)`) for the Autopilot question-guard. |
+| **WaitingForInput** | `◐` Goldenrod | latest main-chain assistant ended the turn (`end_turn`/`stop_sequence`) — **no quiescence gate**: `end_turn` is final for the turn, an mtime-quiet wait can be starved forever by background forks (§2), and the hook race the old synth's 2 s quiet debounced is the §6 precedence's job now (a Stop-hook *block* that makes claude continue just supersedes on its next line). Carries `lastMessageWasQuestion` (from `EndsWithQuestion(lastAssistantText)`) for the Tests Autorunner question-guard. |
 | **NeedsApproval** | `⚠` OrangeRed | dangling `tool_use` (incl. `ExitPlanMode`) + permission-mode requires consent + no tool child + quiescent (§4). |
 | **Compacting** *(new)* | `↻` MediumPurple | a `compact_boundary` / `isCompactSummary` is the live tail with no newer turn — context is being summarized. Transient; resolves to Running/WaitingForInput on the next real line. |
 | **Error** | `✕` Crimson | latest unsuperseded marker is `isApiErrorMessage` / system `api_error`. Distinct from a *tool* failure (`tool_result.is_error` — claude usually continues, so that stays Running). |
@@ -256,8 +256,8 @@ DeriveState(session, tailCursor, proc):
     default:                                   return WaitingForInput  # safe fallback
 ```
 
-The result is applied via a new **tail-native setter** (§6), which fires observers + the Autopilot
-advance seam (so turn-complete still drives the Flight Plan — fired only on a *transition into*
+The result is applied via a new **tail-native setter** (§6), which fires observers + the Tests Autorunner
+advance seam (so turn-complete still drives the Auto Testing — fired only on a *transition into*
 WaitingForInput, like today's `triggerAdvance`) and is a **no-op when unchanged** (so background
 mtime ticks never cause churn — Rule #13's quiet discipline). Unlike today's `_readDelta`, the
 derive runs **every reconcile tick, not only when the file size changed** — the quiescence- and
@@ -309,7 +309,7 @@ and the removal mechanical.
 | --- | --- |
 | `AgentMaster/SessionModels.h` (+ `Activity.h`) | add `Starting`, `Compacting` to `SessionState`; a transient `hasToolChild` enrichment field on `SessionInfo` + `ObservedClaude` (the §4/§5 channel); (optional) annotation fields (`retrying`, `interrupted`, `toolRunning`, `bgBusy`). |
 | `AgentMaster/SessionScanner.{h,cpp}` | extend `_reconcileSession` → `DeriveState` (§5), run **every tick** (not only on size change); **filter `isSidechain`** in `ParseTranscriptDelta` (§8 bug-1); detect error/compaction/dangling-tool-use lines + parse the **`permission-mode` line** from the tail it already reads (the LIVE mode — tracks a mid-session Shift+Tab; the S-lane's cmdline `--permission-mode` is just the seed) (today it only reads assistant `stop_reason` + user prompts). |
-| `AgentMaster/SessionRegistry.{h,cpp}` | add `ApplyDerivedState(id, state, evidenceTs, …)` with the §6 precedence; keep `ObserveClaude` facts-only; route the Autopilot advance off `ApplyDerivedState` too. |
+| `AgentMaster/SessionRegistry.{h,cpp}` | add `ApplyDerivedState(id, state, evidenceTs, …)` with the §6 precedence; keep `ObserveClaude` facts-only; route the Tests Autorunner advance off `ApplyDerivedState` too. |
 | `AgentMaster/ProcessInspect.{h,cpp}` | **no new primitive** — `HasActiveChild(snap, pid)` already exists and already feeds `TabActivityRow::busy` (`ProcessObserver.cpp` O6); §4 reuses it. |
 | `AgentMaster/ProcessObserver.cpp` (S-lane) | enrich `SessionInfo` with `hasToolChild` via `ObserveClaude` (**silently**, like `lastObservedUnixMs` — it flips per tool call and must not drive the change cascade); the pid it already feeds gives the scanner its `ProcessAlive` input for Done. |
 | `AgentMaster/Engine.cpp` | hand the scanner a wake-the-observer callback (it owns both workers) — §4's fresh-child read on entering the dangling-quiet window. |
@@ -340,7 +340,7 @@ and the removal mechanical.
    > parent, this bullet's filter is still needed.
 2. **Interrupts recorded as prompts.** `NoteExternalPrompt` (transcript back-fill) records
    `"[Request interrupted by user]"` / `"[Request interrupted by user for tool use]"` as **Typed
-   Flight-Plan prompts** (seen in `sessions.json` for the `.claude` session). These are control
+   Auto-Testing prompts** (seen in `sessions.json` for the `.claude` session). These are control
    markers, not human prompts — filter them out of the queue back-fill.
    > **Shipped — FIXED.** `_readDelta` skips `IsNoiseUserPrompt(ev.text)` before `NoteExternalPrompt`,
    > and the shared filter (`TranscriptStore::IsNoiseUserPrompt`) catches the interrupt markers — so they
@@ -391,7 +391,7 @@ Survey of **4,837** transcripts; taxonomy over the 80–700 most recent:
    > §4 heuristic is built.
 2. **Keep `Idle` at all?** With `Starting` covering "alive, no transcript", `Idle` only means
    "resumed but untouched" — and even that derives as WaitingForInput (a resumed transcript's last
-   main-chain line is its old `end_turn`), which is what Autopilot treats as ready anyway (Rule
+   main-chain line is its old `end_turn`), which is what Tests Autorunner treats as ready anyway (Rule
    #1 already equates them). Fold into `Starting`, or keep for resumed sessions?
    > **Answered: `Idle` kept** (still a Core-6 value; `Starting` not added — §3a). It is load-bearing:
    > `ShouldSynthesizeRunning`/`ShouldSynthesizeRunningFromExternalWork` fire **from Idle or

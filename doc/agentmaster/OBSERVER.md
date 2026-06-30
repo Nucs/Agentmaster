@@ -62,7 +62,7 @@ by the push path. We then measured the out-of-band alternatives on the live mach
 - No screen scraping (Rule #7). State comes from the transcript + process facts only.
 - No *driving* of Codex (yet). A Codex session is now **managed** — observe (C1) + state (C2) + the
   launch / restore / window-restore / adopt lifecycle (§11f / §19-Q3), all read out-of-band from its
-  rollout (**zero `~/.codex` writes**) — but it is never **driven**: no stdin injector / Autopilot /
+  rollout (**zero `~/.codex` writes**) — but it is never **driven**: no stdin injector / Tests Autorunner /
   Send-now (that is C4). Launch/restore/adopt spawn or `codex resume` a real codex; the **observer
   itself** still never registers or binds a codex (a managed codex is registered by the launch path,
   reconciled by `_ReconcileManagedCodex` — never `ObserveClaude`).
@@ -545,10 +545,10 @@ _ObserverProbe():                                  // co_await resume_foreground
 
 ## 11. Downstream consumers
 
-### 11a. `Scheduler` / Autopilot — no change
+### 11a. `Scheduler` / Tests Autorunner — no change
 Reacts to registry state on the advance seam; the observer feeding the registry drives it. Free
 refinements: `s.background==true` or no injector ⇒ never auto-driven (nothing to inject into);
-`runningApp==WindowsTerminal` never gets an injector, so it's inert to Autopilot.
+`runningApp==WindowsTerminal` never gets an injector, so it's inert to Tests Autorunner.
 
 ### 11b. `AgentTabOverlay` — richer badge + activity
 Already an id-filtered registry observer (`AddObserver`). Additions:
@@ -561,7 +561,7 @@ Already an id-filtered registry observer (`AddObserver`). Additions:
 ### 11c. `AgentManagerContent` (Manager tab) — richer snapshot
 Already snapshot-driven from the registry. New fields become card/row adornments (`model · effort ·
 kind`); add an optional **"External (N)"** group for `runningApp==WindowsTerminal` claudes
-(observe-only, no Flight Plan). No structural change.
+(observe-only, no Auto Testing). No structural change.
 
 **Host label (release/dev/real-WT distinction).** An external row's host must NOT be named by the
 parent process's image leaf — our fork's exe is literally `WindowsTerminal.exe`, so an external claude
@@ -593,7 +593,7 @@ A second agent — the OpenAI **Codex CLI** (`codex.exe`) — is now a first-cla
 began as the Codex analog of the external census (C1, observe-only) and has since graduated to **state**
 (C2) and the **full launch / restore / window-restore / adopt lifecycle** — *lifecycle + state only*:
 Agentmaster launches, resumes, archives, window-restores, and adopts Codex sessions, but does **not**
-yet DRIVE one (no stdin injector / Autopilot / Send-now — that is C4). Everything is read entirely
+yet DRIVE one (no stdin injector / Tests Autorunner / Send-now — that is C4). Everything is read entirely
 out-of-band (**zero writes to `~/.codex`**, Rule #13). The three divergences from Claude that shape it:
 Codex's config home is **`CODEX_HOME`** (else `~/.codex`), not `~/.claude`; it **cannot pin a session id
 at launch** (the id is auto-minted, embedded in the rollout filename — hence the two-id model below); and
@@ -628,7 +628,7 @@ not the command line.
   is **kind-aware** — a Codex external offers **Adopt** (bring its rollout under management via a
   Fork-a-copy vs Resume-anyway choice) / **Open
   New Codex Session Here** (a fresh managed codex in the cwd; both route to the Codex launch handler) +
-  the agent-agnostic **Bring Window To Front**; **left-click → a read-only Flight Plan** sourced from the
+  the agent-agnostic **Bring Window To Front**; **left-click → a read-only Auto Testing** sourced from the
   rollout. The per-tab observe badge reads `○ codex · <model> · unlinked` (an external/unbound codex); a
   MANAGED codex card/row wears the same teal pill + a 3-state dot, and its tab gets the bound overlay.
 - **Data model (`Activity.h`).** New `enum AgentKind { Claude, Codex }` + `CodexProcessFacts`;
@@ -665,13 +665,13 @@ adopt = `_AdoptExternalCodex(pid,cwd,fork)` (a **Fork-a-copy vs Resume-anyway** 
 no two-writers hazard — else `codex resume <uuid>` take-over; original left running). A managed codex is
 **deduped out of the External census** (`managedCodexTokens`) and **never** fed to `ObserveClaude` (it is
 registered by the launch path; `_ReconcileManagedCodex` folds its C2 state onto the record). **Lifecycle +
-state ONLY** — no injector/Autopilot.
+state ONLY** — no injector/Tests Autorunner.
 
 **Still deferred:** **C3** — low-latency PUSH by wiring Codex `notify` (turn-complete only) or
 `~/.codex/hooks.json` (SessionStart/UserPromptSubmit/Stop/PreToolUse/PermissionRequest — payloads map
 ~1:1 to our wire line; the forwarder pattern is reusable) to the same bridge; **invasive** — it mutates
 the user's GLOBAL Codex config (no per-session `--settings` like Claude) + hook-trust friction, so it is a
-product decision. **C4** — bind a stdin injector + Autopilot (DRIVE the Codex TUI); launch is
+product decision. **C4** — bind a stdin injector + Tests Autorunner (DRIVE the Codex TUI); launch is
 PULL-correlated (no `--session-id` to pin), resume=`codex resume <id>`, fork=`codex fork <id>`, model
 fixed on resume; typed-vs-flight echo accounting needs C3's `UserPromptSubmit`.
 
@@ -719,7 +719,7 @@ fixed on resume; typed-vs-flight echo accounting needs C3's `UserPromptSubmit`.
   approval/error event in a rollout), classified ours/external by `AM_SESSION` like claude. The
   **observer** never registers/binds a codex (the External census stays observe-only); a MANAGED codex
   (launched/restored/adopted by us) IS a registry citizen via the launch path + the two-id model, but is
-  still **never driven** (no injector/Autopilot — that is C4). §11f / §19-Q3.
+  still **never driven** (no injector/Tests Autorunner — that is C4). §11f / §19-Q3.
 - **Debounce / caps:** survey ≤ 1 Toolhelp/known-interval; hard cap; abortable on `Stop`; the
   observer **never** writes to any shell stdin (invisibility invariant).
 
@@ -817,7 +817,7 @@ helpers to `AgentMaster/tests/`.
 2. ~~Surface external (`WindowsTerminal`) claudes in the Manager at all, or only count them?~~
    **RESOLVED — surfaced (§11c):** externals appear as a full **External (N)** group on the Triage Board
    AND in the Explorer Tree's **EXTERNAL** scope — enriched (title / host label / model · effort / timing),
-   left-click → a read-only Flight Plan, right-click → Adopt / Open-New-Session-Here / Bring-Window-To-Front
+   left-click → a read-only Auto Testing, right-click → Adopt / Open-New-Session-Here / Bring-Window-To-Front
    — but never bound (observe-only).
 3. ~~Codex: keep as bare acknowledge, or reserve an enrichment slot for a future Codex integration?~~
    **RESOLVED — C1 (observe) + C2 (state) + the managed launch/restore/adopt lifecycle shipped (§11f):**

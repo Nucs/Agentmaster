@@ -27,14 +27,23 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   - **Triage Board** (top) — sessions as cards in five state columns (Running · Waiting-for-you
     · Needs-approval · Error · Idle/Done), plus an observe-only **External** census column.
   - **Explorer Tree** (bottom-left) — the M working directories → their N sessions.
-  - **Flight Plan** (bottom-right) — a per-session prompt queue + **Autopilot**.
-- **Flight Plan / Autopilot:** queue prompts; on **turn-complete** (`Stop` hook) the next
+  - **Auto Testing** (bottom-right) — a per-session prompt queue + **Tests Autorunner**.
+- **Auto Testing / Tests Autorunner:** queue prompts; on **turn-complete** (`Stop` hook) the next
   prompt is auto-sent. Approvals and clarifying-questions are handled separately.
+- **⚠ Auto Testing / Tests Autorunner is a DEV-ONLY feature** (gated on
+  `Profiles::IsDevPackage()` — the `AgentmasterDev` package). In a **release** install the whole
+  subsystem is **hidden and inert**: the Manager's bottom-right pane shows the read-only **Summary**
+  view only (no `[Summary | Auto Testing]` toggle), the autorunner `Scheduler` is **never started**
+  (`Engine.cpp`) so nothing auto-sends, and every autorunner surface — the toolbar **Pause Tests
+  Autorunning** button, the Settings cog **Tests Autorunner** tab, the Triage-Board ⚙ queue badge, the
+  per-tab overlay autorunner button + queued rows, and the tab-strip tooltip's autorunner line — is
+  not shown. (Formerly "Flight Plan" / "Autopilot", renamed + gated in one commit; persisted
+  `autopilot`/`flightPlanShowsSummary`/`defaultAutopilotMode` keys still read back for back-compat.)
 - **Per-tab link badge (overlay) — built ([`TAB_OVERLAY.md`](doc/agentmaster/TAB_OVERLAY.md)):**
   **every terminal tab the Fleet Observer classifies** carries a small **top-right terminal HUD**
   that makes the tab ⇄ Agentmaster link legible *while you work inside the session*. A **linked**
   Claude session shows the full badge — status (color-matched to the Triage Board) + the Fleet
-  Observer's `model · effort · kind`, Autopilot mode (**Manual/Semi/Full**), queued count, and link
+  Observer's `model · effort · kind`, Tests Autorunner mode (**Manual/Semi/Full**), queued count, and link
   state **⛓ linked**, plus a dim **second row** `<workdir folder>/<branch>` and a dim **third row**
   `⏳ <next queued prompt>` (the first `Pending` prompt's first line, ≤300 chars + `...`; shown only when
   something is queued, mode-agnostic). Any **other** tab shows a
@@ -43,7 +52,7 @@ semantic state taken from **Claude Code hooks** — never screen-scraping.
   as the tab's activity changes — a `pwsh` tab → `claude` the moment you run it → the full linked
   badge on its first prompt; cleared when claude exits or the tab closes — so a started-but-unprompted
   claude (no transcript id yet) is never invisible. Dim until hover; hover/click **expands** controls
-  (Autopilot cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm.
+  (Tests Autorunner cycle · Send-now · queue peek · Jump-to-Manager) + a contextual SemiAuto confirm.
   Off-switchable (`AppSettings.showTabOverlay`). Hover also reveals a **row of actions** — a folder
   button (Open Path) + a copy menu (Session Id · working dir · branch · the REAL Claude/Codex launch
   CLI · the full session **Summary** · the **Transcript**) + a **pencil** that toggles a **SUMMARY
@@ -212,7 +221,7 @@ each a focused commit — all zero writes to `~/.codex` (every read is out-of-ba
   transcript exist" gate), filled by the observer's `_ReconcileManagedCodex` on the first prompt.
   `SessionInfo` gained **`kind`** (Claude default) + `codexSessionId`; `TabKind` gained **Codex** (the
   window-record tab refs + persistence (de)serialize it). **Launch** — the primary launch bar carries a
-  **Claude⇄Codex toggle** (Part 4, the scope/sort/autopilot toggle idiom; Codex is *directory-only* — no
+  **Claude⇄Codex toggle** (Part 4, the scope/sort/autorunner toggle idiom; Codex is *directory-only* — no
   typed-id resume/fork, button reads "Launch Codex"), and the EXTERNAL menu's **Open New Codex Session
   Here** spawns one in a running codex's cwd → `_SpawnCodexSession` → `_LaunchCodexSession`
   (`BuildCodexCommandline` = `<codex>` / `<codex> resume <uuid>` / `<codex> fork <uuid>`, where `<codex>`
@@ -231,7 +240,7 @@ each a focused commit — all zero writes to `~/.codex` (every read is out-of-ba
   rollout — safe while the original is still running (no two-writers hazard) — else `codex resume <uuid>`
   (take-over); original left running. A managed Codex reads distinct everywhere via a teal **`codex` pill** (Part 3 —
   board card + tree row, the same teal as the External pill). **Lifecycle + state ONLY** — NO stdin
-  injector / Autopilot / Send-now (driving the Codex TUI is C4); a managed codex's `autopilot.mode` is Off.
+  injector / Tests Autorunner / Send-now (driving the Codex TUI is C4); a managed codex's `autorunner.mode` is Off.
 
 The observer still **never** feeds a codex to `ObserveClaude` (the External census stays observe-only); a
 MANAGED codex is registered by the launch path and reconciled (state + `codexSessionId` + `tabToken`) by
@@ -239,7 +248,7 @@ the UI-lane `_ReconcileManagedCodex`, and is **deduped out of the External censu
 so it shows once. **Lib-compiled green; not yet full-exe deployed** (rides the next deploy cycle).
 **Deferred:** **C3** = low-latency PUSH via Codex `notify` / `~/.codex/hooks.json` (a GLOBAL config
 mutation — a product decision, no per-session `--settings` like Claude); **C4** = bind a stdin injector +
-Autopilot (drive the Codex TUI; launch is PULL-correlated, resume=`codex resume <id>`).
+Tests Autorunner (drive the Codex TUI; launch is PULL-correlated, resume=`codex resume <id>`).
 
 **Archive is REMOVED — replaced by Favorite + Close; the Sessions browser is the SOLE history view
 ([`FAVORITES.md`](doc/agentmaster/FAVORITES.md); commit `b55765138`; lib-compiled green + engine-tested
@@ -272,7 +281,7 @@ page + its round-2/round-3 audits + informativeness batch are HISTORY, supersede
 **The Sessions browser ([`SESSIONS.md`](doc/agentmaster/SESSIONS.md)) is implemented — engine + UI,
 lib-compiled green + engine-tested (the 604-check harness incl. a live-corpus smoke); it rides the
 next deploy cycle. It is now the SOLE history view (the Archive page is gone — FAVORITES.md).** A
-**"Sessions"** toolbar button (the toolbar's rightmost, after Pause Autopilot) opens a full-window page
+**"Sessions"** toolbar button (the toolbar's rightmost, after Pause Tests Autorunner) opens a full-window page
 (the deferred-pointer-handler discipline the Archive page pioneered) listing **EVERY on-disk
 Claude Code session** (`~/.claude/projects/*/<uuid>.jsonl` — not just managed ones) in a selectable
 window: the `[1 month]` button click-cycles 1d/3d/7d/14d/1mo/3mo, hover opens a **From/To range
@@ -380,7 +389,7 @@ process snapshot (stale/PID-reuse dropped) and publishes a `Presence()` table + 
 The same pass also fixed engine bugs: `ReadTranscriptInfo` now honors `ai-title`/legacy `summary`
 + skips sidechain/compact-summary lines, and the shared **noise filter** (`IsNoiseUserPrompt`)
 keeps interrupt markers / command echoes / task notifications out of titles, prompt lists, AND
-the scanner's Flight-Plan back-fill (STATE.md §8 bug-2 fixed). **Both full-window pages (Archive +
+the scanner's Auto-Testing back-fill (STATE.md §8 bug-2 fixed). **Both full-window pages (Archive +
 Sessions) now share generic chrome:** a window-level **overlay registry** — each page
 `_RegisterAgentPageOverlay`s its host + atomic visibility mirror + an optional dismiss hook (the
 Sessions page closes its range Popup there: popups render in the popup ROOT, a collapsed host
@@ -486,7 +495,7 @@ and live-verified; the ONE unexercised step is a full package build of the commi
 fleet is queryable from a shell so an AI agent can understand *what is going on inside any tab/session*
 WITHOUT the UI: **`show <ref>`** (full introspection — identity/placement, derived state + presence,
 the conversation tail + last assistant reply, activity [msgs/tools/**files touched**], the last user
-prompt, the Flight-Plan queue + autopilot; `--tail N` sets how many conversation turns `show` emits,
+prompt, the Auto-Testing queue + autorunner; `--tail N` sets how many conversation turns `show` emits,
 **default 8** — no effect on the other verbs), **`list` / `sessions` / `tabs` / `windows` / `external`**
 (**`sessions` defaults to OPEN/live only** — `--archived` adds shut-down sessions, `--state <S>`
 exact-matches the derived state, `--dir <D>` substring-matches the working dir; **`tabs --window <W>`**
@@ -528,7 +537,7 @@ run**, so the wapproj integration + a properly-branded `wtd.exe` are unconfirmed
 runs on **hand-copied binaries** until then (needs the dev instance closed); and the **release** alias
 `agentmaster show` is **not deployed** (only `agentmasterdev`). **P2 (control — `restore`/`archive` via
 the existing `WM_COPYDATA` handoff + a disk-poll confirm) and P3 (`watch` event stream + prompt-driving
-`enqueue`/`send-now`/`set-autopilot`) are designed + deferred** (CLI.md §4/§9).
+`enqueue`/`send-now`/`set-autorunner`) are designed + deferred** (CLI.md §4/§9).
 
 **In-app auto-updater (`Updater.h`) — implemented + wired (startup check + cog), header-only.** A
 GitHub-release self-updater for our side-by-side packaged app, header-only pure-Win32 like
@@ -607,7 +616,7 @@ tab/card. The tab strip carries the picked brush on `TerminalTabStatus::AgentPen
 `_SetTabPending`, contrast-picked from the per-dir color each scan tick); the board card body is the always-
 dark Manager fill, so cards use the LIGHT color. Applied live + cross-window via the `flashRingColor` settings
 idiom. **Follow-ups:** an off-switch setting, placeholder/dim-attribute filtering, and a `pauseOnHumanInput`
-autopilot tie-in (PENDING_INPUT.md §4/§6).
+autorunner tie-in (PENDING_INPUT.md §4/§6).
 
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
@@ -630,7 +639,7 @@ What works, by area:
   `claude` — see *Adopt any `claude`* below), an 8th, **escaped `prompt`** field on
   `UserPromptSubmit` (`WireEscape`/
   `WireUnescape`: `\ \t \r \n`), so the registry records **every** message a session got — a
-  prompt typed straight into the ConPTY becomes a `Sent`/`Typed` Flight-Plan entry, while the
+  prompt typed straight into the ConPTY becomes a `Sent`/`Typed` Auto-Testing entry, while the
   `UserPromptSubmit` echo of a prompt WE injected is recognized (text + a recency window + the
   transient `QueuedPrompt::echoed` flag) and NOT double-recorded — and a trailing 9th **`ts`**
   field (the hook's FIRE time, stamped by the forwarder before its slow Stop-path transcript
@@ -728,7 +737,7 @@ What works, by area:
   on `SessionStart` (flagged `SessionInfo::external`) and fires every window's adoption handler (`AddAdoptionHandler`, fanned out — whichever window hosts the `+` tab binds it);
   `TerminalPage::_AdoptExternalSession` matches the `tabToken` to a live ConPTY
   (`ITerminalConnection::SessionId`) and **binds a stdin injector** — promoting it to full
-  observe+control (Autopilot can drive it). A claude hosted outside this app (no matching
+  observe+control (Tests Autorunner can drive it). A claude hosted outside this app (no matching
   connection) stays observe-only (Rule #9). **Caveat — this hook fast-path is *degraded* for
   hand-typed `+`-tab claudes:** WT regenerates a `+`-tab's child env from the registry, dropping
   these runtime-only vars (`AM_SESSION` / `CCMGR_HOOK_PIPE` / the PATH shim — see Gotchas), so a bare
@@ -821,11 +830,11 @@ What works, by area:
     `ReadProcessPackageFamily` — "Windows Terminal" for real WT vs "Agentmaster" / "Agentmaster Dev" for a
     SIBLING install's session vs a bare shell leaf), and `created/lastActivity`
     timing. Observe-only — surfaced on the board AND the Explorer Tree's **EXTERNAL** scope, where a row's
-    **Open New Session Here** / **Adopt** lives on the right-click menu and a **left-click → a read-only Flight Plan**
+    **Open New Session Here** / **Adopt** lives on the right-click menu and a **left-click → a read-only Auto Testing**
     of the conversation. **Codex rides this same External group** (`ExternalClaudeRow.kind == Codex`): a
     parallel `codex.exe` census enriches each from its date-sharded rollout (model · effort · sandbox ·
     approval · title · timing + the C2 rollout-tail state) — a teal `codex` pill, an `○ codex · <model>`
-    per-tab badge, a read-only Flight Plan from the rollout — and the kind-aware menu now offers **Adopt**
+    per-tab badge, a read-only Auto Testing from the rollout — and the kind-aware menu now offers **Adopt**
     (resume its rollout into a managed tab) / **Open New Codex Session Here** (a fresh managed codex in the
     cwd), routing to the Codex launch handler (the managed-lifecycle work, above). The OBSERVER still
     **never** feeds a codex to `ObserveClaude` (the External census stays observe-only); a MANAGED codex is
@@ -837,7 +846,7 @@ What works, by area:
     slow heartbeat. Retires the now-dead `SessionScanner` transcript-DISCOVERY sweep (`ArmDiscovery` /
     `RecentTranscripts`, which the observer subsumes; the scanner keeps its state-reconcile tail). A
     denied / elevated / WOW64 PEB read is guarded → observe-only, never a misread. 24-h soak: no leak / wedge.
-- **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Flight Plan,
+- **C1 UI (M6, `AgentManagerContent`).** Triage Board + Explorer Tree + Auto Testing,
   imperative and snapshot-driven from the registry (cross-thread refresh via
   `DispatcherQueue`), bidirectional selection + directory scope. Each **Triage-Board column**
   is a fixed-width box at full board height with a **pinned header over a vertically-scrolling
@@ -847,14 +856,14 @@ What works, by area:
   when a directory IS scoped — it auto-hides (`_showAllBtn`, kept in sync by `_RebuildBoard`) while
   already showing all directories. Next to the LOCAL/GLOBAL twin a **"Clear"** button (`_clearSelBtn`,
   the same hide-when-idle idiom as "Show all") **deselects** the current card/row — managed OR external
-  (`_ClearSelection`) — so the Flight Plan reads nothing-selected. A managed card's **state-colored
+  (`_ClearSelection`) — so the Auto Testing reads nothing-selected. A managed card's **state-colored
   border shows only on hover or when selected** (thickness 0/1/2 at rest/hover/selected, the accent
   pushed onto the Button's PointerOver state) — borderless at rest to cut visual noise on a busy board.
   A managed card's **title sits in a colored band** across the card top, painted the session's
   **working-directory color** — the SAME permanent per-dir color its terminal TABS wear (Rule #12 /
   `dir-colors.json`; `GetDirColor` persisted-first, else the deterministic `AutoDirColorHex`) — with
   **rounded top corners** (matching the card) over a **straight, square bottom edge**, covering ONLY
-  the title; the body below (codex pill · working dir · `model·effort` · timing · autopilot badge)
+  the title; the body below (codex pill · working dir · `model·effort` · timing · autorunner badge)
   stays the neutral gray fill. The title text **flips black/white for contrast** (`PreferDarkTextOn`
   — the WCAG relative-luminance crossover ~0.179: near-black ink on a LIGHT band, white on a DARK
   one), so a card reads its folder at a glance and same-dir cards cluster across the state columns
@@ -889,13 +898,13 @@ What works, by area:
   thread, re-checks its `_claudeTabs`, selects the tab, and **foregrounds itself**
   (`_FocusClaudeSessionTab`: restore-if-minimized + `SetForegroundWindow` + the
   `SwitchToThisWindow` fallback — same-process, so the hand-off is permitted). Board/tree
-  double-click, tree `Enter`, the Flight-Plan eye, and the Sessions page's Jump all ride this one
+  double-click, tree `Enter`, the Auto-Testing eye, and the Sessions page's Jump all ride this one
   seam. **The reverse holds too — switching to a session's tab selects it in the Manager**: the one
   post-startup tab-switch funnel (`_OnTabSelectionChanged`) calls `_SyncManagerSelectionToTab`, which
   resolves the newly-focused tab's managed session (`_ClaudeSessionForTab` — Claude OR Codex, both live
   in `_claudeTabs`) and drives the content's public **`SelectSession`** (the SAME `_SelectSession` path a
   board-card single-click takes), so moving to the Manager tab shows the session you were just in
-  highlighted (board card + tree row + its Flight Plan) — the per-tab → Manager half of the
+  highlighted (board card + tree row + its Auto Testing) — the per-tab → Manager half of the
   Linked-Lenses selection sync (the board/tree → tab half being Activate, above). User click, `Ctrl+Tab`,
   and a `switchToTab` action all route through the funnel. Gated on `_startupState == Initialized` (so a
   reopen's focused-tab restore can't clobber the lens selection seeded from the `WindowRecord` — the same
@@ -911,7 +920,7 @@ What works, by area:
   [`FAVORITES.md`](doc/agentmaster/FAVORITES.md)) leaves the Board/Tree and lives in the **Sessions browser**,
   the SOLE history view now (the full-window Archive page + its **Archived (N)** button + the per-window
   "Reopen window"/"Saved window" rows were removed). It is resumable there (`_RestoreArchivedSession`,
-  `claude --resume`, transcript-gated — the Sessions page's "Resume here" rehydrates its Flight Plan, so it
+  `claude --resume`, transcript-gated — the Sessions page's "Resume here" rehydrates its Auto Testing, so it
   subsumed the old Archive "Restore here") and markable with the **★ favorite**. Saved windows still reopen
   whole via the toolbar **"Reopen Windows (N)"** button. Explorer `Enter`=Activate / `Del`=Close (never
   injects — Rule #2). The tree's **scope toggle is 3-way — LOCAL · GLOBAL ·
@@ -957,10 +966,10 @@ What works, by area:
   groups by host **tab/shell**, the finest reliable unit — it never falsely merges distinct windows).
   **Left-click selects** an external — from the
   Explorer-Tree EXTERNAL row **OR a Triage-Board External card** (the whole card is the click target;
-  there is no inline observe pill / Adopt button) — → the Flight Plan shows its conversation
+  there is no inline observe pill / Adopt button) — → the Auto Testing shows its conversation
   **read-only** (`_RebuildExternalPlan` — the human prompts, read from the transcript on a
   **background thread** and cached; observe-only — we host no ConPTY, so it is never drivable, no
-  queue/Autopilot). Selecting an external is **Linked-Lenses-synced** (`_SelectExternal`): it switches
+  queue/Tests Autorunner). Selecting an external is **Linked-Lenses-synced** (`_SelectExternal`): it switches
   the tree to **EXTERNAL** with the row highlighted, highlights the board card, and renders the
   read-only plan — so a board click behaves exactly like a tree click. **Right-click** (on either the
   tree row or the board card — both use `_MakeExternalTreeMenu`) offers **Adopt** (bring its conversation
@@ -995,7 +1004,7 @@ What works, by area:
   Session Here is offered in EVERY scope** — it is also the **last item** on the LOCAL/GLOBAL
   session-row menu (`_MakeSessionMenu`, after Jump to Tab / Rename / Close), spawning in that session's working
   dir. With no external selected the
-  Flight Plan reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
+  Auto Testing reads **nothing-selected**. Every card/row (board, tree LOCAL/GLOBAL/EXTERNAL) carries a dim
   **timing adornment** `-createdAgo/activeFor/-lastActivityAgo` (e.g. `-2m7d/12h/-2h30m` — created ago /
   active span / last-activity ago; `m`=month or minute by position, tooltip-explained;
   `FormatSessionTiming`/`FormatSpan`) from the transcript's ctime/mtime (managed:
@@ -1013,7 +1022,7 @@ What works, by area:
   dir's persisted color, or a fresh **collision-free auto color** (first in the dir's seeded probe
   order that no other folder holds; on a full palette it resets + reuses, avoiding colors open tabs
   show) that is then persisted. Recoloring one tab persists that pick + recolors every tab in the
-  dir — Rule #12). Flight Plan: a **compose row** — three top-left icon buttons
+  dir — Rule #12). Auto Testing: a **compose row** — three top-left icon buttons
   (**eye** = Focus / jump to the live tab · **!** = Send now, *which now confirms first* ·
   **envelope** = Add to the queue) beside a **multiline textarea** that grows as you type;
   per-message actions moved off a button strip onto a **right-click menu over the messages**
@@ -1024,9 +1033,9 @@ What works, by area:
   behind a `_promptHistoryNavigating` latch so a recall write doesn't reset the index), and **focus
   snaps back to the compose box after a queue/send** (deferred PAST the Send-now confirm so it can't steal
   the dialog's focus) so you can keep typing. Only a **plain** Up/Down browses history — a **modified**
-  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked. **Autopilot** is now a **toggle in the FLIGHT PLAN header** (mirrors the Explorer Tree
+  arrow (Shift/Ctrl+arrow) passes through for caret/selection, never hijacked. **Tests Autorunner** is now a **toggle in the AUTO TESTING header** (mirrors the Explorer Tree
   LOCAL/GLOBAL/EXTERNAL toggle) — a colored state dot, gray ○ Off / amber ◐ Semi / green ● Full, that
-  **cycles** Off → Semi-auto → Full on click (`_CycleAutopilot` / `_UpdateAutopilotButton`,
+  **cycles** Off → Semi-auto → Full on click (`_CycleAutorunner` / `_UpdateAutorunnerButton`,
   replacing the old combo); the **Templates** row (save / apply / apply-to-dir) is collapsed
   behind a **paper icon** at the textarea's top-right (kept inline — NOT a Flyout — so its name
   box still takes keypresses; the XAML-Islands text-input trap). It still reflects **all**
@@ -1047,17 +1056,17 @@ What works, by area:
   green id-resume, no Fork — keeping only the amber "Create & Launch Codex".) Working dirs are
   grouped/scoped with a filesystem-aware
   `PathEq`, so case-variant spellings collapse to one Explorer Tree root (Rule #8).
-- **Autopilot (M7, `Scheduler`).** Pure `DecideAdvance()` + a worker thread on the registry
+- **Tests Autorunner (M7, `Scheduler`).** Pure `DecideAdvance()` + a worker thread on the registry
   advance seam. Turn-complete → auto-send next Pending (Full) / one-click confirm (SemiAuto)
   / Held by the question-guard (transient) / skip Manual gate. Each `QueuedPrompt` also carries optional
   per-prompt scheduling metadata the data model supports beyond this default path — `gate` (OnTurnComplete /
   AfterDelay `delayMs` / Manual), a custom `guardPattern` (empty ⇒ the default not-a-question guard),
-  `dependsOn` (a prompt id that must be `Sent` first), and `attempts`/`maxAttempts` (the current Flight-Plan
+  `dependsOn` (a prompt id that must be `Sent` first), and `attempts`/`maxAttempts` (the current Auto-Testing
   UI queues at the `OnTurnComplete` default). Backstops: pause-on-human-
   input, maxAutoSends, stopOnError, global Pause-all. Idempotent (atomic mark-Sent before
   inject). Advances fire on **two** triggers: the `Stop` seam (turn-complete) AND observed
   changes (`OnObserved`), so a session sitting **Idle** (freshly launched / just `--resume`d —
-  it never emits a `Stop`) with a queued plan + autopilot **starts** consuming instead of
+  it never emits a `Stop`) with a queued plan + autorunner **starts** consuming instead of
   waiting forever. `DecideAdvance` treats `Idle` as *ready* alongside `WaitingForInput`; a
   time-bounded **pickup guard** (the `echoed` flag + `kPickupGuardMs`) holds the next send until
   the just-injected prompt is picked up, so a change-driven advance never drains the queue (one
@@ -1073,7 +1082,7 @@ What works, by area:
   would duplicate it): the FIRST re-press fires fast (`kEnterRetryFirstMs`, 3s — rescue the common
   eaten-CR case without a long stall), later presses space out by `kEnterRetryIntervalMs` (6s), up
   to `kEnterRetryMax` (3) presses, then **gives up — the prompt is marked `Failed` and the session's
-  Autopilot is PAUSED** (mode→Off): it never landed, so don't strand a phantom `Sent` nor advance
+  Tests Autorunner is PAUSED** (mode→Off): it never landed, so don't strand a phantom `Sent` nor advance
   past a broken step (the user Send-nows / re-arms; rolling back to `Pending` would just re-send and
   be re-eaten — an infinite loop). **"Started" = OR of three signals** so it
   degrades across hook / no-hook sessions: the prompt's `UserPromptSubmit` echo arrived (`echoed`) ·
@@ -1083,16 +1092,16 @@ What works, by area:
   fallback). Only **live, injector-bound** sessions are driven — the gate is **controllability**
   (`HasInjector`: do we hold this session's stdin?), NOT provenance (`external`: did we launch it?);
   an **adopted** `+`-tab claude is `external=true` yet injector-bound, so it IS driven (gating on
-  `external` here was the autopilot-on-adopted bug). The watch is **armed
+  `external` here was the autorunner-on-adopted bug). The watch is **armed
   from `OnObserved`** — every send path marks the prompt `Sent` through the registry, which notifies
-  this observer — so no send path needs to know about it, and it works regardless of autopilot **mode**
+  this observer — so no send path needs to know about it, and it works regardless of autorunner **mode**
   (a manual Send-now must still submit). The worker `wait_for`s a `kEnterRetryPollMs` poll cadence
   while a send awaits pickup; `_sweepPendingPickups()` does the re-press + give-up (all registry I/O
   **outside** the scheduler mutex). A retry **restarts** the prompt's `sentAtUnixMs` so a late press's
   echo still lands inside the registry's 15s echo window (else it'd be mis-recorded as a fresh `Typed`
   prompt) AND the pickup guard stays armed (the queue won't drain past the stuck prompt during
   retries). `enterRetries` is transient (reset to 0 at each fresh send). Logs: `[enter-retry] <id>
-  press k/3` · `[enter-retry-giveup] <id>` (`autopilot.log`).
+  press k/3` · `[enter-retry-giveup] <id>` (`autorunner.log`).
 - **Persistence + archive/restore (M8, `Json.h`/`Persistence`).** Sessions + named plan
   templates + the path-picker's recent-dirs MRU (de)serialize to JSON under the **ACTIVE
   PROFILE** dir (`AgentmasterStateDir()` — default `%USERPROFILE%\.agentmaster\`, dev package
@@ -1102,7 +1111,7 @@ What works, by area:
   On startup `_RestoreClaudeSessions()` loads each saved session into the registry as
   **Archived** and does **NOT** auto-launch it (Rule #6) — the app opens to just the Manager
   tab; the prior fleet comes back from the **Sessions browser** (per-row **Resume here**). Closing a
-  session's tab (the X, the tree `Del`, the Manager's **Close**, or the Flight-Plan **Close** item) all
+  session's tab (the X, the tree `Del`, the Manager's **Close**, or the Auto-Testing **Close** item) all
   route through the ONE close seam (`_HandleCloseTabRequested`→`_ArchiveAndCloseClaudeTab`): a 3-way
   confirm (gated by `confirmBeforeKill`) — **Close · ★ Favorite & Close · Cancel** — where both Close
   paths flip `live=false` + clear the injector + persist + close the tab, KEEPING the record so the
@@ -1113,13 +1122,13 @@ What works, by area:
   `.jsonl` on disk is **never** touched. Closing a **batch** that holds managed sessions (a window close,
   or the tab menu's **Close ›**) raises ONE consolidated dialog instead of a
   train of per-tab confirms — **Close All · ★ Favorite & Close All · Cancel All** (either Close path keeps
-  each session resumable in the Sessions browser with its Flight Plan — nothing on disk is deleted; ★
+  each session resumable in the Sessions browser with its Auto Testing — nothing on disk is deleted; ★
   Favorite & Close All stars every managed session first via a `favoriteAll` flag in the apply loop;
   Cancel All aborts the whole close; a batch of only plain shell tabs skips the dialog). The
   tab context-menu's **Close ›** submenu also gained **Close tabs to the left** (`_CloseTabsBefore`, the
   left twin of close-to-the-right), and both close-left/right now **skip the pinned Manager tab** (index 0)
   so a bulk close can never kill it. Restore
-  re-launches in the working dir + reloads the Flight Plan + autopilot; resume is
+  re-launches in the working dir + reloads the Auto Testing + autorunner; resume is
   **transcript-gated**: `claude --resume <id>` only when Claude actually has a conversation for
   that id, otherwise a **fresh** session (new id, same dir + queue) — and the stale archived
   record is dropped. A never-prompted session has no transcript and a blind `--resume` would die
@@ -1180,7 +1189,7 @@ What works, by area:
     before re-homing, instead of skipping its not-yet-loaded sessions and flushing an EMPTY record over its
     workspace; `_CaptureWindowRecord` stops persisting a **dead** per-tab Claude color (the dir-color system
     owns it, Rule #12) and only records a focused shell-tab target that can actually be recreated. *Registry
-    / autopilot:* `SessionRegistry::Remove` now `_notify`s (a resume-fresh drop refreshes every window's
+    / autorunner:* `SessionRegistry::Remove` now `_notify`s (a resume-fresh drop refreshes every window's
     Archive list — no ghost row); `ObserveClaude`'s `live=true` revive is gated on a **different pid** so a
     just-archived session whose claude is briefly still alive isn't bounced back (Rule #7); `Scheduler::Confirm`
     (SemiAuto) + the Manager's Send-now now **roll a failed inject back to `Pending`** like the auto-send path
@@ -1220,7 +1229,7 @@ What works, by area:
   reopen that is briefly tab-empty is safe), reinforcing the existing `UnregisterLiveWindow` empty-record
   deletion + `RecoverableWindows` empty-record filter.
 - **Settings cog (`AppSettings`, `settings.json`).** A `⚙` (toolbar order: Launch · Fork · Reopen · `⚙` ·
-  Pause Autopilot · **Sessions** — the cog sits *before* Pause Autopilot; **Sessions** is the rightmost
+  Pause Tests Autorunner · **Sessions** — the cog sits *before* Pause Tests Autorunner; **Sessions** is the rightmost
   (the **Archived** button was removed — FAVORITES.md)) opens a
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
@@ -1229,7 +1238,7 @@ What works, by area:
   global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via
   `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus a **CLAUDE BINARY** row (the
   native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**
-  (`claudeExePath`) with **Browse…**, re-resolved live on Save via `RefreshClaudeExe` — plus **Autopilot defaults** stamped
+  (`claudeExePath`) with **Browse…**, re-resolved live on Save via `RefreshClaudeExe` — plus **Tests Autorunner defaults** stamped
   onto NEW sessions (mode / maxAutoSends / stopOnError / pauseOnHumanInput) and **behavior**
   (`confirmBeforeKill` — relabeled "Confirm before closing" — routes the Close action
   (tab X / Manager **Close** / tree `Del`) through the confirm dialog;
@@ -1307,8 +1316,8 @@ What works, by area:
   content | browse` — the field a row matched, the line that makes "why did this row surface" self-evident),
   `favorite on/off`, `hide`/`unhide`; **cross-cutting funnels** (cover the Manager board/tree + page + tab
   menus) — `activate` (local vs cross-window fan-out), `rename` (Explorer/Manager `_RenameClaudeSession` AND
-  the tab-strip `_SyncClaudeTitleFromTab`, the latter only on a real change); **Flight Plan** — `queue`,
-  `send-now` (+ delivered vs no-injector rollback), `autopilot -> Off|Semi|Full`, `pause-all`, `template-save`
+  the tab-strip `_SyncClaudeTitleFromTab`, the latter only on a real change); **Auto Testing** — `queue`,
+  `send-now` (+ delivered vs no-injector rollback), `autorunner -> Off|Semi|Full`, `pause-all`, `template-save`
   (a session's queue → a reusable plan) + `template-apply` (the template's prompts → one session, or → EVERY
   session in a dir — the broadcast carries the affected count); **navigation**
   — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a restore's focus-restore can't
@@ -1322,13 +1331,13 @@ What works, by area:
   menu — the per-tab overlay's AND the board/tree Copy submenu — `field` ∈
   session-id/path/branch/claude-cli/codex-cli/transcript/summary), `open-path` (the overlay folder button →
   explorer); **cog/settings** — `settings-save` (the cog Save — logs the behavior-impacting fields
-  skipPerms/model/autopilot/claudeExe), `profile-change <from> -> <to>` (re-point the install's profile
+  skipPerms/model/autorunner/claudeExe), `profile-change <from> -> <to>` (re-point the install's profile
   folder, applies on restart), `check-for-updates` (the interactive button only — not the silent on-open
   check), `reset-hidden-sessions` (un-hide every Sessions-browser row). The fork chain reads
   `[nav] sessions fork-click row=… → [sessions-page->fork] source=… →
   [fork] <new> (forked from <source>) → [nav] sessions fork-done new=<new> from=<source>` (row-clicked →
   resolved source → new id, end-capped so a crash mid-fork is visible). **Deliberately UNLOGGED**
-  (low signal / would add noise): Flight-Plan queue micro-edits (move/delete a Pending row), the settings-cog
+  (low signal / would add noise): Auto-Testing queue micro-edits (move/delete a Pending row), the settings-cog
   OPEN + the summary-panel pencil/wrap toggles + the path-picker navigation, and the pure view-filter toggles
   (sort column, scope LOCAL/GLOBAL/EXTERNAL, window preset, row-filter facets — the active scopes already ride
   the `search` line). **Census log gating** (the observer's
@@ -1345,7 +1354,7 @@ What works, by area:
 Follow-ups (not blocking): the PROFILES.md §5 set (per-identity defterm/shellext CLSIDs — the one
 shared seam left between the release and dev packages; distinct dev iconography; profile
 export/import); feed `pauseOnHumanInput` from a TermControl input tap;
-bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Flight Plan;
+bracketed-paste for true multi-line prompt bodies; a live buffer "peek" in the Auto Testing;
 **bulk open** (the Sessions page's background Resume/Fork) re-opens tabs lazily (a non-foreground tab starts its `claude` only
 when first focused — WT's lazy-background-tab behavior; open one at a time to force start);
 a one-time **"Restore your previous layout?"** launch prompt (offers **all archived sessions**;
@@ -1377,7 +1386,7 @@ The linked badge also carries a **third (dim) row** (`AgentTabOverlay::_promptLi
 (a trailing `...` when that first line surpasses 300 chars OR there's more content behind it, via the
 anon-namespace `FirstLinePreview`). It is the per-tab echo of row 1's `⏳N` count — the count is HOW MANY,
 this is WHAT'S NEXT (the same item `Scheduler::DecideAdvance` fires next) — so it's **mode-agnostic** (shown
-whenever something is `Pending`, regardless of Autopilot). It **wraps** (so the full ≤300-char line can
+whenever something is `Pending`, regardless of Tests Autorunner). It **wraps** (so the full ≤300-char line can
 show) but is `MaxWidth`-capped + right-anchored so a long prompt can't balloon the HUD; the hourglass run is
 goldenrod (matching the row-1 `⏳N`), a hover tooltip reveals the FULL prompt, and it's **hidden** when
 nothing is queued and on observe badges (built only via `_Refresh`, a linked session).
@@ -1424,7 +1433,7 @@ and Codex (`RenderCodexSummary` — via `SummaryEscapeMsg`'s `wrapNewlines` mode
 `Border` rules (`HorizontalAlignment::Stretch`, re-fills on resize; a fixed run of `─` can't in a
 wrapping block), driven by a sentinel line (`\x1F`) the display turns into a `Border` and the plain-text
 copy turns into a `─` rule. **System-injected "user" messages are filtered** out of the Messages list
-(`SeIsCommandNoise` (in `ProcessInspect.cpp`, exposed for tests) — the summary-only filter, distinct from titles/Flight-Plan's
+(`SeIsCommandNoise` (in `ProcessInspect.cpp`, exposed for tests) — the summary-only filter, distinct from titles/Auto-Testing's
 `IsNoiseUserPrompt`): `<command-*>` / `<bash-*>` echoes, `<task-notification>` /
 `<output-file>` / `<status>`+`<summary>`, subagent telemetry `<usage>` / `<subagent_tokens>`, background
 bash `<bash-notification>` / `<shell-id>` / `<persisted-output>`, `<background-task-input>`,
@@ -1584,7 +1593,7 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   picked on an install's FIRST LAUNCH — Production / Development / Browse… — and changeable from
   the cog's PROFILE row, applied on restart). Contents: `hooks-settings.json` +
   `agentmaster-hook.ps1` (the shared hooks config Claude is pointed at via `--settings`),
-  `hooks.log` + `autopilot.log` (engine traces — `hooks.log` carries the hook event stream
+  `hooks.log` + `autorunner.log` (engine traces — `hooks.log` carries the hook event stream
   [`[SessionStart]`/`[Stop]`/…], the engine-mechanism tags [`[fork]`/`[resume]`/`[rehome]`/`[spawn]`/
   `[archive]`/`[restore-fresh]`/`[recon-*]`/…], the `[observer]` census, **and the `[nav]` USER-NAVIGATION
   AUDIT TRAIL** — see the *Logging & observability* bullet above; `grep '\[nav\]' hooks.log` reconstructs the user's whole journey),
@@ -1649,7 +1658,7 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   `_RestoreClaudeSessions()` = load the persisted fleet **as Archived** (process-once via
   the `Engine::restoreMutex` load barrier — a 2nd window blocks until it's loaded, then skips),
   `_RestoreArchivedSession()` = the on-demand resume.
-  **Codex mirrors these seams (lifecycle + state only — NO injector/Autopilot):**
+  **Codex mirrors these seams (lifecycle + state only — NO injector/Tests Autorunner):**
   `_LaunchCodexSession(dir, title, restored, forkFromCodexUuid)` builds a `codex` / `codex resume <uuid>`
   / `codex fork <uuid>` `ConptyConnection` (`BuildCodexCommandline`, launcher resolved to a FULL PATH —
   `ResolveCodexLauncher` / `Engine::codexExePath`, a `.cmd`/`.bat` run via `cmd /c`; `AM_SESSION` stamp,
@@ -1895,7 +1904,7 @@ build **binlog uploads as an artifact** to diagnose the first run.
 - **`TextBox` has no `VerticalScrollBarVisibility`** in this projection (WPF puts it on the
   TextBox; UWP doesn't) — set the **attached** `ScrollViewer.VerticalScrollBarVisibility`
   instead (`ScrollViewer::SetVerticalScrollBarVisibility(box, …)`; also a C2039, hit on the
-  multiline Flight-Plan compose box). Related glyph-alignment quirk: a bare symbol rides
+  multiline Auto-Testing compose box). Related glyph-alignment quirk: a bare symbol rides
   differently per element — a **`TextBlock`** reserves descent space in its line box (so a
   centered `"!"` sits high), while a **`FontIcon`** centers the glyph's ink. Render compose-bar
   symbols as `FontIcon` (even a text-font one, e.g. `Segoe UI` glyph `"!"`) so an icon row lines
@@ -2343,8 +2352,8 @@ build **binlog uploads as an artifact** to diagnose the first run.
     button (`RecoverableWindows` = records − live − content-less). On startup the Emperor reopens the
     manifest∩records set (`WindowEmperor.cpp`), gated by the **decide-prompt** when >1; **No** still
     loses nothing (one window claims the front record, the rest stay recoverable). **Session half**
-    (FAVORITES.md): **Close ALWAYS ARCHIVES** (`live=false`, keep the record + Flight Plan +
-    autopilot; the transcript `.jsonl` is NEVER touched) — there is no Delete; a closed session
+    (FAVORITES.md): **Close ALWAYS ARCHIVES** (`live=false`, keep the record + Auto Testing +
+    autorunner; the transcript `.jsonl` is NEVER touched) — there is no Delete; a closed session
     leaves the Board and is resumable from the **Sessions browser** (the sole history view), the
     recover button bringing back the WHOLE window. **Enforcement that must not regress:** the
     **deterministic close/quit flush** captures the record BEFORE teardown clears `_claudeTabs`

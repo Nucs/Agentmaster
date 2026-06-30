@@ -155,7 +155,7 @@ before any window opens the cog or a session spawns.
 
 | Default | Where it lands | Default value | Why |
 |---|---|---|---|
-| `CLAUDE_CODE_MAX_RETRIES` | the **Global env** (`AppSettings.env`) — editable in the cog's *Environment variables ▸ Global* tab | `50000` | Maximize API-retry resilience for unattended Autopilot runs. ⚠️ Claude **clamps the effective value to 15** since CLI **v2.1.186** (`CLAUDE_CODE_RETRY_WATCHDOG` is the newer unattended path); the literal `50000` is intentional + harmless, and the user may change it. |
+| `CLAUDE_CODE_MAX_RETRIES` | the **Global env** (`AppSettings.env`) — editable in the cog's *Environment variables ▸ Global* tab | `50000` | Maximize API-retry resilience for unattended Tests Autorunner runs. ⚠️ Claude **clamps the effective value to 15** since CLI **v2.1.186** (`CLAUDE_CODE_RETRY_WATCHDOG` is the newer unattended path); the literal `50000` is intentional + harmless, and the user may change it. |
 | `cleanupPeriodDays` | the user's **global `~/.claude/settings.json`** (NOT env, NOT `AppSettings`) — editable in the cog's *Claude history ▸ Keep Claude history (days)* field | `36500` (~100y) | So Claude **never purges global session history** at startup (Resume + the Sessions browser depend on it). The purge is global — any externally-launched `claude` on the default 30 would otherwise delete the whole `~/.claude/projects` store — so we write the **user's own** settings file, not just our `--settings`. |
 
 **Footguns we deliberately avoid** (verified against the official docs + issue tracker):

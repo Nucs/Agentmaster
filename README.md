@@ -7,12 +7,12 @@ _By developers, for developers - Never lose a session again - feel like Windows 
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
-[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Flight Plan (per-session prompt queue)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
+[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Auto Testing (per-session prompt queue)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
 
 ## ✨ What it does for you
 
 ### 🗂️ One tab to run the whole fleet
-A pinned **Manager** tab is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Flight Plan** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which.
+A pinned **Manager** tab is mission control: a **Triage Board** that sorts every session into *Running · Waiting-for-you · Needs-approval · Error · Done*, an **Explorer Tree** of your working-dirs → sessions, and a **Auto Testing** to queue prompts per session. Click a card and its terminal tab follows — both ways, across every window — so you never lose which tab is which.
 
 ### 💾 Never lose a session — ever
 Close a window and reopen it **whole**: geometry, **resumed** Claude *and* Codex conversations, shell tabs back at their real cwd, even the focused tab. And the **Sessions browser** searches *every* conversation that's ever hit disk — an instant index, then ripgrep across the actual content — so you can **Resume or Fork** anything, from any day. Closing only archives a session; your transcripts are never deleted.
@@ -24,7 +24,7 @@ The **Fleet Observer** detects, correlates, and enriches *every* Claude/Codex se
 State is **never screen-scraped**: it's hook-derived and then self-healed from the transcript, so dropped or out-of-order events can't lie to you. It drives a **board column** and a hover card carrying the conversation's **recap** (*"what we did / what's next"*). **Waiting-for-you** works like an unread inbox: a finished turn stays flagged until you've actually looked at it.
 
 ### 🔎 Observability everywhere — every tab is a status lens
-You never have to open the Manager to read a session. Every classified tab wears a **state-colored dot** in the strip and a **top-right overlay badge** — *status · `model · effort · kind` · Autopilot · queued · workdir/branch · the next queued prompt* — that flips live as the session moves, with a one-hover **copy** menu — also on the **tab's right-click menu** — for its id / path / branch / **real launch CLI** / summary / transcript. The badge's **pencil** unfolds a per-tab **summary panel** (plan · tasks · prompts · files read/created/edited), and a per-prompt **Jump** (or **Alt+↑/↓**) scrolls straight to where a prompt was sent. Even a plain shell tab keeps a dim `○ kind · unlinked` twin — nothing in your strip is a mystery.
+You never have to open the Manager to read a session. Every classified tab wears a **state-colored dot** in the strip and a **top-right overlay badge** — *status · `model · effort · kind` · Tests Autorunner · queued · workdir/branch · the next queued prompt* — that flips live as the session moves, with a one-hover **copy** menu — also on the **tab's right-click menu** — for its id / path / branch / **real launch CLI** / summary / transcript. The badge's **pencil** unfolds a per-tab **summary panel** (plan · tasks · prompts · files read/created/edited), and a per-prompt **Jump** (or **Alt+↑/↓**) scrolls straight to where a prompt was sent. Even a plain shell tab keeps a dim `○ kind · unlinked` twin — nothing in your strip is a mystery.
 
 <table>
 <tr>
@@ -37,10 +37,10 @@ You never have to open the Manager to read a session. Every classified tab wears
 </tr>
 </table>
 
-> **And the small stuff that adds up:** **★ favorite** a session to pin it, permanent **per-directory tab colors** (a folder keeps its color across tabs, windows, and restarts), per-install **profiles** so a from-source dev build sits beside the release, and a **Settings** cog for the knobs (model · env · Autopilot defaults).
+> **And the small stuff that adds up:** **★ favorite** a session to pin it, permanent **per-directory tab colors** (a folder keeps its color across tabs, windows, and restarts), per-install **profiles** so a from-source dev build sits beside the release, and a **Settings** cog for the knobs (model · env · Tests Autorunner defaults).
 
 #### Additional features
-- **Autopilot** — auto-sends the next queued prompt on turn-complete (Full / Semi / Manual), with stop-on-error · max-sends · pause-on-input · question-guard · Enter-retry, and savable plan templates.
+- **Tests Autorunner** — auto-sends the next queued prompt on turn-complete (Full / Semi / Manual), with stop-on-error · max-sends · pause-on-input · question-guard · Enter-retry, and savable plan templates.
 - **`agentmaster` CLI** — query the fleet from any shell, app up or down (`show` / `list` / `sessions` / `tabs` / `windows` / `external`, `--self`, `--json`).
 - **In-app updater** — checks GitHub on launch and from Settings → Updates; one-click update, pre-release opt-in, and uninstall.
 - **Keep Awake** — toolbar toggle (Off / Always / While-Running) so the machine won't sleep mid-run.

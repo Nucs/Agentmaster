@@ -20,7 +20,7 @@
 
 ## 1. The feature (spec)
 
-- **Toolbar:** Launch · Reopen · `⚙` · Pause Autopilot · Archived · **Sessions** *(new — right
+- **Toolbar:** Launch · Reopen · `⚙` · Pause Tests Autorunner · Archived · **Sessions** *(new — right
   after Archived)*.
 - **Page shell:** duplicate the Archive page structure (`_BuildArchivePageShell` /
   `_ShowArchivePage` — full-window, mounted over `TerminalPage`'s Root content rows, ← Back to

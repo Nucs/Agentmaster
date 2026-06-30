@@ -89,7 +89,7 @@ event \t sessionId \t cwd \t isQuestion \t permission \t tool \t tabToken \t pro
 | 5 | `permission` | `1`/`0` — a `Notification` requesting tool permission (vs. an idle notice) |
 | 6 | `tool` | associated tool name, when applicable |
 | 7 | `tabToken` | the hosting `WT_SESSION` GUID (for adopting a hand-typed `claude`) |
-| 8 | `prompt` | **escaped**; set ONLY on `UserPromptSubmit` (so the Flight Plan records *every* message a session got) |
+| 8 | `prompt` | **escaped**; set ONLY on `UserPromptSubmit` (so the Auto Testing records *every* message a session got) |
 | 9 | `ts` | the hook's **fire time** (unix ms, UTC) — the event-ORDERING key (see *State machine*) |
 
 Fields 1–2 are required; the rest are optional (a tolerant parser accepts older/edge forwarders
@@ -122,11 +122,11 @@ The materialized `hooks-settings.json` (`BuildHooksSettingsJson`) registers the 
 | Hook | Meaning | Effect in Agentmaster (`NextSessionState`) |
 | --- | --- | --- |
 | `SessionStart` | session began | create/confirm `SessionInfo`, state → `Idle` |
-| `UserPromptSubmit` | a prompt was submitted (by user or by us) | state → `Running`; record the prompt in the Flight Plan; recognize + suppress the echo of a prompt **we** injected (idempotency) |
+| `UserPromptSubmit` | a prompt was submitted (by user or by us) | state → `Running`; record the prompt in the Auto Testing; recognize + suppress the echo of a prompt **we** injected (idempotency) |
 | `Notification` (permission) | tool-permission prompt | state → `NeedsApproval`; run **Approval Policy** (NOT the prompt queue). A plain idle notice leaves state unchanged |
-| `Stop` | main agent finished the turn | state → `WaitingForInput`; **Autopilot.tryAdvance()**; carries `isQuestion` for the question-guard |
+| `Stop` | main agent finished the turn | state → `WaitingForInput`; **Tests Autorunner.tryAdvance()**; carries `isQuestion` for the question-guard |
 | `SubagentStop` | a subagent finished | informational only (state unchanged) |
-| `SessionEnd` | session ended | state → `Done`; stop Autopilot |
+| `SessionEnd` | session ended | state → `Done`; stop Tests Autorunner |
 
 **`PreToolUse` / `PostToolUse` are defined in the protocol but intentionally NOT registered**
 (`HookEvents.h`): the session is already `Running` between `UserPromptSubmit` and `Stop`, and
@@ -161,13 +161,13 @@ showing `WaitingForInput`/`Idle` for an ENTIRE turn (the "second turn never show
   first, so turn N's `Stop` can arrive after turn N+1's `UserPromptSubmit` and would flip the
   Running turn back to `WaitingForInput`. A non-quiescent `Stop` whose wire `ts` predates the
   newest `UserPromptSubmit` (`turns.lastPromptUnixMs`) is **stale**: state is kept, and its
-  question bit + Autopilot advance are suppressed (it described an older turn).
+  question bit + Tests Autorunner advance are suppressed (it described an older turn).
 - **Type-ahead** — Claude Code fires `UserPromptSubmit` at **Enter-time** for a prompt typed while
   a turn is still running (measured live: 21 `UserPromptSubmit` vs 4 `Stop` on one heavy session),
   queues it, then consumes the queued batch as the next turn with **no further hook**. A
   `UserPromptSubmit` landing while `Running`/`NeedsApproval` increments `turns.queuedPrompts`; the
   next non-quiescent `Stop` **consumes** the batch (`queuedPrompts -> 0`) and stays `Running` —
-  no `turnComplete`, so Autopilot does not inject into the already-starting turn (Rule #1's one
+  no `turnComplete`, so Tests Autorunner does not inject into the already-starting turn (Rule #1's one
   prompt per turn).
 - **Quiescent `Stop`** — the scanner's synthesized missed-Stop (`HookMessage::quiescentStop`,
   never on the wire) comes from a ≥2 s-quiet transcript whose tail carries a **terminal**
@@ -191,7 +191,7 @@ Self-healing by construction: every applied `Stop` zeroes `queuedPrompts` (drift
 accumulate; a phantom `UserPromptSubmit` — e.g. a slash command that never starts an API turn —
 costs at most one wrong-`Running` interval, which the scanner's quiescence reconciliation ends),
 `SessionStart`/`SessionEnd` reset the accounting, and `ts == 0` events (an old forwarder) degrade
-to plain arrival order. Only a `turnComplete` transition fires the Autopilot advance; the wire
+to plain arrival order. Only a `turnComplete` transition fires the Tests Autorunner advance; the wire
 `ts` also feeds `lastActivityUnixMs` (monotonic — a stale event can't regress the
 WaitingForInput→Idle decay anchor, which real hooks previously never refreshed at all).
 
@@ -211,7 +211,7 @@ Two fields are computed in the forwarder, not just relayed:
 
 - **`isQuestion`** (on `Stop`): the forwarder tails the transcript (`$j.transcript_path`, last
   ~60 lines), finds the last `assistant` text message, trims it, and sets `1` if it ends with `?`.
-  This feeds the **question-guard**: Autopilot **Holds** the next queued prompt rather than
+  This feeds the **question-guard**: Tests Autorunner **Holds** the next queued prompt rather than
   auto-answering a clarifying question.
 - **`permission`** (on `Notification`): set `1` when the notification `message` matches
   `(?i)permission|approve|allow|grant` — distinguishing a blocking tool-permission prompt from an
@@ -241,12 +241,12 @@ onHook(sid, ev):
   Notification(perm):   s.state = NeedsApproval;   applyApprovalPolicy(s)   // not the queue
 
 tryAdvance(s):
-  if s.autopilot.mode == Off:            return
+  if s.autorunner.mode == Off:            return
   if s.state not in {WaitingForInput, Idle}: return   // Rule #1: Idle is also "ready"
   if humanTypedWithin(s, 1500ms):        return        // pauseOnHumanInput
   item = s.queue.firstPending(); if !item: notifyPlanDone(s); return
   if !passesGuard(s, item):  item.status = Held; flagCard(s); return  // e.g. lastMessageIsQuestion
-  if s.autopilot.mode == SemiAuto:       askConfirm(s, item); return
+  if s.autorunner.mode == SemiAuto:       askConfirm(s, item); return
   markSentAtomically(item); persist(s)                 // idempotent BEFORE inject (Rule #4)
   s.connection.WriteInput(item.text + L"\r");          // inject + submit
 ```

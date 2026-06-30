@@ -2,7 +2,7 @@
 
 > A small, glanceable HUD pinned to the **top-right of every Claude session tab's terminal**,
 > showing the **connection between that tab and Agentmaster**: its hook-driven status, whether
-> (and how) Autopilot is driving it, and what's queued — with on-demand controls. This is the
+> (and how) Tests Autorunner is driving it, and what's queued — with on-demand controls. This is the
 > per-tab counterpart to the Manager tab's Triage Board: the Board is the *fleet* view; this is
 > the *here-and-now* view, visible while you actually work inside a session.
 > Companions: [`DESIGN.md`](./DESIGN.md) · [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) ·
@@ -14,7 +14,7 @@
 > controls) shipped, plus substantial additions this design did not foresee: the badge now shows on
 > **every classified tab** (a dim `○ <kind> · unlinked` *observe badge* — `pwsh` / `cmd` /
 > unprompted-`claude` / `codex` — that flips in place as activity changes, **not** "no badge" as §8
-> originally said); its **row 1** now reads `status · actions · autopilot · queue`, with **link state
+> originally said); its **row 1** now reads `status · actions · autorunner · queue`, with **link state
 > surfaced only when *not* linked** (a linked tab's badge already implies the link), over a dim **second
 > `<workdir>/<branch>` row** and a **third `⏳ <next queued prompt, ≤300 chars>` row** (§13i); the always-shown row-1 **action cluster** is a **folder Open-Path + a copy
 > menu** (Session Id / Path / Branch / the real Claude·Codex launch CLI / Summary / Transcript, with a
@@ -28,9 +28,9 @@
 
 1. **Phase 1 — the badge.** *"Each tab in Agentmaster must get an overlay on the top-right side,
    small font, summarizing the connection between this tab and the Agentmaster. This way the user
-   can see if Agentmaster is handling — or how it's handling — the queued messages, autopilot
+   can see if Agentmaster is handling — or how it's handling — the queued messages, autorunner
    mode, and whatever fits well there."*
-2. **Phase 2 — the controls.** *"Later on: add buttons to the tab overlay for autopilot control,
+2. **Phase 2 — the controls.** *"Later on: add buttons to the tab overlay for autorunner control,
    show/hide the queued messages, and whatever fits well there."*
 
 This document finalizes both, plus a small Phase 3 of deferred ideas.
@@ -39,9 +39,9 @@ This document finalizes both, plus a small Phase 3 of deferred ideas.
 
 | Decision | Choice | Notes |
 | --- | --- | --- |
-| **Resting content** | **1 compact line** | `◐ waiting · Full · ⏳3` — state + autopilot mode + Pending count (link state shows **only when *not* linked**; §13h). |
+| **Resting content** | **1 compact line** | `◐ waiting · Full · ⏳3` — state + autorunner mode + Pending count (link state shows **only when *not* linked**; §13h). |
 | **Interaction** | **Dim, expand on hover/click** | Resting badge is dim + compact; hover (or click) expands a panel with buttons + a queue peek. |
-| **Phase-2 buttons** | Autopilot cycle · Send next now (!) · Show/hide queued · Jump to Manager | Confirm / Skip appears **contextually** in SemiAuto (not an opt-in). |
+| **Phase-2 buttons** | Tests Autorunner cycle · Send next now (!) · Show/hide queued · Jump to Manager | Confirm / Skip appears **contextually** in SemiAuto (not an opt-in). |
 | **Default visibility** | **On, dim until hover** | ~55 % opacity at rest, 1.0 on pointer-over; a Settings-cog toggle (`showTabOverlay`) turns it off. |
 
 Everything below is the implementation of these four choices.
@@ -65,8 +65,8 @@ exists at `_injectors`). The overlay reads it on each refresh. *Don't* key this 
 `SessionInfo::external` alone — an adopted session is `external==true` yet fully controllable
 once bound.
 
-### 3b. Autopilot relationship — *how* is it driving?
-From `SessionInfo::autopilot.mode`. The expanded panel spells out the relationship in words so
+### 3b. Tests Autorunner relationship — *how* is it driving?
+From `SessionInfo::autorunner.mode`. The expanded panel spells out the relationship in words so
 "how is it handling this" is unambiguous:
 
 | Mode | Chip | Expanded sub-text |
@@ -186,14 +186,14 @@ seams):
 | --- | --- | --- |
 | `sessionId` | set at construction | — |
 | read state/queue/mode | shared `SessionRegistry` (`SetRegistry`) | same `shared_ptr` as the Manager |
-| **Autopilot cycle** | registry `Update` of `autopilot.mode` (Off→Semi→Full) | logic of `AgentManagerContent::_CycleAutopilot` |
+| **Tests Autorunner cycle** | registry `Update` of `autorunner.mode` (Off→Semi→Full) | logic of `AgentManagerContent::_CycleAutorunner` |
 | **Send next now (!)** | page callback `sendNextNow(id)` | the Manager's `_DoSendNow` inject path (atomic mark-Sent — Rule #4) |
-| **Confirm / Skip** | page callback → `Scheduler::Confirm(id, bool)` | same as the Flight Plan confirm |
+| **Confirm / Skip** | page callback → `Scheduler::Confirm(id, bool)` | same as the Auto Testing confirm |
 | **Jump to Manager** | page callback: focus `_managerTab` + `AgentManagerContent::SelectSession(id)` (new public entry) | the inverse of `_ActivateClaudeSession` |
 | link state | `SessionRegistry::HasInjector(id)` (new) | — |
 | global pause | provider `() -> _scheduler->GlobalPaused()` | — |
 
-> Cycling Autopilot to `Full`/`SemiAuto` while the session sits `Idle`/`WaitingForInput`
+> Cycling Tests Autorunner to `Full`/`SemiAuto` while the session sits `Idle`/`WaitingForInput`
 > naturally kicks the plan: the registry `Update` fires observers → the scheduler's `OnObserved`
 > requests an advance (the same change-driven start that lets idle plans begin — Correctness
 > Rule #1). No special-casing needed in the overlay.
@@ -247,7 +247,7 @@ Wiring (all existing seams):
   state + mode + Pending count + link mark) + §7 live updates + §8 scope + §9 off-switch +
   dim-until-hover. Delivers ask #1.
 - **Phase 2 — expand + controls.** Hover/click expand → next-prompt preview + the four buttons
-  (Autopilot cycle, Send now, Queue peek, Jump to Manager) + contextual Confirm / Skip. Delivers
+  (Tests Autorunner cycle, Send now, Queue peek, Jump to Manager) + contextual Confirm / Skip. Delivers
   ask #2.
 - **Phase 3 — deferred.** Approve / Deny on `NeedsApproval` (today approvals go through the
   in-terminal y/n; surfacing them on the badge means routing through the Approval Policy, not the
@@ -256,7 +256,7 @@ Wiring (all existing seams):
 
 ## 11. Correctness rules to respect (do not regress)
 
-- **#1** Autopilot readiness / question-guard / approval routing — the overlay only *reflects*
+- **#1** Tests Autorunner readiness / question-guard / approval routing — the overlay only *reflects*
   scheduler state and *requests* the same actions the Manager does; it never invents a new send
   path. Approve/Deny stays out of the prompt queue.
 - **#2** A badge button **never** writes a stray CR. "Send now" goes through the inject path that
@@ -301,7 +301,7 @@ when the tab binds, the agent exits, or the tab leaves the window's roster.
 ### 13b. Enrichment + Codex
 The Fleet Observer's **`model · effort · kind`** enrichment (O6) feeds the Manager cards, the summary
 panel, and the observe badge (`○ codex · <model>`) — but the linked badge's row 1 itself was
-**decluttered** to `status · actions · autopilot · queue` (`model · effort` was dropped from the strip;
+**decluttered** to `status · actions · autorunner · queue` (`model · effort` was dropped from the strip;
 §13h). A managed **Codex** session wears the full badge at its 3-state floor (Running / Waiting / Idle —
 Codex has no hook-derived NeedsApproval/Error via PULL); an external codex shows `○ codex · <model>`.
 
@@ -313,7 +313,7 @@ historical first-seen branch). Hidden when there is no dir/branch, and on observ
 
 ### 13d. **Action buttons** (row 1, after the status block) — Open Path + copy menu
 A linked badge's action buttons are **always visible** (no longer hover-only): they sit in **row 1,
-immediately right of the status part** (so the strip reads `status → folder · copy · pencil → autopilot
+immediately right of the status part** (so the strip reads `status → folder · copy · pencil → autorunner
 · queue`): a **folder** button (Open Path → the working dir via `explorer.exe`, off-thread) + a **copy
 menu** + a **pencil**. The copy menu yields `Session Id` ·
 `Copy Path` · `Copy Branch Name` · `Claude Launch CLI` · `Codex Launch CLI` (each the **REAL** full
@@ -357,7 +357,7 @@ preserving them freshest-from-disk.
 
 ### 13h. Final row-1 layout + the link-state rule
 Row 1, left → right: **status** (the Triage-Board-colored dot + label) · the **action cluster** (folder
-· copy · pencil — §13d, a linked session only) · the **Autopilot** button (§3b) · the **queue** count
+· copy · pencil — §13d, a linked session only) · the **Tests Autorunner** button (§3b) · the **queue** count
 (when Pending > 0) · **link state**. Link state is surfaced **only when NOT linked** — `observe` for an
 external claude, `unlinked` otherwise; a **linked** badge shows *nothing* there, because the badge's mere
 presence on a managed tab already implies the link. `model · effort` is **not** on this strip — it lives
@@ -369,7 +369,7 @@ A **third** badge line previews **what the queue will send next**, complementing
 (which says *how many* are queued): `⏳ <first line of the next prompt, ≤300 chars>`. The "next prompt" is
 the **first `Pending` prompt** in `SessionInfo.queue` — the same item `Scheduler::DecideAdvance` would fire
 next (Full auto-send / Semi confirm / Send-now) — so the preview is mode-agnostic: it shows whenever
-something is queued, regardless of Autopilot mode. The text is the prompt **body's first line** (leading
+something is queued, regardless of Tests Autorunner mode. The text is the prompt **body's first line** (leading
 blank lines skipped, trailing spaces trimmed); a `...` is appended when the first line exceeds **300
 chars** *or* there's more content (further lines) behind it, so `...` always means "there's more than
 shown". Built (`AgentTabOverlay::_promptLine` + the anon-namespace `FirstLinePreview`) only via `_Refresh`

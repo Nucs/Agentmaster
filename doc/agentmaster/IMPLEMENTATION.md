@@ -25,10 +25,10 @@ directories — with full user interaction *and* full programmatic control.
   - **Triage Board** (top) — sessions as cards in state columns
     (Running · Waiting-for-you · Needs-approval · Error · Idle/Done), plus an *External* column.
   - **Explorer Tree** (bottom-left) — `M` working directories → their `N` sessions.
-  - **Flight Plan** (bottom-right) — per-session prompt queue + Autopilot.
+  - **Auto Testing** (bottom-right) — per-session prompt queue + Tests Autorunner.
   - Selection is bidirectional **and tab-synced both ways** (card ⇄ tree node ⇄ terminal tab; pick a
     dir ⇒ filter the board); Activate/Rename reach a session in **any** window.
-- **Flight Plan / Autopilot.** A per-session queue of prompts. On **turn-complete**
+- **Auto Testing / Tests Autorunner.** A per-session queue of prompts. On **turn-complete**
   the scheduler auto-sends the next prompt. See "Correctness rules".
 
 ## Integration points (grounded in the 1.24 codebase)
@@ -58,8 +58,8 @@ Notes:
 
 `src/cascadia/TerminalApp/AgentMaster/SessionModels.h` (plain C++ for now; the XAML
 layer in M6 wraps these in observable view-models):
-`SessionState`, `AutopilotMode`, `PromptGate`, `PromptStatus`, `QueuedPrompt`,
-`ApprovalPolicy`, `AutopilotState`, `SessionInfo`. (`SessionInfo` later gained **`kind`** (Claude /
+`SessionState`, `AutorunnerMode`, `PromptGate`, `PromptStatus`, `QueuedPrompt`,
+`ApprovalPolicy`, `AutorunnerState`, `SessionInfo`. (`SessionInfo` later gained **`kind`** (Claude /
 Codex) + **`codexSessionId`** for managed Codex; `TabKind` — incl. Codex — backs the M10 window
 records.)
 
@@ -70,7 +70,7 @@ Fleet Observer for dropped / out-of-order events), never screen-scraping. See
 [`HOOKS.md`](./HOOKS.md). Each `claude.exe` is spawned with `CCMGR_SESSION_ID`; hooks are flattened
 to a 9-field TAB-separated wire line (event · sessionId · cwd · isQuestion · permission · tool ·
 tabToken · prompt · ts, **payload-first** session id) over a local named pipe; the registry maps
-events to sessions and drives the Triage Board + Autopilot.
+events to sessions and drives the Triage Board + Tests Autorunner.
 
 ## Correctness rules (do not regress)
 
@@ -102,20 +102,20 @@ events to sessions and drives the Triage Board + Autopilot.
   and the Manager UI (Launch button). 67/67 standalone checks pass incl. a live pipe
   round-trip (`AgentMaster/tests/`).
 - **M6** ✅ C1 "Linked Lenses" UI (`AgentManagerContent`): Triage Board + Explorer Tree +
-  Flight Plan, built imperatively, snapshot-driven from the registry (cross-thread refresh
+  Auto Testing, built imperatively, snapshot-driven from the registry (cross-thread refresh
   via DispatcherQueue), bidirectional selection + directory scope; Explorer `Enter`=Activate
-  / `Del`=**Archive** (never injects — Rule #2); Flight Plan queue editing (add/reorder/delete/Send
-  now) + per-session Autopilot mode selector. Shipped + live-verified.
-- **M7** ✅ Autopilot scheduler (`AgentMaster/Scheduler`): a pure `DecideAdvance()`
+  / `Del`=**Archive** (never injects — Rule #2); Auto Testing queue editing (add/reorder/delete/Send
+  now) + per-session Tests Autorunner mode selector. Shipped + live-verified.
+- **M7** ✅ Tests Autorunner scheduler (`AgentMaster/Scheduler`): a pure `DecideAdvance()`
   (every branch unit-tested) + a worker thread on the registry's advance seam. On a clean
   turn-complete it sends the next Pending prompt in Full mode, arms a one-click confirm in
   SemiAuto, Holds behind the question-guard (transient — auto-resumes), honors Manual gate,
   pause-on-human-input, maxAutoSends, stopOnError, and a global Pause-all backstop; sends
   are idempotent (atomic mark-Sent before inject). UI: per-session mode selector, confirm
-  banner, Pause-Autopilot toggle. 79/79 checks pass; runtime check pending deploy.
+  banner, Pause-Tests Autorunner toggle. 79/79 checks pass; runtime check pending deploy.
 - **M8** ✅ Persistence + plan templates + apply-to-many (`AgentMaster/Json.h`,
   `AgentMaster/Persistence`): a tiny dependency-free JSON value/parser/printer; sessions
-  (queue + autopilot + metadata) and named plan templates (de)serialize to JSON under
+  (queue + autorunner + metadata) and named plan templates (de)serialize to JSON under
   `%USERPROFILE%\.agentmaster\` (restore preserves `Sent` statuses — no replay). UI to save
   a session's queue as a template, apply a template to the selected session, or broadcast
   it to every session in a directory; sessions autosave on every registry change. 102/102
@@ -150,7 +150,7 @@ events to sessions and drives the Triage Board + Autopilot.
   that fires zero hooks.
 - **Codex** (the OpenAI Codex CLI) — a first-class **managed** agent: observe + rollout-tail state +
   the full launch / restore / window-restore / adopt lifecycle (a two-id model — our durable handle
-  + the rollout uuid). Driving its TUI (injector + Autopilot) is the one part still deferred.
+  + the rollout uuid). Driving its TUI (injector + Tests Autorunner) is the one part still deferred.
 - **`agentmaster` CLI** ([`CLI.md`](./CLI.md)) — read-only fleet introspection from any shell, app
   up or down (`show`/`list`/`sessions`/`tabs`/`windows`/`external`, `--self`, `--json`).
 - **Sessions browser** ([`SESSIONS.md`](./SESSIONS.md)) — a full-window page over every on-disk

@@ -255,7 +255,7 @@ never invisible (see *Dots color* in §3):
 - **Off-switch**: an `AppSettings` flag to disable the pulse (like `showTabOverlay`); v1 is always-on.
 - **Placeholder/dim filtering** (§4) — read the cells' faint attribute so a dim placeholder never reads as
   a draft.
-- **Autopilot tie-in**: `pauseOnHumanInput` could consult "has a pending draft" to suspend an auto-send
+- **Tests Autorunner tie-in**: `pauseOnHumanInput` could consult "has a pending draft" to suspend an auto-send
   while the user is mid-compose — the draft fact is exactly the signal `pauseOnHumanInput` was waiting for.
 - **Explorer-tree row** + the per-tab overlay HUD could carry the same pulse (the board + tab cover the
   primary surfaces).

@@ -45,7 +45,7 @@ A **profile** is one folder holding everything an install persists:
   settings.json            templates.json           recent-dirs.json
   dir-colors.json          sessions-index\          hooks-settings.json
   agentmaster-hook.ps1     shim\                    bridge.json
-  hooks.log                autopilot.log            scanner.log
+  hooks.log                autorunner.log            scanner.log
   forwarder-errors.log
   terminal\settings.json   terminal\state.json      ← Terminal's OWN settings (seam #6)
 ```

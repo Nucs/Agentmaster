@@ -72,7 +72,7 @@ already persists. It therefore depends on no live responder and **always works, 
 
 | The CLI reads… | from | freshness |
 |---|---|---|
-| sessions + queues + autopilot + titles | `sessions.json` (`Persistence::LoadSessions`) | on-change autosave |
+| sessions + queues + autorunner + titles | `sessions.json` (`Persistence::LoadSessions`) | on-change autosave |
 | tabs: order, window↔session, selected, geometry, lens | `windows/<id>.json` (`LoadWindowRecords`) | ≤750 ms debounce |
 | conversation tail, last reply, prompts, branch | transcripts (`TranscriptStore` / `ProcessInspect`) | live to last flush |
 | live process facts, model, effort, alive, external census | PEB (`ProcessInspect`) | live |
@@ -131,11 +131,11 @@ distinct online mode; `--offline` is reserved as a shim dispatch token, not yet 
 
 ### The `show` payload (the "understand the tab fully" contract)
 
-A faithful render of the per-tab overlay + Flight Plan + Triage card combined:
+A faithful render of the per-tab overlay + Auto Testing + Triage card combined:
 
 - **Identity / placement** — id, title, workingDir (+ live PEB cwd), branch, model, effort,
   permissionMode; window (id + index), tab index, focused?, color, **link state** (linked /
-  observe-only / external), **autopilot** mode.
+  observe-only / external), **autorunner** mode.
 - **State** — `derivedState` (Running / WaitingForInput / NeedsApproval / Error / Idle / Done) +
   raw `presence` (busy/idle/waiting), turn-in-flight?, created-ago / active-for / last-activity-ago,
   pid + alive, hook provenance (`hookWired`, last hook/observed).
@@ -145,14 +145,14 @@ A faithful render of the per-tab overlay + Flight Plan + Triage card combined:
 - **Conversation (the substance)** — the last *N* turn pairs, the **last assistant reply verbatim**
   (where it left off), **`lastUserPrompt`** (the human's last real ask), last-turn tool calls; if
   NeedsApproval → the pending interactive tool; if waiting on a question → the question text.
-- **Flight Plan** — the full queue, each prompt `{label, text, status, origin (flight/typed), gate,
-  sentAt}`, plus the sent history and the autopilot backstops
+- **Auto Testing** — the full queue, each prompt `{label, text, status, origin (flight/typed), gate,
+  sentAt}`, plus the sent history and the autorunner backstops
   (maxAutoSends / autoSendsThisRun / stopOnError / pauseOnHumanInput).
 
 A live claude that is *not* in the queried profile's `sessions.json` (managed by the other instance,
 or not yet persisted) still gets the **full transcript-derived view** — `show` synthesizes a record
 from the live process + transcript, so identity / state / activity / conversation are always present;
-only the queue/autopilot are blank. The `external` census additionally classifies each unmanaged
+only the queue/autorunner are blank. The `external` census additionally classifies each unmanaged
 claude's **`host`** — `windows-terminal` / `agentmaster-other` (a sibling install's session, by its
 `AM_SESSION` GUID prefix) / `agentmaster-self` (one this same instance stamped) / `console` — so a
 sibling instance's session is never mistaken for a truly-foreign one.
@@ -250,7 +250,7 @@ token), so `agentmaster --instance dev show …` dispatches too. Anything else (
 - **P2 — control (designed + deferred):** the `--am-restore` / `--am-archive` handoff intercept +
   disk-poll confirm → `restore` / `archive`.
 - **P3 — designed + deferred:** a `watch` event stream, and **prompt control** (`enqueue` / `send-now` /
-  `set-autopilot`) so an agent can *drive* other sessions — higher-stakes (it injects prompts), so it
+  `set-autorunner`) so an agent can *drive* other sessions — higher-stakes (it injects prompts), so it
   is deliberately a separate phase.
 
 ## 10. Invariants (do not regress)

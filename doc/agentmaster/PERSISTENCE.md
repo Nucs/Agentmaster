@@ -134,7 +134,7 @@ TabEntry { kind: Claude | Codex | Other }   // a discriminated REFERENCE, never 
 
 > **As built (Option 1 — refs, not copies).** A managed `TabEntry` records the
 > `sessionId` + a **`TabKind` discriminator** (`Claude` / `Codex` / `Other`) — NOT a copy
-> of the session's flight-plan / autopilot / color. The session data lives in `sessions.json`
+> of the session's auto-testing / autorunner / color. The session data lives in `sessions.json`
 > (the one source of truth); the record only fixes tab **order** + window↔session **affinity**
 > + the kind, so restore replays the right CLI (`claude --resume` vs `codex resume`). Color
 > + title ride the referenced `SessionInfo` / the dir-color system (Rule #12), so
@@ -200,7 +200,7 @@ flow is superseded by an explicit restore, so a relaunch never avalanches into N
    gated), an `Other` ref via WT action replay (`_RestoreWindowTabs`). The Manager's **Archived**
    page also restores any session **per-tab** into the current window anytime.
 4. As each restored Claude `SessionStart` arrives, the engine re-attaches that `convId`'s
-   Flight Plan + autopilot from the record (correlate by id — window-scoped). A managed Codex
+   Auto Testing + autorunner from the record (correlate by id — window-scoped). A managed Codex
    has no hooks; its state comes from the C2 rollout tail (`_ReconcileManagedCodex`).
 
 **Close window.** Tear down the window's tabs → each ConPTY closes → its `claude.exe` job
@@ -212,7 +212,7 @@ records remain → full restore next launch.
 
 **Session teardown — *as built*, `Kill` became `Archive` (non-destructive).** The agreed
 design above kept a destructive per-session `Kill`; **what shipped has no `Kill`** — closing a
-tab (the X, tree `Del`, the Manager's Archive, the Flight-Plan Archive button) all route through
+tab (the X, tree `Del`, the Manager's Archive, the Auto-Testing Archive button) all route through
 ONE seam (`_HandleCloseTabRequested` → `_ArchiveAndCloseClaudeTab`) that flips `live=false`,
 clears the injector, persists, and closes the tab while **keeping the record** (restorable from
 the Archived page). Archive is terminal and the Claude transcript on disk is never deleted —
