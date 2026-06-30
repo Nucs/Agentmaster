@@ -70,6 +70,31 @@ void TestTranscriptScan()
         const auto r = ParseTranscriptDelta(line);
         CHECK(r.events.empty(), "last-prompt without leafUuid -> no LeafMarker event (never clobbers the leaf)");
     }
+    // Agentmaster (API-error descendant lineage — the reported "not detected in error state" bug): a REAL
+    // post-error sequence from the corpus — the synthetic error (uuid E) is followed by its bookkeeping
+    // CHILD (a system/turn_duration line, parent E) and a last-prompt marker naming that CHILD. The parser
+    // must surface the error's OWN uuid (frontier seed), a Node carrying the child's lineage (uuid+parent),
+    // and the LeafMarker — so the scanner can fold the forward leaf advance into the error's descendant
+    // frontier instead of misreading it as a double-ESC rewind (which suppressed Error entirely).
+    {
+        const std::wstring seq =
+            LR"j({"type":"assistant","uuid":"E","isApiErrorMessage":true,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Overloaded"}]}})j" L"\n"
+            LR"j({"type":"system","subtype":"turn_duration","uuid":"C","parentUuid":"E"})j" L"\n"
+            LR"j({"type":"last-prompt","leafUuid":"C"})j" L"\n";
+        const auto r = ParseTranscriptDelta(seq);
+        CHECK(r.events.size() == 3, "post-error sequence -> 3 events (apiError assistant + Node child + LeafMarker)");
+        CHECK(r.events.size() == 3 && r.events[0].kind == TranscriptEvent::Kind::Assistant && r.events[0].apiError && r.events[0].uuid == L"E",
+              "ev0: apiError assistant carries its OWN uuid (frontier seed)");
+        CHECK(r.events.size() == 3 && r.events[1].kind == TranscriptEvent::Kind::Node && r.events[1].uuid == L"C" && r.events[1].parentUuid == L"E",
+              "ev1: the turn_duration child -> a Node carrying uuid + parentUuid (the descendant chain link)");
+        CHECK(r.events.size() == 3 && r.events[2].kind == TranscriptEvent::Kind::LeafMarker && r.events[2].text == L"C",
+              "ev2: the last-prompt marker names the CHILD C (the forward advance, not a rewind)");
+    }
+    // A mode/permission-mode config line carries NO uuid/parentUuid -> no Node (never pollutes the chain).
+    {
+        const auto r = ParseTranscriptDelta(LR"j({"type":"mode","mode":"default"})j" L"\n");
+        CHECK(r.events.empty(), "a config line without uuid/parentUuid -> no Node event");
+    }
     // assistant tool_use turn: stop_reason tool_use, no text (turn NOT complete -> no synth Stop)
     {
         const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}})j" L"\n";
@@ -238,47 +263,62 @@ void TestTranscriptScan()
         CHECK(!ShouldSynthesizeError(SessionState::Error, true, kScanStopQuiescenceMs), "api-error: already Error -> idempotent (never re-fires)");
         CHECK(!ShouldSynthesizeError(SessionState::Done, true, kScanStopQuiescenceMs), "api-error: a cleanly-ended (Done) session never flips to Error");
     }
-    // Agentmaster (active-leaf distinction — ApiErrorIsActiveLeaf): the error is "the last message" only
-    // when it is positionally newest (lastWasApiError) AND the active leaf has not moved since it
-    // appended (activeLeafUuid == errorEpochLeaf). The user's exact ask: a double-ESC REWIND past the
-    // error repoints the leaf (a last-prompt naming a different uuid) with NO turn event, so the error is
-    // off the active branch even though it stays physically last.
+    // Agentmaster (active-leaf distinction — ApiErrorIsActiveLeaf): the error is "the last message" while it
+    // is positionally newest (lastWasApiError) AND the active leaf is the error, its UNMOVED anchor
+    // (== errorEpochLeaf), or on its forward bookkeeping DESCENDANT chain (errorBranchUuids). A double-ESC
+    // REWIND repoints the leaf to a uuid that is NONE of these — off the error branch — with NO turn event,
+    // so the error is off the active branch even though it stays physically last. (Equality-with-epoch alone
+    // was the ORIGINAL test; it missed the forward advance — the post-error last-prompt names the error's
+    // turn_duration CHILD, not the pre-error anchor — so a real error never entered Error: the reported bug.)
     {
+        const std::unordered_set<std::wstring> branch{ L"E", L"C" }; // {error uuid, its turn_duration child}
+        const std::unordered_set<std::wstring> none{ L"E" }; // error seeded, no descendant marker yet
         // Normal error tail: leaf unchanged since the error -> the active leaf.
-        CHECK(ApiErrorIsActiveLeaf(true, L"p", L"p"), "leaf: error is the active leaf (leaf unmoved since the error)");
-        // Rewind past the error: a later last-prompt repointed the leaf -> NOT the active leaf.
-        CHECK(!ApiErrorIsActiveLeaf(true, L"p0", L"p"), "leaf: rewind moved the leaf off the error -> not the active leaf");
+        CHECK(ApiErrorIsActiveLeaf(true, L"p", L"p", none), "leaf: error is the active leaf (leaf unmoved since the error)");
+        // THE FIX — post-error bookkeeping: the last-prompt marker advances the leaf onto the error's OWN
+        // turn_duration CHILD (a DESCENDANT, in the frontier), which is NOT a rewind -> still the active leaf.
+        CHECK(ApiErrorIsActiveLeaf(true, L"C", L"p", branch),
+              "leaf: forward advance onto the error's bookkeeping child (descendant) -> STILL the active leaf");
+        // Rewind past the error: a later last-prompt repointed the leaf to an EARLIER prompt (off-branch).
+        CHECK(!ApiErrorIsActiveLeaf(true, L"p0", L"p", branch), "leaf: rewind moved the leaf off the error branch -> not the active leaf");
         // No turn-positional error at all -> never the active leaf (a later turn event cleared it).
-        CHECK(!ApiErrorIsActiveLeaf(false, L"p", L"p"), "leaf: positional flag cleared (a turn event) -> not the active leaf");
-        // No last-prompt marker ever seen (older/subagent transcript): both "" -> positional governs.
-        CHECK(ApiErrorIsActiveLeaf(true, L"", L""), "leaf: no marker seen -> falls back to positional (both empty)");
-        // The full ShouldSynthesizeError gate now keys on the leaf-refined bool: a rewound error never
-        // enters Error even when positionally newest + quiet.
-        CHECK(!ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"p0", L"p"), kScanStopQuiescenceMs),
-              "leaf: a rewound error (positionally newest but off-leaf) does NOT enter Error");
-        CHECK(ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"p", L"p"), kScanStopQuiescenceMs),
-              "leaf: an on-leaf error DOES enter Error");
+        CHECK(!ApiErrorIsActiveLeaf(false, L"p", L"p", none), "leaf: positional flag cleared (a turn event) -> not the active leaf");
+        // No last-prompt marker ever seen (older/subagent transcript): leaf "" -> positional governs.
+        CHECK(ApiErrorIsActiveLeaf(true, L"", L"", none), "leaf: no marker seen -> falls back to positional (empty leaf)");
+        // The full ShouldSynthesizeError gate keys on the leaf-refined bool: a rewound error never enters
+        // Error even when positionally newest + quiet; an unmoved OR descendant-advanced one DOES.
+        CHECK(!ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"p0", L"p", branch), kScanStopQuiescenceMs),
+              "leaf: a rewound error (positionally newest but off-branch) does NOT enter Error");
+        CHECK(ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"C", L"p", branch), kScanStopQuiescenceMs),
+              "leaf: a post-error bookkeeping advance (descendant) DOES enter Error (the reported bug, fixed)");
+        CHECK(ShouldSynthesizeError(SessionState::Running, ApiErrorIsActiveLeaf(true, L"p", L"p", none), kScanStopQuiescenceMs),
+              "leaf: an unmoved-leaf error DOES enter Error");
     }
     // Agentmaster (Error RELEASE on a leaf move — ShouldReleaseErrorOnLeafMove): a session stuck in Error
-    // leaves when the leaf rewinds off the error WITHOUT a turn event (the pure rewind-and-sit). Distinct
-    // from recon-run / push (which own the user-RETRIED case, where lastWasApiError is already cleared).
+    // leaves when the leaf rewinds OFF the error branch WITHOUT a turn event (the pure rewind-and-sit).
+    // Distinct from recon-run / push (which own the user-RETRIED case, lastWasApiError already cleared).
     {
-        // The rewind case: in Error, error still positionally last, but the leaf moved + quiet -> release.
-        CHECK(ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p0", L"p", kScanStopQuiescenceMs),
-              "release: Error + rewind (leaf moved) + quiet -> release to Waiting");
+        const std::unordered_set<std::wstring> branch{ L"E", L"C" };
+        // The rewind case: in Error, error still positionally last, leaf moved OFF the branch + quiet -> release.
+        CHECK(ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p0", L"p", branch, kScanStopQuiescenceMs),
+              "release: Error + rewind (leaf off the error branch) + quiet -> release to Waiting");
         // Not quiet yet (the rewind just wrote the marker) -> wait for the settle window.
-        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p0", L"p", kScanStopQuiescenceMs - 1),
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p0", L"p", branch, kScanStopQuiescenceMs - 1),
               "release: not quiet long enough -> wait");
         // Leaf has NOT moved (error still the active leaf) -> stay Error.
-        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p", L"p", kScanStopQuiescenceMs),
-              "release: error still the active leaf -> stay Error");
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"p", L"p", branch, kScanStopQuiescenceMs),
+              "release: error still the active leaf (unmoved) -> stay Error");
+        // Leaf advanced onto the error's bookkeeping DESCENDANT -> NOT a rewind -> stay Error (the fix's
+        // release-side guard: post-error bookkeeping must not bounce the session out of Error).
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, true, L"C", L"p", branch, kScanStopQuiescenceMs),
+              "release: forward advance onto a descendant child is NOT a rewind -> stay Error");
         // Positional flag cleared (a turn event) -> recon-run / push owns recovery, not this path.
-        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, false, L"p0", L"p", kScanStopQuiescenceMs),
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Error, false, L"p0", L"p", branch, kScanStopQuiescenceMs),
               "release: positional cleared (turn event) -> recon-run/push owns it, not the leaf release");
         // Only from Error: a non-Error state has nothing to release here.
-        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Running, true, L"p0", L"p", kScanStopQuiescenceMs),
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::Running, true, L"p0", L"p", branch, kScanStopQuiescenceMs),
               "release: only from Error (a Running session is not stuck)");
-        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::WaitingForInput, true, L"p0", L"p", kScanStopQuiescenceMs),
+        CHECK(!ShouldReleaseErrorOnLeafMove(SessionState::WaitingForInput, true, L"p0", L"p", branch, kScanStopQuiescenceMs),
               "release: already left Error (Waiting) -> no-op (no re-fire)");
     }
     // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts

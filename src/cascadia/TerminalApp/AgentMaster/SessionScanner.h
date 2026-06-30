@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -70,10 +71,25 @@ namespace Agentmaster
             // it) and leave Error — see errorEpochLeaf / ApiErrorIsActiveLeaf / ShouldReleaseErrorOnLeafMove.
             // Only emitted when leafUuid is non-empty (a last-prompt for the trust dialog has none).
             LeafMarker,
+            // A non-turn BOOKKEEPING line carrying only LINEAGE — its `uuid` + `parentUuid` (a
+            // system/turn_duration child, an away_summary, a progress line, …). NOT a turn event (it never
+            // touches state). Claude appends such children AFTER an API error (the error -> a
+            // system/turn_duration child -> an away_summary), and the post-error last-prompt marker points
+            // at that turn_duration CHILD — a DESCENDANT of the error, not a rewind off it. The scanner
+            // folds these into the error's forward descendant frontier (errorBranchUuids) so
+            // ApiErrorIsActiveLeaf recognizes the advanced leaf as still being the error tail. Emitted only
+            // when both uuid + parentUuid are present (mode/permission-mode config lines carry neither).
+            Node,
         };
         Kind kind{ Kind::Assistant };
         std::wstring text; // UserPrompt: the prompt body. Assistant: concatenated text blocks (may be empty). LeafMarker: the leafUuid.
         std::wstring stopReason; // Assistant only: message.stop_reason ("end_turn" / "tool_use" / ...).
+        // Assistant: this message's own uuid (used to SEED the API-error descendant frontier — the error
+        // line's uuid is the root of its bookkeeping chain). Node: the bookkeeping line's uuid. "" otherwise.
+        std::wstring uuid;
+        // Node only: the bookkeeping line's parentUuid (the chain link the scanner walks to extend the
+        // error's descendant frontier — a line whose parent is already on the frontier is itself on it).
+        std::wstring parentUuid;
         // Assistant only: the name of an INTERACTIVE tool_use block in this message (one that blocks
         // on the user — AskUserQuestion), else "". Lets the scanner tell a session that is BLOCKED
         // waiting for the user to answer (-> NeedsApproval) from one genuinely working (a long Bash).
@@ -201,19 +217,34 @@ namespace Agentmaster
     // ask: distinguish "the error is the last message in the chain" from one stranded mid-history.
     //   * lastWasApiError is the BYTE-POSITIONAL signal (the newest TURN event is an unrecovered error);
     //     it is cleared by any later user/assistant/tool_result line, so a fast retry never reaches here.
-    //   * It does NOT see a double-ESC REWIND, which repoints the active leaf BACKWARD by writing a new
-    //     {"type":"last-prompt","leafUuid":…} marker — NOT a turn event, so lastWasApiError stays true
-    //     even though the error is now off the active branch. The leaf check catches exactly that:
-    //     `activeLeafUuid == errorEpochLeaf` (the active leaf has not moved since the error appended).
-    // When no last-prompt marker has been seen (older/subagent transcripts) both are "" -> the equality
-    // is a no-op and lastWasApiError alone governs (the prior behavior, preserved).
-    inline bool ApiErrorIsActiveLeaf(bool lastWasApiError, std::wstring_view activeLeafUuid, std::wstring_view errorEpochLeaf) noexcept
+    //   * The leaf signals distinguish a forward post-error advance from a backward REWIND. After an API
+    //     error Claude appends BOOKKEEPING children — a system/turn_duration line, then an away_summary —
+    //     and rewrites {"type":"last-prompt","leafUuid":…} to name that turn_duration CHILD, advancing the
+    //     active leaf FORWARD onto the error's OWN descendant chain (NOT a rewind). A double-ESC REWIND
+    //     instead repoints the leaf BACKWARD to an earlier prompt — OFF the error's branch — with no turn
+    //     event, so lastWasApiError stays true. The error is still the active leaf iff the leaf is:
+    //       - "" (no last-prompt marker ever seen — older/subagent transcripts: positional flag governs), OR
+    //       - == errorEpochLeaf (the leaf has not moved at all since the error appended — the common case), OR
+    //       - in errorBranchUuids (the leaf advanced onto the error's bookkeeping descendant chain — the
+    //         error's uuid + every later line whose parent is already on the frontier, accumulated in
+    //         _readDelta from Node events). A leaf that is NONE of these is a genuine rewind off the error.
+    // (Equality with errorEpochLeaf was the ORIGINAL test; it MISSED the forward-advance case because the
+    //  post-error last-prompt names the turn_duration child, not the pre-error anchor — so the error was
+    //  wrongly read as rewound and never entered Error. The frontier closes that gap.)
+    inline bool ApiErrorIsActiveLeaf(bool lastWasApiError,
+                                     const std::wstring& activeLeafUuid,
+                                     const std::wstring& errorEpochLeaf,
+                                     const std::unordered_set<std::wstring>& errorBranchUuids) noexcept
     {
         if (!lastWasApiError)
         {
             return false; // a later turn event already superseded the error -> not the tail
         }
-        return activeLeafUuid == errorEpochLeaf; // the active leaf has not moved since the error
+        if (activeLeafUuid.empty() || activeLeafUuid == errorEpochLeaf)
+        {
+            return true; // no marker seen (positional governs), or the leaf has not moved since the error
+        }
+        return errorBranchUuids.count(activeLeafUuid) != 0; // the leaf advanced onto the error's OWN descendant chain (post-error bookkeeping) -> still the active leaf
     }
 
     // PURE + total: should the reconciler synthesize SessionState::Error? Claude Code records an API
@@ -249,13 +280,16 @@ namespace Agentmaster
     // PURE + total: should the reconciler RELEASE a session from Error because a double-ESC REWIND moved
     // the active leaf OFF the error WITHOUT a turn event clearing the positional flag? The error is still
     // physically last in the file (lastWasApiError true), but a later last-prompt marker repointed the
-    // active leaf (activeLeafUuid != errorEpochLeaf) — the user went BACK to an earlier point and is
+    // active leaf to a uuid that is NEITHER the error, its unmoved anchor, NOR on its bookkeeping
+    // descendant chain (i.e. !ApiErrorIsActiveLeaf) — the user went BACK to an earlier point and is
     // waiting to re-prompt, so the error is no longer "the last message". Releases to WaitingForInput (a
     // quiescentStop). Distinct from the recovery paths recon-run / push, which own the user-RETRIED case
     // (a fresh turn event -> Running, with lastWasApiError already cleared): this requires lastWasApiError
-    // STILL true (a pure rewind, no turn event) and a definite leaf move, so the two never overlap. Only
-    // from Error; quiescence-gated like the missed-Stop (the rewind just wrote the marker — let it settle).
-    inline bool ShouldReleaseErrorOnLeafMove(SessionState state, bool lastWasApiError, std::wstring_view activeLeafUuid, std::wstring_view errorEpochLeaf, int64_t quietForMs) noexcept
+    // STILL true (a pure rewind, no turn event) and a definite move OFF the error branch, so the two never
+    // overlap. Crucially, the FORWARD advance onto the error's own turn_duration child (normal post-error
+    // bookkeeping) keeps ApiErrorIsActiveLeaf true, so it does NOT trigger a release. Only from Error;
+    // quiescence-gated like the missed-Stop (the rewind just wrote the marker — let it settle).
+    inline bool ShouldReleaseErrorOnLeafMove(SessionState state, bool lastWasApiError, const std::wstring& activeLeafUuid, const std::wstring& errorEpochLeaf, const std::unordered_set<std::wstring>& errorBranchUuids, int64_t quietForMs) noexcept
     {
         if (state != SessionState::Error)
         {
@@ -265,9 +299,9 @@ namespace Agentmaster
         {
             return false; // the positional flag cleared -> a turn event recovered it (recon-run / push owns that)
         }
-        if (activeLeafUuid == errorEpochLeaf)
+        if (ApiErrorIsActiveLeaf(lastWasApiError, activeLeafUuid, errorEpochLeaf, errorBranchUuids))
         {
-            return false; // the error is still the active leaf (no rewind) — stay Error
+            return false; // the error is still the active leaf (unmoved / a forward descendant advance) — stay Error
         }
         return quietForMs >= kScanStopQuiescenceMs;
     }
@@ -587,11 +621,22 @@ namespace Agentmaster
             // running value (updated by every LeafMarker event); "" until the first marker is seen.
             std::wstring activeLeafUuid;
             // The active leaf captured AT THE MOMENT the API error was consumed (= activeLeafUuid then).
-            // The error is "the last message" only while the leaf STAYS here: a later last-prompt naming a
-            // DIFFERENT leaf is a REWIND past the error -> the error is off the active branch -> leave Error.
-            // "" when no marker had been seen yet (then activeLeafUuid is "" too, so the equality check is a
-            // no-op and the positional lastWasApiError governs — older/subagent transcripts have no markers).
+            // The error is "the last message" while the leaf STAYS here OR advances onto the error's OWN
+            // descendant chain (errorBranchUuids below); a later last-prompt naming a leaf that is NEITHER
+            // is a REWIND past the error -> the error is off the active branch -> leave Error. "" when no
+            // marker had been seen yet (then activeLeafUuid is "" too, so the positional lastWasApiError
+            // governs — older/subagent transcripts have no markers).
             std::wstring errorEpochLeaf;
+            // The API-error line's OWN uuid + its forward DESCENDANT frontier — the bookkeeping lines Claude
+            // appends AFTER the error (a system/turn_duration child, then an away_summary), each parented to
+            // the prior. Seeded with the error's uuid when the error is consumed; extended by any later Node
+            // (bookkeeping) line whose parentUuid is already in the set (_readDelta). The post-error
+            // last-prompt marker points at the turn_duration CHILD, so the active leaf lands IN this set —
+            // ApiErrorIsActiveLeaf then reads it as the error still being the tail, NOT a rewind (the fix for
+            // an API error that fired no Error state because its terminal stop_reason read as a clean
+            // turn-complete). CLEARED together with lastWasApiError when a turn event supersedes the error.
+            std::wstring errorUuid;
+            std::unordered_set<std::wstring> errorBranchUuids;
             int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
         };
 

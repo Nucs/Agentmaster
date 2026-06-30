@@ -144,6 +144,24 @@ namespace Agentmaster
     static TranscriptParse ParseTranscriptDeltaImpl(std::wstring_view chunk)
     {
         TranscriptParse out;
+        // Agentmaster: emit a Node (lineage-only) event for a non-turn BOOKKEEPING line so the scanner can
+        // follow the API-error's forward descendant chain (the error -> a system/turn_duration child -> an
+        // away_summary; the post-error last-prompt marker names the turn_duration child). Only when BOTH
+        // uuid + parentUuid are present — a mode/permission-mode config line carries neither, so it is
+        // skipped and never enters the chain.
+        const auto emitNode = [&out](const json::Value& o) {
+            std::wstring u = o.StrAt(L"uuid");
+            std::wstring p = o.StrAt(L"parentUuid");
+            if (u.empty() || p.empty())
+            {
+                return;
+            }
+            TranscriptEvent ev;
+            ev.kind = TranscriptEvent::Kind::Node;
+            ev.uuid = std::move(u);
+            ev.parentUuid = std::move(p);
+            out.events.push_back(std::move(ev));
+        };
         size_t lineStart = 0;
         for (size_t i = 0; i < chunk.size(); ++i)
         {
@@ -207,6 +225,7 @@ namespace Agentmaster
                 // its terminal stop_reason read as a clean turn-complete.
                 ev.apiError = obj.BoolAt(L"isApiErrorMessage");
                 ev.apiErrorStatus = static_cast<int>(obj.I64At(L"apiErrorStatus")); // top-level HTTP code (429/529/…); 0 when none
+                ev.uuid = obj.StrAt(L"uuid"); // the error line's OWN uuid -> seeds the descendant frontier (errorBranchUuids)
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
@@ -285,15 +304,21 @@ namespace Agentmaster
                     out.events.push_back(std::move(ev));
                 }
             }
-            else if (type == L"system" && obj.StrAt(L"subtype") == L"away_summary")
+            else if (type == L"system")
             {
-                // Agentmaster: the Claude Code idle RECAP. NOT a turn event (it never touches the state
-                // machine) — captured out-of-band so the scanner can mirror it onto SessionInfo.recap and
-                // the CLI can surface it. Last recap in the chunk wins; an empty body never clears it.
-                if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
+                if (obj.StrAt(L"subtype") == L"away_summary")
                 {
-                    out.recap = std::move(r);
+                    // Agentmaster: the Claude Code idle RECAP. NOT a turn event (it never touches the state
+                    // machine) — captured out-of-band so the scanner can mirror it onto SessionInfo.recap and
+                    // the CLI can surface it. Last recap in the chunk wins; an empty body never clears it.
+                    if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
+                    {
+                        out.recap = std::move(r);
+                    }
                 }
+                // A system line (turn_duration child, away_summary, …) is on the API-error's bookkeeping
+                // chain — emit its lineage so the descendant frontier can follow it (errorBranchUuids).
+                emitNode(obj);
             }
             else if (type == L"last-prompt")
             {
@@ -311,6 +336,12 @@ namespace Agentmaster
                     ev.text = std::move(leaf);
                     out.events.push_back(std::move(ev));
                 }
+            }
+            else
+            {
+                // Any other line type (e.g. "progress" — also an API-error child in the corpus) — emit
+                // lineage only, for the same error descendant-frontier tracking as the system child above.
+                emitNode(obj);
             }
         }
         return out;
@@ -676,7 +707,7 @@ namespace Agentmaster
         // Running, and recon-run (ShouldSynthesizeRunning, which now includes Error) is the pull backstop —
         // both keyed off the parser clearing st.lastWasApiError the instant a later turn event supersedes
         // the error. The re-Get mirrors the other synths' freshest-state re-check (a real hook wins).
-        const bool errorIsActiveLeaf = ApiErrorIsActiveLeaf(st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf);
+        const bool errorIsActiveLeaf = ApiErrorIsActiveLeaf(st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, st.errorBranchUuids);
         if (ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs))
         {
             const auto fresh = _registry->Get(s.id);
@@ -717,7 +748,7 @@ namespace Agentmaster
         // error is no longer "the last message". No turn event fired (recon-run / push own the user-RETRIED
         // case, which clears lastWasApiError -> Running), so release HERE to WaitingForInput. Quiescence-
         // gated like recon-stop; early-returns so recon-stop/idle/block don't also fire this pass.
-        if (ShouldReleaseErrorOnLeafMove(s.state, st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, quietForMs))
+        if (ShouldReleaseErrorOnLeafMove(s.state, st.lastWasApiError, st.activeLeafUuid, st.errorEpochLeaf, st.errorBranchUuids, quietForMs))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && fresh->state == SessionState::Error)
@@ -920,11 +951,30 @@ namespace Agentmaster
                     st.lastApiErrorMessage = ev.text;
                     st.lastApiErrorStatus = ev.apiErrorStatus;
                     // Snapshot the ACTIVE LEAF as of the error (the last-prompt leaf seen up to this
-                    // point). The error is "the last message" only while the leaf stays here; a later
-                    // last-prompt naming a DIFFERENT leaf is a double-ESC rewind PAST the error, which
-                    // ApiErrorIsActiveLeaf / ShouldReleaseErrorOnLeafMove use to leave Error. "" when no
-                    // marker has been seen yet (positional lastWasApiError then governs).
+                    // point). The error is "the last message" while the leaf stays here OR advances onto the
+                    // error's OWN descendant chain (errorBranchUuids); a later last-prompt naming a leaf that
+                    // is NEITHER is a double-ESC rewind PAST the error, which ApiErrorIsActiveLeaf /
+                    // ShouldReleaseErrorOnLeafMove use to leave Error. "" when no marker has been seen yet
+                    // (positional lastWasApiError then governs).
                     st.errorEpochLeaf = st.activeLeafUuid;
+                    // Seed the forward descendant frontier with the error's OWN uuid. Claude appends
+                    // bookkeeping children (a system/turn_duration line, then an away_summary) parented to
+                    // the error, and the post-error last-prompt marker names that turn_duration CHILD; the
+                    // Node branch below extends the frontier through those children so ApiErrorIsActiveLeaf
+                    // reads the advanced leaf as still the error tail rather than a rewind off it.
+                    st.errorUuid = ev.uuid;
+                    st.errorBranchUuids.clear();
+                    if (!ev.uuid.empty())
+                    {
+                        st.errorBranchUuids.insert(ev.uuid);
+                    }
+                }
+                else
+                {
+                    // A NON-error assistant line appended after an error is the session resuming —
+                    // lastWasApiError just cleared, so drop the now-stale descendant frontier too.
+                    st.errorUuid.clear();
+                    st.errorBranchUuids.clear();
                 }
                 // The latest assistant block sets / clears the "blocked on the user" flag: an
                 // interactive tool_use (AskUserQuestion) parks the turn on the user until answered;
@@ -955,14 +1005,31 @@ namespace Agentmaster
                 // never synthesized Running before — preserve that.)
                 st.pendingInteractiveTool.clear();
                 st.lastWasApiError = false; // activity past any error -> the tail is no longer that error
+                st.errorUuid.clear();
+                st.errorBranchUuids.clear();
             }
             else if (ev.kind == TranscriptEvent::Kind::LeafMarker)
             {
-                // The active branch head moved (a new prompt's anchor, or a double-ESC REWIND). NOT a
-                // turn event: it never sets consumedTurnEvent and never clears lastWasApiError (the error
-                // stays physically last). If this moves the leaf OFF the error epoch while the error is
-                // still positionally last, the reconciler releases Error (ShouldReleaseErrorOnLeafMove).
+                // The active branch head moved (a new prompt's anchor, the error's bookkeeping child, or a
+                // double-ESC REWIND). NOT a turn event: it never sets consumedTurnEvent and never clears
+                // lastWasApiError (the error stays physically last). If this moves the leaf off the error
+                // AND off its descendant frontier while the error is still positionally last, the
+                // reconciler releases Error (ShouldReleaseErrorOnLeafMove); a forward advance onto a
+                // turn_duration child (in errorBranchUuids) keeps the error the active leaf.
                 st.activeLeafUuid = ev.text;
+            }
+            else if (ev.kind == TranscriptEvent::Kind::Node)
+            {
+                // A bookkeeping line (system/turn_duration, away_summary, progress, …). Extend the API
+                // error's forward DESCENDANT frontier: a line whose parent is already on the frontier is
+                // itself on it. This is what lets the post-error last-prompt marker — which names the
+                // error's turn_duration CHILD — be recognized as the error still being the active leaf,
+                // not a rewind off it. No-op unless an API error is currently the tail (lastWasApiError).
+                if (st.lastWasApiError && !ev.uuid.empty() && !ev.parentUuid.empty() &&
+                    st.errorBranchUuids.count(ev.parentUuid) != 0)
+                {
+                    st.errorBranchUuids.insert(ev.uuid);
+                }
             }
             else // UserPrompt: a new human turn began, OR a turn-abort interrupt marker
             {
@@ -976,6 +1043,8 @@ namespace Agentmaster
                 st.lastStopReason.clear();
                 st.pendingInteractiveTool.clear(); // a human line supersedes any pending question
                 st.lastWasApiError = false; // a new human turn supersedes a prior API error -> recovery (Error -> Running)
+                st.errorUuid.clear();
+                st.errorBranchUuids.clear();
                 if (IsUserInterruptMarker(ev.text))
                 {
                     // The user hit Esc: NO clean Stop hook fires, and the marker clears the

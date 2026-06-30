@@ -373,7 +373,23 @@ Survey of **4,837** transcripts; taxonomy over the 80–700 most recent:
 - **Approval (over 700 recent):** 65 denial `tool_result`s (canonical *"The user doesn't want to
   proceed…"*), 99 `[Request interrupted by user…]`, 17 `ExitPlanMode` tool_uses.
 - **API error shape:** `assistant` line, `model:"<synthetic>"`, content `"API Error: …"`,
-  `isApiErrorMessage:true`, `apiErrorStatus`.
+  `isApiErrorMessage:true`, `apiErrorStatus`. The text is NOT always prefixed `"API Error:"` —
+  `"Prompt is too long"` (`error:"invalid_request"`), `"You've hit your limit · resets …"` /
+  `"You're out of extra usage …"` (`error:"rate_limit"`), `"There's an issue with the selected model …"`
+  (`error:"model_not_found"`) all set `isApiErrorMessage:true` with no prefix — so the **flag**, never the
+  text, is the signal. The error's `stop_reason` is a terminal `"stop_sequence"`, so a naive missed-Stop
+  read maps it to WaitingForInput — `isApiErrorMessage` is checked FIRST (`ShouldSynthesizeError`) so the
+  failure wins. **Active-leaf gotcha (the "not detected in error state" bug):** Claude Code (≥ v2.1.x)
+  appends BOOKKEEPING children AFTER the error — a `system`/`turn_duration` line (parented to the error),
+  then an `away_summary` — and rewrites the `last-prompt` `leafUuid` marker to name that `turn_duration`
+  CHILD, advancing the active leaf FORWARD onto the error's OWN descendant chain. That is NOT a double-ESC
+  rewind: the scanner tracks the error's forward **descendant frontier** (`errorBranchUuids` = the error
+  uuid ∪ every later bookkeeping line whose parent is already on it; `ApiErrorIsActiveLeaf`) so the
+  advanced leaf is still read as the error tail. Treating that forward advance as a rewind (the prior
+  exact-`errorEpochLeaf`-equality check did) SUPPRESSED Error entirely — it only ever entered Error when
+  no post-error marker happened to be written. The session leaves Error on the first new turn event (a real
+  `UserPromptSubmit` → Running, or `ShouldSynthesizeRunning`), and a GENUINE rewind to a uuid OFF the
+  frontier still releases it (`ShouldReleaseErrorOnLeafMove`).
 - **Live confirmation:** stuck session `3f98f88e` tail = `assistant stop_reason:end_turn` (truly
   WaitingForInput) while registry = `Idle`; mtime advanced past the real turn via an `away_summary`
   fork (proves §2's mtime caveat).
