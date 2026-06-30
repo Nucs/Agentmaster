@@ -813,12 +813,122 @@ namespace winrt::TerminalApp::implementation
             // the +Nms anchor to see how much launch time is window setup vs. the exe-side prelude.
             ::Agentmaster::Startup::Phase(L"first-layout TOTAL" + _wid, ::GetTickCount64() - _flStart);
 
-            // Agentmaster (splash): this window is laid out + restored — dismiss the launch splash. The
-            // FIRST window to reach here wins (the PID-named event is idempotent; later windows are
-            // no-ops). Safe if no splash is up (fast launch / -Embedding) — SignalReady just sets a
-            // throwaway event nobody is waiting on.
-            ::Agentmaster::Splash::SignalReady();
+            // Agentmaster (splash): do NOT dismiss the splash here. _OnFirstLayout returning only means
+            // the restored tab OBJECTS were created — their TermControls + ConPTY claude.exe processes
+            // initialize LAZILY over the next ~20s, so dismissing now uncovers a blank, still-building
+            // window (the reported "splash gone, windows appear ~20s later" bug). Instead WATCH the
+            // window and dismiss once it has actually settled (foreground terminal connected + the UI
+            // thread idle again). Logs the timeline under [startup] so the dismiss point is verifiable.
+            _ScheduleSplashDismiss();
         }
+    }
+
+    // Agentmaster (splash): defer the launch-splash dismiss until the window is visibly UP, not merely
+    // until _OnFirstLayout's synchronous code returned. After a window-grouped restore, the foreground
+    // TermControl + its claude.exe init lazily and the UI thread stays busy laying out / binding the
+    // restored fleet for many seconds; dismissing at first-layout uncovers a blank window. We poll on a
+    // DispatcherTimer and dismiss when BOTH (a) the foreground terminal has connected (its ConPTY
+    // started => the terminal is rendering), AND (b) the UI thread has been responsive for ~1.5s straight
+    // (a busy thread can't pump the timer on schedule, so punctual ticks == the restore work has drained).
+    // A foreground with no terminal (the Manager tab) or a hard timeout also release it. Every window
+    // schedules its own watcher; the first to settle dismisses the (process-wide) splash and the rest are
+    // idempotent no-ops. Rich [startup] logging makes the real "window ready" moment measurable.
+    void TerminalPage::_ScheduleSplashDismiss()
+    {
+        _splashDismissStart = ::GetTickCount64();
+        _splashLastTick = _splashDismissStart;
+        _splashSmoothTicks = 0;
+        _splashFgConnectedLogged = false;
+        ::Agentmaster::Startup::Mark(L"splash-watch begin (waiting for window to settle)" + _wid_NoThrow());
+
+        _splashDismissTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+        _splashDismissTimer.Interval(std::chrono::milliseconds(250));
+        auto weak = get_weak();
+        _splashDismissTimer.Tick([weak](auto&&, auto&&) {
+            if (auto self = weak.get())
+            {
+                self->_TickSplashDismiss();
+            }
+            else
+            {
+                ::Agentmaster::Splash::SignalReady(); // page torn down mid-launch — don't strand the splash
+            }
+        });
+        _splashDismissTimer.Start();
+    }
+
+    void TerminalPage::_TickSplashDismiss()
+    {
+        const auto now = ::GetTickCount64();
+        const auto elapsed = now - _splashDismissStart;
+        const auto gap = now - _splashLastTick;
+        _splashLastTick = now;
+
+        // A punctual tick (~the 250ms interval) means the UI thread pumped us on time => it isn't jammed
+        // with restore/layout work this slice. A late tick (thread busy or blocked) resets the streak.
+        if (gap < 600)
+        {
+            ++_splashSmoothTicks;
+        }
+        else
+        {
+            _splashSmoothTicks = 0;
+        }
+
+        const auto ctrl = _GetActiveControl();
+        const bool hasForegroundTerminal = ctrl != nullptr;
+        bool foregroundConnected = false;
+        if (hasForegroundTerminal)
+        {
+            foregroundConnected = ctrl.ConnectionState() != TerminalConnection::ConnectionState::NotConnected;
+            if (foregroundConnected && !_splashFgConnectedLogged)
+            {
+                _splashFgConnectedLogged = true;
+                ::Agentmaster::Startup::Phase(L"splash: foreground terminal connected" + _wid_NoThrow(), elapsed);
+            }
+        }
+
+        std::wstring reason;
+        bool ready = false;
+        if (!hasForegroundTerminal)
+        {
+            // The foreground is the Manager tab (or an empty pane) — nothing heavy to wait on once the UI
+            // thread is responsive. (A fresh, non-restored window lands here and dismisses promptly.)
+            if (_splashSmoothTicks >= 2)
+            {
+                ready = true;
+                reason = L"manager/empty foreground, UI idle";
+            }
+        }
+        else if (foregroundConnected && _splashSmoothTicks >= 6)
+        {
+            ready = true;
+            reason = L"foreground terminal up + UI idle";
+        }
+
+        if (!ready && elapsed > 45000)
+        {
+            ready = true;
+            reason = L"timeout";
+        }
+
+        if (ready)
+        {
+            ::Agentmaster::Splash::SignalReady();
+            ::Agentmaster::Startup::Phase(L"splash dismissed (" + reason + L", smoothTicks=" + std::to_wstring(_splashSmoothTicks) + L")" + _wid_NoThrow(), elapsed);
+            if (_splashDismissTimer)
+            {
+                _splashDismissTimer.Stop();
+                _splashDismissTimer = nullptr;
+            }
+        }
+    }
+
+    // Agentmaster: the per-window tag for [startup] lines, computed defensively (never throws — _windowId
+    // is always set by _InitAgentmasterEngine before these run).
+    std::wstring TerminalPage::_wid_NoThrow() const
+    {
+        return _windowId.empty() ? std::wstring{} : (L" [win " + ::Agentmaster::ShortId(_windowId) + L"]");
     }
 
     // Method Description:

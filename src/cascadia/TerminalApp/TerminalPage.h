@@ -431,6 +431,16 @@ namespace winrt::TerminalApp::implementation
         // Only a claimed record seeds the Manager lens on wire — a fresh window keeps the content's
         // ctor-loaded global splitter sizes, so opening a new window never resets them to default.
         bool _windowRecordClaimed{ false };
+        // Agentmaster (splash): the deferred launch-splash dismiss watcher (see _ScheduleSplashDismiss).
+        // _OnFirstLayout returning is ~20s too early — the restored tabs' TermControls + claude.exe init
+        // LAZILY after it — so a DispatcherTimer polls until the window has SETTLED (foreground terminal
+        // connected + the UI thread responsive again) and dismisses the process-wide splash then.
+        // Transient, launch-only state; the timer self-stops on dismiss.
+        winrt::Windows::UI::Xaml::DispatcherTimer _splashDismissTimer{ nullptr };
+        uint64_t _splashDismissStart{ 0 }; // GetTickCount64 at watch begin (end of _OnFirstLayout)
+        uint64_t _splashLastTick{ 0 }; // last tick time — tick punctuality measures UI-thread idleness
+        int _splashSmoothTicks{ 0 }; // consecutive punctual ticks => the UI thread has drained the restore work
+        bool _splashFgConnectedLogged{ false }; // one-shot [startup] log latch for "foreground terminal connected"
         // Agentmaster (quit-all window-record loss): set once CloseWindow/RequestQuit has
         // flushed the record at its deterministic close/quit seam, so ~TerminalPage's catch-all flush
         // won't re-capture a post-teardown-archive state (where _claudeTabs is already cleared and every
@@ -764,6 +774,9 @@ namespace winrt::TerminalApp::implementation
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.
         int _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): eager-init every dormant managed tab hosted in THIS window; returns the count woken. The receiving half of the activate-all fan-out.
         void _TrackSessionStarted(const std::wstring& sessionId); // Agentmaster (eager-init): mark SessionInfo::started true the moment this session's control initializes (already started => now; else one-shot on TermControl.Initialized) so a focused tab's dot flips full without the ~2s liveness-sweep lag
+        void _ScheduleSplashDismiss(); // Agentmaster (splash): start the deferred-dismiss watcher at the end of _OnFirstLayout — the restored tabs init LAZILY after, so dismissing there uncovers a blank window
+        void _TickSplashDismiss(); // Agentmaster (splash): the watcher tick — dismiss the launch splash once the foreground terminal is connected AND the UI thread has been responsive ~1.5s (or a hard timeout)
+        std::wstring _wid_NoThrow() const; // Agentmaster (splash/[startup]): the " [win <id>]" tag for log lines (empty until _windowId is set)
         bool _FocusClaudeSessionTab(const std::wstring& sessionId, bool bringWindowToFront); // Agentmaster (cross-window activate): select the session's tab IN THIS WINDOW (no fan-out); optionally foreground this window's HWND (the receiving half of the activate sink). Returns false on a miss.
         void _RestartClaudeSession(winrt::hstring sessionId); // Agentmaster (Triage Board / Explorer-tree "Restart session"): restart a managed session's connection in place — local first, then fan out to the hosting window (RestartSessionInOtherWindows), mirroring _ActivateClaudeSession
         bool _RestartClaudeSessionLocal(const std::wstring& sessionId); // Agentmaster (cross-window restart): restart the session's tab IN THIS WINDOW via _restartPaneConnection (the NotConnected guard + _RestartManagedSession); the receiving half of the restart sink. Returns false when this window doesn't host the session's tab.

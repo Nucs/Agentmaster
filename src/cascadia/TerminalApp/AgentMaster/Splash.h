@@ -41,7 +41,9 @@ namespace Agentmaster::Splash
     {
         // ---- tuning ---------------------------------------------------------------------------
         constexpr int kPreShowDelayMs = 350; // don't show unless launch is still going after this
-        constexpr int kMaxLifetimeMs = 30000; // hard cap so a dll hang can't strand the splash
+        constexpr int kMaxLifetimeMs = 60000; // hard cap so a dll hang can't strand the splash (must exceed
+                                              // TerminalPage's ~45s settle-watch timeout, which is the
+                                              // intended dismiss path; this is only the last-resort backstop)
         constexpr int kBaseCardW = 460;
         constexpr int kBaseCardH = 150;
         constexpr UINT_PTR kAnimTimerId = 1;
