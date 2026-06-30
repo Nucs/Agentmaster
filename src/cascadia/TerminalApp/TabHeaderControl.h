@@ -58,6 +58,16 @@ namespace winrt::TerminalApp::implementation
         bool _commitOnKeyUp{ false };
 
         void _CloseRenameBox();
+
+        // Agentmaster: keep the rename box's RIGHT border on-screen. The box is anchored at the tab's
+        // left and grows rightward (NoWrap auto-size), so a long title — or RTL (e.g. Hebrew) text whose
+        // start sits at the right edge — can push the box past the window's right edge, hiding the right
+        // border (and the beginning of RTL text). _ApplyRenamerMaxWidth caps MaxWidth to the space from
+        // the box's actual on-screen left to the window's right edge, so the box grows as large as it can
+        // while staying fully visible. Driven by the box's SizeChanged, RenamerMaxWidth changes, and —
+        // during a rename — window resizes (the XamlRoot.Changed revoker, armed in BeginRename).
+        void _ApplyRenamerMaxWidth();
+        winrt::Windows::UI::Xaml::XamlRoot::Changed_revoker _xamlRootChangedRevoker{};
     };
 }
 

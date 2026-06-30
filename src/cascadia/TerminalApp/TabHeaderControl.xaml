@@ -311,12 +311,18 @@
               content in BOTH tab-width modes, so it stays visible and grows as you type; explicit
               Return newlines still grow it vertically up to MaxHeight. MinWidth is a usable floor so
               an emptied box (Ctrl+A, Delete) stays visible instead of vanishing; MinHeight keeps the
-              one-line look; MaxHeight caps the growth for a tall title.  -->
+              one-line look; MaxHeight caps the growth for a tall title.
+              Agentmaster: MaxWidth is set in code-behind (_ApplyRenamerMaxWidth), NOT bound here. The
+              box is anchored at the tab's left and grows rightward, so an unbounded (SizeToContent) or
+              far-right (equal mode) box could push its RIGHT border off the window edge — and with RTL
+              (Hebrew) text, whose start sits at the right edge, you'd lose both the border and the start
+              of the title. The code caps MaxWidth to the space from the box's on-screen left to the
+              window's right edge (using RenamerMaxWidth as the settings ceiling), so the box grows as
+              large as it can while staying fully visible.  -->
         <TextBox x:Name="HeaderRenamerTextBox"
                  MinHeight="24"
                  MaxHeight="96"
                  MinWidth="120"
-                 MaxWidth="{x:Bind RenamerMaxWidth, Mode=OneWay}"
                  Padding="4,4,4,3"
                  FontSize="12"
                  AcceptsReturn="True"

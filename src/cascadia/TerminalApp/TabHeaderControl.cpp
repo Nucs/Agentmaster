@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -82,13 +83,30 @@ namespace winrt::TerminalApp::implementation
         PropertyChanged([weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
             if (auto self = weakThis.get())
             {
-                if (args.PropertyName() == L"TabStatus")
+                const auto name = args.PropertyName();
+                if (name == L"TabStatus")
                 {
                     self->_HookTabStatusForPending();
+                }
+                else if (name == L"RenamerMaxWidth")
+                {
+                    // Agentmaster: the settings-driven width ceiling changed (tab-width mode flip) — re-fit.
+                    self->_ApplyRenamerMaxWidth();
                 }
             }
         });
         _HookTabStatusForPending();
+
+        // Agentmaster: re-fit the rename box whenever it resizes (it grows as you type) so its right
+        // border can never grow past the window edge — see _ApplyRenamerMaxWidth. leftX is stable as the
+        // box grows (it's left-anchored), so the computed cap is stable too: re-fitting on SizeChanged
+        // converges in one step and can't feedback-loop.
+        HeaderRenamerTextBox().SizeChanged([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self = weakThis.get())
+            {
+                self->_ApplyRenamerMaxWidth();
+            }
+        });
 
         // We'll only process the KeyUp event if we received an initial KeyDown event first.
         // Avoids issue immediately closing the tab rename when we see the enter KeyUp event that was
@@ -256,6 +274,21 @@ namespace winrt::TerminalApp::implementation
         HeaderRenamerTextBox().SelectAll();
         HeaderRenamerTextBox().Focus(Windows::UI::Xaml::FocusState::Programmatic);
 
+        // Agentmaster: keep the rename box fully on-screen for the life of this rename. Re-fit when the
+        // window resizes (the box's left edge / the window's right edge move), and once now — the box's
+        // SizeChanged (it just went Collapsed -> Visible with content) will also drive a fit as layout
+        // settles, giving an accurate on-screen position.
+        if (const auto xr = XamlRoot())
+        {
+            _xamlRootChangedRevoker = xr.Changed(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->_ApplyRenamerMaxWidth();
+                }
+            });
+        }
+        _ApplyRenamerMaxWidth();
+
         TraceLoggingWrite(
             g_hTerminalAppProvider, // handle to TerminalApp tracelogging provider
             "TabRenamerOpened",
@@ -313,9 +346,66 @@ namespace winrt::TerminalApp::implementation
     {
         if (HeaderRenamerTextBox().Visibility() == Windows::UI::Xaml::Visibility::Visible)
         {
+            // Agentmaster: stop tracking window resizes — the box is no longer shown (see BeginRename).
+            _xamlRootChangedRevoker.revoke();
             HeaderRenamerTextBox().Visibility(Windows::UI::Xaml::Visibility::Collapsed);
             HeaderTextBlock().Visibility(Windows::UI::Xaml::Visibility::Visible);
             RenameEnded.raise(*this, nullptr);
+        }
+    }
+
+    // Agentmaster: cap the rename box's MaxWidth so its right border always stays inside the window.
+    // The box is anchored at the tab's left and grows rightward (NoWrap auto-size); RenamerMaxWidth is
+    // the settings ceiling (360 in fixed-width tab modes, +inf in SizeToContent). We tighten that to the
+    // space between the box's actual on-screen left and the window's right edge, so the box grows as
+    // large as it can ("maximize") while the WHOLE border — and, for RTL/Hebrew text whose start sits at
+    // the right edge, the beginning of the text — stays visible. No-op until the box is shown.
+    void TabHeaderControl::_ApplyRenamerMaxWidth()
+    {
+        const auto box = HeaderRenamerTextBox();
+        if (box.Visibility() != Windows::UI::Xaml::Visibility::Visible)
+        {
+            return;
+        }
+
+        double maxW = RenamerMaxWidth(); // the settings ceiling
+
+        if (const auto xr = XamlRoot())
+        {
+            const auto rootSize = xr.Size();
+            if (rootSize.Width > 0)
+            {
+                try
+                {
+                    // The box's FlowDirection is LTR (only its TEXT auto-detects RTL), so (0,0) is the
+                    // top-LEFT corner — its left edge in window coordinates. leftX is independent of the
+                    // box's width (left-anchored), so this cap is stable as the box grows.
+                    const auto leftX = box.TransformToVisual(xr.Content()).TransformPoint({ 0.0f, 0.0f }).X;
+                    constexpr double rightMargin = 8.0; // keep the border clear of the very edge
+                    const double fit = static_cast<double>(rootSize.Width) - leftX - rightMargin;
+                    if (fit < maxW)
+                    {
+                        maxW = fit;
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+
+        // Never collapse below the usable floor (an emptied box must stay grabbable) even on a window so
+        // narrow the box can't fully fit — visibility of a 120px box beats a 0px one.
+        const double floorW = box.MinWidth();
+        if (maxW < floorW)
+        {
+            maxW = floorW;
+        }
+
+        // Skip a redundant write so re-fitting from SizeChanged can't ping-pong.
+        if (std::abs(box.MaxWidth() - maxW) > 0.5)
+        {
+            box.MaxWidth(maxW);
         }
     }
 }
