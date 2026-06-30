@@ -2145,14 +2145,18 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 _copySessionSubMenu.Items().Append(item);
+                return item;
             };
             // The `which` codes + labels are the per-tab overlay copy menu's, verbatim (AgentCopyActions.h):
             // 0 Session Id, 1 Path, 2 Branch, 3 Claude CLI, 4 Codex CLI, 6 Summary, 5 Transcript.
             addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
             addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
             addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
-            addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
-            addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+            // Both launch-CLI items are built; SetAgentCopyMenuVisible (page-driven at flyout-open) reveals
+            // ONLY the one matching the session's agent — a Claude tab shows "Claude Launch CLI", a Codex tab
+            // "Codex Launch CLI", never both (copying the other would synthesize a command for the wrong agent).
+            _copyClaudeCliItem = addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+            _copyCodexCliItem = addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
             addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
             addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
         }
@@ -2486,11 +2490,24 @@ namespace winrt::TerminalApp::implementation
     // this at flyout-open time (a '+' shell tab can become a claude after the menu is built), so the
     // submenu appears exactly where the per-tab overlay's copy button does — only on a linked Claude/Codex
     // tab, never on a plain shell or the pinned Manager tab.
-    void Tab::SetAgentCopyMenuVisible(bool visible)
+    void Tab::SetAgentCopyMenuVisible(bool visible, bool isCodex)
     {
         ASSERT_UI_THREAD();
 
         _copySessionSubMenu.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        // Reveal only the launch-CLI item matching this session's agent (meaningful only when the submenu
+        // is visible) — Codex CLI for a Codex session, Claude CLI otherwise; never both.
+        if (visible)
+        {
+            if (_copyClaudeCliItem)
+            {
+                _copyClaudeCliItem.Visibility(isCodex ? WUX::Visibility::Collapsed : WUX::Visibility::Visible);
+            }
+            if (_copyCodexCliItem)
+            {
+                _copyCodexCliItem.Visibility(isCodex ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+            }
+        }
     }
 
     // Agentmaster: show/hide the "Mark Unread" item. Like SetAgentCopyMenuVisible, the page resolves

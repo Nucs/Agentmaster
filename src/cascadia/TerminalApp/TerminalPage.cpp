@@ -2570,7 +2570,17 @@ namespace winrt::TerminalApp::implementation
                 {
                     const auto sid = page->_ClaudeSessionForTab(*tab);
                     const bool isSession = !sid.empty();
-                    tab->SetAgentCopyMenuVisible(isSession);
+                    // Agentmaster: resolve the session's agent so the "Copy >" submenu offers ONLY the
+                    // matching launch-CLI item (Codex CLI for a Codex session, Claude CLI otherwise).
+                    bool isCodex = false;
+                    if (isSession && page->_sessionRegistry)
+                    {
+                        if (const auto info = page->_sessionRegistry->Get(sid))
+                        {
+                            isCodex = info->kind == ::Agentmaster::AgentKind::Codex;
+                        }
+                    }
+                    tab->SetAgentCopyMenuVisible(isSession, isCodex);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     // Agentmaster (eager-init): "Activate Tab" — shown ONLY when this session is DORMANT (its

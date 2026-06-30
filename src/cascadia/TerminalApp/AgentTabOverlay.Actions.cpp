@@ -92,20 +92,25 @@ namespace winrt::TerminalApp::implementation
             return b;
         };
 
-        // Agentmaster (SUMMARY_JUMP.md §7): ↑ / ↓ — step the view to the previous / next SENT prompt that
-        // is currently off-screen, and highlight it in the summary panel, exactly like alt+up / alt+down
-        // (the page runs the SAME _ScrollAdjacentPrompt). Placed LEFT of the folder button. Claude only —
-        // Codex has no in-buffer prompt resolve in v1, so the buttons are omitted for a Codex session.
-        const bool promptNavEligible = [&]() {
+        // Agentmaster: this session's agent kind (Claude default), read ONCE at build time — a session's
+        // kind is fixed for the overlay's lifetime. It drives two kind-specific menu choices below: the
+        // Claude-only prompt-nav (↑/↓) buttons and the launch-CLI copy item (Claude vs Codex, never both).
+        const bool isCodexSession = [&]() {
             if (_registry && !_sessionId.empty())
             {
                 if (const auto info = _registry->Get(_sessionId))
                 {
-                    return info->kind == AgentKind::Claude;
+                    return info->kind == AgentKind::Codex;
                 }
             }
-            return true; // unknown -> assume Claude (the default kind)
+            return false; // unknown -> Claude (the default kind)
         }();
+
+        // Agentmaster (SUMMARY_JUMP.md §7): ↑ / ↓ — step the view to the previous / next SENT prompt that
+        // is currently off-screen, and highlight it in the summary panel, exactly like alt+up / alt+down
+        // (the page runs the SAME _ScrollAdjacentPrompt). Placed LEFT of the folder button. Claude only —
+        // Codex has no in-buffer prompt resolve in v1, so the buttons are omitted for a Codex session.
+        const bool promptNavEligible = !isCodexSession;
         Button upBtn{ nullptr };
         Button downBtn{ nullptr };
         if (promptNavEligible)
@@ -169,8 +174,17 @@ namespace winrt::TerminalApp::implementation
         addItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
         addItem(L"Copy Path", L"Copy the session's working-directory path", 1);
         addItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
-        addItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
-        addItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        // Offer ONLY the launch-CLI that matches this session's agent — a Claude session gets "Claude Launch
+        // CLI", a Codex session "Codex Launch CLI" (never the other, which would synthesize a command for an
+        // agent this session isn't running).
+        if (isCodexSession)
+        {
+            addItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        }
+        else
+        {
+            addItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+        }
         addItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files), including everything the displayed panel trims", 6);
         addItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
         // The pointer must LEAVE the badge to reach the menu, so pin the expanded state while it's open.

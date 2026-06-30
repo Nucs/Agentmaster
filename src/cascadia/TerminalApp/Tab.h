@@ -136,7 +136,7 @@ namespace winrt::TerminalApp::implementation
 
         void DisableCloseAndMoveMenuItems(); // Agentmaster
         void DisableTabRename(); // Agentmaster
-        void SetAgentCopyMenuVisible(bool visible); // Agentmaster: show/hide the "Copy >" session-field submenu (managed agent-session tabs only; page-driven at flyout-open)
+        void SetAgentCopyMenuVisible(bool visible, bool isCodex); // Agentmaster: show/hide the "Copy >" session-field submenu (managed agent-session tabs only; page-driven at flyout-open). isCodex (meaningful only when visible) offers ONLY the matching launch-CLI item — Codex CLI for a Codex session, Claude CLI otherwise — never both
         void SetAgentMarkUnreadVisible(bool visible); // Agentmaster: show/hide the "Mark Unread" item (managed agent-session tabs only; page-driven at flyout-open)
         void SetAgentTriageMoveState(bool visible, bool toIdle); // Agentmaster (Waiting-for-you triage): show/hide the status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" item + set its label/icon by direction (toIdle == this session is Waiting-for-you, so offer the demote; else it is Idle/Done, so offer the plain promote). Managed agent-session tabs only; page-driven at flyout-open
         void SetAgentFavoriteState(bool visible, bool isFavorite); // Agentmaster (FAVORITES.md): show/hide the "Favorite"/"Unfavorite" item + set its label by the session's current star (managed agent-session tabs only; page-driven at flyout-open)
@@ -225,6 +225,10 @@ namespace winrt::TerminalApp::implementation
         // can show/hide it (SetAgentCopyMenuVisible) per whether this tab currently hosts a managed agent
         // session; built collapsed in _CreateContextMenu, its items raise CopySessionFieldRequested.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem _copySessionSubMenu{};
+        // Agentmaster: the two launch-CLI items inside _copySessionSubMenu, kept as members so
+        // SetAgentCopyMenuVisible can reveal ONLY the one matching the session's agent (Claude vs Codex).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyClaudeCliItem{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _copyCodexCliItem{ nullptr };
         uint32_t _reservedLeadingTabs{ 0 }; // Agentmaster: count of pinned, non-bulk-closable leading tabs (the Manager tab); fed by UpdateTabViewIndex, read by _EnableMenuItems
         winrt::TerminalApp::ShortcutActionDispatch _dispatch;
         Microsoft::Terminal::Settings::Model::IActionMapView _actionMap{ nullptr };

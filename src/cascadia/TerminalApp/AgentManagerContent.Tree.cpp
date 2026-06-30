@@ -1535,8 +1535,16 @@ namespace winrt::TerminalApp::implementation
         addCopyItem(L"Session Id", L"Copy the resumable conversation id (Codex: its rollout uuid)", 0);
         addCopyItem(L"Copy Path", L"Copy the session's working-directory path", 1);
         addCopyItem(L"Copy Branch Name", L"Copy the session's current git branch name", 2);
-        addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
-        addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        // Offer ONLY the launch-CLI matching this session's agent (isCodex resolved above) — a Claude
+        // session gets "Claude Launch CLI", a Codex session "Codex Launch CLI", never both.
+        if (isCodex)
+        {
+            addCopyItem(L"Codex Launch CLI", L"Copy the full codex launch command line", 4);
+        }
+        else
+        {
+            addCopyItem(L"Claude Launch CLI", L"Copy the full claude.exe launch command line (with --settings hooks and flags)", 3);
+        }
         addCopyItem(L"Summary", L"Copy the FULL session summary \x2014 the complete box (id, resume CLI, dir, folder, branch, duration, tasks, messages, files)", 6);
         addCopyItem(L"Transcript", L"Copy the whole conversation as text (your prompts + the agent's replies)", 5);
         menu.Items().Append(copySub);
