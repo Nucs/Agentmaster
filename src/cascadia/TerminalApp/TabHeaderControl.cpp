@@ -97,10 +97,11 @@ namespace winrt::TerminalApp::implementation
         });
         _HookTabStatusForPending();
 
-        // Agentmaster: re-fit the rename box whenever it resizes (it grows as you type) so its right
-        // border can never grow past the window edge — see _ApplyRenamerMaxWidth. leftX is stable as the
-        // box grows (it's left-anchored), so the computed cap is stable too: re-fitting on SizeChanged
-        // converges in one step and can't feedback-loop.
+        // Agentmaster: drive the on-screen fit from the box's resize — it lays out (Collapsed -> Visible)
+        // and grows as you type here. _ApplyRenamerMaxWidth is internally gated on the WINDOW width, so
+        // the fit runs once when the box first arranges and the later growth-driven SizeChanges are
+        // no-ops — that gate is what prevents the MaxWidth-write -> reflow -> SizeChanged layout cycle
+        // (the crash the first attempt hit). A genuine window resize changes the width and re-fits.
         HeaderRenamerTextBox().SizeChanged([weakThis = get_weak()](auto&&, auto&&) {
             if (auto self = weakThis.get())
             {
@@ -274,19 +275,13 @@ namespace winrt::TerminalApp::implementation
         HeaderRenamerTextBox().SelectAll();
         HeaderRenamerTextBox().Focus(Windows::UI::Xaml::FocusState::Programmatic);
 
-        // Agentmaster: keep the rename box fully on-screen for the life of this rename. Re-fit when the
-        // window resizes (the box's left edge / the window's right edge move), and once now — the box's
-        // SizeChanged (it just went Collapsed -> Visible with content) will also drive a fit as layout
-        // settles, giving an accurate on-screen position.
-        if (const auto xr = XamlRoot())
-        {
-            _xamlRootChangedRevoker = xr.Changed(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
-                if (auto self = weakThis.get())
-                {
-                    self->_ApplyRenamerMaxWidth();
-                }
-            });
-        }
+        // Agentmaster: keep the rename box fully on-screen for the life of this rename — re-arm the
+        // one-shot fit (see _ApplyRenamerMaxWidth). The box just went Collapsed -> Visible, so it isn't
+        // arranged yet; this synchronous call sets a safe initial cap, and the box's SizeChanged (which
+        // fires once it lays out with content) does the accurate fit. Window resizes during the rename
+        // are picked up by the same SizeChanged path via the width gate.
+        _renamerFitDone = false;
+        _lastRootWidth = -1.0;
         _ApplyRenamerMaxWidth();
 
         TraceLoggingWrite(
@@ -346,8 +341,8 @@ namespace winrt::TerminalApp::implementation
     {
         if (HeaderRenamerTextBox().Visibility() == Windows::UI::Xaml::Visibility::Visible)
         {
-            // Agentmaster: stop tracking window resizes — the box is no longer shown (see BeginRename).
-            _xamlRootChangedRevoker.revoke();
+            // Agentmaster: the box is hidden again — drop the fit latch so the next rename re-fits fresh.
+            _renamerFitDone = false;
             HeaderRenamerTextBox().Visibility(Windows::UI::Xaml::Visibility::Collapsed);
             HeaderTextBlock().Visibility(Windows::UI::Xaml::Visibility::Visible);
             RenameEnded.raise(*this, nullptr);
@@ -359,7 +354,13 @@ namespace winrt::TerminalApp::implementation
     // the settings ceiling (360 in fixed-width tab modes, +inf in SizeToContent). We tighten that to the
     // space between the box's actual on-screen left and the window's right edge, so the box grows as
     // large as it can ("maximize") while the WHOLE border — and, for RTL/Hebrew text whose start sits at
-    // the right edge, the beginning of the text — stays visible. No-op until the box is shown.
+    // the right edge, the beginning of the text — stays visible.
+    //
+    // Recomputes AT MOST ONCE per (rename, window width). See the header comment: writing MaxWidth
+    // reflows layout and re-fires the SizeChanged that calls this, and recomputing leftX every pass made
+    // the cap oscillate sub-pixel -> XAML layout-cycle abort (the stowed exception that crashed the first
+    // attempt). The width gate below makes a box-growth-driven SizeChanged a no-op once fitted, so the
+    // write can't feed back; only a real window-size change re-arms it.
     void TabHeaderControl::_ApplyRenamerMaxWidth()
     {
         const auto box = HeaderRenamerTextBox();
@@ -368,30 +369,48 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        double maxW = RenamerMaxWidth(); // the settings ceiling
-
-        if (const auto xr = XamlRoot())
+        const auto xr = XamlRoot();
+        if (!xr)
         {
-            const auto rootSize = xr.Size();
-            if (rootSize.Width > 0)
-            {
-                try
-                {
-                    // The box's FlowDirection is LTR (only its TEXT auto-detects RTL), so (0,0) is the
-                    // top-LEFT corner — its left edge in window coordinates. leftX is independent of the
-                    // box's width (left-anchored), so this cap is stable as the box grows.
-                    const auto leftX = box.TransformToVisual(xr.Content()).TransformPoint({ 0.0f, 0.0f }).X;
-                    constexpr double rightMargin = 8.0; // keep the border clear of the very edge
-                    const double fit = static_cast<double>(rootSize.Width) - leftX - rightMargin;
-                    if (fit < maxW)
-                    {
-                        maxW = fit;
-                    }
-                }
-                catch (...)
-                {
-                }
-            }
+            return;
+        }
+        const double rootWidth = static_cast<double>(xr.Size().Width);
+        if (rootWidth <= 0.0)
+        {
+            return;
+        }
+
+        // Already fitted for this window width? Then this call is a box-growth SizeChanged echo — do
+        // NOTHING, or we risk the layout-cycle feedback. A genuine window resize changes rootWidth and
+        // falls through to re-fit.
+        if (_renamerFitDone && std::abs(rootWidth - _lastRootWidth) < 0.5)
+        {
+            return;
+        }
+
+        double maxW = RenamerMaxWidth(); // the settings ceiling
+        constexpr double rightMargin = 8.0; // keep the border clear of the very edge
+
+        bool gotLeft = false;
+        double leftX = 0.0;
+        try
+        {
+            // The box's FlowDirection is LTR (only its TEXT auto-detects RTL), so (0,0) is the top-LEFT
+            // corner — its left edge in window coordinates. leftX is independent of the box's width
+            // (left-anchored), so one post-arrange measurement holds for the whole rename.
+            leftX = box.TransformToVisual(xr.Content()).TransformPoint({ 0.0f, 0.0f }).X;
+            gotLeft = true;
+        }
+        catch (...)
+        {
+        }
+
+        // With a real on-screen left, cap to (left -> window right); otherwise (box not arranged yet)
+        // fall back to never exceeding the window width, and let the post-arrange SizeChanged refine it.
+        const double fit = gotLeft ? (rootWidth - leftX - rightMargin) : (rootWidth - rightMargin);
+        if (fit < maxW)
+        {
+            maxW = fit;
         }
 
         // Never collapse below the usable floor (an emptied box must stay grabbable) even on a window so
@@ -402,7 +421,16 @@ namespace winrt::TerminalApp::implementation
             maxW = floorW;
         }
 
-        // Skip a redundant write so re-fitting from SizeChanged can't ping-pong.
+        // Latch as fitted only once we had a REAL arranged position — so a synchronous pre-layout call
+        // (leftX stale/zero) doesn't cache a wrong width and starve the real fit on the next SizeChanged.
+        // Latch BEFORE the write: should the write ever re-enter SizeChanged synchronously, the gate is
+        // already armed and that re-entry returns immediately — belt-and-suspenders against a layout cycle.
+        if (gotLeft && box.ActualWidth() > 0.0)
+        {
+            _renamerFitDone = true;
+            _lastRootWidth = rootWidth;
+        }
+
         if (std::abs(box.MaxWidth() - maxW) > 0.5)
         {
             box.MaxWidth(maxW);

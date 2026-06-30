@@ -64,10 +64,19 @@ namespace winrt::TerminalApp::implementation
         // start sits at the right edge — can push the box past the window's right edge, hiding the right
         // border (and the beginning of RTL text). _ApplyRenamerMaxWidth caps MaxWidth to the space from
         // the box's actual on-screen left to the window's right edge, so the box grows as large as it can
-        // while staying fully visible. Driven by the box's SizeChanged, RenamerMaxWidth changes, and —
-        // during a rename — window resizes (the XamlRoot.Changed revoker, armed in BeginRename).
+        // while staying fully visible.
+        //
+        // CYCLE SAFETY (this is what crashed the first attempt with a XAML layout-cycle / stowed
+        // exception): the fit is recomputed at most ONCE per (rename, window width). Writing MaxWidth
+        // reflows layout and re-fires SizeChanged; if we recomputed leftX every time, its sub-pixel
+        // shift across passes made the cap oscillate and XAML aborted the layout pass. So _renamerFitDone
+        // + _lastRootWidth gate the recompute: a SizeChanged driven by the box's own growth (window width
+        // unchanged) is a no-op, breaking the feedback loop. A genuine window resize changes the width and
+        // re-arms it. leftX is invariant to the box's own width (the tab's left depends only on the tabs
+        // before it), so a single post-arrange measurement is correct for the whole rename.
         void _ApplyRenamerMaxWidth();
-        winrt::Windows::UI::Xaml::XamlRoot::Changed_revoker _xamlRootChangedRevoker{};
+        bool _renamerFitDone{ false };
+        double _lastRootWidth{ -1.0 };
     };
 }
 
