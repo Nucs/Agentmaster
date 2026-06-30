@@ -365,6 +365,161 @@ static bool AnchorSpansValid(const std::wstring& hay, const std::vector<Agentmas
     return true;
 }
 
+// Agentmaster (SUMMARY_JUMP.md §5b): COLLISION tests. A prompt's needle is its first line (a PREFIX of its
+// text) and matching is a substring search, so several prompts can land on ONE rendered line — by prefix,
+// suffix, substring, or a longer prompt backing off to a shorter sibling's render. The second pass resolves
+// these by region containment (+ a quality tiebreak for an identical region). These cases pin every shape:
+// each prompt is a MARKED `<U+276F> <text>` render; off-screen renders are simulated by omitting them; the
+// glyph is built from its code point so the TU stays pure-ASCII (compiles without /utf-8).
+namespace
+{
+    const std::wstring kCaret(1, static_cast<wchar_t>(0x276F));
+    std::wstring CMk(const std::wstring& t) { return kCaret + L" " + t + L"\n"; }                 // a marked render
+    std::wstring CEcho(const std::wstring& t) { return L"assistant: " + t + L"\n"; }               // an unmarked echo
+    const std::wstring kFill = L"...filler reply output line...\n";
+    std::vector<Agentmaster::AnchorMatch> CRes(const std::wstring& hay, const std::vector<std::wstring>& p)
+    {
+        Agentmaster::AnchorOptions mk;
+        mk.promptMarkers = std::wstring{ Agentmaster::kClaudePromptMarkers };
+        return Agentmaster::ResolvePromptAnchors(hay, p, mk);
+    }
+    bool CDistinct(const std::vector<Agentmaster::AnchorMatch>& r) // all FOUND offsets distinct (no two on one render-offset)
+    {
+        for (size_t i = 0; i < r.size(); ++i)
+            for (size_t j = i + 1; j < r.size(); ++j)
+                if (r[i].found && r[j].found && r[i].offset == r[j].offset)
+                    return false;
+        return true;
+    }
+}
+
+void TestPromptAnchorCollisions()
+{
+    using namespace Agentmaster;
+    std::wprintf(L"Prompt resolver COLLISIONS (prefix / suffix / substring / backoff / exact-dup, SUMMARY_JUMP.md §5b):\n");
+
+    // ---- PREFIX (A is a strict prefix of B) ----
+    {
+        auto r = CRes(CMk(L"deploy dev please") + kFill + CMk(L"deploy dev please, fast mode if possible") + kFill,
+                      { L"deploy dev please", L"deploy dev please, fast mode if possible" });
+        CHECK(r[0].found && r[1].found && CDistinct(r), "collide/prefix: both on screen -> distinct renders");
+    }
+    {
+        auto r = CRes(L"...old output...\n" + CMk(L"deploy dev please, fast mode if possible") + kFill,
+                      { L"deploy dev please", L"deploy dev please, fast mode if possible" });
+        CHECK(!r[0].found && r[1].found, "collide/prefix: shorter's render off-screen -> shorter DIM, longer keeps (the report)");
+    }
+    {
+        auto r = CRes(L"...old output...\n" + CMk(L"deploy dev please") + kFill,
+                      { L"deploy dev please", L"deploy dev please, fast mode if possible" });
+        CHECK(r[0].found && !r[1].found, "collide/prefix: LONGER's render off-screen -> longer DIM (backoff tie broken by quality)");
+    }
+    {
+        auto r = CRes(CMk(L"alpha beta") + kFill + CMk(L"alpha beta gamma") + kFill + CMk(L"alpha beta gamma delta") + kFill,
+                      { L"alpha beta", L"alpha beta gamma", L"alpha beta gamma delta" });
+        CHECK(r[0].found && r[1].found && r[2].found && CDistinct(r), "collide/prefix: 3-way chain ALL on screen -> all distinct");
+    }
+    {
+        auto r = CRes(L"...old...\n" + CMk(L"alpha beta gamma delta") + kFill,
+                      { L"alpha beta", L"alpha beta gamma", L"alpha beta gamma delta" });
+        CHECK(!r[0].found && !r[1].found && r[2].found, "collide/prefix: 3-way chain, only longest render -> only longest survives");
+    }
+    {
+        // Renders in REVERSE order vs prompts (rare): we only require no same-offset collision; the exact
+        // assignment is a documented limitation (SUMMARY_JUMP.md §5b).
+        auto r = CRes(CMk(L"deploy dev please, fast mode if possible") + kFill + CMk(L"deploy dev please") + kFill,
+                      { L"deploy dev please", L"deploy dev please, fast mode if possible" });
+        CHECK(r[0].found && r[1].found && CDistinct(r), "collide/prefix: reversed render order -> both found, distinct (assignment is a known limitation)");
+    }
+    {
+        // Two prompts sharing a >maxNeedle (64-char) prefix => identical needles after truncation.
+        const std::wstring base = L"please carefully perform the entire staged deployment sequence right now today";
+        auto on = CRes(CMk(base + L" using ALPHA") + kFill + CMk(base + L" using BETA") + kFill,
+                       { base + L" using ALPHA", base + L" using BETA" });
+        CHECK(on[0].found && on[1].found && CDistinct(on), "collide/prefix: shared >64-char needle, both on screen -> distinct");
+        auto off = CRes(L"...old...\n" + CMk(base + L" using BETA") + kFill,
+                        { base + L" using ALPHA", base + L" using BETA" });
+        CHECK(!off[0].found && off[1].found, "collide/prefix: shared >64-char needle, first off-screen -> first DIM, second keeps");
+    }
+
+    // ---- SUFFIX / SUBSTRING (B is contained in A's render but not at its start) ----
+    {
+        auto r = CRes(CMk(L"Please deploy dev") + kFill + CMk(L"deploy dev") + kFill,
+                      { L"Please deploy dev", L"deploy dev" });
+        CHECK(r[0].found && r[1].found && CDistinct(r), "collide/suffix: both on screen -> each its own render");
+    }
+    {
+        auto r = CRes(L"...old...\n" + CMk(L"Please deploy dev") + kFill, { L"Please deploy dev", L"deploy dev" });
+        CHECK(r[0].found && !r[1].found, "collide/suffix: shorter off-screen -> shorter DIM (was a mid-line same-row collision)");
+    }
+    {
+        auto r = CRes(L"...old...\n" + CMk(L"the long line about deploying the dev build") + kFill,
+                      { L"the long line about deploying the dev build", L"deploying the dev" });
+        CHECK(r[0].found && !r[1].found, "collide/substring: mid-line substring, shorter off-screen -> shorter DIM");
+    }
+    {
+        // Two SHORTER prompts off-screen + a single longer CONTAINER render on screen -> both shorter DIM.
+        auto r = CRes(L"...old...\n" + CMk(L"deploy the app server now") + kFill,
+                      { L"deploy", L"deploy the app", L"deploy the app server now" });
+        CHECK(!r[0].found && !r[1].found && r[2].found, "collide/container: two shorter off-screen + container render -> only container survives");
+    }
+
+    // ---- NON-collisions that must NOT be over-unresolved ----
+    {
+        auto r = CRes(CMk(L"fix the build now") + kFill + CMk(L"fix the build later") + kFill,
+                      { L"fix the build now", L"fix the build later" });
+        CHECK(r[0].found && r[1].found && CDistinct(r), "no-collide/divergent: shared lead, divergent tail, both on screen -> distinct");
+    }
+    {
+        auto r = CRes(CMk(L"deploy dev") + kFill + CMk(L"deploy app") + kFill, { L"deploy dev", L"deploy app" });
+        CHECK(r[0].found && r[1].found && CDistinct(r), "no-collide/leading-word: two renders sharing a leading word -> each its own");
+    }
+    {
+        // Same first line, different body (multi-line) — distinct renders on screen.
+        auto r = CRes(CMk(L"do the thing\nfast") + kFill + CMk(L"do the thing\nslow") + kFill,
+                      { L"do the thing\nfast", L"do the thing\nslow" });
+        CHECK(r[0].found && r[1].found && CDistinct(r), "no-collide/same-first-line: both on screen -> distinct");
+    }
+
+    // ---- EXACT DUPLICATES (the 'handle exact same properly' case — equal region+quality kept) ----
+    {
+        auto r = CRes(CMk(L"run it") + kFill + CMk(L"run it") + kFill + CMk(L"run it") + kFill,
+                      { L"run it", L"run it", L"run it" });
+        CHECK(r[0].found && r[1].found && r[2].found && CDistinct(r), "collide/exact-dup: 3 sends, 3 renders -> 3 distinct, none unresolved");
+    }
+    {
+        auto r = CRes(L"...old...\n" + CMk(L"run it") + kFill, { L"run it", L"run it", L"run it" });
+        CHECK(r[0].found && r[1].found && r[2].found, "collide/exact-dup: 3 sends, 1 surviving render -> all kept (identical region+quality)");
+    }
+
+    // ---- MARKER + ECHO + PREFIX combined ----
+    {
+        auto r = CRes(CEcho(L"deploy dev please") + CMk(L"deploy dev please, fast mode if possible") + kFill,
+                      { L"deploy dev please", L"deploy dev please, fast mode if possible" });
+        CHECK(!r[0].found && r[1].found, "collide/echo+prefix: unmarked echo of A before B's render -> A DIM, B keeps");
+    }
+
+    // ---- The literal user 1..6 list (the report), two scroll states ----
+    {
+        std::vector<std::wstring> six = { L"Please deploy dev", L"deploy dev", L"again", L"deploy dev please",
+                                          L"deploy dev please, fast mode if possible",
+                                          L"build and deploy dev please, fast mode if possible" };
+        std::wstring all;
+        for (const auto& p : six)
+            all += CMk(p) + kFill;
+        auto r = CRes(all, six);
+        bool allFound = true;
+        for (const auto& m : r)
+            allFound = allFound && m.found;
+        CHECK(allFound && CDistinct(r), "collide/list-1to6: ALL on screen -> all 6 found, distinct (4 and 5 do NOT collide)");
+
+        std::wstring tail = L"...scrollback elided...\n" + CMk(six[4]) + kFill + CMk(six[5]) + kFill;
+        auto t = CRes(tail, six);
+        CHECK(!t[0].found && !t[1].found && !t[2].found && !t[3].found && t[4].found && t[5].found && t[4].offset != t[5].offset,
+              "collide/list-1to6: only 5 and 6 on screen -> 1-4 DIM, 5 and 6 land on distinct rows");
+    }
+}
+
 // Agentmaster (SUMMARY_JUMP.md §5): edge-case + crash-safety fuzz for the prompt resolver with marker
 // validation ON. The resolver feeds alt-nav + jump on the UI thread, so a pathological haystack/needle must
 // never AV / read OOB / infinite-loop / throw -- a crash here takes the whole app. Each case asserts it

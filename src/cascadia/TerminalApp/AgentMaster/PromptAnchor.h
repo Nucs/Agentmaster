@@ -600,33 +600,44 @@ namespace Agentmaster
             results[mi] = m;
         }
 
-        // SECOND PASS — PREFIX-COLLISION resolution (SUMMARY_JUMP.md §5b). When prompt A's text is a strict
-        // PREFIX of prompt B's (e.g. "deploy dev please" vs "deploy dev please, fast mode if possible"), A's
-        // needle also matches the START of B's rendered line. If A's OWN render has scrolled off, the greedy
-        // binds A to B's render — so A and B both resolve to the SAME buffer offset and A's jump wrongly lands
-        // on B (the "(4) and (5) both jump to (5)" report). The render at that offset is B's (it shows B's
-        // full text); A only matched its prefix. Fix: at each offset claimed by more than one prompt, the one
-        // with the LONGEST matched span (it explains the most of the rendered line) OWNS it; a strictly-shorter
-        // match there is unresolved (its real render isn't on screen — better to dim than to mis-jump). EQUAL
-        // lengths are left untouched — those are exact-duplicate texts, the legitimate case the order-preserving
-        // greedy already spreads across distinct occurrences (here they share one surviving render). O(n^2) over
-        // the prompt count (small); order-independent because the longest at each offset is never unresolved.
+        // SECOND PASS — COLLISION resolution (SUMMARY_JUMP.md §5b). A prompt's needle is its first line — a
+        // PREFIX of its text — and matching is a substring search, so SEVERAL prompts can land on ONE rendered
+        // line: a strict PREFIX ("deploy dev please" vs "deploy dev please, fast mode") matches the START of
+        // the longer one's render; a SUFFIX / substring ("deploy dev" inside "please deploy dev") matches the
+        // MIDDLE of it; and a longer prompt whose OWN render scrolled off can BACK OFF to a shorter prefix that
+        // matches a shorter sibling's render (same offset, same length, lower quality). In every shape the two
+        // matches occupy OVERLAPPING regions of the same render — and the prompt the render actually shows owns
+        // it. Decide the owner by REGION CONTAINMENT: if prompt j's matched region [off, off+len) strictly
+        // CONTAINS prompt i's, then i is a prefix/suffix/substring of j's render and is unresolved (its real
+        // render isn't on screen — dimming beats mis-jumping onto a sibling, the "(4) and (5) both jump to (5)"
+        // report). For an IDENTICAL region the fuller match wins (greater quality — so a longer prompt that
+        // merely backed off to this prefix yields to the sibling whose whole text the render shows). Identical
+        // region AND equal quality is left untouched — exact-duplicate texts sharing one surviving render, the
+        // legitimate case the order-preserving greedy already spreads across distinct occurrences. O(n^2) over
+        // the (small) prompt count; order-independent — interval containment is transitive + asymmetric, so the
+        // true owner (the outermost / fullest region) is never the one unresolved.
         for (size_t i = 0; i < results.size(); ++i)
         {
             if (!results[i].found)
             {
                 continue;
             }
+            const size_t iEnd = results[i].offset + results[i].length;
             for (size_t j = 0; j < results.size(); ++j)
             {
                 if (j == i || !results[j].found)
                 {
                     continue;
                 }
-                if (results[j].offset == results[i].offset && results[j].length > results[i].length)
+                const size_t jEnd = results[j].offset + results[j].length;
+                if (results[j].offset <= results[i].offset && jEnd >= iEnd) // j's region contains i's
                 {
-                    results[i] = {}; // a strictly-shorter prefix stole a longer prompt's render -> unresolve it
-                    break;
+                    const bool sameRegion = results[j].offset == results[i].offset && jEnd == iEnd;
+                    if (!sameRegion || results[j].quality > results[i].quality)
+                    {
+                        results[i] = {}; // i is a prefix/suffix/substring of j's render (or a backed-off tie) -> unresolve
+                        break;
+                    }
                 }
             }
         }

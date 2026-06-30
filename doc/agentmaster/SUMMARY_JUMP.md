@@ -365,31 +365,43 @@ resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initiali
   Codex rollouts get no jump buttons in v1 (the resolver itself is agent-agnostic — only the prompt-source
   wiring differs).
 
-## 5b. Prefix collisions — the second pass
+## 5b. Render collisions — the second pass
 
-A prompt's needle is its first line (a **prefix** of the prompt text). So when prompt **A**'s text is a
-strict prefix of prompt **B**'s — e.g. `deploy dev please` vs `deploy dev please, fast mode if possible` —
-A's needle *also* matches the **start of B's rendered line**. If A's own render has scrolled off the recent
-window, the order-preserving greedy binds A to B's render: **A and B resolve to the same buffer offset**, and
-A's jump (or the eligibility icon, or alt-nav) wrongly lands on B. The reported symptom: a summary list where
-*“deploy dev please”* and *“deploy dev please, fast mode if possible”* **both jump to the latter**.
+A prompt's needle is its first line (a **prefix** of the prompt text) and matching is a **substring search**,
+so several prompts can resolve onto **one rendered line**. The shapes:
 
-`ResolvePromptAnchors` runs a small **second pass** to resolve this. The render at a given offset belongs to
-the prompt whose text it shows in full; A only matched a prefix of it. So: **at each offset claimed by more
-than one prompt, the match with the LONGEST span wins (it explains the most of the rendered line); a
-strictly-shorter match at that offset is unresolved** — its real render isn't on screen, so dimming its jump
-is correct (and far better than mis-jumping onto B). **Equal-length** matches at one offset are left untouched:
-those are **exact-duplicate** prompt texts, the legitimate case the order-preserving greedy already spreads
-across distinct occurrences (when only one render survives, they share it — unchanged from before). The pass
-is `O(n²)` over the prompt count (tiny) and **order-independent** (the longest at each offset is never
-unresolved). It runs for the legacy and marker paths alike, and composes with the marker preference (§5) —
-markers steer *which* offset each prompt picks; this pass de-conflicts same-offset ties by length.
+- **Prefix** — A's text is a strict prefix of B's (`deploy dev please` vs `deploy dev please, fast mode if
+  possible`): A's needle matches the **start** of B's render. (The reported symptom: a summary where *both*
+  jumped to the longer one.)
+- **Suffix / substring** — A's text sits **inside** B's render (`deploy dev` inside `Please deploy dev`): A's
+  needle matches the **middle** of B's line.
+- **Backoff tie** — B's own render scrolled off, so B **backs off** to a shorter prefix that matches a shorter
+  sibling A's render at the **same offset and length** but **lower quality** (B only partially matched there).
 
-When BOTH renders are on screen there is no collision (the greedy binds each to its own, distinct render), so
-the pass is a no-op — verified over the real corpus (no spurious unresolves). A residual limitation: a prompt
-whose own render is on screen but appears *out of buffer order* relative to its prefix-sibling can still be
-unresolved rather than re-homed onto its true render (a re-search of the excluded offsets is a possible future
-refinement); the common case — the shorter prompt's render has scrolled off — dims correctly.
+In every shape the two matches occupy **overlapping regions of the same render**, and the prompt the render
+actually shows owns it; the other's real render isn't on screen, so its jump/eligibility icon should **dim**
+rather than mis-land on a sibling.
+
+`ResolvePromptAnchors` runs a small **second pass** that decides the owner by **region containment**: each
+match has a region `[offset, offset+length)`; if prompt **j**'s region **contains** prompt **i**'s, then i is
+a prefix/suffix/substring of j's render and is **unresolved**. For an **identical** region the **higher-quality**
+match wins (so a longer prompt that merely backed off to a shorter sibling's prefix yields to the sibling whose
+whole text the render shows). An identical region **and** equal quality is left untouched — **exact-duplicate**
+texts sharing one surviving render, the legitimate case the order-preserving greedy already spreads across
+distinct occurrences. The pass is `O(n²)` over the (small) prompt count and **order-independent** (interval
+containment is transitive + asymmetric, so the true owner — the outermost / fullest region — is never the one
+unresolved). It runs for the legacy and marker paths alike and composes with the marker preference (§5):
+markers steer *which* offset each prompt picks; this pass de-conflicts overlapping regions on one render.
+
+When the colliding prompts' renders are all **on screen**, the greedy already binds each to its own distinct
+render (disjoint regions), so the pass is a no-op — verified over the real corpus (no spurious unresolves) and
+by a dedicated collision suite (`TestPromptAnchorCollisions`: prefix / 3-way chain / suffix / substring /
+container / backoff / shared-`>64`-char-needle / exact-dup / divergent / echo+prefix / the literal 1–6 list in
+both scroll states). **Residual limitation:** a prompt whose own render is on screen but appears *out of buffer
+order* relative to its collision-sibling (their renders reversed vs prompt order) can still be unresolved
+rather than re-homed onto its true render — the resolver only de-conflicts overlapping regions, it does not
+re-search excluded offsets (a possible future refinement); the common case — the colliding prompt's render has
+scrolled off — dims correctly.
 
 ## 6. Verification status
 

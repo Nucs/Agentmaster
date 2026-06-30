@@ -36,6 +36,7 @@ int wmain()
     TestPendingInput();
     TestPromptAnchor();
     TestPromptAnchorEdgeCases();
+    TestPromptAnchorCollisions();
     TestPromptAnchorRealCorpus();
     TestSummaryUserMsgNoise();
     TestSummaryTableTrim();

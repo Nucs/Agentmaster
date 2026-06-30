@@ -157,6 +157,7 @@ void TestBringToFrontHeuristics();
 void TestSummaryTableTrim();
 void TestPromptAnchor();
 void TestPromptAnchorEdgeCases();
+void TestPromptAnchorCollisions();
 void TestPromptAnchorRealCorpus();
 void TestSummaryUserMsgNoise();
 void TestPendingInput();
