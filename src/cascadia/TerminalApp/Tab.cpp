@@ -2144,12 +2144,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
-            // "Activate Tab" (Agentmaster, eager-init) — start this tab's DORMANT session's claude IN PLACE
-            // (TermControl::InitializeWithSize), without switching the view. A WT background/restored tab
-            // spawns its child lazily, only when first SHOWN, so a window-restored tab never resumes until
-            // clicked; this wakes it where you are. Built COLLAPSED — the page shows it ONLY when this tab's
-            // session is dormant (ConnectionState == NotConnected), at flyout-open (SetAgentActivateVisible),
-            // and it is the FIRST menu item when present. Raises ActivateSessionRequested.
+            // "Activate Tab (Shift+Click)" (Agentmaster, eager-init) — start this tab's DORMANT session's
+            // claude IN PLACE (TermControl::InitializeWithSize), without switching the view. A WT background/
+            // restored tab spawns its child lazily, only when first SHOWN, so a window-restored tab never
+            // resumes until clicked; this wakes it where you are. Built COLLAPSED — the page shows it ONLY
+            // when this tab's session is dormant (ConnectionState == NotConnected), at flyout-open
+            // (SetAgentActivateVisible), and it is the FIRST menu item when present. Raises
+            // ActivateSessionRequested. The label advertises the gesture twin: Shift+Left-Click the tab does
+            // the same in place (TerminalPage::_OnTabPointerPressed), mirroring the Manager board/tree rows.
             Controls::FontIcon activateSymbol;
             activateSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
             activateSymbol.Glyph(L"\xE768"); // Play — "start it"
@@ -2160,10 +2162,10 @@ namespace winrt::TerminalApp::implementation
                     tab->ActivateSessionRequested.raise();
                 }
             });
-            _activateSessionMenuItem.Text(L"Activate Tab");
+            _activateSessionMenuItem.Text(L"Activate Tab (Shift+Click)");
             _activateSessionMenuItem.Icon(activateSymbol);
             _activateSessionMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only when this tab's session is dormant (page-driven)
-            WUX::Controls::ToolTipService::SetToolTip(_activateSessionMenuItem, box_value(winrt::hstring{ L"Start this session's claude now, in place \x2014 it hasn't initialized yet (a restored tab you never opened)" }));
+            WUX::Controls::ToolTipService::SetToolTip(_activateSessionMenuItem, box_value(winrt::hstring{ L"Start this session's claude now, in place \x2014 it hasn't initialized yet (a restored tab you never opened). You can also Shift+Click the tab to do this." }));
         }
 
         {

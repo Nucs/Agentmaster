@@ -1314,7 +1314,49 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)
     {
-        if (!e.GetCurrentPoint(nullptr).Properties().IsMiddleButtonPressed())
+        const auto pointerProps = e.GetCurrentPoint(nullptr).Properties();
+
+        // Agentmaster (eager-init): Shift+Left-Click a DORMANT managed agent-session tab = "Activate Tab"
+        // IN PLACE — start its claude WITHOUT switching to it. A background/restored tab spawns its child
+        // lazily (only when first SHOWN), so a window-restored session never resumes until clicked; this
+        // wakes it where you are. The pointer twin of the tab context menu's "Activate Tab (Shift+Click)"
+        // item and the Manager board-card / Explorer-tree Shift+Click gesture (AgentManagerContent). We must
+        // suppress the TabView's normal switch-to-tab: a MUX TabViewItem (a ListViewItem) defers selection to
+        // its OWN pointer-RELEASE (so a press-drag can reorder instead of select), and the TabView captures
+        // the pointer internally to drive it (see the middle-click note below) — so we STEAL that capture here
+        // (capture isn't ref-counted, last-wins) and the release-driven selection never fires. UWP auto-
+        // releases a mouse capture when the button comes up, so nothing is left captured. We act ONLY when
+        // _ActivateDormantSession actually wakes one (true == this tab's session WAS dormant + hosted here);
+        // an already-running tab returns false and falls through to a normal click (switch to it), so a
+        // Shift+Click is only special on the exact tabs whose menu offers "Activate Tab".
+        if (pointerProps.IsLeftButtonPressed())
+        {
+            bool shiftHeld = false;
+            if (const auto inputWindow = CoreWindow::GetForCurrentThread())
+            {
+                shiftHeld = WI_IsFlagSet(inputWindow.GetKeyState(VirtualKey::Shift), CoreVirtualKeyStates::Down) ||
+                            WI_IsFlagSet(inputWindow.GetKeyState(VirtualKey::LeftShift), CoreVirtualKeyStates::Down) ||
+                            WI_IsFlagSet(inputWindow.GetKeyState(VirtualKey::RightShift), CoreVirtualKeyStates::Down);
+            }
+            if (shiftHeld)
+            {
+                if (const auto tab = _GetTabByTabViewItem(sender))
+                {
+                    if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty() && _ActivateDormantSession(sid))
+                    {
+                        if (const auto tabViewItem = sender.try_as<MUX::Controls::TabViewItem>())
+                        {
+                            tabViewItem.CapturePointer(e.Pointer()); // steal capture so the TabView's release-driven switch never fires (auto-released on button-up)
+                        }
+                        _middleClickClosePending = false;
+                        e.Handled(true);
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (!pointerProps.IsMiddleButtonPressed())
         {
             // Agentmaster: a left/right press clears the middle-click marker so a subsequent X-button
             // close on this tab isn't mistaken for a middle click (see _OnTabCloseRequested).
