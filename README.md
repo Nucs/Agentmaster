@@ -7,7 +7,7 @@ _By developers, for developers - Never lose a session again - feel like Windows 
 
 Each session is a real `claude.exe` on a **ConPTY** connection: a full-fidelity terminal with a shared stdin (you and the orchestrator coexist), output tapped for the UI, and semantic state from **Claude Code hooks** and an **out-of-band observer** — never screen-scraping.
 
-[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the Auto Testing (per-session prompt queue)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
+[![The Agentmaster Manager tab — the Triage Board (sessions as cards in state columns: Running · Waiting-for-you · Needs-approval · Error · Idle/Done · External), the Explorer Tree (working directories → their sessions), and the per-tab summary panel, with a managed tab's right-click menu open showing the Copy submenu (Session Id · Path · Branch · Claude/Codex launch CLI · Summary · Transcript)](doc/agentmaster/img/agent-manager.png)](https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/doc/agentmaster/img/agent-manager.png)
 
 ## ✨ What it does for you
 
