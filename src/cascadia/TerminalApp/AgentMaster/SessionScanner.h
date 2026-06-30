@@ -622,7 +622,7 @@ namespace Agentmaster
         std::atomic<bool> _discoverArmed{ false };
 
         // Waiting-for-you -> Idle timeout in minutes (see SetWaitingDecayMinutes). The default
-        // mirrors AppSettings::waitingForYouTimeoutMinutes so the behavior holds even before the seed lands.
-        std::atomic<uint32_t> _waitingDecayMinutes{ 60 };
+        // mirrors AppSettings::waitingForYouTimeoutMinutes (3 days) so the behavior holds even before the seed lands.
+        std::atomic<uint32_t> _waitingDecayMinutes{ 4320 };
     };
 }

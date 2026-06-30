@@ -583,8 +583,8 @@ namespace Agentmaster
         // A STORED 0 is meaningful (= never decay) — U32At only falls back when the key is absent.
         // RENAMED from "waitingDecayMinutes" on purpose (the Waiting-for-you behavior changed): the
         // legacy key is intentionally NOT read, so a pre-existing settings.json falls back to the new
-        // 60 (1h) default instead of carrying over a value tuned for the old 5-minute cache window.
-        s.waitingForYouTimeoutMinutes = v.U32At(L"waitingForYouTimeoutMinutes", 60);
+        // 4320 (3d) default instead of carrying over a value tuned for the old 5-minute cache window.
+        s.waitingForYouTimeoutMinutes = v.U32At(L"waitingForYouTimeoutMinutes", 4320);
         s.serverCacheMinutes = v.U32At(L"serverCacheMinutes", 5);
         s.recentDirsLimit = v.U32At(L"recentDirsLimit", 10);
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)

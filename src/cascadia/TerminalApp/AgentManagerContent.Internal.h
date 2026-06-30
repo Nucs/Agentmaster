@@ -312,6 +312,131 @@ namespace
         return out;
     }
 
+    // Agentmaster (Waiting-for-you "unread" model): render minutes as a COMPACT, no-space "12h5m" form
+    // for the timeout TEXTBOX to the left of the slider (e.g. 4320 -> "3d", 725 -> "12h5m", 90 -> "1h30m",
+    // 5 -> "5m"). Distinct from FormatMinutesFriendly's spaced "1h 30m". 0 -> "" (the "Never" toggle owns 0,
+    // and the box is disabled then).
+    std::wstring FormatMinutesCompact(uint32_t m)
+    {
+        if (m == 0)
+        {
+            return L"";
+        }
+        const uint32_t d = m / 1440;
+        m %= 1440;
+        const uint32_t h = m / 60;
+        const uint32_t mi = m % 60;
+        std::wstring out;
+        if (d)
+        {
+            out += std::to_wstring(d);
+            out += L'd';
+        }
+        if (h)
+        {
+            out += std::to_wstring(h);
+            out += L'h';
+        }
+        if (mi)
+        {
+            out += std::to_wstring(mi);
+            out += L'm';
+        }
+        return out;
+    }
+
+    // Agentmaster (Waiting-for-you "unread" model): parse a compact duration string into total MINUTES —
+    // the inverse of FormatMinutesCompact, for the timeout textbox. Accepts any combination of d/h/m units
+    // (case-insensitive, whitespace tolerated): "3d", "12h5m", "2d4h30m", "1h", "45m", or a bare number =
+    // minutes ("90" -> 90). Returns false (the caller paints the box red) on: no digits at all, an unknown
+    // unit/char, a number dangling after a unit ("2h30"), or overflow past UINT32. The slider only spans
+    // 1m..7d, but this deliberately accepts far more (the box may exceed the slider, which then sits maxed);
+    // the caller clamps to a sane ceiling on save.
+    bool ParseDurationToMinutes(const std::wstring& s, uint32_t& outMinutes)
+    {
+        constexpr uint64_t kU32Max = 0xFFFFFFFFull;
+        uint64_t total = 0; // accumulate wide to detect overflow
+        uint64_t cur = 0; // the number currently being read
+        bool haveDigit = false; // digits seen in the CURRENT number (since the last unit)
+        bool anyDigit = false; // any digit anywhere (an empty / units-only string is invalid)
+        bool sawUnit = false; // any unit consumed (a trailing bare number is only valid if no unit was used)
+        const auto flush = [&](uint64_t mult) -> bool {
+            if (!haveDigit)
+            {
+                return false; // a unit with no preceding number ("h5m") is invalid
+            }
+            total += cur * mult;
+            if (total > kU32Max)
+            {
+                return false; // overflow
+            }
+            cur = 0;
+            haveDigit = false;
+            return true;
+        };
+        for (const wchar_t c : s)
+        {
+            if (c == L' ' || c == L'\t')
+            {
+                continue; // tolerate spaces between terms
+            }
+            if (c >= L'0' && c <= L'9')
+            {
+                cur = cur * 10 + static_cast<uint64_t>(c - L'0');
+                if (cur > kU32Max)
+                {
+                    return false; // a single number too big
+                }
+                haveDigit = true;
+                anyDigit = true;
+                continue;
+            }
+            uint64_t mult = 0;
+            switch (c)
+            {
+            case L'd':
+            case L'D':
+                mult = 1440;
+                break;
+            case L'h':
+            case L'H':
+                mult = 60;
+                break;
+            case L'm':
+            case L'M':
+                mult = 1;
+                break;
+            default:
+                return false; // any other character => unparsable
+            }
+            if (!flush(mult))
+            {
+                return false;
+            }
+            sawUnit = true;
+        }
+        // A trailing bare number (no unit) counts as MINUTES, but only if NO unit was used in the string
+        // (mixing "2h30" leaves a dangling, ambiguous "30" -> reject it).
+        if (haveDigit)
+        {
+            if (sawUnit)
+            {
+                return false;
+            }
+            total += cur;
+            if (total > kU32Max)
+            {
+                return false;
+            }
+        }
+        if (!anyDigit)
+        {
+            return false; // empty or units-only
+        }
+        outMinutes = static_cast<uint32_t>(total);
+        return true;
+    }
+
     // Agentmaster (context-window adornment): a compact token count for the board card — "182K",
     // "8.3K", "1.05M". Whole-K once past 10K (the common context range), one decimal below that,
     // two-decimal M past a million. PR feedback (Eli): show the raw token count, not a %, because

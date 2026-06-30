@@ -479,15 +479,16 @@ namespace Agentmaster
         // READ it (visited its tab) since the last turn — an unread, past-timeout session keeps
         // waiting until read; a manually "Mark Unread"-ed session never time-decays at all. Enforced
         // by the SessionScanner (ShouldDecayWaitingToIdle). 0 == never decay (the cog's "Never"
-        // toggle). Default 60 (1 hour). The OLD conflation of this with Claude's ~5-minute server
+        // toggle). Default 4320 (3 days). The OLD conflation of this with Claude's ~5-minute server
         // cache is split out into serverCacheMinutes (below), which now drives only the card's
-        // "still cached" ⚡ indicator. Range exposed in the cog: 1m .. 3d (1..4320), plus Never.
+        // "still cached" ⚡ indicator. The cog exposes a SLIDER of 1m .. 7d (1..10080) beside a
+        // free-text "12h5m" box that may exceed 7d (the slider then sits maxed), plus a "Never" toggle.
         // NOTE: this was renamed from the legacy "waitingDecayMinutes" key DELIBERATELY — the meaning
         // changed (a 5-minute cache window -> a read-gated unread timeout), so a pre-existing
         // settings.json (which carried a value tuned for the old behavior, often 5) must NOT carry
-        // over. The new key is absent there, so every existing install falls back to this 60 default;
+        // over. The new key is absent there, so every existing install falls back to this 4320 default;
         // the orphaned old key is ignored and dropped on the next save (Persistence rebuilds the file).
-        uint32_t waitingForYouTimeoutMinutes{ 60 };
+        uint32_t waitingForYouTimeoutMinutes{ 4320 };
         // Agentmaster: Claude's SERVER-SIDE prompt-cache lifetime, in minutes (Anthropic caches the
         // prompt prefix ~5 minutes after the last turn, so a follow-up within the window is cheap).
         // Drives ONLY the Triage-Board card's "still cached" ⚡ indicator (shown for this many minutes

@@ -746,7 +746,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
-        winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..4320 minutes (1m..3d); the "Never" toggle above owns 0
+        winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..10080 minutes (1m..7d); the "Never" toggle above owns 0, the textbox (left) is the source of truth and may exceed 7d (slider then sits maxed)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setWaitingDecayText{ nullptr }; // the same timeout as a compact "12h5m" free-text box to the LEFT of the slider; red border when unparsable; may exceed the slider's 7d max
+        winrt::Windows::UI::Xaml::Controls::Border _setWaitingDecayBorder{ nullptr }; // a normally-transparent ring AROUND _setWaitingDecayText that turns red on an unparsable value (an outer ring, so it survives the TextBox focus visual-states that would override a direct BorderBrush)
+        bool _waitingDecaySyncing{ false }; // reentrancy guard for the textbox<->slider value sync (suppresses the TextChanged/ValueChanged echo so they don't loop)
         winrt::Windows::UI::Xaml::Controls::TextBox _setServerCache{ nullptr }; // Claude's server-side prompt-cache lifetime in minutes (drives the card's ⚡ "still cached" hint); default 5
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchDir{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setRecentDirsLimit{ nullptr }; // how many recent Launch dirs the path-picker keeps

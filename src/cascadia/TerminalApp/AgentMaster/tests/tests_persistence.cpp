@@ -400,7 +400,7 @@ void TestAppSettings()
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
-        CHECK(out.waitingForYouTimeoutMinutes == 60u, "settings waitingForYouTimeoutMinutes default 60 (1h Waiting-for-you timeout) on empty");
+        CHECK(out.waitingForYouTimeoutMinutes == 4320u, "settings waitingForYouTimeoutMinutes default 4320 (3d Waiting-for-you timeout) on empty");
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
@@ -418,11 +418,11 @@ void TestAppSettings()
     // Agentmaster: the legacy "waitingDecayMinutes" key was RENAMED to "waitingForYouTimeoutMinutes"
     // because the Waiting-for-you behavior changed (a 5-minute cache window -> a read-gated unread
     // timeout). A pre-existing settings.json carries the OLD key with a value tuned for the old
-    // behavior (often 5); it must be INVALIDATED — ignored, falling back to the new 60 (1h) default,
+    // behavior (often 5); it must be INVALIDATED — ignored, falling back to the new 4320 (3d) default,
     // NOT carried over as a 5-minute unread timeout. The new key, when present, reads normally.
     {
         const auto legacy = DeserializeAppSettings(L"{\"settings\":{\"waitingDecayMinutes\":5}}");
-        CHECK(legacy.waitingForYouTimeoutMinutes == 60u, "settings legacy waitingDecayMinutes key is IGNORED -> 60 (1h) default (rename invalidates the stale value)");
+        CHECK(legacy.waitingForYouTimeoutMinutes == 4320u, "settings legacy waitingDecayMinutes key is IGNORED -> 4320 (3d) default (rename invalidates the stale value)");
         const auto fresh = DeserializeAppSettings(L"{\"settings\":{\"waitingForYouTimeoutMinutes\":120}}");
         CHECK(fresh.waitingForYouTimeoutMinutes == 120u, "settings new waitingForYouTimeoutMinutes key is read");
     }

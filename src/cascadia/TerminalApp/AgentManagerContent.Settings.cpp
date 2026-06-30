@@ -803,26 +803,116 @@ namespace winrt::TerminalApp::implementation
         _setWaitingNever.Header(winrt::box_value(L"Never decay Waiting-for-you (keep until read)"));
         AgentSetTip(_setWaitingNever, L"When on, a Waiting-for-you session never auto-demotes to Idle by time \x2014 it stays until you read (visit) its tab. When off, it decays after the timeout below (and only once you've read it).");
         _setWaitingNever.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
-            if (_setWaitingDecaySlider && _setWaitingNever)
+            if (_setWaitingNever)
             {
-                _setWaitingDecaySlider.IsEnabled(!_setWaitingNever.IsOn());
+                const bool never = _setWaitingNever.IsOn();
+                if (_setWaitingDecaySlider)
+                {
+                    _setWaitingDecaySlider.IsEnabled(!never);
+                }
+                if (_setWaitingDecayText) // the box mirrors the slider's enabled state
+                {
+                    _setWaitingDecayText.IsEnabled(!never);
+                }
             }
         });
         panel.Children().Append(_setWaitingNever);
 
-        _setWaitingDecaySlider = Slider{};
-        _setWaitingDecaySlider.Minimum(1); // 1 minute
-        _setWaitingDecaySlider.Maximum(4320); // 3 days
-        _setWaitingDecaySlider.StepFrequency(1);
-        _setWaitingDecaySlider.Header(winrt::box_value(L"Waiting-for-you \x2192 Idle after"));
-        AgentSetTip(_setWaitingDecaySlider, L"How long a Waiting-for-you session waits before it may demote to Idle \x2014 1 minute \x2026 3 days. It only demotes once you've READ it (an unread session keeps waiting past the timeout). Use the toggle above for \x201Cnever\x201D.");
-        _setWaitingDecaySlider.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
-            if (_setWaitingDecaySlider)
+        // Agentmaster: the timeout as a compact "12h5m" free-text BOX to the LEFT of a slider. The box is
+        // the source of truth (parsed on Save) and may exceed the slider's 7d max — the slider then sits
+        // maxed. The two stay in lockstep via _waitingDecaySyncing (suppresses the TextChanged/ValueChanged
+        // echo). A normally-transparent ring around the box turns red when the text can't be parsed; the
+        // box's tooltip lists the accepted syntax with examples.
+        {
+            auto waitWrap = StackPanel{};
+            auto waitHeader = Text(L"Waiting-for-you \x2192 Idle after", 13, false, 0.9);
+            waitHeader.Margin(Thickness{ 0, 0, 0, 6 });
+            waitWrap.Children().Append(waitHeader);
+
+            auto waitRow = Grid{};
             {
-                _setWaitingDecaySlider.Header(winrt::box_value(winrt::hstring{ L"Waiting-for-you \x2192 Idle after: " } + winrt::hstring{ FormatMinutesFriendly(static_cast<uint32_t>(_setWaitingDecaySlider.Value())) }));
+                ColumnDefinition cBox;
+                cBox.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto)); // the box hugs its content
+                ColumnDefinition cSlider;
+                cSlider.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star)); // the slider fills the rest
+                waitRow.ColumnDefinitions().Append(cBox);
+                waitRow.ColumnDefinitions().Append(cSlider);
             }
-        });
-        panel.Children().Append(_setWaitingDecaySlider);
+
+            // The red-on-error ring: an outer Border (transparent at rest) around the textbox, so the
+            // indicator survives the TextBox's own PointerOver/Focused visual states (which would override a
+            // BorderBrush set directly on the box while the user is typing in it).
+            _setWaitingDecayBorder = Border{};
+            _setWaitingDecayBorder.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            _setWaitingDecayBorder.CornerRadius(CornerRadius{ 4, 4, 4, 4 });
+            _setWaitingDecayBorder.BorderBrush(SolidColorBrush{ Colors::Transparent() });
+            _setWaitingDecayBorder.VerticalAlignment(VerticalAlignment::Center);
+            _setWaitingDecayBorder.Margin(Thickness{ 0, 0, 12, 0 });
+
+            _setWaitingDecayText = TextBox{};
+            _setWaitingDecayText.Width(96);
+            AgentSetTip(_setWaitingDecayText, L"How long a READ Waiting-for-you session waits before it may demote to Idle. Type a duration \x2014 combine days/hours/minutes:  d = days, h = hours, m = minutes  (a bare number = minutes).\n\nExamples:   3d   \x00B7   12h5m   \x00B7   2d4h30m   \x00B7   90m   \x00B7   45m   \x00B7   120 (= 2h)\n\nThe slider tops out at 7d, but you can type more here (it then sits maxed). The border turns red if the text can't be read. Use the \x201CNever\x201D toggle above to never decay.");
+            _setWaitingDecayText.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
+                if (_waitingDecaySyncing || !_setWaitingDecayText)
+                {
+                    return;
+                }
+                uint32_t mins = 0;
+                if (!ParseDurationToMinutes(std::wstring{ _setWaitingDecayText.Text() }, mins))
+                {
+                    if (_setWaitingDecayBorder) // unparsable -> red ring; leave the slider where it was
+                    {
+                        _setWaitingDecayBorder.BorderBrush(Fill(0xFF, 0xE5, 0x39, 0x35));
+                    }
+                    return;
+                }
+                if (_setWaitingDecayBorder) // valid -> clear the red ring
+                {
+                    _setWaitingDecayBorder.BorderBrush(SolidColorBrush{ Colors::Transparent() });
+                }
+                if (_setWaitingDecaySlider)
+                {
+                    // Mirror into the slider, clamped to its 1..7d range; a bigger value sits maxed.
+                    double sv = static_cast<double>(std::min<uint32_t>(mins, 10080));
+                    if (sv < 1)
+                    {
+                        sv = 1;
+                    }
+                    _waitingDecaySyncing = true;
+                    _setWaitingDecaySlider.Value(sv);
+                    _waitingDecaySyncing = false;
+                }
+            });
+            _setWaitingDecayBorder.Child(_setWaitingDecayText);
+            Grid::SetColumn(_setWaitingDecayBorder, 0);
+            waitRow.Children().Append(_setWaitingDecayBorder);
+
+            _setWaitingDecaySlider = Slider{};
+            _setWaitingDecaySlider.Minimum(1); // 1 minute
+            _setWaitingDecaySlider.Maximum(10080); // 7 days
+            _setWaitingDecaySlider.StepFrequency(1);
+            _setWaitingDecaySlider.VerticalAlignment(VerticalAlignment::Center);
+            AgentSetTip(_setWaitingDecaySlider, L"How long a Waiting-for-you session waits before it may demote to Idle \x2014 1 minute \x2026 7 days. It only demotes once you've READ it (an unread session keeps waiting past the timeout). The box on the left mirrors this and can go beyond 7 days. Use the toggle above for \x201Cnever\x201D.");
+            _setWaitingDecaySlider.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
+                if (_waitingDecaySyncing || !_setWaitingDecaySlider || !_setWaitingDecayText)
+                {
+                    return;
+                }
+                // Dragging the slider is always a valid value -> mirror it into the box + clear any red ring.
+                _waitingDecaySyncing = true;
+                _setWaitingDecayText.Text(winrt::hstring{ FormatMinutesCompact(static_cast<uint32_t>(_setWaitingDecaySlider.Value())) });
+                if (_setWaitingDecayBorder)
+                {
+                    _setWaitingDecayBorder.BorderBrush(SolidColorBrush{ Colors::Transparent() });
+                }
+                _waitingDecaySyncing = false;
+            });
+            Grid::SetColumn(_setWaitingDecaySlider, 1);
+            waitRow.Children().Append(_setWaitingDecaySlider);
+
+            waitWrap.Children().Append(waitRow);
+            panel.Children().Append(waitWrap);
+        }
 
         _setServerCache = TextBox{};
         _setServerCache.Header(winrt::box_value(L"Server-side cache lifetime (minutes)"));
@@ -1410,22 +1500,31 @@ namespace winrt::TerminalApp::implementation
                                            _appSettings.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter ? 1 :
                                                                                                                             0);
         }
-        if (_setWaitingDecaySlider && _setWaitingNever)
+        if (_setWaitingDecaySlider && _setWaitingNever && _setWaitingDecayText)
         {
             const bool never = (_appSettings.waitingForYouTimeoutMinutes == 0);
             _setWaitingNever.IsOn(never);
             uint32_t m = _appSettings.waitingForYouTimeoutMinutes;
             if (m < 1)
             {
-                m = 60; // a sane slider position when "never" is on (toggling off then lands on 1h)
+                m = 4320; // a sane value when "never" is on (toggling off then lands on 3d)
             }
-            if (m > 4320)
+            // The textbox carries the TRUE value (may exceed the slider's 7d max); the slider is clamped.
+            uint32_t sliderM = m > 10080 ? 10080 : m;
+            if (sliderM < 1)
             {
-                m = 4320;
+                sliderM = 1;
             }
-            _setWaitingDecaySlider.Value(static_cast<double>(m));
+            _waitingDecaySyncing = true; // seed both without echoing through ValueChanged/TextChanged
+            _setWaitingDecaySlider.Value(static_cast<double>(sliderM));
+            _setWaitingDecayText.Text(winrt::hstring{ FormatMinutesCompact(m) });
+            if (_setWaitingDecayBorder)
+            {
+                _setWaitingDecayBorder.BorderBrush(SolidColorBrush{ Colors::Transparent() });
+            }
+            _waitingDecaySyncing = false;
             _setWaitingDecaySlider.IsEnabled(!never);
-            _setWaitingDecaySlider.Header(winrt::box_value(winrt::hstring{ L"Waiting-for-you \x2192 Idle after: " } + winrt::hstring{ FormatMinutesFriendly(m) }));
+            _setWaitingDecayText.IsEnabled(!never);
         }
         if (_setServerCache)
         {
@@ -1697,25 +1796,32 @@ namespace winrt::TerminalApp::implementation
                                                idx == 0 ? TabRenameCommitMode::ClickAwayOnly :
                                                           TabRenameCommitMode::ClickAwayOrShiftEnter;
         }
-        if (_setWaitingDecaySlider && _setWaitingNever)
+        if (_setWaitingDecayText && _setWaitingNever)
         {
-            // "Never" => 0 (never time-decay; stay Waiting until read). Else the slider's 1..4320 minutes.
+            // "Never" => 0 (never time-decay; stay Waiting until read). Else the TEXTBOX's parsed minutes —
+            // the source of truth, which may exceed the slider's 7d max. An unparsable/blank box keeps the
+            // prior value rather than corrupting it. Clamp to a generous 365d ceiling, well past the slider.
             if (_setWaitingNever.IsOn())
             {
                 _appSettings.waitingForYouTimeoutMinutes = 0;
             }
             else
             {
-                uint32_t v = static_cast<uint32_t>(_setWaitingDecaySlider.Value());
-                if (v < 1)
+                uint32_t v = 0;
+                if (ParseDurationToMinutes(std::wstring{ _setWaitingDecayText.Text() }, v))
                 {
-                    v = 1;
+                    if (v < 1)
+                    {
+                        v = 1;
+                    }
+                    constexpr uint32_t kMaxWaitingMinutes = 525600; // 365 days
+                    if (v > kMaxWaitingMinutes)
+                    {
+                        v = kMaxWaitingMinutes;
+                    }
+                    _appSettings.waitingForYouTimeoutMinutes = v;
                 }
-                if (v > 4320)
-                {
-                    v = 4320;
-                }
-                _appSettings.waitingForYouTimeoutMinutes = v;
+                // else: unparsable/blank box -> leave _appSettings.waitingForYouTimeoutMinutes untouched.
             }
         }
         if (_setServerCache)
