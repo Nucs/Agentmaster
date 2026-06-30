@@ -365,6 +365,32 @@ resolves). Pattern: any app/overlay-layer buffer reader MUST guard on `_initiali
   Codex rollouts get no jump buttons in v1 (the resolver itself is agent-agnostic — only the prompt-source
   wiring differs).
 
+## 5b. Prefix collisions — the second pass
+
+A prompt's needle is its first line (a **prefix** of the prompt text). So when prompt **A**'s text is a
+strict prefix of prompt **B**'s — e.g. `deploy dev please` vs `deploy dev please, fast mode if possible` —
+A's needle *also* matches the **start of B's rendered line**. If A's own render has scrolled off the recent
+window, the order-preserving greedy binds A to B's render: **A and B resolve to the same buffer offset**, and
+A's jump (or the eligibility icon, or alt-nav) wrongly lands on B. The reported symptom: a summary list where
+*“deploy dev please”* and *“deploy dev please, fast mode if possible”* **both jump to the latter**.
+
+`ResolvePromptAnchors` runs a small **second pass** to resolve this. The render at a given offset belongs to
+the prompt whose text it shows in full; A only matched a prefix of it. So: **at each offset claimed by more
+than one prompt, the match with the LONGEST span wins (it explains the most of the rendered line); a
+strictly-shorter match at that offset is unresolved** — its real render isn't on screen, so dimming its jump
+is correct (and far better than mis-jumping onto B). **Equal-length** matches at one offset are left untouched:
+those are **exact-duplicate** prompt texts, the legitimate case the order-preserving greedy already spreads
+across distinct occurrences (when only one render survives, they share it — unchanged from before). The pass
+is `O(n²)` over the prompt count (tiny) and **order-independent** (the longest at each offset is never
+unresolved). It runs for the legacy and marker paths alike, and composes with the marker preference (§5) —
+markers steer *which* offset each prompt picks; this pass de-conflicts same-offset ties by length.
+
+When BOTH renders are on screen there is no collision (the greedy binds each to its own, distinct render), so
+the pass is a no-op — verified over the real corpus (no spurious unresolves). A residual limitation: a prompt
+whose own render is on screen but appears *out of buffer order* relative to its prefix-sibling can still be
+unresolved rather than re-homed onto its true render (a re-search of the excluded offsets is a possible future
+refinement); the common case — the shorter prompt's render has scrolled off — dims correctly.
+
 ## 6. Verification status
 
 - ✅ **Resolver**: 1005-check engine harness passes (`TestPromptAnchor` covers normalize, needle, in-order,

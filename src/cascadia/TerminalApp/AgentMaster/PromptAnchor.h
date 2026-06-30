@@ -599,6 +599,37 @@ namespace Agentmaster
             }
             results[mi] = m;
         }
+
+        // SECOND PASS — PREFIX-COLLISION resolution (SUMMARY_JUMP.md §5b). When prompt A's text is a strict
+        // PREFIX of prompt B's (e.g. "deploy dev please" vs "deploy dev please, fast mode if possible"), A's
+        // needle also matches the START of B's rendered line. If A's OWN render has scrolled off, the greedy
+        // binds A to B's render — so A and B both resolve to the SAME buffer offset and A's jump wrongly lands
+        // on B (the "(4) and (5) both jump to (5)" report). The render at that offset is B's (it shows B's
+        // full text); A only matched its prefix. Fix: at each offset claimed by more than one prompt, the one
+        // with the LONGEST matched span (it explains the most of the rendered line) OWNS it; a strictly-shorter
+        // match there is unresolved (its real render isn't on screen — better to dim than to mis-jump). EQUAL
+        // lengths are left untouched — those are exact-duplicate texts, the legitimate case the order-preserving
+        // greedy already spreads across distinct occurrences (here they share one surviving render). O(n^2) over
+        // the prompt count (small); order-independent because the longest at each offset is never unresolved.
+        for (size_t i = 0; i < results.size(); ++i)
+        {
+            if (!results[i].found)
+            {
+                continue;
+            }
+            for (size_t j = 0; j < results.size(); ++j)
+            {
+                if (j == i || !results[j].found)
+                {
+                    continue;
+                }
+                if (results[j].offset == results[i].offset && results[j].length > results[i].length)
+                {
+                    results[i] = {}; // a strictly-shorter prefix stole a longer prompt's render -> unresolve it
+                    break;
+                }
+            }
+        }
         return results;
     }
 

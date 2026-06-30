@@ -310,6 +310,40 @@ void TestPromptAnchor()
             auto r = ResolvePromptAnchors(hay, { L"run the migration" }, mopts);
             CHECK(r[0].found && r[0].offset == proximate, "marker: binds the occurrence right after the marker, not a distant in-line one");
         }
+
+        // (6) PREFIX COLLISION (SUMMARY_JUMP.md §5b — the "(4) and (5) both jump to (5)" report): prompt A's
+        //     text is a strict PREFIX of prompt B's. A's needle also matches the START of B's render, so when
+        //     A's OWN render has scrolled off the greedy binds A to B's render -> both resolve to B and A's
+        //     jump wrongly lands on B. The second pass gives the offset to the LONGEST match (B) and unresolves
+        //     the shorter prefix (A).
+        {
+            // Only B's render is on screen (A's scrolled off): A and B's prefixes start at the SAME offset.
+            const std::wstring hay = L"... lots of old output ...\n" + caret + L" deploy dev please, fast mode if possible\nreply\n";
+            auto r = ResolvePromptAnchors(hay, { L"deploy dev please", L"deploy dev please, fast mode if possible" }, mopts);
+            CHECK(r[1].found, "prefix-collision: the longer prompt (B) keeps its render");
+            CHECK(!r[0].found, "prefix-collision: the shorter prefix (A), render off-screen, does NOT steal B's render");
+        }
+        {
+            // Both renders ON screen: the order-preserving greedy already binds each to its OWN render
+            // (distinct offsets), so the second pass must NOT unresolve the shorter one.
+            const std::wstring hay = caret + L" deploy dev please\nout\n" + caret + L" deploy dev please, fast mode if possible\nout\n";
+            auto r = ResolvePromptAnchors(hay, { L"deploy dev please", L"deploy dev please, fast mode if possible" }, mopts);
+            CHECK(r[0].found && r[1].found && r[0].offset != r[1].offset, "prefix-collision: both on screen -> each binds its OWN render (no false unresolve)");
+        }
+        {
+            // EXACT duplicates (equal length) are NOT unresolved by the second pass: two identical sends with
+            // two on-screen renders map to the two renders, in order (the "handle exact same properly" case).
+            const std::wstring hay = caret + L" deploy dev\nout1\n" + caret + L" deploy dev\nout2\n";
+            auto r = ResolvePromptAnchors(hay, { L"deploy dev", L"deploy dev" }, mopts);
+            CHECK(r[0].found && r[1].found && r[0].offset < r[1].offset, "prefix-collision: exact duplicates keep their two distinct renders");
+        }
+        {
+            // Three-way prefix chain at one offset (only the longest render on screen): A < B < C all start at
+            // C's render offset; only C (the longest) survives, A and B unresolve.
+            const std::wstring hay = L"old...\n" + caret + L" alpha beta gamma delta epsilon\ndone\n";
+            auto r = ResolvePromptAnchors(hay, { L"alpha beta", L"alpha beta gamma", L"alpha beta gamma delta epsilon" }, mopts);
+            CHECK(r[2].found && !r[0].found && !r[1].found, "prefix-collision: 3-way chain -> only the longest (C) keeps the render");
+        }
     }
 }
 
