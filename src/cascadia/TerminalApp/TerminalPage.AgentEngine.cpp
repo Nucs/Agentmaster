@@ -567,7 +567,7 @@ namespace winrt::TerminalApp::implementation
 
         // Cross-window activate sink (Linked Lenses): the Manager board/tree show the WHOLE fleet,
         // but a session's tab lives in exactly one window — when ANOTHER window's Activate
-        // (board/tree double-click, tree Enter, the Flight Plan's eye) targets a session hosted
+        // (board/tree double-click, tree Enter, the Auto Testing's eye) targets a session hosted
         // HERE, this sink hops to this window's UI thread, re-checks _claudeTabs there (the host
         // can change while the hop is in flight), and on a hit selects the tab + brings this
         // window to the foreground. A miss is a no-op — the engine fans out to every window, and
@@ -1149,7 +1149,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (Linked Lenses — the per-tab -> Manager half of the selection sync): when the user
     // switches to a managed session's terminal tab, drive the Manager lens to select that session, so
     // moving to the Manager tab shows the session you were just in highlighted (board card + tree row +
-    // its Flight Plan). Equivalent to a single-click on the session's board card. Called from the one
+    // its Auto Testing). Equivalent to a single-click on the session's board card. Called from the one
     // post-startup tab-switch funnel (_OnTabSelectionChanged), so a user click, Ctrl+Tab, or a
     // switchToTab action all follow through here.
     void TerminalPage::_SyncManagerSelectionToTab(const TerminalApp::Tab& tab)

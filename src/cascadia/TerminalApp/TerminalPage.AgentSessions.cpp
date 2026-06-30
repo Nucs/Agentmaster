@@ -187,10 +187,10 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: launch a claude.exe on a ConPTY in `workingDir`, wired for hooks, as a
     // normal terminal tab, and register it so its hook-driven state is tracked. Both the
-    // user (keystrokes) and the orchestrator (Autopilot) write the same stdin.
+    // user (keystrokes) and the orchestrator (Autorunner) write the same stdin.
     //
     // If `restored` is set, this RESUMES that conversation (claude --resume <id>) and
-    // restores its Flight Plan + autopilot from persistence (DESIGN §13) — so closing and
+    // restores its Auto Testing + autorunner from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
     TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition)
@@ -251,7 +251,7 @@ namespace winrt::TerminalApp::implementation
         // Resume ONLY if Claude actually has a saved conversation for the (tail) id. A session that was
         // opened but never received a prompt — or whose transcript vanished — has none, so `claude
         // --resume <id>` would fail with "No conversation found" and the tab would die (exit code 1); it
-        // is re-launched FRESH instead (a new id, keeping the working dir + Flight Plan). (Correctness
+        // is re-launched FRESH instead (a new id, keeping the working dir + Auto Testing). (Correctness
         // Rule #6: restore == resume, never replay.)
         const bool wantResume = !resumeTargetId.empty() && ::Agentmaster::ClaudeConversationExists(resumeTargetId);
         const std::wstring resumeId = wantResume ? resumeTargetId : std::wstring{};
@@ -342,7 +342,7 @@ namespace winrt::TerminalApp::implementation
             _claudeTabs[spec.sessionId] = winrt::make_weak(tab);
         }
 
-        // Register the session (restoring its queue + autopilot if resuming) and bind its
+        // Register the session (restoring its queue + autorunner if resuming) and bind its
         // stdin injector. Correctness Rule #3: the injector is bound to THIS session's id.
         ::Agentmaster::SessionInfo info = restored ? *restored : ::Agentmaster::SessionInfo{};
         info.id = spec.sessionId;
@@ -376,24 +376,24 @@ namespace winrt::TerminalApp::implementation
         }
         if (!restored)
         {
-            // A NEW session inherits ALL the global Autopilot defaults from the cog.
-            info.autopilot.mode = _appSettings.defaultAutopilotMode;
-            info.autopilot.maxAutoSends = _appSettings.maxAutoSends;
-            info.autopilot.stopOnError = _appSettings.stopOnError;
-            info.autopilot.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+            // A NEW session inherits ALL the global Autorunner defaults from the cog.
+            info.autorunner.mode = _appSettings.defaultAutorunnerMode;
+            info.autorunner.maxAutoSends = _appSettings.maxAutoSends;
+            info.autorunner.stopOnError = _appSettings.stopOnError;
+            info.autorunner.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
         }
         else
         {
             // Agentmaster: an OPENED (restored / window-restored) session ALSO adopts the cog's
-            // default Autopilot MODE — the product rule is "all new OR opened sessions run on the
+            // default Autorunner MODE — the product rule is "all new OR opened sessions run on the
             // default (Full)" — even though it keeps its persisted queue + backstops. This
             // intentionally OVERRIDES the session's saved per-session mode (a deliberate carve-out
             // from the old "a restored session keeps its mode"); it stays changeable afterward via
-            // the Flight Plan toggle. Re-arming zeroes the per-run send counter so a reopened plan
+            // the Auto Testing toggle. Re-arming zeroes the per-run send counter so a reopened plan
             // isn't instantly capped by a lingering in-memory autoSendsThisRun (pendingConfirmPromptId
             // was already cleared above). Codex restores keep their own Off (see _LaunchCodexSession).
-            info.autopilot.mode = _appSettings.defaultAutopilotMode;
-            info.autopilot.autoSendsThisRun = 0;
+            info.autorunner.mode = _appSettings.defaultAutorunnerMode;
+            info.autorunner.autoSendsThisRun = 0;
         }
         _sessionRegistry->Upsert(info);
 
@@ -493,7 +493,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     // Archived: present + restorable, but no live tab/claude. Reset the transient
                     // runtime fields (a fresh process has no live state) and keep the persisted queue +
-                    // autopilot intact (Rule #6: restore == resume, never replay; Sent stays Sent).
+                    // autorunner intact (Rule #6: restore == resume, never replay; Sent stays Sent).
                     s.live = false;
                     s.external = false;
                     s.state = ::Agentmaster::SessionState::Idle;
@@ -517,7 +517,7 @@ namespace winrt::TerminalApp::implementation
     {
         const std::wstring id{ sessionId };
         // Nav audit: the user asked to jump to this session's live tab (board/tree double-click, tree
-        // Enter, a "Jump to tab" menu, the Flight-Plan eye, or the Sessions page). `local` = the tab
+        // Enter, a "Jump to tab" menu, the Auto-Testing eye, or the Sessions page). `local` = the tab
         // is in THIS window; `fan-out` = it lives in another window, handed off via the engine sink.
         if (_FocusClaudeSessionTab(id, /*bringWindowToFront*/ false))
         {
@@ -614,7 +614,7 @@ namespace winrt::TerminalApp::implementation
         return true;
     }
 
-    // Agentmaster: close a session (the Manager's "Close" / tree Del / Flight-Plan "Close"). It
+    // Agentmaster: close a session (the Manager's "Close" / tree Del / Auto-Testing "Close"). It
     // routes through the SAME tab-close seam as clicking the tab's X, so the one Close confirm +
     // archive (keep-the-record) bookkeeping (in _HandleCloseTabRequested -> _ArchiveAndCloseClaudeTab)
     // applies uniformly. The session record is KEPT (live=false) so it persists and lists in the
@@ -907,7 +907,7 @@ namespace winrt::TerminalApp::implementation
 
     // Agentmaster: re-launch (resume) a closed session from the Sessions browser. The record is
     // still in the registry (live=false); _LaunchClaudeSession resumes it (claude --resume <id>,
-    // transcript-gated) with its Flight Plan + autopilot, and flips it back to live (Open). A
+    // transcript-gated) with its Auto Testing + autorunner, and flips it back to live (Open). A
     // missing transcript yields a fresh id; _LaunchClaudeSession then drops the stale record so it
     // doesn't linger. (Name kept for churn; "archived" here just means the !live state.)
     TerminalApp::Tab TerminalPage::_RestoreArchivedSession(winrt::hstring sessionId)
@@ -947,8 +947,8 @@ namespace winrt::TerminalApp::implementation
     //     SessionInfo.codexSessionId and FILLED by the Fleet Observer once the rollout resolves.
     //   * No hooks / no --settings: bare `codex` (config.toml governs); state comes from the C2
     //     rollout-tail (mapped onto SessionState by _ReconcileManagedCodex each probe).
-    //   * Lifecycle + state only — NO stdin injector / Autopilot (driving the Codex TUI is a later
-    //     phase). The user types directly into the tab's ConPTY; Autopilot is forced Off.
+    //   * Lifecycle + state only — NO stdin injector / Autorunner (driving the Codex TUI is a later
+    //     phase). The user types directly into the tab's ConPTY; Autorunner is forced Off.
     // `restored` set => RESUME that conversation (reusing its handle) with its rollout uuid, gated on
     // the rollout still existing; else a fresh codex (a new rollout the observer will resolve).
     void TerminalPage::_SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
@@ -1063,7 +1063,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Register the managed Codex record (kind=Codex) — a live card at t=0, like Claude. No injector
-        // (lifecycle + state only); Autopilot forced Off (nothing to drive). codexSessionId carries the
+        // (lifecycle + state only); Autorunner forced Off (nothing to drive). codexSessionId carries the
         // resume target (kept across restore; filled later by the observer for a fresh launch).
         ::Agentmaster::SessionInfo info = restored ? *restored : ::Agentmaster::SessionInfo{};
         info.id = handleId;
@@ -1074,7 +1074,7 @@ namespace winrt::TerminalApp::implementation
         info.state = ::Agentmaster::SessionState::Idle; // the C2 rollout-tail reconcile establishes the real state
         info.external = false; // we own this tab's ConPTY
         info.live = true;
-        info.autopilot.mode = ::Agentmaster::AutopilotMode::Off; // no driving in this phase
+        info.autorunner.mode = ::Agentmaster::AutorunnerMode::Off; // no driving in this phase
         info.pendingConfirmPromptId.clear();
         _sessionRegistry->Upsert(info);
 
@@ -1205,12 +1205,12 @@ namespace winrt::TerminalApp::implementation
             ::Agentmaster::SessionInfo info{};
             info.id = id; // _LaunchClaudeSession transcript-gates the --resume on this id
             info.workingDir = dir;
-            // Adopted sessions are new to us (no persisted plan), so seed the cog's Autopilot defaults
+            // Adopted sessions are new to us (no persisted plan), so seed the cog's Autorunner defaults
             // as a fresh launch would — but resume the external's existing conversation.
-            info.autopilot.mode = _appSettings.defaultAutopilotMode;
-            info.autopilot.maxAutoSends = _appSettings.maxAutoSends;
-            info.autopilot.stopOnError = _appSettings.stopOnError;
-            info.autopilot.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
+            info.autorunner.mode = _appSettings.defaultAutorunnerMode;
+            info.autorunner.maxAutoSends = _appSettings.maxAutoSends;
+            info.autorunner.stopOnError = _appSettings.stopOnError;
+            info.autorunner.pauseOnHumanInput = _appSettings.pauseOnHumanInput;
             restored = std::move(info);
         }
         ::Agentmaster::AppendStateLog(L"hooks.log",
@@ -1447,7 +1447,7 @@ namespace winrt::TerminalApp::implementation
         newConn.Start();
 
         // Re-point this session's stdin injector at the freshly-started connection (Claude only — Codex
-        // has no injector in this phase). Correctness Rule #3 binds by sessionId; without this, Autopilot
+        // has no injector in this phase). Correctness Rule #3 binds by sessionId; without this, Autorunner
         // / Send-now would keep writing to the replaced, dead connection. The observer won't fix it on its
         // own: it sees the tab still bound to <id> (alreadyBound) and skips re-binding. The new connection
         // has a NEW WT_SESSION; the next hook / observer tick refreshes the session's tabToken.
@@ -1465,7 +1465,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: fork a MANAGED session by id — the kind-aware fork shared by the WT tab's "Fork
     // session" (_DuplicateTab) AND the Triage Board / Explorer-tree "Fork session" menu, so the two can
     // never drift. Branches the conversation into a NEW, independent session (the source's transcript is
-    // untouched), registered as a normal managed session ("<title> (fork)", fresh Flight Plan), opened in
+    // untouched), registered as a normal managed session ("<title> (fork)", fresh Auto Testing), opened in
     // THIS window (it reads the shared registry — no live tab needed, so the board can fork a session
     // hosted in another window into here). A source never prompted has no transcript/rollout to fork ->
     // fresh in the same dir (Rule #6). insertPosition threads tab placement (-1 == end). Returns false
@@ -1685,7 +1685,7 @@ namespace winrt::TerminalApp::implementation
     // card's menu — same editor). A session's title is ONE value — the Explorer-tree name, the
     // persisted SessionInfo.title, and the WT tab title.
     // Write it to the shared registry (which persists it via the autosave-on-change observer and
-    // refreshes every window's Triage Board / Explorer Tree / Flight Plan) and, when THIS window
+    // refreshes every window's Triage Board / Explorer Tree / Auto Testing) and, when THIS window
     // hosts the session's tab, retitle the tab strip to match. A session hosted in ANOTHER window
     // is retitled there by that window's registry observer (_SyncClaudeTabTitleFromRegistry rides
     // the tab-dot push), so the rename lands on the right tab no matter which window ran it. The

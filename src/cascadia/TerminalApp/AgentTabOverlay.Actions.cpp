@@ -8,7 +8,7 @@
 // share AgentTabOverlay.Internal.h.
 //
 // Partial files in this group (★ marks THIS file):
-//   AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autopilot
+//   AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autorunner
 //   AgentTabOverlay.Internal.h   - shared file-local helpers: StateColor/Glyph/Label, the summary-box renderers, time formatting, launch-CLI + clipboard (anonymous namespace, a per-TU copy)
 // ★ AgentTabOverlay.Actions.cpp  - the hover action row: the folder (Open Path) button, the copy menu, and the shared CopySessionField action
 //   AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/previous, JUMP, copy-summary
@@ -226,7 +226,7 @@ namespace winrt::TerminalApp::implementation
 
         _actions = StackPanel{};
         _actions.Orientation(Orientation::Horizontal);
-        _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the row-1 status/autopilot parts
+        _actions.VerticalAlignment(VerticalAlignment::Center); // line up with the row-1 status/autorunner parts
         _actions.Spacing(2);
         _actions.Margin(ThicknessHelper::FromLengths(4, 0, 0, 0)); // a small gap after the status block to its left
         if (upBtn)
@@ -241,7 +241,7 @@ namespace winrt::TerminalApp::implementation
         _actions.Children().Append(copyBtn);
         _actions.Children().Append(pencilBtn);
         // ALWAYS shown (no longer hover-only). The buttons live in ROW 1 now, immediately to the RIGHT of
-        // the status block (so the strip reads status -> actions -> autopilot · queue · link). The actual
+        // the status block (so the strip reads status -> actions -> autorunner · queue · link). The actual
         // append is done by _Refresh (it clears + rebuilds row 1 each pass), right after the status part.
     }
 

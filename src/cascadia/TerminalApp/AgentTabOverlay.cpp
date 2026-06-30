@@ -8,13 +8,13 @@
 // share AgentTabOverlay.Internal.h.
 //
 // Partial files in this group (★ marks THIS file):
-// ★ AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autopilot
+// ★ AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autorunner
 //   AgentTabOverlay.Internal.h   - shared file-local helpers: StateColor/Glyph/Label, the summary-box renderers, time formatting, launch-CLI + clipboard (anonymous namespace, a per-TU copy)
 //   AgentTabOverlay.Actions.cpp  - the hover action row: the folder (Open Path) button, the copy menu, and the shared CopySessionField action
 //   AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/previous, JUMP, copy-summary
 // ======================================================================================
 //
-// Agentmaster per-tab link badge / overlay (TAB_OVERLAY.md). CORE: ctor/dtor, Initialize/_Detach, ShowActivity (observe badge), _Refresh (the linked badge), hover/expand, opacities, Autopilot cycle. The action row + the summary panel live in sibling AgentTabOverlay.{Actions,Summary}.cpp TUs.
+// Agentmaster per-tab link badge / overlay (TAB_OVERLAY.md). CORE: ctor/dtor, Initialize/_Detach, ShowActivity (observe badge), _Refresh (the linked badge), hover/expand, opacities, Autorunner cycle. The action row + the summary panel live in sibling AgentTabOverlay.{Actions,Summary}.cpp TUs.
 #include "pch.h"
 #include "AgentTabOverlay.h"
 
@@ -25,6 +25,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
 #include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
+#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the Tests Autorunner badge is dev-only
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
@@ -70,8 +71,8 @@ namespace winrt::TerminalApp::implementation
     {
         _dispatcher = DispatcherQueue::GetForCurrentThread();
 
-        // Row 1: a horizontal strip of DISCRETE parts (status · model·effort · Autopilot[button] · queue
-        // · link) so every part can carry its OWN tooltip and the Autopilot part can be a clickable button.
+        // Row 1: a horizontal strip of DISCRETE parts (status · model·effort · Autorunner[button] · queue
+        // · link) so every part can carry its OWN tooltip and the Autorunner part can be a clickable button.
         // _Refresh / ShowActivity fill _row1.Children(); right-aligned so the badge hugs the right edge.
         _row1 = StackPanel{};
         _row1.Orientation(Orientation::Horizontal);
@@ -190,7 +191,7 @@ namespace winrt::TerminalApp::implementation
         _BuildActionsRow(); // row-2 actions: folder + copy menu + pencil (linked sessions only), left of the dir/branch label
         _BuildSummaryPanel(); // the 2nd slot (summary panel), collapsed until the pencil toggles it on
         // No single line-wide tooltip here: _Refresh builds row 1 as DISCRETE parts, each with its OWN
-        // concise tooltip (status / model·effort / Autopilot / queue / link); the row-2 label + action
+        // concise tooltip (status / model·effort / Autorunner / queue / link); the row-2 label + action
         // buttons carry theirs too.
         _Refresh();
     }
@@ -280,7 +281,7 @@ namespace winrt::TerminalApp::implementation
         // only the abnormal states are worth calling out.
         const std::wstring link = s.external ? std::wstring{ L"observe" } : std::wstring{ L"unlinked" };
 
-        // Row 1 is built as DISCRETE, individually-tooltipped parts: status · Autopilot[button] · queue
+        // Row 1 is built as DISCRETE, individually-tooltipped parts: status · Autorunner[button] · queue
         // · link. A small helper appends a text part (optional tooltip); separators reproduce the
         // one-line look ("  ·  ") as their own tooltip-less elements so the strip reads as one line.
         _row1.Children().Clear();
@@ -325,20 +326,25 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Action buttons (folder / copy menu / pencil) sit immediately AFTER the status block, so the strip
-        // reads status (leftmost) -> actions -> autopilot · queue · link. Built once by _BuildActionsRow
+        // reads status (leftmost) -> actions -> autorunner · queue · link. Built once by _BuildActionsRow
         // (a LINKED session only); re-appended here every pass because _row1 is cleared+rebuilt above.
         if (_actions)
         {
             _row1.Children().Append(_actions);
         }
 
-        // Autopilot mode — a CLICKABLE button that cycles Off -> Semi -> Full -> Off (task 2). Colored
-        // by mode (gray Off / amber Semi / green Full) to match the Triage Board's Autopilot language.
+        // Autorunner mode — DEV ONLY: Auto Testing / Tests Autorunner is gated to the AgentmasterDev
+        // package (the autorunner never runs in a release build — see Engine.cpp), so a release tab's
+        // badge carries no autorunner control. A CLICKABLE button that cycles Off -> Semi -> Full -> Off,
+        // colored by mode (gray Off / amber Semi / green Full) to match the Triage Board's language.
+        static const bool kDevAutoTesting = ::Agentmaster::Profiles::IsDevPackage();
+        if (kDevAutoTesting)
+        {
         appendSep();
         {
-            const auto mode = s.autopilot.mode;
-            const auto modeBrush = (mode == AutopilotMode::Full)     ? Fill(0xFF, 0x3C, 0xB3, 0x71) :  // MediumSeaGreen
-                                   (mode == AutopilotMode::SemiAuto) ? Fill(0xFF, 0xDA, 0xA5, 0x20) :  // Goldenrod
+            const auto mode = s.autorunner.mode;
+            const auto modeBrush = (mode == AutorunnerMode::Full)     ? Fill(0xFF, 0x3C, 0xB3, 0x71) :  // MediumSeaGreen
+                                   (mode == AutorunnerMode::SemiAuto) ? Fill(0xFF, 0xDA, 0xA5, 0x20) :  // Goldenrod
                                                                        Fill(0xFF, 0xB0, 0xB0, 0xB0);   // gray (Off)
             Button b{};
             b.Background(Fill(0x00, 0, 0, 0)); // transparent — still hit-testable; the template gives a hover highlight ("appears clickable")
@@ -356,14 +362,14 @@ namespace winrt::TerminalApp::implementation
             t.Text(winrt::hstring{ ModeLabel(mode) });
             b.Content(t);
             AgentSetTip(b, winrt::hstring{
-                L"Autopilot \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
+                L"Tests Autorunner \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
                 L"Off: you drive. Semi: it proposes the next queued prompt, you confirm.\n"
                 L"Full: it auto-sends the queue on each turn-complete." });
             const auto weak = get_weak();
             b.Click([weak](const IInspectable&, const RoutedEventArgs&) {
                 if (auto self = weak.get())
                 {
-                    self->_CycleAutopilot();
+                    self->_CycleAutorunner();
                 }
             });
             // "appear clickable on hover": a hand cursor over the button (the Button template adds the
@@ -373,9 +379,10 @@ namespace winrt::TerminalApp::implementation
             b.PointerExited([](const IInspectable&, const PointerRoutedEventArgs&) { ApplyCursor(CoreCursorType::Arrow); });
             _row1.Children().Append(b);
         }
+        } // if (kDevAutoTesting) — the Tests Autorunner button is dev-only
 
-        // queued (Pending) count — ⏳N.
-        if (pending > 0)
+        // queued (Pending) count — ⏳N. Dev-only too (a release build never queues, so pending is always 0).
+        if (kDevAutoTesting && pending > 0)
         {
             appendSep();
             appendText(std::wstring{ kHourglass } + std::to_wstring(pending),
@@ -555,13 +562,13 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // The row-1 Autopilot button: cycle THIS session's mode Off -> Semi-auto -> Full -> Off, mirroring
-    // AgentManagerContent::_CycleAutopilot / _OnAutopilotChanged. The overlay already holds the SHARED
+    // The row-1 Autorunner button: cycle THIS session's mode Off -> Semi-auto -> Full -> Off, mirroring
+    // AgentManagerContent::_CycleAutorunner / _OnAutorunnerChanged. The overlay already holds the SHARED
     // registry, so we mutate it directly: SessionRegistry::Update fires observers, which (a) marshals our
     // own _Refresh to repaint the button and (b) wakes the scheduler's OnObserved — cycling to Semi/Full
     // while the session sits Idle/WaitingForInput naturally kicks a queued plan (Correctness Rule #1). No
     // new send path is invented (Rule #2); we only set the mode + reset the per-run backstops on arming.
-    void AgentTabOverlay::_CycleAutopilot()
+    void AgentTabOverlay::_CycleAutorunner()
     {
         if (!_registry || _sessionId.empty())
         {
@@ -572,16 +579,16 @@ namespace winrt::TerminalApp::implementation
         {
             return; // nothing live to drive (same guard as the Manager's header toggle)
         }
-        const auto cur = info->autopilot.mode;
-        const AutopilotMode next = (cur == AutopilotMode::Off)      ? AutopilotMode::SemiAuto :
-                                   (cur == AutopilotMode::SemiAuto) ? AutopilotMode::Full :
-                                                                      AutopilotMode::Off;
+        const auto cur = info->autorunner.mode;
+        const AutorunnerMode next = (cur == AutorunnerMode::Off)      ? AutorunnerMode::SemiAuto :
+                                   (cur == AutorunnerMode::SemiAuto) ? AutorunnerMode::Full :
+                                                                      AutorunnerMode::Off;
         _registry->Update(_sessionId, [&](SessionInfo& s) {
-            s.autopilot.mode = next;
-            if (next != AutopilotMode::Off)
+            s.autorunner.mode = next;
+            if (next != AutorunnerMode::Off)
             {
-                // Arming resets the per-run backstop counter + clears any stale confirm (== _OnAutopilotChanged).
-                s.autopilot.autoSendsThisRun = 0;
+                // Arming resets the per-run backstop counter + clears any stale confirm (== _OnAutorunnerChanged).
+                s.autorunner.autoSendsThisRun = 0;
                 s.pendingConfirmPromptId.clear();
             }
         });

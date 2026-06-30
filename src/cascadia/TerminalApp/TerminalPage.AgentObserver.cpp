@@ -42,6 +42,7 @@
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
+#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the tab tooltip's Tests Autorunner line is dev-only
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
 
@@ -151,16 +152,16 @@ namespace
         }
     }
 
-    const wchar_t* TtModeLabel(::Agentmaster::AutopilotMode m)
+    const wchar_t* TtModeLabel(::Agentmaster::AutorunnerMode m)
     {
-        using ::Agentmaster::AutopilotMode;
+        using ::Agentmaster::AutorunnerMode;
         switch (m)
         {
-        case AutopilotMode::SemiAuto:
+        case AutorunnerMode::SemiAuto:
             return L"Semi";
-        case AutopilotMode::Full:
+        case AutorunnerMode::Full:
             return L"Full";
-        case AutopilotMode::Off:
+        case AutorunnerMode::Off:
         default:
             return L"Off";
         }
@@ -478,7 +479,7 @@ namespace winrt::TerminalApp::implementation
     //   body    claude|codex · <model> · <effort> · <⚡ bypass>
     //           <full working dir> · <branch>
     //           ⏳ N queued · ⏸ M held · next: "…"
-    //           Autopilot: <mode> · <sent>/<total> sent
+    //           Autorunner: <mode> · <sent>/<total> sent
     //           you: "<user's last message>"
     //           agent: "<assistant's last reply>"
     //           you replied <ago> · started <ago>
@@ -506,7 +507,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         const auto& s = *info;
-        using ::Agentmaster::AutopilotMode;
+        using ::Agentmaster::AutorunnerMode;
         using ::Agentmaster::PromptStatus;
         using ::Agentmaster::SessionState;
         const int64_t now = TtNowMs();
@@ -620,10 +621,12 @@ namespace winrt::TerminalApp::implementation
             body.push_back(line);
         }
 
-        // Autopilot mode + plan progress (only when on, or a plan has already run)
-        if (s.autopilot.mode != AutopilotMode::Off || sent > 0)
+        // Autorunner mode + plan progress (only when on, or a plan has already run). DEV ONLY: Auto
+        // Testing / Tests Autorunner is gated to the AgentmasterDev package (the autorunner never runs in
+        // a release build), so a release tab's tooltip never carries this line.
+        if (::Agentmaster::Profiles::IsDevPackage() && (s.autorunner.mode != AutorunnerMode::Off || sent > 0))
         {
-            std::wstring line = std::wstring{ L"Autopilot: " } + TtModeLabel(s.autopilot.mode);
+            std::wstring line = std::wstring{ L"Tests Autorunner: " } + TtModeLabel(s.autorunner.mode);
             if (!s.queue.empty())
             {
                 line += L"  \x00B7  " + std::to_wstring(sent) + L"/" + std::to_wstring(s.queue.size()) + L" sent";
@@ -1477,7 +1480,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (eager-init / "Activate Tab"): start a DORMANT session's claude IN PLACE — without
     // switching to its tab. A WT background/restored tab spawns its child lazily, only on the
     // SwapChainPanel's first non-zero layout (when first SHOWN), so a window-restored / re-homed managed
-    // tab the user never clicked never resumes (no claude, no hooks, no autopilot). TermControl::
+    // tab the user never clicked never resumes (no claude, no hooks, no autorunner). TermControl::
     // InitializeWithSize forces the AV-safe Initialize()->Start() with a placeholder size (the laid-out
     // tab-content area; it self-corrects when the tab is later shown). Returns true if it woke one (false:
     // not hosted here / no terminal / already started). UI thread only.
@@ -2271,7 +2274,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: bind a Claude session id to a specific live tab + ConPTY connection — the shared
     // tail of BOTH correlation paths: WT_SESSION-tabToken hook adoption (_AdoptExternalSession) and
     // the Fleet Observer's PEB correlation table (_ObserverProbe). Runs on the UI thread. Handles the in-
-    // session /resume RE-HOME (a different id already bound to this tab is archived, its Flight Plan
+    // session /resume RE-HOME (a different id already bound to this tab is archived, its Auto Testing
     // kept restorable), derives/pins the title (one-title rule, Rule #11), binds the stdin injector
     // (Rule #3: inject by sessionId), marks the session live, colors the tab per working dir (Rule
     // #12), attaches the per-tab overlay, and persists. `origin` is a human tag for the log only.
@@ -2288,7 +2291,7 @@ namespace winrt::TerminalApp::implementation
 
         // RE-HOME (in-session `/resume`): if this SAME tab is currently bound to a DIFFERENT session
         // id, the conversation switched ids on a stable ConPTY. Supersede the old id — archive it
-        // (its Flight Plan stays restorable) and drop its tab/overlay binding — then re-point below.
+        // (its Auto Testing stays restorable) and drop its tab/overlay binding — then re-point below.
         // reHomedFromOtherId records that we did so, so the title block below does NOT let the old
         // (now-archived) conversation's still-pinned tab title bleed onto the new conversation
         // (Rule #11: each session owns its title; the new id must show ITS name, not the archived one's).
@@ -2326,7 +2329,7 @@ namespace winrt::TerminalApp::implementation
                 // Nav audit: a TAB SWAPPED its bound session id (claude switched conversation in place
                 // — /clear, /resume into another conversation, or /compact). Surface it in the [nav]
                 // trail so "my tab is suddenly a different session" is followable, not just inferable
-                // from the deeper [rehome] line. The old id is archived (its Flight Plan stays restorable).
+                // from the deeper [rehome] line. The old id is archived (its Auto Testing stays restorable).
                 ::Agentmaster::LogNav(L"tab-swap " + ::Agentmaster::ShortId(superseded) + L" -> " + ::Agentmaster::ShortId(id) + L" (same tab; claude switched conversation \x2014 /clear, /resume or /compact)");
                 _claudeTabs.erase(superseded);
                 _claudeOverlays.erase(superseded);

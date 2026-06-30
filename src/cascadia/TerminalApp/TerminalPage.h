@@ -311,7 +311,7 @@ namespace winrt::TerminalApp::implementation
         // of the shared_ptrs. Forward-declared here (HooksBridge's dtor joins its threads).
         std::shared_ptr<::Agentmaster::SessionRegistry> _sessionRegistry{ nullptr };
         std::shared_ptr<::Agentmaster::HooksBridge> _hooksBridge{ nullptr };
-        std::shared_ptr<::Agentmaster::Scheduler> _scheduler{ nullptr }; // Agentmaster: Autopilot
+        std::shared_ptr<::Agentmaster::Scheduler> _scheduler{ nullptr }; // Agentmaster: Autorunner
         std::shared_ptr<::Agentmaster::SessionScanner> _scanner{ nullptr }; // Agentmaster: the interval reconciler (PULL)
         std::shared_ptr<::Agentmaster::ProcessObserver> _observer{ nullptr }; // Agentmaster: the Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §10)
         // Agentmaster (M9): this window's adoption handler on the shared registry — fans out a
@@ -324,7 +324,7 @@ namespace winrt::TerminalApp::implementation
         // pulling SessionScanner.h into this header.)
         uint64_t _livenessToken{ 0 };
         // Agentmaster (cross-window activate): this window's activate sink on the shared engine —
-        // another window's Activate (board/tree double-click, tree Enter, the Flight Plan's eye) on
+        // another window's Activate (board/tree double-click, tree Enter, the Auto Testing's eye) on
         // a session hosted HERE hops to this window's UI thread, selects the session's tab, and
         // brings this window to the foreground. Detached in ~TerminalPage (Rule #10).
         uint64_t _windowActivateToken{ 0 };
@@ -715,7 +715,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Color _PendingDotsColorForTab(const TerminalApp::Tab& tab, const std::wstring& workingDir); // Agentmaster (PENDING_INPUT.md): contrast-pick the "3 dots" color from the tab's CURRENT effective header background (selected/unselected aware) over the session's per-dir color; UI thread
         void _RefreshPendingDotsContrast(); // Agentmaster (PENDING_INPUT.md): re-pick the "3 dots" color for tabs currently showing a draft (no buffer read) so they re-contrast on a selected<->unselected shift; called from _OnTabSelectionChanged; UI thread
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; dormant => the half-hollow "not started" variant; UI thread; no-op when this window doesn't host the session
-        void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + push the rich session hover tooltip (state·age·why / title / kind·model·perm / dir·branch / queue+next / autopilot / last reply / timing) onto a managed session's tab; clears it when the session is gone/archived; UI thread
+        void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + push the rich session hover tooltip (state·age·why / title / kind·model·perm / dir·branch / queue+next / autorunner / last reply / timing) onto a managed session's tab; clears it when the session is gone/archived; UI thread
         // Agentmaster (tab status-dot RED FLASH): a hosted session that goes from Running to a resting
         // state (Idle / WaitingForInput / NeedsApproval — NOT Done or Error) on an UNVISITED tab blinks a
         // RED RING around that tab's status dot (a separate ellipse behind the dot, peeking out around
@@ -759,7 +759,7 @@ namespace winrt::TerminalApp::implementation
         // MANAGED tab, on the same path as Claude. Codex can't pin a session id (no --session-id), so
         // OUR minted id is the durable handle and the real rollout uuid (SessionInfo.codexSessionId,
         // filled by the Fleet Observer) is the `codex resume` target. Lifecycle + state only — no
-        // injector / Autopilot (driving the Codex TUI is a later phase).
+        // injector / Autorunner (driving the Codex TUI is a later phase).
         void _SpawnCodexSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition = -1); // fresh codex in a dir (insertPosition: -1 == end; a tab-context-menu spawn passes clickedIndex+1)
         TerminalApp::Tab _LaunchCodexSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromCodexUuid = {}, uint32_t insertPosition = -1); // fresh, `codex resume <uuid>`, or `codex fork <uuid>` (all rollout-gated); returns the created tab; insertPosition threads tab placement (default -1 == end)
         void _AdoptExternalCodex(uint32_t pid, winrt::hstring cwd, bool fork); // bring an EXTERNAL codex's rollout under management (fork==true => `codex fork` into a NEW rollout [safe on a live external]; else `codex resume` the same; fresh if none)

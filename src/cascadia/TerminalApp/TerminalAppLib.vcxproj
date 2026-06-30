@@ -337,7 +337,7 @@
     <ClCompile Include="AgentManagerContent.Board.cpp" />
     <ClCompile Include="AgentManagerContent.Tree.cpp" />
     <ClCompile Include="AgentManagerContent.Settings.cpp" />
-    <ClCompile Include="AgentManagerContent.FlightPlan.cpp" />
+    <ClCompile Include="AgentManagerContent.AutoTesting.cpp" />
     <ClCompile Include="AgentManagerContent.Launch.cpp" />
     <ClCompile Include="AgentTabOverlay.cpp" />
     <ClCompile Include="AgentTabOverlay.Actions.cpp" />

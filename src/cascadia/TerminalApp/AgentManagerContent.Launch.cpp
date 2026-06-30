@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,7 +13,7 @@
 //   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-//   AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 // ★ AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
@@ -29,7 +29,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 

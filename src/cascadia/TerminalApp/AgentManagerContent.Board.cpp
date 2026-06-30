@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,7 +13,7 @@
 // ★ AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-//   AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 //   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
@@ -29,7 +29,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 
@@ -146,7 +146,7 @@ namespace winrt::TerminalApp::implementation
         const auto accent = StateColor(s.state);
 
         // Agentmaster: the card BODY (everything below the colored title band) — codex pill,
-        // working dir, model·effort, timing, autopilot badge. The title itself lives in the band.
+        // working dir, model·effort, timing, autorunner badge. The title itself lives in the band.
         auto stack = StackPanel{};
         stack.Spacing(2);
 
@@ -315,7 +315,7 @@ namespace winrt::TerminalApp::implementation
             stack.Children().Append(ctxText);
         }
 
-        // autopilot badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
+        // autorunner badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
         // right of ⚙ N/M). The ⚙ badge shows only when there's a queue; the ⚡ shows whenever the
         // session is still inside Claude's server-side prompt-cache window (serverCacheMinutes).
         {
@@ -323,7 +323,10 @@ namespace winrt::TerminalApp::implementation
             metaRow.Orientation(Orientation::Horizontal);
             metaRow.Spacing(8);
 
-            if (!s.queue.empty())
+            // DEV ONLY: the ⚙ sent/total badge is the Auto Testing prompt queue, gated to the
+            // AgentmasterDev package (a release build never queues prompts — the autorunner is off).
+            // The ⚡ server-cache indicator below is unrelated and stays in every build.
+            if (::Agentmaster::Profiles::IsDevPackage() && !s.queue.empty())
             {
                 int sent = 0;
                 for (const auto& p : s.queue)
@@ -335,11 +338,11 @@ namespace winrt::TerminalApp::implementation
                 }
                 const auto badge = winrt::hstring{ L"\x2699 " } + winrt::to_hstring(sent) + L"/" + winrt::to_hstring(static_cast<int>(s.queue.size()));
                 auto bt = Text(badge, 11, false, 0.8);
-                if (s.autopilot.mode != AutopilotMode::Off)
+                if (s.autorunner.mode != AutorunnerMode::Off)
                 {
                     bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
                 }
-                AgentSetTip(bt, L"Flight Plan queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Autopilot is on for this session.", kCardTipDelay);
+                AgentSetTip(bt, L"Auto Testing queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Tests Autorunner is on for this session.", kCardTipDelay);
                 metaRow.Children().Append(bt);
             }
 
@@ -646,7 +649,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: the grab bar is draggable but easy to miss (it is near-invisible at rest);
         // name what it resizes so the affordance is discoverable beyond the hover cursor change.
         AgentSetTip(bar, vertical ?
-                             winrt::hstring{ L"Drag to resize \x2014 the Explorer Tree and the Flight Plan share this divider." } :
+                             winrt::hstring{ L"Drag to resize \x2014 the Explorer Tree and the Auto Testing share this divider." } :
                              winrt::hstring{ L"Drag to resize \x2014 the Triage Board and the panels below it share this divider." });
 
         const auto cursorType = vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth;
@@ -979,7 +982,7 @@ namespace winrt::TerminalApp::implementation
             // state model, so naming them on hover is the core learning-curve aid.
             const wchar_t* colTip =
                 col.state == SessionState::Running        ? L"Running \x2014 the agent is actively working on a turn." :
-                col.state == SessionState::WaitingForInput ? L"Waiting-for-you \x2014 the turn is complete; the agent is waiting for your next prompt. With Autopilot on, the next queued prompt sends automatically." :
+                col.state == SessionState::WaitingForInput ? L"Waiting-for-you \x2014 the turn is complete; the agent is waiting for your next prompt. With Tests Autorunner on, the next queued prompt sends automatically." :
                 col.state == SessionState::NeedsApproval  ? L"Needs-approval \x2014 the agent is paused on a tool-permission prompt or a question and needs your response to continue." :
                 col.state == SessionState::Error          ? L"Error \x2014 the agent's last turn ended in an error." :
                                                             L"Idle / Done \x2014 no turn in progress: freshly launched, just resumed, or finished.";
@@ -1000,7 +1003,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Agentmaster (O6): a trailing observe-only "External (N)" group for real-WindowsTerminal
-        // claudes the observer detected (NOT our tabs — no registry session, no Flight Plan). Shown
+        // claudes the observer detected (NOT our tabs — no registry session, no Auto Testing). Shown
         // unscoped (it is a global census, not part of the managed directory tree).
         if (!_externalClaudes.empty())
         {
@@ -1284,7 +1287,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // The whole card is clickable — left-click SELECTS this external, EXACTLY like clicking its
-        // row in the Explorer Tree (_SelectExternal): the Flight Plan shows its conversation read-only
+        // row in the Explorer Tree (_SelectExternal): the Auto Testing shows its conversation read-only
         // and the tree syncs to EXTERNAL with this one highlighted (Linked Lenses). Right-click opens
         // the SAME menu the tree row uses — Adopt / Open New Session Here / Bring Window To Front. (No
         // inline "observe"/"Adopt" affordance: the card itself is the observe action; the rest lives

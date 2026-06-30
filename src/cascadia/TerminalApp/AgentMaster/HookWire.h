@@ -12,7 +12,7 @@
 // Fields after `sessionId` are optional (older/edge forwarders may omit them). `cwd`,
 // `tool` and `tabToken` are assumed free of TAB/newline (true for Windows paths, Claude
 // tool names, and the plain WT_SESSION GUID). The `prompt` (set only on
-// UserPromptSubmit, so the Flight Plan can show EVERY message a session received, not just
+// UserPromptSubmit, so the Auto Testing can show EVERY message a session received, not just
 // ones we queued) is the one field that CAN contain TAB/newline, so it is escaped
 // (\ \t \r \n) by both the forwarder and BuildWireLine and un-escaped on parse — keeping
 // the record single-line and the field split unambiguous. The trailing `ts` is the hook's

@@ -10,7 +10,7 @@
 #include "Json.h"
 #include "ProcessInspect.h" // SubagentActivityUnixMs — subagent/Task side-file activity (the parent transcript stays quiescent while a subagent runs)
 #include "SessionRegistry.h"
-#include "TranscriptStore.h" // IsNoiseUserPrompt — keep control markers out of the Flight-Plan back-fill
+#include "TranscriptStore.h" // IsNoiseUserPrompt — keep control markers out of the Auto-Testing back-fill
 
 #include <windows.h>
 
@@ -559,7 +559,7 @@ namespace Agentmaster
         // restored/adopted transcript must never light a just-resumed idle claude Running) — whose
         // tail says a turn is in progress; the synthesized event goes through the ONE state machine
         // (OnHookEvent) exactly like the missed-Stop: ts stamped (also refreshes the decay anchor),
-        // EMPTY promptText (no Flight-Plan side effects — NoteExternalPrompt in _readDelta owns the
+        // EMPTY promptText (no Auto-Testing side effects — NoteExternalPrompt in _readDelta owns the
         // prompt back-fill, and the echo bookkeeping stays push-owned, so a late real
         // UserPromptSubmit lands on Running -> Running, a no-op). The re-Get mirrors the
         // missed-Stop's freshest-state re-check: a real hook that landed mid-pass wins.
@@ -740,7 +740,7 @@ namespace Agentmaster
         // max_tokens / refusal) or the user INTERRUPTED it (Esc -> no clean Stop hook) — the file
         // has gone quiescent, yet we are STILL Running (or blocked in NeedsApproval whose
         // post-approval / post-answer Stop was dropped). Synthesize a Stop identical to the real
-        // one (-> WaitingForInput + the question-guard + the Autopilot advance). The state gate
+        // one (-> WaitingForInput + the question-guard + the Autorunner advance). The state gate
         // (re-checked against the freshest state right before firing) makes a real Stop that
         // already landed win, so this never double-fires.
         const bool stopFromTail = ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs);
@@ -792,7 +792,7 @@ namespace Agentmaster
         // waiting for the user to answer, NOT working, so it must not show Running. Synthesize a
         // permission-style Notification (-> NeedsApproval, the "needs you" column). Idempotent: only
         // from Running, so once it lands NeedsApproval it stays until the answer + the turn's end
-        // release it via the missed-Stop reconciliation above. (Autopilot treats NeedsApproval as
+        // release it via the missed-Stop reconciliation above. (Autorunner treats NeedsApproval as
         // NOT ready — Rule #1 — so it won't auto-answer the question with a queued prompt.)
         if (ShouldSynthesizeBlockedOnUser(s.state, st.pendingInteractiveTool, st.interrupted, quietForMs))
         {
@@ -933,7 +933,7 @@ namespace Agentmaster
                 if (!ev.text.empty())
                 {
                     st.lastAssistantText = ev.text;
-                    // Mirror into the model for a future Flight-Plan "peek". QUIET: streamed text
+                    // Mirror into the model for a future Auto-Testing "peek". QUIET: streamed text
                     // must not trigger the persist / UI / scheduler cascade on every line.
                     const std::wstring text = ev.text;
                     _registry->UpdateQuiet(s.id, [&text](SessionInfo& ss) { ss.lastAssistantText = text; });
@@ -1010,7 +1010,7 @@ namespace Agentmaster
     // transcript — the recon-subagent promotion's target) is never raced to Idle. Like the synthesized
     // missed-Stop above, this is a deliberate TIME-derived transition layered on the hook-derived machine
     // (Rule #7-adjacent — never screen-scraped): the mutator RE-CHECKS the full gate UNDER the registry
-    // lock, so a hook / a visit (read stamp) landing between our snapshot and the update wins. Autopilot
+    // lock, so a hook / a visit (read stamp) landing between our snapshot and the update wins. Autorunner
     // semantics are unchanged: DecideAdvance treats Idle as ready exactly like WaitingForInput (Rule #1).
     void SessionScanner::_maybeDecayWaiting(const SessionInfo& s, int64_t nowMs)
     {

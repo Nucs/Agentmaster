@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — core data model for the Manager tab (Design A / C1 / Flight Plan).
+// Agentmaster — core data model for the Manager tab (Design A / C1 / Auto Testing).
 // Plain C++ (no WinRT projection) so it compiles standalone; the XAML layer (M6) wraps
 // these in observable view-models. See doc/agentmaster/IMPLEMENTATION.md.
 
@@ -29,7 +29,7 @@ namespace Agentmaster
         Done // session ended (SessionEnd)
     };
 
-    enum class AutopilotMode
+    enum class AutorunnerMode
     {
         Off,
         SemiAuto, // confirm each auto-send (recommended for the first N sends)
@@ -102,13 +102,15 @@ namespace Agentmaster
         Failed
     };
 
-    // How a prompt entered the Flight Plan. The Flight Plan reflects EVERY message a session
-    // received (DESIGN: "all messages user sent, not only via the flight plan"), so a prompt
+    // How a prompt entered the Auto Testing queue. The queue reflects EVERY message a session
+    // received (DESIGN: "all messages user sent, not only via the auto testing"), so a prompt
     // the human typed straight into the ConPTY — captured from the UserPromptSubmit hook — is
-    // recorded too, tagged `Typed`, alongside the `Flight` prompts we queued/injected.
+    // recorded too, tagged `Typed`, alongside the `Autorun` prompts we queued/injected.
+    // (The serialized value is "Autorun"; a pre-rename "Flight" still reads back as Autorun — see
+    // PromptOriginFromString.)
     enum class PromptOrigin
     {
-        Flight, // queued and injected through the Flight Plan (our send)
+        Autorun, // queued and injected through Auto Testing / Tests Autorunner (our send) — was "Flight"
         Typed, // typed directly into the terminal by the human (captured via UserPromptSubmit)
     };
 
@@ -127,8 +129,8 @@ namespace Agentmaster
         uint32_t attempts{ 0 };
         uint32_t maxAttempts{ 1 };
         int64_t sentAtUnixMs{ 0 };
-        PromptOrigin origin{ PromptOrigin::Flight }; // Flight (we sent it) vs Typed (human typed it)
-        // Transient (NOT persisted): a Flight prompt we just injected expects ONE
+        PromptOrigin origin{ PromptOrigin::Autorun }; // Autorun (we sent it) vs Typed (human typed it)
+        // Transient (NOT persisted): an Autorun prompt we just injected expects ONE
         // UserPromptSubmit echo back; `echoed` marks that echo consumed so the registry does
         // not re-record our own injection as a `Typed` message. Reset to false at each send.
         bool echoed{ false };
@@ -179,9 +181,9 @@ namespace Agentmaster
         std::vector<std::wstring> autoApproveTools; // allowlist of safe tools
     };
 
-    struct AutopilotState
+    struct AutorunnerState
     {
-        AutopilotMode mode{ AutopilotMode::Off };
+        AutorunnerMode mode{ AutorunnerMode::Off };
         uint32_t throttleMs{ 500 }; // min delay between auto-sends
         bool stopOnError{ true }; // pause the plan if a turn ends in error
         bool pauseOnHumanInput{ true }; // suspend while the human is typing
@@ -281,7 +283,7 @@ namespace Agentmaster
         // once? A WT background tab spawns its child lazily — only on the SwapChainPanel's first
         // non-zero layout, which fires when the tab is first SHOWN — so a window-restored / re-homed
         // managed tab that the user never clicked stays dormant (claude never resumes, no hooks, no
-        // autopilot). This flag is the UI's "needs activation" signal: false == live but dormant
+        // autorunner). This flag is the UI's "needs activation" signal: false == live but dormant
         // (the half-hollow status dot + the "Activate All Tabs (N)" count + the per-tab/menu
         // "Activate Tab" gate); it flips true when the control starts (naturally on focus, or in
         // place via TermControl::InitializeWithSize). Transient (NOT persisted) and maintained ONLY
@@ -291,7 +293,7 @@ namespace Agentmaster
         // (we host no control) — left false, and every consumer also gates on `!external`.
         bool started{ false };
         // Transient runtime flag (not persisted): set from the most recent Stop hook's
-        // best-effort `lastMessageIsQuestion`. Feeds the Autopilot question-guard (M7):
+        // best-effort `lastMessageIsQuestion`. Feeds the Autorunner question-guard (M7):
         // a turn that ended on a clarifying question must NOT be auto-answered.
         bool lastMessageWasQuestion{ false };
         // Agentmaster (Waiting-for-you "unread" model): the last time the user READ this session —
@@ -317,7 +319,7 @@ namespace Agentmaster
         TurnAccounting turns{};
         // Transient (NOT persisted): the latest assistant message text the interval reconciler
         // (SessionScanner) tailed from this session's transcript. Hooks don't carry assistant
-        // output — this captures it (the foundation for a live Flight-Plan "peek"). Written via
+        // output — this captures it (the foundation for a live Auto-Testing "peek"). Written via
         // the registry's QUIET path so streaming text never triggers a persist/UI/scheduler
         // cascade. Empty until the scanner reads a transcript line.
         std::wstring lastAssistantText;
@@ -342,7 +344,7 @@ namespace Agentmaster
         // AnalyzeSessionTranscript (SessionSummary.awaySummary), the same data by a different path.
         std::wstring recap;
         // Transient (not persisted): in SemiAuto, the scheduler arms the next prompt here
-        // and the Flight Plan shows a one-click confirm. Empty when nothing awaits confirm.
+        // and the Auto Testing shows a one-click confirm. Empty when nothing awaits confirm.
         std::wstring pendingConfirmPromptId;
         // Agentmaster (PENDING_INPUT.md): the session's UNSENT input-box DRAFT — text the user typed
         // into Claude's input box but has NOT yet submitted. Read out-of-band from the rendered terminal
@@ -395,8 +397,8 @@ namespace Agentmaster
         // shown instead). 0 until the first assistant turn. Transient — re-derived each run (NOT persisted).
         int64_t contextTokens{};
 
-        std::vector<QueuedPrompt> queue; // the Flight Plan
-        AutopilotState autopilot{};
+        std::vector<QueuedPrompt> queue; // the Auto Testing
+        AutorunnerState autorunner{};
     };
 
     // A reusable plan (DESIGN §10 "Plans across the fleet"): a named sequence of prompts
@@ -414,17 +416,17 @@ namespace Agentmaster
     struct ManagerLayout
     {
         double boardFraction{ 0.4 }; // Triage Board height / (Board + Bottom)      [root rows]
-        double treeFraction{ 0.4 }; // Explorer Tree width / (Tree + Flight Plan)   [bottom cols]
+        double treeFraction{ 0.4 }; // Explorer Tree width / (Tree + Auto Testing)   [bottom cols]
     };
 
-    // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autopilot").
-    // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutopilotMode (now
-    // Full, the product default — "all new or opened sessions run on Autopilot"), so a missing
+    // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autorunner").
+    // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutorunnerMode (now
+    // Full, the product default — "all new or opened sessions run on Autorunner"), so a missing
     // settings.json mostly changes nothing. Persisted to ~/.agentmaster/settings.json, loaded at
     // startup, and applied at two seams: the spawn recipe (Claude fields) and session OPEN — the
-    // autopilot MODE is stamped onto EVERY opened session (new / adopted / restored); the other
-    // autopilot backstops are stamped onto NEW sessions only. These are GLOBAL defaults/backstops;
-    // per-session autopilot mode still lives in the Flight Plan (changeable after open).
+    // autorunner MODE is stamped onto EVERY opened session (new / adopted / restored); the other
+    // autorunner backstops are stamped onto NEW sessions only. These are GLOBAL defaults/backstops;
+    // per-session autorunner mode still lives in the Auto Testing (changeable after open).
     struct AppSettings
     {
         // --- Claude sessions (spawn recipe; see ClaudeSpawn) ---
@@ -454,13 +456,13 @@ namespace Agentmaster
         // enrichment are all claude.exe-keyed).
         std::wstring claudeExePath{};
 
-        // --- Autopilot defaults ---
+        // --- Autorunner defaults ---
         // The MODE seeds every OPENED session — new, adopted, AND restored/window-restored (a
         // reopened session is re-armed on this default, OVERRIDING its saved per-session mode),
-        // and stays changeable afterward (the Flight Plan toggle / this cog). Default Full ==
-        // "all new or opened sessions run on Autopilot". The backstops below are stamped onto
+        // and stays changeable afterward (the Auto Testing toggle / this cog). Default Full ==
+        // "all new or opened sessions run on Autorunner". The backstops below are stamped onto
         // NEW sessions only; a restored one keeps its persisted maxAutoSends/stopOnError/pauseOnHumanInput.
-        AutopilotMode defaultAutopilotMode{ AutopilotMode::Full };
+        AutorunnerMode defaultAutorunnerMode{ AutorunnerMode::Full };
         uint32_t maxAutoSends{ 100 }; // runaway backstop
         bool stopOnError{ true }; // pause a plan when a turn ends in error
         bool pauseOnHumanInput{ true }; // suspend auto-send while the human is typing
@@ -552,7 +554,7 @@ namespace Agentmaster
         std::wstring pendingDotsDarkColor{ L"#FF5A3E00" }; // shown on a LIGHT tab/card background
 
         // Agentmaster (TAB_OVERLAY.md): show the per-tab "link badge" overlay pinned to the
-        // top-right of each Claude session's terminal (status + autopilot mode + queued count +
+        // top-right of each Claude session's terminal (status + autorunner mode + queued count +
         // link state). Default ON; a missing key => true (a no-op default, like the rest).
         bool showTabOverlay{ true };
         // Agentmaster (TAB_OVERLAY.md): the per-tab overlay (badge + its summary panel) sits dim at REST
@@ -611,13 +613,13 @@ namespace Agentmaster
         // once cards are split across state columns).
         ExplorerSort boardSort{ ExplorerSort::MostActive };
         // Agentmaster: which tab the Manager's FLIGHT-PLAN pane shows. Its top line is a two-state
-        // [Summary | Flight Plan] segmented toggle; true == the (currently empty) Summary tab is
-        // selected, false == the Flight Plan tab (the prompt queue / Autopilot / compose box). GLOBAL
+        // [Summary | Auto Testing] segmented toggle; true == the (currently empty) Summary tab is
+        // selected, false == the Auto Testing tab (the prompt queue / Autorunner / compose box). GLOBAL
         // across windows like treeSort/boardSort: a click in any window persists it here + broadcasts,
         // so every window's pane shows the same tab and the choice survives restart. Default true
         // (Summary). NOTE: distinct from showSummaryPanel — that is the per-tab OVERLAY's pencil-toggled
-        // summary panel (TAB_OVERLAY.md); this is the Manager Flight-Plan pane's tab selection.
-        bool flightPlanShowsSummary{ true };
+        // summary panel (TAB_OVERLAY.md); this is the Manager Auto-Testing pane's tab selection.
+        bool autoTestingShowsSummary{ true };
         // Agentmaster: the Archive page's table|detail splitter position — the TABLE's share of
         // the two columns, kept within (0.05, 0.95). Applied as STAR ratios, so the split scales
         // with the window (window-size-relative, not pixels). GLOBAL like treeSort: written by
@@ -691,7 +693,7 @@ namespace Agentmaster
     };
 
     // One ordered tab inside a window — a REFERENCE, not a copy. A Claude tab stores only the
-    // session's id (its full record — queue, autopilot, live/archived — lives once in
+    // session's id (its full record — queue, autorunner, live/archived — lives once in
     // sessions.json); `tabColor` is the optional "#RRGGBB" we paint it. An Other tab is opaque:
     // `actionsJson` is the WT ActionAndArgs (NewTab + SetTabColor + RenameTab) that recreates
     // it, so its own color/title ride along inside that blob. This records tab ORDER + the
@@ -711,7 +713,7 @@ namespace Agentmaster
     {
         std::wstring selectedId; // selected session card
         std::wstring scopeDir; // Explorer-tree directory scope ("" => all)
-        std::wstring selectedPromptId; // selected Flight-Plan row
+        std::wstring selectedPromptId; // selected Auto-Testing row
         std::vector<std::wstring> collapsedDirs; // Explorer-tree dirs the user collapsed
         ManagerLayout layout{}; // splitter fractions (was the global layout.json; now per-window)
         // Agentmaster: the ONE session scope behind BOTH toggles — the Explorer Tree's 3-way cycle

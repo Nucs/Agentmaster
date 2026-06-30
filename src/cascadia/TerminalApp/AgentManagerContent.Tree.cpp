@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,7 +13,7 @@
 //   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 // ★ AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-//   AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 //   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
@@ -29,7 +29,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 
@@ -562,7 +562,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: render the Explorer Tree's EXTERNAL scope — observe-only external claudes (real
     // Windows Terminal AND cmd-/console-hosted; the observer correlated them but will never bind,
     // Rule #9/#13), grouped by working dir, each row enriched from its transcript (title / host /
-    // branch / timing). Left-click SELECTS a row -> the Flight Plan shows its conversation read-only
+    // branch / timing). Left-click SELECTS a row -> the Auto Testing shows its conversation read-only
     // (we host no ConPTY, so it is never drivable). Right-click -> Open New Session Here (spawn a
     // managed session in that cwd) / Adopt (resume its conversation into a managed tab).
     void AgentManagerContent::_RebuildExternalTree()
@@ -875,7 +875,7 @@ namespace winrt::TerminalApp::implementation
                 rowBtn.Background(Fill(selExt ? 0x40 : 0x00, 0x80, 0x80, 0x80));
                 rowBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
 
-                // Left-click SELECTS this external -> the Flight Plan shows its conversation prompts
+                // Left-click SELECTS this external -> the Auto Testing shows its conversation prompts
                 // read-only (observe-only; we host no ConPTY so we can't drive it). Right-click -> the
                 // Adopt / Open New Session Here / Bring Window To Front menu.
                 rowBtn.ContextFlyout(_MakeExternalTreeMenu(ex));
@@ -914,7 +914,7 @@ namespace winrt::TerminalApp::implementation
             // Codex-launch (lifecycle + state): Adopt resumes this codex's rollout into a MANAGED tab
             // (`codex resume <uuid>`; the original keeps running), and Open New Codex Session Here
             // launches a fresh managed codex in the cwd. Both route to _codexLaunchHandler (adopt flag).
-            // No injector/Autopilot yet — you type into the tab directly (driving Codex is a later phase).
+            // No injector/Autorunner yet — you type into the tab directly (driving Codex is a later phase).
             const std::wstring sid = ex.sessionId;
             const std::wstring adoptTitle = ex.title;
             MenuFlyoutItem adopt;
@@ -1162,13 +1162,13 @@ namespace winrt::TerminalApp::implementation
         }
         _treeScope = scope;
         // Entering EXTERNAL: externals are observe-only, so drop any managed session selection — the
-        // Flight Plan then reads "nothing selected" until an external row is clicked (read-only).
+        // Auto Testing then reads "nothing selected" until an external row is clicked (read-only).
         if (_treeScope == TreeScope::External && !_selectedId.empty())
         {
             _selectedId.clear();
             _selectedPromptId.clear();
         }
-        // Leaving EXTERNAL: drop the external (read-only) selection so the Flight Plan returns to the
+        // Leaving EXTERNAL: drop the external (read-only) selection so the Auto Testing returns to the
         // managed view cleanly.
         if (_treeScope != TreeScope::External && !_selectedExternalTitle.empty())
         {
@@ -1184,7 +1184,7 @@ namespace winrt::TerminalApp::implementation
         if (refresh)
         {
             // _Refresh (not just _RebuildTree) so the board re-filters (LOCAL/GLOBAL), the selection
-            // highlight tracks, and the Flight Plan re-renders when entering/leaving EXTERNAL.
+            // highlight tracks, and the Auto Testing re-renders when entering/leaving EXTERNAL.
             _Refresh();
         }
     }
@@ -1393,7 +1393,7 @@ namespace winrt::TerminalApp::implementation
         // separator sets the navigate action apart from the session-edit ops below.
         MenuFlyoutItem jump;
         jump.Text(L"Jump to Tab");
-        jump.Icon(glyphIcon(L"\xE7B3")); // RedEye — matches the Flight Plan's "jump to the live tab" eye
+        jump.Icon(glyphIcon(L"\xE7B3")); // RedEye — matches the Auto Testing's "jump to the live tab" eye
         AgentSetTip(jump, L"Switch to this session's live terminal tab (jumps to its hosting window if it lives elsewhere)");
         jump.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
             if (disp)
@@ -1664,7 +1664,7 @@ namespace winrt::TerminalApp::implementation
         return menu;
     }
 
-    // Agentmaster: the Flight-Plan message right-click menu. Copy (this prompt's text) is offered on
+    // Agentmaster: the Auto-Testing message right-click menu. Copy (this prompt's text) is offered on
     // EVERY row; the per-prompt queue ops (Move up / Move down / Delete) appear only on UPCOMING rows
     // (a sent/historical row can't be reordered or unqueued). The queue ops act on `promptId` (the
     // right-clicked row, selecting it first) and — like _MakeSessionMenu — defer one tick so the

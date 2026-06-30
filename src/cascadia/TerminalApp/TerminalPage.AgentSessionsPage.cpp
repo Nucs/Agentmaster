@@ -2033,7 +2033,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button resume;
             resume.Content(winrt::box_value(winrt::hstring{ L"Resume here" }));
-            SessSetTip(resume, L"Resume this conversation in a managed tab \x2014 continue where it left off, with Flight Plan + Autopilot (claude --resume).");
+            SessSetTip(resume, L"Resume this conversation in a managed tab \x2014 continue where it left off, with Auto Testing + Tests Autorunner (claude --resume).");
             resume.Click([this, id, dir, title](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, title]() {
                     if (auto self = weak.get())

@@ -7,7 +7,7 @@
 // own thread. The session engine must therefore be a PROCESS singleton, not a per-window
 // (per-TerminalPage) object: there is exactly one SessionRegistry (the single source of
 // truth), one HooksBridge (the local named pipe `\\.\pipe\agentmaster.<pid>` — the PID is
-// unambiguous only because there is one bridge), and one Scheduler (Autopilot). Every
+// unambiguous only because there is one bridge), and one Scheduler (Autorunner). Every
 // window's Manager tab is an independent VIEW (lens) over this one shared fleet.
 //
 // Before M9 each TerminalPage stood up its own engine, so two windows raced two registries
@@ -153,7 +153,7 @@ namespace Agentmaster
         // Agentmaster (cross-window activate; Linked Lenses): per-window "focus this session's tab"
         // sinks. The Manager's Triage Board / Explorer Tree (GLOBAL) show the WHOLE fleet, but a
         // session's tab lives in exactly ONE window (its _claudeTabs) — so Activate (board/tree
-        // double-click, tree Enter, the Flight Plan's eye) on a session hosted ELSEWHERE must reach
+        // double-click, tree Enter, the Auto Testing's eye) on a session hosted ELSEWHERE must reach
         // that window. Each TerminalPage registers a sink at engine init — "select this session's
         // tab + bring your window to the foreground if YOU host it"; the sink hops to its own UI
         // thread and no-ops on a miss — and detaches it at teardown (Rule #10). Guarded by its own

@@ -580,7 +580,7 @@ namespace Agentmaster::Profiles
         const std::wstring instruction = firstLaunch ? L"Choose a profile for this installation" :
                                                        L"Switch the profile folder";
         std::wstring content =
-            L"A profile folder holds everything Agentmaster stores: sessions, Flight Plans, window "
+            L"A profile folder holds everything Agentmaster stores: sessions, test queues, window "
             L"layouts, settings and hooks. Each installation remembers its own choice, so the "
             L"release and development installs never touch each other's data.\n\nAsking: ";
         content += !packaged ? L"a portable/unpackaged copy." :

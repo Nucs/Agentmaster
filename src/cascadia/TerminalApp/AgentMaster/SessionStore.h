@@ -11,7 +11,7 @@
 // adding a KEY, with no schema/format change and no migration.
 //
 // How it differs from the two existing per-session-ish files:
-//   - sessions.json — the HEAVY managed-fleet record (flight plan, autopilot, geometry refs),
+//   - sessions.json — the HEAVY managed-fleet record (auto testing, autorunner, geometry refs),
 //     loaded as one document. The store is a LIGHT KV any tool can read by id WITHOUT loading the
 //     fleet, and it SURVIVES a record being deleted from the fleet (a historical title we keep).
 //   - sessions-index/<sid>.json — the rebuildable SEARCH/STATS cache, (size,mtime)-invalidated and

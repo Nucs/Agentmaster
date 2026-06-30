@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,11 +13,11 @@
 //   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-//   AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 //   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
-// Agentmaster Manager tab content (C1 "Linked Lenses"). CORE: ctor/dtor, the Set* wiring, IPaneContent, the per-window lens, _BuildLayout, _Refresh. The board/tree/flight-plan/settings/launch live in sibling AgentManagerContent.*.cpp TUs (the TerminalPage.Agent*.cpp pattern).
+// Agentmaster Manager tab content (C1 "Linked Lenses"). CORE: ctor/dtor, the Set* wiring, IPaneContent, the per-window lens, _BuildLayout, _Refresh. The board/tree/auto-testing/settings/launch live in sibling AgentManagerContent.*.cpp TUs (the TerminalPage.Agent*.cpp pattern).
 #include "pch.h"
 #include "AgentManagerContent.h"
 
@@ -29,7 +29,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 
@@ -127,7 +127,7 @@ namespace winrt::TerminalApp::implementation
         // only because each sets an explicit Fill() Background (and the keep-awake/scope buttons because
         // PaintHoldButton seeds these very keys per-button). Seed them ONCE at _root scope so every default
         // Button under the Manager (the toolbar cog / Pause / Sessions / Keep-Awake, the launch + header
-        // toggles, the Flight-Plan compose buttons, the settings-overlay buttons, …) is hit-testable across
+        // toggles, the Auto-Testing compose buttons, the settings-overlay buttons, …) is hit-testable across
         // its whole body and shows a real hover/press. A near-invisible rest fill (alpha 0x01 — the
         // "~invisible yet hit-testable" value used elsewhere here) keeps the flat look; hover/press lift.
         // A button with its OWN Background/Resources (cards, PaintHoldButton) overrides these locally. This
@@ -338,7 +338,7 @@ namespace winrt::TerminalApp::implementation
     }
     // Agentmaster (Linked Lenses — per-tab -> Manager sync): drive the lens selection from the page when
     // the user switches to a managed session's terminal tab. Routes through _SelectSession (the same path
-    // a board-card single-click takes), so the board card + tree row highlight and the Flight Plan show
+    // a board-card single-click takes), so the board card + tree row highlight and the Auto Testing show
     // that session. _SelectSession early-outs when the id is already selected, so a re-select is cheap.
     void AgentManagerContent::SelectSession(winrt::hstring id)
     {
@@ -375,7 +375,7 @@ namespace winrt::TerminalApp::implementation
         // have completed a layout pass yet (MUX TabView hosts only the selected tab's content). Realize
         // it (UpdateLayout) so each card has a real extent, then StartBringIntoView walks up to the
         // card's column ScrollViewer and scrolls it into view (a no-op if already fully visible) — the
-        // same UpdateLayout-then-scroll recipe the Flight-Plan auto-scroll-to-bottom uses. Run at LOW
+        // same UpdateLayout-then-scroll recipe the Auto-Testing auto-scroll-to-bottom uses. Run at LOW
         // priority so this lands AFTER the framework's own restore work this attach triggers (each fresh
         // column ScrollViewer re-applies its saved offset on Loaded; see _MakeBoardColumn) — our reveal
         // must be the last word on the selected card's column, else the offset restore would re-hide it.
@@ -407,6 +407,14 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetSettings(const ::Agentmaster::AppSettings& settings)
     {
         _appSettings = settings;
+        // Auto Testing is a DEV-ONLY feature: in a RELEASE install the bottom-right pane is the
+        // read-only Summary view only (no [Summary | Auto Testing] toggle). Force the Summary tab
+        // selected so every reader (the pane visibility, _RefreshSummaryTab, _LoadSummaryForSession)
+        // shows it regardless of what settings.json carries. In memory only — never re-persisted.
+        if (!::Agentmaster::Profiles::IsDevPackage())
+        {
+            _appSettings.autoTestingShowsSummary = true;
+        }
         // Seed the Launch cwd box with the configured default (wiring runs after _BuildLayout,
         // which had defaulted the box to %USERPROFILE%). Only override when a default is set.
         if (_cwdBox && !settings.defaultLaunchDir.empty())
@@ -423,7 +431,7 @@ namespace winrt::TerminalApp::implementation
         // just the ctor defaults — including a board sort changed in another window (adopted on launch).
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
-        _UpdatePlanPaneTab(); // reflect the (global, persisted) Flight-Plan pane tab; no-op while its controls are null
+        _UpdatePlanPaneTab(); // reflect the (global, persisted) Auto-Testing pane tab; no-op while its controls are null
     }
     void AgentManagerContent::SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler)
     {
@@ -440,9 +448,13 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::ApplyExternalSettings(const ::Agentmaster::AppSettings& settings)
     {
         _appSettings = settings;
+        if (!::Agentmaster::Profiles::IsDevPackage())
+        {
+            _appSettings.autoTestingShowsSummary = true; // release: Summary-only pane (Auto Testing is dev-only)
+        }
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
-        _UpdatePlanPaneTab(); // adopt another window's Flight-Plan pane tab choice (GLOBAL setting)
+        _UpdatePlanPaneTab(); // adopt another window's Auto-Testing pane tab choice (GLOBAL setting)
         _Refresh();
     }
 
@@ -636,7 +648,7 @@ namespace winrt::TerminalApp::implementation
         // ---- Toolbar ----
         {
             // Agentmaster: the toolbar is a VERTICAL stack — a TOP row (the "Agentmaster" title +
-            // the launch controls) over a compact ACTIONS row (Settings, Pause Autopilot, Sessions,
+            // the launch controls) over a compact ACTIONS row (Settings, Pause Autorunner, Sessions,
             // Keep Awake) tucked just below the title in the top-left. The actions buttons are
             // deliberately thinner (smaller font + slim padding), matching the header-toggle idiom.
             _toolbarCol = StackPanel{};
@@ -670,7 +682,7 @@ namespace winrt::TerminalApp::implementation
             bar.Children().Append(_launchAText);
 
             // Agentmaster (Codex-launch): the agent toggle — Claude (default) <-> Codex. Click cycles it
-            // (the scope/sort/autopilot toggle idiom). It retargets the SAME cwd box + Launch button, so a
+            // (the scope/sort/autorunner toggle idiom). It retargets the SAME cwd box + Launch button, so a
             // managed Codex launches exactly the way a Claude does ("do what we do for Claude"). A Codex
             // launch is directory-only — Codex has no typed-id resume/fork here (Codex resume is reached via
             // the Archive page / window-restore / EXTERNAL Adopt), so _ValidateLaunchBox suppresses those.
@@ -909,27 +921,27 @@ namespace winrt::TerminalApp::implementation
                 cog.FontSize(13);
                 _settingsBtn.Content(cog);
             }
-            AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Autopilot defaults, the Claude binary, the active profile, and app behavior.");
+            AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Tests Autorunner defaults, the Claude binary, the active profile, and app behavior.");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             actionsRow.Children().Append(_settingsBtn);
 
-            // Global Autopilot backstop: Pause-all / Resume-all. Built here but appended LAST, so it
+            // Global Autorunner backstop: Pause-all / Resume-all. Built here but appended LAST, so it
             // sits at the RIGHT end of the actions row (after cog, Sessions, Keep Awake).
             _pauseBtn = Button{};
             _pauseBtn.FontSize(11);
             _pauseBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            _pauseBtn.Content(winrt::box_value(L"Pause Autopilot"));
-            AgentSetTip(_pauseBtn, L"Global Autopilot backstop \x2014 pauses or resumes auto-sending across ALL sessions at once.");
+            _pauseBtn.Content(winrt::box_value(L"Pause Tests Autorunning"));
+            AgentSetTip(_pauseBtn, L"Global Tests Autorunning backstop \x2014 pauses or resumes auto-sending across ALL sessions at once.");
             _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _globalPaused = !_globalPaused;
-                ::Agentmaster::LogNav(_globalPaused ? L"pause-all on (global Autopilot backstop)" : L"pause-all off (global Autopilot resumed)");
+                ::Agentmaster::LogNav(_globalPaused ? L"pause-all on (global Autorunner backstop)" : L"pause-all off (global Autorunner resumed)");
                 if (_pauseHandler)
                 {
                     _pauseHandler(_globalPaused);
                 }
                 if (_pauseBtn)
                 {
-                    _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Autopilot" : L"Pause Autopilot"));
+                    _pauseBtn.Content(winrt::box_value(_globalPaused ? L"Resume Tests Autorunning" : L"Pause Tests Autorunning"));
                 }
             });
             // (appended LAST — see below, after Keep Awake)
@@ -960,8 +972,15 @@ namespace winrt::TerminalApp::implementation
             actionsRow.Children().Append(_keepAwakeBtn);
             _UpdateKeepAwakeButton();
 
-            // Pause/Resume Autopilot — the rightmost button in the actions row (built far above).
-            actionsRow.Children().Append(_pauseBtn);
+            // Pause/Resume Tests Autorunning — the rightmost button in the actions row (built far
+            // above). Auto Testing / Tests Autorunner is a DEV-ONLY feature: in a RELEASE install the
+            // autorunner never runs (the scheduler isn't started — see Engine.cpp), so this global
+            // pause/resume backstop is hidden. Built unconditionally above but only ATTACHED under the
+            // AgentmasterDev package, so the actions row never carries a no-op control in release.
+            if (::Agentmaster::Profiles::IsDevPackage())
+            {
+                actionsRow.Children().Append(_pauseBtn);
+            }
 
             // Stack the compact actions row directly below the top (title + launch) row.
             toolbarCol.Children().Append(bar);
@@ -1012,7 +1031,7 @@ namespace winrt::TerminalApp::implementation
             _UpdateBoardSortButton();
             // Agentmaster: a refresh button AFTER the sort toggle — the twin of the Explorer Tree's
             // _treeRefreshBtn. Re-scans + redraws the ENTIRE tab: _Refresh() rebuilds the board, tree
-            // AND flight plan (recomputing the live "ago" timing), and _refreshHandler forces the
+            // AND auto testing (recomputing the live "ago" timing), and _refreshHandler forces the
             // Fleet Observer to re-survey NOW (re-enrich the registry + recompute the external census)
             // instead of waiting for the next tick. Same handler as the tree button by design.
             _boardRefreshBtn = Button{};
@@ -1021,7 +1040,7 @@ namespace winrt::TerminalApp::implementation
             _boardRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
             AgentSetTip(_boardRefreshBtn, L"Refresh now \x2014 re-scan and redraw the whole tab (also re-detects external sessions).");
             _boardRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
-                _Refresh(); // immediate redraw from current data (board + tree + flight plan; recomputes the "ago" timing)
+                _Refresh(); // immediate redraw from current data (board + tree + auto testing; recomputes the "ago" timing)
                 if (_refreshHandler)
                 {
                     _refreshHandler(); // page: wake the observer + re-probe -> fresh data lands shortly
@@ -1029,14 +1048,14 @@ namespace winrt::TerminalApp::implementation
             });
             header.Children().Append(_boardRefreshBtn);
             // Agentmaster: a "Clear" button right next to LOCAL/GLOBAL — deselect the current card/row
-            // (the Flight Plan then shows nothing-selected). Hidden while nothing is selected (kept in
+            // (the Auto Testing then shows nothing-selected). Hidden while nothing is selected (kept in
             // sync by _RebuildBoard, like "Show all"); shown once a session/external is selected.
             _clearSelBtn = Button{};
             _clearSelBtn.Content(winrt::box_value(L"Clear"));
             _clearSelBtn.FontSize(11);
             _clearSelBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _clearSelBtn.Visibility(Visibility::Collapsed); // nothing selected at build; _RebuildBoard syncs
-            AgentSetTip(_clearSelBtn, L"Deselect the current card / row \x2014 nothing stays selected and the Flight Plan empties.");
+            AgentSetTip(_clearSelBtn, L"Deselect the current card / row \x2014 nothing stays selected and the Auto Testing empties.");
             _clearSelBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ClearSelection(); });
             header.Children().Append(_clearSelBtn);
             // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
@@ -1075,7 +1094,7 @@ namespace winrt::TerminalApp::implementation
             _root.Children().Append(b);
         }
 
-        // ---- Bottom: Explorer Tree | Flight Plan (row 3) ----
+        // ---- Bottom: Explorer Tree | Auto Testing (row 3) ----
         {
             auto bottom = Grid{};
             // Columns: tree (★) · splitter (auto) · plan (★). The two ★ cols are seeded from
@@ -1155,7 +1174,7 @@ namespace winrt::TerminalApp::implementation
                 bottom.Children().Append(b);
             }
 
-            // Flight Plan
+            // Auto Testing
             {
                 auto outer = Grid{};
                 outer.RowDefinitions().Append(autoRow()); // header
@@ -1180,8 +1199,8 @@ namespace winrt::TerminalApp::implementation
                 auto actions = StackPanel{};
                 actions.Spacing(6);
 
-                // Autopilot mode now lives as a toggle in the FLIGHT PLAN header (Agentmaster) —
-                // _autopilotBtn / _CycleAutopilot / _UpdateAutopilotButton, mirroring the EXPLORER
+                // Autorunner mode now lives as a toggle in the FLIGHT PLAN header (Agentmaster) —
+                // _autorunnerBtn / _CycleAutorunner / _UpdateAutorunnerButton, mirroring the EXPLORER
                 // TREE LOCAL/GLOBAL toggle but acting on the selected session. (No combo here.)
 
                 // Compose row (Agentmaster): the action icons stick to the TOP-LEFT and the prompt
@@ -1360,7 +1379,7 @@ namespace winrt::TerminalApp::implementation
                 // Templates row open/closed (Agentmaster). Kept inline (not a Flyout) so its
                 // TextBox keeps receiving keypresses — a text box in a popup/ContentDialog gets
                 // none in XAML Islands (see Gotchas).
-                auto paperBtn = mkIconBtn(L"Templates \x2014 save the current queue as a plan, or apply a saved one", fluentGlyph(L"\xE8A5"), [this]() {
+                auto paperBtn = mkIconBtn(L"Test Templates \x2014 save the current queue as a plan, or apply a saved one", fluentGlyph(L"\xE8A5"), [this]() {
                     if (_templatesRow)
                     {
                         _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
@@ -1390,13 +1409,13 @@ namespace winrt::TerminalApp::implementation
                 _templatesRow.Visibility(Visibility::Collapsed);
                 _templateNameBox = TextBox{};
                 _templateNameBox.Width(150);
-                _templateNameBox.PlaceholderText(L"template name");
-                AgentSetTip(_templateNameBox, L"Name to save the current queue under as a reusable template");
+                _templateNameBox.PlaceholderText(L"test template name");
+                AgentSetTip(_templateNameBox, L"Name to save the current queue under as a reusable test template");
                 _templatesRow.Children().Append(_templateNameBox);
-                _templatesRow.Children().Append(mkBtn(L"Save as template", L"Save the selected session's current queue as a reusable plan, under the name on the left", [this]() { _OnSaveTemplate(); }));
+                _templatesRow.Children().Append(mkBtn(L"Save as test template", L"Save the selected session's current queue as a reusable plan, under the name on the left", [this]() { _OnSaveTemplate(); }));
                 _templateCombo = ComboBox{};
                 _templateCombo.MinWidth(140);
-                AgentSetTip(_templateCombo, L"Pick a saved plan template to apply");
+                AgentSetTip(_templateCombo, L"Pick a saved test template to apply");
                 _templatesRow.Children().Append(_templateCombo);
                 _templatesRow.Children().Append(mkBtn(L"Apply", L"Append the selected template's prompts to this session's queue", [this]() { _OnApplyTemplate(false); }));
                 _templatesRow.Children().Append(mkBtn(L"Apply to dir", L"Append the selected template's prompts to EVERY session in this directory", [this]() { _OnApplyTemplate(true); }));
@@ -1406,23 +1425,23 @@ namespace winrt::TerminalApp::implementation
                 Grid::SetRow(actions, 2);
                 outer.Children().Append(actions);
 
-                // Top line (Agentmaster): a two-state [Summary | Flight Plan] segmented toggle that
+                // Top line (Agentmaster): a two-state [Summary | Auto Testing] segmented toggle that
                 // REPLACES the old "FLIGHT PLAN" label — a COMPACT pill split in two, only one half
                 // "checked" at a time. Both halves share ONE width (symmetric), sized to fit the LONGER
-                // label ("Flight Plan", measured in its bold/selected form so it never clips), and the
+                // label ("Auto Testing", measured in its bold/selected form so it never clips), and the
                 // pill is LEFT-aligned rather than stretched across the pane. The selected half is accent-
                 // filled (holds through hover/press via PaintHoldButton — the scope-toggle accent) + bold;
                 // the other reads as the inactive segment. Summary is the default and the choice is GLOBAL
-                // (AppSettings::flightPlanShowsSummary), so it persists + syncs across every window (see
+                // (AppSettings::autoTestingShowsSummary), so it persists + syncs across every window (see
                 // _SelectPlanPaneTab / _UpdatePlanPaneTab). The Summary tab is empty for now; the Flight
-                // Plan tab holds the existing pane (Autopilot + queue + compose box).
+                // Plan tab holds the existing pane (Autorunner + queue + compose box).
                 auto tabBar = Grid{};
                 tabBar.HorizontalAlignment(HorizontalAlignment::Left); // compact — size to the two segments, don't stretch the pane width
                 tabBar.ColumnDefinitions().Append(autoCol()); // Summary segment (fixed symmetric width)
-                tabBar.ColumnDefinitions().Append(autoCol()); // Flight Plan segment
+                tabBar.ColumnDefinitions().Append(autoCol()); // Auto Testing segment
                 // Symmetric segment width = the wider label's measured width (measure the SemiBold form —
                 // the selected state — so a bold label never clips) + horizontal padding + a little slack.
-                // Both segments take this one width, so "Summary" is simply padded out to match "Flight Plan".
+                // Both segments take this one width, so "Summary" is simply padded out to match "Auto Testing".
                 const double tabFont = 11.0;
                 const double tabHPad = 10.0;
                 const auto measureLabel = [tabFont](const winrt::hstring& s) -> double {
@@ -1434,7 +1453,7 @@ namespace winrt::TerminalApp::implementation
                     return static_cast<double>(t.DesiredSize().Width);
                 };
                 const double wSummary = measureLabel(L"Summary");
-                const double wFlight = measureLabel(L"Flight Plan");
+                const double wFlight = measureLabel(L"Auto Testing");
                 const double tabLabelW = wFlight > wSummary ? wFlight : wSummary;
                 const double tabSegW = (tabLabelW > 1.0 ? tabLabelW : 80.0) + tabHPad * 2 + 8.0; // + padding + slack (fallback if Measure runs pre-tree)
                 auto mkTabBtn = [&](const winrt::hstring& label, const winrt::hstring& tip, const CornerRadius& cr, bool summary) {
@@ -1450,41 +1469,41 @@ namespace winrt::TerminalApp::implementation
                     return btn;
                 };
                 _summaryTabBtn = mkTabBtn(L"Summary", L"Summary \x2014 a per-session overview (coming soon).", CornerRadius{ 6, 0, 0, 6 }, true);
-                _flightPlanTabBtn = mkTabBtn(L"Flight Plan", L"Flight Plan \x2014 the selected session's prompt queue, Autopilot, and compose box.", CornerRadius{ 0, 6, 6, 0 }, false);
+                _autoTestTabBtn = mkTabBtn(L"Auto Testing", L"Auto Testing \x2014 the selected session's prompt queue, Tests Autorunner, and compose box.", CornerRadius{ 0, 6, 6, 0 }, false);
                 Grid::SetColumn(_summaryTabBtn, 0);
                 tabBar.Children().Append(_summaryTabBtn);
-                Grid::SetColumn(_flightPlanTabBtn, 1);
-                tabBar.Children().Append(_flightPlanTabBtn);
+                Grid::SetColumn(_autoTestTabBtn, 1);
+                tabBar.Children().Append(_autoTestTabBtn);
 
-                // Flight Plan TAB body: a thin strip carrying the Autopilot toggle (relocated from the
+                // Auto Testing TAB body: a thin strip carrying the Autorunner toggle (relocated from the
                 // old header — mirrors the EXPLORER TREE toggle but acts on the SELECTED session; a colored
                 // state dot cycles Off -> Semi-auto -> Full, dim/disabled with no live session) over the
                 // existing prompt list / compose box (`outer`).
-                _autopilotBtn = Button{};
-                _autopilotBtn.FontSize(11);
-                _autopilotBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTip(_autopilotBtn, L"Autopilot for the selected session \x2014 click to cycle: Off (manual) \xB7 Semi-auto (you confirm each send) \xB7 Full (auto-send the queue when a turn completes).");
-                _autopilotBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutopilot(); });
-                _UpdateAutopilotButton(AutopilotMode::Off, false);
+                _autorunnerBtn = Button{};
+                _autorunnerBtn.FontSize(11);
+                _autorunnerBtn.Padding(Thickness{ 8, 1, 8, 1 });
+                AgentSetTip(_autorunnerBtn, L"Tests Autorunner for the selected session \x2014 click to cycle: Off (manual) \xB7 Semi-auto (you confirm each send) \xB7 Full (auto-send the queue when a turn completes).");
+                _autorunnerBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutorunner(); });
+                _UpdateAutorunnerButton(AutorunnerMode::Off, false);
                 auto apStrip = StackPanel{};
                 apStrip.Orientation(Orientation::Horizontal);
                 apStrip.HorizontalAlignment(HorizontalAlignment::Right);
                 apStrip.Margin(Thickness{ 0, 0, 0, 6 });
-                apStrip.Children().Append(_autopilotBtn);
+                apStrip.Children().Append(_autorunnerBtn);
 
-                _flightPlanBody = Grid{};
-                _flightPlanBody.RowDefinitions().Append(autoRow()); // 0: Autopilot strip
-                _flightPlanBody.RowDefinitions().Append(starRow(1)); // 1: the existing body (`outer`)
+                _autoTestBody = Grid{};
+                _autoTestBody.RowDefinitions().Append(autoRow()); // 0: Autorunner strip
+                _autoTestBody.RowDefinitions().Append(starRow(1)); // 1: the existing body (`outer`)
                 Grid::SetRow(apStrip, 0);
-                _flightPlanBody.Children().Append(apStrip);
+                _autoTestBody.Children().Append(apStrip);
                 Grid::SetRow(outer, 1);
-                _flightPlanBody.Children().Append(outer);
+                _autoTestBody.Children().Append(outer);
 
                 // Summary TAB body (Agentmaster): the SAME session-summary box the Sessions page + the
                 // per-tab overlay render (RenderSessionSummaryBox), shown for the selected managed Claude
                 // session — analyzed off-thread + cached (see _RefreshSummaryTab / _LoadSummaryForSession),
                 // user MESSAGES reversed to newest-first, and the WHOLE box inside ONE inner ScrollViewer
-                // so the narrow Flight-Plan pane scrolls a long summary instead of clipping it.
+                // so the narrow Auto-Testing pane scrolls a long summary instead of clipping it.
                 _summaryHost = Grid{};
                 _summaryBoxHost = StackPanel{};
                 _summaryBoxHost.Spacing(0); // the rendered box manages its own spacing (mono TextBlocks + rules)
@@ -1501,13 +1520,21 @@ namespace winrt::TerminalApp::implementation
                 // Both tab bodies share one grid cell; _UpdatePlanPaneTab toggles which is Visible.
                 auto contentArea = Grid{};
                 contentArea.Children().Append(_summaryHost);
-                contentArea.Children().Append(_flightPlanBody);
+                contentArea.Children().Append(_autoTestBody);
 
                 auto wrap = Grid{};
-                wrap.RowDefinitions().Append(autoRow()); // 0: the [Summary | Flight Plan] toggle
+                wrap.RowDefinitions().Append(autoRow()); // 0: the [Summary | Auto Testing] toggle (dev only)
                 wrap.RowDefinitions().Append(starRow(1)); // 1: the selected tab's body
-                Grid::SetRow(tabBar, 0);
-                wrap.Children().Append(tabBar);
+                // Auto Testing is a DEV-ONLY feature: the [Summary | Auto Testing] toggle is shown ONLY
+                // under the AgentmasterDev package. In a RELEASE install this pane is the read-only
+                // Summary view only — SetSettings/ApplyExternalSettings force autoTestingShowsSummary=true,
+                // so _UpdatePlanPaneTab keeps the Summary body visible and collapses _autoTestBody (which
+                // is still built so all members stay non-null and the methods are no-ops).
+                if (::Agentmaster::Profiles::IsDevPackage())
+                {
+                    Grid::SetRow(tabBar, 0);
+                    wrap.Children().Append(tabBar);
+                }
                 Grid::SetRow(contentArea, 1);
                 wrap.Children().Append(contentArea);
 
@@ -1518,7 +1545,7 @@ namespace winrt::TerminalApp::implementation
                 bottom.Children().Append(b);
             }
 
-            // Vertical splitter between Tree and Flight Plan (drag = resize ↔).
+            // Vertical splitter between Tree and Auto Testing (drag = resize ↔).
             {
                 auto vbar = _MakeSplitter(true);
                 Grid::SetColumn(vbar, 1);

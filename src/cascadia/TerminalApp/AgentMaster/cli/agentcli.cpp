@@ -49,7 +49,7 @@ namespace json = Agentmaster::json;
 
 namespace
 {
-    constexpr int kSchemaVersion = 1;
+    constexpr int kSchemaVersion = 2; // v2: keys renamed in the Auto Testing rename (autopilot->autorunner, autopilotDetail->autorunnerDetail, flightPlan->autoTesting)
     constexpr size_t kTailBytes = 131072; // transcript tail read for state + last reply (~128 KiB)
 
     // ===== output (UTF-8 to stdout) =========================================================
@@ -636,7 +636,7 @@ namespace
         return arr;
     }
 
-    json::Value JAutopilot(const AutopilotState& a)
+    json::Value JAutorunner(const AutorunnerState& a)
     {
         auto o = json::Value::MkObj();
         o.Set(L"mode", json::Value::MkStr(ToString(a.mode)));
@@ -751,7 +751,7 @@ namespace
                 o.Set(L"permissionMode", json::Value::MkStr(lc->facts.permissionMode));
             }
         }
-        o.Set(L"autopilot", json::Value::MkStr(ToString(s.autopilot.mode)));
+        o.Set(L"autorunner", json::Value::MkStr(ToString(s.autorunner.mode)));
         // queue counts
         {
             int pending = 0, sent = 0, held = 0;
@@ -785,8 +785,8 @@ namespace
 
         if (full)
         {
-            o.Set(L"autopilotDetail", JAutopilot(s.autopilot));
-            o.Set(L"flightPlan", JQueue(s.queue));
+            o.Set(L"autorunnerDetail", JAutorunner(s.autorunner));
+            o.Set(L"autoTesting", JQueue(s.queue));
             if (!ds.lastAssistant.empty())
             {
                 o.Set(L"lastAssistantReply", json::Value::MkStr(ds.lastAssistant));
@@ -1450,7 +1450,7 @@ namespace
               (js.Find(L"pid") ? L"   pid=" + std::to_wstring(js.U32At(L"pid")) : L"") +
               (js.Find(L"model") ? L"   " + js.StrAt(L"model") : L"") +
               (js.Find(L"effort") ? L" · " + js.StrAt(L"effort") : L""));
-        OutLn(L"  autopilot: " + js.StrAt(L"autopilot"));
+        OutLn(L"  autorunner: " + js.StrAt(L"autorunner"));
         if (const auto* t = js.Find(L"timing"))
         {
             OutLn(L"  timing:    created " + t->StrAt(L"createdAgo") + L" ago · last activity " + t->StrAt(L"lastActivityAgo") + L" ago");
@@ -1489,8 +1489,8 @@ namespace
             OutLn(L"    " + js.StrAt(L"recap")); // FULL recap — never truncated
         }
 
-        // flight plan
-        if (const auto* fp = js.Find(L"flightPlan"); fp && !fp->arr.empty())
+        // auto testing
+        if (const auto* fp = js.Find(L"autoTesting"); fp && !fp->arr.empty())
         {
             OutLn(L"");
             OutLn(L"  FLIGHT PLAN");

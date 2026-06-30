@@ -8,7 +8,7 @@
 // share AgentTabOverlay.Internal.h.
 //
 // Partial files in this group (★ marks THIS file):
-//   AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autopilot
+//   AgentTabOverlay.cpp          - CORE: ctor/dtor, Initialize/_Detach, ShowActivity (the observe badge), _Refresh (the linked badge), hover/expand, opacities, Autorunner
 // ★ AgentTabOverlay.Internal.h   - shared file-local helpers: StateColor/Glyph/Label, the summary-box renderers, time formatting, launch-CLI + clipboard (anonymous namespace, a per-TU copy)
 //   AgentTabOverlay.Actions.cpp  - the hover action row: the folder (Open Path) button, the copy menu, and the shared CopySessionField action
 //   AgentTabOverlay.Summary.cpp  - the pencil-toggled summary panel: build/render/load off-thread, the times bar, resize grips, wrap/truncate/previous, JUMP, copy-summary
@@ -149,15 +149,15 @@ namespace
         }
     }
 
-    const wchar_t* ModeLabel(AutopilotMode m)
+    const wchar_t* ModeLabel(AutorunnerMode m)
     {
         switch (m)
         {
-        case AutopilotMode::SemiAuto:
+        case AutorunnerMode::SemiAuto:
             return L"Semi";
-        case AutopilotMode::Full:
+        case AutorunnerMode::Full:
             return L"Full";
-        case AutopilotMode::Off:
+        case AutorunnerMode::Off:
         default:
             return L"Off";
         }

@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,7 +13,7 @@
 //   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 // ★ AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-//   AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 //   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
@@ -29,7 +29,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 
@@ -538,8 +538,8 @@ namespace winrt::TerminalApp::implementation
         // The six group panels (built empty; filled by the sections below, in this label order).
         auto sessionsPanel = StackPanel{};
         sessionsPanel.Spacing(10);
-        auto autopilotPanel = StackPanel{};
-        autopilotPanel.Spacing(10);
+        auto autorunnerPanel = StackPanel{};
+        autorunnerPanel.Spacing(10);
         auto behaviorPanel = StackPanel{};
         behaviorPanel.Spacing(10);
         auto tabsPanel = StackPanel{};
@@ -752,29 +752,29 @@ namespace winrt::TerminalApp::implementation
             panel.Children().Append(browse);
         }
 
-        // === AUTOPILOT tab ===
-        panel = autopilotPanel;
-        // AUTOPILOT
-        panel.Children().Append(Text(L"AUTOPILOT (defaults for new sessions)", 11, true, 0.6));
+        // === TESTS AUTORUNNER tab ===
+        panel = autorunnerPanel;
+        // TESTS AUTORUNNER
+        panel.Children().Append(Text(L"TESTS AUTORUNNER (defaults for new sessions)", 11, true, 0.6));
         _setDefaultMode = ComboBox{};
         _setDefaultMode.Header(winrt::box_value(L"New-session mode"));
         _setDefaultMode.Items().Append(winrt::box_value(L"Off"));
         _setDefaultMode.Items().Append(winrt::box_value(L"SemiAuto"));
         _setDefaultMode.Items().Append(winrt::box_value(L"Full"));
-        AgentSetTip(_setDefaultMode, L"Autopilot mode each new session starts in \x2014 Off (manual) \xB7 SemiAuto (you confirm each send) \xB7 Full (auto-send the queue on turn-complete). Per-session, changeable from the Flight Plan.");
+        AgentSetTip(_setDefaultMode, L"Tests Autorunner mode each new session starts in \x2014 Off (manual) \xB7 SemiAuto (you confirm each send) \xB7 Full (auto-send the queue on turn-complete). Per-session, changeable from the Auto Testing pane.");
         panel.Children().Append(_setDefaultMode);
         _setMaxAutoSends = TextBox{};
         _setMaxAutoSends.Header(winrt::box_value(L"Max auto-sends per run"));
         _setMaxAutoSends.PlaceholderText(L"100");
-        AgentSetTip(_setMaxAutoSends, L"Backstop cap on how many prompts Autopilot may auto-send in one run before stopping. Blank or 0 resets to 100.");
+        AgentSetTip(_setMaxAutoSends, L"Backstop cap on how many prompts Tests Autorunner may auto-send in one run before stopping. Blank or 0 resets to 100.");
         panel.Children().Append(_setMaxAutoSends);
         _setStopOnError = ToggleSwitch{};
         _setStopOnError.Header(winrt::box_value(L"Stop on error"));
-        AgentSetTip(_setStopOnError, L"When on, Autopilot halts a session's queue as soon as it enters the Error state instead of sending the next prompt.");
+        AgentSetTip(_setStopOnError, L"When on, Tests Autorunner halts a session's queue as soon as it enters the Error state instead of sending the next prompt.");
         panel.Children().Append(_setStopOnError);
         _setPauseOnHuman = ToggleSwitch{};
         _setPauseOnHuman.Header(winrt::box_value(L"Pause on human input"));
-        AgentSetTip(_setPauseOnHuman, L"When on, typing into a session's terminal yourself pauses its Autopilot so a manual interruption isn't overwritten by the next queued send.");
+        AgentSetTip(_setPauseOnHuman, L"When on, typing into a session's terminal yourself pauses its Tests Autorunner so a manual interruption isn't overwritten by the next queued send.");
         panel.Children().Append(_setPauseOnHuman);
 
         // === BEHAVIOR tab ===
@@ -1363,7 +1363,13 @@ namespace winrt::TerminalApp::implementation
         // (title -> tabs -> divider -> content -> Save/Cancel). _SwitchSettingsTab(0) below swaps the
         // Sessions panel into the scroller.
         addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
-        addSettingsTab(L"Autopilot", L"Autopilot defaults stamped onto every new session \x2014 the starting mode and its backstops.", autopilotPanel);
+        // Auto Testing is a DEV-ONLY feature: the Tests Autorunner defaults tab is added only under the
+        // AgentmasterDev package (the autorunner never runs in a release build — see Engine.cpp). The
+        // panel is still built above so the cog's load/save code paths stay uniform; it's just not shown.
+        if (::Agentmaster::Profiles::IsDevPackage())
+        {
+            addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
+        }
         addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
         addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
@@ -1473,8 +1479,8 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setDefaultMode)
         {
-            _setDefaultMode.SelectedIndex(_appSettings.defaultAutopilotMode == AutopilotMode::Full ? 2 :
-                                          _appSettings.defaultAutopilotMode == AutopilotMode::SemiAuto ? 1 :
+            _setDefaultMode.SelectedIndex(_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? 2 :
+                                          _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? 1 :
                                                                                                          0);
         }
         if (_setMaxAutoSends)
@@ -1759,8 +1765,8 @@ namespace winrt::TerminalApp::implementation
         if (_setDefaultMode)
         {
             const int idx = _setDefaultMode.SelectedIndex();
-            _appSettings.defaultAutopilotMode = idx == 2 ? AutopilotMode::Full : idx == 1 ? AutopilotMode::SemiAuto :
-                                                                                            AutopilotMode::Off;
+            _appSettings.defaultAutorunnerMode = idx == 2 ? AutorunnerMode::Full : idx == 1 ? AutorunnerMode::SemiAuto :
+                                                                                            AutorunnerMode::Off;
         }
         if (_setMaxAutoSends)
         {
@@ -1921,7 +1927,7 @@ namespace winrt::TerminalApp::implementation
             // settings.json, the durable record).
             ::Agentmaster::LogNav(std::wstring{ L"settings-save skipPerms=" } + (_appSettings.skipPermissions ? L"1" : L"0") +
                                   L" model=" + (_appSettings.model.empty() ? std::wstring{ L"(default)" } : _appSettings.model) +
-                                  L" autopilot=" + (_appSettings.defaultAutopilotMode == AutopilotMode::Full ? L"Full" : _appSettings.defaultAutopilotMode == AutopilotMode::SemiAuto ? L"Semi" : L"Off") +
+                                  L" autorunner=" + (_appSettings.defaultAutorunnerMode == AutorunnerMode::Full ? L"Full" : _appSettings.defaultAutorunnerMode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off") +
                                   L" claudeExe=" + (_appSettings.claudeExePath.empty() ? std::wstring{ L"(auto)" } : _appSettings.claudeExePath));
             _settingsSink(_appSettings); // page persists + applies to future spawns
         }

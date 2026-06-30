@@ -361,17 +361,17 @@ namespace Agentmaster
                 s.lastMessageWasQuestion = msg.lastMessageIsQuestion;
             }
 
-            // The Flight Plan reflects EVERY message a session received. A UserPromptSubmit is
+            // The Auto Testing reflects EVERY message a session received. A UserPromptSubmit is
             // either the echo of a prompt WE just injected (suppress it — it is already in the
             // queue as Sent), or a prompt the human typed straight into the ConPTY (record it
-            // as a Sent/Typed entry so the Flight Plan's "sent" summary is complete).
+            // as a Sent/Typed entry so the Auto Testing's "sent" summary is complete).
             if (msg.event == HookEvent::UserPromptSubmit && !msg.promptText.empty())
             {
                 const int64_t now = NowMs();
                 bool isEcho = false;
                 for (auto& p : s.queue)
                 {
-                    if (p.origin == PromptOrigin::Flight && p.status == PromptStatus::Sent && !p.echoed &&
+                    if (p.origin == PromptOrigin::Autorun && p.status == PromptStatus::Sent && !p.echoed &&
                         p.text == msg.promptText && p.sentAtUnixMs != 0 && (now - p.sentAtUnixMs) >= 0 &&
                         (now - p.sentAtUnixMs) < kEchoWindowMs)
                     {
@@ -397,7 +397,7 @@ namespace Agentmaster
 
             snapshot = s;
             found = true;
-            // Only a clean turn-complete advances the Flight Plan (Correctness Rule #1). The
+            // Only a clean turn-complete advances the Auto Testing (Correctness Rule #1). The
             // ordered machine narrows this further: a Stop consumed by a queued type-ahead
             // prompt stays Running (the next turn is already starting — injecting now would
             // interleave), and a STALE Stop must not re-fire an advance for a turn that

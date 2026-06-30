@@ -46,11 +46,11 @@ void TestPersistence()
 
     // enum round-trips.
     CHECK(SessionStateFromString(ToString(SessionState::NeedsApproval)) == SessionState::NeedsApproval, "state enum round-trip");
-    CHECK(AutopilotModeFromString(ToString(AutopilotMode::SemiAuto)) == AutopilotMode::SemiAuto, "mode enum round-trip");
+    CHECK(AutorunnerModeFromString(ToString(AutorunnerMode::SemiAuto)) == AutorunnerMode::SemiAuto, "mode enum round-trip");
     CHECK(PromptStatusFromString(ToString(PromptStatus::Held)) == PromptStatus::Held, "status enum round-trip");
     CHECK(PromptGateFromString(ToString(PromptGate::Manual)) == PromptGate::Manual, "gate enum round-trip");
 
-    // Session round-trip (queue + autopilot preserved, incl. Sent status — no replay).
+    // Session round-trip (queue + autorunner preserved, incl. Sent status — no replay).
     {
         SessionInfo s;
         s.id = L"sid-1";
@@ -74,12 +74,12 @@ void TestPersistence()
         b.gate = PromptGate::Manual;
         b.guardPattern = L"answers-a-question:ok";
         s.queue = { a, b };
-        s.autopilot.mode = AutopilotMode::Full;
-        s.autopilot.throttleMs = 750;
-        s.autopilot.stopOnError = false;
-        s.autopilot.maxAutoSends = 7;
-        s.autopilot.approval.pauseForHuman = false;
-        s.autopilot.approval.autoApproveTools = { L"Read", L"Bash(git *)" };
+        s.autorunner.mode = AutorunnerMode::Full;
+        s.autorunner.throttleMs = 750;
+        s.autorunner.stopOnError = false;
+        s.autorunner.maxAutoSends = 7;
+        s.autorunner.approval.pauseForHuman = false;
+        s.autorunner.approval.autoApproveTools = { L"Read", L"Bash(git *)" };
 
         const auto text = SerializeSessions({ s });
         const auto back = DeserializeSessions(text);
@@ -93,10 +93,10 @@ void TestPersistence()
             CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
-            CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Flight, "prompt origin preserved (Typed vs Flight)");
+            CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Autorun, "prompt origin preserved (Typed vs Flight)");
             CHECK(r.queue.size() == 2 && r.queue[1].gate == PromptGate::Manual && r.queue[1].guardPattern == L"answers-a-question:ok", "prompt gate+guard preserved");
-            CHECK(r.autopilot.mode == AutopilotMode::Full && r.autopilot.throttleMs == 750 && !r.autopilot.stopOnError && r.autopilot.maxAutoSends == 7, "autopilot preserved");
-            CHECK(!r.autopilot.approval.pauseForHuman && r.autopilot.approval.autoApproveTools.size() == 2, "approval policy preserved");
+            CHECK(r.autorunner.mode == AutorunnerMode::Full && r.autorunner.throttleMs == 750 && !r.autorunner.stopOnError && r.autorunner.maxAutoSends == 7, "autorunner preserved");
+            CHECK(!r.autorunner.approval.pauseForHuman && r.autorunner.approval.autoApproveTools.size() == 2, "approval policy preserved");
         }
     }
 
@@ -330,7 +330,7 @@ void TestAppSettings()
         in.skipPermissions = false;
         in.model = L"opus";
         in.includeCoAuthoredBy = false;
-        in.defaultAutopilotMode = AutopilotMode::Full;
+        in.defaultAutorunnerMode = AutorunnerMode::Full;
         in.maxAutoSends = 7;
         in.stopOnError = false;
         in.pauseOnHumanInput = false;
@@ -353,14 +353,14 @@ void TestAppSettings()
         in.serverCacheMinutes = 17; // non-default (default 5) — the ⚡ "still cached" window
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
         in.boardSort = ExplorerSort::Newest; // non-default (default MostActive) — Triage Board sort
-        in.flightPlanShowsSummary = false; // non-default (default true = Summary) — Manager Flight-Plan pane tab
+        in.autoTestingShowsSummary = false; // non-default (default true = Summary) — Manager Auto-Testing pane tab
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
         CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
         CHECK(out.model == L"opus", "settings model round-trip");
         CHECK(out.includeCoAuthoredBy == false, "settings includeCoAuthoredBy round-trip");
-        CHECK(out.defaultAutopilotMode == AutopilotMode::Full, "settings defaultAutopilotMode round-trip");
+        CHECK(out.defaultAutorunnerMode == AutorunnerMode::Full, "settings defaultAutorunnerMode round-trip");
         CHECK(out.maxAutoSends == 7u, "settings maxAutoSends round-trip");
         CHECK(out.stopOnError == false, "settings stopOnError round-trip");
         CHECK(out.pauseOnHumanInput == false, "settings pauseOnHumanInput round-trip");
@@ -382,7 +382,7 @@ void TestAppSettings()
         CHECK(out.serverCacheMinutes == 17u, "settings serverCacheMinutes round-trip");
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
         CHECK(out.boardSort == ExplorerSort::Newest, "settings boardSort round-trip");
-        CHECK(out.flightPlanShowsSummary == false, "settings flightPlanShowsSummary round-trip");
+        CHECK(out.autoTestingShowsSummary == false, "settings autoTestingShowsSummary round-trip");
         CHECK(out.hiddenSessionIds.size() == 2 &&
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
                   out.hiddenSessionIds[1] == L"22222222-2222-2222-2222-222222222222",
@@ -393,7 +393,7 @@ void TestAppSettings()
     {
         const auto out = DeserializeAppSettings(L"");
         CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
-        CHECK(out.defaultAutopilotMode == AutopilotMode::Full && out.maxAutoSends == 100u, "settings autopilot default Full on empty");
+        CHECK(out.defaultAutorunnerMode == AutorunnerMode::Full && out.maxAutoSends == 100u, "settings autorunner default Full on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");
         CHECK(out.summaryPanelWrapNewlines == false, "settings summaryPanelWrapNewlines default false (literal-\\n look) on empty");
@@ -409,7 +409,7 @@ void TestAppSettings()
         CHECK(out.pendingDotsDarkColor == L"#FF5A3E00", "settings pendingDotsDarkColor default (amber, on light) on empty");
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
-        CHECK(out.flightPlanShowsSummary == true, "settings flightPlanShowsSummary default (Summary) on empty");
+        CHECK(out.autoTestingShowsSummary == true, "settings autoTestingShowsSummary default (Summary) on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");

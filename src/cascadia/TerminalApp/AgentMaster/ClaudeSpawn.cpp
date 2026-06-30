@@ -268,7 +268,7 @@ try {
   if ($j -ne $null) {
     if ($j.cwd) { $cwd = [string]$j.cwd }
     if ($j.tool_name) { $tool = [string]$j.tool_name }
-    # The submitted prompt text, so the Manager's Flight Plan reflects EVERY message the
+    # The submitted prompt text, so the Manager's Auto Testing reflects EVERY message the
     # session got (including ones typed straight into this terminal). Escaped to keep the
     # wire record single-line + TAB-free (mirrors HookWire.h WireEscape): \ -> \\ then tab/CR/LF.
     if ($Event -eq "UserPromptSubmit" -and $j.prompt) {
@@ -389,7 +389,7 @@ try {
     std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
-        // the app drives claude programmatically (Autopilot + injected prompts) and gates risky
+        // the app drives claude programmatically (Autorunner + injected prompts) and gates risky
         // actions through its own Approval Policy, so the per-tool permission prompts are
         // redundant. Critically, permission mode `bypassPermissions` ALSO skips the per-folder
         // "Do you trust the files in this folder?" trust dialog at startup (the dialog block is
@@ -655,7 +655,7 @@ try {
 
     // Agentmaster: a local-time [HH:MM:SS.mmm] stamp prefixed to the START of every log record (below), so
     // the hook event stream / engine-mechanism tags / [nav] trail / observer census in hooks.log (and the
-    // autopilot/scanner logs) are all time-ordered — turn time, Enter-retry gaps, observer lag, and the
+    // autorunner/scanner logs) are all time-ordered — turn time, Enter-retry gaps, observer lag, and the
     // span between a [nav] begin and its end read straight off the log. LOCAL time (the user's wall clock)
     // so it lines up with what they saw on screen. (Closes the documented "no timestamp" Known gap.)
     static std::wstring LogTimestampPrefix()

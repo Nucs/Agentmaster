@@ -176,26 +176,26 @@ namespace Agentmaster
         return SessionState::Idle;
     }
 
-    std::wstring ToString(AutopilotMode m)
+    std::wstring ToString(AutorunnerMode m)
     {
         switch (m)
         {
-        case AutopilotMode::SemiAuto:
+        case AutorunnerMode::SemiAuto:
             return L"SemiAuto";
-        case AutopilotMode::Full:
+        case AutorunnerMode::Full:
             return L"Full";
-        case AutopilotMode::Off:
+        case AutorunnerMode::Off:
         default:
             return L"Off";
         }
     }
-    AutopilotMode AutopilotModeFromString(std::wstring_view s)
+    AutorunnerMode AutorunnerModeFromString(std::wstring_view s)
     {
         if (s == L"SemiAuto")
-            return AutopilotMode::SemiAuto;
+            return AutorunnerMode::SemiAuto;
         if (s == L"Full")
-            return AutopilotMode::Full;
-        return AutopilotMode::Off;
+            return AutorunnerMode::Full;
+        return AutorunnerMode::Off;
     }
 
     std::wstring ToString(ExplorerSort s)
@@ -322,11 +322,13 @@ namespace Agentmaster
 
     std::wstring ToString(PromptOrigin o)
     {
-        return o == PromptOrigin::Typed ? L"Typed" : L"Flight";
+        // "Autorun" (was "Flight" before the Auto Testing rename); PromptOriginFromString maps any
+        // non-"Typed" value — including a pre-rename "Flight" — back to Autorun, so old files still read.
+        return o == PromptOrigin::Typed ? L"Typed" : L"Autorun";
     }
     PromptOrigin PromptOriginFromString(std::wstring_view s)
     {
-        return s == L"Typed" ? PromptOrigin::Typed : PromptOrigin::Flight;
+        return s == L"Typed" ? PromptOrigin::Typed : PromptOrigin::Autorun;
     }
 
     // ---- struct <-> json ----
@@ -369,13 +371,13 @@ namespace Agentmaster
         p.attempts = v.U32At(L"attempts");
         p.maxAttempts = v.U32At(L"maxAttempts", 1);
         p.sentAtUnixMs = v.I64At(L"sentAtUnixMs");
-        p.origin = PromptOriginFromString(v.StrAt(L"origin", L"Flight"));
+        p.origin = PromptOriginFromString(v.StrAt(L"origin", L"Autorun"));
         // `echoed` is transient (not persisted): a reloaded Sent prompt's echo already
         // happened in a past run; the recency window stops it from matching a fresh message.
         return p;
     }
 
-    json::Value ToJson(const AutopilotState& a)
+    json::Value ToJson(const AutorunnerState& a)
     {
         auto o = json::Value::MkObj();
         o.Set(L"mode", json::Value::MkStr(ToString(a.mode)));
@@ -395,10 +397,10 @@ namespace Agentmaster
         return o;
     }
 
-    AutopilotState AutopilotFromJson(const json::Value& v)
+    AutorunnerState AutorunnerFromJson(const json::Value& v)
     {
-        AutopilotState a;
-        a.mode = AutopilotModeFromString(v.StrAt(L"mode", L"Off"));
+        AutorunnerState a;
+        a.mode = AutorunnerModeFromString(v.StrAt(L"mode", L"Off"));
         a.throttleMs = v.U32At(L"throttleMs", 500);
         a.stopOnError = v.BoolAt(L"stopOnError", true);
         a.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);
@@ -453,7 +455,7 @@ namespace Agentmaster
             q.Push(ToJson(p));
         }
         o.Set(L"queue", std::move(q));
-        o.Set(L"autopilot", ToJson(s.autopilot));
+        o.Set(L"autorunner", ToJson(s.autorunner));
         return o;
     }
 
@@ -477,9 +479,17 @@ namespace Agentmaster
                 s.queue.push_back(PromptFromJson(pv));
             }
         }
-        if (const auto* a = v.Find(L"autopilot"); a && a->type == json::Value::Type::Obj)
+        // MIGRATION: the per-session block was renamed "autopilot" -> "autorunner" (Autopilot ->
+        // Tests Autorunner). Read the old key when the new one is absent so a pre-rename sessions.json
+        // keeps each session's mode + backstops.
+        const auto* a = v.Find(L"autorunner");
+        if (!a)
         {
-            s.autopilot = AutopilotFromJson(*a);
+            a = v.Find(L"autopilot");
+        }
+        if (a && a->type == json::Value::Type::Obj)
+        {
+            s.autorunner = AutorunnerFromJson(*a);
         }
         return s;
     }
@@ -519,7 +529,7 @@ namespace Agentmaster
         o.Set(L"includeCoAuthoredBy", json::Value::MkBool(s.includeCoAuthoredBy));
         o.Set(L"env", json::Value::MkStr(s.env));
         o.Set(L"claudeExePath", json::Value::MkStr(s.claudeExePath));
-        o.Set(L"defaultAutopilotMode", json::Value::MkStr(ToString(s.defaultAutopilotMode)));
+        o.Set(L"defaultAutorunnerMode", json::Value::MkStr(ToString(s.defaultAutorunnerMode)));
         o.Set(L"maxAutoSends", json::Value::MkNum(s.maxAutoSends));
         o.Set(L"stopOnError", json::Value::MkBool(s.stopOnError));
         o.Set(L"pauseOnHumanInput", json::Value::MkBool(s.pauseOnHumanInput));
@@ -545,7 +555,7 @@ namespace Agentmaster
         o.Set(L"summaryPanelShowPrevious", json::Value::MkBool(s.summaryPanelShowPrevious));
         o.Set(L"treeSort", json::Value::MkStr(ToString(s.treeSort)));
         o.Set(L"boardSort", json::Value::MkStr(ToString(s.boardSort)));
-        o.Set(L"flightPlanShowsSummary", json::Value::MkBool(s.flightPlanShowsSummary));
+        o.Set(L"autoTestingShowsSummary", json::Value::MkBool(s.autoTestingShowsSummary));
         o.Set(L"archiveSplitFraction", json::Value::MkNum(s.archiveSplitFraction));
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
@@ -572,8 +582,12 @@ namespace Agentmaster
         s.env = v.StrAt(L"env");
         s.claudeExePath = v.StrAt(L"claudeExePath");
         // Default Full (Agentmaster): a missing field => Full, matching the struct default so an
-        // older / absent settings.json also opts every new/opened session into Autopilot.
-        s.defaultAutopilotMode = AutopilotModeFromString(v.StrAt(L"defaultAutopilotMode", L"Full"));
+        // older / absent settings.json also opts every new/opened session into Autorunner.
+        // MIGRATION: renamed from "defaultAutopilotMode" (Autopilot -> Tests Autorunner). Fall back
+        // to the old key when the new one is absent so a pre-rename stored default survives.
+        s.defaultAutorunnerMode = AutorunnerModeFromString(
+            v.Find(L"defaultAutorunnerMode") ? v.StrAt(L"defaultAutorunnerMode", L"Full") :
+                                               v.StrAt(L"defaultAutopilotMode", L"Full"));
         s.maxAutoSends = v.U32At(L"maxAutoSends", 100);
         s.stopOnError = v.BoolAt(L"stopOnError", true);
         s.pauseOnHumanInput = v.BoolAt(L"pauseOnHumanInput", true);
@@ -632,8 +646,12 @@ namespace Agentmaster
         // (most-recently-active first). A stored "pid" would deserialize fine but the board never
         // produces it (its cycle skips ByPid), so it can only arrive via a hand-edit.
         s.boardSort = ExplorerSortFromString(v.StrAt(L"boardSort", L"active"));
-        // Manager Flight-Plan pane tab (Agentmaster): absent => Summary (true), the default tab.
-        s.flightPlanShowsSummary = v.BoolAt(L"flightPlanShowsSummary", true);
+        // Manager Auto-Testing pane tab (Agentmaster): absent => Summary (true), the default tab.
+        // MIGRATION: renamed from "flightPlanShowsSummary" (Flight Plan -> Auto Testing). Fall back
+        // to the old key when the new one is absent so a pre-rename choice survives.
+        s.autoTestingShowsSummary = v.Find(L"autoTestingShowsSummary") ?
+                                        v.BoolAt(L"autoTestingShowsSummary", true) :
+                                        v.BoolAt(L"flightPlanShowsSummary", true);
         {
             // Same sane-band clamp as the Manager layout fractions — a corrupt/extreme value
             // must not collapse a pane (fall back to the 50/50 default instead).

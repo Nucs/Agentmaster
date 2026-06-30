@@ -226,7 +226,7 @@ namespace Agentmaster
         // (a new recap can only appear on growth), so an idle external costs zero content reads. ""
         // until/unless an away_summary is in the tail; "empty never clears" a captured recap. Surfaced
         // read-only on the External card (hover), the EXTERNAL tree row (hover), and the read-only
-        // Flight Plan — mirroring where a managed session shows its recap.
+        // Auto Testing — mirroring where a managed session shows its recap.
         std::wstring recap;
         RunningApp host{ RunningApp::WindowsTerminal }; // WindowsTerminal == WT-hosted; Other == cmd / bare console
         std::wstring hostImage; // the host shell leaf for an Other host ("cmd.exe", "pwsh.exe", ...); empty for WT

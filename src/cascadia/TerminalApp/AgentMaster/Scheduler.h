@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — the Autopilot scheduler (DESIGN §10, HOOKS.md tryAdvance). It advances a
-// session's Flight Plan when the session reaches turn-complete (a clean Stop ->
+// Agentmaster — the Autorunner scheduler (DESIGN §10, HOOKS.md tryAdvance). It advances a
+// session's Auto Testing when the session reaches turn-complete (a clean Stop ->
 // WaitingForInput, surfaced via SessionRegistry's advance seam), honoring the correctness
 // rules and backstops.
 //
@@ -45,7 +45,7 @@ namespace Agentmaster
     // The scheduler watches every just-sent Flight prompt; if the turn has not started within
     // kEnterRetryFirstMs (then kEnterRetryIntervalMs for later presses) it re-presses a LONE Enter
     // (never the text again — that would duplicate it), up to kEnterRetryMax extra presses, then gives
-    // up: the prompt is marked Failed and the session's autopilot is PAUSED (it never landed — don't
+    // up: the prompt is marked Failed and the session's autorunner is PAUSED (it never landed — don't
     // strand a phantom Sent nor advance past a broken step; the user Send-nows / re-arms). kEnterRetry-
     // PollMs is how often the worker re-checks while a send awaits pickup. kEnterRetryActivityMarginMs
     // guards the transcript-advanced "it started" signal against a send fired sub-second after the
@@ -96,14 +96,14 @@ namespace Agentmaster
             plan.reason = L"global pause";
             return plan;
         }
-        if (s.autopilot.mode == AutopilotMode::Off)
+        if (s.autorunner.mode == AutorunnerMode::Off)
         {
-            plan.reason = L"autopilot off";
+            plan.reason = L"autorunner off";
             return plan;
         }
         // Ready for a prompt = turn-complete (a clean Stop -> WaitingForInput) OR sitting Idle
         // with no turn in progress (freshly launched / just resumed). An Idle session never
-        // emits a Stop, so gating on WaitingForInput alone would leave a queued plan + autopilot
+        // emits a Stop, so gating on WaitingForInput alone would leave a queued plan + autorunner
         // waiting forever; allowing Idle lets the plan START. Running / NeedsApproval / Error /
         // Done are NOT ready (mid-turn, awaiting you, or ended).
         if (s.state != SessionState::WaitingForInput && s.state != SessionState::Idle)
@@ -111,7 +111,7 @@ namespace Agentmaster
             plan.reason = L"not ready (mid-turn / needs-approval / ended)";
             return plan;
         }
-        if (s.autopilot.pauseOnHumanInput &&
+        if (s.autorunner.pauseOnHumanInput &&
             lastHumanInputUnixMs != 0 &&
             (nowUnixMs - lastHumanInputUnixMs) >= 0 &&
             (nowUnixMs - lastHumanInputUnixMs) < 1500)
@@ -119,7 +119,7 @@ namespace Agentmaster
             plan.reason = L"human typing";
             return plan;
         }
-        if (s.autopilot.autoSendsThisRun >= s.autopilot.maxAutoSends)
+        if (s.autorunner.autoSendsThisRun >= s.autorunner.maxAutoSends)
         {
             plan.reason = L"maxAutoSends reached";
             return plan;
@@ -132,7 +132,7 @@ namespace Agentmaster
         // and ignores un-timestamped Sent prompts (e.g. a restored plan) via sentAtUnixMs != 0.
         for (const auto& q : s.queue)
         {
-            if (q.origin == PromptOrigin::Flight && q.status == PromptStatus::Sent && !q.echoed &&
+            if (q.origin == PromptOrigin::Autorun && q.status == PromptStatus::Sent && !q.echoed &&
                 q.sentAtUnixMs != 0 && (nowUnixMs - q.sentAtUnixMs) >= 0 &&
                 (nowUnixMs - q.sentAtUnixMs) < kPickupGuardMs)
             {
@@ -184,7 +184,7 @@ namespace Agentmaster
             return plan; // None: the prompt stays Pending; a later non-question turn-complete fires it
         }
 
-        if (s.autopilot.mode == AutopilotMode::SemiAuto)
+        if (s.autorunner.mode == AutorunnerMode::SemiAuto)
         {
             plan.action = AdvanceAction::AwaitConfirm;
             plan.reason = L"semi-auto: awaiting confirm";
@@ -226,7 +226,7 @@ namespace Agentmaster
     // (do we have stdin?), NOT provenance (s.external = did we launch it): an ADOPTED session — typed
     // into a `+` tab, external=true — is bound an injector on adoption and IS drivable, so it must NOT
     // be excluded the way an observe-only external (no injector) is. Gating on s.external here used to
-    // wrongly skip adopted sessions (Agentmaster: the autopilot-on-adopted bug).
+    // wrongly skip adopted sessions (Agentmaster: the autorunner-on-adopted bug).
     inline EnterRetryPlan DecideEnterRetry(const SessionInfo& s, int64_t nowUnixMs, bool controllable = true)
     {
         EnterRetryPlan plan;
@@ -243,7 +243,7 @@ namespace Agentmaster
         const QueuedPrompt* best = nullptr;
         for (const auto& p : s.queue)
         {
-            if (p.origin != PromptOrigin::Flight || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
+            if (p.origin != PromptOrigin::Autorun || p.status != PromptStatus::Sent || p.echoed || p.sentAtUnixMs == 0)
             {
                 continue;
             }

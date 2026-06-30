@@ -3,7 +3,7 @@
 //
 // Agentmaster — SessionRegistry: the single source of truth for all Claude Code
 // sessions (DESIGN §6). The UI (M6) binds to it; the hooks bridge (HooksBridge) feeds it
-// authoritative state; the Autopilot scheduler (M7) reacts to it.
+// authoritative state; the Autorunner scheduler (M7) reacts to it.
 //
 // Pure C++ + the STL (no WinRT) so it is unit-testable standalone. The seam to the live
 // terminal is an `Injector` callback (bound to the session's ConptyConnection by the app
@@ -30,7 +30,7 @@ namespace Agentmaster
     // thread) and the event that caused it. Invoked OUTSIDE the registry lock.
     using RegistryObserver = std::function<void(const SessionInfo& snapshot, HookEvent cause)>;
 
-    // The Autopilot seam (M7): invoked when a clean `Stop` moves a session into
+    // The Autorunner seam (M7): invoked when a clean `Stop` moves a session into
     // WaitingForInput. The handler decides whether to dequeue + inject the next prompt.
     using AdvanceHandler = std::function<void(const std::wstring& sessionId)>;
 
@@ -84,7 +84,7 @@ namespace Agentmaster
         // conversation id yet — §11d). Thread-safe.
         void ObserveClaude(const ObservedClaude& o);
 
-        // Mutate a session's Flight Plan / autopilot under the lock (used by the scheduler
+        // Mutate a session's Auto Testing / autorunner under the lock (used by the scheduler
         // and UI). The mutator runs while holding the lock; the post-change snapshot is
         // delivered to the observer afterwards. Returns false if the id is unknown.
         bool Update(const std::wstring& id, const std::function<void(SessionInfo&)>& mutate);

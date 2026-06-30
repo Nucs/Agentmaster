@@ -612,12 +612,12 @@ void TestBridgeRoundTrip()
 
 void TestScheduler()
 {
-    std::wprintf(L"Autopilot DecideAdvance (Correctness Rule #1 + backstops):\n");
-    auto mk = [](AutopilotMode m, SessionState st) {
+    std::wprintf(L"Autorunner DecideAdvance (Correctness Rule #1 + backstops):\n");
+    auto mk = [](AutorunnerMode m, SessionState st) {
         SessionInfo s;
         s.id = L"a";
         s.state = st;
-        s.autopilot.mode = m;
+        s.autorunner.mode = m;
         QueuedPrompt p;
         p.id = L"p1";
         p.text = L"do it";
@@ -627,85 +627,85 @@ void TestScheduler()
     const int64_t now = 100000;
 
     {
-        auto s = mk(AutopilotMode::Off, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Off, SessionState::WaitingForInput);
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "off -> none");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::Running);
+        auto s = mk(AutorunnerMode::Full, SessionState::Running);
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "not turn-complete -> none");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         const auto p = DecideAdvance(s, now, 0, false);
         CHECK(p.action == AdvanceAction::Send && p.promptIndex == 0, "full+waiting -> send #0");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         CHECK(DecideAdvance(s, now, 0, true).action == AdvanceAction::None, "global pause -> none");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
-        s.autopilot.maxAutoSends = 2;
-        s.autopilot.autoSendsThisRun = 2;
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
+        s.autorunner.maxAutoSends = 2;
+        s.autorunner.autoSendsThisRun = 2;
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "maxAutoSends -> none");
     }
     {
         // A pending question / "needs you" state is treated like a mid-turn Running state: the
         // prompt stays Pending and waits for the next (non-question) turn-complete — it is NOT
-        // parked in Held, and autopilot is NOT paused (the "reacted to needs-approval" bug).
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        // parked in Held, and autorunner is NOT paused (the "reacted to needs-approval" bug).
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         s.lastMessageWasQuestion = true;
         const auto p = DecideAdvance(s, now, 0, false);
         CHECK(p.action == AdvanceAction::None, "question -> none (stay queued, wait like running)");
         CHECK(s.queue[0].status == PromptStatus::Pending, "question: prompt is left Pending (never moved to Held)");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         s.lastMessageWasQuestion = true;
         s.queue[0].guardPattern = std::wstring{ kAnswersQuestionOk };
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::Send, "question + override -> send");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         s.queue[0].gate = PromptGate::Manual;
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "manual gate -> none");
     }
     {
-        auto s = mk(AutopilotMode::SemiAuto, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::SemiAuto, SessionState::WaitingForInput);
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::AwaitConfirm, "semi-auto -> await confirm");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         s.queue[0].status = PromptStatus::Sent;
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::PlanDone, "no pending -> plan done");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         CHECK(DecideAdvance(s, now, now - 500, false).action == AdvanceAction::None, "human typing -> none");
     }
     {
-        auto s = mk(AutopilotMode::Full, SessionState::WaitingForInput);
+        auto s = mk(AutorunnerMode::Full, SessionState::WaitingForInput);
         CHECK(DecideAdvance(s, now, now - 5000, false).action == AdvanceAction::Send, "human idle -> send");
     }
 
     // --- Idle bootstrap: a just-resumed / freshly-launched session must START its plan, not
     //     wait for a Stop it will never emit (the "ddd is Idle + auto but won't fire" bug). ---
     {
-        auto s = mk(AutopilotMode::Full, SessionState::Idle);
+        auto s = mk(AutorunnerMode::Full, SessionState::Idle);
         const auto p = DecideAdvance(s, now, 0, false);
         CHECK(p.action == AdvanceAction::Send && p.promptIndex == 0, "full + idle -> send (bootstrap)");
     }
     {
-        auto s = mk(AutopilotMode::SemiAuto, SessionState::Idle);
+        auto s = mk(AutorunnerMode::SemiAuto, SessionState::Idle);
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::AwaitConfirm, "semi-auto + idle -> await confirm");
     }
     {
-        auto s = mk(AutopilotMode::Off, SessionState::Idle);
+        auto s = mk(AutorunnerMode::Off, SessionState::Idle);
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "off + idle -> none");
     }
     {
         // Not-ready states stay rejected (mid-turn / awaiting you).
-        auto s = mk(AutopilotMode::Full, SessionState::NeedsApproval);
+        auto s = mk(AutorunnerMode::Full, SessionState::NeedsApproval);
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "needs-approval -> none");
         s.state = SessionState::Done;
         CHECK(DecideAdvance(s, now, 0, false).action == AdvanceAction::None, "done -> none");
@@ -713,12 +713,12 @@ void TestScheduler()
 
     // --- Pickup guard: one prompt per turn even though advances can now be change-driven. ---
     auto withLead = [&](PromptStatus st, bool echoed, int64_t sentAt, SessionState state) {
-        auto s = mk(AutopilotMode::Full, state);
+        auto s = mk(AutorunnerMode::Full, state);
         QueuedPrompt lead; // a prior Flight prompt at the FRONT; p1 (Pending) follows
         lead.id = L"p0";
         lead.text = L"already sent";
         lead.status = st;
-        lead.origin = PromptOrigin::Flight;
+        lead.origin = PromptOrigin::Autorun;
         lead.echoed = echoed;
         lead.sentAtUnixMs = sentAt;
         s.queue.insert(s.queue.begin(), lead);
@@ -748,7 +748,7 @@ void TestScheduler()
 // never starts). Pure + deterministic, like DecideAdvance.
 void TestEnterRetry()
 {
-    std::wprintf(L"Autopilot DecideEnterRetry (the TUI-ate-my-Enter backstop):\n");
+    std::wprintf(L"Autorunner DecideEnterRetry (the TUI-ate-my-Enter backstop):\n");
     const int64_t T = 1000000;
     // A live, managed session with one Sent (Flight, not echoed) prompt at sentAt.
     auto mk = [](SessionState st, int64_t sentAt, bool echoed, uint32_t retries) {
@@ -761,7 +761,7 @@ void TestEnterRetry()
         p.id = L"rp";
         p.text = L"go";
         p.status = PromptStatus::Sent;
-        p.origin = PromptOrigin::Flight;
+        p.origin = PromptOrigin::Autorun;
         p.sentAtUnixMs = sentAt;
         p.echoed = echoed;
         p.enterRetries = retries;
@@ -842,7 +842,7 @@ void TestEnterRetry()
         CHECK(DecideEnterRetry(s, T + kEnterRetryIntervalMs, /*controllable*/ false).action == EnterRetryAction::None, "uncontrollable -> none");
     }
     {
-        // Agentmaster (autopilot-on-adopted): an ADOPTED external (external=true) that IS controllable
+        // Agentmaster (autorunner-on-adopted): an ADOPTED external (external=true) that IS controllable
         // (an injector was bound on adoption) MUST be driven — provenance != controllability. The pure
         // decider keys on `controllable`, not s.external, so an adopted session retries like a launched one.
         auto s = mk(SessionState::WaitingForInput, T, false, 0);
@@ -874,7 +874,7 @@ void TestEnterRetry()
         p2.id = L"rp2";
         p2.text = L"go2";
         p2.status = PromptStatus::Sent;
-        p2.origin = PromptOrigin::Flight;
+        p2.origin = PromptOrigin::Autorun;
         p2.sentAtUnixMs = T + 2000; // sent later
         p2.echoed = false;
         s.queue.push_back(p2);
@@ -914,18 +914,18 @@ void TestBuildPromptSubmission()
 
 // Agentmaster — Scheduler INTEGRATION (the threaded change-driven advance, wired exactly like
 // Engine.cpp). The pure DecideAdvance above never exercised the OnObserved -> RequestAdvance ->
-// worker -> Inject chain, which is precisely where the "toggle Autopilot Off and back -> pending
+// worker -> Inject chain, which is precisely where the "toggle Autorunner Off and back -> pending
 // not sent" bug lived: OnObserved gated the change-driven advance on !s.external (provenance)
 // instead of HasInjector (controllability), so an ADOPTED session (external=true but injector-bound)
 // was never driven. This test drives the real Scheduler thread and polls for the injected result.
 void TestSchedulerIntegration()
 {
-    std::wprintf(L"Autopilot Scheduler integration (toggle Off->Full; controllability != provenance):\n");
+    std::wprintf(L"Autorunner Scheduler integration (toggle Off->Full; controllability != provenance):\n");
 
     // Wire a registry + scheduler like Engine.cpp (advance handler + OnObserved observer), seed a
     // live Waiting session with one Pending Flight prompt (throttleMs 0 so the worker injects at
-    // once), optionally bind an injector, then toggle Autopilot Off->Full via the registry exactly
-    // as AgentManagerContent::_OnAutopilotChanged does. Returns true iff the prompt reached Sent
+    // once), optionally bind an injector, then toggle Autorunner Off->Full via the registry exactly
+    // as AgentManagerContent::_OnAutorunnerChanged does. Returns true iff the prompt reached Sent
     // within the poll budget. Each case gets its OWN registry+scheduler so they can't cross-talk.
     auto runToggleCase = [](bool external, bool bindInjector) -> bool {
         auto reg = std::make_shared<SessionRegistry>();
@@ -943,13 +943,13 @@ void TestSchedulerIntegration()
             s.state = SessionState::WaitingForInput; // turn already complete; no future Stop hook fires
             s.live = true;
             s.external = external;
-            s.autopilot.mode = AutopilotMode::Off;
-            s.autopilot.throttleMs = 0; // inject immediately (no 500ms throttle) -> a short poll suffices
+            s.autorunner.mode = AutorunnerMode::Off;
+            s.autorunner.throttleMs = 0; // inject immediately (no 500ms throttle) -> a short poll suffices
             QueuedPrompt p;
             p.id = L"p1";
             p.text = L"the pending prompt";
             p.status = PromptStatus::Pending;
-            p.origin = PromptOrigin::Flight;
+            p.origin = PromptOrigin::Autorun;
             s.queue.push_back(p);
             reg->Upsert(std::move(s));
         }
@@ -958,10 +958,10 @@ void TestSchedulerIntegration()
             reg->SetInjector(id, [&injected](const std::wstring&) { injected.fetch_add(1); });
         }
 
-        // Toggle Off->Full (the user re-enabling Autopilot) — the exact _OnAutopilotChanged write.
+        // Toggle Off->Full (the user re-enabling Autorunner) — the exact _OnAutorunnerChanged write.
         reg->Update(id, [](SessionInfo& s) {
-            s.autopilot.mode = AutopilotMode::Full;
-            s.autopilot.autoSendsThisRun = 0;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.autoSendsThisRun = 0;
             s.pendingConfirmPromptId.clear();
         });
 
@@ -990,7 +990,7 @@ void TestSchedulerIntegration()
     CHECK(!runToggleCase(/*external*/ true, /*injector*/ false), "observe-only: toggle does not send (no injector)");
 
     // --- Question-guard treats a pending question / "needs you" status like a Running mid-turn: the
-    //     queued prompt STAYS Pending (never parked in Held, autopilot never paused) and fires only
+    //     queued prompt STAYS Pending (never parked in Held, autorunner never paused) and fires only
     //     when the question clears (a later non-question turn-complete). The "reacted to
     //     needs-approval" report (session 2de51dd0): two Flight prompts were Held + stranded. ---
     {
@@ -1009,13 +1009,13 @@ void TestSchedulerIntegration()
             s.state = SessionState::WaitingForInput; // turn complete, but...
             s.live = true;
             s.lastMessageWasQuestion = true; // ...the agent ended it asking the user something
-            s.autopilot.mode = AutopilotMode::Full;
-            s.autopilot.throttleMs = 0;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.throttleMs = 0;
             QueuedPrompt p;
             p.id = L"p1";
             p.text = L"the queued prompt";
             p.status = PromptStatus::Pending;
-            p.origin = PromptOrigin::Flight;
+            p.origin = PromptOrigin::Autorun;
             s.queue.push_back(p);
             reg->Upsert(std::move(s));
         }
@@ -1065,13 +1065,13 @@ void TestSchedulerIntegration()
             s.state = SessionState::WaitingForInput;
             s.live = true;
             s.lastMessageWasQuestion = false; // the question is gone — the Held prompt should recover
-            s.autopilot.mode = AutopilotMode::Full;
-            s.autopilot.throttleMs = 0;
+            s.autorunner.mode = AutorunnerMode::Full;
+            s.autorunner.throttleMs = 0;
             QueuedPrompt p;
             p.id = L"p1";
             p.text = L"the held prompt";
             p.status = PromptStatus::Held; // a legacy hold loaded from disk
-            p.origin = PromptOrigin::Flight;
+            p.origin = PromptOrigin::Autorun;
             s.queue.push_back(p);
             reg->Upsert(std::move(s));
         }

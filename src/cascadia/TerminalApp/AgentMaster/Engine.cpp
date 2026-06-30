@@ -11,6 +11,7 @@
 #include "HooksBridge.h"
 #include "Persistence.h"
 #include "ProcessObserver.h"
+#include "ProfileBootstrap.h" // Profiles::IsDevPackage — Auto Testing / Tests Autorunner is a DEV-ONLY feature
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
@@ -77,13 +78,23 @@ namespace Agentmaster
                 AppendStateLog(L"hooks.log", line);
             });
 
-            // Autopilot scheduler (M7): owns its own worker thread and drives Flight Plan
+            // Autorunner scheduler (M7): owns its own worker thread and drives Auto Testing
             // queues. A clean turn-complete (Stop -> WaitingForInput) lands on the advance seam
             // and is forwarded to the scheduler; a separate observer feeds the stopOnError
             // backstop.
+            //
+            // Agentmaster (Auto Testing is a DEV-ONLY feature): the autorunner that auto-sends
+            // queued prompts runs ONLY under the AgentmasterDev package. In a RELEASE install we
+            // create the Scheduler object (so callers never null-deref) but DO NOT start its worker
+            // and DO NOT wire the advance seam — so no session ever auto-sends. The Auto Testing UI
+            // (the Manager pane tab, the autorunner toggles, the queue/compose, the board badge, the
+            // overlay queue rows, the cog tab, the Pause button) is hidden in release to match, so
+            // there is no way to queue a prompt either. Send-now is a direct registry->Inject (it
+            // does not go through the scheduler), and it too is gated to dev in the UI.
             e->scheduler = std::make_shared<Scheduler>(e->registry);
-            e->scheduler->Start();
+            if (::Agentmaster::Profiles::IsDevPackage())
             {
+                e->scheduler->Start();
                 auto sched = e->scheduler;
                 e->registry->SetAdvanceHandler([sched](const std::wstring& id) {
                     sched->RequestAdvance(id);
@@ -92,8 +103,12 @@ namespace Agentmaster
                     sched->OnObserved(s);
                 });
             }
+            else
+            {
+                AppendStateLog(L"hooks.log", L"[engine] release build: Auto Testing autorunner disabled (scheduler not started)\n");
+            }
 
-            // Persistence (M8): autosave the registry (queue + autopilot + metadata) to
+            // Persistence (M8): autosave the registry (queue + autorunner + metadata) to
             // sessions.json on every change, so an in-progress plan survives a crash. Restore
             // never replays Sent prompts (statuses are preserved).
             {

@@ -106,7 +106,7 @@ namespace Agentmaster
         HookEvent event{ HookEvent::Unknown };
         int64_t ts{ 0 };
         // Best-effort, set only on Stop: did the agent's last message end in a question?
-        // Feeds the question-guard so Autopilot does not auto-answer a clarifying question.
+        // Feeds the question-guard so Autorunner does not auto-answer a clarifying question.
         bool lastMessageIsQuestion{ false };
         // Notification specifically requesting tool permission (vs. an idle notification).
         // Drives NeedsApproval / ApprovalPolicy rather than the prompt queue.
@@ -114,7 +114,7 @@ namespace Agentmaster
         std::wstring tool; // associated tool name, when applicable
         // The submitted prompt body, set ONLY on UserPromptSubmit (escaped on the wire). Lets
         // the registry record EVERY message a session received — including ones the human
-        // typed straight into the ConPTY, not just ones we queued — into the Flight Plan.
+        // typed straight into the ConPTY, not just ones we queued — into the Auto Testing.
         // Empty for every other event.
         std::wstring promptText;
         // The hosting terminal's WT_SESSION GUID (plain, no braces), echoed by the forwarder
@@ -226,8 +226,8 @@ namespace Agentmaster
         // Agentmaster: an API-error turn-ender ended the turn ABNORMALLY (no clean Stop). out.state is
         // already Error (NextSessionState). Settle the type-ahead accounting like a Stop would (a queued
         // prompt that never produced its turn is now void), but it is NOT a clean turn boundary: leave
-        // turnComplete false so no question-guard fires and Autopilot does NOT advance off an error (the
-        // scheduler's stopOnError backstop handles the autopilot pause on the Error state itself).
+        // turnComplete false so no question-guard fires and Autorunner does NOT advance off an error (the
+        // scheduler's stopOnError backstop handles the autorunner pause on the Error state itself).
         if (m.apiError)
         {
             turns.queuedPrompts = 0;

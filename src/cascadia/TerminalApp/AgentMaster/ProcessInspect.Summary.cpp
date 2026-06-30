@@ -74,7 +74,7 @@ namespace Agentmaster
         // session-end.js look) collapses a message's newlines/tabs to a literal "\n"/"\t"; true PRESERVES
         // them so a multi-line prompt reads as multiple lines. `truncate` (summaryPanelTruncate) — true
         // (default) caps at maxChars (the historic 240) with a trailing "..."; false shows the WHOLE
-        // message. The defaults reproduce the prior behavior, so existing callers (the Manager Flight-Plan
+        // message. The defaults reproduce the prior behavior, so existing callers (the Manager Auto-Testing
         // summary, the tests) are unchanged; the Sessions page passes the live toggles. (Mirrors
         // AgentTabOverlay's SummaryEscapeMsg — the two copies are the documented "converge on a quiet day"
         // duplication, like the StateColor table.)

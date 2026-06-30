@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Agentmaster — persistence (DESIGN §13) + plan templates / apply-to-many (DESIGN §10).
-// Sessions (queue + autopilot + metadata) and plan templates serialize to JSON under the
+// Sessions (queue + autorunner + metadata) and plan templates serialize to JSON under the
 // app state dir. Restore never replays already-Sent prompts (statuses are preserved).
 //
 // Enum<->string and the struct<->JSON mappings are pure (Json.h only) and unit-tested.
@@ -25,8 +25,8 @@ namespace Agentmaster
     // ---- enum <-> string ----
     std::wstring ToString(SessionState s);
     SessionState SessionStateFromString(std::wstring_view s);
-    std::wstring ToString(AutopilotMode m);
-    AutopilotMode AutopilotModeFromString(std::wstring_view s);
+    std::wstring ToString(AutorunnerMode m);
+    AutorunnerMode AutorunnerModeFromString(std::wstring_view s);
     std::wstring ToString(PromptStatus s);
     PromptStatus PromptStatusFromString(std::wstring_view s);
     std::wstring ToString(PromptGate g);
@@ -43,8 +43,8 @@ namespace Agentmaster
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);
     QueuedPrompt PromptFromJson(const json::Value& v);
-    json::Value ToJson(const AutopilotState& a);
-    AutopilotState AutopilotFromJson(const json::Value& v);
+    json::Value ToJson(const AutorunnerState& a);
+    AutorunnerState AutorunnerFromJson(const json::Value& v);
     json::Value ToJson(const SessionInfo& s);
     SessionInfo SessionFromJson(const json::Value& v);
     json::Value ToJson(const PlanTemplate& t);

@@ -443,7 +443,7 @@ namespace Agentmaster
     // -> Waiting): after an Esc the dying subagents keep flushing side files for up to kScanSubagentFreshMs
     // and claude's heartbeat lingers "busy" for a tick, so WITHOUT an interrupt guard recon-stop
     // (Running -> Waiting on interrupted) and THIS promotion (Waiting -> Running on that stale activity)
-    // FLIP-FLOP every tick — a Running<->Waiting oscillation that floods scanner/autopilot/hooks logs and
+    // FLIP-FLOP every tick — a Running<->Waiting oscillation that floods scanner/autorunner/hooks logs and
     // the UI until the freshness window expires (in the field it ballooned hooks.log to ~291 MB and wedged
     // the hosting window). Guarding on `interrupted` makes the two MUTUALLY EXCLUSIVE — the same discipline
     // ShouldSynthesizeResumed / ShouldSynthesizeBlockedOnUser / ShouldSynthesizeStopFromPresenceIdle already

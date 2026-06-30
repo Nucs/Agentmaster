@@ -59,7 +59,7 @@ namespace winrt::TerminalApp::implementation
         void SetSummaryPaneSizeHandler(std::function<void(double, double)> handler);
         // Agentmaster: mark this pane's content as hosting a MANAGED Claude session (set on bind via
         // _AttachClaudeOverlay). toggleBroadcastInput EXCLUDES such panes — a Claude session's stdin is
-        // driven by the orchestrator's injector / Flight Plan, never raw broadcast keystrokes, and a
+        // driven by the orchestrator's injector / Auto Testing, never raw broadcast keystrokes, and a
         // constantly-repainting Claude TUI is not a meaningful broadcast target. Non-projected (get_self).
         void SetAgentManaged(bool value) noexcept { _agentManaged = value; }
         bool AgentManaged() const noexcept { return _agentManaged; }

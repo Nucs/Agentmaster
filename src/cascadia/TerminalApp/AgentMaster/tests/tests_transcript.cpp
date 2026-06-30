@@ -282,7 +282,7 @@ void TestTranscriptScan()
               "release: already left Error (Waiting) -> no-op (no re-fire)");
     }
     // The synthesized event's effect through the ONE state machine: UserPromptSubmit-shaped, ts
-    // stamped (refreshes the decay anchor), EMPTY promptText (no Flight-Plan side effects — the
+    // stamped (refreshes the decay anchor), EMPTY promptText (no Auto-Testing side effects — the
     // prompt back-fill stays NoteExternalPrompt's job).
     {
         SessionRegistry reg;
@@ -293,7 +293,7 @@ void TestTranscriptScan()
         const auto got = reg.Get(L"run1");
         CHECK(got && got->state == SessionState::Running, "synthesized UserPromptSubmit -> Running (one state machine)");
         CHECK(got && got->lastActivityUnixMs == 777, "synthesized ts stamps lastActivityUnixMs (decay anchor refreshed)");
-        CHECK(got && got->queue.empty(), "empty promptText -> no Flight-Plan entry recorded");
+        CHECK(got && got->queue.empty(), "empty promptText -> no Auto-Testing entry recorded");
     }
     // Agentmaster (API-error synth through the registry): the scanner's [recon-error] event (a
     // Notification carrying apiError) lands SessionState::Error, and the session then COMES OUT of Error

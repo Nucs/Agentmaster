@@ -5,7 +5,7 @@
 // compact HUD pinned to the top-right of a Claude session's terminal, summarizing the tab <->
 // Agentmaster link at a glance. Row 1 is a strip of DISCRETE, individually-tooltipped parts, in order:
 // hook-driven status (color-matched to the Triage Board; LEFTMOST), the action buttons (folder / copy
-// menu / pencil — ALWAYS shown for a LINKED session), Autopilot mode (Off/Semi/Full — a CLICKABLE button
+// menu / pencil — ALWAYS shown for a LINKED session), Autorunner mode (Off/Semi/Full — a CLICKABLE button
 // that cycles the mode), queued (Pending) count, and link state (surfaced ONLY when NOT linked —
 // "observe" / "unlinked"; a linked session shows nothing for link state).
 // Row 2: "<root workdir folder>/<branch>" (dim; e.g. myworkdir/feature/issue123) so the session's place +
@@ -175,7 +175,7 @@ namespace winrt::TerminalApp::implementation
         void _WireHover(); // attach the pointer-over brighten handlers (idempotent; weak-captured)
         void _BuildActionsRow(); // lazily build the action buttons (folder + copy menu + pencil); placed in row 1 right after the status block by _Refresh, for a LINKED session
         void _SetExpanded(bool on); // dim<->bright the whole badge (driven by hover OR the copy-menu pinned state)
-        void _CycleAutopilot(); // row-1 Autopilot button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
+        void _CycleAutorunner(); // row-1 Autorunner button: cycle this session's mode Off -> Semi -> Full -> Off (mutates the shared registry; Rule #1)
         void _OpenFolder(); // row 3 folder button: open the session's working dir in Explorer (off-thread)
         void _CopyField(int which); // row 3 copy menu: 0=Session Id 1=Copy Path 2=Copy Branch 3=Claude CLI 4=Codex CLI 5=Transcript 6=Summary (full textual box)
         void _BuildSummaryPanel(); // build the summary panel element (the 2nd slot), collapsed
@@ -213,7 +213,7 @@ namespace winrt::TerminalApp::implementation
 
         winrt::Windows::UI::Xaml::Controls::Border _root{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _stack{ nullptr }; // vertical: row 1 / row 2 / row 3
-        winrt::Windows::UI::Xaml::Controls::StackPanel _row1{ nullptr }; // row 1: a horizontal strip of DISCRETE, individually-tooltipped parts (status · [actions] · Autopilot[button] · queue · link)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _row1{ nullptr }; // row 1: a horizontal strip of DISCRETE, individually-tooltipped parts (status · [actions] · Autorunner[button] · queue · link)
         winrt::Windows::UI::Xaml::Controls::StackPanel _row2{ nullptr }; // row 2: the dir/branch label only ("<root workdir folder>/<branch>")
         winrt::Windows::UI::Xaml::Controls::TextBlock _subline{ nullptr }; // row 2 label: "<root workdir folder>/<branch>"
         winrt::Windows::UI::Xaml::Controls::StackPanel _actions{ nullptr }; // row 1: folder + copy + pencil buttons — ALWAYS shown, just after the status block

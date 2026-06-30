@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,11 +13,11 @@
 //   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-// ★ AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+// ★ AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 //   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
-// Agentmaster Manager tab: the FLIGHT PLAN -- plan rebuild + selection sync (managed + external read-only), prompt compose/history, the Autopilot toggle, the Summary tab, and plan templates. Partial TU of AgentManagerContent.cpp.
+// Agentmaster Manager tab: the FLIGHT PLAN -- plan rebuild + selection sync (managed + external read-only), prompt compose/history, the Autorunner toggle, the Summary tab, and plan templates. Partial TU of AgentManagerContent.cpp.
 #include "pch.h"
 #include "AgentManagerContent.h"
 
@@ -29,7 +29,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/Engine.h" // RecoverableWindows (the "Reopen Windows (N)" recover button)
-#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Flight Plan of an external) + BringClaudeWindowToFront (EXTERNAL menu)
+#include "AgentMaster/ProcessInspect.h" // ReadTranscriptInfo (read-only Auto Testing of an external) + BringClaudeWindowToFront (EXTERNAL menu)
 #include "AgentMaster/TranscriptStore.h" // ReadTranscriptQuickFacts — resolve a launch-box session id's cwd
 #include "AgentMaster/Updater.h" // the in-app updater: the cog's "Check for updates" + the "vX available!" label
 
@@ -86,12 +86,12 @@ namespace winrt::TerminalApp::implementation
         _planHeaderHost.Children().Clear();
         _planListHost.Children().Clear();
 
-        // EXTERNAL scope: the Flight Plan is READ-ONLY (externals are observe-only — we host no
+        // EXTERNAL scope: the Auto Testing is READ-ONLY (externals are observe-only — we host no
         // ConPTY, so nothing to drive). With an external selected, show its conversation's prompts;
         // with none selected, the nothing-selected hint.
         if (_treeScope == TreeScope::External)
         {
-            _UpdateAutopilotButton(AutopilotMode::Off, false); // not drivable
+            _UpdateAutorunnerButton(AutorunnerMode::Off, false); // not drivable
             if (!_selectedExternalTitle.empty())
             {
                 _RebuildExternalPlan();
@@ -108,7 +108,7 @@ namespace winrt::TerminalApp::implementation
         if (!sel || !sel->live) // an archived (closed) session isn't planned here — restore it first
         {
             _planHeaderHost.Children().Append(Text(L"Select a session to plan its prompts.", 13, false, 0.6));
-            _UpdateAutopilotButton(AutopilotMode::Off, false); // no live session: dim the header toggle
+            _UpdateAutorunnerButton(AutorunnerMode::Off, false); // no live session: dim the header toggle
             _PinPlanToBottomOnSubjectChange(L""); // re-arm so re-selecting a session pins to bottom again
             return;
         }
@@ -126,8 +126,8 @@ namespace winrt::TerminalApp::implementation
         _planHeaderHost.Children().Append(titleRow);
         _planHeaderHost.Children().Append(Text(winrt::hstring{ sel->workingDir }, 12, false, 0.6));
 
-        // reflect autopilot mode on the header toggle
-        _UpdateAutopilotButton(sel->autopilot.mode, true);
+        // reflect autorunner mode on the header toggle
+        _UpdateAutorunnerButton(sel->autorunner.mode, true);
 
         // SemiAuto one-click confirm banner (the scheduler armed the next prompt).
         if (!sel->pendingConfirmPromptId.empty())
@@ -145,13 +145,13 @@ namespace winrt::TerminalApp::implementation
             banner.Orientation(Orientation::Horizontal);
             banner.Spacing(8);
             banner.VerticalAlignment(VerticalAlignment::Center);
-            banner.Children().Append(Text(L"\x2699 Autopilot ready:", 12, true, 1.0));
+            banner.Children().Append(Text(L"\x2699 Tests Autorunner ready:", 12, true, 1.0));
             auto lbl = Text(label, 12, false, 0.9);
             lbl.MaxWidth(220);
             banner.Children().Append(lbl);
             auto sendBtn = Button{};
             sendBtn.Content(winrt::box_value(L"Send"));
-            AgentSetTip(sendBtn, L"Semi-auto: send the next queued prompt that Autopilot armed.");
+            AgentSetTip(sendBtn, L"Semi-auto: send the next queued prompt that Tests Autorunner armed.");
             sendBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 if (_confirmHandler && !_selectedId.empty())
                 {
@@ -179,7 +179,7 @@ namespace winrt::TerminalApp::implementation
             _planHeaderHost.Children().Append(bannerBorder);
         }
 
-        // The Flight Plan reflects EVERY message this session received — not only ones queued
+        // The Auto Testing reflects EVERY message this session received — not only ones queued
         // here. Split the queue into a chronological "sent" summary (each tagged by origin:
         // queued-by-flight vs typed-straight-into-the-terminal) followed by the upcoming queue.
         std::vector<const QueuedPrompt*> sent;
@@ -226,11 +226,11 @@ namespace winrt::TerminalApp::implementation
             {
                 const bool typed = (p.origin == PromptOrigin::Typed);
                 // Amber "typed" (a human keystroke) vs. blue "flight" (queued + injected by us).
-                auto originPill = Pill(typed ? winrt::hstring{ L"typed" } : winrt::hstring{ L"flight" },
+                auto originPill = Pill(typed ? winrt::hstring{ L"typed" } : winrt::hstring{ L"auto" },
                                        typed ? ColorHelper::FromArgb(0xFF, 0xD9, 0xA6, 0x2E) : ColorHelper::FromArgb(0xFF, 0x4F, 0x8B, 0xD0));
                 AgentSetTip(originPill, typed ?
                                             winrt::hstring{ L"Typed \x2014 you typed this prompt straight into the terminal." } :
-                                            winrt::hstring{ L"Flight \x2014 Agentmaster queued this prompt and sent it for you (Autopilot or Send now)." });
+                                            winrt::hstring{ L"Auto \x2014 Agentmaster queued this prompt and sent it for you (Tests Autorunner or Send now)." });
                 row.Children().Append(originPill);
             }
             else
@@ -302,9 +302,9 @@ namespace winrt::TerminalApp::implementation
         _PinPlanToBottomOnSubjectChange(sel->id);
     }
 
-    // Agentmaster: the READ-ONLY Flight Plan for a selected EXTERNAL session — its conversation's
+    // Agentmaster: the READ-ONLY Auto Testing for a selected EXTERNAL session — its conversation's
     // human prompts (read from the transcript on a background thread by _LoadExternalPlan). No
-    // queue, no actions, no Autopilot: an external runs outside Agentmaster and we never drive it
+    // queue, no actions, no Autorunner: an external runs outside Agentmaster and we never drive it
     // (Rule #9/#13). The header offers Adopt as the path to make it controllable.
     void AgentManagerContent::_RebuildExternalPlan()
     {
@@ -420,7 +420,7 @@ namespace winrt::TerminalApp::implementation
         _PinPlanToBottomOnSubjectChange(L"x:" + _selectedExternalSessionId);
     }
 
-    // Agentmaster: scroll the Flight Plan to the bottom the FIRST time a subject is shown (a managed
+    // Agentmaster: scroll the Auto Testing to the bottom the FIRST time a subject is shown (a managed
     // session's plan, or an external's read-only conversation). The newest SENT message + the UPCOMING
     // queue live at the bottom, so a freshly-opened plan defaults to "where things stand" rather than
     // the oldest message. Gated on the subject CHANGING — a same-subject _Refresh (a background state
@@ -492,7 +492,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Selecting a managed session clears any external (read-only) selection — the Flight Plan is
+        // Selecting a managed session clears any external (read-only) selection — the Auto Testing is
         // one surface; a managed selection wins (it is drivable).
         const bool hadExternal = !_selectedExternalSessionId.empty();
         if (_selectedId == id && !hadExternal)
@@ -513,7 +513,7 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster: the board header's "Clear" button — deselect whatever managed session OR external is
-    // selected (the Flight Plan then shows nothing-selected). A no-op when nothing is selected. Clears
+    // selected (the Auto Testing then shows nothing-selected). A no-op when nothing is selected. Clears
     // BOTH selection kinds at once (the Launch box is left as-is — it is an independent launch target).
     void AgentManagerContent::_ClearSelection()
     {
@@ -545,12 +545,12 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: select an EXTERNAL (observe-only) row -> the Flight Plan shows its conversation
+    // Agentmaster: select an EXTERNAL (observe-only) row -> the Auto Testing shows its conversation
     // READ-ONLY. We host no ConPTY for it (Rule #9/#13), so this never binds an injector; it only
-    // surfaces what was prompted. Clears the managed selection (one Flight-Plan surface).
+    // surfaces what was prompted. Clears the managed selection (one Auto-Testing surface).
     void AgentManagerContent::_SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath)
     {
-        _ResetPromptHistory(); // an external's Flight Plan is read-only — no managed history to recall
+        _ResetPromptHistory(); // an external's Auto Testing is read-only — no managed history to recall
         // Nav audit: the user selected an EXTERNAL (unmanaged) session to inspect — board External
         // card or Explorer-Tree EXTERNAL row — surfacing its read-only conversation. Distinct from a
         // managed select (no tab-focus equivalent — we host no tab for it).
@@ -574,7 +574,7 @@ namespace winrt::TerminalApp::implementation
         _selectedExternalRolloutPath = rolloutPath;
         // Linked Lenses: selecting an external — from the Explorer Tree OR a Triage-Board External
         // card — puts all three regions in agreement. Switch the tree to EXTERNAL so it lists the
-        // externals with this one highlighted, and the Flight Plan renders its read-only conversation
+        // externals with this one highlighted, and the Auto Testing renders its read-only conversation
         // (its render is gated on EXTERNAL scope, see _RebuildPlan). A no-op when invoked from the
         // tree (already EXTERNAL); the meaningful case is a board card click from LOCAL/GLOBAL.
         if (_treeScope != TreeScope::External)
@@ -671,7 +671,7 @@ namespace winrt::TerminalApp::implementation
             s.queue.push_back(std::move(p));
         });
         // Nav audit: the user QUEUED a prompt to this session (the envelope). The first line is the
-        // identifying context; Autopilot/Send-now later consumes it (scheduler [send]/[confirm-send]).
+        // identifying context; Autorunner/Send-now later consumes it (scheduler [send]/[confirm-send]).
         ::Agentmaster::LogNav(L"queue " + ::Agentmaster::ShortId(id) + L" \"" + label + L"\"");
         _addPromptBox.Text(L"");
         _Refresh();
@@ -743,7 +743,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // "Send now" sends what's in the compose box (and records it in the Flight Plan as a
+        // "Send now" sends what's in the compose box (and records it in the Auto Testing as a
         // Sent item) so typing + Send is one intuitive action. With an empty box it instead
         // sends the selected (or first Pending) already-queued prompt.
         std::wstring composed = _addPromptBox ? std::wstring{ _addPromptBox.Text() } : std::wstring{};
@@ -1044,30 +1044,30 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
-    void AgentManagerContent::_OnAutopilotChanged(int index)
+    void AgentManagerContent::_OnAutorunnerChanged(int index)
     {
-        if (_suppressAutopilotEvent || _selectedId.empty() || !_registry)
+        if (_suppressAutorunnerEvent || _selectedId.empty() || !_registry)
         {
             return;
         }
-        const AutopilotMode mode = index == 2 ? AutopilotMode::Full : index == 1 ? AutopilotMode::SemiAuto :
-                                                                                   AutopilotMode::Off;
-        // Nav audit: the user changed this session's Autopilot mode (the Flight-Plan header toggle).
-        ::Agentmaster::LogNav(L"autopilot " + ::Agentmaster::ShortId(_selectedId) + L" -> " + (mode == AutopilotMode::Full ? L"Full" : mode == AutopilotMode::SemiAuto ? L"Semi" : L"Off"));
+        const AutorunnerMode mode = index == 2 ? AutorunnerMode::Full : index == 1 ? AutorunnerMode::SemiAuto :
+                                                                                   AutorunnerMode::Off;
+        // Nav audit: the user changed this session's Autorunner mode (the Auto-Testing header toggle).
+        ::Agentmaster::LogNav(L"autorunner " + ::Agentmaster::ShortId(_selectedId) + L" -> " + (mode == AutorunnerMode::Full ? L"Full" : mode == AutorunnerMode::SemiAuto ? L"Semi" : L"Off"));
         _registry->Update(_selectedId, [&](SessionInfo& s) {
-            s.autopilot.mode = mode;
-            if (mode != AutopilotMode::Off)
+            s.autorunner.mode = mode;
+            if (mode != AutorunnerMode::Off)
             {
                 // Arming resets the per-run backstop counter and clears any stale confirm.
-                s.autopilot.autoSendsThisRun = 0;
+                s.autorunner.autoSendsThisRun = 0;
                 s.pendingConfirmPromptId.clear();
             }
         });
     }
 
-    // Agentmaster: the FLIGHT-PLAN-header Autopilot toggle — advance the selected session's mode
-    // (Off -> Semi-auto -> Full -> Off), reusing _OnAutopilotChanged's apply logic.
-    void AgentManagerContent::_CycleAutopilot()
+    // Agentmaster: the FLIGHT-PLAN-header Autorunner toggle — advance the selected session's mode
+    // (Off -> Semi-auto -> Full -> Off), reusing _OnAutorunnerChanged's apply logic.
+    void AgentManagerContent::_CycleAutorunner()
     {
         if (_selectedId.empty() || !_registry)
         {
@@ -1079,17 +1079,17 @@ namespace winrt::TerminalApp::implementation
             return; // nothing live to drive (the button is disabled in this state anyway)
         }
         // Off(0) -> Semi-auto(1) -> Full(2) -> Off — same index order the old combo used.
-        const int next = s->autopilot.mode == AutopilotMode::Off ? 1 :
-                                                                    (s->autopilot.mode == AutopilotMode::SemiAuto ? 2 : 0);
-        _OnAutopilotChanged(next); // writes the registry + clears the per-run backstops
+        const int next = s->autorunner.mode == AutorunnerMode::Off ? 1 :
+                                                                    (s->autorunner.mode == AutorunnerMode::SemiAuto ? 2 : 0);
+        _OnAutorunnerChanged(next); // writes the registry + clears the per-run backstops
         _Refresh(); // repaint the header toggle now (the registry observer also refreshes)
     }
 
-    // Paint the Autopilot toggle: a colored state dot (gray circle = Off, amber half = Semi, green
+    // Paint the Autorunner toggle: a colored state dot (gray circle = Off, amber half = Semi, green
     // disc = Full) + a label. Dim + disabled when no live session is selected.
-    void AgentManagerContent::_UpdateAutopilotButton(AutopilotMode mode, bool enabled)
+    void AgentManagerContent::_UpdateAutorunnerButton(AutorunnerMode mode, bool enabled)
     {
-        if (!_autopilotBtn)
+        if (!_autorunnerBtn)
         {
             return;
         }
@@ -1098,20 +1098,20 @@ namespace winrt::TerminalApp::implementation
         Color dot{};
         switch (mode)
         {
-        case AutopilotMode::Full:
+        case AutorunnerMode::Full:
             glyph = L"\x25CF"; // ●
-            label = L"Autopilot: Full";
+            label = L"Tests Autorunner: Full";
             dot = Colors::MediumSeaGreen();
             break;
-        case AutopilotMode::SemiAuto:
+        case AutorunnerMode::SemiAuto:
             glyph = L"\x25D0"; // ◐
-            label = L"Autopilot: Semi";
+            label = L"Tests Autorunner: Semi";
             dot = Colors::Goldenrod();
             break;
-        case AutopilotMode::Off:
+        case AutorunnerMode::Off:
         default:
             glyph = L"\x25CB"; // ○
-            label = L"Autopilot: Off";
+            label = L"Tests Autorunner: Off";
             dot = Colors::Gray();
             break;
         }
@@ -1122,22 +1122,29 @@ namespace winrt::TerminalApp::implementation
         g.Foreground(SolidColorBrush{ dot });
         row.Children().Append(g);
         row.Children().Append(Text(label, 11, false, enabled ? 0.95 : 0.5));
-        _autopilotBtn.Content(row);
-        _autopilotBtn.IsEnabled(enabled);
+        _autorunnerBtn.Content(row);
+        _autorunnerBtn.IsEnabled(enabled);
     }
 
-    // Agentmaster: select the Flight-Plan pane's [Summary | Flight Plan] tab. The choice is a GLOBAL app
-    // setting (AppSettings::flightPlanShowsSummary), so — exactly like the Explorer-Tree / Triage-Board
+    // Agentmaster: select the Auto-Testing pane's [Summary | Auto Testing] tab. The choice is a GLOBAL app
+    // setting (AppSettings::autoTestingShowsSummary), so — exactly like the Explorer-Tree / Triage-Board
     // sort toggles — mutate _appSettings, re-paint, then push it through the settings sink (the page
     // persists settings.json + broadcasts it to every OTHER window, which adopt it in ApplyExternalSettings).
     // A no-op when unchanged, so re-clicking the active tab doesn't churn persistence/broadcast.
     void AgentManagerContent::_SelectPlanPaneTab(bool summary)
     {
-        if (_appSettings.flightPlanShowsSummary == summary)
+        // Auto Testing is a DEV-ONLY feature: in a release build the pane is Summary-only and the toggle
+        // is hidden, so this can only ever be invoked under the AgentmasterDev package. Defensive no-op
+        // otherwise (a future caller / keybinding can't switch the release pane off Summary).
+        if (!::Agentmaster::Profiles::IsDevPackage())
+        {
+            return;
+        }
+        if (_appSettings.autoTestingShowsSummary == summary)
         {
             return; // already on this tab
         }
-        _appSettings.flightPlanShowsSummary = summary;
+        _appSettings.autoTestingShowsSummary = summary;
         _UpdatePlanPaneTab();
         if (_settingsSink)
         {
@@ -1145,17 +1152,17 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: reflect the current Flight-Plan pane tab — accent the selected segment (held through
+    // Agentmaster: reflect the current Auto-Testing pane tab — accent the selected segment (held through
     // hover via PaintHoldButton, the scope-toggle accent) + bold it, leave the other on default chrome,
-    // and show ONLY that tab's body (the empty Summary host vs the Flight Plan body). No-op until the
+    // and show ONLY that tab's body (the empty Summary host vs the Auto Testing body). No-op until the
     // controls exist, so it's safe to call from SetSettings before _BuildLayout has run.
     void AgentManagerContent::_UpdatePlanPaneTab()
     {
-        if (!_summaryTabBtn || !_flightPlanTabBtn)
+        if (!_summaryTabBtn || !_autoTestTabBtn)
         {
             return;
         }
-        const bool summary = _appSettings.flightPlanShowsSummary;
+        const bool summary = _appSettings.autoTestingShowsSummary;
         const auto paintSegment = [](const Button& b, bool selected) {
             if (selected)
             {
@@ -1169,31 +1176,31 @@ namespace winrt::TerminalApp::implementation
             }
         };
         paintSegment(_summaryTabBtn, summary);
-        paintSegment(_flightPlanTabBtn, !summary);
+        paintSegment(_autoTestTabBtn, !summary);
         if (_summaryHost)
         {
             _summaryHost.Visibility(summary ? Visibility::Visible : Visibility::Collapsed);
         }
-        if (_flightPlanBody)
+        if (_autoTestBody)
         {
-            _flightPlanBody.Visibility(summary ? Visibility::Collapsed : Visibility::Visible);
+            _autoTestBody.Visibility(summary ? Visibility::Collapsed : Visibility::Visible);
         }
         _RefreshSummaryTab(); // populate/refresh the Summary tab when it becomes active (self-guards otherwise)
     }
 
     // Agentmaster (Summary tab): show the selected managed Claude session's summary box (the SAME
-    // RenderSessionSummaryBox the Sessions page + per-tab overlay render) in the Flight-Plan Summary
+    // RenderSessionSummaryBox the Sessions page + per-tab overlay render) in the Auto-Testing Summary
     // tab. Cheap + idempotent: early-returns unless the Summary tab is active; renders from the
     // single-entry cache when (id, mtime) is unchanged; otherwise kicks the off-thread analyze. The
     // user messages are reversed to newest-first; the whole box rides one inner scrollbar.
     void AgentManagerContent::_RefreshSummaryTab()
     {
-        if (!_summaryBoxHost || !_appSettings.flightPlanShowsSummary)
+        if (!_summaryBoxHost || !_appSettings.autoTestingShowsSummary)
         {
             return; // Summary tab not built, or not the active tab — nothing to do
         }
         // Subject = the selected MANAGED CLAUDE session. Codex / external / nothing-selected get a
-        // placeholder (the Flight Plan tab still serves those). The analyze cache key is the registry's
+        // placeholder (the Auto Testing tab still serves those). The analyze cache key is the registry's
         // convLastActivityUnixMs — the same "last activity" signal the timing adornment uses.
         std::wstring id, dir;
         int64_t mtime = 0;
@@ -1301,7 +1308,7 @@ namespace winrt::TerminalApp::implementation
                     self->_summaryLoadingId.clear();
                 }
                 // Render only if the Summary tab is still active AND this id is still the selected subject.
-                if (!self->_appSettings.flightPlanShowsSummary || self->_selectedId != id)
+                if (!self->_appSettings.autoTestingShowsSummary || self->_selectedId != id)
                 {
                     return;
                 }
@@ -1448,7 +1455,7 @@ namespace winrt::TerminalApp::implementation
             }
             _registry->Update(_selectedId, [&](SessionInfo& s) { ::Agentmaster::AppendTemplateToQueue(s.queue, tmpl); });
             // Nav audit: the user applied a template's prompts to THIS session's queue (consequential — it
-            // adds what Autopilot will send; more than a single `queue`, so logged even though the per-prompt
+            // adds what Autorunner will send; more than a single `queue`, so logged even though the per-prompt
             // queue micro-edits aren't).
             ::Agentmaster::LogNav(L"template-apply \"" + tmpl.name + L"\" prompts=" + std::to_wstring(tmpl.prompts.size()) + L" -> " + ::Agentmaster::ShortId(_selectedId));
             _FocusPromptBox(); // Agentmaster: return focus to the compose box after applying a template

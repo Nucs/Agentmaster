@@ -143,7 +143,7 @@ void TestOrderedStateMachine()
         CHECK(t.queuedPrompts == kMaxQueuedPrompts, "ordered: queuedPrompts capped");
     }
     { // API error: -> Error, settles type-ahead like a Stop, but is NOT a clean turn boundary
-      // (turnComplete stays false -> no autopilot advance off an error; the scheduler's stopOnError pauses).
+      // (turnComplete stays false -> no autorunner advance off an error; the scheduler's stopOnError pauses).
         TurnAccounting t;
         NextSessionStateOrdered(SessionState::Idle, at(HookEvent::UserPromptSubmit, 1000), t);
         NextSessionStateOrdered(SessionState::Running, at(HookEvent::UserPromptSubmit, 2000), t); // queue one
@@ -513,12 +513,12 @@ void TestForkSourceIdEcho()
 
 void TestTypedCapture()
 {
-    std::wprintf(L"Flight Plan: record typed messages + suppress our own echoes:\n");
+    std::wprintf(L"Auto Testing: record typed messages + suppress our own echoes:\n");
     SessionRegistry reg;
     reg.Upsert(MakeSession(L"s1"));
 
     // 1. A prompt typed straight into the ConPTY (no matching queued prompt) is recorded as a
-    //    Sent/Typed Flight-Plan entry, so the "messages already sent" summary is complete.
+    //    Sent/Typed Auto-Testing entry, so the "messages already sent" summary is complete.
     reg.OnHookEvent(UPS(L"s1", L"hello there"));
     auto s = reg.Get(L"s1");
     CHECK(s && s->queue.size() == 1, "typed prompt recorded as a queue entry");
@@ -535,7 +535,7 @@ void TestTypedCapture()
         p.id = L"f1";
         p.text = L"run the build";
         p.status = PromptStatus::Sent;
-        p.origin = PromptOrigin::Flight;
+        p.origin = PromptOrigin::Autorun;
         p.echoed = false;
         p.sentAtUnixMs = NowMsTest();
         ss.queue.push_back(p);
@@ -565,7 +565,7 @@ void TestTypedCapture()
         p.id = L"old";
         p.text = L"stale text";
         p.status = PromptStatus::Sent;
-        p.origin = PromptOrigin::Flight;
+        p.origin = PromptOrigin::Autorun;
         p.echoed = false;
         p.sentAtUnixMs = NowMsTest() - 60000; // a minute ago, outside the echo window
         ss.queue.push_back(p);

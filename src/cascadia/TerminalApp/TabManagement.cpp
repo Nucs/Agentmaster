@@ -328,7 +328,7 @@ namespace winrt::TerminalApp::implementation
         // SECOND claude writing the SAME <id>.jsonl (two writers on one transcript -> corruption). Instead
         // FORK the conversation: `claude --resume <id> --fork-session` branches its history into a new,
         // independent session id with its own transcript (the source's is untouched), registered as a
-        // normal managed session ("<title> (fork)", fresh Flight Plan). A source that was never prompted
+        // normal managed session ("<title> (fork)", fresh Auto Testing). A source that was never prompted
         // has no transcript to fork -> fall back to a fresh session in the same dir. A managed Codex tab
         // forks the SAME way but via `codex fork <rolloutUuid>` (kind-aware, below) — the tab map is
         // agent-agnostic, so Codex tabs reach this seam too and must NOT take the Claude path.
@@ -485,7 +485,7 @@ namespace winrt::TerminalApp::implementation
     {
         // Agentmaster: a Claude session tab ARCHIVES (shut down + keep restorable) rather than a
         // plain close. This is the single seam shared by clicking the tab's X, the Manager's
-        // Delete/Archive, the tree Del key, and the Flight-Plan "Archive" button.
+        // Delete/Archive, the tree Del key, and the Auto-Testing "Archive" button.
         // _ArchiveAndCloseClaudeTab shows the one consequence confirm, does the archive
         // bookkeeping (live=false, clear injector, drop the _claudeTabs entry, persist), then
         // closes. It erases the id from _claudeTabs FIRST, so the close it triggers (-> _RemoveTab)
@@ -1156,7 +1156,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (FAVORITES.md): a bulk close that includes managed agent sessions asks ONCE for
         // the whole batch — Close All / Cancel All — instead of silently closing every session or
         // walking a train of per-tab confirms. Close All keeps each session resumable in the Sessions
-        // browser (with its Flight Plan) — nothing on disk is deleted (always archive, never delete);
+        // browser (with its Auto Testing) — nothing on disk is deleted (always archive, never delete);
         // Cancel All stops the close entirely. A batch of only plain shell tabs keeps upstream's single
         // generic confirm (gated on ConfirmOnClose). The decision is then applied to each tab below
         // WITHOUT re-prompting (skipConfirm).

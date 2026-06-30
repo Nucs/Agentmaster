@@ -158,9 +158,9 @@ namespace Agentmaster
             {
                 done.push_back(id);
                 // Agentmaster (#4): the submit never landed after kEnterRetryMax presses. Don't leave a
-                // phantom Sent (it reads as delivered but isn't) and don't let autopilot advance past a
-                // broken step: mark the prompt Failed and PAUSE this session's autopilot (mirrors the
-                // stopOnError backstop). The user fixes the cause, then Send-now / re-arms autopilot.
+                // phantom Sent (it reads as delivered but isn't) and don't let autorunner advance past a
+                // broken step: mark the prompt Failed and PAUSE this session's autorunner (mirrors the
+                // stopOnError backstop). The user fixes the cause, then Send-now / re-arms autorunner.
                 // (Rolling back to Pending would just re-send and be re-eaten — an infinite loop.)
                 _registry->Update(id, [&](SessionInfo& ss) {
                     for (auto& p : ss.queue)
@@ -171,11 +171,11 @@ namespace Agentmaster
                             break;
                         }
                     }
-                    ss.autopilot.mode = AutopilotMode::Off;
+                    ss.autorunner.mode = AutorunnerMode::Off;
                 });
-                AppendStateLog(L"autopilot.log",
+                AppendStateLog(L"autorunner.log",
                                L"[enter-retry-giveup] " + id + L" (turn never started after " +
-                                   std::to_wstring(kEnterRetryMax) + L" Enter retries; marked Failed, autopilot paused)\n");
+                                   std::to_wstring(kEnterRetryMax) + L" Enter retries; marked Failed, autorunner paused)\n");
             }
             else if (plan.action == EnterRetryAction::Retry)
             {
@@ -205,7 +205,7 @@ namespace Agentmaster
                         }
                     }
                 });
-                AppendStateLog(L"autopilot.log",
+                AppendStateLog(L"autorunner.log",
                                L"[enter-retry] " + id + L" press " + std::to_wstring(attempt) + L"/" +
                                    std::to_wstring(kEnterRetryMax) + L"\n");
             }
@@ -260,7 +260,7 @@ namespace Agentmaster
         {
             // Throttle off the bridge: this runs on the scheduler thread, so sleeping is
             // fine. Re-decide afterwards in case state changed (human typed, paused, etc.).
-            const auto throttle = s->autopilot.throttleMs;
+            const auto throttle = s->autorunner.throttleMs;
             if (throttle > 0)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(throttle));
@@ -284,7 +284,7 @@ namespace Agentmaster
                         p.attempts += 1;
                         p.echoed = false; // await this injection's UserPromptSubmit echo
                         p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
-                        ss.autopilot.autoSendsThisRun += 1;
+                        ss.autorunner.autoSendsThisRun += 1;
                         ss.pendingConfirmPromptId.clear();
                     }
                 });
@@ -296,7 +296,7 @@ namespace Agentmaster
                     const bool delivered = _registry->Inject(id, BuildPromptSubmission(text));
                     if (delivered)
                     {
-                        AppendStateLog(L"autopilot.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
+                        AppendStateLog(L"autorunner.log", L"[send] " + id + L" #" + std::to_wstring(plan2.promptIndex) + L"\n");
                     }
                     else
                     {
@@ -314,13 +314,13 @@ namespace Agentmaster
                                 {
                                     p.attempts -= 1;
                                 }
-                                if (ss.autopilot.autoSendsThisRun > 0)
+                                if (ss.autorunner.autoSendsThisRun > 0)
                                 {
-                                    ss.autopilot.autoSendsThisRun -= 1;
+                                    ss.autorunner.autoSendsThisRun -= 1;
                                 }
                             }
                         });
-                        AppendStateLog(L"autopilot.log", L"[send-deferred] " + id + L" (no injector yet)\n");
+                        AppendStateLog(L"autorunner.log", L"[send-deferred] " + id + L" (no injector yet)\n");
                     }
                 }
                 return;
@@ -342,7 +342,7 @@ namespace Agentmaster
                     ss.queue[plan.promptIndex].status = PromptStatus::Held;
                 }
             });
-            AppendStateLog(L"autopilot.log", L"[hold] " + id + L" (" + plan.reason + L")\n");
+            AppendStateLog(L"autorunner.log", L"[hold] " + id + L" (" + plan.reason + L")\n");
             break;
         case AdvanceAction::AwaitConfirm:
             _registry->Update(id, [&](SessionInfo& ss) {
@@ -351,10 +351,10 @@ namespace Agentmaster
                     ss.pendingConfirmPromptId = ss.queue[plan.promptIndex].id;
                 }
             });
-            AppendStateLog(L"autopilot.log", L"[await-confirm] " + id + L"\n");
+            AppendStateLog(L"autorunner.log", L"[await-confirm] " + id + L"\n");
             break;
         case AdvanceAction::PlanDone:
-            AppendStateLog(L"autopilot.log", L"[plan-done] " + id + L"\n");
+            AppendStateLog(L"autorunner.log", L"[plan-done] " + id + L"\n");
             break;
         case AdvanceAction::None:
         case AdvanceAction::Send: // (already handled / state changed away from Send)
@@ -368,8 +368,8 @@ namespace Agentmaster
         // Enter-retry watch (DecideEnterRetry): arm the watch whenever a session has a Flight send
         // awaiting pickup. EVERY send path — the auto-send + SemiAuto confirm below AND the Manager's
         // manual Send-now — marks the prompt Sent through the registry, which notifies this observer,
-        // so no send path needs to know about the retry mechanism. Independent of autopilot mode (a
-        // manual Send-now with autopilot Off must still submit reliably) and of the early returns
+        // so no send path needs to know about the retry mechanism. Independent of autorunner mode (a
+        // manual Send-now with autorunner Off must still submit reliably) and of the early returns
         // below, so it sits first. The worker sweep drains the watch as turns start / give up.
         {
             const auto rp = DecideEnterRetry(s, NowMs(), _registry->HasInjector(s.id));
@@ -388,16 +388,16 @@ namespace Agentmaster
         }
 
         // stopOnError backstop: a turn that ended in Error pauses the plan.
-        if (s.state == SessionState::Error && s.autopilot.stopOnError && s.autopilot.mode != AutopilotMode::Off)
+        if (s.state == SessionState::Error && s.autorunner.stopOnError && s.autorunner.mode != AutorunnerMode::Off)
         {
-            _registry->Update(s.id, [](SessionInfo& ss) { ss.autopilot.mode = AutopilotMode::Off; });
-            AppendStateLog(L"autopilot.log", L"[stop-on-error] paused " + s.id + L"\n");
+            _registry->Update(s.id, [](SessionInfo& ss) { ss.autorunner.mode = AutorunnerMode::Off; });
+            AppendStateLog(L"autorunner.log", L"[stop-on-error] paused " + s.id + L"\n");
             return;
         }
 
         // Drive the plan from observed changes, not only the Stop hook: a managed session
-        // sitting Idle/WaitingForInput with autopilot on and something Pending (just resumed,
-        // or you just enabled autopilot / added a prompt) should START consuming. Without this
+        // sitting Idle/WaitingForInput with autorunner on and something Pending (just resumed,
+        // or you just enabled autorunner / added a prompt) should START consuming. Without this
         // a resumed-Idle session would wait forever — it never emits a Stop to trigger an
         // advance. DecideAdvance + the pickup guard keep it to one prompt per turn, and
         // RequestAdvance dedups the burst.
@@ -406,13 +406,13 @@ namespace Agentmaster
         // provenance (s.external — did we launch it?). The two diverge for an ADOPTED session:
         // a claude typed into a `+` tab is external=true yet, once adopted, is bound an injector
         // and is fully drivable. Gating on !s.external used to skip every adopted session here,
-        // so toggling Autopilot Off→back (a UI Update that fires no hook, hence no Stop-seam
-        // advance) never started consuming its queue — the "switching autopilot off and back,
+        // so toggling Autorunner Off→back (a UI Update that fires no hook, hence no Stop-seam
+        // advance) never started consuming its queue — the "switching autorunner off and back,
         // pending messages are not sent" bug. An observe-only external (no injector) and an
         // ARCHIVED session (!live, loads from disk Idle possibly with mode=Full + Pending) both
         // lack an injector, so HasInjector is false and they are still correctly skipped — no
         // churn on the deferred-send path until the user restores/adopts them.
-        if (s.live && s.autopilot.mode != AutopilotMode::Off &&
+        if (s.live && s.autorunner.mode != AutorunnerMode::Off &&
             (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
             _registry->HasInjector(s.id))
         {
@@ -459,7 +459,7 @@ namespace Agentmaster
                         p.attempts += 1;
                         p.echoed = false; // await this injection's UserPromptSubmit echo
                         p.enterRetries = 0; // fresh send -> reset the Enter-retry watch (Scheduler.h)
-                        ss.autopilot.autoSendsThisRun += 1;
+                        ss.autorunner.autoSendsThisRun += 1;
                     }
                     else if (!confirm)
                     {
@@ -482,7 +482,7 @@ namespace Agentmaster
             const bool delivered = _registry->Inject(sessionId, BuildPromptSubmission(text));
             if (delivered)
             {
-                AppendStateLog(L"autopilot.log", L"[confirm-send] " + sessionId + L"\n");
+                AppendStateLog(L"autorunner.log", L"[confirm-send] " + sessionId + L"\n");
             }
             else
             {
@@ -497,15 +497,15 @@ namespace Agentmaster
                             {
                                 p.attempts -= 1;
                             }
-                            if (ss.autopilot.autoSendsThisRun > 0)
+                            if (ss.autorunner.autoSendsThisRun > 0)
                             {
-                                ss.autopilot.autoSendsThisRun -= 1;
+                                ss.autorunner.autoSendsThisRun -= 1;
                             }
                             break;
                         }
                     }
                 });
-                AppendStateLog(L"autopilot.log", L"[confirm-deferred] " + sessionId + L" (no injector yet)\n");
+                AppendStateLog(L"autorunner.log", L"[confirm-deferred] " + sessionId + L" (no injector yet)\n");
             }
         }
     }

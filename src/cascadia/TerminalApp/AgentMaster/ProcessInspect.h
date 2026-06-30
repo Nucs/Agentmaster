@@ -263,7 +263,7 @@ namespace Agentmaster
     int64_t SubagentActivityUnixMs(std::wstring_view transcriptPath);
 
     // A transcript's user-facing metadata, read out-of-band for the Manager's external rows (a real
-    // title instead of a bare "claude") and the read-only Flight Plan of a selected external session.
+    // title instead of a bare "claude") and the read-only Auto Testing of a selected external session.
     struct TranscriptInfo
     {
         bool found{};
@@ -467,7 +467,7 @@ namespace Agentmaster
     // pseudo-"user" messages (command/bash echoes, task/bash notifications, status+summary blocks,
     // subagent telemetry, system reminders) AND verbatim-pasted Claude-Code TUI output (a message
     // starting with the ●/⏺/⎿ marker glyphs) out of the summary's numbered Messages list. Distinct from
-    // IsNoiseUserPrompt (titles / Flight Plan). Exposed for tests. Expects leading whitespace trimmed.
+    // IsNoiseUserPrompt (titles / Auto Testing). Exposed for tests. Expects leading whitespace trimmed.
     bool SeIsCommandNoise(const std::wstring& c);
 
     // Agentmaster: the session-end.js summary BOX rendered to PLAIN TEXT — the SINGLE source of

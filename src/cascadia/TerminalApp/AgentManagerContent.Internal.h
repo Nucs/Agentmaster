@@ -3,7 +3,7 @@
 //
 // ======================================================================================
 // Agentmaster Manager tab content -- C1 'Linked Lenses' (7 partial files)
-// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Flight Plan over
+// The pinned leftmost tab's UI (DESIGN section 9): a Triage Board + Explorer Tree + Auto Testing over
 // ONE shared SessionRegistry, built imperatively. ONE class (AgentManagerContent) split from the
 // former 10864-line .cpp into by-area TUs that share AgentManagerContent.Internal.h.
 //
@@ -13,13 +13,13 @@
 //   AgentManagerContent.Board.cpp       - the Triage Board: cards, columns, splitters, _RebuildBoard
 //   AgentManagerContent.Tree.cpp        - the Explorer Tree: managed/external trees, context menus, scope/sort toggles, rename, confirm dialogs
 //   AgentManagerContent.Settings.cpp    - keep-awake/reopen/activate buttons + the Settings cog overlay (tabs, save, env editor, UPDATES, claude-missing)
-//   AgentManagerContent.FlightPlan.cpp  - the Flight Plan: plan + selection sync, prompt compose/history, Autopilot, the Summary tab, templates
+//   AgentManagerContent.AutoTesting.cpp  - the Auto Testing: plan + selection sync, prompt compose/history, Autorunner, the Summary tab, templates
 //   AgentManagerContent.Launch.cpp      - the Launch bar: cwd validation, the Claude/Codex toggle, launch/create/fork, the path-picker drop-down
 // ======================================================================================
 //
 // Agentmaster: AgentManagerContent file-local helpers (the StateColor/Pill/StateDot/Text/Fill/
 // path + sort utilities, ~48 of them). Factored out of AgentManagerContent.cpp so the by-area
-// partial TUs (AgentManagerContent.{cpp,Board,Tree,Settings,FlightPlan,Launch}.cpp) all share ONE
+// partial TUs (AgentManagerContent.{cpp,Board,Tree,Settings,AutoTesting,Launch}.cpp) all share ONE
 // copy. Kept in an ANONYMOUS namespace exactly as before (internal linkage, a per-TU copy) -- no
 // behavior change. IMPORTANT: this header is NOT standalone -- it must be included AFTER pch.h and
 // the file-scope using-directives that each AgentManagerContent.*.cpp replicates (it relies on them,

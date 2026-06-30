@@ -2994,7 +2994,7 @@ void Pane::CollectTaskbarStates(std::vector<winrt::TerminalApp::TaskbarState>& s
 
 // Agentmaster: does this leaf pane host a MANAGED Claude session? (the bind sets the flag on the
 // TerminalPaneContent via _AttachClaudeOverlay). Broadcast input is excluded from such panes — the
-// orchestrator owns a Claude session's stdin (injector / Flight Plan), and a Claude TUI is not a
+// orchestrator owns a Claude session's stdin (injector / Auto Testing), and a Claude TUI is not a
 // meaningful broadcast target. A branch pane / non-terminal / non-managed leaf returns false.
 bool Pane::IsAgentManaged() const noexcept
 {

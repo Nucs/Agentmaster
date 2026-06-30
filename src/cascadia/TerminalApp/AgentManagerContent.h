@@ -5,7 +5,7 @@
 // Lenses" UI (DESIGN §9). Three regions over ONE shared model (the SessionRegistry):
 //   * Triage Board (top)        — sessions as cards in hook-driven state columns
 //   * Explorer Tree (bottom-left) — the M working directories -> their N sessions
-//   * Flight Plan (bottom-right) — the selected session's prompt queue + Autopilot
+//   * Auto Testing (bottom-right) — the selected session's prompt queue + Autorunner
 // with bidirectional selection sync. Built imperatively (no IDL/XAML markup, like
 // ScratchpadContent). The views are snapshot-driven: on any registry change we rebuild
 // from SessionRegistry::Snapshot() on the UI thread.
@@ -98,7 +98,7 @@ namespace winrt::TerminalApp::implementation
         // on every ~2s observer/registry tick. The page wires this to GetForegroundWindow()==hwnd; when
         // backgrounded the user isn't keyboard-navigating this board, so the focus-restore is skipped.
         void SetWindowForegroundProvider(std::function<bool()> provider);
-        void SetPauseHandler(std::function<void(bool)> handler); // global Autopilot Pause-all
+        void SetPauseHandler(std::function<void(bool)> handler); // global Autorunner Pause-all
         void SetConfirmHandler(std::function<void(winrt::hstring, bool)> handler); // SemiAuto confirm/skip
         void SetSettings(const ::Agentmaster::AppSettings& settings); // seed the cog dialog's current values
         void SetSettingsHandler(std::function<void(::Agentmaster::AppSettings)> handler); // persist on Save
@@ -137,7 +137,7 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (Linked Lenses — the per-tab -> Manager sync): select a managed session in the
         // lens from OUTSIDE. The page calls this when the user switches to that session's terminal tab,
         // so returning to the Manager tab shows the session you were just in selected (board card + tree
-        // row highlighted + its Flight Plan). Equivalent to a single-click on the session's board card;
+        // row highlighted + its Auto Testing). Equivalent to a single-click on the session's board card;
         // a no-op when the id is empty or already selected. Marshal to the UI thread is the caller's job.
         void SelectSession(winrt::hstring id);
         // Agentmaster (Linked Lenses — selection VISIBILITY sync): scroll the currently-selected board
@@ -153,7 +153,7 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (Fleet Observer O6; OBSERVER.md §11c): the External (WindowsTerminal) claude
         // census — observe-only sessions the observer detected in a real Windows Terminal (NOT our
-        // tabs, NO registry session, NO Flight Plan). The page's _ObserverProbe pushes the observer's
+        // tabs, NO registry session, NO Auto Testing). The page's _ObserverProbe pushes the observer's
         // External() table here each tick; the content shows them as a collapsible "External (N)"
         // board group. Diffs against the current list, so an unchanged push is a no-op (no rebuild).
         void SetExternalClaudes(std::vector<::Agentmaster::ExternalClaudeRow> rows);
@@ -197,7 +197,7 @@ namespace winrt::TerminalApp::implementation
         void _RebuildExternalTree();
         void _RebuildPlan(const std::vector<::Agentmaster::SessionInfo>& sessions);
         // Agentmaster: select an EXTERNAL (observe-only) row in the tree's EXTERNAL scope -> the
-        // Flight Plan shows that conversation's prompts READ-ONLY (we host no ConPTY, so we can't
+        // Auto Testing shows that conversation's prompts READ-ONLY (we host no ConPTY, so we can't
         // drive it). _LoadExternalPlan reads the transcript prompts on a background thread (one-shot
         // per id) and posts them back via the dispatcher; _RebuildExternalPlan renders them.
         // `kind` (Claude vs Codex) + `rolloutPath` (Codex's date-sharded .jsonl, carried on the row)
@@ -206,7 +206,7 @@ namespace winrt::TerminalApp::implementation
         void _SelectExternal(const std::wstring& sessionId, const std::wstring& cwd, const std::wstring& title, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath);
         void _LoadExternalPlan(const std::wstring& sessionId, const std::wstring& cwd, ::Agentmaster::AgentKind kind, const std::wstring& rolloutPath);
         void _RebuildExternalPlan();
-        // Agentmaster: pin the Flight Plan's scroll to the BOTTOM the first time a given subject is
+        // Agentmaster: pin the Auto Testing's scroll to the BOTTOM the first time a given subject is
         // viewed (the latest SENT message + the UPCOMING queue sit at the bottom of the list, so a
         // freshly-opened plan defaults to "where the conversation left off"). `subjectKey` identifies
         // what the list currently shows — a managed session id, or "x:<id>" for an external's
@@ -219,7 +219,7 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: Explorer Tree scope toggle, cycling LOCAL -> GLOBAL -> EXTERNAL (this
         // window's tabs / all windows / observe-only externals). _ToggleTreeScope advances the mode
-        // + rebuilds (and clears selection when entering EXTERNAL so the Flight Plan reads
+        // + rebuilds (and clears selection when entering EXTERNAL so the Auto Testing reads
         // nothing-selected); _UpdateTreeScopeButton refreshes the toggle button's label.
         void _ToggleTreeScope();
         void _UpdateTreeScopeButton();
@@ -282,17 +282,17 @@ namespace winrt::TerminalApp::implementation
         bool _PromptCaretOnFirstRow() const;
         void _OnMovePrompt(int delta);
         void _OnDeletePrompt();
-        void _OnAutopilotChanged(int index);
-        // Agentmaster: the FLIGHT-PLAN-header Autopilot toggle. _CycleAutopilot advances the
-        // selected session's mode (Off -> Semi-auto -> Full -> Off); _UpdateAutopilotButton paints
+        void _OnAutorunnerChanged(int index);
+        // Agentmaster: the FLIGHT-PLAN-header Autorunner toggle. _CycleAutorunner advances the
+        // selected session's mode (Off -> Semi-auto -> Full -> Off); _UpdateAutorunnerButton paints
         // the button's colored state dot + label (dim/disabled when no live session is selected).
-        void _CycleAutopilot();
-        void _UpdateAutopilotButton(::Agentmaster::AutopilotMode mode, bool enabled);
-        // Agentmaster: the Flight-Plan pane's two-state [Summary | Flight Plan] tab toggle (its top
-        // line). _SelectPlanPaneTab(summary) sets the GLOBAL choice (AppSettings::flightPlanShowsSummary),
+        void _CycleAutorunner();
+        void _UpdateAutorunnerButton(::Agentmaster::AutorunnerMode mode, bool enabled);
+        // Agentmaster: the Auto-Testing pane's two-state [Summary | Auto Testing] tab toggle (its top
+        // line). _SelectPlanPaneTab(summary) sets the GLOBAL choice (AppSettings::autoTestingShowsSummary),
         // persists + broadcasts it through the settings sink (the treeSort idiom), and re-paints;
         // _UpdatePlanPaneTab reflects the current choice — accents the selected segment and shows that
-        // tab's content (Summary host vs the Flight Plan body), no-op while the controls are null.
+        // tab's content (Summary host vs the Auto Testing body), no-op while the controls are null.
         void _SelectPlanPaneTab(bool summary);
         void _UpdatePlanPaneTab();
         // Agentmaster (Summary tab): render the selected managed Claude session's summary — the SAME
@@ -407,7 +407,7 @@ namespace winrt::TerminalApp::implementation
         // transcript for the custom title + prompt corpus the tab pick matches against).
         // Observe-only safe: window activation, never input.
         void _BringExternalToFront(uint32_t pid, const std::wstring& cwd);
-        // Flight-Plan message right-click menu: per-prompt Move up / Move down / Delete (only on
+        // Auto-Testing message right-click menu: per-prompt Move up / Move down / Delete (only on
         // UPCOMING rows — a sent row can't be reordered) + Archive session (always). Queue ops act
         // on `promptId` (the right-clicked row), not the current selection.
         winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakePromptMenu(const std::wstring& promptId, bool upcoming);
@@ -423,7 +423,7 @@ namespace winrt::TerminalApp::implementation
         void _ShowSettings(); // populate controls from _appSettings, then reveal the overlay
         void _HideSettings();
         void _SaveSettings(); // read controls -> _appSettings -> _settingsSink, then hide
-        // Agentmaster: the cog's TOP TAB strip — Sessions · Autopilot · Behavior · Tabs & Overlay ·
+        // Agentmaster: the cog's TOP TAB strip — Sessions · Autorunner · Behavior · Tabs & Overlay ·
         // Claude · About. A button-tab swaps one scrollable panel per group (the _SwitchEnvTab idiom;
         // NOT a Pivot — themes unreliably under XAML Islands). _settingsTabButtons / _settingsTabPanels
         // are parallel-indexed; Save/Cancel is a fixed footer outside the tabs.
@@ -565,7 +565,7 @@ namespace winrt::TerminalApp::implementation
         std::wstring _selectedPromptId;
         // Agentmaster: the EXTERNAL row selected in the tree's EXTERNAL scope (its resolved
         // conversation id + cwd + title), and the prompts read from its transcript for the read-only
-        // Flight Plan. _externalPlanLoadedFor == the id whose prompts are loaded (empty while loading
+        // Auto Testing. _externalPlanLoadedFor == the id whose prompts are loaded (empty while loading
         // or none selected). Mutually exclusive with _selectedId (a managed selection clears these).
         std::wstring _selectedExternalSessionId;
         std::wstring _selectedExternalCwd;
@@ -593,7 +593,7 @@ namespace winrt::TerminalApp::implementation
         void _SetTreeScope(TreeScope scope, bool refresh = true);
         void _UpdateBoardScopeButton();
         std::unordered_set<std::wstring> _collapsedDirs;
-        bool _suppressAutopilotEvent{ false };
+        bool _suppressAutorunnerEvent{ false };
         // Agentmaster (O6): the observer's External (WindowsTerminal) claudes, pushed by the page's
         // _ObserverProbe; rendered as a collapsible "External (N)" board group. _externalCollapsed
         // hides the cards (the header keeps the count).
@@ -640,7 +640,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::StackPanel _planHeaderHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::StackPanel _planListHost{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _planScroll{ nullptr }; // Agentmaster: hosts _planListHost — pinned to the bottom on first view of a subject (see _PinPlanToBottomOnSubjectChange)
-        std::wstring _planAutoScrolledFor; // Agentmaster: the subject key (session id / "x:<extId>") we last auto-scrolled the Flight Plan to bottom for; only a CHANGE re-pins (a same-subject _Refresh keeps the user's scroll)
+        std::wstring _planAutoScrolledFor; // Agentmaster: the subject key (session id / "x:<extId>") we last auto-scrolled the Auto Testing to bottom for; only a CHANGE re-pins (a same-subject _Refresh keeps the user's scroll)
         winrt::Windows::UI::Xaml::Controls::TextBox _cwdBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Button _launchBtn{ nullptr }; // Agentmaster: "Launch Claude" (dir) / "Resume session" (a found session id); disabled on a red box
         // Agentmaster (responsive launch bar): the toolbar's top row + its collapsible pieces, promoted to
@@ -679,15 +679,15 @@ namespace winrt::TerminalApp::implementation
         std::vector<std::wstring> _promptHistory;
         std::wstring _promptHistoryDraft;
         bool _promptHistoryNavigating{ false };
-        winrt::Windows::UI::Xaml::Controls::Button _autopilotBtn{ nullptr }; // Agentmaster: Autopilot mode toggle, now in a thin strip atop the Flight Plan TAB body (was the old FLIGHT PLAN header)
-        // Agentmaster: the Flight-Plan pane's two-state [Summary | Flight Plan] segmented tab toggle
-        // (its top line) + the two swappable tab bodies. _summaryHost holds the Summary tab; _flightPlanBody
-        // holds the Autopilot strip + the prompt queue / compose box. Visibility is driven by
-        // AppSettings::flightPlanShowsSummary via _UpdatePlanPaneTab.
+        winrt::Windows::UI::Xaml::Controls::Button _autorunnerBtn{ nullptr }; // Agentmaster: Autorunner mode toggle, now in a thin strip atop the Auto Testing TAB body (was the old FLIGHT PLAN header)
+        // Agentmaster: the Auto-Testing pane's two-state [Summary | Auto Testing] segmented tab toggle
+        // (its top line) + the two swappable tab bodies. _summaryHost holds the Summary tab; _autoTestBody
+        // holds the Autorunner strip + the prompt queue / compose box. Visibility is driven by
+        // AppSettings::autoTestingShowsSummary via _UpdatePlanPaneTab.
         winrt::Windows::UI::Xaml::Controls::Button _summaryTabBtn{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Button _flightPlanTabBtn{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Button _autoTestTabBtn{ nullptr };
         winrt::Windows::UI::Xaml::Controls::Grid _summaryHost{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Grid _flightPlanBody{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Grid _autoTestBody{ nullptr };
         // Agentmaster (Summary tab): the scrollable host + box panel for the Summary tab. _summaryScroll
         // is the ONE inner scrollbar (the narrow pane scrolls a long box); _summaryBoxHost holds the
         // rendered RenderSessionSummaryBox lines (mono TextBlocks + full-width rules), mirroring the
@@ -833,7 +833,7 @@ namespace winrt::TerminalApp::implementation
         {
             None,
             Rows, // dragging the horizontal bar (Board vs Bottom)
-            Cols // dragging the vertical bar (Tree vs Flight Plan)
+            Cols // dragging the vertical bar (Tree vs Auto Testing)
         };
         DragKind _dragKind{ DragKind::None };
         double _dragOrigin{ 0 }; // root-relative pointer coord on the drag axis at press

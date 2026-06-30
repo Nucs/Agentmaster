@@ -532,7 +532,7 @@ namespace winrt::TerminalApp::implementation
     // place, so "close the window -> reopen it" brings the whole workspace back — not just geometry +
     // lens. Per ref, in record order:
     //   • Claude -> resume its session INTO this window (claude --resume, the archived record's queue +
-    //     autopilot intact) via _LaunchClaudeSession — the Archived-button path, targeted here. Lazy-
+    //     autorunner intact) via _LaunchClaudeSession — the Archived-button path, targeted here. Lazy-
     //     start safe: the tab is created through the normal pane path (no eager connection.Start()), so
     //     a background restored claude starts its conversation only when first focused (WT's lazy-tab
     //     behavior) — never the eager-Start AV (see Gotchas). A session already live (open in another
