@@ -39,6 +39,9 @@
 // Agentmaster: [startup] phase timing — see where the (slow) launch spends its time. Header-only,
 // shares one process-creation clock with the dll-side TerminalPage/Engine lines in the same hooks.log.
 #include "../TerminalApp/AgentMaster/StartupTiming.h"
+// Agentmaster: the launch SPLASH — a lightweight Win32 loading window on its OWN thread, so it keeps
+// animating while the UI thread is blocked in session/window restore. Header-only + pure Win32.
+#include "../TerminalApp/AgentMaster/Splash.h"
 
 using namespace winrt;
 using namespace winrt::Microsoft::Terminal;
@@ -798,6 +801,19 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     // is the exe→dll handoff point — compare it to a window's "first-layout TOTAL" to split launch
     // time into exe-prelude (incl. window dispatch) vs. per-window setup.
     ::Agentmaster::Startup::Mark(L"exe prelude done — entering message loop");
+
+    // Agentmaster (splash): start the lightweight loading window NOW — deliberately AFTER every modal
+    // launch prompt (the update dialog + the "reopen N windows?" MessageBox), so a TOPMOST splash can
+    // never cover one. The heavy work (window layout + session/window restore) all happens from here in
+    // the pump, so this still covers it. The splash runs on its OWN thread (it keeps animating while the
+    // UI thread is blocked in restore), self-suppresses on a fast launch (a pre-show delay), and is
+    // dismissed by the first window's _OnFirstLayout (Splash::SignalReady). Skip a -Embedding/defterm
+    // activation — it has no user-facing surface.
+    if (std::wstring_view{ GetCommandLineW() }.find(L"-Embedding") == std::wstring_view::npos)
+    {
+        ::Agentmaster::Splash::Show();
+        ::Agentmaster::Splash::SetStatus(L"Restoring your sessions...");
+    }
 
     // Main message loop. It pumps all windows.
     bool loggedInteraction = false;

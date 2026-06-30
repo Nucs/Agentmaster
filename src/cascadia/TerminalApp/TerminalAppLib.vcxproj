@@ -192,6 +192,7 @@
     <ClInclude Include="AgentMaster\SessionStore.h" />
     <ClInclude Include="AgentMaster\Updater.h" />
     <ClInclude Include="AgentMaster\StartupTiming.h" />
+    <ClInclude Include="AgentMaster\Splash.h" />
     <ClInclude Include="SnippetsPaneContent.h">
       <DependentUpon>SnippetsPaneContent.xaml</DependentUpon>
     </ClInclude>

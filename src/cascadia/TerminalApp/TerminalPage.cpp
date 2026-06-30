@@ -33,6 +33,7 @@
 #include "AgentMaster/SessionScanner.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (FAVORITES.md): IsSessionFavorite for the tab context-menu Favorite item
 #include "AgentMaster/StartupTiming.h" // Agentmaster: [startup] phase timing for _OnFirstLayout
+#include "AgentMaster/Splash.h" // Agentmaster: dismiss the launch splash once the first window is laid out
 #include "App.h"
 #include "DebugTapConnection.h"
 #include "MarkdownPaneContent.h"
@@ -811,6 +812,12 @@ namespace winrt::TerminalApp::implementation
             // Agentmaster ([startup] timing): the whole first-layout cost for THIS window. Compare to
             // the +Nms anchor to see how much launch time is window setup vs. the exe-side prelude.
             ::Agentmaster::Startup::Phase(L"first-layout TOTAL" + _wid, ::GetTickCount64() - _flStart);
+
+            // Agentmaster (splash): this window is laid out + restored — dismiss the launch splash. The
+            // FIRST window to reach here wins (the PID-named event is idempotent; later windows are
+            // no-ops). Safe if no splash is up (fast launch / -Embedding) — SignalReady just sets a
+            // throwaway event nobody is waiting on.
+            ::Agentmaster::Splash::SignalReady();
         }
     }
 
