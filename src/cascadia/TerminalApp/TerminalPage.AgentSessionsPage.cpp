@@ -557,6 +557,7 @@ namespace winrt::TerminalApp::implementation
         leftScroll.Content(_sessionsRowsHost);
         Grid::SetRow(leftScroll, 1);
         left.Children().Append(leftScroll);
+        _sessionsRowsScroll = leftScroll; // keep a handle so a tab-switch away can snapshot/restore the scroll offset
         Grid::SetColumn(left, 0);
         body.Children().Append(left);
 
@@ -588,19 +589,57 @@ namespace winrt::TerminalApp::implementation
         // Generic overlay registration: the tab-switch seam dismisses every registered page
         // (TabManagement.cpp) — the extra hook closes the range Popup, which a collapsed host
         // would NOT hide (popups render in the popup root, not under the parent).
-        _RegisterAgentPageOverlay(host, &_sessionsPageVisible, [weak = get_weak()]() {
-            if (const auto self = weak.get())
-            {
-                if (self->_sessRangePopup)
+        _RegisterAgentPageOverlay(
+            host,
+            &_sessionsPageVisible,
+            [weak = get_weak()]() {
+                // onDismiss (tab-switch OFF the Manager tab): close the owned popup + tooltips (a
+                // collapsed host does NOT hide those), and SNAPSHOT the table's scroll offset while the
+                // page is still laid out, so _RestoreAgentPageOverlays can bring it back "as I left it".
+                if (const auto self = weak.get())
                 {
-                    self->_sessRangePopup.IsOpen(false);
+                    if (self->_sessRangePopup)
+                    {
+                        self->_sessRangePopup.IsOpen(false);
+                    }
+                    if (self->_sessionsPageHost)
+                    {
+                        SessCloseTipsIn(self->_sessionsPageHost); // tooltips don't collapse with the host either
+                    }
+                    if (self->_sessionsRowsScroll)
+                    {
+                        self->_sessionsSavedScrollOffset = self->_sessionsRowsScroll.VerticalOffset();
+                    }
                 }
-                if (self->_sessionsPageHost)
+            },
+            [weak = get_weak()]() {
+                // onRestore (return TO the Manager tab, page was on-screen when left): the host was just
+                // re-shown, but a Collapse drops transient view state — re-apply it. DEFER to a clean
+                // tick: the re-shown ScrollViewer's content extent isn't realized yet in this pass
+                // (ScrollableHeight reads 0, which would CLAMP the restore to the top — the board-column
+                // recipe), and the selection handler re-focuses the Manager tab AFTER us. On the tick:
+                // force one layout so the extent is real, restore the saved scroll, then focus the search
+                // box so Up/Down + typing route through the page again (matching _ShowSessionsPage).
+                if (const auto self = weak.get())
                 {
-                    SessCloseTipsIn(self->_sessionsPageHost); // tooltips don't collapse with the host either
+                    self->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak]() {
+                        const auto self = weak.get();
+                        if (!self)
+                        {
+                            return;
+                        }
+                        if (self->_sessionsRowsScroll && self->_sessionsSavedScrollOffset > 0.0)
+                        {
+                            self->_sessionsRowsScroll.UpdateLayout(); // realize the extent first so ChangeView doesn't clamp to 0
+                            self->_sessionsRowsScroll.ChangeView(nullptr, self->_sessionsSavedScrollOffset, nullptr, true);
+                        }
+                        if (self->_sessionsSearchBox)
+                        {
+                            self->_sessionsSearchBox.Focus(FocusState::Programmatic);
+                        }
+                    });
                 }
-            }
-        });
+            });
 
         // Up/Down = move the selection through the visible rows (wraps; none selected => Down
         // picks the first, Up the last). PREVIEW (tunneling) so it wins over the focused search
@@ -690,6 +729,9 @@ namespace winrt::TerminalApp::implementation
             }
             self->_sessionsPageHost.Visibility(Visibility::Visible);
             self->_sessionsPageVisible.store(true, std::memory_order_relaxed);
+            // Mark the page logically OPEN so leaving + returning to the Manager tab restores it as left
+            // (the tab-switch seam only collapses; this intent is what tells it to re-open on return).
+            self->_SetAgentPageOverlayOpenIntent(&self->_sessionsPageVisible, true);
             ::Agentmaster::LogNav(L"sessions-page shown"); // END (pairs with open-begin): the page is up; rows render async next
             if (self->_sessionsSearchBox)
             {
@@ -708,6 +750,11 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Clear the restore-on-return intent SYNCHRONOUSLY (before the deferred collapse). An explicit
+        // hide must win over a concurrent tab-switch dismiss — e.g. a Resume/Fork selects the new tab
+        // (firing _DismissAgentPageOverlays synchronously) BEFORE this Hide runs; keying restore on this
+        // intent, not that transient collapse, keeps a "closed" page from re-opening on return to Manager.
+        _SetAgentPageOverlayOpenIntent(&_sessionsPageVisible, false);
         Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
             auto self = weak.get();
             if (self && self->_sessionsPageHost)

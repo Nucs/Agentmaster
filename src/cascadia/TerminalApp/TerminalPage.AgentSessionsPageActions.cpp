@@ -803,26 +803,76 @@ namespace winrt::TerminalApp::implementation
     // TabManagement.cpp — closes ALL of them without naming any page, so a future page binds
     // automatically by registering.
 
-    void TerminalPage::_RegisterAgentPageOverlay(const Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss)
+    void TerminalPage::_RegisterAgentPageOverlay(const Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss, std::function<void()> onRestore)
     {
-        _agentPageOverlays.push_back(_AgentPageOverlay{ host, visibleMirror, std::move(onDismiss) });
+        _agentPageOverlays.push_back(_AgentPageOverlay{ host, visibleMirror, std::move(onDismiss), std::move(onRestore) });
     }
 
     void TerminalPage::_DismissAgentPageOverlays()
     {
         for (auto& p : _agentPageOverlays)
         {
+            // Collapse only — the tree is NOT torn down, so a logically-open page keeps its typed search,
+            // gathered rows, and selection in memory for _RestoreAgentPageOverlays to bring back (in
+            // memory, no persistence). Run onDismiss BEFORE collapsing so it can snapshot live view state
+            // (e.g. the table scroll offset) while the page is still laid out. The "should I re-open on
+            // return" decision is the page's own restoreOnReturn intent (set by its Show/Hide), NOT this
+            // transient collapse — so a Resume's synchronous tab-switch dismiss can't out-race a Hide.
+            if (p.onDismiss)
+            {
+                p.onDismiss(); // e.g. close an owned Popup (a collapsed host does NOT hide those) + snapshot scroll
+            }
             if (p.host)
             {
                 p.host.Visibility(Visibility::Collapsed);
             }
             if (p.visibleMirror)
             {
-                p.visibleMirror->store(false, std::memory_order_relaxed);
+                p.visibleMirror->store(false, std::memory_order_relaxed); // mirror == ON-SCREEN, now false
             }
-            if (p.onDismiss)
+        }
+    }
+
+    void TerminalPage::_RestoreAgentPageOverlays()
+    {
+        // The counterpart to _DismissAgentPageOverlays: when the Manager tab is re-selected, bring back
+        // any full-window page (e.g. Sessions) that is logically OPEN (restoreOnReturn — set by the page's
+        // Show, cleared by its Hide). The page was merely COLLAPSED (never rebuilt), so its in-memory tree
+        // — typed search text, gathered rows, selection — is intact; onRestore re-applies the transient
+        // view state a collapse drops (scroll + focus).
+        for (auto& p : _agentPageOverlays)
+        {
+            if (!p.restoreOnReturn)
             {
-                p.onDismiss(); // e.g. close an owned Popup — a collapsed host does NOT hide those
+                continue;
+            }
+            if (p.host)
+            {
+                p.host.Visibility(Visibility::Visible);
+            }
+            if (p.visibleMirror)
+            {
+                p.visibleMirror->store(true, std::memory_order_relaxed);
+            }
+            if (p.onRestore)
+            {
+                p.onRestore();
+            }
+        }
+    }
+
+    void TerminalPage::_SetAgentPageOverlayOpenIntent(std::atomic<bool>* visibleMirror, bool open)
+    {
+        // A page's Show/Hide records whether _RestoreAgentPageOverlays should re-open it on return to the
+        // Manager tab. Keyed by the page's visibility mirror (its stable identity in the registry). This is
+        // the authoritative "logically open" bit — independent of the transient collapse/re-show, so an
+        // explicit Hide (e.g. Resume landing on a new tab) always wins over a concurrent tab-switch.
+        for (auto& p : _agentPageOverlays)
+        {
+            if (p.visibleMirror == visibleMirror)
+            {
+                p.restoreOnReturn = open;
+                break;
             }
         }
     }

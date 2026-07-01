@@ -1474,11 +1474,17 @@ namespace winrt::TerminalApp::implementation
             // moves OFF the Manager tab. Collapse synchronously: this is a SelectionChanged handler
             // (already mutating the tree just above), NOT an in-page pointer handler, so the hit-test
             // AV that makes the in-page Hide paths defer doesn't apply — and a synchronous collapse
-            // avoids a one-frame bleed over the new tab. (Pages reopen from their Manager buttons;
-            // they do not auto-restore on returning to the Manager tab.)
+            // avoids a one-frame bleed over the new tab. Symmetrically, RETURNING to the Manager tab
+            // re-shows any page still logically OPEN (its Show set the intent, a Hide would have cleared
+            // it) exactly as left — the collapse kept its typed search + rows in memory; onRestore re-
+            // applies scroll + focus. Pages otherwise open only from their Manager buttons.
             if (tab != _managerTab)
             {
                 _DismissAgentPageOverlays();
+            }
+            else
+            {
+                _RestoreAgentPageOverlays();
             }
 
             // GH#7409: If the tab switcher is open, then we _don't_ want to

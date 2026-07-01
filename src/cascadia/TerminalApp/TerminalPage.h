@@ -493,6 +493,8 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Grid _sessionsPageHost{ nullptr }; // full-bleed page over Root rows 1-2
         winrt::Windows::UI::Xaml::Controls::Grid _sessionsHeaderRow{ nullptr }; // LEFT: sortable column header
         winrt::Windows::UI::Xaml::Controls::StackPanel _sessionsRowsHost{ nullptr }; // LEFT: table data rows
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _sessionsRowsScroll{ nullptr }; // LEFT: the table's ScrollViewer — kept so a tab-switch away can snapshot/restore its scroll offset (keep the page "as I left it")
+        double _sessionsSavedScrollOffset{ 0 }; // table scroll offset captured on tab-switch dismiss; re-applied (deferred) when the Manager tab is re-selected
         winrt::Windows::UI::Xaml::Controls::StackPanel _sessionsDetailHost{ nullptr }; // RIGHT: detail/preview
         winrt::Windows::UI::Xaml::Controls::TextBox _sessionsSearchBox{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBlock _sessionsCountText{ nullptr };
@@ -618,6 +620,8 @@ namespace winrt::TerminalApp::implementation
             winrt::Windows::UI::Xaml::Controls::Grid host{ nullptr };
             std::atomic<bool>* visibleMirror{ nullptr };
             std::function<void()> onDismiss; // optional (close popups etc.); may be empty
+            std::function<void()> onRestore; // optional: re-apply transient view state (scroll/focus) a collapse drops, when the Manager tab is re-selected; may be empty
+            bool restoreOnReturn{ false }; // "logically open" intent — set true by the page's Show, false by its Hide (NOT by dismiss/restore); _RestoreAgentPageOverlays re-shows it on return to the Manager tab. Order-independent, so a Resume's synchronous tab-switch dismiss can't out-race the page's own Hide.
         };
         std::vector<_AgentPageOverlay> _agentPageOverlays;
 
@@ -915,8 +919,10 @@ namespace winrt::TerminalApp::implementation
         void _UpdateSessionsFilterChip(); // refresh the "✕ filter: …" chip's label + visibility from _sessionsRowFilter
         // Agentmaster: the generic window-level page-overlay seam (_agentPageOverlays) — register
         // at page build; dismiss-all from any global site (the tab-switch handler). See the struct.
-        void _RegisterAgentPageOverlay(const winrt::Windows::UI::Xaml::Controls::Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss);
+        void _RegisterAgentPageOverlay(const winrt::Windows::UI::Xaml::Controls::Grid& host, std::atomic<bool>* visibleMirror, std::function<void()> onDismiss, std::function<void()> onRestore = {});
         void _DismissAgentPageOverlays(); // synchronous collapse of EVERY registered page (safe outside in-page pointer handlers)
+        void _RestoreAgentPageOverlays(); // re-show pages logically-open when the Manager tab was last left (their collapsed tree kept the search text/rows); called on RETURN to the Manager tab
+        void _SetAgentPageOverlayOpenIntent(std::atomic<bool>* visibleMirror, bool open); // a page's Show/Hide flags whether _RestoreAgentPageOverlays should re-open it (found by its visibility mirror)
         void _MoveArchiveSelection(int delta); // Up/Down keyboard nav over _archiveVisibleOrder (same rotate semantics as the Sessions page)
 
         std::wstring _evaluatePathForCwd(std::wstring_view path);
