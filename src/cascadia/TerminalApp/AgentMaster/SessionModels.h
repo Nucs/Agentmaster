@@ -29,6 +29,46 @@ namespace Agentmaster
         Done // session ended (SessionEnd)
     };
 
+    // Agentmaster (crash/restore state fidelity — Correctness Rule #16): map a PERSISTED SessionState
+    // to the state a freshly-REOPENED session should SEED with, so a CRASH (or a window/session restore)
+    // does not silently drop the fleet's "which sessions need me" triage. sessions.json persists the
+    // real state, but the reopen path used to force every session to Idle unconditionally — harmless on
+    // a clean shutdown (those sessions were deliberately closed) but on a crash it threw away the live
+    // Running / WaitingForInput / NeedsApproval the user wanted back (every card landed in "Idle/Done").
+    //
+    // The mapping keeps ONLY the "AT REST, needs you" states — WaitingForInput and NeedsApproval — which
+    // genuinely SURVIVE a `claude --resume`: the conversation is parked at a completed turn / an
+    // unanswered question, and the transcript tail still says so. Everything else normalizes to Idle:
+    //   * Running -> Idle: a resumed claude does NOT continue the interrupted turn (it waits for you),
+    //       and the SessionScanner's primed-cursor gate (ShouldSynthesizeRunning) deliberately refuses to
+    //       re-light Running off the initial history replay — so seeding Running would just STICK. Idle is
+    //       the true post-resume state.
+    //   * Error -> Idle: transient. The scanner re-derives Error from the tail (ShouldSynthesizeError
+    //       fires from any non-Error/Done state) if the API error is still the active leaf.
+    //   * Done -> Idle: "ended"; a session being reopened is alive again, not done.
+    //   * Idle -> Idle: unchanged.
+    // The SessionScanner then REFINES the seed on its first reconcile pass (recon-stop corrects a
+    // NeedsApproval whose turn actually ended -> WaitingForInput; recon-run/recon-resume promote on fresh
+    // work), the Waiting-for-you decay treats a reopened session as UNREAD (readUnixMs resets to 0) so a
+    // restored WaitingForInput card keeps waiting until the user actually reads it (never instant-decays
+    // off an ancient lastActivity), and hooks own it live the instant the tab is activated (claude
+    // resumes -> SessionStart -> Idle). PURE + total.
+    inline SessionState RestoredSessionState(SessionState persisted) noexcept
+    {
+        switch (persisted)
+        {
+        case SessionState::WaitingForInput:
+        case SessionState::NeedsApproval:
+            return persisted; // an at-rest "needs you" state survives a resume — preserve the triage cue
+        case SessionState::Idle:
+        case SessionState::Running:
+        case SessionState::Error:
+        case SessionState::Done:
+        default:
+            return SessionState::Idle; // in-flight / transient / ended -> a reopened session starts Idle
+        }
+    }
+
     enum class AutorunnerMode
     {
         Off,

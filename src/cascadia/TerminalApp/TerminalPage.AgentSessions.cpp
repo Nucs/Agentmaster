@@ -348,7 +348,15 @@ namespace winrt::TerminalApp::implementation
         info.id = spec.sessionId;
         info.title = ttl;
         info.workingDir = dir;
-        info.state = ::Agentmaster::SessionState::Idle; // hooks re-establish the real state
+        // Agentmaster (crash/restore state fidelity — Rule #16): a REOPENED session (window-restore, or a
+        // Sessions-browser resume) keeps its persisted "needs you" state (WaitingForInput / NeedsApproval)
+        // so a crash doesn't drop the "which sessions need me" triage; in-flight/ended states normalize to
+        // Idle (a --resume'd claude waits, it doesn't continue the interrupted turn, and the scanner's
+        // primed-cursor gate would strand a seeded Running — RestoredSessionState). A FRESH spawn (no
+        // `restored`) is Idle. `info` was copied from *restored above, so info.state == restored->state
+        // here. The SessionScanner refines the seed from the transcript tail; hooks own it live the instant
+        // the tab is activated (claude resumes -> SessionStart -> Idle).
+        info.state = restored ? ::Agentmaster::RestoredSessionState(info.state) : ::Agentmaster::SessionState::Idle;
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.live = true; // OPEN: has a live tab/claude now -> shows on the Triage Board (not Archived)
         info.pendingConfirmPromptId.clear();
@@ -496,7 +504,13 @@ namespace winrt::TerminalApp::implementation
                     // autorunner intact (Rule #6: restore == resume, never replay; Sent stays Sent).
                     s.live = false;
                     s.external = false;
-                    s.state = ::Agentmaster::SessionState::Idle;
+                    // Agentmaster (crash/restore state fidelity — Rule #16): PRESERVE the persisted
+                    // "needs you" triage state (WaitingForInput / NeedsApproval) instead of forcing Idle,
+                    // so a crash (which persisted the LIVE state) doesn't drop "which sessions need me".
+                    // In-flight/ended states normalize to Idle (RestoredSessionState). The card is not
+                    // shown until re-homed (live=false here); the SessionScanner then refines it and the
+                    // Waiting decay is read-gated (readUnixMs resets to 0 -> unread -> keeps waiting).
+                    s.state = ::Agentmaster::RestoredSessionState(s.state);
                     s.lastMessageWasQuestion = false;
                     s.pendingConfirmPromptId.clear();
                     _sessionRegistry->Upsert(std::move(s));
@@ -1071,7 +1085,12 @@ namespace winrt::TerminalApp::implementation
         info.title = ttl;
         info.workingDir = dir;
         info.codexSessionId = resumeUuid.empty() ? (restored ? restored->codexSessionId : std::wstring{}) : resumeUuid;
-        info.state = ::Agentmaster::SessionState::Idle; // the C2 rollout-tail reconcile establishes the real state
+        // Agentmaster (crash/restore state fidelity — Rule #16): mirror _LaunchClaudeSession. A reopened
+        // Codex keeps its persisted WaitingForInput (Codex has no NeedsApproval/Error — the 3-state floor),
+        // so a DORMANT restored Codex tab shows the triage cue before it's activated; a fresh spawn is Idle.
+        // Once activated + correlated, _ReconcileManagedCodex overwrites this UNCONDITIONALLY with the
+        // rollout-tail-derived state, so this seed only governs the dormant (pre-activation) window.
+        info.state = restored ? ::Agentmaster::RestoredSessionState(info.state) : ::Agentmaster::SessionState::Idle;
         info.external = false; // we own this tab's ConPTY
         info.live = true;
         info.autorunner.mode = ::Agentmaster::AutorunnerMode::Off; // no driving in this phase

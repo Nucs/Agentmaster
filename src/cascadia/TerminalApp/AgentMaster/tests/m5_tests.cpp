@@ -41,6 +41,7 @@ int wmain()
     TestSummaryUserMsgNoise();
     TestSummaryTableTrim();
     TestStateMachine();
+    TestRestoredSessionState();
     TestOrderedStateMachine();
     TestWire();
     TestRegistry();

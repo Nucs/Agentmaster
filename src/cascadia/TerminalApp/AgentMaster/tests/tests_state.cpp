@@ -61,6 +61,33 @@ void TestStateMachine()
     CHECK(ParseHookEvent(L"bogus") == HookEvent::Unknown, "ParseHookEvent(bogus) -> Unknown");
 }
 
+// Agentmaster (crash/restore state fidelity — Correctness Rule #16): RestoredSessionState maps a
+// PERSISTED state to the state a reopened session seeds with. A crash persists the LIVE state; the
+// reopen used to force Idle, dropping "which sessions need me". The mapping keeps the AT-REST "needs
+// you" states (they survive a --resume) and normalizes in-flight/ended ones to Idle.
+void TestRestoredSessionState()
+{
+    std::wprintf(L"Restored session state (crash/restore fidelity, Rule #16):\n");
+    // AT-REST "needs you" states survive a reopen — this is the whole fix (Waiting/NeedsApproval were
+    // being lost to Idle on a crash restore).
+    CHECK(RestoredSessionState(SessionState::WaitingForInput) == SessionState::WaitingForInput, "restore keeps WaitingForInput (the reported waiting-for-you loss)");
+    CHECK(RestoredSessionState(SessionState::NeedsApproval) == SessionState::NeedsApproval, "restore keeps NeedsApproval");
+    // In-flight / transient / ended states normalize to Idle — a --resume'd claude does not continue an
+    // interrupted turn (Running would stick behind the scanner's primed-cursor gate), Error is transient
+    // (the scanner re-derives it from the tail), and Done means ended (a reopened session is alive again).
+    CHECK(RestoredSessionState(SessionState::Running) == SessionState::Idle, "restore normalizes Running -> Idle (turn was interrupted; resume waits)");
+    CHECK(RestoredSessionState(SessionState::Error) == SessionState::Idle, "restore normalizes Error -> Idle (scanner re-derives if still active)");
+    CHECK(RestoredSessionState(SessionState::Done) == SessionState::Idle, "restore normalizes Done -> Idle (reopened => alive)");
+    CHECK(RestoredSessionState(SessionState::Idle) == SessionState::Idle, "restore keeps Idle");
+    // Idempotent: the mapping is applied at BOTH clobber sites (_RestoreClaudeSessions load AND
+    // _LaunchClaudeSession re-home), so mapping a mapped value must be a fixed point — else the second
+    // application could drift the state.
+    for (auto st : { SessionState::Idle, SessionState::Running, SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Error, SessionState::Done })
+    {
+        CHECK(RestoredSessionState(RestoredSessionState(st)) == RestoredSessionState(st), "RestoredSessionState is idempotent (applied at two restore seams)");
+    }
+}
+
 // Agentmaster (event ordering + turn identity): the layer over NextSessionState that makes the
 // machine immune to out-of-order Stops (the Stop forwarder runs slow — transcript work — so turn
 // N's Stop can land after turn N+1's UserPromptSubmit) and aware of TYPE-AHEAD (a prompt typed

@@ -119,6 +119,7 @@ inline int64_t NowMsTest()
 // ---- test entry points (each DEFINED in its themed TU; called by wmain in m5_tests.cpp) ----
 // tests_state.cpp
 void TestStateMachine();
+void TestRestoredSessionState();
 void TestOrderedStateMachine();
 void TestWire();
 void TestRegistry();

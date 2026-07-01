@@ -1209,9 +1209,22 @@ What works, by area:
     tab** — `Upsert(live=true)`+`SetInjector` still run unconditionally after `_CreateNewTabFromPane`
     (`TerminalPage.AgentSessions.cpp:183`; the upsert/inject at `:209`/`:219`), but the `pane==null` guard (`:160`) makes a null `tab` unreachable
     (`_CreateNewTabFromPane` returns null only for a null pane), so there is no phantom in practice; the
-    unconditional upsert is a latent defensive nit. **(6, LOW — open) persisted `state` is dead weight** —
-    `ToJson(SessionInfo)` writes it but `_RestoreClaudeSessions` forces `Idle` on load (`TerminalPage.AgentSessions.cpp:296`); written,
-    never read (the resume-gating gotcha already says don't trust it). **Verified clean (not gaps):**
+    unconditional upsert is a latent defensive nit. **(6, ✅ FIXED — crash/restore state fidelity, Rule #16)
+    persisted `state` was dead weight** — `ToJson(SessionInfo)` wrote it but the reopen path forced every
+    session to `Idle`, so a CRASH (which persisted the LIVE state, unlike a clean shutdown's deliberate
+    close) dropped the fleet's "which sessions need me" triage: a Running or Waiting-for-you session came
+    back Idle/Done (the reported bug). Now the three restore seams (`_RestoreClaudeSessions` load +
+    `_LaunchClaudeSession`/`_LaunchCodexSession` re-home) map the persisted state through the pure
+    `RestoredSessionState` (`SessionModels.h`): the AT-REST "needs you" states (WaitingForInput /
+    NeedsApproval) are PRESERVED (they survive a `--resume` — the transcript tail still says so), while
+    in-flight/ended states (Running / Error / Done) normalize to `Idle` (a resumed claude does NOT continue
+    the interrupted turn, and the SessionScanner's primed-cursor gate would strand a seeded Running). The
+    scanner refines the seed on its first pass, the Waiting-for-you decay treats a reopened session as
+    UNREAD (`readUnixMs` resets to 0 → it keeps waiting until actually read, never instant-decaying off an
+    ancient `lastActivity`), no flash-storm fires (the ring keys on a live Running→needs-you EDGE; a restore
+    is first-sight), and hooks own it live the instant the tab is activated (claude resumes → `SessionStart`
+    → Idle). Resume-vs-fresh is STILL transcript-gated, never state-gated (the gotcha stands). Unit-tested
+    (`TestRestoredSessionState`). **Verified clean (not gaps):**
     external WindowsTerminal/Other claudes never enter the registry or `sessions.json` (`ObserveClaude` is
     gated on rostered + resolved id, `ProcessObserver.cpp:680`) — no foreign-claude leak into the Archived
     list; cross-window double-bind is guarded (`HasInjector`; one ConPTY lives in one window); and
@@ -2046,9 +2059,12 @@ build **binlog uploads as an artifact** to diagnose the first run.
   trusted ancestor counts; accepting at your **home dir never persists** (so it re-prompts).
 - **`claude --resume <id>` dies if there's no conversation.** A session that was opened but
   never prompted has no saved transcript; resuming it exits code 1 ("No conversation found")
-  and the tab is dead. **Don't gate on the persisted `SessionState`** — it is overwritten
-  with the *live post-restore* state (a just-resumed session reads `Idle` until its first
-  new turn), so it's useless as a "was-it-used" signal. Gate on the transcript on disk:
+  and the tab is dead. **Don't gate resume-vs-fresh on the persisted `SessionState`** — a
+  just-resumed session reads `Idle` until its first new turn, so state is useless as a
+  "was-it-used" signal. (Restore DOES seed a reopened session's DISPLAY state from the persisted
+  one — the at-rest "needs you" states WaitingForInput/NeedsApproval survive a crash via
+  `RestoredSessionState`, Rule #16 — but that is triage display, never the resume decision.)
+  Gate on the transcript on disk:
   `ClaudeConversationExists(id)` globs `<CLAUDE_CONFIG_DIR | ~/.claude>/projects/*/<id>.jsonl`
   (ids are unique UUIDs, so no need to reproduce Claude's cwd→dir encoding). No transcript ⇒
   launch fresh (`[restore-fresh]` in `hooks.log`) instead of `--resume` (`[resume]`).
@@ -2254,8 +2270,11 @@ build **binlog uploads as an artifact** to diagnose the first run.
    record dropped). Queues reload with statuses intact. **Close is the only close verb — it always
    archives** (keeps the `live=false` record so the session stays resumable; it NEVER deletes, and
    there is no Delete — FAVORITES.md). The Claude transcript on disk is never touched; mark a session
-   you want to keep with the **★ favorite** (SessionStore). Never decide resume from the persisted
-   `SessionState` (it's the live post-restore state) — see Gotchas.
+   you want to keep with the **★ favorite** (SessionStore). Never decide **resume-vs-fresh** from the
+   persisted `SessionState` (that is transcript-gated, above) — but the persisted state DOES seed a
+   reopened session's DISPLAY state: its at-rest "needs you" triage (WaitingForInput / NeedsApproval)
+   is PRESERVED across a crash while in-flight/ended states normalize to Idle (`RestoredSessionState`,
+   Rule #16). See Gotchas.
 7. **State is hook-derived,** never screen-scraped (the Ink TUI repaints constantly).
 8. **Same directory = same path, filesystem-aware.** Group/scope/match sessions by working
    dir through `PathEq` (case-insensitive on Windows, case-sensitive on POSIX), so
