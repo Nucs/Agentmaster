@@ -794,73 +794,105 @@ namespace winrt::TerminalApp::implementation
         auto strongThis{ get_strong() };
         _tabTooltipSummaryInFlight.insert(id);
 
-        // Snapshot the cached path/mtime + the display toggles on the UI thread, before going background.
-        std::wstring cachedPath;
-        int64_t cachedMtime = 0;
-        if (const auto it = _tabTooltipSummary.find(id); it != _tabTooltipSummary.end())
+        // Agentmaster (extra-safe): this is a fire_and_forget — ANY exception that escapes it
+        // std::terminates the app (the _RefreshPromptNavCache / _ScrollAdjacentPrompt idiom). Two throw
+        // classes lurk here: (1) the OFF-THREAD transcript resolve/stat/analyze/render — a corrupt or huge
+        // .jsonl / rollout, a std::bad_alloc, an out_of_range (AnalyzeSessionTranscript self-contains, but
+        // RenderSessionSummaryBox / RenderCodexSummaryBox / ReadCodexRolloutInfo do NOT); and (2) the
+        // UI-thread re-host / resume_foreground — a teardown-race resume throw, or _UpdateTabAgentToolTip
+        // building XAML. The INNER try contains (1) on the background thread (so it never touches the
+        // UI-thread maps and we still reach the resume_foreground cleanup); the OUTER try is the
+        // terminate-net for (2). On any failure we simply leave the header-only card — never crash over a
+        // tooltip.
+        try
         {
-            cachedPath = it->second.path;
-            cachedMtime = it->second.mtime;
-        }
-        const bool wrapNewlines = _appSettings.summaryPanelWrapNewlines;
-        const bool truncate = _appSettings.summaryPanelTruncate;
-        const std::wstring codexUuid{ codexId };
-        const std::wstring dir{ cwd };
-
-        co_await winrt::resume_background();
-
-        std::wstring path = cachedPath;
-        if (path.empty())
-        {
-            path = codex ? ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexUuid)
-                         : ::Agentmaster::ResolveClaudeTranscriptPath(id);
-        }
-        int64_t mtime = 0;
-        if (!path.empty())
-        {
-            WIN32_FILE_ATTRIBUTE_DATA fad{};
-            if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            // Snapshot the cached path/mtime + the display toggles on the UI thread, before going background.
+            std::wstring cachedPath;
+            int64_t cachedMtime = 0;
+            if (const auto it = _tabTooltipSummary.find(id); it != _tabTooltipSummary.end())
             {
-                ULARGE_INTEGER li{};
-                li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
-                li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
-                mtime = static_cast<int64_t>(li.QuadPart);
+                cachedPath = it->second.path;
+                cachedMtime = it->second.mtime;
             }
-        }
-        std::wstring body;
-        bool rendered = false;
-        if (!path.empty() && (mtime != cachedMtime || cachedMtime == 0))
-        {
-            if (codex)
-            {
-                const auto cinfo = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
-                body = ::Agentmaster::RenderCodexSummaryBox(cinfo, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, /*full*/ false);
-            }
-            else
-            {
-                auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
-                body = ::Agentmaster::RenderSessionSummaryBox(a, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, a.planFilePath, /*full*/ false, wrapNewlines, truncate);
-            }
-            rendered = true;
-        }
+            const bool wrapNewlines = _appSettings.summaryPanelWrapNewlines;
+            const bool truncate = _appSettings.summaryPanelTruncate;
+            const std::wstring codexUuid{ codexId };
+            const std::wstring dir{ cwd };
 
-        co_await wil::resume_foreground(Dispatcher());
-        _tabTooltipSummaryInFlight.erase(id);
-        if (path.empty())
-        {
-            co_return; // no transcript yet (never prompted) -- leave the header-only card
+            co_await winrt::resume_background();
+
+            std::wstring path = cachedPath;
+            int64_t mtime = 0;
+            std::wstring body;
+            bool rendered = false;
+            try
+            {
+                if (path.empty())
+                {
+                    path = codex ? ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexUuid)
+                                 : ::Agentmaster::ResolveClaudeTranscriptPath(id);
+                }
+                if (!path.empty())
+                {
+                    WIN32_FILE_ATTRIBUTE_DATA fad{};
+                    if (::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+                    {
+                        ULARGE_INTEGER li{};
+                        li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                        li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                        mtime = static_cast<int64_t>(li.QuadPart);
+                    }
+                }
+                if (!path.empty() && (mtime != cachedMtime || cachedMtime == 0))
+                {
+                    if (codex)
+                    {
+                        const auto cinfo = ::Agentmaster::ReadCodexRolloutInfo(path, 0 /* whole file */, 200 /* prompts */);
+                        body = ::Agentmaster::RenderCodexSummaryBox(cinfo, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, /*full*/ false);
+                    }
+                    else
+                    {
+                        auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                        body = ::Agentmaster::RenderSessionSummaryBox(a, std::wstring{}, dir, path, std::wstring{}, std::wstring{}, std::wstring{}, a.planFilePath, /*full*/ false, wrapNewlines, truncate);
+                    }
+                    rendered = true;
+                }
+            }
+            catch (...)
+            {
+                // Contained on the BACKGROUND thread (no UI-map access here) — fall through to the
+                // resume_foreground cleanup so the in-flight guard is always cleared. Leave the
+                // header-only card (body stays empty).
+                OutputDebugStringW(L"[Agentmaster] _EnsureTabTooltipSummary: swallowed background analyze/render exception (no crash)\n");
+            }
+
+            co_await wil::resume_foreground(Dispatcher());
+            _tabTooltipSummaryInFlight.erase(id);
+            if (!path.empty())
+            {
+                auto& slot = _tabTooltipSummary[id];
+                slot.path = path;
+                slot.mtime = mtime;
+                if (rendered)
+                {
+                    slot.body = winrt::hstring{ body };
+                }
+                // Re-host the card with the now-loaded / refreshed body. _UpdateTabAgentToolTip recomputes the
+                // signature (new mtime) so it re-hosts; the throttle (lastCheckMs, bumped by the caller) keeps it
+                // from immediately re-kicking us.
+                _UpdateTabAgentToolTip(tab, id);
+            }
+            // path empty => no transcript yet (never prompted): leave the header-only card. The in-flight
+            // flag was already cleared above, so a later hover retries.
         }
-        auto& slot = _tabTooltipSummary[id];
-        slot.path = path;
-        slot.mtime = mtime;
-        if (rendered)
+        catch (...)
         {
-            slot.body = winrt::hstring{ body };
+            // Terminate-net for a resume_foreground teardown-race throw or a _UpdateTabAgentToolTip
+            // XAML-build throw. Deliberately does NOT touch the UI-thread maps (we may be off-thread on a
+            // resume failure; on a UI-thread throw the in-flight flag was already erased above). A leaked
+            // flag can only happen on teardown, where the map dies with the page — moot. Never rethrow.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tab-tooltip] _EnsureTabTooltipSummary: swallowed exception (no crash)\n");
         }
-        // Re-host the card with the now-loaded / refreshed body. _UpdateTabAgentToolTip recomputes the
-        // signature (new mtime) so it re-hosts; the throttle (lastCheckMs, bumped by the caller) keeps it
-        // from immediately re-kicking us.
-        _UpdateTabAgentToolTip(tab, id);
     }
 
     // Agentmaster (tab status-dot RED FLASH): the attention cue. When a hosted session goes from
