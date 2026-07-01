@@ -12,6 +12,7 @@
 #include "../../types/inc/ColorFix.hpp"
 
 #include <chrono> // Agentmaster (tab tooltip): the fast-open timer interval
+#include <atomic> // Agentmaster (tab tooltip): the cross-window/thread reopen-cooldown stamp
 
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml;
@@ -29,6 +30,23 @@ namespace winrt
 }
 
 #define ASSERT_UI_THREAD() assert(TabViewItem().Dispatcher().HasThreadAccess())
+
+namespace
+{
+    // Agentmaster (tab tooltip): PROCESS-WIDE serialization of agent-tooltip open-after-close. UI-thread
+    // only, so a plain static needs no atomic. Jumping the cursor between two tabs opens B's tooltip while
+    // A's popup is still in the framework's ASYNC teardown; two agent tooltip popups colliding in ONE XAML
+    // render/composition pass is what crashes — a stowed fail-fast (0xC000027B) or a freed-read AV, raised
+    // OFF our call stack during that pass, so NO try/catch can catch it. Every agent-tooltip close stamps
+    // this tick; the hover open-tick DEFERS (re-arms its one-shot) while a close is within the cooldown, so
+    // the prior teardown fully drains before the next tooltip opens. A settled hover with no recent close
+    // still opens immediately, so the fast-open UX is preserved.
+    // std::atomic because the WindowEmperor runs each window on its OWN UI thread, so different windows'
+    // Tab handlers touch this concurrently (relaxed is enough — we only need a recent-ish timestamp, not
+    // ordering; cross-window popups render on separate islands so at worst it over-defers harmlessly).
+    std::atomic<uint64_t> g_lastAgentToolTipCloseTick{ 0 };
+    constexpr uint64_t kAgentToolTipReopenCooldownMs = 150;
+}
 
 namespace winrt::TerminalApp::implementation
 {
@@ -434,6 +452,21 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
+                // Agentmaster (rapid tab-swap fail-fast fix): serialize open-AFTER-close ACROSS tabs.
+                // Jumping the cursor between two tabs' tooltips opens THIS one while the PREVIOUS tab's
+                // popup is still in the framework's async teardown; two agent popups in one render pass is
+                // what fail-faults off our stack (uncatchable). If any agent tooltip closed within the
+                // cooldown, DEFER this open — re-arm the one-shot so it retries once the prior teardown has
+                // drained. A settled hover with no recent close falls straight through (fast path).
+                if (const auto lastClose = g_lastAgentToolTipCloseTick.load(std::memory_order_relaxed);
+                    lastClose != 0 && (::GetTickCount64() - lastClose) < kAgentToolTipReopenCooldownMs)
+                {
+                    if (self->_agentToolTipOpenTimer)
+                    {
+                        self->_agentToolTipOpenTimer.Start(); // retry after the interval (the tick Stop()ped it above)
+                    }
+                    return;
+                }
                 // Agentmaster (rapid tab-swap use-after-free fix): create a FRESH tooltip for THIS open.
                 // The close paths now DROP _agentToolTip (see _ForceCloseAgentToolTip), so it is null here
                 // after any prior close. Reusing ONE ToolTip across an open/close cycle is what crashed:
@@ -563,6 +596,10 @@ namespace winrt::TerminalApp::implementation
     // only. Idempotent + safe if the timers/tooltip were never created (no agent tooltip on this tab).
     void Tab::_ForceCloseAgentToolTip()
     {
+        // Stamp the cross-tab reopen cooldown (below) only when there was a REAL tooltip to tear down. A
+        // bare pointer-exit with no open tooltip (the open-tick hadn't fired) must NOT throttle the next
+        // tab's open — otherwise merely sweeping the cursor across the strip would defer every tooltip.
+        const bool hadAgentToolTip = static_cast<bool>(_agentToolTip);
         if (_agentToolTipOpenTimer)
         {
             _agentToolTipOpenTimer.Stop();
@@ -598,6 +635,12 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _agentToolTip = nullptr;
+        if (hadAgentToolTip)
+        {
+            // A real popup just started its async teardown — hold off the NEXT tab's open (cross-tab
+            // serialization; see g_lastAgentToolTipCloseTick) so the two don't collide in one render pass.
+            g_lastAgentToolTipCloseTick.store(::GetTickCount64(), std::memory_order_relaxed);
+        }
     }
 
     // Agentmaster (tab tooltip): (re)start the auto-dismiss backstop from now. Stop+Start so an already-
