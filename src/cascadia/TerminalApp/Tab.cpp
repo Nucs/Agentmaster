@@ -407,11 +407,25 @@ namespace winrt::TerminalApp::implementation
                     t.Stop(); // one-shot: open once, then idle until the next hover
                 }
                 const auto self = weakTick.get();
-                if (self && self->_agentToolTipActive && self->_agentToolTip)
+                if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
                 {
-                    self->_SafeSetAgentToolTipOpen(true);
-                    self->_ArmAgentToolTipDismiss(); // start the backstop the instant it opens
+                    return;
                 }
+                // Agentmaster: NEVER place the popup on an owner that has left the visual tree. Between
+                // arming this one-shot and its tick, MUX's TabView can recycle/detach the owner
+                // TabViewItem (tab close/reorder/re-virtualize). Opening a tooltip whose owner is
+                // unrooted orphans the popup — and the framework's subsequent DEFERRED input/placement
+                // pass on it is what crashes OFF our call stack: a null-deref in Microsoft.UI.Xaml.dll
+                // (the Release AV, READ @0x0) or a stowed fail-fast in Windows.UI.Xaml.dll (the Debug
+                // 0xC000027B). The IsOpen try/catch can't catch either (they aren't on our stack), so the
+                // real guard is to not open unless the owner is still loaded AND rooted (has a XamlRoot).
+                const auto tvi = self->TabViewItem();
+                if (!tvi || !tvi.IsLoaded() || !tvi.XamlRoot())
+                {
+                    return;
+                }
+                self->_SafeSetAgentToolTipOpen(true);
+                self->_ArmAgentToolTipDismiss(); // start the backstop the instant it opens
             });
             _agentToolTipOpenTimer = openTimer;
         }
@@ -489,6 +503,21 @@ namespace winrt::TerminalApp::implementation
         tvi.PointerExited(closeHandler);
         tvi.PointerCanceled(closeHandler);
         tvi.PointerCaptureLost(closeHandler);
+
+        // Agentmaster: the owner TabViewItem leaving the visual tree — recycle, detach, or tab close —
+        // is the exact moment a manually-driven open tooltip becomes orphaned. The framework's NEXT
+        // deferred input/render pass on that popup then crashes OFF our call stack (a null-deref in
+        // Microsoft.UI.Xaml.dll — the Release AV — or a stowed fail-fast in Windows.UI.Xaml.dll — the
+        // Debug 0xC000027B), which the IsOpen try/catch cannot catch. Force the popup shut + stop the
+        // timers the instant the owner unloads, so there is no open popup for that pass to touch. A
+        // transient recycle is safe: _agentToolTipActive + the attached ToolTip persist, so the next
+        // hover re-opens (the pointer handlers are wired once and reused).
+        tvi.Unloaded([weakThis](auto&&, auto&&) {
+            if (const auto self = weakThis.get())
+            {
+                self->_ForceCloseAgentToolTip();
+            }
+        });
     }
 
     // Agentmaster (tab tooltip): toggle the agent tooltip's IsOpen inside a try/catch. Driving IsOpen
@@ -512,6 +541,25 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
         }
+    }
+
+    // Agentmaster (tab tooltip): stop the open/dismiss timers and force the popup shut. Run when the
+    // owner TabViewItem unloads (recycle/detach/close) or the tab shuts down, so no orphaned, still-open
+    // popup survives for the framework's deferred input/render pass to null-deref (the Release MUX AV,
+    // READ @0x0) or fail-fast (the Debug 0xC000027B) — neither of which fires on our call stack, so the
+    // IsOpen try/catch can't help; the fix is to never leave one open when the owner goes away. UI thread
+    // only. Idempotent + safe if the timers/tooltip were never created (no agent tooltip on this tab).
+    void Tab::_ForceCloseAgentToolTip()
+    {
+        if (_agentToolTipOpenTimer)
+        {
+            _agentToolTipOpenTimer.Stop();
+        }
+        if (_agentToolTipDismissTimer)
+        {
+            _agentToolTipDismissTimer.Stop();
+        }
+        _SafeSetAgentToolTipOpen(false); // no-ops when _agentToolTip is null
     }
 
     // Agentmaster (tab tooltip): (re)start the auto-dismiss backstop from now. Stop+Start so an already-
@@ -1230,6 +1278,11 @@ namespace winrt::TerminalApp::implementation
     void Tab::Shutdown()
     {
         ASSERT_UI_THREAD();
+
+        // Agentmaster: tear down the agent tooltip BEFORE the tab's visuals go away — stop the open/
+        // dismiss timers and force the popup shut, so a pending open tick can't place (nor a deferred
+        // framework pass touch) an orphaned tooltip as the tab is destroyed. See _ForceCloseAgentToolTip.
+        _ForceCloseAgentToolTip();
 
         // NOTE: `TerminalPage::_HandleCloseTabRequested` relies on the content being null after this call.
         Content(nullptr);

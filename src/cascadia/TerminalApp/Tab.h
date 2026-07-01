@@ -351,6 +351,7 @@ namespace winrt::TerminalApp::implementation
         void _WireAgentToolTipHover(); // Agentmaster: wire (once) the TabViewItem hover handlers that fast-open / reliably close the agent tooltip (AgentTipHelpers recipe)
         void _ArmAgentToolTipDismiss(); // Agentmaster: (re)start the auto-dismiss backstop timer — the keep-alive + the guarantee the tip never sticks open
         void _SafeSetAgentToolTipOpen(bool open); // Agentmaster: toggle the agent tooltip's IsOpen inside a try/catch — swallows the XAML 0xC000027B stowed-exception fail-fast (owner-less / re-entrant tooltip) that crashed the app on tooltip fade / mouse-exit
+        void _ForceCloseAgentToolTip(); // Agentmaster: stop the open/dismiss timers + force the popup shut — run when the owner TabViewItem unloads (recycle/detach/close) or the tab shuts down, so no orphaned open popup survives for the framework's deferred input/render pass to null-deref (the Release MUX AV @0x0)
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);
