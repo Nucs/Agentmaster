@@ -24,16 +24,27 @@
 // ANTI-FLASH: the thread waits kPreShowDelayMs BEFORE creating the window — a fast/empty launch
 // signals ready within that window and the splash is NEVER shown (no flicker); it only appears for a
 // genuinely slow launch.
+//
+// WINDOW: a NORMAL top-level window — dark caption, the app icon, a TASKBAR button, and MINIMIZE +
+// CLOSE buttons (WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX + WS_EX_APPWINDOW) — kept WS_EX_TOPMOST so it
+// covers the still-building main window. Shown SW_SHOWNOACTIVATE so it never steals foreground; the
+// user can minimize or close it early (close => DefWindowProc => WM_DESTROY => the thread exits), and
+// the settle-watch dismisses it automatically when the window is ready.
 
 #pragma once
 
 #include <windows.h>
+#include <dwmapi.h> // DwmSetWindowAttribute — dark title bar to match the dark card
+#include <shellapi.h> // ExtractIconExW — the app icon for the taskbar button + caption
 
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 namespace Agentmaster::Splash
 {
@@ -180,8 +191,19 @@ namespace Agentmaster::Splash
                 wc.lpfnWndProc = WndProc;
                 wc.hInstance = ::GetModuleHandleW(nullptr);
                 wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
-                wc.hbrBackground = nullptr; // we paint everything
+                wc.hbrBackground = nullptr; // we paint everything (double-buffered in WM_PAINT)
                 wc.lpszClassName = kClass;
+                // The app's own icon, for the taskbar button + the caption. Extract it from this exe
+                // (WindowsTerminal.exe / agentmaster) so the loading window matches the installed app;
+                // a null result just falls back to the default icon.
+                wchar_t exePath[MAX_PATH]{};
+                if (::GetModuleFileNameW(nullptr, exePath, MAX_PATH))
+                {
+                    HICON big = nullptr, small = nullptr;
+                    ::ExtractIconExW(exePath, 0, &big, &small, 1);
+                    wc.hIcon = big; // may be null => default
+                    wc.hIconSm = small;
+                }
                 ::RegisterClassExW(&wc);
             });
             return kClass;
@@ -202,18 +224,28 @@ namespace Agentmaster::Splash
             g_titleFont = ::CreateFontW(-::MulDiv(15, static_cast<int>(g_dpi), 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             g_bodyFont = ::CreateFontW(-::MulDiv(10, static_cast<int>(g_dpi), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-            const int W = Scaled(kBaseCardW);
-            const int H = Scaled(kBaseCardH);
+            // A NORMAL top-level window (not a tool-window overlay): a real caption with the app title +
+            // a MINIMIZE and CLOSE button (WS_SYSMENU | WS_MINIMIZEBOX), and a TASKBAR button
+            // (WS_EX_APPWINDOW, and crucially NO WS_EX_TOOLWINDOW). Still WS_EX_TOPMOST so it keeps
+            // covering the building main window; no WS_MAXIMIZEBOX / WS_THICKFRAME (a fixed-size loading
+            // window). Sized so the CLIENT area equals the card — AdjustWindowRectExForDpi grows the rect
+            // by the DPI-scaled caption + borders so the card content isn't squeezed under the title bar.
+            const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+            const DWORD exStyle = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+            RECT wr{ 0, 0, Scaled(kBaseCardW), Scaled(kBaseCardH) };
+            ::AdjustWindowRectExForDpi(&wr, style, FALSE, exStyle, g_dpi);
+            const int W = wr.right - wr.left;
+            const int H = wr.bottom - wr.top;
             RECT wa{};
             ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
             const int x = wa.left + ((wa.right - wa.left) - W) / 2;
             const int y = wa.top + ((wa.bottom - wa.top) - H) / 2;
 
             HWND hwnd = ::CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                exStyle,
                 EnsureClass(),
                 L"Agentmaster",
-                WS_POPUP,
+                style,
                 x, y, W, H,
                 nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
             if (!hwnd)
@@ -235,10 +267,18 @@ namespace Agentmaster::Splash
                 return;
             }
 
-            ::SetLayeredWindowAttributes(hwnd, 0, 245, LWA_ALPHA);
-            ::SetWindowRgn(hwnd, ::CreateRoundRectRgn(0, 0, W + 1, H + 1, Scaled(12), Scaled(12)), TRUE);
+            // Dark title bar to match the dark card (best-effort; a harmless no-op / error on Windows
+            // builds that predate the attribute — the caption just stays light there).
+            {
+                const BOOL dark = TRUE;
+                ::DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+            }
             g_hwnd.store(hwnd);
-            ::ShowWindow(hwnd, SW_SHOWNA);
+            // Show WITHOUT stealing foreground from the launching main window — the user can still click
+            // the window, its taskbar button, or its minimize/close as usual. Topmost keeps it above the
+            // (blank, still-building) main window until the settle-watch or the user dismisses it.
+            ::ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            ::UpdateWindow(hwnd); // paint the card synchronously now (no longer layered) so there's no blank flash on show
             ::SetTimer(hwnd, kAnimTimerId, kAnimIntervalMs, nullptr);
 
             const ULONGLONG start = ::GetTickCount64();
