@@ -417,7 +417,7 @@ namespace winrt::TerminalApp::implementation
                     t.Stop(); // one-shot: open once, then idle until the next hover
                 }
                 const auto self = weakTick.get();
-                if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
+                if (!self || !self->_agentToolTipActive)
                 {
                     return;
                 }
@@ -434,6 +434,15 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
+                // Agentmaster (rapid tab-swap use-after-free fix): create a FRESH tooltip for THIS open.
+                // The close paths now DROP _agentToolTip (see _ForceCloseAgentToolTip), so it is null here
+                // after any prior close. Reusing ONE ToolTip across an open/close cycle is what crashed:
+                // IsOpen(false) starts the framework's ASYNC popup teardown, and a rapid re-hover's
+                // IsOpen(true) then raced that teardown -> read freed 0xDDDD.. memory (an AV the IsOpen
+                // try/catch can't catch). _UpdateAgentToolTip creates it if null + hosts the current card;
+                // opening a brand-new object each time can't race a previous one's teardown. (This is the
+                // SAME create->SetToolTip->IsOpen path the very first open always took — known-good.)
+                self->_UpdateAgentToolTip();
                 self->_SafeSetAgentToolTipOpen(true);
                 self->_ArmAgentToolTipDismiss(); // start the backstop the instant it opens
             });
@@ -450,10 +459,11 @@ namespace winrt::TerminalApp::implementation
                 {
                     t.Stop();
                 }
-                const auto self = weakTick.get();
-                if (self && self->_agentToolTip)
+                // Drop-on-close (not just close): _ForceCloseAgentToolTip closes + detaches + NULLS the
+                // reused object, so the next hover opens a FRESH one and can't race this one's teardown.
+                if (const auto self = weakTick.get())
                 {
-                    self->_SafeSetAgentToolTipOpen(false);
+                    self->_ForceCloseAgentToolTip();
                 }
             });
             _agentToolTipDismissTimer = dismissTimer;
@@ -461,7 +471,7 @@ namespace winrt::TerminalApp::implementation
 
         tvi.PointerEntered([weakThis](auto&&, auto&&) {
             const auto self = weakThis.get();
-            if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
+            if (!self || !self->_agentToolTipActive)
             {
                 return; // not an agent tab right now -> let the framework handle the default tooltip
             }
@@ -475,11 +485,11 @@ namespace winrt::TerminalApp::implementation
 
         tvi.PointerMoved([weakThis](auto&&, auto&&) {
             const auto self = weakThis.get();
-            if (!self || !self->_agentToolTipActive || !self->_agentToolTip)
+            if (!self || !self->_agentToolTipActive)
             {
                 return;
             }
-            if (self->_agentToolTip.IsOpen())
+            if (self->_agentToolTip && self->_agentToolTip.IsOpen()) // _agentToolTip is null after a close (drop-on-close); a re-hover then re-arms the open timer below
             {
                 self->_ArmAgentToolTipDismiss(); // keep-alive: push the dismiss out while genuinely hovering
             }
@@ -492,22 +502,13 @@ namespace winrt::TerminalApp::implementation
         // Close from EVERY pointer-loss event, not just Exited (which islands routinely drops). All three
         // share the same handler shape (sender, PointerRoutedEventArgs).
         const auto closeHandler = [weakThis](auto&&, auto&&) {
-            const auto self = weakThis.get();
-            if (!self)
+            // Drop-on-close: _ForceCloseAgentToolTip stops BOTH timers, closes the popup, detaches it from
+            // the owner, AND nulls the reused _agentToolTip. Dropping (not just closing) is the rapid
+            // tab-swap use-after-free fix: the next hover opens a brand-new tooltip via the open-tick, so
+            // an IsOpen(true) can never race the framework's async teardown of a just-closed reused object.
+            if (const auto self = weakThis.get())
             {
-                return;
-            }
-            if (self->_agentToolTipOpenTimer)
-            {
-                self->_agentToolTipOpenTimer.Stop();
-            }
-            if (self->_agentToolTipDismissTimer)
-            {
-                self->_agentToolTipDismissTimer.Stop();
-            }
-            if (self->_agentToolTip)
-            {
-                self->_SafeSetAgentToolTipOpen(false);
+                self->_ForceCloseAgentToolTip();
             }
         };
         tvi.PointerExited(closeHandler);
@@ -520,8 +521,9 @@ namespace winrt::TerminalApp::implementation
         // Microsoft.UI.Xaml.dll — the Release AV — or a stowed fail-fast in Windows.UI.Xaml.dll — the
         // Debug 0xC000027B), which the IsOpen try/catch cannot catch. Force the popup shut + stop the
         // timers the instant the owner unloads, so there is no open popup for that pass to touch. A
-        // transient recycle is safe: _agentToolTipActive + the attached ToolTip persist, so the next
-        // hover re-opens (the pointer handlers are wired once and reused).
+        // transient recycle is safe: _agentToolTipActive persists and dropping the tooltip is harmless —
+        // the next hover recreates a fresh one via the open-tick (the pointer handlers are wired once and
+        // reused, and they now guard on _agentToolTipActive, not the possibly-null _agentToolTip).
         tvi.Unloaded([weakThis](auto&&, auto&&) {
             if (const auto self = weakThis.get())
             {
