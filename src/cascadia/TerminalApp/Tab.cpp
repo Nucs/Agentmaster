@@ -336,6 +336,16 @@ namespace winrt::TerminalApp::implementation
     // Opening fast + closing reliably is the _WireAgentToolTipHover recipe.
     void Tab::_UpdateAgentToolTip()
     {
+        // Agentmaster (use-after-free defense, complements _ForceCloseAgentToolTip): never create OR mutate
+        // the tooltip for a detached owner. If the TabViewItem has left the visual tree (a recycle), then
+        // building + SetToolTip + `.Content()` here is at best wasted and at worst races the peer teardown
+        // that produced the `.Content()` freed-read AV — skip until the owner is live again (the next ~2s
+        // refresh / the state-line "ago" rollover rebuilds it). A normal loaded tab (foreground OR a
+        // background tab in the strip) is always IsLoaded()+rooted, so steady-state is unaffected.
+        if (const auto owner = TabViewItem(); !owner || !owner.IsLoaded() || !owner.XamlRoot())
+        {
+            return;
+        }
         if (!_agentToolTip)
         {
             _agentToolTip = WUX::Controls::ToolTip{};
@@ -559,7 +569,33 @@ namespace winrt::TerminalApp::implementation
         {
             _agentToolTipDismissTimer.Stop();
         }
-        _SafeSetAgentToolTipOpen(false); // no-ops when _agentToolTip is null
+        _SafeSetAgentToolTipOpen(false); // no-ops when _agentToolTip is null (the peer is still valid at unload-time — this close path never crashed; the crashes were on LATER reuse)
+
+        // Agentmaster (use-after-free fix — the 0xC0000409 CFG __fastfail + the 0xDDDD.. freed-read AV):
+        // when the owner TabViewItem is recycled/detached (MUX TabView virtualizes its containers — heavy
+        // during a multi-tab window restore), XAML tears down the ToolTip's NATIVE peer, but our WinRT
+        // strong ref keeps the now-ZOMBIE ToolTip projection resolving NON-NULL. Reusing it later crashed
+        // the app two ways, NEITHER catchable by the IsOpen try/catch (a __fastfail bypasses SEH; an AV is
+        // not a C++ exception under /EHsc): the hover open-tick's `.IsOpen(true)` dispatched through the
+        // freed vtable -> CFG __fastfail (FAST_FAIL_GUARD_ICALL_CHECK_FAILURE, subcode 0xA), and the ~2s
+        // liveness sweep's `_UpdateAgentToolTip` `.Content()` read freed 0xDDDD.. memory -> AV. So DROP the
+        // reused object on THIS unload/shutdown (which runs BEFORE the async peer teardown) AND detach it
+        // from the owner, so afterward NEITHER our code (open-tick / sweep) NOR the framework's
+        // ToolTipService auto-open can touch the zombie. `_UpdateAgentToolTip`'s `if (!_agentToolTip)`
+        // branch then rebuilds a FRESH tooltip bound to the live (reloaded) TabViewItem on the next
+        // refresh, and the open/dismiss ticks early-return on the null `_agentToolTip`. (ClearAgentToolTip
+        // already nulls the ref the same way for the archived/gone case.)
+        if (const auto tvi = TabViewItem())
+        {
+            try
+            {
+                WUX::Controls::ToolTipService::SetToolTip(tvi, nullptr);
+            }
+            catch (...)
+            {
+            }
+        }
+        _agentToolTip = nullptr;
     }
 
     // Agentmaster (tab tooltip): (re)start the auto-dismiss backstop from now. Stop+Start so an already-
