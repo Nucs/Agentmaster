@@ -1,0 +1,13 @@
+# Agentmaster debug-dumps skill — commit the SOURCES + docs + the compressed fixture only.
+# Built tools + intermediates (regenerate with scripts/build.bat):
+scripts/*.exe
+scripts/*.obj
+scripts/*.pdb
+scripts/*.ilk
+scripts/*_build.log
+
+# Raw / extracted dumps (regenerate: gunzip the .gz, or run scripts/makedump.exe).
+# Only the compressed fixture test/sample-crash.dmp.gz is committed — never a raw full-memory dump
+# (real WER dumps contain live process memory).
+*.dmp
+!test/*.dmp.gz
