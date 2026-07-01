@@ -1316,19 +1316,21 @@ namespace winrt::TerminalApp::implementation
     {
         const auto pointerProps = e.GetCurrentPoint(nullptr).Properties();
 
-        // Agentmaster (eager-init): Shift+Left-Click a DORMANT managed agent-session tab = "Activate Tab"
-        // IN PLACE — start its claude WITHOUT switching to it. A background/restored tab spawns its child
-        // lazily (only when first SHOWN), so a window-restored session never resumes until clicked; this
-        // wakes it where you are. The pointer twin of the tab context menu's "Activate Tab (Shift+Click)"
-        // item and the Manager board-card / Explorer-tree Shift+Click gesture (AgentManagerContent). We must
-        // suppress the TabView's normal switch-to-tab: a MUX TabViewItem (a ListViewItem) defers selection to
-        // its OWN pointer-RELEASE (so a press-drag can reorder instead of select), and the TabView captures
-        // the pointer internally to drive it (see the middle-click note below) — so we STEAL that capture here
-        // (capture isn't ref-counted, last-wins) and the release-driven selection never fires. UWP auto-
-        // releases a mouse capture when the button comes up, so nothing is left captured. We act ONLY when
-        // _ActivateDormantSession actually wakes one (true == this tab's session WAS dormant + hosted here);
-        // an already-running tab returns false and falls through to a normal click (switch to it), so a
-        // Shift+Click is only special on the exact tabs whose menu offers "Activate Tab".
+        // Agentmaster (eager-init): Shift+Left-Click a managed agent-session tab = "Activate Tab" ONLY —
+        // ACTIVATE without switching. If the session is DORMANT this starts its claude IN PLACE (a
+        // background/restored tab spawns its child lazily, only when first SHOWN, so a window-restored
+        // session never resumes until clicked; this wakes it where you are); it NEVER switches to the tab.
+        // Activate is the WHOLE gesture — to also ENTER the tab, use a plain click (which switches + starts
+        // it as a side effect). So the switch is suppressed for ANY managed session tab, dormant or already
+        // running (on a running one _ActivateDormantSession no-ops and nothing visible happens — you stay
+        // where you are), matching the Manager board-card / Explorer-tree Shift+Click twin
+        // (AgentManagerContent), which likewise suppresses the select/jump on Shift regardless of state. A
+        // NON-session tab (pwsh/cmd/Manager) has nothing to activate, so it falls through to a normal switch.
+        // Suppressing the switch: a MUX TabViewItem (a ListViewItem) defers selection to its OWN pointer-
+        // RELEASE (so a press-drag can reorder instead of select), and the TabView captures the pointer
+        // internally to drive it (see the middle-click note below) — so we STEAL that capture here (capture
+        // isn't ref-counted, last-wins) and the release-driven selection never fires. UWP auto-releases a
+        // mouse capture when the button comes up, so nothing is left captured.
         if (pointerProps.IsLeftButtonPressed())
         {
             bool shiftHeld = false;
@@ -1342,15 +1344,16 @@ namespace winrt::TerminalApp::implementation
             {
                 if (const auto tab = _GetTabByTabViewItem(sender))
                 {
-                    if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty() && _ActivateDormantSession(sid))
+                    if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())
                     {
+                        _ActivateDormantSession(sid); // wake it if dormant; a no-op if already running / not hosted here
                         if (const auto tabViewItem = sender.try_as<MUX::Controls::TabViewItem>())
                         {
                             tabViewItem.CapturePointer(e.Pointer()); // steal capture so the TabView's release-driven switch never fires (auto-released on button-up)
                         }
                         _middleClickClosePending = false;
                         e.Handled(true);
-                        return;
+                        return; // Shift+Click a managed session tab NEVER switches — activate only
                     }
                 }
             }
