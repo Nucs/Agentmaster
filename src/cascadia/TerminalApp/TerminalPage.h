@@ -826,10 +826,15 @@ namespace winrt::TerminalApp::implementation
         void _StripSessionFromSavedWindows(const std::wstring& sessionId);
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
+        winrt::Windows::Foundation::IAsyncAction _SweepClaudeLivenessImpl(); // Agentmaster (terminate-net): the body of _SweepClaudeLiveness, awaited inside its try/catch so a throw can't escape the fire_and_forget (std::terminate)
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)
+        winrt::Windows::Foundation::IAsyncAction _ReconcileClaudeTabsImpl(); // Agentmaster (terminate-net): the body of _ReconcileClaudeTabs, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _ReconcileClaudeTabs(); // Agentmaster: poll backstop — bind/attach + re-home claude tabs by stable WT_SESSION (scanner-ticked)
+        winrt::Windows::Foundation::IAsyncAction _ObserverProbeImpl(); // Agentmaster (terminate-net): the body of _ObserverProbe, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _ObserverProbe(); // Agentmaster: the Fleet Observer UI lane — publish this window's tab roster, then bind via the observer's correlation table (replaces _DiscoverClaudeTabsByCwd; OBSERVER.md §10)
+        winrt::Windows::Foundation::IAsyncAction _ScanPendingInputImpl(); // Agentmaster (terminate-net): the body of _ScanPendingInput, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _ScanPendingInput(); // Agentmaster (PENDING_INPUT.md): read each bound Claude tab's unsent input-box draft from its buffer + record it on the session (scanner-ticked)
+        winrt::Windows::Foundation::IAsyncAction _RefreshObserverDataImpl(); // Agentmaster (terminate-net): the body of _RefreshObserverData, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _RefreshObserverData(); // Agentmaster: the Explorer Tree "refresh" button's action — Wake the observer (force a survey now) + re-probe + force a Manager redraw once it lands
         void _BindClaudeSessionToTab(const TerminalApp::Tab& hostTab, const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn, const std::wstring& id, const std::wstring& cwd, const std::wstring& origin); // Agentmaster: shared bind tail for adoption + discovery
         void _WireAgentManagerContent(const winrt::com_ptr<implementation::AgentManagerContent>& content); // Agentmaster

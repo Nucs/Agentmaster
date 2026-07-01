@@ -2603,6 +2603,24 @@ namespace winrt::TerminalApp::implementation
     // seam). Best-effort + idempotent: a tab with no terminal, or any live terminal, is left alone.
     winrt::fire_and_forget TerminalPage::_SweepClaudeLiveness()
     {
+        // Agentmaster (terminate-net): a fire_and_forget must never let an exception escape — that
+        // std::terminates the app (the _RefreshPromptNavCache / _ScrollAdjacentPrompt idiom). This UI-lane
+        // sweep touches cross-ABI control state (ConnectionState()) + the registry; the body runs as an
+        // awaitable IAsyncAction (_SweepClaudeLivenessImpl) whose exceptions PROPAGATE to this co_await
+        // (unlike a fire_and_forget's, which terminate), so the catch contains them.
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _SweepClaudeLivenessImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _SweepClaudeLiveness: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_SweepClaudeLivenessImpl()
+    {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
 
@@ -2783,6 +2801,24 @@ namespace winrt::TerminalApp::implementation
     // the indicator off. UI thread (the only place a control's buffer is readable).
     winrt::fire_and_forget TerminalPage::_ScanPendingInput()
     {
+        // Agentmaster (terminate-net): the inner per-control ReadPendingInputDraft is already try/caught,
+        // but the surrounding UI-thread work (_SetTabPending / _PendingDotsColorForTab / registry) is not —
+        // an exception escaping this fire_and_forget would std::terminate. The body is an awaitable
+        // IAsyncAction (_ScanPendingInputImpl) whose exceptions propagate to this co_await (see
+        // _SweepClaudeLiveness).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _ScanPendingInputImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ScanPendingInput: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ScanPendingInputImpl()
+    {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
         if (!_sessionRegistry || _claudeTabs.empty())
@@ -2914,6 +2950,22 @@ namespace winrt::TerminalApp::implementation
     // ids sharing one ConPTY can't ping-pong over the tab.
     winrt::fire_and_forget TerminalPage::_ReconcileClaudeTabs()
     {
+        // Agentmaster (terminate-net): contain any exception so this scanner-ticked bind/re-home lane can
+        // never std::terminate the app. The body is an awaitable IAsyncAction (_ReconcileClaudeTabsImpl)
+        // whose exceptions propagate to this co_await (see _SweepClaudeLiveness).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _ReconcileClaudeTabsImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ReconcileClaudeTabs: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ReconcileClaudeTabsImpl()
+    {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
         if (!_sessionRegistry)
@@ -3034,6 +3086,23 @@ namespace winrt::TerminalApp::implementation
     //     so a freshly-typed claude binds this tick (≤ ~one cadence) rather than next.
     // External (WindowsTerminal) claudes are observe-only (runningApp != Agentmaster) and never bind.
     winrt::fire_and_forget TerminalPage::_ObserverProbe()
+    {
+        // Agentmaster (terminate-net): the Fleet Observer UI lane touches many cross-ABI control reads
+        // (SessionId() / RootProcessHandle()) + XAML bind work every ~2s tick; an exception escaping this
+        // fire_and_forget would std::terminate the app. The body is an awaitable IAsyncAction
+        // (_ObserverProbeImpl) whose exceptions propagate to this co_await (see _SweepClaudeLiveness).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _ObserverProbeImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ObserverProbe: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ObserverProbeImpl()
     {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
@@ -3366,6 +3435,22 @@ namespace winrt::TerminalApp::implementation
     // lands we force ONE Manager redraw so the refreshed LOCAL/GLOBAL timing + the EXTERNAL census both
     // show even when nothing structurally "changed". Covers every displayed scope.
     winrt::fire_and_forget TerminalPage::_RefreshObserverData()
+    {
+        // Agentmaster (terminate-net): the Explorer-tree refresh button's lane — contain any exception so
+        // it can never std::terminate the app. The body is an awaitable IAsyncAction
+        // (_RefreshObserverDataImpl) whose exceptions propagate to this co_await (see _SweepClaudeLiveness).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _RefreshObserverDataImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _RefreshObserverData: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_RefreshObserverDataImpl()
     {
         auto weakThis = get_weak();
         if (_observer)
