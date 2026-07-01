@@ -58,6 +58,7 @@ void TestPersistence()
         s.workingDir = L"K:/api";
         s.state = SessionState::WaitingForInput;
         s.lastActivityUnixMs = 123456789;
+        s.lastMessageWasQuestion = true; // PERSISTED (Rule #16): the question-guard must survive a crash so a queued prompt can't auto-answer it on reopen
         s.external = true; // adopted session: must survive the round-trip
         s.forkParentId = L"src-conv-7"; // a never-messaged fork remembers its source across restart (PERSISTED)
         QueuedPrompt a;
@@ -89,6 +90,7 @@ void TestPersistence()
             const auto& r = back[0];
             CHECK(r.id == L"sid-1" && r.title == L"My Task" && r.workingDir == L"K:/api", "session metadata");
             CHECK(r.state == SessionState::WaitingForInput, "session state");
+            CHECK(r.lastMessageWasQuestion, "question-guard flag preserved (PERSISTED: a crash mustn't drop the guard and auto-answer a pending question)");
             CHECK(r.external, "external flag preserved");
             CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
             CHECK(r.queue.size() == 2, "queue size");

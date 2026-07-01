@@ -1223,8 +1223,13 @@ What works, by area:
     UNREAD (`readUnixMs` resets to 0 → it keeps waiting until actually read, never instant-decaying off an
     ancient `lastActivity`), no flash-storm fires (the ring keys on a live Running→needs-you EDGE; a restore
     is first-sight), and hooks own it live the instant the tab is activated (claude resumes → `SessionStart`
-    → Idle). Resume-vs-fresh is STILL transcript-gated, never state-gated (the gotcha stands). Unit-tested
-    (`TestRestoredSessionState`). **Verified clean (not gaps):**
+    → Idle). Resume-vs-fresh is STILL transcript-gated, never state-gated (the gotcha stands). The
+    **companion question-guard flag** (`lastMessageWasQuestion`) is now persisted the same way and gated by
+    `RestoredQuestionFlag`, so a crash while the agent was WaitingForInput on a clarifying question can't
+    drop the guard and let the Autorunner auto-ANSWER it on reopen (the flag rides ONLY a preserved
+    needs-you state; a stale flag from an interrupted Running turn — already answered — is dropped when the
+    state normalizes to Idle, so it can't falsely hold the queue). Unit-tested (`TestRestoredSessionState`
+    + the persistence round-trip). **Verified clean (not gaps):**
     external WindowsTerminal/Other claudes never enter the registry or `sessions.json` (`ObserveClaude` is
     gated on rostered + resolved id, `ProcessObserver.cpp:680`) — no foreign-claude leak into the Archived
     list; cross-window double-bind is guarded (`HasInjector`; one ConPTY lives in one window); and

@@ -429,6 +429,15 @@ namespace Agentmaster
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
         o.Set(L"external", json::Value::MkBool(s.external));
+        // Agentmaster (crash/restore fidelity — Rule #16): persist the question-guard flag so a crash
+        // while the agent was WaitingForInput on a clarifying question can't drop the guard on reopen
+        // (else a queued prompt would auto-ANSWER the question). Omitted when false (the common case), so
+        // an all-normal sessions.json is byte-unchanged; restored only alongside a preserved needs-you
+        // state (RestoredQuestionFlag). See SessionInfo::lastMessageWasQuestion.
+        if (s.lastMessageWasQuestion)
+        {
+            o.Set(L"lastMessageWasQuestion", json::Value::MkBool(true));
+        }
         // Codex managed-session support: persist the agent kind + the rollout resume target. Both
         // are omitted when default (Claude / empty), so an all-Claude sessions.json is byte-unchanged.
         if (s.kind == AgentKind::Codex)
@@ -469,6 +478,7 @@ namespace Agentmaster
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
         s.external = v.BoolAt(L"external", false);
+        s.lastMessageWasQuestion = v.BoolAt(L"lastMessageWasQuestion", false); // PERSISTED (Rule #16): absent => false (back-compat + the common case)
         s.kind = (v.StrAt(L"kind", L"Claude") == L"Codex") ? AgentKind::Codex : AgentKind::Claude; // absent => Claude (back-compat)
         s.codexSessionId = v.StrAt(L"codexSessionId");
         s.forkParentId = v.StrAt(L"forkParentId"); // PERSISTED: the fork SOURCE, for re-forking a never-messaged fork on restore (absent => "")

@@ -69,6 +69,20 @@ namespace Agentmaster
         }
     }
 
+    // Agentmaster (crash/restore state fidelity — Rule #16, companion to RestoredSessionState): the
+    // question-guard flag (SessionInfo::lastMessageWasQuestion — "the last turn ended on a clarifying
+    // question", which HOLDS the Autorunner queue so a queued prompt never auto-ANSWERS the question) is
+    // now PERSISTED so it survives a crash — but it is only meaningful at a PRESERVED needs-you
+    // turn-boundary. DROP it whenever the restored state normalized to Idle: a session that was Running
+    // at the crash had ALREADY answered any prior question (that is what STARTED the interrupted turn),
+    // so its now-stale flag=true must not falsely hold the queue on reopen. Kept for WaitingForInput
+    // (the fix — the queue stays held so a crash can't auto-answer a pending question) and harmlessly for
+    // NeedsApproval (never Autorunner-ready anyway). PURE + total.
+    inline bool RestoredQuestionFlag(SessionState restoredState, bool persistedFlag) noexcept
+    {
+        return restoredState == SessionState::Idle ? false : persistedFlag;
+    }
+
     enum class AutorunnerMode
     {
         Off,
@@ -332,9 +346,15 @@ namespace Agentmaster
         // until opened), so it never round-trips to JSON. Meaningless for an `external` session
         // (we host no control) — left false, and every consumer also gates on `!external`.
         bool started{ false };
-        // Transient runtime flag (not persisted): set from the most recent Stop hook's
-        // best-effort `lastMessageIsQuestion`. Feeds the Autorunner question-guard (M7):
-        // a turn that ended on a clarifying question must NOT be auto-answered.
+        // Set from the most recent Stop hook's best-effort `lastMessageIsQuestion`. Feeds the
+        // Autorunner question-guard (M7): a turn that ended on a clarifying question must NOT be
+        // auto-answered (DecideAdvance holds the queued prompt while this is true). PERSISTED (Rule
+        // #16, crash/restore fidelity): the flag rides sessions.json so a crash while the agent was
+        // waiting on a question can't drop the guard and auto-answer it on reopen — restored ONLY
+        // alongside a preserved needs-you state (RestoredQuestionFlag drops it when the state
+        // normalizes to Idle, so a stale flag from an interrupted Running turn can't falsely hold the
+        // queue). Written only by a fresh Stop (SessionRegistry::OnHookEvent), never cleared by
+        // SessionStart — so it correctly stays true across a --resume until a real non-question turn.
         bool lastMessageWasQuestion{ false };
         // Agentmaster (Waiting-for-you "unread" model): the last time the user READ this session —
         // i.e. visited (switched to) its terminal tab, or had it as the focused tab while a turn

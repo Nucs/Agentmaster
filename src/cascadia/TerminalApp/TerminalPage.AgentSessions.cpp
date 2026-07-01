@@ -357,6 +357,11 @@ namespace winrt::TerminalApp::implementation
         // here. The SessionScanner refines the seed from the transcript tail; hooks own it live the instant
         // the tab is activated (claude resumes -> SessionStart -> Idle).
         info.state = restored ? ::Agentmaster::RestoredSessionState(info.state) : ::Agentmaster::SessionState::Idle;
+        // Keep the persisted question-guard flag consistent with the (normalized) state: preserved for a
+        // restored WaitingForInput-on-a-question (so the Autorunner queue stays held and can't auto-answer
+        // it), dropped when the state is Idle — a fresh spawn (no `restored`) OR a Running-interrupted
+        // record whose stale flag would otherwise falsely hold the queue. (RestoredQuestionFlag, Rule #16.)
+        info.lastMessageWasQuestion = restored ? ::Agentmaster::RestoredQuestionFlag(info.state, info.lastMessageWasQuestion) : false;
         info.external = false; // we own this tab's ConPTY -> managed, not an adopted session
         info.live = true; // OPEN: has a live tab/claude now -> shows on the Triage Board (not Archived)
         info.pendingConfirmPromptId.clear();
@@ -511,7 +516,11 @@ namespace winrt::TerminalApp::implementation
                     // shown until re-homed (live=false here); the SessionScanner then refines it and the
                     // Waiting decay is read-gated (readUnixMs resets to 0 -> unread -> keeps waiting).
                     s.state = ::Agentmaster::RestoredSessionState(s.state);
-                    s.lastMessageWasQuestion = false;
+                    // The question-guard flag (persisted too) rides ONLY a preserved needs-you state:
+                    // keep it for a WaitingForInput turn that ended on a question (so the Autorunner queue
+                    // stays held across the crash and can't auto-answer it), drop it when the state
+                    // normalized to Idle (a stale flag from an interrupted Running turn must not hold).
+                    s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
                     s.pendingConfirmPromptId.clear();
                     _sessionRegistry->Upsert(std::move(s));
                 }

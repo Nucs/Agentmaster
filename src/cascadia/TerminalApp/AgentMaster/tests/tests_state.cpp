@@ -86,6 +86,18 @@ void TestRestoredSessionState()
     {
         CHECK(RestoredSessionState(RestoredSessionState(st)) == RestoredSessionState(st), "RestoredSessionState is idempotent (applied at two restore seams)");
     }
+
+    // RestoredQuestionFlag (Finding A fix): the PERSISTED question-guard flag rides ONLY a preserved
+    // needs-you state, so a crash while WaitingForInput on a clarifying question keeps the guard (the
+    // Autorunner can't auto-answer it), while a stale flag from an interrupted Running turn is dropped.
+    CHECK(RestoredQuestionFlag(SessionState::WaitingForInput, true), "question flag kept for a restored WaitingForInput (the guard survives a crash)");
+    CHECK(!RestoredQuestionFlag(SessionState::WaitingForInput, false), "no question flag stays no question flag (Waiting)");
+    CHECK(RestoredQuestionFlag(SessionState::NeedsApproval, true), "question flag kept for NeedsApproval (harmless — not Autorunner-ready)");
+    // The key guard: RestoredSessionState maps Running/Error/Done -> Idle, and the (now-stale) flag must
+    // be dropped there or it would falsely hold the Autorunner queue on a session that already answered.
+    CHECK(!RestoredQuestionFlag(RestoredSessionState(SessionState::Running), true), "STALE question flag dropped when a Running-interrupted turn normalizes to Idle (no false queue hold)");
+    CHECK(!RestoredQuestionFlag(SessionState::Idle, true), "question flag dropped for Idle (an Idle session is never 'waiting on a question')");
+    CHECK(!RestoredQuestionFlag(SessionState::Idle, false), "Idle + no flag stays no flag");
 }
 
 // Agentmaster (event ordering + turn identity): the layer over NextSessionState that makes the
