@@ -1145,6 +1145,30 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (TAB_OVERLAY.md summary panel): switching TO a managed tab kicks a cheap, mtime-gated
+    // content re-read of its summary panel, so the "here-and-now lens" is current the instant you look at
+    // it instead of up to ~5 s stale (the panel's own DispatcherTimer backstop cadence). Called from the
+    // one tab-switch funnel (_OnTabSelectionChanged), so a user click, Ctrl+Tab, a switchToTab action, or a
+    // cross-window Activate all reach it. No-op for a non-session tab (no overlay), when the panel is off,
+    // or when the transcript is unchanged (the mtime gate makes it a cheap stat — no re-render / scroll
+    // reset). The overlay may not be attached yet during restore (bind attaches it), so the find can miss.
+    void TerminalPage::_RefreshFocusedTabSummary(const TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        const auto id = _ClaudeSessionForTab(tab);
+        if (id.empty())
+        {
+            return; // not a managed Claude/Codex tab
+        }
+        if (const auto it = _claudeOverlays.find(id); it != _claudeOverlays.end() && it->second)
+        {
+            it->second->RefreshSummaryContent();
+        }
+    }
+
     // Agentmaster (Waiting-for-you "unread" model): stamp this session READ now. The engine gate
     // (ShouldDecayWaitingToIdle) then permits a past-timeout WaitingForInput card to demote to Idle —
     // an unread session keeps waiting until this lands. Quiet (no observer churn): the visible demote

@@ -806,6 +806,15 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        // Agentmaster (subagent activity): fold in the registry's SUBAGENT-AWARE last-activity so the
+        // times line keeps advancing while a Task/Agent subagent runs — the panel's own sources above
+        // (_summaryLastActivityMs + the parent file's mtime) come from the PARENT <id>.jsonl, which stays
+        // quiescent then, so both read stale. max() only ever makes "last activity" fresher, never older;
+        // 0 (unknown) is a no-op. Set by _UpdateSummary from SessionInfo::convLastActivityUnixMs each pass.
+        if (_summaryConvLastActivityMs > lastAct)
+        {
+            lastAct = _summaryConvLastActivityMs;
+        }
         const std::wstring line = FormatTimesLine(_summaryCreatedMs, _summaryLastUserMs, lastAct);
         _summaryTimesText.Text(winrt::hstring{ line });
         _summaryTimesText.Visibility(line.empty() ? Visibility::Collapsed : Visibility::Visible);
@@ -1057,6 +1066,25 @@ namespace winrt::TerminalApp::implementation
     void AgentTabOverlay::RefreshJumpData()
     {
         _RefreshJumpEligibility();
+    }
+
+    // Agentmaster (TAB_OVERLAY.md summary panel): a cheap, mtime-gated content re-read from the freshest
+    // registry snapshot — the SAME reload the 5 s backstop timer's Tick performs (the panel content
+    // otherwise reloads only on that timer or a registry notify). Exposed so the page can kick it when
+    // this tab is FOCUSED, so switching TO a background tab shows current content instead of up to ~5 s
+    // stale. Unlike the ↻ button (_RefreshSummary) this does NOT force — the mtime gate inside
+    // _LoadSummaryAsync makes an unchanged transcript a cheap stat with no re-render (no flicker / scroll
+    // reset), and a load already in flight is coalesced via _summaryReloadPending. No-op when the panel is
+    // off / no session / no registry.
+    void AgentTabOverlay::RefreshSummaryContent()
+    {
+        if (_summaryEnabled && _registry && !_sessionId.empty())
+        {
+            if (const auto info = _registry->Get(_sessionId))
+            {
+                _UpdateSummary(*info);
+            }
+        }
     }
 
     // Agentmaster (SUMMARY_JUMP.md): remember the message we jumped to and paint the band on its row.
@@ -1362,6 +1390,13 @@ namespace winrt::TerminalApp::implementation
             _summaryRoot.Visibility(Visibility::Collapsed);
             return;
         }
+        // Agentmaster (subagent activity): capture the registry's SUBAGENT-FOLDED last-activity every
+        // refresh — synchronous, from the live snapshot, and BEFORE the _summaryLoading guard below so a
+        // slow in-flight load can't freeze it. The times line (_UpdateTimesLine) max()es it into "last
+        // activity" so the panel keeps advancing while a Task/Agent subagent runs and the PARENT
+        // <id>.jsonl (the panel's own transcript source) stays quiescent — the "looks idle while working"
+        // fix, keying on the same OBSERVER subagent fold that feeds SessionInfo::convLastActivityUnixMs.
+        _summaryConvLastActivityMs = s.convLastActivityUnixMs;
         // Pinned TITLE row (top of the panel): the session's title == the tab name (Rule #11). Set it every
         // refresh — synchronously on the UI thread, independent of the off-thread transcript load below — so
         // a rename updates it live. Guarded so an unchanged title doesn't relayout the wrapping block each

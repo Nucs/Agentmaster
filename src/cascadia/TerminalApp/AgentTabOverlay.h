@@ -169,6 +169,15 @@ namespace winrt::TerminalApp::implementation
         // is closed / has no jump buttons. Call on the UI thread.
         void RefreshJumpData();
 
+        // Agentmaster (TAB_OVERLAY.md summary panel): a cheap, mtime-gated content re-read from the
+        // freshest registry snapshot — the SAME reload the panel's own 5 s backstop timer performs.
+        // Exposed so the page can kick it when this tab is FOCUSED (switching TO a background tab then
+        // shows current content instead of up to ~5 s stale — the panel is a "here-and-now lens"). Unlike
+        // the times-bar ↻ button (_RefreshSummary) this does NOT force: the mtime gate inside
+        // _LoadSummaryAsync makes an unchanged transcript a cheap stat with NO re-render (no flicker /
+        // scroll reset). No-op when the panel is off / no session / no registry. Call on the UI thread.
+        void RefreshSummaryContent();
+
     private:
         void _Refresh(); // rebuild the line from the registry snapshot (UI thread)
         void _Detach(); // drop the registry observer
@@ -244,6 +253,14 @@ namespace winrt::TerminalApp::implementation
         int64_t _summaryCreatedMs{ 0 }; // times line: conversation start (unix ms) — "age"
         int64_t _summaryLastUserMs{ 0 }; // times line: last real user prompt (unix ms) — "last user msg"
         int64_t _summaryLastActivityMs{ 0 }; // times line: last transcript entry (unix ms) — "last activity"
+        // Agentmaster (subagent activity): the registry's SUBAGENT-FOLDED last-activity
+        // (SessionInfo::convLastActivityUnixMs) — captured synchronously by _UpdateSummary from the live
+        // snapshot and max()'d into the "last activity" the times line shows. The panel's OWN sources
+        // (_summaryLastActivityMs from the transcript tail + the parent file's mtime) read the PARENT
+        // <id>.jsonl only, which stays quiescent while a Task/Agent subagent runs (its work streams to
+        // <id>/subagents/*.jsonl) — so without this the times line froze ("looks idle while working")
+        // even as the badge showed Running. 0 == unknown (a harmless no-op in the max).
+        int64_t _summaryConvLastActivityMs{ 0 };
         bool _summaryLoading{ false }; // one analyze+render in flight at a time
         bool _summaryWrapDirty{ false }; // a wrap-mode toggle landed while a load was in flight — re-render when it completes
         bool _summaryTruncateDirty{ false }; // a truncate-mode toggle landed while a load was in flight — re-render when it completes
