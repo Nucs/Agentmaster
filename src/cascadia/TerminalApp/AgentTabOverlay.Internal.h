@@ -840,7 +840,16 @@ namespace
                     a.previousSegments.insert(a.previousSegments.begin(), lineage.begin(), lineage.end());
                 }
             }
-            times = FormatTimesLine(IsoToUnixMs(a.firstTs), IsoToUnixMs(a.lastUserTs), IsoToUnixMs(a.lastTs));
+            // Agentmaster (subagent activity): fold the newest subagent side-file write into "last
+            // activity" so a copy taken WHILE a Task/Agent subagent runs matches the live panel — the
+            // parent transcript's a.lastTs stays quiescent then (the same fold ReadTranscriptLastActivityTail
+            // does for the observer's convLastActivityUnixMs). max() only ever makes it fresher.
+            int64_t copyLastActMs = IsoToUnixMs(a.lastTs);
+            if (const int64_t subMs = ::Agentmaster::SubagentActivityUnixMs(path); subMs > copyLastActMs)
+            {
+                copyLastActMs = subMs;
+            }
+            times = FormatTimesLine(IsoToUnixMs(a.firstTs), IsoToUnixMs(a.lastUserTs), copyLastActMs);
             std::wstring planFile = a.planFilePath;
             if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
             {
