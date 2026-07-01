@@ -1917,9 +1917,7 @@ namespace winrt::TerminalApp::implementation
         {
             dialog.ShowAsync();
         }
-        catch (...)
-        {
-        }
+        CATCH_LOG(); // Agentmaster: a silently-swallowed ShowAsync = a user-action confirm dialog that never appears (a confusing no-op with no trace) — log it (matches the CATCH_LOG on the button-click above)
     }
 
     // Agentmaster: a THREE-way buttons-only choice (Primary / Secondary / Cancel) — the XAML-Islands-safe
@@ -1973,9 +1971,7 @@ namespace winrt::TerminalApp::implementation
         {
             dialog.ShowAsync();
         }
-        catch (...)
-        {
-        }
+        CATCH_LOG(); // Agentmaster: a silently-swallowed ShowAsync = a user-action confirm dialog that never appears (a confusing no-op with no trace) — log it (matches the CATCH_LOG on the button-click above)
     }
 
     // ---- Archived-sessions overlay: REMOVED (FAVORITES.md) ------------------

@@ -212,9 +212,7 @@ namespace winrt::TerminalApp::implementation
             {
                 dialog.ShowAsync();
             }
-            catch (...)
-            {
-            }
+            CATCH_LOG(); // Agentmaster: a silently-swallowed ShowAsync = this "couldn't create folder" error dialog never appears, so the user sees the Launch just do nothing with no trace — log it
             return false;
         }
         return true;
