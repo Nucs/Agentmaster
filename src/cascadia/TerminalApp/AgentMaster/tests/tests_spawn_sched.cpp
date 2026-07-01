@@ -917,7 +917,10 @@ void TestBuildPromptSubmission()
 // worker -> Inject chain, which is precisely where the "toggle Autorunner Off and back -> pending
 // not sent" bug lived: OnObserved gated the change-driven advance on !s.external (provenance)
 // instead of HasInjector (controllability), so an ADOPTED session (external=true but injector-bound)
-// was never driven. This test drives the real Scheduler thread and polls for the injected result.
+// was never driven. It ALSO covers the Finding-B dormant gate: a re-homed BACKGROUND tab (live +
+// injector-bound but not yet STARTED) must NOT be driven until its ConPTY launches (else the send is
+// lost -> Enter-retry -> Failed + plan paused). This test drives the real Scheduler thread and polls
+// for the injected result.
 void TestSchedulerIntegration()
 {
     std::wprintf(L"Autorunner Scheduler integration (toggle Off->Full; controllability != provenance):\n");
@@ -927,7 +930,7 @@ void TestSchedulerIntegration()
     // once), optionally bind an injector, then toggle Autorunner Off->Full via the registry exactly
     // as AgentManagerContent::_OnAutorunnerChanged does. Returns true iff the prompt reached Sent
     // within the poll budget. Each case gets its OWN registry+scheduler so they can't cross-talk.
-    auto runToggleCase = [](bool external, bool bindInjector) -> bool {
+    auto runToggleCase = [](bool external, bool bindInjector, bool started) -> bool {
         auto reg = std::make_shared<SessionRegistry>();
         Scheduler sched{ reg };
         sched.Start();
@@ -943,6 +946,7 @@ void TestSchedulerIntegration()
             s.state = SessionState::WaitingForInput; // turn already complete; no future Stop hook fires
             s.live = true;
             s.external = external;
+            s.started = started; // Agentmaster (Finding B): a launched session must be STARTED to be driven; external is carved out (started is meaningless for it)
             s.autorunner.mode = AutorunnerMode::Off;
             s.autorunner.throttleMs = 0; // inject immediately (no 500ms throttle) -> a short poll suffices
             QueuedPrompt p;
@@ -982,12 +986,18 @@ void TestSchedulerIntegration()
         return sent && (!bindInjector || injected.load() > 0);
     };
 
-    // Manager-Launched (external=false, injector bound): always worked — the regression baseline.
-    CHECK(runToggleCase(/*external*/ false, /*injector*/ true), "launched: toggle Off->Full sends pending");
-    // Adopted (external=true, injector bound): THE fix — provenance != controllability, must send.
-    CHECK(runToggleCase(/*external*/ true, /*injector*/ true), "adopted: toggle Off->Full sends pending");
+    // Manager-Launched (external=false, injector bound, STARTED): always worked — the regression baseline.
+    CHECK(runToggleCase(/*external*/ false, /*injector*/ true, /*started*/ true), "launched+started: toggle Off->Full sends pending");
+    // Adopted (external=true, injector bound): THE fix — provenance != controllability, must send. Its
+    // control is untracked so `started` stays false; the `|| s.external` carve-out keeps it drivable.
+    CHECK(runToggleCase(/*external*/ true, /*injector*/ true, /*started*/ false), "adopted: toggle Off->Full sends pending (external carve-out, started=false)");
     // Observe-only external (external=true, NO injector): must NOT send (nothing to drive, no churn).
-    CHECK(!runToggleCase(/*external*/ true, /*injector*/ false), "observe-only: toggle does not send (no injector)");
+    CHECK(!runToggleCase(/*external*/ true, /*injector*/ false, /*started*/ false), "observe-only: toggle does not send (no injector)");
+    // Agentmaster (Finding B): a DORMANT re-homed tab — launched (external=false) + injector bound but
+    // its ConPTY has NOT started yet (WT lazy-starts a background tab) — must NOT be driven: injecting
+    // into a not-yet-launched claude loses the submit -> the Enter-retry watchdog gives up -> Failed +
+    // plan paused. The send must DEFER until SetStarted(true) fires on the tab's first layout/activation.
+    CHECK(!runToggleCase(/*external*/ false, /*injector*/ true, /*started*/ false), "dormant launched: a not-yet-started re-homed tab does NOT auto-send (Finding B)");
 
     // --- Question-guard treats a pending question / "needs you" status like a Running mid-turn: the
     //     queued prompt STAYS Pending (never parked in Held, autorunner never paused) and fires only
@@ -1008,6 +1018,7 @@ void TestSchedulerIntegration()
             s.workingDir = L"K:\\tmp";
             s.state = SessionState::WaitingForInput; // turn complete, but...
             s.live = true;
+            s.started = true; // a live, driven session IS started (Finding B gate); the question-guard is what holds it here
             s.lastMessageWasQuestion = true; // ...the agent ended it asking the user something
             s.autorunner.mode = AutorunnerMode::Full;
             s.autorunner.throttleMs = 0;
@@ -1064,6 +1075,7 @@ void TestSchedulerIntegration()
             s.workingDir = L"K:\\tmp";
             s.state = SessionState::WaitingForInput;
             s.live = true;
+            s.started = true; // a live, driven session IS started (Finding B gate)
             s.lastMessageWasQuestion = false; // the question is gone — the Held prompt should recover
             s.autorunner.mode = AutorunnerMode::Full;
             s.autorunner.throttleMs = 0;

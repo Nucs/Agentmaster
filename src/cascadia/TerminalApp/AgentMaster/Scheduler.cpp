@@ -412,7 +412,20 @@ namespace Agentmaster
         // ARCHIVED session (!live, loads from disk Idle possibly with mode=Full + Pending) both
         // lack an injector, so HasInjector is false and they are still correctly skipped — no
         // churn on the deferred-send path until the user restores/adopts them.
-        if (s.live && s.autorunner.mode != AutorunnerMode::Off &&
+        //
+        // Agentmaster (dormant re-homed tab): ALSO require the session to have STARTED (its ConPTY/claude
+        // has actually launched) OR be external. A window-restored BACKGROUND tab is live=true +
+        // injector-bound but DORMANT — WT starts a background tab's child LAZILY (only on its first
+        // layout, i.e. when the tab is first shown) — so injecting a queued prompt now writes into a
+        // connection whose claude has NOT launched: the submit is lost, the Enter-retry watchdog then
+        // gives up and marks the prompt Failed + PAUSES the plan (a phantom failure on every reopen).
+        // Defer until the tab actually starts: SetStarted(true) (fired the instant the control
+        // initializes — on focus, or an in-place Activate) _notify's this observer, so the plan resumes
+        // exactly then with nothing lost. `started` is MEANINGLESS for an external session (we track no
+        // control for it — left false though the adopted claude IS running), so the `|| s.external`
+        // carve-out keeps adopted sessions drivable (mirrors the `!started && !external` "dormant"
+        // definition the tab-strip status dot uses).
+        if (s.live && (s.started || s.external) && s.autorunner.mode != AutorunnerMode::Off &&
             (s.state == SessionState::Idle || s.state == SessionState::WaitingForInput) &&
             _registry->HasInjector(s.id))
         {
