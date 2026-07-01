@@ -11,8 +11,7 @@
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
 
-#include <chrono> // Agentmaster (tab tooltip): the fast-open timer interval
-#include <atomic> // Agentmaster (tab tooltip): the cross-window/thread reopen-cooldown stamp
+#include <chrono> // DispatcherTimer intervals + til::throttled_func delays
 
 using namespace winrt;
 using namespace winrt::Windows::UI::Xaml;
@@ -30,23 +29,6 @@ namespace winrt
 }
 
 #define ASSERT_UI_THREAD() assert(TabViewItem().Dispatcher().HasThreadAccess())
-
-namespace
-{
-    // Agentmaster (tab tooltip): PROCESS-WIDE serialization of agent-tooltip open-after-close. UI-thread
-    // only, so a plain static needs no atomic. Jumping the cursor between two tabs opens B's tooltip while
-    // A's popup is still in the framework's ASYNC teardown; two agent tooltip popups colliding in ONE XAML
-    // render/composition pass is what crashes — a stowed fail-fast (0xC000027B) or a freed-read AV, raised
-    // OFF our call stack during that pass, so NO try/catch can catch it. Every agent-tooltip close stamps
-    // this tick; the hover open-tick DEFERS (re-arms its one-shot) while a close is within the cooldown, so
-    // the prior teardown fully drains before the next tooltip opens. A settled hover with no recent close
-    // still opens immediately, so the fast-open UX is preserved.
-    // std::atomic because the WindowEmperor runs each window on its OWN UI thread, so different windows'
-    // Tab handlers touch this concurrently (relaxed is enough — we only need a recent-ish timestamp, not
-    // ordering; cross-window popups render on separate islands so at worst it over-defers harmlessly).
-    std::atomic<uint64_t> g_lastAgentToolTipCloseTick{ 0 };
-    constexpr uint64_t kAgentToolTipReopenCooldownMs = 150;
-}
 
 namespace winrt::TerminalApp::implementation
 {
@@ -325,88 +307,78 @@ namespace winrt::TerminalApp::implementation
         _agentToolTipActive = false;
         _agentToolTipContent = nullptr;
         _agentToolTipSig = {};
-        if (_agentToolTipOpenTimer)
-        {
-            _agentToolTipOpenTimer.Stop();
-        }
-        if (_agentToolTipDismissTimer)
-        {
-            _agentToolTipDismissTimer.Stop();
-        }
-        if (_agentToolTip)
-        {
-            _SafeSetAgentToolTipOpen(false);
-            _agentToolTip = nullptr; // drop the reused object; re-activation recreates + re-SetToolTip cleanly
-        }
+        _DetachAgentToolTip(); // drop the framework-managed tooltip + detach it from the owner (the framework closes any open popup on its own)
         _UpdateToolTip(); // revert to the default title + key-chord tooltip (re-attaches the default)
     }
 
     // Agentmaster (tab tooltip): host the rich tooltip element TerminalPage built (a dark, summary-style
     // card — see TerminalPage::_UpdateTabAgentToolTip). The page owns the layout + content; the Tab owns
-    // the ToolTip lifecycle.
+    // the ToolTip lifecycle. FRAMEWORK-MANAGED: ToolTipService owns open/close (hover opens after the
+    // system delay, pointer-exit closes) — the SAME model as the plain default tab tooltip (_UpdateToolTip),
+    // which has NEVER crashed. We never drive IsOpen; the six historical tooltip crashes were all on the old
+    // manual-open path (timers + IsOpen + a cross-tab cooldown), now removed — see
+    // doc/agentmaster/HANDOVER_tab-tooltip.md.
     //
-    // Reuse ONE ToolTip object across refreshes (swap its Content): re-creating it + re-SetToolTip on each
-    // ~2s data refresh would REPLACE — and so visibly CLOSE — an already-open tip while you hover it (the
-    // "disappears after showing" bug, made constant by the seconds ticking in the 'ago' line). Configure
-    // it once: pinned Dark (a ToolTip renders in the popup root and does NOT inherit the host theme, and
-    // ToolTipService theme propagation is unreliable under XAML Islands — see AgentTipHelpers) and placed
-    // BELOW the tab (the default placement would push it up into the titlebar / off the top of the screen).
-    // Opening fast + closing reliably is the _WireAgentToolTipHover recipe.
+    // Reuse ONE ToolTip object across refreshes and swap its Content ONLY while closed: re-creating it +
+    // re-SetToolTip on each ~2s data refresh would replace — and so flicker/close — the framework's open
+    // tip while you hover it (made constant by the seconds ticking in the 'ago' line). Configure it once:
+    // pinned Dark (a ToolTip renders in the popup root and does NOT inherit the host theme, and
+    // ToolTipService theme propagation is unreliable under XAML Islands — see AgentTipHelpers), placed BELOW
+    // the tab (the default placement would push it up into the titlebar / off the top of the screen), and
+    // hit-test-invisible (a big card sitting under the cursor as a pointer target would churn the
+    // framework's own hover tracking).
     void Tab::_UpdateAgentToolTip()
     {
-        // Agentmaster (use-after-free defense, complements _ForceCloseAgentToolTip): never create OR mutate
-        // the tooltip for a detached owner. If the TabViewItem has left the visual tree (a recycle), then
-        // building + SetToolTip + `.Content()` here is at best wasted and at worst races the peer teardown
-        // that produced the `.Content()` freed-read AV — skip until the owner is live again (the next ~2s
-        // refresh / the state-line "ago" rollover rebuilds it). A normal loaded tab (foreground OR a
-        // background tab in the strip) is always IsLoaded()+rooted, so steady-state is unaffected.
+        // Never create OR mutate the tooltip for a detached owner. If the TabViewItem has left the visual
+        // tree (a MUX TabView recycle), building + SetToolTip + `.Content()` here is at best wasted and at
+        // worst touches a torn-down peer — skip until the owner is live again (the next ~2s refresh / the
+        // state-line "ago" rollover rebuilds it). A normal loaded tab (foreground OR a background tab in the
+        // strip) is always IsLoaded()+rooted, so steady-state is unaffected. Complements the Unloaded detach
+        // (_WireAgentToolTipUnload -> _DetachAgentToolTip): a recycle drops the ref so a later RELOAD of the
+        // same owner rebuilds a FRESH tooltip here instead of reusing a stale one (the crash #4 lesson).
         if (const auto owner = TabViewItem(); !owner || !owner.IsLoaded() || !owner.XamlRoot())
         {
             return;
         }
-        if (!_agentToolTip)
+        else if (!_agentToolTip)
         {
             _agentToolTip = WUX::Controls::ToolTip{};
             _agentToolTip.RequestedTheme(WUX::ElementTheme::Dark);
             _agentToolTip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
-            // Make the tooltip popup click/hover-THROUGH: a hit-testable popup becomes a pointer target,
-            // so as it opens under the cursor it steals the tab's own PointerExited/Entered — the churn
-            // that races the open/dismiss timers and drove the 0xC000027B fail-fast on fade. A tooltip is
-            // purely informational and never needs input (the AgentTipHelpers recipe does the same).
+            // Make the tooltip popup click/hover-THROUGH: a hit-testable popup becomes a pointer target, so
+            // the large card sitting under the cursor would churn the framework's own hover tracking. A
+            // tooltip is purely informational and never needs input (the AgentTipHelpers recipe does the same).
             _agentToolTip.IsHitTestVisible(false);
-            WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), _agentToolTip);
+            WUX::Controls::ToolTipService::SetToolTip(owner, _agentToolTip);
+            _WireAgentToolTipUnload(); // wire (once) the owner Unloaded -> detach, so a recycle can't strand a stale ref
         }
-        _WireAgentToolTipHover();
 
-        // Don't swap content while the tip is OPEN (you're reading it): the ~2s refresh churns the
-        // seconds in the 'ago' line, and swapping Content under the pointer flickers. The next hover shows
-        // the latest data (≤ one refresh interval stale — negligible for a tooltip).
+        // Don't swap Content while the framework has the tip OPEN (you're reading it): the ~2s refresh
+        // churns the seconds in the 'ago' line, and swapping under the pointer flickers. Reading IsOpen is
+        // safe — only DRIVING it ever raced. The next closed refresh re-sets Content, so a hover always
+        // shows current data (≤ one refresh interval stale — negligible for a tooltip).
         if (_agentToolTip.IsOpen())
         {
             return;
         }
-        _agentToolTip.Content(_agentToolTipContent); // host the page-built card on the REUSED object
+        _agentToolTip.Content(_agentToolTipContent); // host the page-built card on the reused object
     }
 
-    // Agentmaster (tab tooltip): open the agent tooltip FAST on hover and — the part that actually bites —
-    // close it RELIABLY. The framework hover delay is sluggish (and this SDK exposes no
-    // ToolTipService.InitialShowDelay), so a one-shot DispatcherTimer at ~1/3 the system hover time opens
-    // it. But driving IsOpen ourselves bypasses the framework's native auto-dismiss — and under XAML
-    // Islands that auto-dismiss, AND PointerExited, are both routinely MISSED (window deactivate, a fast
-    // exit off the top of the tab strip, a pointer-capture stolen by a tab click/drag), which strands the
-    // manually-opened popup open forever (the "stuck tooltip" bug). So closing is defense-in-depth:
-    //   - close from THREE pointer-loss events (Exited / Canceled / CaptureLost), not just Exited;
-    //   - an auto-dismiss BACKSTOP timer force-closes after a read window no matter what — re-armed while
-    //     the pointer keeps moving over the tab (keep-alive, so active reading isn't cut off), but always
-    //     firing once the mouse stops or leaves, so the tip can never get stuck;
-    //   - PointerMoved re-opens after a stationary auto-dismiss, so the tab is never left "hovered but
-    //     refusing to show".
-    // Wired ONCE on the TabViewItem; the tooltip CONTENT changes per refresh but the handlers operate on
-    // the reused _agentToolTip and no-op unless a tooltip is active (a tab on the default tooltip is
-    // unaffected). This is the AgentTipHelpers recipe, hardened for the manual-open case.
-    void Tab::_WireAgentToolTipHover()
+    // Agentmaster (tab tooltip): FRAMEWORK-MANAGED lifecycle. ToolTipService owns open (hover, after the
+    // system delay) and close (pointer-exit) — the SAME model as the plain default tab tooltip
+    // (_UpdateToolTip), which has NEVER crashed. The ONLY handler we wire is the owner's Unloaded, so a MUX
+    // TabView recycle/detach can't leave us holding a stale ToolTip ref: on unload we detach + drop it, and
+    // the next content refresh rebuilds a FRESH one bound to the live (reloaded) owner (the crash #4 lesson,
+    // kept — but now with NO manual IsOpen, so it cannot fail-fast). Wired ONCE per tab.
+    //
+    // The historical manual-open path (a fast-open one-shot timer, an 8s auto-dismiss backstop, three
+    // pointer-loss close handlers, PointerMoved keep-alive/re-open, a cross-tab reopen cooldown, and
+    // _SafeSetAgentToolTipOpen driving IsOpen) is GONE — it was the source of ALL SIX tooltip crashes
+    // (doc/agentmaster/HANDOVER_tab-tooltip.md §9). The tradeoff: the tip now opens at the system hover
+    // delay instead of ~1/3 of it (this SDK exposes no ToolTipService.InitialShowDelay to tune).
+    void Tab::_WireAgentToolTipUnload()
     {
-        if (_agentToolTipHoverWired)
+        if (_agentToolTipUnloadWired)
         {
             return;
         }
@@ -415,215 +387,36 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        _agentToolTipHoverWired = true;
+        _agentToolTipUnloadWired = true;
         const auto weakThis = get_weak();
 
-        // One-shot fast-open timer: opens the tip ~1/3 the system hover time after the pointer arrives,
-        // then arms the auto-dismiss backstop.
-        {
-            unsigned int hoverMs{ 400 };
-            if (!::SystemParametersInfoW(SPI_GETMOUSEHOVERTIME, 0, &hoverMs, 0) || hoverMs == 0)
-            {
-                hoverMs = 400;
-            }
-            WUX::DispatcherTimer openTimer;
-            openTimer.Interval(std::chrono::milliseconds{ hoverMs / 3 }); // ~1/3 the system hover time
-            const auto weakTick = weakThis;
-            openTimer.Tick([weakTick](auto&& s, auto&&) {
-                if (const auto t = s.try_as<WUX::DispatcherTimer>())
-                {
-                    t.Stop(); // one-shot: open once, then idle until the next hover
-                }
-                const auto self = weakTick.get();
-                if (!self || !self->_agentToolTipActive)
-                {
-                    return;
-                }
-                // Agentmaster: NEVER place the popup on an owner that has left the visual tree. Between
-                // arming this one-shot and its tick, MUX's TabView can recycle/detach the owner
-                // TabViewItem (tab close/reorder/re-virtualize). Opening a tooltip whose owner is
-                // unrooted orphans the popup — and the framework's subsequent DEFERRED input/placement
-                // pass on it is what crashes OFF our call stack: a null-deref in Microsoft.UI.Xaml.dll
-                // (the Release AV, READ @0x0) or a stowed fail-fast in Windows.UI.Xaml.dll (the Debug
-                // 0xC000027B). The IsOpen try/catch can't catch either (they aren't on our stack), so the
-                // real guard is to not open unless the owner is still loaded AND rooted (has a XamlRoot).
-                const auto tvi = self->TabViewItem();
-                if (!tvi || !tvi.IsLoaded() || !tvi.XamlRoot())
-                {
-                    return;
-                }
-                // Agentmaster (rapid tab-swap fail-fast fix): serialize open-AFTER-close ACROSS tabs.
-                // Jumping the cursor between two tabs' tooltips opens THIS one while the PREVIOUS tab's
-                // popup is still in the framework's async teardown; two agent popups in one render pass is
-                // what fail-faults off our stack (uncatchable). If any agent tooltip closed within the
-                // cooldown, DEFER this open — re-arm the one-shot so it retries once the prior teardown has
-                // drained. A settled hover with no recent close falls straight through (fast path).
-                if (const auto lastClose = g_lastAgentToolTipCloseTick.load(std::memory_order_relaxed);
-                    lastClose != 0 && (::GetTickCount64() - lastClose) < kAgentToolTipReopenCooldownMs)
-                {
-                    if (self->_agentToolTipOpenTimer)
-                    {
-                        self->_agentToolTipOpenTimer.Start(); // retry after the interval (the tick Stop()ped it above)
-                    }
-                    return;
-                }
-                // Agentmaster (rapid tab-swap use-after-free fix): create a FRESH tooltip for THIS open.
-                // The close paths now DROP _agentToolTip (see _ForceCloseAgentToolTip), so it is null here
-                // after any prior close. Reusing ONE ToolTip across an open/close cycle is what crashed:
-                // IsOpen(false) starts the framework's ASYNC popup teardown, and a rapid re-hover's
-                // IsOpen(true) then raced that teardown -> read freed 0xDDDD.. memory (an AV the IsOpen
-                // try/catch can't catch). _UpdateAgentToolTip creates it if null + hosts the current card;
-                // opening a brand-new object each time can't race a previous one's teardown. (This is the
-                // SAME create->SetToolTip->IsOpen path the very first open always took — known-good.)
-                self->_UpdateAgentToolTip();
-                self->_SafeSetAgentToolTipOpen(true);
-                self->_ArmAgentToolTipDismiss(); // start the backstop the instant it opens
-            });
-            _agentToolTipOpenTimer = openTimer;
-        }
-
-        // One-shot auto-dismiss backstop: the guaranteed close even if every pointer-loss event is missed.
-        {
-            WUX::DispatcherTimer dismissTimer;
-            dismissTimer.Interval(std::chrono::seconds{ 8 }); // generous read window; re-armed on PointerMoved
-            const auto weakTick = weakThis;
-            dismissTimer.Tick([weakTick](auto&& s, auto&&) {
-                if (const auto t = s.try_as<WUX::DispatcherTimer>())
-                {
-                    t.Stop();
-                }
-                // Drop-on-close (not just close): _ForceCloseAgentToolTip closes + detaches + NULLS the
-                // reused object, so the next hover opens a FRESH one and can't race this one's teardown.
-                if (const auto self = weakTick.get())
-                {
-                    self->_ForceCloseAgentToolTip();
-                }
-            });
-            _agentToolTipDismissTimer = dismissTimer;
-        }
-
-        tvi.PointerEntered([weakThis](auto&&, auto&&) {
-            const auto self = weakThis.get();
-            if (!self || !self->_agentToolTipActive)
-            {
-                return; // not an agent tab right now -> let the framework handle the default tooltip
-            }
-            // Start the open countdown only if it isn't already pending — restarting it on every event
-            // would keep pushing the open out, so it'd never fire while the pointer lingers.
-            if (self->_agentToolTipOpenTimer && !self->_agentToolTipOpenTimer.IsEnabled())
-            {
-                self->_agentToolTipOpenTimer.Start();
-            }
-        });
-
-        tvi.PointerMoved([weakThis](auto&&, auto&&) {
-            const auto self = weakThis.get();
-            if (!self || !self->_agentToolTipActive)
-            {
-                return;
-            }
-            if (self->_agentToolTip && self->_agentToolTip.IsOpen()) // _agentToolTip is null after a close (drop-on-close); a re-hover then re-arms the open timer below
-            {
-                self->_ArmAgentToolTipDismiss(); // keep-alive: push the dismiss out while genuinely hovering
-            }
-            else if (self->_agentToolTipOpenTimer && !self->_agentToolTipOpenTimer.IsEnabled())
-            {
-                self->_agentToolTipOpenTimer.Start(); // re-open after a stationary auto-dismiss (or a missed enter)
-            }
-        });
-
-        // Close from EVERY pointer-loss event, not just Exited (which islands routinely drops). All three
-        // share the same handler shape (sender, PointerRoutedEventArgs).
-        const auto closeHandler = [weakThis](auto&&, auto&&) {
-            // Drop-on-close: _ForceCloseAgentToolTip stops BOTH timers, closes the popup, detaches it from
-            // the owner, AND nulls the reused _agentToolTip. Dropping (not just closing) is the rapid
-            // tab-swap use-after-free fix: the next hover opens a brand-new tooltip via the open-tick, so
-            // an IsOpen(true) can never race the framework's async teardown of a just-closed reused object.
-            if (const auto self = weakThis.get())
-            {
-                self->_ForceCloseAgentToolTip();
-            }
-        };
-        tvi.PointerExited(closeHandler);
-        tvi.PointerCanceled(closeHandler);
-        tvi.PointerCaptureLost(closeHandler);
-
-        // Agentmaster: the owner TabViewItem leaving the visual tree — recycle, detach, or tab close —
-        // is the exact moment a manually-driven open tooltip becomes orphaned. The framework's NEXT
-        // deferred input/render pass on that popup then crashes OFF our call stack (a null-deref in
-        // Microsoft.UI.Xaml.dll — the Release AV — or a stowed fail-fast in Windows.UI.Xaml.dll — the
-        // Debug 0xC000027B), which the IsOpen try/catch cannot catch. Force the popup shut + stop the
-        // timers the instant the owner unloads, so there is no open popup for that pass to touch. A
-        // transient recycle is safe: _agentToolTipActive persists and dropping the tooltip is harmless —
-        // the next hover recreates a fresh one via the open-tick (the pointer handlers are wired once and
-        // reused, and they now guard on _agentToolTipActive, not the possibly-null _agentToolTip).
+        // The owner TabViewItem leaving the visual tree (MUX TabView recycles its containers — heavy during
+        // a multi-tab window restore) tears down the ToolTip's native peer while our WinRT strong ref keeps
+        // resolving non-null — a zombie. If the SAME owner later RELOADS, reusing that stale ref to swap
+        // .Content() would read freed memory (crash #4). So on unload, detach the tooltip from the owner +
+        // drop our ref; _UpdateAgentToolTip then rebuilds a fresh one on the next refresh. We drive NO
+        // IsOpen here (the framework closes any open popup on exit/recycle itself), so this can't fail-fast.
         tvi.Unloaded([weakThis](auto&&, auto&&) {
             if (const auto self = weakThis.get())
             {
-                self->_ForceCloseAgentToolTip();
+                self->_DetachAgentToolTip();
             }
         });
     }
 
-    // Agentmaster (tab tooltip): toggle the agent tooltip's IsOpen inside a try/catch. Driving IsOpen
-    // ourselves (the fast-open tick, the auto-dismiss backstop, the pointer-loss close handlers, and the
-    // ClearAgentToolTip teardown) can raise a XAML fail-fast — STATUS_STOWED_EXCEPTION (0xC000027B) in
-    // Windows.UI.Xaml.dll — when the tooltip's owner (the TabViewItem) has been detached/recycled out from
-    // under a still-pending tick, or on a re-entrant dismiss as the pointer leaves. That fail-fast crashed
-    // the dev instance on tooltip fade / mouse-exit (WER: 0xC000027B in Windows.UI.Xaml.dll). A tooltip
-    // that can't open/close is moot, so swallow it and never crash over a tip — the SAME guard
-    // AgentTipHelpers already wraps its own manual-open tips in. UI thread only.
-    void Tab::_SafeSetAgentToolTipOpen(bool open)
+    // Agentmaster (tab tooltip): detach the framework-managed tooltip from its owner and drop our strong
+    // ref. Run on an owner recycle/unload (_WireAgentToolTipUnload), on ClearAgentToolTip (session gone), and
+    // on Shutdown. Idempotent + safe when no tooltip was ever created (the guard leaves a default tooltip, if
+    // any, untouched). We do NOT touch IsOpen — the framework owns open/close, so detaching is enough (it
+    // dismisses any open popup itself); NOT driving IsOpen is precisely what removes the fail-fast/UAF class
+    // the manual path suffered. Nulling the ref means the next _UpdateAgentToolTip rebuilds a FRESH tooltip
+    // bound to the live owner. UI thread only.
+    void Tab::_DetachAgentToolTip()
     {
         if (!_agentToolTip)
         {
-            return;
+            return; // nothing of ours attached — leave the default title+keychord tooltip (if any) alone
         }
-        try
-        {
-            _agentToolTip.IsOpen(open);
-        }
-        catch (...)
-        {
-        }
-    }
-
-    // Agentmaster (tab tooltip): stop the open/dismiss timers and force the popup shut. Run when the
-    // owner TabViewItem unloads (recycle/detach/close) or the tab shuts down, so no orphaned, still-open
-    // popup survives for the framework's deferred input/render pass to null-deref (the Release MUX AV,
-    // READ @0x0) or fail-fast (the Debug 0xC000027B) — neither of which fires on our call stack, so the
-    // IsOpen try/catch can't help; the fix is to never leave one open when the owner goes away. UI thread
-    // only. Idempotent + safe if the timers/tooltip were never created (no agent tooltip on this tab).
-    void Tab::_ForceCloseAgentToolTip()
-    {
-        // Stamp the cross-tab reopen cooldown (below) only when there was a REAL tooltip to tear down. A
-        // bare pointer-exit with no open tooltip (the open-tick hadn't fired) must NOT throttle the next
-        // tab's open — otherwise merely sweeping the cursor across the strip would defer every tooltip.
-        const bool hadAgentToolTip = static_cast<bool>(_agentToolTip);
-        if (_agentToolTipOpenTimer)
-        {
-            _agentToolTipOpenTimer.Stop();
-        }
-        if (_agentToolTipDismissTimer)
-        {
-            _agentToolTipDismissTimer.Stop();
-        }
-        _SafeSetAgentToolTipOpen(false); // no-ops when _agentToolTip is null (the peer is still valid at unload-time — this close path never crashed; the crashes were on LATER reuse)
-
-        // Agentmaster (use-after-free fix — the 0xC0000409 CFG __fastfail + the 0xDDDD.. freed-read AV):
-        // when the owner TabViewItem is recycled/detached (MUX TabView virtualizes its containers — heavy
-        // during a multi-tab window restore), XAML tears down the ToolTip's NATIVE peer, but our WinRT
-        // strong ref keeps the now-ZOMBIE ToolTip projection resolving NON-NULL. Reusing it later crashed
-        // the app two ways, NEITHER catchable by the IsOpen try/catch (a __fastfail bypasses SEH; an AV is
-        // not a C++ exception under /EHsc): the hover open-tick's `.IsOpen(true)` dispatched through the
-        // freed vtable -> CFG __fastfail (FAST_FAIL_GUARD_ICALL_CHECK_FAILURE, subcode 0xA), and the ~2s
-        // liveness sweep's `_UpdateAgentToolTip` `.Content()` read freed 0xDDDD.. memory -> AV. So DROP the
-        // reused object on THIS unload/shutdown (which runs BEFORE the async peer teardown) AND detach it
-        // from the owner, so afterward NEITHER our code (open-tick / sweep) NOR the framework's
-        // ToolTipService auto-open can touch the zombie. `_UpdateAgentToolTip`'s `if (!_agentToolTip)`
-        // branch then rebuilds a FRESH tooltip bound to the live (reloaded) TabViewItem on the next
-        // refresh, and the open/dismiss ticks early-return on the null `_agentToolTip`. (ClearAgentToolTip
-        // already nulls the ref the same way for the archived/gone case.)
         if (const auto tvi = TabViewItem())
         {
             try
@@ -635,24 +428,6 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _agentToolTip = nullptr;
-        if (hadAgentToolTip)
-        {
-            // A real popup just started its async teardown — hold off the NEXT tab's open (cross-tab
-            // serialization; see g_lastAgentToolTipCloseTick) so the two don't collide in one render pass.
-            g_lastAgentToolTipCloseTick.store(::GetTickCount64(), std::memory_order_relaxed);
-        }
-    }
-
-    // Agentmaster (tab tooltip): (re)start the auto-dismiss backstop from now. Stop+Start so an already-
-    // running timer is reset to a full read window — that's the keep-alive while the pointer moves over the
-    // tab. UI thread only (called from the tooltip hover handlers / the open tick).
-    void Tab::_ArmAgentToolTipDismiss()
-    {
-        if (_agentToolTipDismissTimer)
-        {
-            _agentToolTipDismissTimer.Stop();
-            _agentToolTipDismissTimer.Start();
-        }
     }
 
     // Method Description:
@@ -1360,10 +1135,10 @@ namespace winrt::TerminalApp::implementation
     {
         ASSERT_UI_THREAD();
 
-        // Agentmaster: tear down the agent tooltip BEFORE the tab's visuals go away — stop the open/
-        // dismiss timers and force the popup shut, so a pending open tick can't place (nor a deferred
-        // framework pass touch) an orphaned tooltip as the tab is destroyed. See _ForceCloseAgentToolTip.
-        _ForceCloseAgentToolTip();
+        // Agentmaster: detach + drop the agent tooltip BEFORE the tab's visuals go away, so no stale ref
+        // survives the teardown. The framework owns open/close, so there is no manually-opened popup to
+        // force shut; detaching from the owner is enough. See _DetachAgentToolTip.
+        _DetachAgentToolTip();
 
         // NOTE: `TerminalPage::_HandleCloseTabRequested` relies on the content being null after this call.
         Content(nullptr);

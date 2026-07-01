@@ -6,9 +6,12 @@
 > feature) with each root cause and the fix that shipped for it. If you touch the tab tooltip, read
 > the **Crash history** and **Invariants** sections FIRST.
 
-Author's note: this is the single most crash-prone surface in the fork. It manually drives a XAML
-`ToolTip` under XAML Islands, and that combination is inherently fragile (see *Why this is hard*).
-Every "obvious" simplification here has a landmine; the comments in the code are load-bearing.
+Author's note: this WAS the single most crash-prone surface in the fork — six distinct crashes, all on a
+hand-rolled **manual-open** path (fast-open/dismiss timers + driving `IsOpen` + a cross-tab cooldown) under
+XAML Islands. As of **2026-07-01** that path is **removed**: the rich tooltip is now **framework-managed**
+(§4) — `ToolTipService` owns open/close, the SAME lifetime model as the plain default tab tooltip that
+never crashed. The manual-open history (§9) is kept because it explains WHY the design is what it is and
+what NOT to reintroduce; the comments in the code remain load-bearing.
 
 ---
 
@@ -37,17 +40,18 @@ Every tab header can carry ONE of two tooltips, mutually exclusive, gated by `Ta
 | Shown on | shell/pwsh/cmd tabs, the Manager tab, an agent tab before its first push | a **managed** (bound) Claude/Codex session tab |
 | Content | title + key-chord (`TextBlock`) | dark summary card (state dot, title, folder/branch, state line, model·effort·mode, divider, transcript Summary body) |
 | Built in | `Tab::_UpdateToolTip` (Tab.cpp) | `TerminalPage::_UpdateTabAgentToolTip` builds it, `Tab::SetAgentToolTip` hosts it |
-| Open/close | **framework-managed** (`ToolTipService` auto opens/closes on hover) | **manually driven** (our timers + `IsOpen`) |
-| Crashes? | **never** (framework owns the lifetime) | **the entire crash history below** |
+| Open/close | **framework-managed** (`ToolTipService` auto opens/closes on hover) | **framework-managed** now too (was manually driven — timers + `IsOpen`; that was the crash source, §9) |
+| Crashes? | **never** (framework owns the lifetime) | the crash history below is the OLD manual path; the current path shares the default's crash-free lifetime model |
 
 There is also a **third, degenerate variant** — the **observe badge tooltip** (`TtBuildObserveCard`):
 a tiny `○ <kind> · unlinked` card shown on a non-managed but observed tab (pwsh / cmd / an
 unprompted claude / external codex). It is pushed via `SetAgentToolTip` too (so it rides the same
 manually-driven lifecycle), by `_SetTabActivityBadge`.
 
-**Key insight that recurs in every crash:** the default tooltip is framework-managed and never
-crashes; the rich tooltip is manually driven and does. The manual driving exists for real reasons
-(fast open, reliable close under Islands — see *Why this is hard*), but it is the crash source.
+**Key insight that drove the rewrite:** the default tooltip is framework-managed and never crashes; the
+rich tooltip WAS manually driven (for fast-open + reliable-close under Islands) and crashed six times. The
+fix was to make the rich tooltip framework-managed too — accepting the slower system-hover open in exchange
+for the default tooltip's crash-free lifetime model (see §4 and §9).
 
 ---
 
@@ -59,18 +63,20 @@ TerminalPage (owns SessionInfo + the registry)            Tab (owns the ToolTip 
 _UpdateTabAgentToolTip(tab, sessionId)                    SetAgentToolTip(UIElement content, hstring sig)
   reads SessionInfo -> formats STRINGS (TtSpan/…)           stores content+sig, _agentToolTipActive=true
   builds the card element (TtBuildTooltipCard)               -> _UpdateToolTip -> _UpdateAgentToolTip
-  computes a content SIGNATURE (skip if unchanged)         _UpdateAgentToolTip: create/host on the reused ToolTip
-  impl->SetAgentToolTip(card, sig) ----------------------->  _WireAgentToolTipHover: open/close on hover
-  kicks _EnsureTabTooltipSummary (off-thread body)         ClearAgentToolTip: revert to the default tooltip
+  computes a content SIGNATURE (skip if unchanged)         _UpdateAgentToolTip: create + host on the reused ToolTip
+  impl->SetAgentToolTip(card, sig) ----------------------->  _WireAgentToolTipUnload: detach on owner recycle
+  kicks _EnsureTabTooltipSummary (off-thread body)         (ToolTipService owns open/close on hover)
+                                                           ClearAgentToolTip: revert to the default tooltip
 ```
 
 **Split of responsibility (do not blur this):**
 - **TerminalPage side** (`TerminalPage.AgentObserver.cpp`) owns the *content*: it has the
   `SessionInfo`, formats the strings, builds the XAML card, computes the change signature, and runs
   the off-thread transcript summary load. It knows nothing about *when* the popup opens.
-- **Tab side** (`Tab.cpp`) owns the *lifecycle*: hosting the element, the hover open/close timers,
-  and the popup's create/open/close/drop. It knows nothing about the session; it just hosts whatever
-  element it's handed and toggles visibility.
+- **Tab side** (`Tab.cpp`) owns the *lifecycle*: creating + hosting the element on ONE framework-managed
+  `ToolTip`, swapping its `Content` only while closed, and detaching it on an owner recycle. It knows
+  nothing about the session; it just hosts whatever element it's handed. It does NOT own open/close —
+  `ToolTipService` does (post-rewrite; the old manual timers + `IsOpen` are gone, §9).
 
 This split is why a content change is a cheap "push a new element + signature," and why all the
 crashiness lives on the Tab side (the lifecycle), not the TerminalPage side (the content).
@@ -79,29 +85,27 @@ crashiness lives on the Tab side (the lifecycle), not the TerminalPage side (the
 
 ## 3. File & symbol map
 
-**`src/cascadia/TerminalApp/Tab.cpp` / `Tab.h`** — the lifecycle (all `Agentmaster`-marked):
-- Members (`Tab.h` ~243–259):
+**`src/cascadia/TerminalApp/Tab.cpp` / `Tab.h`** — the lifecycle (all `Agentmaster`-marked; framework-managed
+post-rewrite — the old manual-open members/methods listed in §9's history are DELETED):
+- Members (`Tab.h` ~238–252):
   - `bool _agentToolTipActive` — is the rich tooltip active (vs the default)?
   - `winrt::…UIElement _agentToolTipContent` — the card element last handed to us by the page.
   - `winrt::hstring _agentToolTipSig` — the content fingerprint (skip re-host if unchanged).
-  - `winrt::…Controls::ToolTip _agentToolTip` — the ToolTip object. **Created fresh per open,
-    nulled on close** (post-`1d1edbe18`; see Crash history). `{ nullptr }` when none.
-  - `winrt::…DispatcherTimer _agentToolTipOpenTimer` — one-shot fast-open timer (~1/3 system hover).
-  - `winrt::…DispatcherTimer _agentToolTipDismissTimer` — one-shot 8s auto-dismiss backstop.
-  - `bool _agentToolTipHoverWired` — the hover handlers are wired ONCE per tab; this guards that.
-- File-scope (Tab.cpp, anonymous namespace, ~34):
-  - `std::atomic<uint64_t> g_lastAgentToolTipCloseTick` — the **cross-tab reopen-cooldown** stamp
-    (post-`9c026822d`). Atomic because each window runs on its own UI thread.
-  - `constexpr uint64_t kAgentToolTipReopenCooldownMs = 150`.
+  - `winrt::…Controls::ToolTip _agentToolTip` — the ONE reused ToolTip. Framework-managed (we never
+    drive `IsOpen`); `Content` swapped only while closed; **detached + nulled** on owner recycle /
+    `ClearAgentToolTip` / `Shutdown`. `{ nullptr }` when none.
+  - `bool _agentToolTipUnloadWired` — the owner-`Unloaded`→detach handler is wired ONCE per tab; guards that.
+  - *(DELETED in the rewrite: `_agentToolTipOpenTimer`, `_agentToolTipDismissTimer`, `_agentToolTipHoverWired`,
+    and the file-scope `g_lastAgentToolTipCloseTick` / `kAgentToolTipReopenCooldownMs` cross-tab cooldown.)*
 - Methods:
   - `_UpdateToolTip()` — the entry that decides default vs rich; builds the default tooltip inline.
   - `SetAgentToolTip(content, sig)` — public; the page calls this. Stores + `_UpdateToolTip`.
-  - `ClearAgentToolTip()` — public; revert to the default tooltip (session gone/archived).
-  - `_UpdateAgentToolTip()` — create (if null) + host the card on the reused ToolTip.
-  - `_WireAgentToolTipHover()` — wire (once) the open/dismiss timers + pointer handlers on the tvi.
-  - `_SafeSetAgentToolTipOpen(bool)` — `_agentToolTip.IsOpen(open)` inside try/catch.
-  - `_ForceCloseAgentToolTip()` — stop timers + close + **detach + drop** + stamp cooldown.
-  - `_ArmAgentToolTipDismiss()` — (re)start the 8s dismiss backstop (Stop+Start).
+  - `ClearAgentToolTip()` — public; revert to the default tooltip (session gone/archived); `_DetachAgentToolTip` first.
+  - `_UpdateAgentToolTip()` — owner-guard; create (if null) + `SetToolTip` + `_WireAgentToolTipUnload`;
+    swap `Content` only when `!IsOpen()` (a safe READ; we never SET IsOpen).
+  - `_WireAgentToolTipUnload()` — wire (once) the owner `TabViewItem.Unloaded` → `_DetachAgentToolTip`.
+  - `_DetachAgentToolTip()` — `SetToolTip(tvi, nullptr)` + null the ref (no `IsOpen`, no timers, no cooldown).
+  - *(DELETED: `_WireAgentToolTipHover`, `_SafeSetAgentToolTipOpen`, `_ForceCloseAgentToolTip`, `_ArmAgentToolTipDismiss`.)*
 
 **`src/cascadia/TerminalApp/TerminalPage.AgentObserver.cpp`** — the content:
 - TU-local string helpers (anon namespace ~81–195): `TtNowMs`, `TtSpan`, `TtStateLabel`, `TtJoin`,
@@ -124,7 +128,7 @@ crashiness lives on the Tab side (the lifecycle), not the TerminalPage side (the
 
 ---
 
-## 4. The lifecycle, end to end (CURRENT behavior, post all 6 fixes)
+## 4. The lifecycle, end to end (CURRENT behavior — framework-managed, post-rewrite)
 
 ### 4a. Content push (page → tab)
 1. Something (bind / sweep / activity — see §5) calls `_UpdateTabAgentToolTip(tab, sessionId)`.
@@ -144,48 +148,39 @@ crashiness lives on the Tab side (the lifecycle), not the TerminalPage side (the
 - `_UpdateToolTip`: `_agentToolTipActive` → `_UpdateAgentToolTip`; else build the default tooltip.
 - `_UpdateAgentToolTip`:
   1. **Owner guard**: if the `TabViewItem` is null / `!IsLoaded()` / no `XamlRoot()` → return (never
-     build/mutate for a detached owner).
-  2. If `!_agentToolTip` → **create** a fresh `ToolTip`: `RequestedTheme(Dark)`,
-     `Placement(Bottom)`, `IsHitTestVisible(false)`, `ToolTipService::SetToolTip(tvi, it)`.
-  3. `_WireAgentToolTipHover()` (no-op after the first time).
-  4. If the tip **IsOpen** → return (do NOT swap `Content` while you're reading it).
-  5. `_agentToolTip.Content(_agentToolTipContent)`.
+     build/mutate for a detached owner). The `owner` is captured in the `if`-init and reused below.
+  2. `else if (!_agentToolTip)` → **create** the ONE reused `ToolTip`: `RequestedTheme(Dark)`,
+     `Placement(Bottom)`, `IsHitTestVisible(false)`, `ToolTipService::SetToolTip(owner, it)`, then
+     `_WireAgentToolTipUnload()` (no-op after the first time). From here **`ToolTipService` owns
+     open/close** — hover opens (after the system delay), pointer-exit closes. We wire nothing else.
+  3. If `_agentToolTip.IsOpen()` → return (a safe READ — do NOT swap `Content` while the framework is
+     showing it). Else `_agentToolTip.Content(_agentToolTipContent)` — swap only while closed.
 
-### 4c. Hover open/close (`_WireAgentToolTipHover`, wired once per tab)
-- **openTimer** (one-shot, ~1/3 the system hover time, e.g. ~133ms). On tick:
-  1. `Stop()` (one-shot). Guard `!_agentToolTipActive` → return.
-  2. Owner guard (`IsLoaded()`+`XamlRoot()`) → return.
-  3. **Cooldown guard** (§4e): if an agent tooltip closed within 150ms → re-arm the one-shot + return.
-  4. `_UpdateAgentToolTip()` (creates a FRESH tooltip since it's null after the last close) →
-     `_SafeSetAgentToolTipOpen(true)` → `_ArmAgentToolTipDismiss()`.
-- **dismissTimer** (one-shot, 8s). On tick → `_ForceCloseAgentToolTip()` (close + drop).
-- **PointerEntered**: guard `!_agentToolTipActive`; start openTimer if idle.
-- **PointerMoved**: guard `!_agentToolTipActive`; if `_agentToolTip && IsOpen()` → re-arm dismiss
-  (keep-alive while genuinely hovering); else start openTimer (re-open after a stationary dismiss / a
-  missed enter). The `_agentToolTip &&` null-check matters — it's null after a close (drop-on-close).
-- **PointerExited / PointerCanceled / PointerCaptureLost** (shared `closeHandler`) → `_ForceCloseAgentToolTip()`.
-- **TabViewItem().Unloaded** → `_ForceCloseAgentToolTip()`.
+### 4c. Open / close = the FRAMEWORK
+There are no open/dismiss timers, no pointer-loss handlers, no manual `IsOpen`, and no cross-tab
+cooldown anymore — `ToolTipService` opens the tip on hover (at the system hover delay) and closes it on
+pointer-exit / window-deactivate, exactly as it does for the plain default tab tooltip (which never
+crashed). We only ever *read* `IsOpen()` (to gate the content swap); we never *set* it. This is what
+removes the entire crash class (§9) — there is no manually-opened popup, and no reused object we drive
+across an open/close cycle.
 
-### 4d. Close = drop (`_ForceCloseAgentToolTip`) — the crux of the whole design
-Runs from EVERY close path (the 3 pointer-loss handlers, the dismiss backstop, Unloaded, and
-`Tab::Shutdown`). It:
-1. Captures `hadAgentToolTip = (bool)_agentToolTip`.
-2. Stops both timers.
-3. `_SafeSetAgentToolTipOpen(false)` (close the popup while the peer is still valid).
-4. `ToolTipService::SetToolTip(tvi, nullptr)` (**detach** from the owner).
-5. `_agentToolTip = nullptr` (**drop** our strong ref).
-6. If `hadAgentToolTip` → `g_lastAgentToolTipCloseTick = GetTickCount64()` (start the cooldown).
+### 4d. Detach = drop (`_DetachAgentToolTip`)
+Runs from the owner `Unloaded` handler (§4e), `ClearAgentToolTip` (session gone), and `Tab::Shutdown`. It:
+1. Returns early if `!_agentToolTip` (nothing of ours attached — leaves any default tooltip alone).
+2. `ToolTipService::SetToolTip(tvi, nullptr)` (**detach** from the owner; try/catch).
+3. `_agentToolTip = nullptr` (**drop** our strong ref).
 
-The **drop** (steps 4–5) is the entire point: after a close there is no reused object for the next
-open (or a deferred framework pass) to touch. The next open creates a brand-new one.
+It drives **no `IsOpen`** — the framework closes any open popup itself on exit/recycle — so this path
+can't fail-fast. Dropping the ref means the next `_UpdateAgentToolTip` rebuilds a FRESH tooltip bound to
+the live (reloaded) owner (the crash #4 lesson, kept without the manual machinery).
 
-### 4e. Cross-tab reopen cooldown (`g_lastAgentToolTipCloseTick`, post-`9c026822d`)
-Jumping the cursor between tab A and tab B opens B's tooltip while A's popup is still in the
-framework's **async teardown**. Two agent popups colliding in one render/composition pass is what
-fail-faults. So: any close that tore down a real tooltip stamps the shared timestamp; the open-tick
-**defers** (re-arms) while a close is within 150ms. A settled hover with no recent close opens
-immediately (fast path preserved). A bare pointer-exit with no open tooltip does **not** stamp (so
-sweeping the cursor across the strip never throttles).
+### 4e. Owner-recycle safety (`_WireAgentToolTipUnload`, wired once per tab)
+MUX `TabView` virtualizes/recycles its item containers (heavy during a multi-tab window restore), which
+tears down the ToolTip's native peer while our WinRT strong ref keeps resolving non-null — a zombie. If
+the SAME owner later RELOADS, reusing that stale ref to swap `.Content()` would read freed memory (crash
+#4). So the sole surviving handler is `TabViewItem().Unloaded → _DetachAgentToolTip()`: on unload we
+detach + drop, and the next content refresh rebuilds fresh. The `_UpdateAgentToolTip` owner-loaded guard
+is the complementary front door (never build/mutate for a detached owner).
 
 ---
 
@@ -267,23 +262,25 @@ Under **XAML Islands**, a `ToolTip`:
    `RequestedTheme(Dark)` explicitly (`ToolTipService` theme propagation is unreliable here). This is
    why both the default and rich tooltips set Dark directly.
 2. **Framework auto-dismiss is unreliable** — a tip opened on hover routinely OUTLIVES the pointer
-   leaving. That's the whole reason for the **manual driving** (our open/dismiss timers + `IsOpen`),
-   and the manual driving is the crash source. The plain default tooltip accepts the framework's
-   (working-enough) behavior and never crashes; the rich one wanted fast-open + reliable-close and
-   pays for it.
-3. **Is dual-driven** — attaching via `ToolTipService::SetToolTip` AND manually calling `IsOpen`
-   means both the framework and our code toggle the popup. `IsHitTestVisible(false)` stops the popup
-   stealing pointer events, but the dual-drive + rapid hover is the deep race behind the later crashes.
+   leaving. That unreliability was the ORIGINAL reason for the **manual driving** (open/dismiss timers +
+   `IsOpen`) — which then became the crash source. The rewrite gives that up: like the plain default
+   tooltip, the rich one now accepts the framework's (working-enough) behavior and never crashes, at the
+   cost of the slower system-hover open (§4/§12). The points below are WHY the manual path was so
+   fragile — kept as the rationale for NOT reintroducing it.
+3. **Manual driving is dual-driving** — attaching via `ToolTipService::SetToolTip` AND manually calling
+   `IsOpen` meant both the framework and our code toggled the popup; that dual-drive + rapid hover was
+   the deep race behind the later crashes. The rewrite removes our half — only the framework toggles now.
+   `IsHitTestVisible(false)` is still set (so the large card never sits under the cursor as a target).
 4. **Owner is a MUX `TabViewItem`** — MUX `TabView` **virtualizes/recycles** its item containers, so
    the owner (and the ToolTip's native peer) can be torn down out from under our still-valid WinRT
-   strong ref → a "zombie" peer. This is what makes the tab tooltip far more crash-prone than the
-   page tooltips `AgentTipHelpers` drives.
+   strong ref → a "zombie" peer. This is the ONE fragility that survives the rewrite (a reused ref can
+   still go stale), so the `Unloaded → _DetachAgentToolTip` handler + the owner-loaded guard remain.
 5. **Fail-fasts + AVs bypass `try/catch`** — a XAML stowed exception (`0xC000027B`) is a
    `RaiseFailFastException`; a CFG violation (`0xC0000409` subcode `0xA`) and an access violation
-   (`0xC0000005`) are not C++ exceptions under `/EHsc`. So `_SafeSetAgentToolTipOpen`'s try/catch
-   catches the *hresult_error* cousins but NOT the fail-fast/AV. And several of these fire in a
-   **deferred framework render/input pass** — OFF our call stack — where NO guard we add can catch
-   them. The only defense against those is to never leave the popup in a state that pass chokes on.
+   (`0xC0000005`) are not C++ exceptions under `/EHsc`, and several fired in a **deferred framework
+   render/input pass** OFF our call stack where no guard could catch them. That is exactly why the fix
+   had to be **structural** (stop driving `IsOpen` at all), not another `try/catch` — the retired
+   `_SafeSetAgentToolTipOpen` caught only the *hresult_error* cousins, never the fail-fast/AV.
 
 ---
 
@@ -313,9 +310,22 @@ build box.
   fail-fasts and AVs aren't caught by `catch(...)` under `/EHsc` anyway. The real fixes are all
   *structural* (never leave a bad popup for a later pass to touch).
 
-**Current status:** #6's cooldown is **MODERATE confidence, not proven** — the fail-fast is deferred
-and off-stack, so 150ms *serializes/shrinks* the collision window rather than provably eliminating it.
-If a 7th appears, do NOT add a 7th point-patch — go to the fallback (§12).
+**RESOLUTION (2026-07-01) — the manual-open path was RETIRED.** After crash #6, rather than adding a 7th
+point-patch to a fundamentally racy design (#6's cooldown was only MODERATE confidence — a deferred,
+off-stack fail-fast can be *shrunk* but not provably eliminated by a 150ms serialize), the whole
+manual-open machinery was **removed** and the rich tooltip made **framework-managed** — the §12
+"recommended fallback", now the shipping design (§4). Deleted: the fast-open one-shot timer, the 8s
+auto-dismiss backstop, the three pointer-loss close handlers, `PointerMoved` keep-alive/re-open,
+`_SafeSetAgentToolTipOpen` (manual `IsOpen`), `_ForceCloseAgentToolTip`, `_ArmAgentToolTipDismiss`, and the
+`g_lastAgentToolTipCloseTick` cross-tab cooldown. Kept: the rich card content (unchanged — the whole
+TerminalPage/`Tt*` side is untouched), the ONE reused `ToolTip`, the owner-loaded guard, the closed-only
+`Content` swap, and a single `Unloaded → _DetachAgentToolTip` handler (the crash #4 defense, minus the
+manual bits). `ToolTipService` now owns open/close. **Tradeoff:** opens at the system hover delay (~0.5–1s;
+no `InitialShowDelay` in this SDK) instead of ~1/3 of it, and the old "sticky tooltip under Islands"
+annoyance *may* reappear in edge cases — **both cosmetic, not crashes**. Every crash class in the table
+above is closed by construction (no manual `IsOpen` → no #1/#5/#6; framework closes on exit/recycle → no
+#2; `Unloaded`-detach → no #4; nets stay → no #3). If a NEW crash somehow appears on this framework path
+(the same path the default tooltip uses), the remaining escape hatch is the §12 **off-switch**.
 
 ---
 
@@ -323,20 +333,22 @@ If a 7th appears, do NOT add a 7th point-patch — go to the fallback (§12).
 
 1. **UI thread only.** All tooltip code runs on the window's UI thread; off-thread callers marshal
    first. Keep the `ASSERT_UI_THREAD()`s.
-2. **Never reuse a ToolTip across an open/close cycle.** Every close path goes through
-   `_ForceCloseAgentToolTip` (close + detach + **null**); every open recreates fresh via
-   `_UpdateAgentToolTip`. Do not "optimize" by keeping `_agentToolTip` alive across a close — that is
-   exactly crash #5.
-3. **Detach on drop.** When you null `_agentToolTip`, also `SetToolTip(tvi, nullptr)` — otherwise the
-   owner's attached property still points at the (soon-zombie) object and the framework's own
-   auto-open can fire it (crash #4/#6 territory).
-4. **Never build/mutate the tooltip for a detached owner.** Keep the `IsLoaded()`+`XamlRoot()` guard
-   at the top of `_UpdateAgentToolTip` and in the open-tick.
-5. **Don't swap `Content` while open.** Keep the `if (_agentToolTip.IsOpen()) return;` before
-   `.Content(...)` — swapping under the pointer flickers and races.
-6. **Keep the cross-tab cooldown.** Any close that tore down a real popup stamps
-   `g_lastAgentToolTipCloseTick`; the open-tick defers within `kAgentToolTipReopenCooldownMs`. It's
-   atomic (per-window UI threads).
+2. **NEVER drive `IsOpen`.** `ToolTipService` owns open/close. Reading `IsOpen()` (to gate the content
+   swap) is fine; *setting* it is what caused crashes #1/#5/#6. Do not reintroduce open/dismiss timers,
+   pointer-loss close handlers, `_SafeSetAgentToolTipOpen`, or a cross-tab cooldown — that is the retired
+   manual-open path (§9).
+3. **Reuse ONE object; swap `Content` only while closed.** Create `_agentToolTip` once and `SetToolTip`
+   once; on refresh, `if (_agentToolTip.IsOpen()) return;` before `.Content(...)` — swapping under the
+   pointer flickers, and re-`SetToolTip`ing every ~2s would replace the framework's open tip.
+4. **Never build/mutate the tooltip for a detached owner.** Keep the `IsLoaded()`+`XamlRoot()` guard at
+   the top of `_UpdateAgentToolTip`.
+5. **Detach + drop on owner recycle.** Keep the `TabViewItem().Unloaded → _DetachAgentToolTip` handler
+   (`SetToolTip(tvi, nullptr)` + null the ref). Without it, a recycle→reload reuses a zombie ref on the
+   next `.Content()` swap — exactly crash #4. `_DetachAgentToolTip` drives NO `IsOpen` (the framework
+   closes any open popup itself), so it can't fail-fast.
+6. **Keep it framework-managed — do not "speed it up" back into manual open.** The slower system-hover
+   open is the deliberate price of the default tooltip's crash-free lifetime. If it must be faster, that
+   is a framework/SDK concern (there is no `InitialShowDelay` here), not a reason to hand-drive `IsOpen`.
 7. **`fire_and_forget`s must contain exceptions.** `_EnsureTabTooltipSummary` (and the 5 observer
    lanes) must keep their terminate-nets. An escaping exception = `std::terminate`.
 8. **Builders return FRESH element trees.** Never cache/share a XAML element as `Content` across
@@ -376,32 +388,37 @@ insufficient). Don't diagnose without this check.
 
 ---
 
-## 12. The fallback if it crashes AGAIN
+## 12. Design history + the remaining escape hatch
 
-If a 7th distinct crash appears, stop point-patching and do ONE of:
-- **Framework-managed rich tooltip (recommended):** keep the rich card content but let
-  `ToolTipService` own open/close — remove the manual `IsOpen` driving, the open/dismiss timers, and
-  the cooldown. This is the SAME mechanism as the plain default tooltip, which has NEVER crashed.
-  Cost: opens at the system hover delay (~0.5–1s, no `InitialShowDelay` in this SDK) instead of
-  instantly, and the original "sticky tooltip under Islands" annoyance may return (cosmetic, not a
-  crash). Content refresh: set `toolTip.Content(newCard)` only when `!toolTip.IsOpen()`.
-- **Off-switch:** a setting to disable the rich tab tooltip and fall back to the default title
-  tooltip (robust). Loses the rich card unless re-enabled.
+**IMPLEMENTED (2026-07-01) — framework-managed rich tooltip.** This was the "recommended fallback" and is
+now the shipping design (see §4, §9 RESOLUTION): the rich card content is unchanged, but `ToolTipService`
+owns open/close — the manual `IsOpen` driving, the open/dismiss timers, the pointer-loss handlers, and the
+cross-tab cooldown are gone. It is the SAME lifetime mechanism as the plain default tooltip, which has
+NEVER crashed. Cost: opens at the system hover delay (~0.5–1s, no `InitialShowDelay` in this SDK) instead
+of instantly, and the "sticky tooltip under Islands" annoyance may occasionally return (both cosmetic).
+Content refresh sets `_agentToolTip.Content(newCard)` only when `!_agentToolTip.IsOpen()`.
 
-The user, as of this handover, chose to keep the fast manual tooltip (hence commit `9c026822d`), with
-the framework-managed path held as the escape hatch.
+**Remaining escape hatch — off-switch.** If a NEW crash somehow appears on this framework path (unlikely —
+it is the default tooltip's own path), do NOT hand-drive `IsOpen` again. Add a setting to disable the rich
+tab tooltip and fall back to the default title tooltip (fully robust). Loses the rich card unless re-enabled.
+
+History: the user originally chose to keep the fast **manual** tooltip (commit `9c026822d`) with the
+framework-managed path held as the escape hatch; after crash #6 that hatch was taken and the manual path
+retired (§9 RESOLUTION).
 
 ---
 
 ## 13. Quick reference
 
-- Rich card built: `TerminalPage::_UpdateTabAgentToolTip` (`TerminalPage.AgentObserver.cpp`).
-- Hosted + lifecycle: `Tab::SetAgentToolTip` / `_UpdateAgentToolTip` / `_WireAgentToolTipHover` /
-  `_ForceCloseAgentToolTip` (`Tab.cpp`).
-- The one function that fixes reuse: `_ForceCloseAgentToolTip` (close + detach + null + stamp).
-- The one guard that keeps the fast path: the cooldown check in the openTimer tick.
+- Rich card built: `TerminalPage::_UpdateTabAgentToolTip` (`TerminalPage.AgentObserver.cpp`) — unchanged by
+  the rewrite (the whole content side is untouched).
+- Hosted + lifecycle (framework-managed): `Tab::SetAgentToolTip` / `_UpdateAgentToolTip` /
+  `_WireAgentToolTipUnload` / `_DetachAgentToolTip` (`Tab.cpp`).
+- The one rule: `ToolTipService` owns open/close — we never drive `IsOpen`; swap `Content` only while closed.
+- Owner-recycle safety: the `TabViewItem().Unloaded → _DetachAgentToolTip` handler + the `_UpdateAgentToolTip`
+  owner-loaded guard.
 - Off-thread body: `_EnsureTabTooltipSummary` + `_tabTooltipSummary`/`_tabTooltipSig`/`_tabTooltipSummaryInFlight`.
 - Shared palette: `AgentStatusColorFor` (`AgentStatusColors.h`).
 - Commits: `918b720b7`, `44beaea7e`, `be1d63b7f`, `9792161b8` (observer nets), `6601c7532`,
-  `1d1edbe18`, `9c026822d`.
+  `1d1edbe18`, `9c026822d` (the six manual-open crashes) → the framework-managed rewrite (this change).
 - Diagnostics: the `debug-dumps` skill + `tools/dumpexc|dumpourscan|dumpwalk2|hangwalk`.

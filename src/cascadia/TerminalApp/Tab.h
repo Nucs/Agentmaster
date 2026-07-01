@@ -243,20 +243,13 @@ namespace winrt::TerminalApp::implementation
         bool _agentToolTipActive{ false };
         winrt::Windows::UI::Xaml::UIElement _agentToolTipContent{ nullptr };
         winrt::hstring _agentToolTipSig{};
-        // The ONE reused ToolTip object (swap its Content; re-creating + re-SetToolTip on each refresh
-        // would replace — and so visibly close — an open tip while hovered). Configured once: pinned Dark
-        // + Placement Bottom. Plus a one-shot fast-open timer (the framework hover delay is sluggish and
-        // this SDK has no ToolTipService.InitialShowDelay) — the AgentTipHelpers recipe, wired once.
+        // The ONE reused ToolTip object (swap its Content only while CLOSED; re-creating + re-SetToolTip on
+        // each ~2s refresh would flicker/replace the framework's open tip while hovered). Configured once:
+        // pinned Dark + Placement Bottom + hit-test-invisible. FRAMEWORK-MANAGED — ToolTipService owns
+        // open/close; we NEVER drive IsOpen (that was the crash source — see _UpdateAgentToolTip and
+        // doc/agentmaster/HANDOVER_tab-tooltip.md). Detached + nulled on an owner recycle/unload/shutdown.
         winrt::Windows::UI::Xaml::Controls::ToolTip _agentToolTip{ nullptr };
-        winrt::Windows::UI::Xaml::DispatcherTimer _agentToolTipOpenTimer{ nullptr };
-        // Auto-dismiss BACKSTOP. We drive IsOpen(true) ourselves, which bypasses the framework's native
-        // tooltip auto-dismiss — and that auto-dismiss (like PointerExited) is unreliable under XAML
-        // Islands anyway. Without a backstop a single missed PointerExited (window deactivate, a fast
-        // exit off the top of the tab strip, a stolen pointer-capture) strands the popup open FOREVER.
-        // This one-shot timer force-closes it after a generous read window, re-armed while the pointer
-        // genuinely moves over the tab (keep-alive) — so it can never get stuck. See _WireAgentToolTipHover.
-        winrt::Windows::UI::Xaml::DispatcherTimer _agentToolTipDismissTimer{ nullptr };
-        bool _agentToolTipHoverWired{ false };
+        bool _agentToolTipUnloadWired{ false }; // the owner Unloaded -> detach handler is wired once per tab
 
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _themeColor{ nullptr };
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _unfocusedThemeColor{ nullptr };
@@ -347,11 +340,9 @@ namespace winrt::TerminalApp::implementation
         void _EnableMenuItems();
         void _UpdateSwitchToTabKeyChord();
         void _UpdateToolTip();
-        void _UpdateAgentToolTip(); // Agentmaster: host the page-built rich session tooltip card (dark summary-style card) on the reused ToolTip object; frozen while open
-        void _WireAgentToolTipHover(); // Agentmaster: wire (once) the TabViewItem hover handlers that fast-open / reliably close the agent tooltip (AgentTipHelpers recipe)
-        void _ArmAgentToolTipDismiss(); // Agentmaster: (re)start the auto-dismiss backstop timer — the keep-alive + the guarantee the tip never sticks open
-        void _SafeSetAgentToolTipOpen(bool open); // Agentmaster: toggle the agent tooltip's IsOpen inside a try/catch — swallows the XAML 0xC000027B stowed-exception fail-fast (owner-less / re-entrant tooltip) that crashed the app on tooltip fade / mouse-exit
-        void _ForceCloseAgentToolTip(); // Agentmaster: stop the open/dismiss timers + force the popup shut — run when the owner TabViewItem unloads (recycle/detach/close) or the tab shuts down, so no orphaned open popup survives for the framework's deferred input/render pass to null-deref (the Release MUX AV @0x0)
+        void _UpdateAgentToolTip(); // Agentmaster: host the page-built rich session tooltip card on the reused ToolTip; FRAMEWORK-MANAGED open/close (Content swapped only while closed; we never drive IsOpen)
+        void _WireAgentToolTipUnload(); // Agentmaster: wire (once) the owner TabViewItem Unloaded -> _DetachAgentToolTip, so a MUX recycle can't strand a stale ToolTip ref (the sole handler left after the manual-open path was removed)
+        void _DetachAgentToolTip(); // Agentmaster: detach the framework-managed tooltip from its owner + drop our ref (owner recycle/unload, ClearAgentToolTip, Shutdown); no IsOpen driven — the framework closes any open popup itself
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);
