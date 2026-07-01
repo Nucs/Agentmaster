@@ -347,9 +347,10 @@ namespace winrt::TerminalApp::implementation
         void _EnableMenuItems();
         void _UpdateSwitchToTabKeyChord();
         void _UpdateToolTip();
-        void _UpdateAgentToolTip(); // Agentmaster: (re)build the rich session tooltip's content on the reused ToolTip object (colored state line / bold title / plain body); frozen while open
+        void _UpdateAgentToolTip(); // Agentmaster: host the page-built rich session tooltip card (dark summary-style card) on the reused ToolTip object; frozen while open
         void _WireAgentToolTipHover(); // Agentmaster: wire (once) the TabViewItem hover handlers that fast-open / reliably close the agent tooltip (AgentTipHelpers recipe)
         void _ArmAgentToolTipDismiss(); // Agentmaster: (re)start the auto-dismiss backstop timer — the keep-alive + the guarantee the tip never sticks open
+        void _SafeSetAgentToolTipOpen(bool open); // Agentmaster: toggle the agent tooltip's IsOpen inside a try/catch — swallows the XAML 0xC000027B stowed-exception fail-fast (owner-less / re-entrant tooltip) that crashed the app on tooltip fade / mouse-exit
 
         void _RecalculateAndApplyTabColor();
         void _ApplyTabColorOnUIThread(const winrt::Windows::UI::Color& color);

@@ -317,7 +317,7 @@ namespace winrt::TerminalApp::implementation
         }
         if (_agentToolTip)
         {
-            _agentToolTip.IsOpen(false);
+            _SafeSetAgentToolTipOpen(false);
             _agentToolTip = nullptr; // drop the reused object; re-activation recreates + re-SetToolTip cleanly
         }
         _UpdateToolTip(); // revert to the default title + key-chord tooltip (re-attaches the default)
@@ -341,6 +341,11 @@ namespace winrt::TerminalApp::implementation
             _agentToolTip = WUX::Controls::ToolTip{};
             _agentToolTip.RequestedTheme(WUX::ElementTheme::Dark);
             _agentToolTip.Placement(WUX::Controls::Primitives::PlacementMode::Bottom);
+            // Make the tooltip popup click/hover-THROUGH: a hit-testable popup becomes a pointer target,
+            // so as it opens under the cursor it steals the tab's own PointerExited/Entered — the churn
+            // that races the open/dismiss timers and drove the 0xC000027B fail-fast on fade. A tooltip is
+            // purely informational and never needs input (the AgentTipHelpers recipe does the same).
+            _agentToolTip.IsHitTestVisible(false);
             WUX::Controls::ToolTipService::SetToolTip(TabViewItem(), _agentToolTip);
         }
         _WireAgentToolTipHover();
@@ -404,7 +409,7 @@ namespace winrt::TerminalApp::implementation
                 const auto self = weakTick.get();
                 if (self && self->_agentToolTipActive && self->_agentToolTip)
                 {
-                    self->_agentToolTip.IsOpen(true);
+                    self->_SafeSetAgentToolTipOpen(true);
                     self->_ArmAgentToolTipDismiss(); // start the backstop the instant it opens
                 }
             });
@@ -424,7 +429,7 @@ namespace winrt::TerminalApp::implementation
                 const auto self = weakTick.get();
                 if (self && self->_agentToolTip)
                 {
-                    self->_agentToolTip.IsOpen(false);
+                    self->_SafeSetAgentToolTipOpen(false);
                 }
             });
             _agentToolTipDismissTimer = dismissTimer;
@@ -478,12 +483,35 @@ namespace winrt::TerminalApp::implementation
             }
             if (self->_agentToolTip)
             {
-                self->_agentToolTip.IsOpen(false);
+                self->_SafeSetAgentToolTipOpen(false);
             }
         };
         tvi.PointerExited(closeHandler);
         tvi.PointerCanceled(closeHandler);
         tvi.PointerCaptureLost(closeHandler);
+    }
+
+    // Agentmaster (tab tooltip): toggle the agent tooltip's IsOpen inside a try/catch. Driving IsOpen
+    // ourselves (the fast-open tick, the auto-dismiss backstop, the pointer-loss close handlers, and the
+    // ClearAgentToolTip teardown) can raise a XAML fail-fast — STATUS_STOWED_EXCEPTION (0xC000027B) in
+    // Windows.UI.Xaml.dll — when the tooltip's owner (the TabViewItem) has been detached/recycled out from
+    // under a still-pending tick, or on a re-entrant dismiss as the pointer leaves. That fail-fast crashed
+    // the dev instance on tooltip fade / mouse-exit (WER: 0xC000027B in Windows.UI.Xaml.dll). A tooltip
+    // that can't open/close is moot, so swallow it and never crash over a tip — the SAME guard
+    // AgentTipHelpers already wraps its own manual-open tips in. UI thread only.
+    void Tab::_SafeSetAgentToolTipOpen(bool open)
+    {
+        if (!_agentToolTip)
+        {
+            return;
+        }
+        try
+        {
+            _agentToolTip.IsOpen(open);
+        }
+        catch (...)
+        {
+        }
     }
 
     // Agentmaster (tab tooltip): (re)start the auto-dismiss backstop from now. Stop+Start so an already-
