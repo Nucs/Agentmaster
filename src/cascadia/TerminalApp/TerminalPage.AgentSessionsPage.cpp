@@ -1183,7 +1183,7 @@ namespace winrt::TerminalApp::implementation
             b.Padding(Thickness{ 0, 0, 0, 0 });
             b.MinWidth(0);
             b.MinHeight(0);
-            const bool leftAlign = (col == 2 || col == 3 || col == 4); // Title, Directory, Branch (left, matching their left-rendered data cells; after the ★ shift, FAVORITES.md)
+            const bool leftAlign = (col == 3 || col == 4 || col == 5); // Title, Directory, Branch (left, matching their left-rendered data cells; after the ★ + Tags columns, they sit at 3/4/5)
             b.HorizontalAlignment(HorizontalAlignment::Stretch);
             b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(SessText(label + arrow, 11, true, 0.7));
@@ -1202,7 +1202,7 @@ namespace winrt::TerminalApp::implementation
                     else
                     {
                         self->_sessionsSortColumn = col;
-                        self->_sessionsSortAscending = (col == 2 || col == 3 || col == 4); // Title/Dir/Branch asc; time/counts desc (after the ★ shift)
+                        self->_sessionsSortAscending = (col == 3 || col == 4 || col == 5); // Title/Dir/Branch asc; time/counts desc (Title/Dir/Branch at 3/4/5 after the ★ + Tags columns)
                     }
                     self->_RenderSessionsTable();
                 });
@@ -1211,11 +1211,13 @@ namespace winrt::TerminalApp::implementation
             _sessionsHeaderRow.Children().Append(b);
         };
         addHeader(0, L"", false, L"Favorite \x2014 click the star to keep / find a session (the star column).");
-        addHeader(1, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
-        addHeader(2, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
-        addHeader(3, L"Directory", true, L"The session's working directory. Click to sort.");
-        addHeader(4, L"Branch", true, L"Git branch the session was on. Click to sort.");
-        addHeader(5, L"Tags", false, L"Bookmark tags \x2014 the same ribbons the session's tab wears. Hover one for every session carrying that tag (click a live one there to jump); add/remove tags from the row's right-click \x2192 Tags.");
+        // Tags (col 1): NO header text (like the star + chip columns) — a headerless, fixed 4-ribbon
+        // adornment. The tip is inert (an empty header cell has no hit area); the ribbons carry the hover.
+        addHeader(1, L"", false, L"");
+        addHeader(2, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
+        addHeader(3, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
+        addHeader(4, L"Directory", true, L"The session's working directory. Click to sort.");
+        addHeader(5, L"Branch", true, L"Git branch the session was on. Click to sort.");
         addHeader(6, L"Created", true, L"When the session was first created. Click to sort.");
         addHeader(7, L"Active", true, L"When the session was last active. Click to sort.");
         addHeader(8, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
@@ -1366,15 +1368,15 @@ namespace winrt::TerminalApp::implementation
             };
             const auto cmpI = [](int64_t x, int64_t y) { return x < y ? -1 : (x > y ? 1 : 0); };
             int c = 0;
-            switch (sortCol) // col indices after the ★ column (+1, FAVORITES.md) and the Tags column (+1 past Branch)
+            switch (sortCol) // col indices: ★=0, Tags=1, chip=2, Title=3, Dir=4, Branch=5, Created=6, Active=7, Msgs=8, Ctx=9, Hits=10
             {
-            case 2:
+            case 3:
                 c = cmpS(a->title, b->title);
                 break;
-            case 3:
+            case 4:
                 c = cmpS(a->dir, b->dir);
                 break;
-            case 4:
+            case 5:
                 c = cmpS(a->branch, b->branch);
                 break;
             case 6:
@@ -1483,6 +1485,60 @@ namespace winrt::TerminalApp::implementation
                 Grid::SetColumn(starCell, 0);
                 g.Children().Append(starCell);
             }
+            // Tags (col 1): the session's BOOKMARK ribbons — the same hoverable badges its tab wears,
+            // colors resolved the same way (user-picked > name-hash). Placed right after the ★ star
+            // (before the status chip + title), HEADER-LESS, in a FIXED 4-ribbon-wide cell: up to 4
+            // ribbons render CENTERED; a 5th-or-more collapses the 4th slot into a dim "+N" so the cell
+            // never grows. Hovering a ribbon opens the rich per-tag panel (every carrier + status dot;
+            // click a live row to jump) — the tab badges' exact behavior, wired straight to the page's
+            // _OnTagBadgeHoverBegin/End (this TU IS TerminalPage). The cell stays HIT-TESTABLE (like the
+            // ★ cell — the row's other cells are clickthrough): the ribbons need pointer enter/leave;
+            // the gaps between ribbons have no background, so clicks there still pass to the row.
+            if (const auto tit = _sessionsTags.find(r.id); tit != _sessionsTags.end() && !tit->second.empty())
+            {
+                const auto& tglist = tit->second;
+                StackPanel tagsCell;
+                tagsCell.Orientation(Orientation::Horizontal);
+                tagsCell.Spacing(2);
+                tagsCell.VerticalAlignment(VerticalAlignment::Center);
+                tagsCell.HorizontalAlignment(HorizontalAlignment::Center); // centered in the fixed 4-ribbon cell
+                constexpr size_t kSessMaxTagRibbons = 4; // the fixed cell holds exactly 4 ribbons
+                const bool overflow = tglist.size() > kSessMaxTagRibbons;
+                const size_t ribbonsToShow = overflow ? (kSessMaxTagRibbons - 1) : tglist.size(); // >4 => 3 ribbons + "+N"
+                for (size_t i = 0; i < ribbonsToShow; ++i)
+                {
+                    winrt::Windows::UI::Xaml::Shapes::Polygon ribbon; // the tab badges' 6.5x9.3 bookmark shape
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
+                    ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tglist[i], sessTagColors) });
+                    ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+                    ribbon.StrokeThickness(0.75);
+                    ribbon.VerticalAlignment(VerticalAlignment::Center);
+                    const winrt::hstring tagName{ tglist[i] };
+                    ribbon.PointerEntered([this, tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
+                        if (const auto el = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                        {
+                            _OnTagBadgeHoverBegin(tagName, el);
+                        }
+                    });
+                    ribbon.PointerExited([this](auto&&, auto&&) {
+                        _OnTagBadgeHoverEnd();
+                    });
+                    tagsCell.Children().Append(ribbon);
+                }
+                if (overflow)
+                {
+                    auto more = SessText(winrt::hstring{ L"+" + std::to_wstring(tglist.size() - ribbonsToShow) }, 9, false, 0.6);
+                    more.VerticalAlignment(VerticalAlignment::Center);
+                    more.IsHitTestVisible(false);
+                    tagsCell.Children().Append(more);
+                }
+                Grid::SetColumn(tagsCell, 1);
+                g.Children().Append(tagsCell);
+            }
             {
                 Border chip;
                 chip.Width(10);
@@ -1501,7 +1557,7 @@ namespace winrt::TerminalApp::implementation
                     chip.BorderBrush(SessBrush(0xFF, 0xE8, 0xC0, 0x60)); // claude's busy/idle/waiting heartbeat ring
                     chip.BorderThickness(Thickness{ 1.5, 1.5, 1.5, 1.5 });
                 }
-                Grid::SetColumn(chip, 1);
+                Grid::SetColumn(chip, 2);
                 g.Children().Append(chip);
             }
 
@@ -1557,7 +1613,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 _sessRenameBox = box;
-                Grid::SetColumn(box, 2);
+                Grid::SetColumn(box, 3); // the Title column (now 3, after ★ + Tags + chip)
                 g.Children().Append(box);
             }
             else
@@ -1571,7 +1627,7 @@ namespace winrt::TerminalApp::implementation
                 titleWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
                 titleWrap.Padding(Thickness{ 0, 0, 0, 1 }); // a hair of gap between the descenders and the rule
                 titleWrap.IsHitTestVisible(false); // clickthrough -> the row Border is the one click target + tooltip
-                Grid::SetColumn(titleWrap, 2);
+                Grid::SetColumn(titleWrap, 3); // Title column (now 3, after ★ + Tags + chip)
                 g.Children().Append(titleWrap);
                 titleCellEl = titleWrap; // the title column's bounds drive the rename gate (left edge..dir cell's left edge)
             }
@@ -1587,67 +1643,13 @@ namespace winrt::TerminalApp::implementation
             dirWrap.BorderThickness(Thickness{ 0, 0, 0, 2 });
             dirWrap.Padding(Thickness{ 0, 0, 0, 1 });
             dirWrap.IsHitTestVisible(false);
-            Grid::SetColumn(dirWrap, 3);
+            Grid::SetColumn(dirWrap, 4); // Directory column (now 4)
             g.Children().Append(dirWrap);
 
             auto branch = SessText(winrt::hstring{ r.branch }, 11, false, 0.6);
             branch.IsHitTestVisible(false);
-            Grid::SetColumn(branch, 4);
+            Grid::SetColumn(branch, 5);
             g.Children().Append(branch);
-
-            // Tags (col 5): the session's BOOKMARK ribbons — the same hoverable badges its tab wears,
-            // colors resolved the same way (user-picked > name-hash). Hovering a ribbon opens the
-            // rich per-tag panel (every carrier + status dot; clicking a live row jumps to its tab) —
-            // the tab badges' exact behavior, wired straight to the page's _OnTagBadgeHoverBegin/End
-            // (this TU IS TerminalPage). Capped to the 64px column; a dim "+N" marks overflow. This
-            // cell stays HIT-TESTABLE (like the ★ cell — the row's other cells are clickthrough): the
-            // ribbons need pointer enter/leave; the panel itself has no background, so clicks between
-            // ribbons still pass through to the row.
-            if (const auto tit = _sessionsTags.find(r.id); tit != _sessionsTags.end() && !tit->second.empty())
-            {
-                StackPanel tagsCell;
-                tagsCell.Orientation(Orientation::Horizontal);
-                tagsCell.Spacing(2);
-                tagsCell.VerticalAlignment(VerticalAlignment::Center);
-                tagsCell.HorizontalAlignment(HorizontalAlignment::Left);
-                constexpr size_t kSessMaxTagRibbons = 6;
-                size_t shownRibbons = 0;
-                for (const auto& tg : tit->second)
-                {
-                    if (shownRibbons >= kSessMaxTagRibbons)
-                    {
-                        auto more = SessText(winrt::hstring{ L"+" + std::to_wstring(tit->second.size() - kSessMaxTagRibbons) }, 9, false, 0.6);
-                        more.VerticalAlignment(VerticalAlignment::Center);
-                        more.IsHitTestVisible(false);
-                        tagsCell.Children().Append(more);
-                        break;
-                    }
-                    winrt::Windows::UI::Xaml::Shapes::Polygon ribbon; // the tab badges' 6.5x9.3 bookmark shape
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
-                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
-                    ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tg, sessTagColors) });
-                    ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
-                    ribbon.StrokeThickness(0.75);
-                    ribbon.VerticalAlignment(VerticalAlignment::Center);
-                    const winrt::hstring tagName{ tg };
-                    ribbon.PointerEntered([this, tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
-                        if (const auto el = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
-                        {
-                            _OnTagBadgeHoverBegin(tagName, el);
-                        }
-                    });
-                    ribbon.PointerExited([this](auto&&, auto&&) {
-                        _OnTagBadgeHoverEnd();
-                    });
-                    tagsCell.Children().Append(ribbon);
-                    ++shownRibbons;
-                }
-                Grid::SetColumn(tagsCell, 5);
-                g.Children().Append(tagsCell);
-            }
 
             auto created = SessText(winrt::hstring{ SessAgo(r.createdMs, now) }, 11, false, 0.6);
             created.HorizontalAlignment(HorizontalAlignment::Center);
