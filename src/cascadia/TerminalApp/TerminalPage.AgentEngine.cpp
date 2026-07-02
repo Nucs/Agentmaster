@@ -923,6 +923,24 @@ namespace winrt::TerminalApp::implementation
                 self->_OpenTagEditorForElement(std::wstring{ id }, anchor);
             }
         });
+        // Agentmaster (bookmark tags): a Triage-Board card ribbon's pointer enter/leave — route to
+        // the SAME rich tag hover panel the tab badges + the Sessions Tags column use (every session
+        // carrying the tag + its status dot; clicking a live row jumps to its tab). The Manager
+        // content lives inside this page's visual tree, so the ribbon anchors into Root() space
+        // like any main-tree badge.
+        content->SetTagHoverHandlers(
+            [weakThis](winrt::hstring tag, winrt::Windows::UI::Xaml::UIElement anchor) {
+                if (auto self = weakThis.get())
+                {
+                    self->_OnTagBadgeHoverBegin(tag, anchor);
+                }
+            },
+            [weakThis]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_OnTagBadgeHoverEnd();
+                }
+            });
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL
         // scope — bring its conversation under management. `fork` (chosen in the Manager's Adopt
         // dialog) selects the two-writers-safe branch (--fork-session into a NEW transcript) vs. a

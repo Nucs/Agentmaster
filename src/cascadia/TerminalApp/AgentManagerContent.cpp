@@ -286,6 +286,11 @@ namespace winrt::TerminalApp::implementation
     {
         _tagsHandler = std::move(handler);
     }
+    void AgentManagerContent::SetTagHoverHandlers(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> begin, std::function<void()> end)
+    {
+        _tagHoverBeginHandler = std::move(begin);
+        _tagHoverEndHandler = std::move(end);
+    }
     void AgentManagerContent::SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring, bool)> handler)
     {
         _adoptExternalHandler = std::move(handler);

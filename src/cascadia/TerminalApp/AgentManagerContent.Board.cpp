@@ -23,8 +23,9 @@
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
-#include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
+#include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor (the cog's color pickers) + ResolveTagDisplayColor (the card's bookmark ribbons)
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
+#include "AgentMaster/SessionStore.h" // GetSessionTags / LoadAllTagColors — the card title band's bookmark ribbons
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
 #include "AgentMaster/ProfileBootstrap.h" // the cog's Profile row (active dir + Change… picker)
 #include "AgentMaster/SessionRegistry.h"
@@ -209,6 +210,67 @@ namespace winrt::TerminalApp::implementation
             bandTip += s.recap;
         }
         AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
+
+        // Agentmaster (bookmark tags): the session's bookmark ribbons hang out of the TITLE BAND's
+        // bottom edge — the tab badges' "bookmark out of the book" look (~30% riding ON the colored
+        // band, ~70% overhanging below it), x-aligned with the title's first character (the band's
+        // 8px left inset). Unlike the tab (whose strip ScrollViewer CLIPS at the tab's bottom edge,
+        // forcing the popup-root host), the card clips nothing — a NEGATIVE top margin in the
+        // band→body stack straddles the boundary (the row is appended AFTER the band, so it draws
+        // OVER it), and the row's remaining in-flow height pushes the body down so ribbons never
+        // cover body text. Same 6.5x9.3 ribbon + resolved colors as the tab and the Sessions Tags
+        // column (ResolveTagDisplayColor: user-picked > name-hash, from _boardTagColors — both maps
+        // re-read each _RebuildBoard), and the SAME rich hover panel (every carrier + status dot,
+        // click a live row to jump) via the page's SetTagHoverHandlers wiring.
+        StackPanel tagRow{ nullptr };
+        if (const auto tit = _boardTags.find(s.id); tit != _boardTags.end() && !tit->second.empty())
+        {
+            tagRow = StackPanel{};
+            tagRow.Orientation(Orientation::Horizontal);
+            tagRow.Spacing(2);
+            tagRow.HorizontalAlignment(HorizontalAlignment::Left);
+            tagRow.Margin(Thickness{ 8, -3, 8, 0 }); // pull ~30% of the 9.3px ribbon up ONTO the band; the rest flows below its edge
+            constexpr size_t kCardMaxTagRibbons = 8; // bound a heavily-tagged card; a dim "+N" marks overflow
+            size_t shownRibbons = 0;
+            for (const auto& tg : tit->second)
+            {
+                if (shownRibbons >= kCardMaxTagRibbons)
+                {
+                    auto more = Text(winrt::hstring{ L"+" + std::to_wstring(tit->second.size() - kCardMaxTagRibbons) }, 9, false, 0.6);
+                    more.VerticalAlignment(VerticalAlignment::Center);
+                    more.IsHitTestVisible(false);
+                    tagRow.Children().Append(more);
+                    break;
+                }
+                winrt::Windows::UI::Xaml::Shapes::Polygon ribbon; // the tab badges' 6.5x9.3 bookmark shape
+                ribbon.Points().Append(Point{ 0.0f, 0.0f });
+                ribbon.Points().Append(Point{ 6.5f, 0.0f });
+                ribbon.Points().Append(Point{ 6.5f, 9.3f });
+                ribbon.Points().Append(Point{ 3.25f, 6.5f });
+                ribbon.Points().Append(Point{ 0.0f, 9.3f });
+                ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tg, _boardTagColors) });
+                ribbon.Stroke(SolidColorBrush{ Colors::Black() });
+                ribbon.StrokeThickness(0.75);
+                const winrt::hstring tagName{ tg };
+                ribbon.PointerEntered([this, tagName](const IInspectable& sdr, const PointerRoutedEventArgs&) {
+                    if (_tagHoverBeginHandler)
+                    {
+                        if (const auto el = sdr.try_as<UIElement>())
+                        {
+                            _tagHoverBeginHandler(tagName, el);
+                        }
+                    }
+                });
+                ribbon.PointerExited([this](const IInspectable&, const PointerRoutedEventArgs&) {
+                    if (_tagHoverEndHandler)
+                    {
+                        _tagHoverEndHandler();
+                    }
+                });
+                tagRow.Children().Append(ribbon);
+                ++shownRibbons;
+            }
+        }
 
         // Agentmaster (PENDING_INPUT.md): an UNSENT-DRAFT pulse at the top of the card body — when the
         // Fleet Observer detects the user has typed but not yet submitted a message in this session's
@@ -418,6 +480,10 @@ namespace winrt::TerminalApp::implementation
         auto outer = StackPanel{};
         outer.Spacing(0);
         outer.Children().Append(band);
+        if (tagRow)
+        {
+            outer.Children().Append(tagRow); // after the band in z-order — the ribbons' top ~30% draws OVER the colored band
+        }
         outer.Children().Append(bodyBorder);
 
         // Agentmaster: the hover/selection outline is drawn as an OVERLAY ring, NOT on the card
@@ -906,6 +972,26 @@ namespace winrt::TerminalApp::implementation
         {
             boardLocalIds = _localScopeProvider();
         }
+
+        // Agentmaster (bookmark tags): re-read the LIVE sessions' tags + the user-picked tag colors
+        // once per rebuild so each card can hang its bookmark ribbons out of the title band
+        // (_MakeCard reads _boardTags/_boardTagColors). Per-session GetSessionTags (a tiny
+        // session-store file each, absent for most sessions) beats LoadAllSessionTags here — the
+        // store holds every session EVER titled/starred/tagged while the board shows only the live
+        // handful. The colors file loads only when something is actually tagged.
+        _boardTags.clear();
+        for (const auto& s : sessions)
+        {
+            if (!s.live)
+            {
+                continue;
+            }
+            if (auto tags = ::Agentmaster::GetSessionTags(s.id); !tags.empty())
+            {
+                _boardTags.emplace(s.id, std::move(tags));
+            }
+        }
+        _boardTagColors = _boardTags.empty() ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
 
         struct Col
         {

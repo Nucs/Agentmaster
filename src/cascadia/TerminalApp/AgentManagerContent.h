@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <functional>
+#include <map> // _boardTagColors (folded tag name -> "#AARRGGBB", the card ribbons' user-picked colors)
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -74,6 +75,14 @@ namespace winrt::TerminalApp::implementation
         void SetForkManagedSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> fork a managed session (kind-aware), like the WT tab's "Fork session"
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         void SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler); // Agentmaster (bookmark tags): (sessionId, anchor) -> the page opens its tag editor panel under the clicked board card / tree row (the WT tab menu's "Tags" twin)
+        // Agentmaster (bookmark tags): the pointer entered/left one of a board card's bookmark
+        // ribbons. begin(tag, anchor) -> the page shows its rich tag hover panel (every session
+        // carrying the tag + its status dot; clicking a live row jumps to its tab) anchored at the
+        // ribbon; end() cancels a pending open / grace-closes an open panel — the tab badges' + the
+        // Sessions Tags column's exact hover behavior, fanned through the page because the panel
+        // (and the carriers-of-a-tag data) live there. The Manager content sits inside the page's
+        // visual tree, so the ribbon transforms into Root() space like any main-tree badge.
+        void SetTagHoverHandlers(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> begin, std::function<void()> end);
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL scope.
         // (pid, workingDir) -> the page resolves the conversation id from the transcript and resumes it
         // into a NEW managed, controllable tab (`claude --resume <id>`), or launches fresh if it has no
@@ -548,6 +557,8 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _tagsHandler; // Agentmaster (bookmark tags): board-card / tree-row "Tags" -> page opens the tag editor panel (sessionId, the clicked element as the anchor)
+        std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> _tagHoverBeginHandler; // Agentmaster (bookmark tags): a card ribbon's pointer-enter -> the page's rich tag hover panel (tag, the ribbon as the anchor)
+        std::function<void()> _tagHoverEndHandler; // Agentmaster (bookmark tags): the ribbon's pointer-exit -> cancel/grace-close that panel
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab
         std::function<void(uint32_t, winrt::hstring, bool, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex (pid, cwd, adopt, fork): Adopt (adopt=true; fork picks fork/resume) / Open-New-Codex (adopt=false)
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)
@@ -625,6 +636,15 @@ namespace winrt::TerminalApp::implementation
         // not). The focused element is identified by its "b:<id>" / "t:<id>" Tag.
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _boardCardsById;
         std::unordered_map<std::wstring, winrt::Windows::UI::Xaml::Controls::Button> _treeRowsById;
+        // Agentmaster (bookmark tags): the LIVE sessions' tags + the user-picked tag colors,
+        // re-read from the SessionStore at the top of every _RebuildBoard (one tiny per-session
+        // file each — most sessions have none — plus one tag-colors.json read, only when something
+        // is tagged; rebuilds are event-driven, never per-tick) so _MakeCard can hang each card's
+        // bookmark ribbons out of its title band. Same-window fresh (a tag edit triggers a board
+        // refresh via the page); another window's edits land on its next rebuild — the tab badges'
+        // accepted cross-window staleness.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> _boardTags;
+        std::map<std::wstring, std::wstring> _boardTagColors; // folded tag name -> "#AARRGGBB" (empty when no live session is tagged)
         // Agentmaster: column title (e.g. "Running", "External") -> that column's live card
         // ScrollViewer, repopulated on every _RebuildBoard. Used ONLY to PRESERVE each column's
         // vertical scroll offset across a rebuild: _RebuildBoard recreates the per-column ScrollViewers

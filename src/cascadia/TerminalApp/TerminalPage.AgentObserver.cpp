@@ -822,6 +822,23 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (bookmark tags): repaint THIS window's Manager content now. A tag add/remove/
+    // recolor lives in the SessionStore, never the SessionRegistry — no registry notify fires —
+    // so the Triage-Board cards' bookmark ribbons (fed by _RebuildBoard's per-rebuild tag read)
+    // would otherwise show stale tags until the next unrelated registry event. Same-window
+    // instant, like the tab badges; another window's board catches up on its own next rebuild
+    // (the accepted cross-window staleness). Safe when the Manager was never built (null get()).
+    void TerminalPage::_RefreshManagerBoardTags()
+    {
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->RefreshNow();
+            }
+        }
+    }
+
     // Context-menu "Tags" (WT tab menu): open the panel for this tab's managed session, anchored
     // under its TabViewItem.
     void TerminalPage::_OpenTagEditorForTab(const TerminalApp::Tab& tab)
@@ -1448,6 +1465,7 @@ namespace winrt::TerminalApp::implementation
             _sessionsTags[_tagEditorSessionId] = ::Agentmaster::GetSessionTags(_tagEditorSessionId);
             _RebuildSessionsTagChips();
             _RenderSessionsTable();
+            _RefreshManagerBoardTags(); // Triage-Board card ribbons (tags never notify the registry)
             _RandomizeTagEditorColor(); // hand the picker a fresh random color for the NEXT add
         }
         _tagEditorBox.Text(L"");
@@ -1501,6 +1519,7 @@ namespace winrt::TerminalApp::implementation
             }
             _RebuildSessionsTagChips();
             _RenderSessionsTable();
+            _RefreshManagerBoardTags(); // Triage-Board card ribbons (tags never notify the registry)
         }
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {
