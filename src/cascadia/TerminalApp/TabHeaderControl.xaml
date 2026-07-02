@@ -337,33 +337,31 @@
             </TextBox.ContextFlyout>
         </TextBox>
         </StackPanel>
-        <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, drawn as
-              an OVERLAY pinned to the TAB'S BOTTOM EDGE — the row starts at the title's FIRST
-              CHARACTER x-position with each ribbon FLUSH against the hosting TabViewItem's bottom
-              (positioned in code-behind, _PositionTagBadges), below EVERY title line, so a wrapped
-              multi-line title is never overlapped. Flush rather than overhanging: the tab strip's
-              ScrollViewer clips at the tab's bottom edge, so pixels below the tab rectangle can never
-              render — flush-bottom is the maximum "bookmark coming out of the book" that stays
-              visible. A LAYOUT-NEUTRAL overlay on purpose: the host Canvas is 0x0 (a Canvas neither
-              sizes to nor clips its children), so however many badges show, the tab measures exactly
-              as if they weren't there — which is what lets MORE than a few tags stay visible (the
-              earlier in-flow trailing row consumed strip width and got clipped after ~3 badges on a
-              width-capped tab; an overlay spans the whole tab up to ITS clip instead). The Polygons
-              are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec — tag count
-              varies, each badge colored by the spec-carried resolved color — riding the same
+        <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, drawn
+              OVERHANGING the tab's bottom edge — ~30% of each ribbon above the tab's bottom line,
+              ~70% hanging BELOW it (a bookmark sticking out of the "book"), the row starting at the
+              title's FIRST-CHARACTER x. Hosted in an ALWAYS-OPEN PARENTED POPUP because that's the
+              only way the overhang can render: in-tree pixels below the tab rectangle are clipped by
+              the tab strip's ScrollViewer (its viewport bottom IS the tab's bottom edge), while a
+              parented Popup's child renders in the island's POPUP ROOT — outside every clip — at the
+              parent's position + offsets (the same raw-parented-Popup pattern the page's tag panels
+              use; the codebase's popup crash class was OWNERLESS tooltips, not parented popups).
+              Layout-neutral by construction (a closed/open Popup takes no layout space), so however
+              many badges show, the tab measures exactly as if they weren't there. Positioning,
+              scroll/reorder tracking, and out-of-viewport hiding live in _PositionTagBadges. The
+              Polygons are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec — tag
+              count varies, each badge colored by the spec-carried resolved color — riding the same
               TabStatus PropertyChanged pipeline as the pending-dots animation. Hovering a badge raises
               TagBadgeHoverBegin/End: the PAGE shows the rich tag panel (every session carrying the tag,
               title + status dot, click == jump to its tab) — richer than a ToolTip, which cannot take
-              clicks. Hit-test ON for the hover; presses still bubble to the TabViewItem (tab click/drag
-              unaffected). Drawn LAST, so the ribbons render over anything at the tab's bottom edge.  -->
-        <Canvas x:Name="HeaderTagBookmarksHost"
-                Width="0"
-                Height="0"
-                HorizontalAlignment="Left"
-                VerticalAlignment="Top">
+              clicks. Hit-test ON for the hover; popup-hosted badges no longer bubble presses to the
+              TabViewItem, so a badge Tapped explicitly selects its tab (click-to-switch preserved).  -->
+        <Popup x:Name="HeaderTagBookmarksPopup"
+               HorizontalAlignment="Left"
+               VerticalAlignment="Top">
             <StackPanel x:Name="HeaderTagBookmarks"
                         Orientation="Horizontal"
                         Spacing="2" />
-        </Canvas>
+        </Popup>
     </Grid>
 </UserControl>

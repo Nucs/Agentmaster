@@ -19,10 +19,12 @@
 #include <cstdint>
 #include <cmath>
 #include <cwctype>
+#include <map>
 #include <string>
 #include <string_view>
 
 #include "AgentMaster/SessionModels.h" // ::Agentmaster::SessionState
+#include "AgentMaster/SessionStore.h" // ::Agentmaster::FoldTagName (the tag identity fold — ResolveTagDisplayColor)
 
 namespace winrt::TerminalApp::implementation
 {
@@ -188,5 +190,17 @@ namespace winrt::TerminalApp::implementation
             h = (h ^ ((folded >> 8) & 0xFF)) * 16777619u;
         }
         return TagPaletteColor(h % kTagPaletteSize);
+    }
+
+    // Agentmaster (bookmark tags): a tag's DISPLAY color — the user-picked stored color
+    // (tag-colors.json; `storedByFoldedName` = one LoadAllTagColors() the caller did) when present,
+    // else the stable name-hash fallback above. THE one resolution every direct tag renderer shares:
+    // the AgentTagsSpec producer (TerminalPage::_SetTabAgentTags), the Tags panel list, the tag
+    // hover panel, and the Sessions page's Tags column — so a tag can never wear two colors.
+    inline winrt::Windows::UI::Color ResolveTagDisplayColor(const std::wstring& name, const std::map<std::wstring, std::wstring>& storedByFoldedName)
+    {
+        const auto fallback = TagColorFor(name);
+        const auto it = storedByFoldedName.find(::Agentmaster::FoldTagName(name));
+        return it == storedByFoldedName.end() ? fallback : ParseArgbHexColor(it->second, fallback);
     }
 }

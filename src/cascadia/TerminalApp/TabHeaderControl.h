@@ -65,20 +65,29 @@ namespace winrt::TerminalApp::implementation
         // as the pending-dots pulse; change-gated on _renderedTagsSpec so a re-assert of an
         // unchanged spec rebuilds nothing.
         void _UpdateTagBadges();
-        // Position the overlay row: left == the title's first-character x (fallback: just past the
-        // status-dot slot), top == the hosting TabViewItem's BOTTOM edge minus the ribbon height —
-        // the ribbons sit FLUSH with the tab's bottom (below every title line; the strip's
-        // ScrollViewer clips anything past that edge, so a true below-tab overhang can't render).
-        // Runs after every badge rebuild, on the root grid's SizeChanged (the title shifts when
-        // leading indicator icons appear/disappear), and on the TabViewItem's SizeChanged (the strip
-        // growing for ANOTHER tab's wrapped title resizes every equal-height tab without resizing
-        // THIS header's grid).
+        // Position + show/hide the popup-hosted badge row: left == the title's first-character x
+        // (fallback: just past the status-dot slot), top == the hosting TabViewItem's bottom edge
+        // minus ~30% of the ribbon height — so ~70% of each ribbon OVERHANGS below the tab (the
+        // popup root isn't clipped by the strip's ScrollViewer, which is what makes the overhang
+        // renderable at all). Also: hides the popup when the tab is scrolled out of the strip
+        // viewport (an unclipped popup would otherwise float over the caption buttons), and — since
+        // an open popup does not reliably track its PARENT moving without a size change (tab
+        // reorder, strip scroll) — close+reopens when the header's absolute position changed since
+        // the last apply (offset changes alone reposition live). Triggers: every badge rebuild, the
+        // root grid's SizeChanged, the TabViewItem's SizeChanged (the strip growing for ANOTHER
+        // tab's wrapped title), the strip ScrollViewer's ViewChanged (scrolls), and LayoutUpdated
+        // (reorders — change-gated, cheap early-out when no badges).
         void _PositionTagBadges();
         winrt::hstring _renderedTagsSpec;
-        // The TabViewItem ancestor the badges are pinned to + its SizeChanged hook (re-resolved when
-        // the header re-parents, e.g. a tab torn out into another window).
+        // The TabViewItem ancestor the badges are pinned to + its SizeChanged hook, and the tab
+        // strip's ScrollViewer + its ViewChanged hook (both re-resolved fresh each position pass —
+        // the weak refs only gate re-hooking, e.g. after a tab tears out into another window).
         winrt::weak_ref<winrt::Microsoft::UI::Xaml::Controls::TabViewItem> _badgeTabViewItem;
         winrt::Windows::UI::Xaml::FrameworkElement::SizeChanged_revoker _badgeTviSizeRevoker{};
+        winrt::weak_ref<winrt::Windows::UI::Xaml::Controls::ScrollViewer> _badgeStripScroller;
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer::ViewChanged_revoker _badgeSvViewChangedRevoker{};
+        double _badgeLastAbsX{ -1e9 }; // the header grid's island-absolute position at the last apply —
+        double _badgeLastAbsY{ -1e9 }; // a change means the PARENT moved => force a close+reopen
 
         bool _receivedKeyDown{ false };
         bool _renameCancelled{ false };

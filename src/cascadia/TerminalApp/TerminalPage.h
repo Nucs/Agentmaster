@@ -545,7 +545,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _sessTagChipsScroll{ nullptr }; // the TAG CHIPS row host (header row 2, table-width) — collapsed while no tags exist; horizontal-scrolls past ~a screenful of chips
         winrt::Windows::UI::Xaml::Controls::StackPanel _sessTagChipsPanel{ nullptr }; // the chips themselves — one blue, partially-transparent toggle chip per GLOBAL tag, rebuilt by _RebuildSessionsTagChips
         std::wstring _sessionsSelectedId;
-        int _sessionsSortColumn{ 6 }; // default: Active (last activity), newest first — col 6 after the leftmost ★ column shifted everything +1 (FAVORITES.md)
+        int _sessionsSortColumn{ 7 }; // default: Active (last activity), newest first — col 7 after the leftmost ★ column (FAVORITES.md) and the Tags column (after Branch) each shifted the rest +1
         bool _sessionsSortAscending{ false };
         std::wstring _sessionsQueryText; // the raw search text (folding happens in the engine)
         std::atomic<bool> _sessionsPageVisible{ false };

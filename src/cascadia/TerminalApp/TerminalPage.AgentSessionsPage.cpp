@@ -50,6 +50,7 @@
 #include "TerminalPage.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
+#include "AgentStatusColors.h" // ResolveTagDisplayColor / TagColorFor — the Tags column's bookmark ribbons
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
 #include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
 #include "AgentMaster/Persistence.h" // GetDirColor / AutoDirColorHex (the per-dir color chip)
@@ -1149,13 +1150,13 @@ namespace winrt::TerminalApp::implementation
         const bool showHits = searching && contentScope;
         // Relevance-tier ranking (name match on top) is the DEFAULT-VIEW behavior — it must NOT override
         // an EXPLICIT column sort, or clicking a header while searching appears to do nothing ("sorting
-        // stopped working"). So apply tiers only while the sort is on the DEFAULT column (Active, col 6 —
-        // either direction); the moment the user picks ANY other column (Created/Msgs/Ctx/Title/…), the
-        // pure column sort governs. Active is the default sort, so a fresh search still ranks the best
-        // match first (the case the tiers were added for) while every other column sorts as asked. Tying
-        // it to the column (not its asc/desc) avoids a flip-flop where toggling Active's arrow also
-        // toggled the tiers.
-        const bool rankByRelevance = searching && _sessionsSortColumn == 6;
+        // stopped working"). So apply tiers only while the sort is on the DEFAULT column (Active, col 7
+        // after the Tags column shifted the time/count columns +1 — either direction); the moment the
+        // user picks ANY other column (Created/Msgs/Ctx/Title/…), the pure column sort governs. Active is
+        // the default sort, so a fresh search still ranks the best match first (the case the tiers were
+        // added for) while every other column sorts as asked. Tying it to the column (not its asc/desc)
+        // avoids a flip-flop where toggling Active's arrow also toggled the tiers.
+        const bool rankByRelevance = searching && _sessionsSortColumn == 7;
 
         // --- sortable header ---
         _sessionsHeaderRow.Children().Clear();
@@ -1214,11 +1215,12 @@ namespace winrt::TerminalApp::implementation
         addHeader(2, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
         addHeader(3, L"Directory", true, L"The session's working directory. Click to sort.");
         addHeader(4, L"Branch", true, L"Git branch the session was on. Click to sort.");
-        addHeader(5, L"Created", true, L"When the session was first created. Click to sort.");
-        addHeader(6, L"Active", true, L"When the session was last active. Click to sort.");
-        addHeader(7, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
-        addHeader(8, L"Ctx", true, L"Context \x2014 tokens in the session's newest turn (input + cache + output), the same value the Triage Board shows as \x201C" L"ctx N\x201D. Blank until the first assistant reply. Click to sort.");
-        addHeader(9, showHits ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, showHits ? winrt::hstring{ L"Number of content matches (\U0001F464/\U0001F916 scopes) in this session" } : winrt::hstring{ L"" });
+        addHeader(5, L"Tags", false, L"Bookmark tags \x2014 the same ribbons the session's tab wears. Hover one for every session carrying that tag (click a live one there to jump); add/remove tags from the row's right-click \x2192 Tags.");
+        addHeader(6, L"Created", true, L"When the session was first created. Click to sort.");
+        addHeader(7, L"Active", true, L"When the session was last active. Click to sort.");
+        addHeader(8, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
+        addHeader(9, L"Ctx", true, L"Context \x2014 tokens in the session's newest turn (input + cache + output), the same value the Triage Board shows as \x201C" L"ctx N\x201D. Blank until the first assistant reply. Click to sort.");
+        addHeader(10, showHits ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, showHits ? winrt::hstring{ L"Number of content matches (\U0001F464/\U0001F916 scopes) in this session" } : winrt::hstring{ L"" });
 
         // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
         // minus the user's "Hide from list" set. This render is the single chokepoint both the
@@ -1364,7 +1366,7 @@ namespace winrt::TerminalApp::implementation
             };
             const auto cmpI = [](int64_t x, int64_t y) { return x < y ? -1 : (x > y ? 1 : 0); };
             int c = 0;
-            switch (sortCol) // col indices after the leftmost ★ column shifted everything +1 (FAVORITES.md)
+            switch (sortCol) // col indices after the ★ column (+1, FAVORITES.md) and the Tags column (+1 past Branch)
             {
             case 2:
                 c = cmpS(a->title, b->title);
@@ -1375,16 +1377,16 @@ namespace winrt::TerminalApp::implementation
             case 4:
                 c = cmpS(a->branch, b->branch);
                 break;
-            case 5:
+            case 6:
                 c = cmpI(a->createdMs, b->createdMs);
                 break;
-            case 6:
+            case 7:
                 c = cmpI(a->lastActivityMs, b->lastActivityMs);
                 break;
-            case 7:
+            case 8:
                 c = cmpI(a->msgs, b->msgs);
                 break;
-            case 8:
+            case 9:
                 c = cmpI(a->contextTokens, b->contextTokens);
                 break;
             default:
@@ -1399,6 +1401,8 @@ namespace winrt::TerminalApp::implementation
 
         // --- live enrichment lookups (UI thread; cheap) ---
         const auto presence = _observer ? _observer->Presence() : std::vector<::Agentmaster::SessionPresenceRow>{};
+        // The Tags column's picker-chosen colors — ONE small read per render (hash fallback per tag).
+        const auto sessTagColors = _sessionsTags.empty() ? std::map<std::wstring, std::wstring>{} : ::Agentmaster::LoadAllTagColors();
         const auto presenceFor = [&presence](const std::wstring& sid) -> const ::Agentmaster::SessionPresenceRow* {
             for (const auto& p : presence)
             {
@@ -1591,35 +1595,89 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(branch, 4);
             g.Children().Append(branch);
 
+            // Tags (col 5): the session's BOOKMARK ribbons — the same hoverable badges its tab wears,
+            // colors resolved the same way (user-picked > name-hash). Hovering a ribbon opens the
+            // rich per-tag panel (every carrier + status dot; clicking a live row jumps to its tab) —
+            // the tab badges' exact behavior, wired straight to the page's _OnTagBadgeHoverBegin/End
+            // (this TU IS TerminalPage). Capped to the 64px column; a dim "+N" marks overflow. This
+            // cell stays HIT-TESTABLE (like the ★ cell — the row's other cells are clickthrough): the
+            // ribbons need pointer enter/leave; the panel itself has no background, so clicks between
+            // ribbons still pass through to the row.
+            if (const auto tit = _sessionsTags.find(r.id); tit != _sessionsTags.end() && !tit->second.empty())
+            {
+                StackPanel tagsCell;
+                tagsCell.Orientation(Orientation::Horizontal);
+                tagsCell.Spacing(2);
+                tagsCell.VerticalAlignment(VerticalAlignment::Center);
+                tagsCell.HorizontalAlignment(HorizontalAlignment::Left);
+                constexpr size_t kSessMaxTagRibbons = 6;
+                size_t shownRibbons = 0;
+                for (const auto& tg : tit->second)
+                {
+                    if (shownRibbons >= kSessMaxTagRibbons)
+                    {
+                        auto more = SessText(winrt::hstring{ L"+" + std::to_wstring(tit->second.size() - kSessMaxTagRibbons) }, 9, false, 0.6);
+                        more.VerticalAlignment(VerticalAlignment::Center);
+                        more.IsHitTestVisible(false);
+                        tagsCell.Children().Append(more);
+                        break;
+                    }
+                    winrt::Windows::UI::Xaml::Shapes::Polygon ribbon; // the tab badges' 6.5x9.3 bookmark shape
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
+                    ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
+                    ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tg, sessTagColors) });
+                    ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+                    ribbon.StrokeThickness(0.75);
+                    ribbon.VerticalAlignment(VerticalAlignment::Center);
+                    const winrt::hstring tagName{ tg };
+                    ribbon.PointerEntered([this, tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
+                        if (const auto el = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                        {
+                            _OnTagBadgeHoverBegin(tagName, el);
+                        }
+                    });
+                    ribbon.PointerExited([this](auto&&, auto&&) {
+                        _OnTagBadgeHoverEnd();
+                    });
+                    tagsCell.Children().Append(ribbon);
+                    ++shownRibbons;
+                }
+                Grid::SetColumn(tagsCell, 5);
+                g.Children().Append(tagsCell);
+            }
+
             auto created = SessText(winrt::hstring{ SessAgo(r.createdMs, now) }, 11, false, 0.6);
             created.HorizontalAlignment(HorizontalAlignment::Center);
             created.IsHitTestVisible(false);
-            Grid::SetColumn(created, 5);
+            Grid::SetColumn(created, 6);
             g.Children().Append(created);
 
             auto active = SessText(winrt::hstring{ SessAgo(r.lastActivityMs, now) }, 11, false, 0.75);
             active.HorizontalAlignment(HorizontalAlignment::Center);
             active.IsHitTestVisible(false);
-            Grid::SetColumn(active, 6);
+            Grid::SetColumn(active, 7);
             g.Children().Append(active);
 
             const std::wstring weight = std::to_wstring(r.msgs) + L"\x00B7" + std::to_wstring(r.tools);
             auto w = SessText(winrt::hstring{ weight }, 11, false, 0.6);
             w.HorizontalAlignment(HorizontalAlignment::Center);
             w.IsHitTestVisible(false);
-            Grid::SetColumn(w, 7);
+            Grid::SetColumn(w, 8);
             g.Children().Append(w);
 
-            // Ctx (col 8): the compact context-token count (the board's "ctx N" value, without the
+            // Ctx (col 9): the compact context-token count (the board's "ctx N" value, without the
             // prefix). Blank until an assistant turn carries usage (0), matching the board card. The
             // cell is clickthrough — the whole-row Border owns the one tooltip + click target.
             auto ctx = SessText(winrt::hstring{ r.contextTokens > 0 ? SessFormatTokens(r.contextTokens) : L"" }, 11, false, 0.6);
             ctx.HorizontalAlignment(HorizontalAlignment::Center);
             ctx.IsHitTestVisible(false);
-            Grid::SetColumn(ctx, 8);
+            Grid::SetColumn(ctx, 9);
             g.Children().Append(ctx);
 
-            // Hits (col 9): the content-match count — shown only when a content scope (👤/🤖) is active
+            // Hits (col 10): the content-match count — shown only when a content scope (👤/🤖) is active
             // (showHits), the only time the column is reserved + populated.
             if (showHits)
             {
@@ -1629,7 +1687,7 @@ namespace winrt::TerminalApp::implementation
                     auto h = SessText(winrt::hstring{ std::to_wstring(hit->second) }, 11, true, 0.9);
                     h.HorizontalAlignment(HorizontalAlignment::Center);
                     h.IsHitTestVisible(false);
-                    Grid::SetColumn(h, 9);
+                    Grid::SetColumn(h, 10);
                     g.Children().Append(h);
                 }
             }

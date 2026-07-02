@@ -745,19 +745,6 @@ namespace winrt::TerminalApp::implementation
     // name; applying an existing tag is always allowed.
     // ==================================================================================
 
-    // TU-local: a tag's DISPLAY color — the user-picked stored color (tag-colors.json, keyed by the
-    // folded name; `stored` = one LoadAllTagColors() the caller did) when present, else the stable
-    // name-hash (TagColorFor). The one resolution the spec producer + the panel/editor renderers share.
-    namespace
-    {
-        winrt::Windows::UI::Color TagDisplayColorFor(const std::wstring& name, const std::map<std::wstring, std::wstring>& stored)
-        {
-            const auto fallback = TagColorFor(name);
-            const auto it = stored.find(::Agentmaster::FoldTagName(name));
-            return it == stored.end() ? fallback : ParseArgbHexColor(it->second, fallback);
-        }
-    }
-
     // Low-level: write the session's tag list onto a tab's TabStatus as the '\n'-joined
     // "name\t#AARRGGBB" spec the header control renders from — the COLOR is resolved HERE, once
     // (user-picked > name-hash), so every spec consumer (badges, the rich tab tooltip) reads the
@@ -791,7 +778,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     spec += t;
                     spec.push_back(L'\t');
-                    spec += FormatArgbHexColor(TagDisplayColorFor(t, stored));
+                    spec += FormatArgbHexColor(ResolveTagDisplayColor(t, stored));
                 }
                 status.AgentTagsSpec(winrt::hstring{ spec });
             }
@@ -1213,7 +1200,7 @@ namespace winrt::TerminalApp::implementation
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
-            ribbon.Fill(SolidColorBrush{ TagDisplayColorFor(info.name, storedColors) });
+            ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(info.name, storedColors) });
             ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
             ribbon.VerticalAlignment(VerticalAlignment::Center);
@@ -1771,7 +1758,7 @@ namespace winrt::TerminalApp::implementation
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
-            ribbon.Fill(SolidColorBrush{ TagDisplayColorFor(tag, ::Agentmaster::LoadAllTagColors()) });
+            ribbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(tag, ::Agentmaster::LoadAllTagColors()) });
             ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
             ribbon.VerticalAlignment(VerticalAlignment::Center);

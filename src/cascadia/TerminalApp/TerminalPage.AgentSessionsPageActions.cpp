@@ -892,7 +892,9 @@ namespace winrt::TerminalApp::implementation
             chip.MinWidth(0);
             chip.MinHeight(0);
             chip.Padding(Thickness{ 10, 2, 10, 3 });
-            chip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 10, 10, 10, 10 }); // pill
+            // A gently-rounded RECTANGLE, not the earlier radius-10 pill/capsule (per request:
+            // less circle-ish) — matches the square-cornered filter toggles/buttons beside it.
+            chip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 4, 4, 4, 4 });
             chip.FontSize(12);
             chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
             // The requested look: a blue, PARTIALLY TRANSPARENT chip at rest. The checked state

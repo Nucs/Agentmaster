@@ -122,6 +122,37 @@ namespace winrt::TerminalApp::implementation
                 self->_PositionTagBadges();
             }
         });
+        // ... and on EVERY layout pass: a tab REORDER (or the strip re-laying out around a
+        // closed/opened sibling) MOVES this header without resizing it or its TabViewItem, which no
+        // SizeChanged sees — the popup-hosted badges would float at the stale spot. LayoutUpdated
+        // fires per tree-wide layout pass; the no-badges early-out + _PositionTagBadges' absolute-
+        // position change-gate keep it O(one transform compare) when nothing tag-related moved.
+        HeaderRootGrid().LayoutUpdated([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self = weakThis.get())
+            {
+                if (!self->_renderedTagsSpec.empty())
+                {
+                    self->_PositionTagBadges();
+                }
+            }
+        });
+        // A popup-root child isn't torn down with the tab's subtree — close it explicitly when this
+        // header unloads (tab closed / torn out; a re-parented header's next layout pass reopens it).
+        Unloaded([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self = weakThis.get())
+            {
+                try
+                {
+                    if (const auto popup = self->HeaderTagBookmarksPopup(); popup && popup.IsOpen())
+                    {
+                        popup.IsOpen(false);
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        });
 
         // We'll only process the KeyUp event if we received an initial KeyDown event first.
         // Avoids issue immediately closing the tab rename when we see the enter KeyUp event that was
@@ -329,19 +360,19 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-            // A classic bookmark ribbon: a 5x7 rectangle with a notch cut up into the bottom edge —
-            // pinned flush with the tab's bottom edge (_PositionTagBadges), notch pointing down.
+            // A classic bookmark ribbon: a 6.5x9.3 rectangle (the base 5x7 scaled ~33% up, per
+            // request) with a notch cut up into the bottom edge — positioned straddling the tab's
+            // bottom line (~30% above / ~70% hanging below it; _PositionTagBadges), notch down.
             winrt::Windows::UI::Xaml::Shapes::Polygon ribbon;
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 5.0f, 0.0f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 5.0f, 7.0f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 2.5f, 4.9f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 7.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
             ribbon.Fill(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ ParseArgbHexColor(hex, TagColorFor(name)) });
             ribbon.Stroke(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
-            // Hit-testable ON PURPOSE: the hover panel needs enter/leave. Presses still bubble to
-            // the TabViewItem (nothing here handles them), so tab click/drag are unaffected.
+            // Hit-testable ON PURPOSE: the hover panel needs enter/leave.
             const winrt::hstring tagName{ name };
             ribbon.PointerEntered([weakThis = get_weak(), tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
                 if (auto self = weakThis.get())
@@ -358,34 +389,58 @@ namespace winrt::TerminalApp::implementation
                     self->TagBadgeHoverEnd.raise();
                 }
             });
+            // Popup-hosted badges live in the popup root, so a press no longer bubbles to the
+            // TabViewItem — select the tab explicitly to keep click-on-badge == click-on-tab.
+            ribbon.Tapped([weakThis = get_weak()](auto&&, const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& e) {
+                if (auto self = weakThis.get())
+                {
+                    if (const auto tvi = self->_badgeTabViewItem.get())
+                    {
+                        e.Handled(true);
+                        tvi.IsSelected(true);
+                    }
+                }
+            });
             panel.Children().Append(ribbon);
             ++shown;
         }
         _PositionTagBadges();
     }
 
-    // Agentmaster (bookmark tags): pin the overlay badge row at (title's first character x, the
-    // TAB's bottom edge) — the "bookmark hanging out of the book" placement. The ribbons sit FLUSH
-    // with the hosting TabViewItem's bottom: below EVERY title line (the old 3/4-of-header-height
-    // anchor landed mid-text on a wrapped multi-line title), straddling the title block's bottom on
-    // a tight header. Flush rather than the literal 30%-in/70%-below overhang because pixels BELOW
-    // the tab rectangle can never render — the tab strip's ScrollViewer (TabViewListView) clips at
-    // its viewport, whose bottom coincides with the tab's bottom edge (the TabView is
-    // VerticalAlignment=Bottom and list items stretch), so an overhang would just be cut off;
-    // flush-bottom is the maximum "coming out" that stays visible. The host Canvas sits at the root
-    // grid's top-left with zero size (layout-neutral — badges never widen the tab), so
-    // Canvas.Left/Top position the row in grid coordinates. The tab bottom is resolved by walking up
-    // to the TabViewItem ancestor and transforming its height into grid space; its SizeChanged is
-    // hooked (re-hooked if the header ever re-parents — a tear-out) because the STRIP growing for
-    // ANOTHER tab's wrapped title resizes every equal-height TabViewItem without resizing THIS
-    // header's grid. The title x comes from a live transform (leading indicator icons shift it);
-    // pre-layout — or before the ancestor resolves — sensible fallbacks hold until the next
-    // SizeChanged re-pins (fallback x: just past the 18px status-dot slot).
+    // Agentmaster (bookmark tags): place the popup-hosted badge row at (title's first character x,
+    // straddling the TAB's bottom line — ~30% of each ribbon above it, ~70% OVERHANGING below) — the
+    // "bookmark sticking out of the book" placement. The overhang is only renderable because the row
+    // lives in a parented Popup: its child draws in the island's POPUP ROOT, outside the tab strip
+    // ScrollViewer's clip (whose viewport bottom IS the tab's bottom edge — in-tree pixels below it
+    // never render; the pre-popup flush-bottom placement was that constraint's ceiling). The tab
+    // bottom is resolved by walking up to the TabViewItem ancestor (fresh each pass — the weak ref
+    // only gates re-hooking its SizeChanged, which covers the STRIP growing for ANOTHER tab's
+    // wrapped title without this header resizing). Popup mechanics this must own:
+    //   - offsets are PARENT-relative (the header grid), so the same grid-space math applies; an
+    //     offset change while open repositions live;
+    //   - a PARENT MOVE (tab reorder / strip scroll) does NOT reliably re-place an open popup, so
+    //     when the grid's island-absolute position changed since the last apply, close+reopen;
+    //   - an unclipped popup would float over the caption buttons when its tab scrolls out of the
+    //     strip viewport — hide it when the row leaves the strip ScrollViewer's x-range (the
+    //     scroller's ViewChanged is hooked here, fresh-resolved like the TabViewItem).
+    // The title x comes from a live transform (leading indicator icons shift it); pre-layout — or
+    // before the ancestor resolves — sensible fallbacks hold until the next trigger re-pins
+    // (fallback x: just past the 18px status-dot slot).
     void TabHeaderControl::_PositionTagBadges()
     {
+        const auto popup = HeaderTagBookmarksPopup();
         const auto row = HeaderTagBookmarks();
-        if (!row)
+        if (!popup || !row)
         {
+            return;
+        }
+        // No badges -> nothing to show (the popup stays closed; _UpdateTagBadges re-runs us on change).
+        if (_renderedTagsSpec.empty() || row.Children().Size() == 0)
+        {
+            if (popup.IsOpen())
+            {
+                popup.IsOpen(false);
+            }
             return;
         }
         double x = 20.0; // fallback: just past the status-dot slot
@@ -400,14 +455,14 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
         }
-        constexpr double kBadgeHeight = 7.0; // the ribbon Polygon's height (_UpdateTagBadges)
+        constexpr double kBadgeHeight = 9.3; // the ribbon Polygon's height (_UpdateTagBadges)
         double top = 0.0;
         bool pinned = false;
         try
         {
             if (const auto grid = HeaderRootGrid())
             {
-                // Find the hosting TabViewItem — the visible tab rectangle whose bottom edge we pin to.
+                // Find the hosting TabViewItem — the visible tab rectangle whose bottom line we straddle.
                 winrt::Microsoft::UI::Xaml::Controls::TabViewItem tvi{ nullptr };
                 auto d = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(grid);
                 while (d && !tvi)
@@ -421,9 +476,9 @@ namespace winrt::TerminalApp::implementation
                 if (tvi && tvi.ActualHeight() > kBadgeHeight)
                 {
                     const auto bottom = tvi.TransformToVisual(grid).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, static_cast<float>(tvi.ActualHeight()) });
-                    // 1px inset above flush: at fractional DPI scales the floor'd flush position can
-                    // land the ribbon's last row past the strip's clip, shaving the notch tips.
-                    top = std::floor(bottom.Y - kBadgeHeight - 1.0);
+                    // The 30/70 straddle: the ribbon's top sits 30% of its height above the tab's
+                    // bottom line, the remaining ~70% hangs below it (unclipped — popup root).
+                    top = std::floor(bottom.Y - std::ceil(kBadgeHeight * 0.30));
                     pinned = top > 0.0;
                     if (pinned && _badgeTabViewItem.get() != tvi)
                     {
@@ -443,17 +498,90 @@ namespace winrt::TerminalApp::implementation
         }
         if (!pinned)
         {
-            // Pre-layout / ancestor not resolvable yet: straddle the header block's bottom (~2px in,
-            // the rest in the tab's lower padding) until a SizeChanged re-pins to the real tab bottom.
+            // Pre-layout / ancestor not resolvable yet: straddle the header block's bottom instead,
+            // until a SizeChanged/LayoutUpdated trigger re-pins to the real tab bottom.
             double h = HeaderRootGrid() ? HeaderRootGrid().ActualHeight() : 0.0;
             if (h <= 0)
             {
                 h = 22.0; // the dot wrap's height (the row's usual tallest child)
             }
-            top = std::floor(h - 2.0);
+            top = std::floor(h - std::ceil(kBadgeHeight * 0.30));
         }
-        winrt::Windows::UI::Xaml::Controls::Canvas::SetLeft(row, x);
-        winrt::Windows::UI::Xaml::Controls::Canvas::SetTop(row, top);
+
+        // Island-absolute position + strip-viewport visibility.
+        bool visible = true;
+        double absX = _badgeLastAbsX;
+        double absY = _badgeLastAbsY;
+        try
+        {
+            const auto grid = HeaderRootGrid();
+            const auto origin = grid.TransformToVisual(nullptr).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+            absX = origin.X;
+            absY = origin.Y;
+            // Resolve the tab strip's ScrollViewer (fresh — the weak ref only gates re-hooking) and
+            // hide the row when it leaves the viewport's x-range: the popup escapes the clip that
+            // would otherwise hide a scrolled-out tab's badges.
+            winrt::Windows::UI::Xaml::Controls::ScrollViewer sv{ nullptr };
+            auto d = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(grid);
+            while (d && !sv)
+            {
+                sv = d.try_as<winrt::Windows::UI::Xaml::Controls::ScrollViewer>();
+                if (!sv)
+                {
+                    d = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(d);
+                }
+            }
+            if (sv)
+            {
+                if (_badgeStripScroller.get() != sv)
+                {
+                    _badgeStripScroller = sv;
+                    _badgeSvViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+                        if (auto self = weakThis.get())
+                        {
+                            if (!self->_renderedTagsSpec.empty())
+                            {
+                                self->_PositionTagBadges();
+                            }
+                        }
+                    });
+                }
+                const auto svOrigin = sv.TransformToVisual(nullptr).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+                const double svLeft = svOrigin.X;
+                const double svRight = svOrigin.X + sv.ActualWidth();
+                const double rowLeft = absX + x;
+                const double rowWidth = std::max(12.0, row.ActualWidth()); // pre-arrange fallback
+                if (rowLeft + rowWidth < svLeft + 2.0 || rowLeft > svRight - 2.0)
+                {
+                    visible = false; // the tab is scrolled (mostly) out of the strip
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+
+        const bool parentMoved = std::abs(absX - _badgeLastAbsX) > 0.5 || std::abs(absY - _badgeLastAbsY) > 0.5;
+        _badgeLastAbsX = absX;
+        _badgeLastAbsY = absY;
+        if (!visible)
+        {
+            if (popup.IsOpen())
+            {
+                popup.IsOpen(false);
+            }
+            return;
+        }
+        if (popup.IsOpen() && parentMoved)
+        {
+            popup.IsOpen(false); // force the reopen below to re-evaluate the parent's new position
+        }
+        popup.HorizontalOffset(x);
+        popup.VerticalOffset(top);
+        if (!popup.IsOpen())
+        {
+            popup.IsOpen(true);
+        }
     }
 
     // Method Description:

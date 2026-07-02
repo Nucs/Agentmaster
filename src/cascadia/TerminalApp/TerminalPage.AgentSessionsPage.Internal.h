@@ -249,9 +249,11 @@ namespace winrt::TerminalApp::implementation
             return cut == std::wstring::npos ? std::wstring{} : projects.substr(0, cut) + L"\\history.jsonl";
         }
 
-        // The page's table columns (FAVORITES.md adds the leftmost ★ column, shifting the rest +1):
-        // 0=★ favorite · 1=color/live chip · 2=Title · 3=Directory · 4=Branch · 5=Created ·
-        // 6=Active · 7=Msgs·Tools · 8=Ctx (context tokens) · 9=Hits (populated while searching).
+        // The page's table columns (FAVORITES.md adds the leftmost ★ column; the bookmark-tags
+        // Tags column sits after Branch, shifting the time/count columns +1 again):
+        // 0=★ favorite · 1=color/live chip · 2=Title · 3=Directory · 4=Branch · 5=Tags (bookmark
+        // ribbons, hoverable) · 6=Created · 7=Active · 8=Msgs·Tools · 9=Ctx (context tokens) ·
+        // 10=Hits (populated while searching).
         void SessAddColumns(Grid& g, bool showHits)
         {
             const auto col = [&](double v, GridUnitType t) {
@@ -264,6 +266,7 @@ namespace winrt::TerminalApp::implementation
             col(2.2, GridUnitType::Star); // title
             col(1.6, GridUnitType::Star); // directory
             col(0.8, GridUnitType::Star); // branch
+            col(64, GridUnitType::Pixel); // tags (bookmark ribbons — ~6 fit; a "+N" marks overflow)
             col(58, GridUnitType::Pixel); // created
             col(58, GridUnitType::Pixel); // active
             col(74, GridUnitType::Pixel); // msgs·tools
