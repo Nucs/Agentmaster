@@ -222,6 +222,24 @@ namespace Agentmaster
     // firstUserPrompt).
     bool AccumulateTranscriptStats(const std::wstring& path, TranscriptStats& stats);
 
+    // ===== inferred working directory (tab color modes) ======================================
+    // Infer the directory a session ACTUALLY works in from its tool-touched paths — the files it
+    // read / edited / created (+ the dirs it searched): TranscriptStats::pathsAccessed, already a
+    // deduped per-file set (so one file edited 50 times votes once). Every path votes for its
+    // whole ancestor DIRECTORY chain (its leaf excluded — tool paths are mostly files), and the
+    // inferred dir is the DEEPEST directory holding a STRICT MAJORITY (>50%) of the votes: "the
+    // most common shared path, ranked+picked by occurrence". Ancestor counts are monotone
+    // (a parent's count >= a child's), so the majority set is a root-anchored chain and "deepest
+    // majority" is well-defined; requiring the majority is what keeps a stray one-off read (a
+    // ~/.claude settings file, a temp dir) from dragging the pick toward the drive root the way a
+    // plain longest-common-prefix would, while depth preference keeps it from settling on a
+    // too-shallow ancestor. Drive/UNC roots themselves never win (candidates start one segment
+    // below the root token); a count/depth tie breaks lexicographically (determinism). Paths are
+    // separator-normalized and compared by NormDirKey (case-insensitive on Windows, Rule #8); the
+    // returned spelling is the first-seen original. No majority anywhere (paths split across
+    // drives) or no usable paths => `fallbackDir` (the session's launch cwd). Pure.
+    std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths, const std::wstring& fallbackDir);
+
     // ===== cheap row facts: head + growing-tail windows, never a full read ===================
 
     // The browse-row essentials, extracted without reading the body: `created` from the FIRST

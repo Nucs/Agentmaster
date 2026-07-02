@@ -1315,7 +1315,18 @@ What works, by area:
   the right of `⚙ sent/total`), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
-  broadcast), and (TABS section) **`flashRingColor`** (the **Status flashing color** picker — a
+  broadcast), and (TABS section) **`tabColorMode`** (the **Tab coloring** dropdown — HOW managed tabs get
+  their color: **Shared per working directory** default [the classic Rule-#12 per-dir permanence] ·
+  **Individual per tab** [each session dealt + KEEPS its own color, persisted on the record —
+  `SessionInfo::tabColorHex`; a user pick recolors only that session, a reset re-deals next launch] ·
+  **Inferred working directory** [per-dir semantics keyed by the dir the session ACTUALLY works in —
+  `InferWorkingDirectory` over the transcript's tool-touched paths (deepest strict-majority ancestor,
+  stray-read-proof), re-detected mtime-gated + ~15s-throttled off the scanner tick
+  (`_ScanInferredTabColors`, sidecar-cached), cached persisted on `SessionInfo::inferredWorkingDir`];
+  GLOBAL, applied live on Save + cross-window broadcast via `_ReapplyManagedTabColors`; every color
+  read-surface — board title band, Sessions chip, pending-dots contrast — resolves through the shared
+  `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab), and (TABS section)
+  **`flashRingColor`** (the **Status flashing color** picker — a
   `muxc::ColorPicker` with its **alpha slider enabled**, so one control sets both the hue AND the
   **opacity** of the tab status-dot **"unread" flash ring**; stored `#AARRGGBB`, **default red at 80%
   opacity** `#CCFF0000`; GLOBAL, applied live on Save + cross-window broadcast via
@@ -2330,7 +2341,16 @@ build **binlog uploads as an artifact** to diagnose the first run.
     **increments** (` (fork 2)`, ` (fork 3)`, … — multi-digit, nested/earlier parens preserved) instead
     of stacking ` (fork) (fork)`. Don't reintroduce a separate tab title or scrape claude's OSC title
     for the name.
-12. **A tab's color is ONE value per working directory — PERMANENT.** Every Claude tab in a dir
+12. **A tab's color is ONE value per COLOR KEY — PERMANENT.** The key is per-`tabColorMode` (the
+    cog's **Tab coloring** dropdown): the **working dir** (default — the classic rule below, verbatim),
+    the **session itself** (`Individual` — the color persists on `SessionInfo::tabColorHex`, never in
+    the dir map, so Individual can't exhaust the folder palette; no fan-out), or the **inferred
+    working dir** (`InferredWorkingDirectory` — the SAME dir machinery keyed by
+    `SessionInfo::inferredWorkingDir` when known, else the cwd; `SessionColorKeyDir` is the one key
+    resolver, `ResolveSessionColorHex` the one read-side resolution every display surface shares).
+    Every paint routes through `_ApplySessionTabColor` (the mode dispatch); everything below is the
+    DEFAULT (dir-keyed) mode's contract, which the inferred mode inherits over its key. Every Claude
+    tab in a dir
     shares one color (filesystem-aware key `NormDirKey` — slash/case/trailing-normalized), and a dir
     **keeps the same color across tabs, windows, and restarts** (the user gets used to a folder's
     color). `dir-colors.json` (schema **v2**) is the single source of truth — the PERMANENT

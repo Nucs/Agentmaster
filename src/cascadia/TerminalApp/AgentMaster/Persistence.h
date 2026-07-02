@@ -39,6 +39,8 @@ namespace Agentmaster
     TabRenameCommitMode TabRenameCommitModeFromString(std::wstring_view s);
     std::wstring ToString(FavoriteIcon i);
     FavoriteIcon FavoriteIconFromString(std::wstring_view s);
+    std::wstring ToString(TabColorMode m);
+    TabColorMode TabColorModeFromString(std::wstring_view s);
 
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);
@@ -210,6 +212,31 @@ namespace Agentmaster
     // off-palette user picks are kept verbatim). Used by the v1->v2 migration.
     std::vector<std::pair<std::wstring, std::wstring>>
     DeCollideDirColors(const std::vector<std::pair<std::wstring, std::wstring>>& entries, uint64_t seed);
+    // Agentmaster (tab color modes — TabColorMode::Individual): deal a SESSION its own auto tab
+    // color. The same collision-avoiding chooser as a dir's (ChooseDirColor), keyed by the session
+    // id: the first color of the session's seeded probe order that no other LIVE session already
+    // wears (`liveSessionColors` = the (sessionId, "#RRGGBB") pairs of the OTHER open sessions,
+    // all windows), then — palette exhausted — the first color no open tab actively shows
+    // (`activeColors`), else the session's preferred color. NO disk write here: the caller
+    // persists the pick on the SessionInfo record (sessions.json, the per-session permanence),
+    // NOT dir-colors.json — the folder<->color map stays folders-only (Rule #12), so Individual
+    // mode can't exhaust the dir palette. Deterministic given the engine's color seed.
+    std::wstring ChooseSessionAutoColor(const std::wstring& sessionId,
+                                        const std::vector<std::pair<std::wstring, std::wstring>>& liveSessionColors,
+                                        const std::unordered_set<std::wstring>& activeColors);
+    // Agentmaster (tab color modes): the DIR that keys a session's color under `mode` — the
+    // grouping/fan-out key. InferredWorkingDirectory with a known inference => the inferred dir;
+    // everything else (incl. Individual, whose callers branch on the mode BEFORE any dir grouping)
+    // => the session's working dir. Callers NormDirKey it where a canonical key is needed. Pure.
+    std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s);
+    // Agentmaster (tab color modes): READ a session's tab color under `mode` — the one resolution
+    // every display surface shares (board title band, Sessions-page chip, pending-dots contrast),
+    // so a card/chip always matches what the tab actually wears. Individual => the session's own
+    // persisted tabColorHex (falling back to the dir-keyed color while none is dealt yet); dir
+    // modes => the key dir's persisted color, else its AutoDirColorHex preview (the existing
+    // board/chip precedence). Read-only — never deals/persists (the tab PAINT seams do that:
+    // AssignDirAutoColor / TerminalPage::_ApplySessionTabColor's Individual deal).
+    std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s);
     // One-time dir-colors.json upgrade (v1 -> v2): de-collide the persisted map (every folder keeps its
     // color where possible; duplicate palette colors are reassigned to free ones). Idempotent (version).
     void MigrateDirColorsToV2IfNeeded();

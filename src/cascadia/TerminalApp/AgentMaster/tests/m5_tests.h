@@ -142,6 +142,7 @@ void TestManagerLayout();
 void TestWindowRecord();
 void TestAppSettings();
 void TestTabNamingAndColor();
+void TestTabColorModes(); // tab color modes: enum/JSON round-trips + ChooseSessionAutoColor + SessionColorKeyDir/ResolveSessionColorHex
 // tests_transcript.cpp
 void TestTranscriptScan();
 void TestBlockedAndInterruptedStates();
@@ -150,6 +151,7 @@ void TestProcessInspectParse();
 void TestTranscriptResolve();
 void TestCodexObserve();
 void TestTranscriptStore();
+void TestInferWorkingDirectory(); // tab color modes: the pure inferred-workdir picker (majority-deepest over tool-touched paths)
 void TestConversationLineage();
 void TestSessionSearch();
 void TestProcessInspectLive();

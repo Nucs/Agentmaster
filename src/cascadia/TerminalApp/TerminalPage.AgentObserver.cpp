@@ -45,6 +45,7 @@
 #include "AgentMaster/ProfileBootstrap.h" // Profiles:: profile-aware state paths (engine)
 #include "AgentMaster/SessionRegistry.h"
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
+#include "AgentMaster/TranscriptStore.h" // Agentmaster (tab color modes): LoadOrRefreshSessionIndex + InferWorkingDirectory (the inferred-workdir scan)
 #include <winrt/Windows.UI.Xaml.Shapes.h> // Agentmaster (tab tooltip): the header state-dot Ellipse in the summary card
 
 #include <mmsystem.h> // PlaySoundW — the prompt-nav boundary sound (alt+up/down at the ends)
@@ -561,13 +562,13 @@ namespace winrt::TerminalApp::implementation
     // color on a dark effective background, the DARK one on a light one, so the dots are never invisible.
     // The background is the tab's CURRENT effective header background (Tab::CurrentEffectiveTabBackground),
     // which accounts for the selected/unselected light/dark shift (a deselected colored tab renders at 30%
-    // over the dark tab row); the session's per-dir color (Rule #12, the same precedence the board card
-    // uses) is the source/fallback. Shared by the per-tick scan and the focus-change refresh so both pick
-    // the same way. UI thread.
-    winrt::Windows::UI::Color TerminalPage::_PendingDotsColorForTab(const TerminalApp::Tab& tab, const std::wstring& workingDir)
+    // over the dark tab row); the session's MODE-AWARE tab color (ResolveSessionColorHex — the per-dir
+    // color in the default mode, the session's own color under Individual, the inferred dir's under
+    // InferredWorkingDirectory; the same precedence the board card uses) is the source/fallback. Shared
+    // by the per-tick scan and the focus-change refresh so both pick the same way. UI thread.
+    winrt::Windows::UI::Color TerminalPage::_PendingDotsColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info)
     {
-        const auto dirHex = ::Agentmaster::GetDirColor(workingDir);
-        const std::wstring hex = dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(workingDir);
+        const std::wstring hex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, info);
         const auto dirColor = ParseArgbHexColor(hex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x2E, 0x2E, 0x2E));
         const auto bg = winrt::get_self<Tab>(tab)->CurrentEffectiveTabBackground(dirColor);
         return PendingDotsColorFor(bg, _appSettings.pendingDotsLightColor, _appSettings.pendingDotsDarkColor);
@@ -605,7 +606,7 @@ namespace winrt::TerminalApp::implementation
             }
             if (hostTab)
             {
-                _SetTabPending(hostTab, true, _PendingDotsColorForTab(hostTab, info->workingDir));
+                _SetTabPending(hostTab, true, _PendingDotsColorForTab(hostTab, *info));
             }
         }
     }
@@ -2646,7 +2647,7 @@ namespace winrt::TerminalApp::implementation
                 _SetClaudeTabTextPinned(impl, winrt::hstring{ s->title }); // pinned: registry->tab, no write-back
             }
         }
-        _ApplyDirColorToTab(hostTab, cwd); // per-directory tab color
+        _ApplySessionTabColor(hostTab, id, cwd); // mode-aware tab color (per-dir / individual / inferred)
         _AttachClaudeOverlay(hostTab, id); // per-tab "link badge" overlay (TAB_OVERLAY.md)
         // Tab status dot: managed now — seed the strip dot from the session's current state (the
         // engine-init registry observer keeps it live from here on). A re-homed restored tab whose
@@ -2976,7 +2977,7 @@ namespace winrt::TerminalApp::implementation
                 std::optional<winrt::Windows::UI::Color> dotsColor;
                 if (hasPending)
                 {
-                    dotsColor = _PendingDotsColorForTab(hostTab, info->workingDir);
+                    dotsColor = _PendingDotsColorForTab(hostTab, *info);
                 }
                 _SetTabPending(hostTab, hasPending, dotsColor);
             }
@@ -3005,6 +3006,182 @@ namespace winrt::TerminalApp::implementation
                     }
                     ::Agentmaster::AppendStateLog(L"hooks.log", L"[pending] " + ::Agentmaster::ShortId(id) + L" draft (chars=" + std::to_wstring(effectiveDraft.size()) + L" cp: " + cp + L"): " + firstLine + L"\n");
                 }
+            }
+        }
+        co_return;
+    }
+
+    // Agentmaster (tab color modes — InferredWorkingDirectory): the inferred-workdir scan. While the
+    // GLOBAL tabColorMode is InferredWorkingDirectory, periodically re-infer each hosted Claude
+    // session's ACTUAL working directory from the paths its tool calls touch (files read / edited /
+    // created + searched dirs) and re-key its tab color when the inference changes — so a session
+    // launched at a repo root that settles into one subtree wears THAT subtree's color, and two
+    // sessions sharing a cwd but working in different areas become tellable apart.
+    //
+    // Cost discipline: scanner-ticked (~2s) but each session is throttled to one inference per
+    // kInferredScanThrottleMs AND gated on the transcript mtime actually GROWING; the paths come
+    // from the Sessions page's per-session SIDECAR index (LoadOrRefreshSessionIndex — (size,mtime)-
+    // keyed, resumed incrementally from the stored byte offset, so a steady tick reads only the
+    // appended suffix; keeping the sidecar warm also benefits the Sessions browser). File IO runs
+    // off-thread; registry/tab work returns to the UI thread. Codex is skipped (its rollout isn't
+    // path-parsed — the cwd keys its color, SessionColorKeyDir's fallback). The inference persists
+    // on the record (SessionInfo::inferredWorkingDir, sessions.json) so a reopened session wears
+    // its inferred color immediately; an inference that lands ON the cwd is stored EMPTY (pure
+    // fallback — the common just-launched case stays byte-unchanged on disk).
+    winrt::fire_and_forget TerminalPage::_ScanInferredTabColors()
+    {
+        // Agentmaster (terminate-net): contain any exception so this scanner-ticked lane can never
+        // std::terminate the app (the _SweepClaudeLiveness idiom).
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _ScanInferredTabColorsImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _ScanInferredTabColors: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_ScanInferredTabColorsImpl()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (_appSettings.tabColorMode != ::Agentmaster::TabColorMode::InferredWorkingDirectory || !_sessionRegistry || _claudeTabs.empty())
+        {
+            co_return; // scan only in the inferred mode (the state map idles empty otherwise)
+        }
+        constexpr int64_t kInferredScanThrottleMs = 15000; // per-session floor between inferences (~15s latency is plenty for a color)
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+
+        // Prune scan state whose session left this window (closed / re-homed / moved out).
+        for (auto it = _inferredColorScan.begin(); it != _inferredColorScan.end();)
+        {
+            it = (_claudeTabs.find(it->first) == _claudeTabs.end()) ? _inferredColorScan.erase(it) : std::next(it);
+        }
+
+        // Collect the DUE candidates on the UI thread (registry + maps), then hop off for the IO.
+        struct InferCand
+        {
+            std::wstring id;
+            std::wstring workingDir;
+            std::wstring path;
+            int64_t lastMtimeMs{};
+        };
+        std::vector<InferCand> due;
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            if (!weakTab.get())
+            {
+                continue;
+            }
+            const auto info = _sessionRegistry->Get(id);
+            if (!info || !info->live || info->kind != ::Agentmaster::AgentKind::Claude)
+            {
+                continue; // Codex rollouts aren't path-parsed — its color keys on the cwd
+            }
+            auto& st = _inferredColorScan[id];
+            if (st.nextRunMs > now)
+            {
+                continue; // throttled
+            }
+            if (st.transcriptPath.empty())
+            {
+                st.transcriptPath = ::Agentmaster::ResolveClaudeTranscriptPath(id); // globbed once, cached
+                if (st.transcriptPath.empty())
+                {
+                    st.nextRunMs = now + kInferredScanThrottleMs; // no transcript yet (never prompted) — retry later
+                    continue;
+                }
+            }
+            due.push_back({ id, info->workingDir, st.transcriptPath, st.lastMtimeMs });
+        }
+        if (due.empty())
+        {
+            co_return;
+        }
+
+        co_await winrt::resume_background();
+        struct InferResult
+        {
+            std::wstring id;
+            std::wstring inferred; // the raw inference (== workingDir for the fallback case)
+            std::wstring workingDir;
+            int64_t mtimeMs{};
+            bool ran{}; // false == the transcript was quiet (mtime unchanged) — just refresh the throttle
+        };
+        std::vector<InferResult> results;
+        results.reserve(due.size());
+        for (const auto& c : due)
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!::GetFileAttributesExW(c.path.c_str(), GetFileExInfoStandard, &fad) || (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                continue; // vanished mid-scan — the liveness/re-home lanes own that story
+            }
+            // FILETIME -> Unix ms, matching TranscriptStore's own conversion so the TranscriptRef's
+            // (size, mtime) key agrees byte-for-byte with the sidecar the Sessions page writes.
+            const auto toUnixMs = [](const FILETIME& ft) -> int64_t {
+                ULARGE_INTEGER u{};
+                u.HighPart = ft.dwHighDateTime;
+                u.LowPart = ft.dwLowDateTime;
+                if (u.QuadPart < 116444736000000000ULL)
+                {
+                    return 0;
+                }
+                return static_cast<int64_t>((u.QuadPart - 116444736000000000ULL) / 10000ULL);
+            };
+            const int64_t mtimeMs = toUnixMs(fad.ftLastWriteTime);
+            if (mtimeMs == c.lastMtimeMs)
+            {
+                results.push_back({ c.id, std::wstring{}, c.workingDir, mtimeMs, false });
+                continue; // quiet transcript — nothing new to infer from
+            }
+            ::Agentmaster::TranscriptRef ref;
+            ref.sessionId = c.id;
+            ref.path = c.path;
+            ref.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | static_cast<int64_t>(fad.nFileSizeLow);
+            ref.mtimeMs = mtimeMs;
+            ref.birthMs = toUnixMs(fad.ftCreationTime);
+            const auto entry = ::Agentmaster::LoadOrRefreshSessionIndex(ref); // sidecar-cached; reads only the appended suffix
+            const std::wstring inferred = entry.valid ? ::Agentmaster::InferWorkingDirectory(entry.stats.pathsAccessed, c.workingDir) : c.workingDir;
+            results.push_back({ c.id, inferred, c.workingDir, mtimeMs, true });
+        }
+
+        co_await wil::resume_foreground(Dispatcher());
+        const int64_t after = static_cast<int64_t>(::GetTickCount64());
+        for (const auto& r : results)
+        {
+            auto& st = _inferredColorScan[r.id];
+            st.lastMtimeMs = r.mtimeMs;
+            st.nextRunMs = after + kInferredScanThrottleMs;
+            if (!r.ran)
+            {
+                continue;
+            }
+            const auto info = _sessionRegistry->Get(r.id);
+            if (!info || !info->live)
+            {
+                continue; // archived/re-homed while we were off-thread
+            }
+            // An inference that lands ON the cwd is stored EMPTY: SessionColorKeyDir then falls back
+            // to workingDir naturally, and the common case never dirties sessions.json.
+            const std::wstring store = (::Agentmaster::NormDirKey(r.inferred) == ::Agentmaster::NormDirKey(r.workingDir)) ? std::wstring{} : r.inferred;
+            if (info->inferredWorkingDir == store)
+            {
+                continue; // settled — no churn (the usual steady-state outcome)
+            }
+            _sessionRegistry->Update(r.id, [&store](::Agentmaster::SessionInfo& s) { s.inferredWorkingDir = store; });
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[infer-dir] " + ::Agentmaster::ShortId(r.id) + L" -> " + (store.empty() ? (L"(cwd) " + r.workingDir) : store) + L"\n");
+            TerminalApp::Tab tab{ nullptr };
+            if (const auto it = _claudeTabs.find(r.id); it != _claudeTabs.end())
+            {
+                tab = it->second.get();
+            }
+            if (tab)
+            {
+                _ApplySessionTabColor(tab, r.id, r.workingDir); // re-key the paint onto the new inferred dir
             }
         }
         co_return;

@@ -63,11 +63,13 @@ int wmain()
     TestWindowRecord();
     TestAppSettings();
     TestTabNamingAndColor();
+    TestTabColorModes();
     TestProcessInspectTree();
     TestProcessInspectParse();
     TestTranscriptResolve();
     TestCodexObserve();
     TestTranscriptStore();
+    TestInferWorkingDirectory();
     TestConversationLineage();
     TestSessionSearch();
     TestProcessInspectLive();

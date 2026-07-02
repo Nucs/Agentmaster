@@ -438,8 +438,9 @@ namespace winrt::TerminalApp::implementation
             {
                 _SetClaudeTabTextPinned(impl, winrt::hstring{ ttl }); // pinned: registry->tab, no write-back
             }
-            // Per-directory tab color: the dir's persisted color, or a stable auto-assigned one.
-            _ApplyDirColorToTab(tab, dir);
+            // Tab color (mode-aware): per-dir (default, the dir's persisted/auto color), per-session
+            // (Individual), or per-inferred-dir — the one paint seam (_ApplySessionTabColor).
+            _ApplySessionTabColor(tab, spec.sessionId, dir);
             // Per-tab "link badge" overlay (TAB_OVERLAY.md): top-right status HUD for this session.
             _AttachClaudeOverlay(tab, spec.sessionId);
             // Tab status dot: seed the strip dot from the (just-upserted) session's state — Idle
@@ -1112,7 +1113,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _SetClaudeTabTextPinned(impl, winrt::hstring{ ttl }); // pinned: registry->tab, no write-back
             }
-            _ApplyDirColorToTab(tab, dir);
+            _ApplySessionTabColor(tab, handleId, dir); // mode-aware tab color (per-dir / individual / inferred)
             _AttachClaudeOverlay(tab, handleId); // the per-tab badge (status color from the record's state)
             if (const auto s = _sessionRegistry->Get(handleId))
             {
@@ -1862,6 +1863,9 @@ namespace winrt::TerminalApp::implementation
         {
             // The currently-open dirs (across all windows — the registry is process-wide) whose colors
             // an auto pick must avoid. Archived (non-live) sessions don't show, so they don't count.
+            // Mode-aware key (tab color modes): under InferredWorkingDirectory an open session "shows"
+            // its INFERRED dir's color, so that is the key the avoid-set must carry (SessionColorKeyDir
+            // == plain workingDir in the default mode — byte-identical to the prior behavior).
             std::vector<std::wstring> openDirKeys;
             if (_sessionRegistry)
             {
@@ -1869,7 +1873,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (s.live)
                     {
-                        openDirKeys.push_back(::Agentmaster::NormDirKey(s.workingDir));
+                        openDirKeys.push_back(::Agentmaster::NormDirKey(::Agentmaster::SessionColorKeyDir(_appSettings.tabColorMode, s)));
                     }
                 }
             }
@@ -1884,8 +1888,117 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (tab color modes): THE mode-aware paint seam — every managed-tab launch / restore /
+    // bind routes through here instead of calling _ApplyDirColorToTab directly, so the ONE global
+    // AppSettings::tabColorMode decides how the tab is colored:
+    //   * WorkingDirectory (default) — the classic Rule-#12 per-dir paint, verbatim.
+    //   * InferredWorkingDirectory — the same per-dir machinery, but KEYED by the session's inferred
+    //     working dir once one exists (SessionColorKeyDir; until then the launch cwd — identical to
+    //     the default mode, so a fresh session never flashes an interim color).
+    //   * Individual — the session's OWN persisted color (SessionInfo::tabColorHex); a session with
+    //     none yet is DEALT one collision-free against the other OPEN sessions' colors
+    //     (ChooseSessionAutoColor) and the pick is persisted on the record FIRST (registry Update ->
+    //     sessions.json autosave) so the synchronous _OnClaudeTabColorChanged re-entry the paint
+    //     triggers sees it already stored and no-ops (the same settle-immediately contract the dir
+    //     paint has vs GetDirColor).
+    // Never called for the Manager tab (its color is per-window, in the WindowRecord).
+    void TerminalPage::_ApplySessionTabColor(const TerminalApp::Tab& tab, const std::wstring& sessionId, const std::wstring& dir)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        const auto mode = _appSettings.tabColorMode;
+        if (mode == ::Agentmaster::TabColorMode::Individual && _sessionRegistry)
+        {
+            const auto info = _sessionRegistry->Get(sessionId);
+            std::wstring hex = info ? info->tabColorHex : std::wstring{};
+            if (hex.empty())
+            {
+                // Deal this session its own color: avoid every color another OPEN session already
+                // wears (both as "assigned" and as "actively shown" — for sessions the two sets
+                // coincide, unlike folders, where closed dirs keep palette slots).
+                std::vector<std::pair<std::wstring, std::wstring>> liveColors;
+                std::unordered_set<std::wstring> activeColors;
+                for (const auto& s : _sessionRegistry->Snapshot())
+                {
+                    if (s.live && s.id != sessionId && !s.tabColorHex.empty())
+                    {
+                        liveColors.emplace_back(s.id, s.tabColorHex);
+                        activeColors.insert(s.tabColorHex);
+                    }
+                }
+                hex = ::Agentmaster::ChooseSessionAutoColor(sessionId, liveColors, activeColors);
+                // Persist BEFORE painting: SetRuntimeTabColor synchronously re-enters
+                // _OnClaudeTabColorChanged, whose Individual branch compares against the stored
+                // tabColorHex — already equal, so it settles without a spurious "user pick" write.
+                _sessionRegistry->Update(sessionId, [&hex](::Agentmaster::SessionInfo& s) { s.tabColorHex = hex; });
+            }
+            if (const auto color = ClaudeHexToColor(hex))
+            {
+                if (const auto impl = _GetTabImpl(tab))
+                {
+                    impl->SetRuntimeTabColor(*color);
+                }
+            }
+            return;
+        }
+        // Dir-keyed modes: the classic paint, keyed by the mode's dir (cwd, or the inferred dir).
+        std::wstring keyDir = dir;
+        if (mode == ::Agentmaster::TabColorMode::InferredWorkingDirectory && _sessionRegistry)
+        {
+            if (const auto info = _sessionRegistry->Get(sessionId); info && !info->inferredWorkingDir.empty())
+            {
+                keyDir = info->inferredWorkingDir;
+            }
+        }
+        _ApplyDirColorToTab(tab, keyDir);
+    }
+
+    // Agentmaster (tab color modes): repaint every managed tab THIS window hosts per the CURRENT
+    // AppSettings::tabColorMode — the live-apply half of the cog's "Tab coloring" dropdown (called
+    // from the settings Save handler + _ApplyBroadcastSettings, so a mode change recolors every
+    // window's tabs immediately, the _RefreshFlashRingBrush idiom). Each paint settles: the mode's
+    // color is already persisted (or is dealt+persisted first), so the synchronous
+    // _OnClaudeTabColorChanged re-entries all no-op. Board cards / Sessions chips re-resolve on
+    // their own next rebuild (ApplyExternalSettings ends in _Refresh()).
+    void TerminalPage::_ReapplyManagedTabColors()
+    {
+        if (!_sessionRegistry || _claudeTabs.empty())
+        {
+            return;
+        }
+        std::vector<std::wstring> ids;
+        ids.reserve(_claudeTabs.size());
+        for (const auto& [id, weakTab] : _claudeTabs)
+        {
+            ids.push_back(id);
+        }
+        for (const auto& id : ids)
+        {
+            const auto info = _sessionRegistry->Get(id);
+            if (!info)
+            {
+                continue;
+            }
+            TerminalApp::Tab tab{ nullptr };
+            if (const auto it = _claudeTabs.find(id); it != _claudeTabs.end())
+            {
+                tab = it->second.get();
+            }
+            if (tab)
+            {
+                _ApplySessionTabColor(tab, id, info->workingDir);
+            }
+        }
+    }
+
     // Agentmaster: recolor every live Claude tab whose session shares `dir` (filesystem-aware match)
     // to `colorHex`, or reset them when nullopt. Fans a user's color change across the directory.
+    // Mode-aware (tab color modes): a session matches by its color-KEY dir — the plain workingDir in
+    // the default mode (byte-identical to before), the INFERRED dir under InferredWorkingDirectory —
+    // so a user pick fans out to exactly the tabs that genuinely share the picked color's key. Never
+    // called in Individual mode (its _OnClaudeTabColorChanged branch has no fan-out).
     void TerminalPage::_ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex)
     {
         if (!_sessionRegistry)
@@ -1901,7 +2014,7 @@ namespace winrt::TerminalApp::implementation
         for (const auto& [sid, weakTab] : _claudeTabs)
         {
             const auto info = _sessionRegistry->Get(sid);
-            if (!info || ::Agentmaster::NormDirKey(info->workingDir) != key)
+            if (!info || ::Agentmaster::NormDirKey(::Agentmaster::SessionColorKeyDir(_appSettings.tabColorMode, *info)) != key)
             {
                 continue;
             }
@@ -1954,7 +2067,6 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        const std::wstring dir = info->workingDir;
 
         std::optional<std::wstring> newHex;
         if (const auto impl = _GetTabImpl(tab))
@@ -1964,12 +2076,33 @@ namespace winrt::TerminalApp::implementation
                 newHex = ClaudeColorToHex(*c);
             }
         }
+        // Tab color modes — Individual: the pick belongs to THIS session alone. Persist it on the
+        // session record (sessions.json via the registry autosave) and fan out to NOTHING; a reset
+        // (nullopt) clears the stored color so the next launch deals a fresh one (the per-session
+        // analog of SetDirColor's drop-on-reset). The equality guard makes our OWN paints no-ops —
+        // _ApplySessionTabColor persists the deal BEFORE painting — so only a genuine user pick lands.
+        if (_appSettings.tabColorMode == ::Agentmaster::TabColorMode::Individual)
+        {
+            const std::wstring stored = info->tabColorHex;
+            const std::wstring picked = newHex ? *newHex : std::wstring{};
+            if (stored == picked)
+            {
+                return; // already this session's persisted color (our paint / a settled pick) -> no loop
+            }
+            _sessionRegistry->Update(id, [&picked](::Agentmaster::SessionInfo& s) { s.tabColorHex = picked; });
+            _ScheduleWindowRecordSave(); // M10: the per-tab color rides in the window record
+            return;
+        }
+        // Dir-keyed modes: color is ONE value per KEY dir — the working dir (default), or the
+        // session's inferred dir under InferredWorkingDirectory (SessionColorKeyDir) — persisted in
+        // dir-colors.json and fanned out to every live tab sharing that key.
+        const std::wstring dir = ::Agentmaster::SessionColorKeyDir(_appSettings.tabColorMode, *info);
         if (::Agentmaster::GetDirColor(dir) == newHex)
         {
             return; // already the dir's persisted color (our auto paint / user-pick fan-out / reset) -> no loop
         }
         ::Agentmaster::SetDirColor(dir, newHex); // upsert the color, or drop it on reset
-        _ApplyDirColorToTabs(dir, newHex); // every live tab in this dir tracks the change
+        _ApplyDirColorToTabs(dir, newHex); // every live tab sharing this color key tracks the change
         _ScheduleWindowRecordSave(); // M10: the per-tab color rides in the window record
     }
 }

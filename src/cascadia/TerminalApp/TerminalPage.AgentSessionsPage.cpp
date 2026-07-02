@@ -1381,12 +1381,23 @@ namespace winrt::TerminalApp::implementation
             const auto reg = _sessionRegistry ? _sessionRegistry->Get(r.id) : std::nullopt;
             const bool live = reg && reg->live;
             const auto* pres = presenceFor(r.id);
-            // The per-dir color (the same color the session's tab + the chip wear): its persisted
-            // dir-colors.json entry, else the deterministic auto color. Drives BOTH the live chip
-            // below AND the colored underline under the title, so a row reads its folder identity
-            // the way its terminal tab does.
-            const auto dirHex = ::Agentmaster::GetDirColor(r.dir);
-            const auto dirColor = SessHexToColor(dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(r.dir));
+            // The session's TAB color (the same color its tab + the chip wear): mode-aware for a
+            // session the registry knows (ResolveSessionColorHex — individual / inferred), else the
+            // row dir's persisted dir-colors.json entry / deterministic auto color (the classic
+            // per-dir precedence, and the only thing an unknown on-disk session can key on). Drives
+            // BOTH the live chip below AND the colored underline under the title, so a row reads
+            // its group identity the way its terminal tab does.
+            std::wstring chipHex;
+            if (reg && _appSettings.tabColorMode != ::Agentmaster::TabColorMode::WorkingDirectory)
+            {
+                chipHex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, *reg);
+            }
+            else
+            {
+                const auto dirHex = ::Agentmaster::GetDirColor(r.dir);
+                chipHex = dirHex ? *dirHex : ::Agentmaster::AutoDirColorHex(r.dir);
+            }
+            const auto dirColor = SessHexToColor(chipHex);
 
             // ★ favorite (col 0, FAVORITES.md): hollow ☆ normally, filled yellow ★ when favorited.
             // This cell stays HIT-TESTABLE (the other cells are made clickthrough below) so a click

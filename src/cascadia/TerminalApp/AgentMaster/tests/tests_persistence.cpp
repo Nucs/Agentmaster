@@ -61,6 +61,8 @@ void TestPersistence()
         s.lastMessageWasQuestion = true; // PERSISTED (Rule #16): the question-guard must survive a crash so a queued prompt can't auto-answer it on reopen
         s.external = true; // adopted session: must survive the round-trip
         s.forkParentId = L"src-conv-7"; // a never-messaged fork remembers its source across restart (PERSISTED)
+        s.tabColorHex = L"#61AFEF"; // tab color modes (Individual): the session's own color survives close/restore (PERSISTED)
+        s.inferredWorkingDir = L"K:/api/src/deep"; // tab color modes (Inferred): the inferred-workdir cache survives restart (PERSISTED)
         QueuedPrompt a;
         a.id = L"p1";
         a.label = L"add tests";
@@ -93,6 +95,8 @@ void TestPersistence()
             CHECK(r.lastMessageWasQuestion, "question-guard flag preserved (PERSISTED: a crash mustn't drop the guard and auto-answer a pending question)");
             CHECK(r.external, "external flag preserved");
             CHECK(r.forkParentId == L"src-conv-7", "forkParentId preserved (PERSISTED: restores a never-messaged fork)");
+            CHECK(r.tabColorHex == L"#61AFEF", "tabColorHex preserved (PERSISTED: an Individual-mode session keeps ITS color across restore)");
+            CHECK(r.inferredWorkingDir == L"K:/api/src/deep", "inferredWorkingDir preserved (PERSISTED: a reopened session wears its inferred color immediately)");
             CHECK(r.queue.size() == 2, "queue size");
             CHECK(r.queue.size() == 2 && r.queue[0].status == PromptStatus::Sent && r.queue[0].sentAtUnixMs == 999, "Sent status preserved (no replay)");
             CHECK(r.queue.size() == 2 && r.queue[0].origin == PromptOrigin::Typed && r.queue[1].origin == PromptOrigin::Autorun, "prompt origin preserved (Typed vs Flight)");
@@ -113,7 +117,8 @@ void TestPersistence()
         cx.codexSessionId = L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a"; // the codex resume uuid
         SessionInfo claudeDefault;
         claudeDefault.id = L"claude-1";
-        const auto back = DeserializeSessions(SerializeSessions({ cx, claudeDefault }));
+        const auto text = SerializeSessions({ cx, claudeDefault });
+        const auto back = DeserializeSessions(text);
         CHECK(back.size() == 2, "codex+claude sessions round-trip count");
         if (back.size() == 2)
         {
@@ -121,7 +126,13 @@ void TestPersistence()
             CHECK(back[0].codexSessionId == L"019ec0c7-a4e3-7c73-8c57-9f83ecb1903a", "codex resume uuid (codexSessionId) preserved");
             CHECK(back[1].kind == AgentKind::Claude && back[1].codexSessionId.empty(), "default session is Claude with no codex uuid");
             CHECK(back[0].forkParentId.empty() && back[1].forkParentId.empty(), "a non-fork session carries no forkParentId (key omitted when empty)");
+            CHECK(back[0].tabColorHex.empty() && back[1].tabColorHex.empty() && back[0].inferredWorkingDir.empty() && back[1].inferredWorkingDir.empty(),
+                  "default sessions carry no tab-color-mode fields");
         }
+        // Tab color modes: both new keys are OMITTED when empty, so a pre-feature sessions.json is
+        // byte-unchanged (the forkParentId/codexSessionId omission contract).
+        CHECK(text.find(L"tabColorHex") == std::wstring::npos && text.find(L"inferredWorkingDir") == std::wstring::npos,
+              "empty tabColorHex/inferredWorkingDir keys omitted from the serialized document");
     }
 
     // Templates: capture-from-queue resets ids/status; apply assigns fresh ids + Pending.
@@ -339,6 +350,7 @@ void TestAppSettings()
         in.confirmBeforeKill = false;
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
+        in.tabColorMode = TabColorMode::Individual; // non-default (default is WorkingDirectory) — tab color modes
         in.flashRingColor = L"#8000FF00"; // non-default (default #CCFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
         in.pendingDotsLightColor = L"#FF112233"; // non-default (default #FFE0A92B) — pending "3 dots" shown on a DARK tab/card bg
         in.pendingDotsDarkColor = L"#FF445566"; // non-default (default #FF5A3E00) — pending "3 dots" shown on a LIGHT tab/card bg
@@ -369,6 +381,7 @@ void TestAppSettings()
         CHECK(out.confirmBeforeKill == false, "settings confirmBeforeKill round-trip");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
+        CHECK(out.tabColorMode == TabColorMode::Individual, "settings tabColorMode round-trip");
         CHECK(out.flashRingColor == L"#8000FF00", "settings flashRingColor round-trip");
         CHECK(out.pendingDotsLightColor == L"#FF112233", "settings pendingDotsLightColor round-trip");
         CHECK(out.pendingDotsDarkColor == L"#FF445566", "settings pendingDotsDarkColor round-trip");
@@ -406,6 +419,7 @@ void TestAppSettings()
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
+        CHECK(out.tabColorMode == TabColorMode::WorkingDirectory, "settings tabColorMode default (shared per working dir) on empty");
         CHECK(out.flashRingColor == L"#CCFF0000", "settings flashRingColor default (80% red) on empty");
         CHECK(out.pendingDotsLightColor == L"#FFE0A92B", "settings pendingDotsLightColor default (gold, on dark) on empty");
         CHECK(out.pendingDotsDarkColor == L"#FF5A3E00", "settings pendingDotsDarkColor default (amber, on light) on empty");
@@ -462,6 +476,19 @@ void TestAppSettings()
         CHECK(star.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon 'star' honored");
         const auto bad = DeserializeAppSettings(L"{\"settings\":{\"favoriteIcon\":\"bogus\"}}");
         CHECK(bad.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon unknown -> default (Crown)");
+    }
+
+    // tabColorMode (tab color modes): each token parses to its mode; an unknown/absent token falls
+    // back to WorkingDirectory (the prior shared-per-dir behavior).
+    {
+        const auto wd = DeserializeAppSettings(L"{\"settings\":{\"tabColorMode\":\"workingDirectory\"}}");
+        CHECK(wd.tabColorMode == TabColorMode::WorkingDirectory, "settings tabColorMode 'workingDirectory' honored");
+        const auto ind = DeserializeAppSettings(L"{\"settings\":{\"tabColorMode\":\"individual\"}}");
+        CHECK(ind.tabColorMode == TabColorMode::Individual, "settings tabColorMode 'individual' honored");
+        const auto inf = DeserializeAppSettings(L"{\"settings\":{\"tabColorMode\":\"inferredWorkingDirectory\"}}");
+        CHECK(inf.tabColorMode == TabColorMode::InferredWorkingDirectory, "settings tabColorMode 'inferredWorkingDirectory' honored");
+        const auto bad = DeserializeAppSettings(L"{\"settings\":{\"tabColorMode\":\"bogus\"}}");
+        CHECK(bad.tabColorMode == TabColorMode::WorkingDirectory, "settings tabColorMode unknown -> default (shared per working dir)");
     }
 
     // A present subset is honored; the rest keep defaults.
@@ -653,3 +680,86 @@ void TestTabNamingAndColor()
     CHECK(DeserializeDirColors(L"not json").empty(), "garbage dir-colors -> empty");
 }
 
+
+void TestTabColorModes()
+{
+    std::wprintf(L"[tab color modes]\n");
+
+    // --- enum <-> string round-trip + unknown-token fallback ---
+    CHECK(TabColorModeFromString(ToString(TabColorMode::WorkingDirectory)) == TabColorMode::WorkingDirectory, "tabColorMode workingDirectory round-trip");
+    CHECK(TabColorModeFromString(ToString(TabColorMode::Individual)) == TabColorMode::Individual, "tabColorMode individual round-trip");
+    CHECK(TabColorModeFromString(ToString(TabColorMode::InferredWorkingDirectory)) == TabColorMode::InferredWorkingDirectory, "tabColorMode inferredWorkingDirectory round-trip");
+    CHECK(TabColorModeFromString(L"nonsense") == TabColorMode::WorkingDirectory, "tabColorMode unknown token -> WorkingDirectory (the prior behavior)");
+
+    // --- SessionColorKeyDir: which dir KEYS a session's color under each mode ---
+    {
+        SessionInfo s;
+        s.id = L"sid-key";
+        s.workingDir = L"K:\\repo";
+        CHECK(SessionColorKeyDir(TabColorMode::WorkingDirectory, s) == L"K:\\repo", "key dir: default mode -> the working dir");
+        CHECK(SessionColorKeyDir(TabColorMode::InferredWorkingDirectory, s) == L"K:\\repo", "key dir: inferred mode with NO inference yet -> the working dir (no interim color flip)");
+        s.inferredWorkingDir = L"K:\\repo\\src\\area";
+        CHECK(SessionColorKeyDir(TabColorMode::InferredWorkingDirectory, s) == L"K:\\repo\\src\\area", "key dir: inferred mode with an inference -> the inferred dir");
+        CHECK(SessionColorKeyDir(TabColorMode::WorkingDirectory, s) == L"K:\\repo", "key dir: default mode IGNORES a stored inference (mode switch keeps dir semantics)");
+        CHECK(SessionColorKeyDir(TabColorMode::Individual, s) == L"K:\\repo", "key dir: individual mode returns the working dir (callers branch on the mode before grouping)");
+    }
+
+    // --- ResolveSessionColorHex: the one read-side resolution every display surface shares ---
+    {
+        SeedDirColors(0xA11CE5EEull); // deterministic probe orders (no disk write — the seed is in-memory)
+        SessionInfo s;
+        s.id = L"sid-resolve";
+        s.workingDir = L"K:\\repo";
+        s.tabColorHex = L"#ABCDEF";
+        CHECK(ResolveSessionColorHex(TabColorMode::Individual, s) == L"#ABCDEF", "resolve: Individual -> the session's own persisted color");
+        // Dir modes always resolve SOME "#RRGGBB" (persisted dir color, else the AutoDirColorHex
+        // preview) — the exact hue depends on this machine's dir-colors.json, so shape-check only.
+        const auto wd = ResolveSessionColorHex(TabColorMode::WorkingDirectory, s);
+        CHECK(wd.size() == 7 && wd[0] == L'#', "resolve: WorkingDirectory -> a #RRGGBB (persisted or auto preview)");
+        SessionInfo bare = s;
+        bare.tabColorHex.clear();
+        const auto fallback = ResolveSessionColorHex(TabColorMode::Individual, bare);
+        CHECK(fallback.size() == 7 && fallback[0] == L'#', "resolve: Individual with NO dealt color falls back to the dir-keyed precedence");
+        CHECK(fallback == wd, "resolve: the Individual fallback IS the dir-keyed color (matches the tab until the first deal)");
+    }
+
+    // --- ChooseSessionAutoColor: the per-SESSION deal (Individual mode) ---
+    {
+        SeedDirColors(0xA11CE5EEull); // the session deal shares the dir-color seed
+        using Pairs = std::vector<std::pair<std::wstring, std::wstring>>;
+
+        // Deterministic: the same session id + the same live set -> the same color.
+        const auto c1 = ChooseSessionAutoColor(L"11111111-aaaa-bbbb-cccc-000000000001", {}, {});
+        CHECK(c1.size() == 7 && c1[0] == L'#', "session deal yields a #RRGGBB palette color");
+        CHECK(c1 == ChooseSessionAutoColor(L"11111111-aaaa-bbbb-cccc-000000000001", {}, {}), "session deal deterministic");
+
+        // Collision avoidance: dealing palette-many sessions in turn (each fed back as live) yields
+        // all-DISTINCT colors — no two open tabs share a color while palette colors remain.
+        const size_t n = 14; // == kAutoPalette size in Persistence.cpp
+        Pairs live;
+        std::unordered_set<std::wstring> active;
+        std::unordered_set<std::wstring> seen;
+        bool distinct = true;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const std::wstring sid = L"22222222-aaaa-bbbb-cccc-0000000000" + std::to_wstring(10 + i);
+            const auto c = ChooseSessionAutoColor(sid, live, active);
+            live.emplace_back(sid, c);
+            active.insert(c);
+            if (!seen.insert(c).second)
+            {
+                distinct = false;
+            }
+        }
+        CHECK(distinct && seen.size() == n, "palette-many OPEN sessions get distinct colors (collision-free)");
+
+        // Palette exhausted: the deal resets + reuses but still avoids actively-shown colors when any
+        // slack remains; with EVERY color active, reuse is unavoidable but stays a palette color.
+        const auto forced = ChooseSessionAutoColor(L"33333333-aaaa-bbbb-cccc-000000000001", live, active);
+        CHECK(forced.size() == 7 && forced[0] == L'#', "session deal all-active fallback is still a palette color");
+        std::unordered_set<std::wstring> nearlyAll = active;
+        nearlyAll.erase(c1); // free exactly one color
+        const auto slack = ChooseSessionAutoColor(L"44444444-aaaa-bbbb-cccc-000000000001", live, nearlyAll);
+        CHECK(slack == c1, "session deal exhausted-reset picks the one color no open tab is showing");
+    }
+}
