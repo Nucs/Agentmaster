@@ -439,7 +439,43 @@ namespace winrt::TerminalApp::implementation
     // The title x comes from a live transform (leading indicator icons shift it); pre-layout — or
     // before the ancestor resolves — sensible fallbacks hold until the next trigger re-pins
     // (fallback x: just past the 18px status-dot slot).
+    //
+    // CYCLE SAFETY — this is a SCHEDULER, not the work. Every trigger is layout-driven
+    // (SizeChanged / LayoutUpdated / ViewChanged / a PropertyChanged inside a layout pass), and
+    // mutating the popup (offsets / IsOpen) SYNCHRONOUSLY from inside a layout pass re-invalidates
+    // layout, which re-enters the same pass: mid-pass geometry reads (a settling tab strip) shift
+    // between iterations, so the "unchanged" gates never latch and XAML's cycle detector fail-fasts
+    // with E_LAYOUTCYCLE 0x88000FA8 — the SECOND 0xC000027B crash (dumps 2026-07-02 13:32 + 13:50:
+    // stowed backtraces show HorizontalOffset writes from the LayoutUpdated hook, ~250 iterations).
+    // The same trap _ApplyRenamerMaxWidth's comment documents. So triggers only COALESCE-SCHEDULE
+    // (_badgeReposQueued) and the mutation runs in _PositionTagBadgesNow on a CLEAN dispatcher tick,
+    // after layout settles: reads are stable there, a mutation starts a fresh pass whose
+    // LayoutUpdated merely schedules one more check that no-ops on the unchanged gates — settled,
+    // no synchronous feedback, no cycle.
     void TabHeaderControl::_PositionTagBadges()
+    {
+        if (_badgeReposQueued)
+        {
+            return; // a check is already scheduled — triggers coalesce
+        }
+        _badgeReposQueued = true;
+        try
+        {
+            Dispatcher().RunAsync(winrt::Windows::UI::Core::CoreDispatcherPriority::Normal, [weakThis = get_weak()]() {
+                if (auto self = weakThis.get())
+                {
+                    self->_badgeReposQueued = false;
+                    self->_PositionTagBadgesNow();
+                }
+            });
+        }
+        catch (...)
+        {
+            _badgeReposQueued = false; // no dispatcher (teardown) — drop the request
+        }
+    }
+
+    void TabHeaderControl::_PositionTagBadgesNow()
     {
         const auto popup = HeaderTagBookmarksPopup();
         const auto row = HeaderTagBookmarks();

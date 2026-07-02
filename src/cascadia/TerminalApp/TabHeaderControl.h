@@ -75,9 +75,15 @@ namespace winrt::TerminalApp::implementation
         // reorder, strip scroll) — close+reopens when the header's absolute position changed since
         // the last apply (offset changes alone reposition live). Triggers: every badge rebuild, the
         // root grid's SizeChanged, the TabViewItem's SizeChanged (the strip growing for ANOTHER
-        // tab's wrapped title), the strip ScrollViewer's ViewChanged (scrolls), and LayoutUpdated
-        // (reorders — change-gated, cheap early-out when no badges).
-        void _PositionTagBadges();
+        // tab's wrapped title), the strip ScrollViewer's ViewChanged (scrolls), LayoutUpdated
+        // (reorders), and Loaded (a restored tab's badges are asserted pre-tree; the open is gated
+        // on rootedness). CYCLE SAFETY: _PositionTagBadges only SCHEDULES (coalesced,
+        // _badgeReposQueued) — every trigger is layout-driven, and mutating the popup synchronously
+        // inside a layout pass is the E_LAYOUTCYCLE fail-fast (the 2026-07-02 13:32/13:50 dumps);
+        // _PositionTagBadgesNow does the actual reads + gated mutations on a clean dispatcher tick.
+        void _PositionTagBadges(); // the coalescing scheduler — safe from ANY trigger
+        void _PositionTagBadgesNow(); // the deferred work: resolve geometry, place, show/hide (clean tick only)
+        bool _badgeReposQueued{ false }; // a reposition tick is pending — triggers coalesce onto it
         winrt::hstring _renderedTagsSpec;
         // The TabViewItem ancestor the badges are pinned to + its SizeChanged hook, and the tab
         // strip's ScrollViewer + its ViewChanged hook (both re-resolved fresh each position pass —
