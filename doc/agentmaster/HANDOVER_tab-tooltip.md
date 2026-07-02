@@ -6,12 +6,16 @@
 > feature) with each root cause and the fix that shipped for it. If you touch the tab tooltip, read
 > the **Crash history** and **Invariants** sections FIRST.
 
-Author's note: this WAS the single most crash-prone surface in the fork — six distinct crashes, all on a
-hand-rolled **manual-open** path (fast-open/dismiss timers + driving `IsOpen` + a cross-tab cooldown) under
-XAML Islands. As of **2026-07-01** that path is **removed**: the rich tooltip is now **framework-managed**
-(§4) — `ToolTipService` owns open/close, the SAME lifetime model as the plain default tab tooltip that
-never crashed. The manual-open history (§9) is kept because it explains WHY the design is what it is and
-what NOT to reintroduce; the comments in the code remain load-bearing.
+Author's note: this WAS the single most crash-prone surface in the fork — seven distinct crashes. The
+resolution came in TWO parts (§9): **(1)** 2026-07-01 — the hand-rolled **manual-open** path (fast-open/
+dismiss timers + driving `IsOpen` + a cross-tab cooldown) was removed; the rich tooltip is now
+**framework-managed** (§4), the SAME lifetime model as the plain default tab tooltip. That killed the
+use-after-free class. **(2)** 2026-07-02 — a full-memory dump's decoded stowed backtrace (crash #7, the
+first PROVEN stow stack) showed the `0xC000027B` fail-fasts originate in the **card content's
+`ScrollViewer`** (DirectManipulation activation on popup-open), independent of who drives open/close — so
+the ScrollViewer was removed too (line truncation + a clipping Grid). The history (§9) is kept because it
+explains WHY the design is what it is and what NOT to reintroduce; the comments in the code remain
+load-bearing.
 
 ---
 
@@ -217,7 +221,11 @@ tooltip code off the UI thread.
     11, dim `#B0B0B0`, ellipsized).
   - **State line** (Cascadia Mono 11, colored `accent`): `<state> · <ago> · <why> · ⚠ unread`.
   - **Meta line** (Cascadia Mono 11, dim): `claude|codex · model · effort · <mode/⚡ bypass>`.
-  - **Divider** (full-width 1px `Border`) + a **ScrollViewer** (MaxHeight 360) hosting the Summary body.
+  - **Divider** (full-width 1px `Border`) + the Summary body, **line-truncated** (`kTtBodyMaxLines` 32 +
+    a dim `"… +K more (see the summary panel)"` marker) inside a plain **`Grid` with MaxHeight 360**
+    (UWP layout-clips overflow). **Deliberately NOT a ScrollViewer** — a ScrollViewer entering the ToolTip
+    popup activates DirectManipulation, which fail-fasted the app (crash #7, §9); and the tooltip is
+    hit-test-invisible, so it could never scroll anyway.
 - `TtBuildSummaryBody(text)` → a `StackPanel` of Cascadia Mono `TextBlock`s; the sentinel line
   `\x1F` becomes a full-width `Border` rule (the same convention the overlay's summary panel uses).
   The text is the `RenderSessionSummaryBox(..., full=false)` output (numbered messages + files; no
@@ -297,35 +305,54 @@ build box.
 | 3 | `be1d63b7f` | (potential) `std::terminate` | any throw from the off-thread Summary load | `_EnsureTabTooltipSummary` `fire_and_forget` had no exception containment | inner (bg) + outer (terminate-net) try/catch |
 | 4 | `6601c7532` | `0xC0000005` **READ freed** (`Rcx=0xDDDD…`) in put_Content, from the sweep · AND `0xC0000409` CFG (`subcode 0xA`) in put_IsOpen, from the open-tick | owner recycled, then the tab **reloaded** | the reused `_agentToolTip` was kept after the peer was torn down → **zombie** reuse (owner-guard didn't help: the owner had recovered) | on close-for-unload, **detach + null** `_agentToolTip` (don't keep the zombie) |
 | 5 | `1d1edbe18` | `0xC0000005` **READ freed** (`Rax=0xDDDD…`) in put_IsOpen, from the open-tick | **rapid tab↔tab tooltip swapping** (no unload) | reusing ONE object across an open/close cycle: `IsOpen(false)` starts async teardown, a rapid re-hover's `IsOpen(true)` races it | **create-fresh-on-open + drop-on-close** — never reuse across a close (all close paths → `_ForceCloseAgentToolTip`; the open-tick recreates) |
-| 6 | `9c026822d` | `0xC000027B` stowed fail-fast in a **render/composition pass** (GPU driver on the stack), deferred/off-stack, **zero of our frames** | jumping the cursor between the focused tab and a just-activated (dormant) tab | **cross-tab** race: opening B's fresh tooltip while A's popup is still in async teardown → two agent popups collide in one render pass | **cross-tab reopen cooldown** (`g_lastAgentToolTipCloseTick`, 150ms) — defer B's open until A's teardown drains |
+| 6 | `9c026822d` | `0xC000027B` stowed fail-fast in a **render/composition pass** (GPU driver on the stack), deferred/off-stack, **zero of our frames** | jumping the cursor between the focused tab and a just-activated (dormant) tab | **cross-tab** race: opening B's fresh tooltip while A's popup is still in async teardown → two agent popups collide in one render pass — *attribution now SUPERSEDED: see #7* | **cross-tab reopen cooldown** (`g_lastAgentToolTipCloseTick`, 150ms) — defer B's open until A's teardown drains — *insufficient (a 20:00 build with it crashed at 20:02)* |
+| 7 | this change | `0xC000027B`, **PROVEN via a full-memory dump's decoded `STOWED_EXCEPTION` backtrace** (the first crash with the actual stow stack) | hovering a tab ~14s after stepping through restored tabs — on the **framework-managed rewrite binary** | `DirectUI::ToolTipService::OpenAutomaticToolTip` → `ToolTip::OpenPopup` → the card's content tree **Enter** walk → **the Summary body's `ScrollViewer`** → `ScrollViewer::OnManipulatabilityAffectingPropertyChanged` → `CDirectManipulationService::ActivateDirectManipulationManager` = **E_INVALIDARG** → stowed → fail-fast. NOT an open/close race at all — the CARD CONTENT was the poison | **remove the `ScrollViewer` from `TtBuildTooltipCard`** (a hit-test-invisible tooltip could never scroll — it was dead weight): line-truncate the body (`kTtBodyMaxLines` 32 + a dim "+K more" marker) inside a plain `MaxHeight(360)` `Grid` (UWP layout-clips overflow; a Grid has no manipulation machinery) |
 
-**Patterns to internalize:**
-- Every crash reduces to *"a method (`IsOpen`/`Content`) reached a torn-down / racing ToolTip peer."*
-  The `0xDDDD…` register value is the MSVC debug-CRT freed-block fill — a dead giveaway of
-  use-after-free; look for it in the faulting registers (`dumpexc`).
-- The fixes progressed: guard the call → guard the owner → drop the zombie on unload → never reuse
-  across close → serialize across tabs. Each closed a specific window; the *class* is the manual-open
-  reused-ToolTip pattern under Islands.
-- **`try/catch` is not a fix here.** Two of the six (2 and 6) fire in a deferred pass off our stack;
-  fail-fasts and AVs aren't caught by `catch(...)` under `/EHsc` anyway. The real fixes are all
-  *structural* (never leave a bad popup for a later pass to touch).
+**Patterns to internalize (REVISED after #7's full-dump proof):**
+- The saga had **TWO distinct crash classes**, not one:
+  - **Real use-after-frees (#4, #5)** — `0xDDDD…` registers (MSVC debug-CRT freed fill) prove a method
+    reached a torn-down ToolTip peer. The manual-path hardening (detach+drop, create-fresh) was genuinely
+    needed for these, and the framework-managed rewrite deletes the whole class.
+  - **Stowed-exception fail-fasts (#1, #6, #7 + three unanalyzed overnight crashes)** — for six crashes we
+    could only see `ProcessUnhandledError → RaiseFailFastException` (deferred, off-stack, zero of our
+    frames) and attributed them to open/close races by repro correlation. #7's full dump finally decoded
+    the stowed backtrace: the fatal error originates in **DirectManipulation activation for the card's
+    `ScrollViewer` during the popup-open Enter walk** — `E_INVALIDARG`, plausibly state-dependent on the
+    island's input-site state (which is why "a tab I just activated without entering" correlated). #1/#6
+    can't be re-proven (their WER dumps are partial — no heap, no stow structs) but match this shape.
+- **A ToolTip's content is part of its crash surface.** The open/close mechanics were only half the story;
+  what the popup's Enter walk touches (manipulation, input sites) can fail-fast all by itself. Keep
+  tooltip content INERT: text, shapes, panels — no ScrollViewer, no manipulation-capable element.
+- **`try/catch` is not a fix here.** Fail-fasts and AVs aren't caught by `catch(...)` under `/EHsc`, and
+  several fire in a deferred pass off our stack. The real fixes are all *structural*.
+- **Chronic tolerated stows are noise, not the killer.** Both Debug and Release layouts have 34 missing
+  PRI `Path` assets (ProfileIcons etc. — `0x80070003` stows on tab-header render); they appear in the
+  stowed-history array of any fail-fast dump. Check each stow's **nested-blob FILETIME** to find the one
+  that matches the crash instant — that's the fatal one; earlier timestamps are residue.
 
-**RESOLUTION (2026-07-01) — the manual-open path was RETIRED.** After crash #6, rather than adding a 7th
-point-patch to a fundamentally racy design (#6's cooldown was only MODERATE confidence — a deferred,
-off-stack fail-fast can be *shrunk* but not provably eliminated by a 150ms serialize), the whole
-manual-open machinery was **removed** and the rich tooltip made **framework-managed** — the §12
-"recommended fallback", now the shipping design (§4). Deleted: the fast-open one-shot timer, the 8s
-auto-dismiss backstop, the three pointer-loss close handlers, `PointerMoved` keep-alive/re-open,
-`_SafeSetAgentToolTipOpen` (manual `IsOpen`), `_ForceCloseAgentToolTip`, `_ArmAgentToolTipDismiss`, and the
-`g_lastAgentToolTipCloseTick` cross-tab cooldown. Kept: the rich card content (unchanged — the whole
-TerminalPage/`Tt*` side is untouched), the ONE reused `ToolTip`, the owner-loaded guard, the closed-only
-`Content` swap, and a single `Unloaded → _DetachAgentToolTip` handler (the crash #4 defense, minus the
-manual bits). `ToolTipService` now owns open/close. **Tradeoff:** opens at the system hover delay (~0.5–1s;
-no `InitialShowDelay` in this SDK) instead of ~1/3 of it, and the old "sticky tooltip under Islands"
-annoyance *may* reappear in edge cases — **both cosmetic, not crashes**. Every crash class in the table
-above is closed by construction (no manual `IsOpen` → no #1/#5/#6; framework closes on exit/recycle → no
-#2; `Unloaded`-detach → no #4; nets stay → no #3). If a NEW crash somehow appears on this framework path
-(the same path the default tooltip uses), the remaining escape hatch is the §12 **off-switch**.
+**RESOLUTION, part 1 (2026-07-01) — the manual-open path was RETIRED.** After crash #6, rather than adding
+a 7th point-patch to a fundamentally racy design, the whole manual-open machinery was **removed** and the
+rich tooltip made **framework-managed** — the §12 "recommended fallback", now the shipping design (§4).
+Deleted: the fast-open one-shot timer, the 8s auto-dismiss backstop, the three pointer-loss close handlers,
+`PointerMoved` keep-alive/re-open, `_SafeSetAgentToolTipOpen` (manual `IsOpen`), `_ForceCloseAgentToolTip`,
+`_ArmAgentToolTipDismiss`, and the `g_lastAgentToolTipCloseTick` cross-tab cooldown. Kept: the rich card
+content, the ONE reused `ToolTip`, the owner-loaded guard, the closed-only `Content` swap, and a single
+`Unloaded → _DetachAgentToolTip` handler. `ToolTipService` now owns open/close. **Tradeoff:** opens at the
+system hover delay (~0.5–1s; no `InitialShowDelay` in this SDK), and the old "sticky tooltip" annoyance may
+occasionally reappear — both cosmetic. This closes the UAF class (#2/#4/#5) by construction.
+
+**RESOLUTION, part 2 (2026-07-02) — the rewrite alone was NOT enough; the card's `ScrollViewer` was the
+fail-fast.** The 21:57 build containing the rewrite crashed `0xC000027B` three more times overnight (22:21,
+05:22, 05:37). A procdump watcher captured the 05:37 one as a **full-memory dump**, whose decoded
+`STOWED_EXCEPTION` backtrace (crash #7 above) proved the fatal chain runs through the **framework's own
+`OpenAutomaticToolTip`** into the card content's `ScrollViewer` DirectManipulation activation —
+`E_INVALIDARG`, independent of who drives open/close (so the manual-path era's stowed crashes #1/#6 were
+plausibly this all along). The fix removed the `ScrollViewer` from `TtBuildTooltipCard` (line-truncation +
+a plain clipping `Grid` instead — §6); the tooltip is hit-test-invisible, so the ScrollViewer was never
+scrollable and nothing was lost. **Both parts stand:** part 1 killed the UAF class and simplified the
+lifecycle; part 2 killed the stowed-fail-fast class at its proven origin. If a NEW crash somehow appears,
+decode its stow stack FIRST (§11 — full dump + `STOWED_EXCEPTION` + the MS symbol server); the remaining
+escape hatch is the §12 **off-switch**.
 
 ---
 
@@ -349,6 +376,11 @@ above is closed by construction (no manual `IsOpen` → no #1/#5/#6; framework c
 6. **Keep it framework-managed — do not "speed it up" back into manual open.** The slower system-hover
    open is the deliberate price of the default tooltip's crash-free lifetime. If it must be faster, that
    is a framework/SDK concern (there is no `InitialShowDelay` here), not a reason to hand-drive `IsOpen`.
+6a. **NO ScrollViewer — no manipulation-capable element — inside ToolTip content. Ever.** The popup-open
+   Enter walk activates a ScrollViewer's DirectManipulation, which can fail `E_INVALIDARG` under XAML
+   Islands → stowed → `0xC000027B` fail-fast (crash #7, the only PROVEN stow stack of the saga). Tooltip
+   content must be inert: TextBlocks, panels, shapes, Borders. Height is capped by line truncation + a
+   plain `MaxHeight` Grid. This applies to ANY future popup-hosted content we build, not just this card.
 7. **`fire_and_forget`s must contain exceptions.** `_EnsureTabTooltipSummary` (and the 5 observer
    lanes) must keep their terminate-nets. An escaping exception = `std::terminate`.
 8. **Builders return FRESH element trees.** Never cache/share a XAML element as `Content` across
@@ -384,19 +416,46 @@ pass?). A histogram dominated by `Windows.UI.Xaml`/`Microsoft.UI.Xaml`/`CoreMess
 **Crash-vs-fix timeline check (critical):** always compare the crashed `TerminalApp.dll` build time
 (WER gives the faulting path; `ls` the DLL) against the fix commit time. Several times a crash was on
 a binary that PREDATED the relevant fix (moot), and once (crash #6) it POSTDATED it (proving the fix
-insufficient). Don't diagnose without this check.
+insufficient). Don't diagnose without this check. The dump itself carries both halves: `MiscInfoStream`
+→ **ProcessCreateTime** (which on-disk binary the process loaded) and the module list's **TimeDateStamp**
+(the exact link time of the loaded DLL) — `stowed2`/`dumpstowed` print them.
+
+**The `0xC000027B` breakthrough (crash #7) — decode the STOWED stack; stop guessing.** A stowed fail-fast's
+`ExceptionInformation[0]` points at an array of `STOWED_EXCEPTION_INFORMATION_V2*` (`[1]` = count). Each
+carries the nested HRESULT **and the ORIGINAL backtrace captured at stow time** — the exact framework call
+chain the six earlier crashes never revealed. Requirements + gotchas:
+- **A FULL-memory dump** (the stow structs live in heap; WER's default ~30 MB dumps drop them). Capture
+  with a `procdump -ma -e` watcher armed BEFORE the crash (the `fulldumps/` recipe): attaching procdump
+  does NOT cause the fail-fasts (two of the overnight crashes happened with no debugger attached).
+- **The signature is a multi-char constant**: `'SE01'/'SE02'` = `0x53453031/32` stores little-endian as
+  bytes `31/32 30 45 53` — check BOTH byte orders (`tools/dumpstowed.cpp`'s original check missed this and
+  could never match; the fixed decoder is the scratchpad `stowed2.cpp`).
+- **The tid bitfield is `(tid | form)`, not `(tid << 2 | form)`** — Windows TIDs are multiples of 4, so
+  `tid = bits & ~3`. All of #7's stows were on the window's own UI thread.
+- Each stow's **nested "XAML"-typed blob** (`NestedExceptionType == 0x4C4D4158`) starts with a **FILETIME**
+  — the stow instant. Match it against the crash time to find the FATAL stow; earlier ones are tolerated
+  residue (e.g. the chronic missing-asset `0x80070003`s).
+- **Symbolize the WUX frames via the MS symbol server**: copy `symsrv.dll` (VS Remote Debugger x64 dir) +
+  `dbghelp.dll` (System32) NEXT TO the decoder exe, pass
+  `srv*<cache>*https://msdl.microsoft.com/download/symbols;<our-pdb-dir>` as the symbol path. Without
+  names, an Enter-walk recursion and a DManip activation are unreadable module+offset noise.
+- When `StackWalkEx` dies at `RaiseFailFastException` (partial dumps), the scratchpad `scanstack.cpp`
+  (unwind-free symbolized stack scan, dbghelp+symsrv) still recovers the shape — e.g. it showed the old
+  crashes' `ProcessUnhandledError` envelopes.
 
 ---
 
 ## 12. Design history + the remaining escape hatch
 
-**IMPLEMENTED (2026-07-01) — framework-managed rich tooltip.** This was the "recommended fallback" and is
-now the shipping design (see §4, §9 RESOLUTION): the rich card content is unchanged, but `ToolTipService`
+**IMPLEMENTED (2026-07-01, + the 2026-07-02 content fix) — framework-managed rich tooltip.** This was the
+"recommended fallback" and is now the shipping design (see §4, §9 RESOLUTION parts 1+2): `ToolTipService`
 owns open/close — the manual `IsOpen` driving, the open/dismiss timers, the pointer-loss handlers, and the
-cross-tab cooldown are gone. It is the SAME lifetime mechanism as the plain default tooltip, which has
-NEVER crashed. Cost: opens at the system hover delay (~0.5–1s, no `InitialShowDelay` in this SDK) instead
-of instantly, and the "sticky tooltip under Islands" annoyance may occasionally return (both cosmetic).
-Content refresh sets `_agentToolTip.Content(newCard)` only when `!_agentToolTip.IsOpen()`.
+cross-tab cooldown are gone — and the card content lost its `ScrollViewer` (the proven crash-#7 fail-fast;
+line truncation + a clipping Grid instead). It is the SAME lifetime mechanism as the plain default tooltip,
+which has NEVER crashed, with content that is now inert (no manipulation-capable elements). Cost: opens at
+the system hover delay (~0.5–1s, no `InitialShowDelay` in this SDK) instead of instantly, and the "sticky
+tooltip under Islands" annoyance may occasionally return (both cosmetic). Content refresh sets
+`_agentToolTip.Content(newCard)` only when `!_agentToolTip.IsOpen()`.
 
 **Remaining escape hatch — off-switch.** If a NEW crash somehow appears on this framework path (unlikely —
 it is the default tooltip's own path), do NOT hand-drive `IsOpen` again. Add a setting to disable the rich

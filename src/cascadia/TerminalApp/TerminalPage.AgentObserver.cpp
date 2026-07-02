@@ -262,8 +262,18 @@ namespace
     // Build the whole tab-tooltip card: a dark, rounded Border (summary-panel chrome) holding the header
     // (state dot + title on the left, folder/branch on the right), a state line (colored to match the tab
     // dot), a dim kind/model/effort/perm line, and -- once the Summary body has loaded -- a divider + the
-    // numbered Summary box, height-capped by a ScrollViewer so a long conversation can't make a
-    // screen-tall tooltip (the full, scrollable view is the pencil-toggled summary panel).
+    // numbered Summary box, height-capped by LINE TRUNCATION + a plain clipping Grid (the full, scrollable
+    // view is the pencil-toggled summary panel).
+    //
+    // NO ScrollViewer -- this is a hard rule, learned from a proven fail-fast (2026-07-02, full-dump stowed
+    // backtrace): when the ToolTip popup opens, its content tree ENTERs the live tree, and a ScrollViewer's
+    // enter walk activates DirectManipulation (ScrollViewer::OnManipulatabilityAffectingPropertyChanged ->
+    // CInputServices::UpdateDirectManipulationManagerActivation -> CDirectManipulationService::
+    // ActivateDirectManipulationManager), which under XAML Islands can fail E_INVALIDARG -> a stowed
+    // exception -> the 0xC000027B fail-fast that repeatedly crashed the app (see
+    // doc/agentmaster/HANDOVER_tab-tooltip.md crash #7). The ScrollViewer was dead weight anyway: the
+    // tooltip is IsHitTestVisible(false), so it could NEVER be scrolled -- content past the height cap was
+    // already unreachable. Truncating the text loses nothing and removes the DManip surface entirely.
     winrt::Windows::UI::Xaml::Controls::Border TtBuildTooltipCard(winrt::Windows::UI::Color accent,
                                                                   const std::wstring& title,
                                                                   const std::wstring& folderBranch,
@@ -358,13 +368,51 @@ namespace
             rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
             col.Children().Append(rule);
 
-            ScrollViewer sv;
-            sv.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
-            sv.VerticalScrollMode(ScrollMode::Auto);
-            sv.HorizontalScrollBarVisibility(ScrollBarVisibility::Disabled);
-            sv.MaxHeight(360);
-            sv.Content(TtBuildSummaryBody(std::wstring{ bodyText }));
-            col.Children().Append(sv);
+            // Truncate the body to a sane line count (bounds the XAML element count AND the typical
+            // height; the old ScrollViewer's 360px cap made anything past ~24 rows invisible anyway).
+            constexpr size_t kTtBodyMaxLines = 32;
+            std::wstring bodyStr{ bodyText };
+            size_t hiddenLines = 0;
+            {
+                size_t lines = 0, cutAt = std::wstring::npos;
+                for (size_t p = 0; p < bodyStr.size(); ++p)
+                {
+                    if (bodyStr[p] == L'\n' && ++lines == kTtBodyMaxLines)
+                    {
+                        cutAt = p;
+                        break;
+                    }
+                }
+                if (cutAt != std::wstring::npos)
+                {
+                    for (size_t p = cutAt + 1; p < bodyStr.size(); ++p)
+                    {
+                        hiddenLines += (bodyStr[p] == L'\n');
+                    }
+                    ++hiddenLines; // the partial last segment counts too
+                    bodyStr.resize(cutAt);
+                }
+            }
+
+            // A plain Grid as the height cap: UWP layout-clips a child arranged smaller than it wants, so
+            // pathological wrapping still can't make a screen-tall tooltip -- WITHOUT a ScrollViewer (whose
+            // DirectManipulation activation on popup-enter is the proven 0xC000027B fail-fast; see the
+            // function comment). A Grid carries no manipulation machinery.
+            Grid bodyClip;
+            bodyClip.MaxHeight(360);
+            bodyClip.Children().Append(TtBuildSummaryBody(bodyStr));
+            col.Children().Append(bodyClip);
+
+            if (hiddenLines > 0)
+            {
+                TextBlock more;
+                more.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+                more.FontSize(10);
+                more.Foreground(TtFill(0xFF, 0x8A, 0x8A, 0x8A));
+                more.Margin(ThicknessHelper::FromLengths(0, 2, 0, 0));
+                more.Text(winrt::hstring{ L"\x2026 +" + std::to_wstring(hiddenLines) + L" more (see the summary panel)" });
+                col.Children().Append(more);
+            }
         }
 
         Border root;
