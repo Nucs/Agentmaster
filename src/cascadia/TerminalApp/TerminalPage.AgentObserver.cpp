@@ -4329,6 +4329,7 @@ namespace winrt::TerminalApp::implementation
         struct InferCand
         {
             std::wstring id;
+            std::wstring scanSid; // whose transcript/SIDECAR backs the accumulate: the session's own id, or its fork SOURCE (below)
             std::wstring workingDir;
             std::wstring path;
             int64_t lastMtimeMs{};
@@ -4350,16 +4351,39 @@ namespace winrt::TerminalApp::implementation
             {
                 continue; // throttled
             }
-            if (st.transcriptPath.empty())
+            std::wstring scanPath = st.transcriptPath;
+            std::wstring scanSid = id;
+            if (scanPath.empty())
             {
-                st.transcriptPath = ::Agentmaster::ResolveClaudeTranscriptPath(id); // globbed once, cached
-                if (st.transcriptPath.empty())
+                scanPath = ::Agentmaster::ResolveClaudeTranscriptPath(id); // globbed while missing, cached once found
+                if (!scanPath.empty())
                 {
-                    st.nextRunMs = now + kInferredScanThrottleMs; // no transcript yet (never prompted) — retry later
+                    st.transcriptPath = scanPath; // the session's own transcript exists now (its first turn happened)
+                }
+                else if (!info->forkParentId.empty())
+                {
+                    // Never-messaged FORK: its own transcript doesn't exist until its first turn, but
+                    // its content-to-be IS the source's (a fork copies the parent verbatim at fork
+                    // point) — so infer from the SOURCE's transcript, against the SOURCE's sidecar
+                    // (scanSid: parent stats must never land under the fork's sid — a byte cursor
+                    // carried over from the parent's file could silently corrupt the fork's own index
+                    // later). Deliberately NOT cached in st.transcriptPath: every pass re-checks for
+                    // the fork's OWN transcript first and switches over the moment it exists (the
+                    // registry clears forkParentId on the fork's first own-id hook at ~the same time).
+                    // This covers the fork whose SOURCE the registry doesn't know — the
+                    // adopt-external fork — where the launch-time inheritance can't help but the
+                    // transcript glob can; it also backstops a managed fork created before its source
+                    // ever had an inference to inherit.
+                    scanPath = ::Agentmaster::ResolveClaudeTranscriptPath(info->forkParentId);
+                    scanSid = info->forkParentId;
+                }
+                if (scanPath.empty())
+                {
+                    st.nextRunMs = now + kInferredScanThrottleMs; // nothing to infer from yet — retry later
                     continue;
                 }
             }
-            due.push_back({ id, info->workingDir, st.transcriptPath, st.lastMtimeMs });
+            due.push_back({ id, scanSid, info->workingDir, scanPath, st.lastMtimeMs });
         }
         if (due.empty())
         {
@@ -4403,7 +4427,7 @@ namespace winrt::TerminalApp::implementation
                 continue; // quiet transcript — nothing new to infer from
             }
             ::Agentmaster::TranscriptRef ref;
-            ref.sessionId = c.id;
+            ref.sessionId = c.scanSid; // the OWNER of the scanned transcript — a fork borrowing its source's file refreshes the SOURCE's sidecar, never its own
             ref.path = c.path;
             ref.sizeBytes = (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | static_cast<int64_t>(fad.nFileSizeLow);
             ref.mtimeMs = mtimeMs;

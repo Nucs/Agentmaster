@@ -70,6 +70,7 @@ int wmain()
     TestCodexObserve();
     TestTranscriptStore();
     TestSessionTags();
+    TestExtractPathsFromText();
     TestInferWorkingDirectory();
     TestConversationLineage();
     TestSessionSearch();

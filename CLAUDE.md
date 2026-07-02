@@ -1376,10 +1376,35 @@ What works, by area:
   their color: **Shared per working directory** default [the classic Rule-#12 per-dir permanence] ·
   **Individual per tab** [each session dealt + KEEPS its own color, persisted on the record —
   `SessionInfo::tabColorHex`; a user pick recolors only that session, a reset re-deals next launch] ·
-  **Inferred working directory** [per-dir semantics keyed by the dir the session ACTUALLY works in —
-  `InferWorkingDirectory` over the transcript's tool-touched paths (deepest strict-majority ancestor,
-  stray-read-proof), re-detected mtime-gated + ~15s-throttled off the scanner tick
-  (`_ScanInferredTabColors`, sidecar-cached), cached persisted on `SessionInfo::inferredWorkingDir`];
+  **Inferred working directory** [per-dir semantics keyed by the dir the session ACTUALLY works in.
+  **The inference:** every tool-touched path VOTES for its whole ancestor-directory chain (leaf
+  excluded) and the inferred dir = the DEEPEST directory holding a STRICT MAJORITY (>50%) of the
+  voting paths (`InferWorkingDirectory` — "the most common shared path, ranked by occurrence": the
+  majority bar is what keeps a stray one-off read (~/.claude files, temp dirs) from dragging the pick
+  to the drive root the way a longest-common-prefix would; drive/UNC roots + relative paths never
+  vote/win; ties break lexicographically; no majority ⇒ the launch cwd). **The votes** =
+  `TranscriptStats::pathsAccessed` (deduped per-FILE, cap 512): the canonical tool path fields
+  (Read/Edit/Write/Grep/Glob `file_path`/`notebook_path`/`path`) **plus absolute paths MINED from
+  shell `command` strings** (`ExtractPathsFromText` — a QUOTED path is taken whole, spaces + leaf
+  included, "(x86)" parens and all [the shell itself demands the quotes]; an UNQUOTED path tolerates
+  **one interior space, only inside a folder name a later separator confirms** — `C:\Program
+  Files\App\x.exe` — so prose after a path is never swallowed and a space-carrying LEAF truncates at
+  the space with its parent, the thing the vote uses, exact; `f.cs:123` line refs stop at the colon,
+  `,;=&`+quotes/wildcards terminate, unbalanced `)`/`]` + sentence dots trim; per-line cap 8 shared
+  with the field extraction — these also enrich the Sessions 📁/📄 scopes). **The loop:** re-detected
+  mtime-gated + ~15s-throttled off the scanner tick (`_ScanInferredTabColors`, reading the Sessions
+  sidecar incrementally), cached persisted on `SessionInfo::inferredWorkingDir` (stored EMPTY when ==
+  cwd) so a reopened session wears its color immediately; `[infer-dir]` logs each change. **Fork
+  lineage:** a fork INHERITS its source's inference at launch (registry copy in `_LaunchClaudeSession`
+  — a fork's own transcript doesn't exist until its first turn, and its content-to-be is a verbatim
+  copy of the parent's, so parent color parity from the first frame — the "forked session got a
+  different color" fix), and a still-transcript-less fork's scan pass infers from the SOURCE's
+  transcript via `forkParentId` (against the SOURCE's sidecar — covers adopt-external forks whose
+  source the registry never knew); the moment the fork writes its own transcript the scan switches to
+  it. **Other lifecycle seams:** resume of an unknown-on-disk id ⇒ its transcript exists, first scan
+  pass (~2s) infers; `/clear` ⇒ honestly no inference (cwd color) until the new conversation touches
+  files; restore-FRESH keeps the dead conversation's inference as a CONTINUITY seed until the new
+  history overrides it; Codex ⇒ never inferred (rollouts aren't path-parsed — cwd keys its color)];
   GLOBAL, applied live on Save + cross-window broadcast via `_ReapplyManagedTabColors`; every color
   read-surface — board title band, Sessions chip, pending-dots contrast — resolves through the shared
   `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab), and (TABS section)

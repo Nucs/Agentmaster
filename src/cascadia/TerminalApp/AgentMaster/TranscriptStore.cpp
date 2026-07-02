@@ -676,6 +676,24 @@ namespace Agentmaster
                                     f.toolPaths.push_back(p);
                                 }
                             }
+                            // Absolute paths MINED from a shell tool's `command` string
+                            // (ExtractPathsFromText — quoted paths free-form; unquoted tolerate ONE
+                            // interior space, only inside a folder name a later separator confirms):
+                            // `cd`/`cat`/compiler/git arguments are REAL touched paths the canonical
+                            // fields above never carry, so they now feed the 📁/📄 scopes and the
+                            // inferred-workdir vote too. Same 8/line cap; deduped downstream
+                            // (AccumulateTranscriptStats' case-insensitive union).
+                            if (f.toolPaths.size() < 8)
+                            {
+                                const std::wstring cmd = in->StrAt(L"command");
+                                if (!cmd.empty())
+                                {
+                                    for (auto& mined : ExtractPathsFromText(cmd, 8 - f.toolPaths.size()))
+                                    {
+                                        f.toolPaths.push_back(std::move(mined));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -994,6 +1012,188 @@ namespace Agentmaster
         stats.parsedBytes = newOffset;
         stats.found = true;
         return true;
+    }
+
+    // ===== absolute-path mining from free text (tool commands) ===============================
+
+    std::vector<std::wstring> ExtractPathsFromText(std::wstring_view text, size_t maxPaths)
+    {
+        std::vector<std::wstring> out;
+        std::unordered_set<std::wstring> seen; // case-folded, separator-normalized dedupe keys
+        const auto isSep = [](wchar_t c) { return c == L'\\' || c == L'/'; };
+        const auto isAlpha = [](wchar_t c) { return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z'); };
+        const auto isAlnum = [isAlpha](wchar_t c) { return isAlpha(c) || (c >= L'0' && c <= L'9'); };
+        // Characters that TERMINATE an unquoted path: illegal-in-a-name (`"<>|*?` + controls) plus
+        // the prose/shell punctuation far likelier to delimit than to be part of a folder name
+        // (`,;=&` + quotes). `(`/`)`/`[`/`]` are deliberately ALLOWED — "(x86)" — an UNBALANCED
+        // trailing closer is trimmed after the fact. `:` terminates past the drive colon (handled
+        // in the loop, so "K:\a\f.cs:12" line refs stop clean). Space has its own rule below.
+        const auto isTerm = [](wchar_t c) {
+            return c == L'"' || c == L'\'' || c == L'<' || c == L'>' || c == L'|' || c == L'*' || c == L'?' ||
+                   c == L',' || c == L';' || c == L'=' || c == L'&' || c < 0x20;
+        };
+        constexpr size_t kMaxPathLen = 512; // matches the toolPaths per-path filter
+
+        size_t i = 0;
+        const size_t n = text.size();
+        while (i < n && out.size() < maxPaths)
+        {
+            // --- find a start — a drive spec "X:\"/"X:/" or a UNC "\\server…" — at a word boundary
+            // (never mid-token: "ABCK:\x" must not match at 'K'; a longer path's middle must not
+            // re-match after its own separators).
+            size_t start = std::wstring_view::npos;
+            bool unc = false;
+            if (i + 2 < n && isAlpha(text[i]) && text[i + 1] == L':' && isSep(text[i + 2]) &&
+                (i == 0 || !isAlnum(text[i - 1])))
+            {
+                start = i;
+            }
+            else if (i + 3 < n && text[i] == L'\\' && text[i + 1] == L'\\' && isAlnum(text[i + 2]) &&
+                     (i == 0 || (!isAlnum(text[i - 1]) && !isSep(text[i - 1]))))
+            {
+                start = i;
+                unc = true;
+            }
+            if (start == std::wstring_view::npos)
+            {
+                ++i;
+                continue;
+            }
+            // A path opened by a quote is consumed to its CLOSING quote — the delimiters make interior
+            // spaces unambiguous (leaf spaces included), which is how "C:\Program Files (x86)\…" (TWO
+            // spaces in one folder name — past the unquoted 1-space rule) is fully supported: quote it,
+            // exactly as the shell itself requires for such a command to work at all.
+            const wchar_t quote = (start > 0 && (text[start - 1] == L'"' || text[start - 1] == L'\'')) ? text[start - 1] : L'\0';
+
+            // --- consume ---
+            size_t j = start;
+            if (quote != L'\0')
+            {
+                while (j < n && (j - start) < kMaxPathLen)
+                {
+                    const wchar_t c = text[j];
+                    if (c == quote || c == L'<' || c == L'>' || c == L'|' || c == L'*' || c == L'?' || c < 0x20)
+                    {
+                        break;
+                    }
+                    ++j;
+                }
+            }
+            else
+            {
+                while (j < n && (j - start) < kMaxPathLen)
+                {
+                    const wchar_t c = text[j];
+                    if (c == L':')
+                    {
+                        if (j == start + 1)
+                        {
+                            ++j; // the drive's own colon
+                            continue;
+                        }
+                        break; // any later colon — a "file.cs:123" line ref, a URL, prose
+                    }
+                    if (c == L' ')
+                    {
+                        // The "1 whitespace in folder names" rule: accept a SINGLE interior space
+                        // only when a later separator CONFIRMS the segment continues into a deeper
+                        // path ("C:\Program Files\App\x.exe" — the space sits in a folder name). A
+                        // second space, a terminator, or end-of-text before any separator means the
+                        // path ended AT the space: prose after a path ("cat K:\a\x.txt and then…")
+                        // is never swallowed, and an unquoted leaf-with-space truncates at the space
+                        // (its PARENT — what the inference votes with — stays exact; quote the path
+                        // for a space-carrying leaf).
+                        size_t k = j + 1;
+                        bool confirmed = false;
+                        while (k < n)
+                        {
+                            const wchar_t lc = text[k];
+                            if (isSep(lc))
+                            {
+                                confirmed = true;
+                                break;
+                            }
+                            if (lc == L' ' || lc == L':' || isTerm(lc))
+                            {
+                                break;
+                            }
+                            ++k;
+                        }
+                        if (!confirmed)
+                        {
+                            break;
+                        }
+                        ++j;
+                        continue;
+                    }
+                    if (isTerm(c))
+                    {
+                        break;
+                    }
+                    ++j;
+                }
+            }
+
+            std::wstring token{ text.substr(start, j - start) };
+
+            // --- tail trim: sentence punctuation, an UNBALANCED closer, trailing separators ---
+            bool trimmedSomething = true;
+            while (trimmedSomething && !token.empty())
+            {
+                trimmedSomething = false;
+                const wchar_t b = token.back();
+                if (b == L' ' || b == L'.' || b == L'!')
+                {
+                    token.pop_back(); // a folder/file can't END in '.' on Windows; ' '/'!' are sentence context
+                    trimmedSomething = true;
+                }
+                else if ((b == L')' && token.find(L'(') == std::wstring::npos) ||
+                         (b == L']' && token.find(L'[') == std::wstring::npos))
+                {
+                    token.pop_back(); // "(K:\repo\src)" — the closer belongs to the prose, "(x86)" keeps its pair
+                    trimmedSomething = true;
+                }
+            }
+            while (!token.empty() && isSep(token.back()))
+            {
+                token.pop_back();
+            }
+
+            // --- validate: at least one child segment below the root (a bare "K:\" / "\\s\share"
+            // carries no signal for either consumer) ---
+            bool valid = false;
+            if (!unc)
+            {
+                valid = token.size() >= 4 && isSep(token[2]); // "K:\a" at minimum
+            }
+            else
+            {
+                const size_t serverSep = token.find_first_of(L"\\/", 2);
+                const size_t shareSep = (serverSep == std::wstring::npos) ? std::wstring::npos : token.find_first_of(L"\\/", serverSep + 1);
+                valid = shareSep != std::wstring::npos && shareSep + 1 < token.size(); // "\\server\share\x" at minimum
+            }
+            if (valid)
+            {
+                std::wstring key = token;
+                for (auto& c : key)
+                {
+                    if (c >= L'A' && c <= L'Z')
+                    {
+                        c = static_cast<wchar_t>(c - L'A' + L'a');
+                    }
+                    else if (c == L'/')
+                    {
+                        c = L'\\';
+                    }
+                }
+                if (seen.insert(std::move(key)).second)
+                {
+                    out.push_back(std::move(token));
+                }
+            }
+            i = (j > start) ? j : start + 1; // resume past the match (or past a degenerate start)
+        }
+        return out;
     }
 
     // ===== inferred working directory (tab color modes) ======================================

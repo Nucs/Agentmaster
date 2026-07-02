@@ -146,11 +146,15 @@ namespace Agentmaster
     //     other OPEN sessions' colors and PERSISTED on the session record (SessionInfo::tabColorHex,
     //     sessions.json) so it survives close/restore; a user pick recolors ONLY that session.
     //   * InferredWorkingDirectory — WorkingDirectory semantics, but keyed by the directory the
-    //     session ACTUALLY works in, INFERRED from the files its tool calls read/edit/create
-    //     (InferWorkingDirectory over TranscriptStats::pathsAccessed — the deepest directory a
-    //     majority of the touched paths share, re-detected as the transcript grows). Until an
-    //     inference exists (no file ops yet; or a Codex session — its rollout isn't path-parsed)
-    //     the launch cwd keys the color, exactly like WorkingDirectory.
+    //     session ACTUALLY works in, INFERRED from the files its tool calls read/edit/create plus
+    //     the absolute paths its shell commands name (InferWorkingDirectory over
+    //     TranscriptStats::pathsAccessed — canonical tool path fields + ExtractPathsFromText's
+    //     command mining — the deepest directory a strict majority of the touched paths share,
+    //     re-detected as the transcript grows). A FORK inherits its source's inference at launch
+    //     and, while it has no transcript of its own yet, is inferred from the source's (its
+    //     content-to-be is a verbatim copy), so it wears the parent conversation's color from the
+    //     first frame. Until an inference exists (no file ops yet; or a Codex session — its
+    //     rollout isn't path-parsed) the launch cwd keys the color, exactly like WorkingDirectory.
     // GLOBAL app setting (AppSettings::tabColorMode), persisted to settings.json, applied live on
     // cog Save + the cross-window broadcast (every window repaints its hosted managed tabs).
     // Serialized as a string token (Persistence ToString / TabColorModeFromString); a missing key

@@ -137,8 +137,11 @@ namespace Agentmaster
         std::wstring cwd; // the line's cwd field, when present
         std::wstring gitBranch; // the line's gitBranch field, when present
         // Filesystem paths this line's tool calls touched (assistant tool_use inputs: file_path /
-        // notebook_path / path — Read/Edit/Write/Grep/Glob/...). Feeds the Sessions page's 📁/📄
-        // scope (filter by directories/files ACCESSED). Capped (8/line); always extracted (cheap).
+        // notebook_path / path — Read/Edit/Write/Grep/Glob/... — PLUS absolute paths MINED from a
+        // shell tool's `command` string via ExtractPathsFromText: quoted paths free-form, unquoted
+        // with one interior space allowed inside a folder name). Feeds the Sessions page's 📁/📄
+        // scope (filter by directories/files ACCESSED) and the inferred-workdir vote
+        // (InferWorkingDirectory). Capped (8/line); always extracted (cheap).
         std::vector<std::wstring> toolPaths;
     };
 
@@ -222,10 +225,33 @@ namespace Agentmaster
     // firstUserPrompt).
     bool AccumulateTranscriptStats(const std::wstring& path, TranscriptStats& stats);
 
+    // ===== absolute-path mining from free text (tool commands) ===============================
+    // Find absolute Windows paths INSIDE a text (a Bash tool's `command` string): a drive form
+    // ("K:\x\y", forward slashes tolerated) or a UNC form ("\\server\share\x"), each requiring at
+    // least one child segment below its root (a bare "K:\" / share root carries no signal). The
+    // canonical tool fields (file_path/notebook_path/path) never carry the paths a shell command
+    // touches — `cd`, `cat`, compiler/git arguments — so this is what lets those feed
+    // TranscriptLineFacts::toolPaths (the 📁/📄 search scopes + the inferred-workdir vote).
+    // Whitespace rule ("1 whitespace support in folder names"): a QUOTED path ("..." / '...')
+    // consumes freely to its closing quote — spaces anywhere, leaf included. An UNQUOTED path may
+    // contain a SINGLE interior space per segment, and only in a NON-LEAF segment — the space is
+    // accepted only when a later path separator confirms it ("C:\Program Files (x86)\App\x.exe")
+    // — so prose after a path ("cat K:\a\x.txt and then ...") is never swallowed into the match
+    // (an unquoted leaf-with-space truncates at the space; its PARENT — what the inference votes
+    // with — is still exact). Two consecutive spaces always terminate. Prose punctuation
+    // terminates (`, ; : = & < > | * ?` + quotes; `:` only past the drive colon — so "K:\a\f.cs:12"
+    // line refs stop clean); trailing sentence punctuation and unbalanced `)`/`]` are trimmed
+    // (parenthesized folder names like "(x86)" survive). Matches are deduped case-insensitively,
+    // each ≤512 chars, at most `maxPaths` returned, drive/UNC starts only at a non-alphanumeric
+    // boundary (never mid-word). POSIX-style absolute paths ("/k/source/x") are deliberately NOT
+    // mined — no drive/share marker to anchor on. Pure.
+    std::vector<std::wstring> ExtractPathsFromText(std::wstring_view text, size_t maxPaths);
+
     // ===== inferred working directory (tab color modes) ======================================
     // Infer the directory a session ACTUALLY works in from its tool-touched paths — the files it
-    // read / edited / created (+ the dirs it searched): TranscriptStats::pathsAccessed, already a
-    // deduped per-file set (so one file edited 50 times votes once). Every path votes for its
+    // read / edited / created, the dirs it searched, AND the absolute paths its shell commands
+    // named (ExtractPathsFromText above): TranscriptStats::pathsAccessed, already a deduped
+    // per-file set (so one file edited 50 times votes once). Every path votes for its
     // whole ancestor DIRECTORY chain (its leaf excluded — tool paths are mostly files), and the
     // inferred dir is the DEEPEST directory holding a STRICT MAJORITY (>50%) of the votes: "the
     // most common shared path, ranked+picked by occurrence". Ancestor counts are monotone

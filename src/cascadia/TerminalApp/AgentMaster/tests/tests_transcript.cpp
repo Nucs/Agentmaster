@@ -2863,6 +2863,92 @@ void TestSessionTags()
 // │/| bars + padding, rejoin cells with " · " = U+00B7, drop empty cells). Box-drawing chars + the dot
 // are written as \x escapes / a built separator so the test is source-encoding independent.
 
+// --- ExtractPathsFromText (tab color modes): absolute-path mining from shell command strings ---
+// Quoted paths consume freely to the closing quote (spaces anywhere, leaf included — the shell
+// itself demands the quotes for such a command to work, so the quotes are the ground truth).
+// Unquoted paths accept ONE interior space only in a NON-LEAF segment (a later separator confirms
+// it), so prose after a path is never swallowed. Prose punctuation terminates; unbalanced closers
+// and sentence dots trim; drive/UNC roots alone carry no signal; matches dedupe case-insensitively.
+void TestExtractPathsFromText()
+{
+    std::wprintf(L"[extract paths from text]\n");
+    const auto one = [](std::wstring_view text) -> std::wstring {
+        const auto v = ExtractPathsFromText(text, 8);
+        return v.size() == 1 ? v[0] : (v.empty() ? std::wstring{ L"<none>" } : std::wstring{ L"<many:" } + std::to_wstring(v.size()) + L">");
+    };
+
+    // Plain absolute path in a command.
+    CHECK(one(L"cat K:\\repo\\src\\main.cs") == L"K:\\repo\\src\\main.cs", "plain drive path extracted");
+    // Prose after the path is NOT swallowed (the space rule: no later separator => stop at the space).
+    CHECK(one(L"cat K:\\repo\\src\\x.txt and then commit") == L"K:\\repo\\src\\x.txt", "prose after a path not swallowed");
+    // ONE interior space in a FOLDER name — confirmed by the later separator.
+    CHECK(one(L"dir C:\\Program Files\\App\\x.exe") == L"C:\\Program Files\\App\\x.exe", "one space inside a folder name (unquoted) kept");
+    // An unquoted leaf-with-space truncates AT the space — the parent (what the inference votes with) stays exact.
+    CHECK(one(L"type K:\\repo\\my file.txt") == L"K:\\repo\\my", "unquoted leaf space truncates (parent exact)");
+    // Quoted: spaces free-form, leaf included.
+    CHECK(one(L"cd \"K:\\My Projects\\some repo\"") == L"K:\\My Projects\\some repo", "quoted path with spaces (incl. leaf) kept whole");
+    // Quoted "(x86)" — two spaces in one folder name + a balanced paren pair survive.
+    CHECK(one(L"run \"C:\\Program Files (x86)\\App\\tool.exe\"") == L"C:\\Program Files (x86)\\App\\tool.exe", "quoted Program Files (x86) kept whole");
+    // A later colon is a line ref / prose, never part of the path.
+    CHECK(one(L"see K:\\a\\f.cs:123") == L"K:\\a\\f.cs", "file.cs:123 line ref stops at the colon");
+    // Prose punctuation terminates; sentence dot + unbalanced closer trim.
+    CHECK(one(L"K:\\a\\b, then more") == L"K:\\a\\b", "comma terminates");
+    CHECK(one(L"(in K:\\repo\\src)") == L"K:\\repo\\src", "unbalanced trailing ) trimmed");
+    CHECK(one(L"open K:\\repo\\src.") == L"K:\\repo\\src", "sentence dot trimmed");
+    // Shell operators terminate.
+    CHECK(one(L"cd K:\\a\\b&&echo hi") == L"K:\\a\\b", "&& terminates");
+    // A glob tail stops at the wildcard; the dir prefix (trailing sep trimmed) is still the signal.
+    CHECK(one(L"del K:\\repo\\*.tmp") == L"K:\\repo", "wildcard stops; dir prefix kept");
+    // UNC: a child segment is required below the share root.
+    CHECK(one(L"copy \\\\nas\\share\\proj\\a.bin") == L"\\\\nas\\share\\proj\\a.bin", "UNC path extracted");
+    CHECK(ExtractPathsFromText(L"ping \\\\nas\\share", 8).empty(), "a bare UNC share root carries no signal");
+    // Forward slashes tolerated; the original spelling is returned.
+    CHECK(one(L"gcc K:/source/x/file.h") == L"K:/source/x/file.h", "forward-slash spelling preserved");
+    // Word boundary: a drive spec mid-token never matches.
+    CHECK(ExtractPathsFromText(L"ABCK:\\x\\y", 8).empty(), "no match mid-word (ABCK:)");
+    // Bare roots carry no signal.
+    CHECK(ExtractPathsFromText(L"K:\\ alone", 8).empty(), "a bare drive root is not a path");
+    // Case/separator-insensitive dedupe; first spelling wins; the cap is honored.
+    {
+        const auto v = ExtractPathsFromText(L"K:\\a\\b K:/a/b k:\\A\\B", 8);
+        CHECK(v.size() == 1 && v[0] == L"K:\\a\\b", "case/slash variants dedupe to the first spelling");
+        const auto capped = ExtractPathsFromText(L"K:\\a\\1 K:\\a\\2 K:\\a\\3", 2);
+        CHECK(capped.size() == 2, "maxPaths cap honored");
+    }
+    // Two paths in one command line.
+    {
+        const auto v = ExtractPathsFromText(L"copy K:\\src\\a.txt C:\\dst\\b.txt", 8);
+        CHECK(v.size() == 2 && v[0] == L"K:\\src\\a.txt" && v[1] == L"C:\\dst\\b.txt", "two paths in one command both extracted");
+    }
+
+    // The ClassifyTranscriptLine wiring: a Bash tool_use `command` feeds toolPaths. The canned line
+    // is built via json::Value + Dump so the JSON escaping is exact, never hand-rolled.
+    {
+        auto input = json::Value::MkObj();
+        input.Set(L"command", json::Value::MkStr(L"cd \"K:\\My Projects\\repo\" && type K:\\repo\\src\\main.cs"));
+        auto tu = json::Value::MkObj();
+        tu.Set(L"type", json::Value::MkStr(L"tool_use"));
+        tu.Set(L"name", json::Value::MkStr(L"Bash"));
+        tu.Set(L"input", std::move(input));
+        auto contentArr = json::Value::MkArr();
+        contentArr.Push(std::move(tu));
+        auto msg = json::Value::MkObj();
+        msg.Set(L"content", std::move(contentArr));
+        auto root = json::Value::MkObj();
+        root.Set(L"type", json::Value::MkStr(L"assistant"));
+        root.Set(L"message", std::move(msg));
+        const auto facts = ClassifyTranscriptLine(json::Dump(root));
+        bool foundQuoted = false;
+        bool foundPlain = false;
+        for (const auto& p : facts.toolPaths)
+        {
+            foundQuoted = foundQuoted || p == L"K:\\My Projects\\repo";
+            foundPlain = foundPlain || p == L"K:\\repo\\src\\main.cs";
+        }
+        CHECK(foundQuoted && foundPlain, "Bash command paths mined into toolPaths (quoted + plain)");
+    }
+}
+
 // --- InferWorkingDirectory (tab color modes): the pure inferred-workdir picker ---
 // Every tool-touched path votes for its ancestor DIRECTORY chain (leaf excluded); the inferred
 // dir is the DEEPEST directory with a STRICT MAJORITY (>50%) of the voting paths — the "most

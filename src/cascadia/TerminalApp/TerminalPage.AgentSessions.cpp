@@ -382,6 +382,24 @@ namespace winrt::TerminalApp::implementation
         if (!effectiveForkFrom.empty())
         {
             info.forkParentId = effectiveForkFrom;
+            // Tab color modes: a fork INHERITS its source's inferred working dir (when the source is
+            // a session the registry knows and this fork has none of its own — a fresh fork always
+            // has none; a re-fork may carry its previously-persisted one, which wins). A fork's own
+            // transcript doesn't exist until its first turn, so without this the fork would key its
+            // color on the launch cwd and wear a DIFFERENT color than the parent conversation it just
+            // branched from (the reported fork-color mismatch) until the first message + the next
+            // inference pass. The fork's transcript is a verbatim copy of the parent's at fork point,
+            // so the parent's inference IS the fork's correct starting inference; the scan re-derives
+            // it from the fork's own history once one exists. Mode-agnostic data copy (consulted only
+            // while tabColorMode is InferredWorkingDirectory). A source unknown to the registry (an
+            // adopt-external fork) is covered by the scan's parent-transcript fallback instead.
+            if (info.inferredWorkingDir.empty() && _sessionRegistry)
+            {
+                if (const auto src = _sessionRegistry->Get(effectiveForkFrom); src && !src->inferredWorkingDir.empty())
+                {
+                    info.inferredWorkingDir = src->inferredWorkingDir;
+                }
+            }
         }
         else
         {
@@ -417,6 +435,12 @@ namespace winrt::TerminalApp::implementation
         // stale — drop it so it doesn't linger in the Archived list as a duplicate/ancestor. A re-fork
         // (forkIntoId) deliberately does NOT differ — it forks back into restored->id — so this is a
         // no-op there and the fork keeps its identity (the whole point of re-forking into the same id).
+        // Tab color modes: the new record deliberately KEEPS the old one's inferredWorkingDir (it rode
+        // the *restored copy above) as a CONTINUITY seed — a restore-fresh reopens the same work in the
+        // same dir, so the old inferred color is the best first guess; the inferred-workdir scan
+        // replaces it with the NEW conversation's own honest inference (usually the cwd at first — no
+        // file ops yet) on its first pass after the first turn. Same continuity applies to tabColorHex
+        // in Individual mode (the fresh conversation keeps the tab's color).
         if (restored && !restored->id.empty() && restored->id != spec.sessionId)
         {
             _sessionRegistry->Remove(restored->id);
