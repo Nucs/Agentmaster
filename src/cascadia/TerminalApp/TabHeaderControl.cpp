@@ -153,6 +153,19 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         });
+        // ... and (re)assert the badges the moment the header ENTERS a live tree: the popup open is
+        // gated on IsLoaded + XamlRoot (_PositionTagBadges — opening earlier THROWS under islands,
+        // the 2026-07-02 fail-fast), and a restored tab's badges are asserted via AgentTagsSpec
+        // BEFORE its header is in the tree, so this Loaded is what finally shows them.
+        Loaded([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self = weakThis.get())
+            {
+                if (!self->_renderedTagsSpec.empty())
+                {
+                    self->_PositionTagBadges();
+                }
+            }
+        });
 
         // We'll only process the KeyUp event if we received an initial KeyDown event first.
         // Avoids issue immediately closing the tab rename when we see the enter KeyUp event that was
@@ -437,10 +450,14 @@ namespace winrt::TerminalApp::implementation
         // No badges -> nothing to show (the popup stays closed; _UpdateTagBadges re-runs us on change).
         if (_renderedTagsSpec.empty() || row.Children().Size() == 0)
         {
-            if (popup.IsOpen())
+            try
             {
-                popup.IsOpen(false);
+                if (popup.IsOpen())
+                {
+                    popup.IsOpen(false);
+                }
             }
+            CATCH_LOG();
             return;
         }
         double x = 20.0; // fallback: just past the status-dot slot
@@ -564,24 +581,45 @@ namespace winrt::TerminalApp::implementation
         const bool parentMoved = std::abs(absX - _badgeLastAbsX) > 0.5 || std::abs(absY - _badgeLastAbsY) > 0.5;
         _badgeLastAbsX = absX;
         _badgeLastAbsY = absY;
-        if (!visible)
+        // ISLANDS SAFETY — the popup open/close tail is fully guarded. THIS EXACT SECTION
+        // fail-fasted the app (0xC000027B, dumps 2026-07-02 12:41 + 12:50, 4 stowed records all
+        // pointing here): Popup.IsOpen mutations on a header that is not (yet / anymore) rooted in
+        // a live island tree throw — E_UNEXPECTED opening with no XamlRoot (a RESTORED tab's badges
+        // are asserted via _SetTabAgentTags -> AgentTagsSpec BEFORE its header enters the tree, so
+        // every launch with a tagged session crashed), E_INVALIDARG around a teardown-pass
+        // SizeChanged — and a winrt exception escaping a layout/property handler becomes the stowed
+        // fail-fast (uncatchable at the crash site; it must be caught HERE). Two layers:
+        //   (a) never OPEN unless the grid IsLoaded + has a XamlRoot — the ctor's Loaded hook
+        //       re-runs us the moment the header actually enters a tree, so gated-off badges
+        //       appear then (and a torn-down header never reopens its popup);
+        //   (b) CATCH_LOG the whole tail so any residual refusal degrades to "badges hidden this
+        //       pass" instead of process death.
+        try
         {
-            if (popup.IsOpen())
+            if (!visible)
             {
-                popup.IsOpen(false);
+                if (popup.IsOpen())
+                {
+                    popup.IsOpen(false);
+                }
+                return;
             }
-            return;
+            if (popup.IsOpen() && parentMoved)
+            {
+                popup.IsOpen(false); // force the reopen below to re-evaluate the parent's new position
+            }
+            popup.HorizontalOffset(x);
+            popup.VerticalOffset(top);
+            if (!popup.IsOpen())
+            {
+                const auto grid = HeaderRootGrid();
+                if (grid && grid.IsLoaded() && grid.XamlRoot())
+                {
+                    popup.IsOpen(true);
+                }
+            }
         }
-        if (popup.IsOpen() && parentMoved)
-        {
-            popup.IsOpen(false); // force the reopen below to re-evaluate the parent's new position
-        }
-        popup.HorizontalOffset(x);
-        popup.VerticalOffset(top);
-        if (!popup.IsOpen())
-        {
-            popup.IsOpen(true);
-        }
+        CATCH_LOG();
     }
 
     // Method Description:
