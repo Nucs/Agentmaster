@@ -914,6 +914,15 @@ namespace winrt::TerminalApp::implementation
                 self->_RenameClaudeSession(id, title);
             }
         });
+        // Agentmaster (bookmark tags): the board-card / tree-row "Tags" item — open the page's tag
+        // editor panel for that session, anchored under the clicked card/row (the Manager content
+        // lives inside this page's visual tree, so the anchor transforms into Root() space).
+        content->SetTagsHandler([weakThis](winrt::hstring id, winrt::Windows::UI::Xaml::FrameworkElement anchor) {
+            if (auto self = weakThis.get())
+            {
+                self->_OpenTagEditorForElement(std::wstring{ id }, anchor);
+            }
+        });
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL
         // scope — bring its conversation under management. `fork` (chosen in the Manager's Adopt
         // dialog) selects the two-writers-safe branch (--fork-session into a NEW transcript) vs. a

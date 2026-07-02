@@ -282,6 +282,10 @@ namespace winrt::TerminalApp::implementation
     {
         _renameHandler = std::move(handler);
     }
+    void AgentManagerContent::SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler)
+    {
+        _tagsHandler = std::move(handler);
+    }
     void AgentManagerContent::SetAdoptExternalHandler(std::function<void(uint32_t, winrt::hstring, bool)> handler)
     {
         _adoptExternalHandler = std::move(handler);

@@ -73,6 +73,7 @@ namespace winrt::TerminalApp::implementation
         void SetRestartSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> restart a managed session's connection in place
         void SetForkManagedSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> fork a managed session (kind-aware), like the WT tab's "Fork session"
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
+        void SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler); // Agentmaster (bookmark tags): (sessionId, anchor) -> the page opens its tag editor panel under the clicked board card / tree row (the WT tab menu's "Tags" twin)
         // Agentmaster: adopt an EXTERNAL (observe-only) claude from the Explorer Tree's EXTERNAL scope.
         // (pid, workingDir) -> the page resolves the conversation id from the transcript and resumes it
         // into a NEW managed, controllable tab (`claude --resume <id>`), or launches fresh if it has no
@@ -389,8 +390,10 @@ namespace winrt::TerminalApp::implementation
         void _OnSplitterReleased(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
 
         // Explorer-tree session actions: right-click context menu (Rename / Archive, then Open New
-        // Session Here in the row's cwd as the last item) + double-click to activate.
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id, const std::wstring& cwd);
+        // Session Here in the row's cwd as the last item) + double-click to activate. `anchor` is the
+        // element the menu is attached to (board card / tree row / the card's ⋯ button) — the Tags
+        // item hands it to the page so the tag editor opens right under what was clicked.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _MakeSessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor = nullptr);
         // Agentmaster: the EXTERNAL-tree row right-click menu. Adopt -> resume the external's conversation
         // into a managed, controllable tab (via _adoptExternalHandler); Open New Session Here -> spawn a
         // managed session in the external's cwd (an independent conversation); Bring Window To Front (last)
@@ -544,6 +547,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring)> _restartSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Restart session" -> rebuild a managed session's connection in place (page does it cross-window)
         std::function<void(winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
+        std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _tagsHandler; // Agentmaster (bookmark tags): board-card / tree-row "Tags" -> page opens the tag editor panel (sessionId, the clicked element as the anchor)
         std::function<void(uint32_t, winrt::hstring, bool)> _adoptExternalHandler; // Agentmaster: EXTERNAL-tree Adopt (pid, cwd, fork) -> page forks/resumes the external's conversation into a managed tab
         std::function<void(uint32_t, winrt::hstring, bool, bool)> _codexLaunchHandler; // Agentmaster (Codex-launch): EXTERNAL-codex (pid, cwd, adopt, fork): Adopt (adopt=true; fork picks fork/resume) / Open-New-Codex (adopt=false)
         std::function<std::unordered_set<std::wstring>()> _localScopeProvider; // Agentmaster: this window's hosted session ids (for the Explorer Tree LOCAL scope)

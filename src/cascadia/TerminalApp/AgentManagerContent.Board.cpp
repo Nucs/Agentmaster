@@ -404,7 +404,7 @@ namespace winrt::TerminalApp::implementation
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
         AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)", kCardTipDelay);
-        dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir)); // a click opens the session menu
+        dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir, dotsBtn)); // a click opens the session menu (the button anchors its Tags panel)
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
         // Agentmaster: the body carries the inset the card used to own (card Padding is now 0 so
@@ -603,7 +603,7 @@ namespace winrt::TerminalApp::implementation
         // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
         // row — Rename… / Archive… / Open New Session Here — one card/row, one action set
         // (Linked Lenses). The menu acts on the captured id/cwd, never "the selected session".
-        card.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
+        card.ContextFlyout(_MakeSessionMenu(id, s.workingDir, card)); // the card anchors its Tags panel
         // Agentmaster: tag + register the card so _Refresh can RESTORE keyboard focus onto it after
         // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.

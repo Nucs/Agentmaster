@@ -8,7 +8,7 @@
 #include "TabHeaderControl.g.cpp"
 
 #include "AgentTipHelpers.h" // Agentmaster: islands-safe hover tooltip for the tab-strip status dot
-#include "AgentStatusColors.h" // Agentmaster (bookmark tags): TagColorFor — the stable per-tag color
+#include "AgentStatusColors.h" // Agentmaster (bookmark tags): ParseArgbHexColor (the spec-carried picked color) + TagColorFor (the name-hash fallback)
 
 #include <atomic>
 #include <chrono>
@@ -280,15 +280,17 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Agentmaster (bookmark tags): rebuild the HeaderTagBookmarks overlay row from
-    // TabStatus.AgentTagsSpec — one small bookmark-ribbon Polygon per '\n'-separated tag name. Each
-    // ribbon is filled with the tag's stable color (TagColorFor — the same name always wears the same
-    // color, everywhere) over a thin black stroke (legible on any per-dir tab color, like the status
-    // dot). Hovering a badge raises TagBadgeHoverBegin(tag, badge) / TagBadgeHoverEnd — the PAGE
-    // shows the rich tag panel there (every session carrying the tag + status, click == jump), which
-    // a ToolTip cannot do (tooltips are non-interactive; AgentSetTip's are hit-test-invisible on
-    // purpose). Change-gated on the rendered spec so the frequent re-asserts (bind/launch/refresh
-    // paths) rebuild nothing; capped at 20 badges (the layout-neutral overlay costs no strip width —
-    // the tab's own clip is the real bound; every tag stays stored + listed in the Tags panel).
+    // TabStatus.AgentTagsSpec — one small bookmark-ribbon Polygon per '\n'-separated
+    // "name\t#AARRGGBB" line. The COLOR rides the spec: the page resolves it once at the producer
+    // (_SetTabAgentTags — the user-picked tag-colors.json color, else the stable name-hash) so this
+    // renderer does no store I/O; a color-less legacy line falls back to TagColorFor here. Painted
+    // over a thin black stroke (legible on any per-dir tab color, like the status dot). Hovering a
+    // badge raises TagBadgeHoverBegin(tag, badge) / TagBadgeHoverEnd — the PAGE shows the rich tag
+    // panel there (every session carrying the tag + status, click == jump), which a ToolTip cannot
+    // do (tooltips are non-interactive; AgentSetTip's are hit-test-invisible on purpose).
+    // Change-gated on the rendered spec so the frequent re-asserts (bind/launch/refresh paths)
+    // rebuild nothing; capped at 20 badges (the layout-neutral overlay costs no strip width — the
+    // tab's own clip is the real bound; every tag stays stored + listed in the Tags panel).
     void TabHeaderControl::_UpdateTagBadges()
     {
         const auto status = TabStatus();
@@ -310,8 +312,17 @@ namespace winrt::TerminalApp::implementation
         while (!rest.empty() && shown < kMaxBadges)
         {
             const size_t nl = rest.find(L'\n');
-            const std::wstring_view name = rest.substr(0, nl);
+            const std::wstring_view line = rest.substr(0, nl);
             rest = (nl == std::wstring_view::npos) ? std::wstring_view{} : rest.substr(nl + 1);
+            // Split the line's resolved color off the name ("name\t#AARRGGBB"; NormalizeTagName
+            // strips tabs from names, so the first '\t' is always the separator).
+            std::wstring_view name = line;
+            std::wstring_view hex{};
+            if (const size_t sep = line.find(L'\t'); sep != std::wstring_view::npos)
+            {
+                name = line.substr(0, sep);
+                hex = line.substr(sep + 1);
+            }
             if (name.empty())
             {
                 continue;
@@ -324,7 +335,7 @@ namespace winrt::TerminalApp::implementation
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 5.0f, 7.0f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 2.5f, 4.9f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 7.0f });
-            ribbon.Fill(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ TagColorFor(name) });
+            ribbon.Fill(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ ParseArgbHexColor(hex, TagColorFor(name)) });
             ribbon.Stroke(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
             // Hit-testable ON PURPOSE: the hover panel needs enter/leave. Presses still bubble to

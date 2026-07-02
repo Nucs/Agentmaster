@@ -281,6 +281,7 @@ namespace
                                                                   const std::wstring& folderBranch,
                                                                   const std::wstring& stateText,
                                                                   const std::wstring& metaText,
+                                                                  const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
                                                                   const winrt::hstring& bodyText)
     {
         using namespace winrt::Windows::UI::Xaml;
@@ -360,6 +361,59 @@ namespace
             mt.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
             mt.Text(winrt::hstring{ metaText });
             col.Children().Append(mt);
+        }
+        // Bookmark TAGS — each tag's name over a 2px UNDERSCORE in its picked color (the badge
+        // ribbon's color; user-picked > name-hash, resolved by the spec producer). An underline
+        // rather than inked text because XAML can't color a TextDecorations underline separately
+        // from its text — a thin Border under the name is the practical colored underscore, and it
+        // keeps the names readable in the card's normal foreground. Greedy line-packing by an
+        // estimated character budget (no platform WrapPanel; tags are few and short, so the
+        // estimate only needs to keep a long tag set from overflowing the card's MaxWidth).
+        if (!tagChips.empty())
+        {
+            StackPanel tagRows;
+            tagRows.Orientation(Orientation::Vertical);
+            tagRows.Spacing(3);
+            tagRows.Margin(ThicknessHelper::FromLengths(0, 3, 0, 0));
+            StackPanel line{ nullptr };
+            size_t lineChars = 0;
+            constexpr size_t kTagLineBudget = 52; // ~mono-11 chars that fit the 460px card minus padding
+            for (const auto& [tagName, tagColor] : tagChips)
+            {
+                if (!line || (lineChars > 0 && lineChars + tagName.size() > kTagLineBudget))
+                {
+                    if (line)
+                    {
+                        tagRows.Children().Append(line);
+                    }
+                    line = StackPanel{};
+                    line.Orientation(Orientation::Horizontal);
+                    line.Spacing(10);
+                    lineChars = 0;
+                }
+                StackPanel chip;
+                chip.Orientation(Orientation::Vertical);
+                TextBlock nameTb;
+                nameTb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+                nameTb.FontSize(11);
+                nameTb.Foreground(TtFill(0xFF, 0xDC, 0xDC, 0xDC));
+                nameTb.Text(winrt::hstring{ tagName });
+                chip.Children().Append(nameTb);
+                Border underscore;
+                underscore.Height(2);
+                underscore.CornerRadius(CornerRadiusHelper::FromUniformRadius(1));
+                underscore.HorizontalAlignment(HorizontalAlignment::Stretch);
+                underscore.Margin(ThicknessHelper::FromLengths(0, 1, 0, 0));
+                underscore.Background(SolidColorBrush{ tagColor });
+                chip.Children().Append(underscore);
+                line.Children().Append(chip);
+                lineChars += tagName.size() + 2;
+            }
+            if (line && line.Children().Size() > 0)
+            {
+                tagRows.Children().Append(line);
+            }
+            col.Children().Append(tagRows);
         }
         if (!bodyText.empty())
         {
@@ -691,8 +745,23 @@ namespace winrt::TerminalApp::implementation
     // name; applying an existing tag is always allowed.
     // ==================================================================================
 
+    // TU-local: a tag's DISPLAY color — the user-picked stored color (tag-colors.json, keyed by the
+    // folded name; `stored` = one LoadAllTagColors() the caller did) when present, else the stable
+    // name-hash (TagColorFor). The one resolution the spec producer + the panel/editor renderers share.
+    namespace
+    {
+        winrt::Windows::UI::Color TagDisplayColorFor(const std::wstring& name, const std::map<std::wstring, std::wstring>& stored)
+        {
+            const auto fallback = TagColorFor(name);
+            const auto it = stored.find(::Agentmaster::FoldTagName(name));
+            return it == stored.end() ? fallback : ParseArgbHexColor(it->second, fallback);
+        }
+    }
+
     // Low-level: write the session's tag list onto a tab's TabStatus as the '\n'-joined
-    // spec the header control renders from. The observable no-ops when unchanged, so the
+    // "name\t#AARRGGBB" spec the header control renders from — the COLOR is resolved HERE, once
+    // (user-picked > name-hash), so every spec consumer (badges, the rich tab tooltip) reads the
+    // same resolution with no store I/O of its own. The observable no-ops when unchanged, so the
     // frequent re-asserts (launch/bind/refresh) are free. UI thread.
     void TerminalPage::_SetTabAgentTags(const TerminalApp::Tab& tab, const std::vector<std::wstring>& tags)
     {
@@ -704,6 +773,11 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto status = tab.TabStatus())
             {
+                std::map<std::wstring, std::wstring> stored;
+                if (!tags.empty())
+                {
+                    stored = ::Agentmaster::LoadAllTagColors(); // one small read per (rare) re-assert
+                }
                 std::wstring spec;
                 for (const auto& t : tags)
                 {
@@ -716,6 +790,8 @@ namespace winrt::TerminalApp::implementation
                         spec.push_back(L'\n');
                     }
                     spec += t;
+                    spec.push_back(L'\t');
+                    spec += FormatArgbHexColor(TagDisplayColorFor(t, stored));
                 }
                 status.AgentTagsSpec(winrt::hstring{ spec });
             }
@@ -740,13 +816,23 @@ namespace winrt::TerminalApp::implementation
         if (const auto tab = it->second.get())
         {
             _SetTabAgentTags(tab, ::Agentmaster::GetSessionTags(sessionId));
+            _UpdateTabAgentToolTip(tab, sessionId); // the tooltip's tag-chip row rides the spec — reflect a toggle instantly (sig-gated)
         }
     }
 
-    // Context-menu "Tag": open the panel for this tab's managed session, anchored under its
-    // TabViewItem. The open is DEFERRED one dispatcher tick: the context flyout's Closed
-    // handler tosses focus back to the terminal control (Tab.cpp), and that refocus must land
-    // BEFORE the panel opens + focuses its name box, or it would steal the box's focus.
+    // Re-assert the badges on EVERY tab this window hosts — the recolor fan-out: an explicit
+    // swatch pick that recolors an existing tag must repaint each hosted session carrying it
+    // (which sessions those are isn't tracked; N small reads over the hosted set is cheap).
+    void TerminalPage::_RefreshAllTabTags()
+    {
+        for (const auto& [sid, weakTab] : _claudeTabs)
+        {
+            _RefreshTabTags(sid);
+        }
+    }
+
+    // Context-menu "Tags" (WT tab menu): open the panel for this tab's managed session, anchored
+    // under its TabViewItem.
     void TerminalPage::_OpenTagEditorForTab(const TerminalApp::Tab& tab)
     {
         const auto sid = _ClaudeSessionForTab(tab);
@@ -768,6 +854,42 @@ namespace winrt::TerminalApp::implementation
             }
         }
         CATCH_LOG();
+        _OpenTagEditorAt(sid, x, y);
+    }
+
+    // The Sessions-page row / Triage-Board card / Explorer-tree row "Tags" items: open the panel
+    // for ANY session id (SessionStore is id-keyed — an on-disk, never-hosted session tags fine;
+    // its badges apply wherever/whenever a tab hosts it), anchored just under the clicked element.
+    // The element may be recycled by a re-render between menu open and click — the transform is
+    // guarded and the default anchor holds.
+    void TerminalPage::_OpenTagEditorForElement(const std::wstring& sessionId, const WUX::FrameworkElement& anchor)
+    {
+        double x = 8;
+        double y = 40;
+        try
+        {
+            if (anchor)
+            {
+                const auto pt = anchor.TransformToVisual(Root()).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+                x = pt.X;
+                y = pt.Y + anchor.ActualHeight() + 2;
+            }
+        }
+        CATCH_LOG();
+        _OpenTagEditorAt(sessionId, x, y);
+    }
+
+    // The shared open: place + show the panel for `sid` at root-relative (x, y). DEFERRED one
+    // dispatcher tick: every caller sits inside a closing context flyout's click, whose Closed
+    // handler tosses focus back to its target — that refocus must land BEFORE the panel opens +
+    // focuses its name box, or it would steal the box's focus. The color picker is re-randomized
+    // on every open (the "prepicked random" pre-pick).
+    void TerminalPage::_OpenTagEditorAt(const std::wstring& sid, double x, double y)
+    {
+        if (sid.empty())
+        {
+            return;
+        }
         const winrt::hstring sidH{ sid };
         Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), sidH, x, y]() {
             const auto page = weak.get();
@@ -797,6 +919,7 @@ namespace winrt::TerminalApp::implementation
             page->_tagEditorPopup.HorizontalOffset(std::max(0.0, cx));
             page->_tagEditorPopup.VerticalOffset(std::max(0.0, y));
             page->_tagEditorBox.Text(L"");
+            page->_RandomizeTagEditorColor(); // fresh random pre-pick each open
             page->_RebuildTagEditorList();
             page->_UpdateTagEditorAddState();
             page->_tagEditorPopup.IsOpen(true);
@@ -898,6 +1021,40 @@ namespace winrt::TerminalApp::implementation
         Grid::SetColumn(_tagEditorAddBtn, 1);
         nameRow.Children().Append(_tagEditorAddBtn);
         body.Children().Append(nameRow);
+
+        // Row 2 — the COLOR PICKER: one swatch per palette color (the same mini-palette the
+        // name-hash fallback draws from), the picked one ringed white. Pre-picked RANDOM on every
+        // open and re-randomized after every added tag (_RandomizeTagEditorColor); clicking a
+        // swatch makes the pick EXPLICIT (_tagEditorUserPicked) — a NEW tag always takes the
+        // current pick, an EXISTING tag is recolored only by an explicit pick (the one recolor
+        // path; the roulette must never silently repaint established tags). The "+" button wears
+        // the pick as its background, so what the add will produce is visible at the commit point.
+        // Swatch taps only flip brushes (no tree mutation), so the handler is islands-safe inline.
+        _tagEditorSwatchRow = StackPanel{};
+        _tagEditorSwatchRow.Orientation(Orientation::Horizontal);
+        _tagEditorSwatchRow.Spacing(3);
+        for (size_t i = 0; i < kTagPaletteSize; ++i)
+        {
+            Border sw;
+            sw.Width(15);
+            sw.Height(15);
+            sw.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 3, 3, 3, 3 });
+            sw.Background(SolidColorBrush{ TagPaletteColor(i) });
+            sw.BorderBrush(SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
+            sw.BorderThickness(Thickness{ 2, 2, 2, 2 });
+            const winrt::hstring hexH{ FormatArgbHexColor(TagPaletteColor(i)) };
+            sw.Tag(winrt::box_value(hexH)); // the ring update matches swatches by this hex
+            AgentSetTip(sw, L"Use this color for the next tag you add (picking one explicitly also recolors an existing tag when you re-add its name)");
+            sw.Tapped([weak = get_weak(), hexH](auto&&, const WUX::Input::TappedRoutedEventArgs& e) {
+                e.Handled(true); // don't let the press double as an outside/inside-card gesture
+                if (const auto page = weak.get())
+                {
+                    page->_SelectTagEditorColor(std::wstring{ hexH }, true /* explicit user pick */);
+                }
+            });
+            _tagEditorSwatchRow.Children().Append(sw);
+        }
+        body.Children().Append(_tagEditorSwatchRow);
 
         // The cap message — shown by _UpdateTagEditorAddState when the typed name is NEW and the
         // universe is already at AppSettings::maxTags.
@@ -1007,6 +1164,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _tagEditorUniverse = ::Agentmaster::CollectGlobalTags(::Agentmaster::LoadAllSessionTags(), activity);
+        const auto storedColors = ::Agentmaster::LoadAllTagColors(); // picker-chosen colors (hash fallback per row)
 
         std::unordered_set<std::wstring> mine; // folded — this session's tags
         for (const auto& t : ::Agentmaster::GetSessionTags(_tagEditorSessionId))
@@ -1049,7 +1207,7 @@ namespace winrt::TerminalApp::implementation
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
-            ribbon.Fill(SolidColorBrush{ TagColorFor(info.name) });
+            ribbon.Fill(SolidColorBrush{ TagDisplayColorFor(info.name, storedColors) });
             ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
             ribbon.VerticalAlignment(VerticalAlignment::Center);
@@ -1136,6 +1294,53 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Select a picker color (an explicit swatch tap, or the random pre-pick): remember the hex +
+    // whether the USER chose it, ring the matching swatch white, and paint the "+" button with the
+    // pick (contrast-inked) so the upcoming add's color is visible right where it commits. Brush
+    // flips only — no tree mutation, safe inside pointer dispatch.
+    void TerminalPage::_SelectTagEditorColor(const std::wstring& hex, bool userPicked)
+    {
+        _tagEditorPickedHex = hex;
+        _tagEditorUserPicked = userPicked;
+        if (_tagEditorSwatchRow)
+        {
+            for (const auto& child : _tagEditorSwatchRow.Children())
+            {
+                if (const auto sw = child.try_as<Border>())
+                {
+                    bool isPicked = false;
+                    if (const auto tagged = sw.Tag().try_as<winrt::hstring>())
+                    {
+                        isPicked = std::wstring{ *tagged } == hex;
+                    }
+                    sw.BorderBrush(SolidColorBrush{ isPicked ? winrt::Windows::UI::Colors::White() : winrt::Windows::UI::Colors::Transparent() });
+                }
+            }
+        }
+        if (_tagEditorAddBtn)
+        {
+            const auto c = ParseArgbHexColor(hex, TagPaletteColor(0));
+            _tagEditorAddBtn.Background(SolidColorBrush{ c });
+            _tagEditorAddBtn.Foreground(SolidColorBrush{ BackgroundIsLight(c) ? winrt::Windows::UI::Colors::Black() : winrt::Windows::UI::Colors::White() });
+        }
+    }
+
+    // Roll a fresh RANDOM pre-pick (panel open + after every added tag — the request's "prepicked
+    // random on open and after every new tag added"). Always moves OFF the current pick so a
+    // just-consumed color visibly hands over to the next one; the pick is non-explicit
+    // (_tagEditorUserPicked=false), so the roulette can never recolor an existing tag.
+    void TerminalPage::_RandomizeTagEditorColor()
+    {
+        static uint64_t rngState = ::GetTickCount64() | 1; // process-wide; quality is irrelevant here
+        rngState = rngState * 6364136223846793005ULL + 1442695040888963407ULL;
+        size_t idx = static_cast<size_t>((rngState >> 33) % kTagPaletteSize);
+        if (!_tagEditorPickedHex.empty() && FormatArgbHexColor(TagPaletteColor(idx)) == _tagEditorPickedHex)
+        {
+            idx = (idx + 1) % kTagPaletteSize;
+        }
+        _SelectTagEditorColor(FormatArgbHexColor(TagPaletteColor(idx)), false);
+    }
+
     // The "+" / Enter: add the typed tag to the session being edited. An existing name (case-
     // insensitive) just APPLIES it — reusing the canonical stored casing — while a NEW name is
     // cap-gated (the "+" is already disabled then; this re-check is the belt for a stale cache).
@@ -1170,15 +1375,32 @@ namespace winrt::TerminalApp::implementation
         }
         if (::Agentmaster::AddSessionTag(_tagEditorSessionId, canonical))
         {
-            // Nav audit: the user tagged a session from the tab menu's Tag panel ((new) == this
-            // name just entered the global universe).
+            // The picker's color: a NEW tag always takes the current pick (the random pre-pick IS
+            // the color shown on the "+" the user just pressed); an EXISTING tag is recolored only
+            // by an EXPLICIT swatch pick this open — the deliberate recolor path — never by the
+            // roulette. Stored BEFORE the badge refresh so the new spec resolves it.
+            const bool recolorExisting = exists && _tagEditorUserPicked;
+            if (!_tagEditorPickedHex.empty() && (!exists || recolorExisting))
+            {
+                ::Agentmaster::SetTagColor(canonical, _tagEditorPickedHex);
+            }
+            // Nav audit: the user tagged a session from the Tags panel ((new) == this name just
+            // entered the global universe).
             ::Agentmaster::LogNav(L"tag add \"" + canonical + L"\" sid=" + ::Agentmaster::ShortId(_tagEditorSessionId) + (exists ? L"" : L" (new)"));
-            _RefreshTabTags(_tagEditorSessionId);
+            if (recolorExisting)
+            {
+                _RefreshAllTabTags(); // other hosted sessions may carry the recolored tag
+            }
+            else
+            {
+                _RefreshTabTags(_tagEditorSessionId);
+            }
             // Sessions page live-sync (the _ToggleSessionTag idiom): reflect the new tag into an
             // open page's cache + header chips + table; no-ops when the page was never built.
             _sessionsTags[_tagEditorSessionId] = ::Agentmaster::GetSessionTags(_tagEditorSessionId);
             _RebuildSessionsTagChips();
             _RenderSessionsTable();
+            _RandomizeTagEditorColor(); // hand the picker a fresh random color for the NEXT add
         }
         _tagEditorBox.Text(L"");
         _RebuildTagEditorList();
@@ -1462,7 +1684,7 @@ namespace winrt::TerminalApp::implementation
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
-            ribbon.Fill(SolidColorBrush{ TagColorFor(tag) });
+            ribbon.Fill(SolidColorBrush{ TagDisplayColorFor(tag, ::Agentmaster::LoadAllTagColors()) });
             ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
             ribbon.VerticalAlignment(VerticalAlignment::Center);
@@ -1720,6 +1942,40 @@ namespace winrt::TerminalApp::implementation
 
         const std::wstring title = s.title.empty() ? std::wstring{ L"(untitled)" } : s.title;
 
+        // Bookmark TAGS — parsed off the tab's own AgentTagsSpec ("name\t#AARRGGBB" lines; the
+        // colors were already resolved by _SetTabAgentTags), so this per-sweep refresh does no
+        // store I/O. Rendered as name-over-colored-underscore chips in the card.
+        std::wstring tagsSpec;
+        std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>> tagChips;
+        try
+        {
+            if (const auto status = tab.TabStatus())
+            {
+                tagsSpec = std::wstring{ status.AgentTagsSpec() };
+            }
+        }
+        CATCH_LOG();
+        {
+            std::wstring_view rest{ tagsSpec };
+            while (!rest.empty())
+            {
+                const size_t nl = rest.find(L'\n');
+                const std::wstring_view specLine = rest.substr(0, nl);
+                rest = (nl == std::wstring_view::npos) ? std::wstring_view{} : rest.substr(nl + 1);
+                std::wstring_view tagName = specLine;
+                std::wstring_view tagHex{};
+                if (const size_t sep = specLine.find(L'\t'); sep != std::wstring_view::npos)
+                {
+                    tagName = specLine.substr(0, sep);
+                    tagHex = specLine.substr(sep + 1);
+                }
+                if (!tagName.empty())
+                {
+                    tagChips.emplace_back(std::wstring{ tagName }, ParseArgbHexColor(tagHex, TagColorFor(tagName)));
+                }
+            }
+        }
+
         // The Summary-box body (numbered messages + files), cached + loaded off-thread (see below).
         winrt::hstring bodyText;
         int64_t bodyMtime = 0;
@@ -1729,9 +1985,10 @@ namespace winrt::TerminalApp::implementation
             bodyMtime = it->second.mtime;
         }
 
-        // Re-host only on a real content change. The signature folds the header strings + the body's mtime
-        // (the body itself changes only when the transcript grows, which bumps the mtime), so an unchanged
-        // idle tab is skipped; the "ago" ticking is what re-hosts an otherwise-quiet tab each sweep.
+        // Re-host only on a real content change. The signature folds the header strings + the tags spec +
+        // the body's mtime (the body itself changes only when the transcript grows, which bumps the
+        // mtime), so an unchanged idle tab is skipped; the "ago" ticking is what re-hosts an
+        // otherwise-quiet tab each sweep.
         std::wstring sig = stateText;
         sig += L'\x1f';
         sig += title;
@@ -1740,10 +1997,12 @@ namespace winrt::TerminalApp::implementation
         sig += L'\x1f';
         sig += metaText;
         sig += L'\x1f';
+        sig += tagsSpec;
+        sig += L'\x1f';
         sig += std::to_wstring(bodyMtime);
         if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText), winrt::hstring{ sig });
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, tagChips, bodyText), winrt::hstring{ sig });
             _tabTooltipSig[sessionId] = sig;
         }
 

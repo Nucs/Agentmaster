@@ -548,7 +548,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
-                rowBtn.ContextFlyout(_MakeSessionMenu(id, s.workingDir));
+                rowBtn.ContextFlyout(_MakeSessionMenu(id, s.workingDir, rowBtn)); // the row anchors its Tags panel
                 AgentSetTip(rowBtn, L"Click to select this session \x2014 double-click or Enter jumps to its live tab; F2 renames, Del archives, right-click for more.");
                 // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
                 // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
@@ -1313,7 +1313,7 @@ namespace winrt::TerminalApp::implementation
 
     // ---- Explorer-tree session actions (right-click menu, rename, delete) ----
 
-    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id, const std::wstring& cwd)
+    MenuFlyout AgentManagerContent::_MakeSessionMenu(const std::wstring& id, const std::wstring& cwd, const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
     {
         MenuFlyout menu;
         auto disp = _dispatcher;
@@ -1502,6 +1502,30 @@ namespace winrt::TerminalApp::implementation
             }
         });
         menu.Items().Append(rename);
+
+        // Tags — the bookmark-tags panel for this session (the WT tab menu's "Tags" twin): name a
+        // NEW tag (with the color picker) or toggle existing ones; each shows as a small bookmark on
+        // the session's tab. The PAGE owns the panel (SetTagsHandler -> _OpenTagEditorForElement),
+        // anchored under the right-clicked card / row (`anchor` — captured at menu build; the page
+        // guards a recycled element and falls back to a default position). Deferred one tick like
+        // Rename so the closing flyout's focus restore can't fight the panel's name-box focus.
+        MenuFlyoutItem tagsItem;
+        tagsItem.Text(L"Tags");
+        tagsItem.Icon(glyphIcon(L"\xE8A4")); // Bookmarks — matches the WT tab menu's Tags item
+        AgentSetTip(tagsItem, L"Bookmark tags for this session \x2014 add a tag (pick its color) or toggle existing ones; each tag shows as a small bookmark ribbon on the session's tab.");
+        tagsItem.Click([weak, disp, id, anchor](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, id, anchor]() {
+                if (auto self = weak.get())
+                {
+                    if (self->_tagsHandler)
+                    {
+                        self->_tagsHandler(winrt::hstring{ id }, anchor);
+                    }
+                }
+            };
+            if (disp) { disp.TryEnqueue(act); } else { act(); }
+        });
+        menu.Items().Append(tagsItem);
 
         // Copy — a submenu mirroring the per-tab link badge's copy button (DESIGN §9.7 / TAB_OVERLAY.md).
         // Placed directly below Rename (at the user's request). It routes through the SAME shared

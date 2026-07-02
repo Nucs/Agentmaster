@@ -154,4 +154,27 @@ namespace Agentmaster
     bool AddSessionTag(const std::wstring& sessionId, const std::wstring& tag);
     bool RemoveSessionTag(const std::wstring& sessionId, const std::wstring& tag);
     std::unordered_map<std::wstring, std::vector<std::wstring>> LoadAllSessionTags();
+
+    // ===== typed convenience: the TAG COLORS (the tag editor's color picker) =================
+    //
+    // A PROFILE-LEVEL map (<stateDir>\tag-colors.json — FOLDED tag name -> "#AARRGGBB"), NOT a
+    // per-session store key: a tag's color is a property of the TAG's global (case-insensitive)
+    // identity, worn identically by every bookmark badge / hover panel / tooltip chip that renders
+    // it, like dir-colors.json is for folders. Written by the tag editor's color picker (a NEW tag
+    // takes the picked color; an explicit swatch pick may recolor an existing tag on re-add). A tag
+    // with NO entry falls back to the stable name-hash color (AgentStatusColors.h TagColorFor), so
+    // pre-picker tags keep their historical colors with no migration. An empty value REMOVES the
+    // entry (back to the hash); an entry whose tag later vanished from the universe is kept — it is
+    // harmless (a tiny file) and a re-created tag REGAINING its old color is a feature. Values are
+    // shape-validated ("#RRGGBB" / "#AARRGGBB") on write AND on load, so a hand-mangled file can
+    // never feed a garbage color into the UI. Concurrency: the same atomic temp+rename write as the
+    // per-session records (read-modify-write of one small file; last writer wins).
+    std::map<std::wstring, std::wstring> LoadAllTagColorsIn(const std::wstring& stateDir); // folded name -> "#AARRGGBB"
+    std::wstring GetTagColorIn(const std::wstring& stateDir, const std::wstring& tag); // "" when unset (use the hash fallback)
+    bool SetTagColorIn(const std::wstring& stateDir, const std::wstring& tag, const std::wstring& hexOrEmpty); // "" removes; invalid hex/tag -> false, no write
+
+    // ---- live wrappers (resolve AgentmasterStateDir() — the file sits at the profile root) ----
+    std::map<std::wstring, std::wstring> LoadAllTagColors();
+    std::wstring GetTagColor(const std::wstring& tag);
+    bool SetTagColor(const std::wstring& tag, const std::wstring& hex);
 }

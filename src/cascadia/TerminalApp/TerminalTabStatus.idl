@@ -81,13 +81,16 @@ namespace TerminalApp
         // Fill="#E0A92B".
         Windows.UI.Xaml.Media.Brush AgentPendingBrush { get; set; };
 
-        // Agentmaster (bookmark tags): the session's tag list for the tab-strip BOOKMARK badges — the
-        // normalized tag names joined by '\n' (NormalizeTagName strips control chars, so the join is
-        // unambiguous; "" == no tags). A SPEC STRING rather than a vector so it rides the same ONE
-        // observable-property pipeline the pending-dots animation uses: TerminalPage::_SetTabAgentTags
-        // writes it (idempotent — the observable no-ops when unchanged) and TabHeaderControl's
-        // code-behind rebuilds one small bookmark Path per tag (each colored by TagColorFor + carrying
-        // its own tooltip) anchored at the bottom of the tab header.
+        // Agentmaster (bookmark tags): the session's tag list for the tab-strip BOOKMARK badges —
+        // '\n'-joined "name\t#AARRGGBB" lines (NormalizeTagName strips control chars from names, so
+        // both separators are unambiguous; "" == no tags). The COLOR rides the spec: the producer
+        // (TerminalPage::_SetTabAgentTags) resolves each tag's display color ONCE (the user-picked
+        // tag-colors.json entry, else the stable name-hash TagColorFor), so every consumer renders
+        // the same resolution with no store I/O. A SPEC STRING rather than a vector so it rides the
+        // same ONE observable-property pipeline the pending-dots animation uses: the producer writes
+        // it (idempotent — the observable no-ops when unchanged), TabHeaderControl's code-behind
+        // rebuilds one small bookmark ribbon per tag, and the rich tab tooltip renders its tag-chip
+        // row (name over a colored underscore) from the same string.
         String AgentTagsSpec { get; set; };
     }
 }

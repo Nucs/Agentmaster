@@ -800,24 +800,34 @@ namespace winrt::TerminalApp::implementation
         void _SetTabAgentFavorite(const TerminalApp::Tab& tab, bool on); // Agentmaster (FAVORITES.md §5a): show/hide the FAVORITE marker (CROWN or STAR per AppSettings::favoriteIcon) over a tab's status dot via Tab.TabStatus(); the two markers are mutually exclusive; UI thread, idempotent
         void _RefreshTabFavoriteCrown(const std::wstring& sessionId); // Agentmaster (FAVORITES.md): re-read IsSessionFavorite(sid) and (re)assert the marker on this window's hosting tab; no-op when this window doesn't host the session. Called at bind/launch + on toggle (same-window instant; cross-window catches up on next bind)
         void _RefreshAllFavoriteIcons(); // Agentmaster (FAVORITES.md §5a): re-assert the favorite marker on every hosted tab — used when the GLOBAL favoriteIcon (Crown<->Star) changes (cog Save / cross-window broadcast) so the glyph switches live
-        // Agentmaster (bookmark tags): the tab-header BOOKMARK badges + the tab context menu's "Tag"
-        // panel. Tags are the durable SessionStore "tags" key (like the favorite star — same-window
-        // instant, cross-window catches up on next bind); the panel is an islands-safe raw Popup the
-        // page owns (a Flyout-hosted TextBox gets no keypresses — the documented text-input trap),
-        // parented into Root() and anchored under the invoking tab.
-        void _SetTabAgentTags(const TerminalApp::Tab& tab, const std::vector<std::wstring>& tags); // low-level: join + write TabStatus.AgentTagsSpec (idempotent); UI thread
-        void _RefreshTabTags(const std::wstring& sessionId); // re-read GetSessionTags(sid) and (re)assert the badges on this window's hosting tab; map-miss no-op. Called at bind/launch + on toggle
-        void _OpenTagEditorForTab(const TerminalApp::Tab& tab); // context-menu "Tag": open the panel for this tab's session, anchored under its TabViewItem (deferred past the flyout close so its refocus can't fight the panel)
-        void _EnsureTagEditorPopup(); // lazily build the panel ONCE (card + [name box | +] row + hint + tag list) and parent it into Root(); wires Esc / Enter / outside-press dismissal
+        // Agentmaster (bookmark tags): the tab-header BOOKMARK badges + the "Tags" panel (opened from
+        // the WT tab context menu, a Sessions-page row menu, or a Triage-Board card / Explorer-tree row
+        // menu). Tags are the durable SessionStore "tags" key (like the favorite star — same-window
+        // instant, cross-window catches up on next bind); each tag's COLOR is the profile-level
+        // tag-colors.json entry the panel's picker writes (name-hash fallback). The panel is an
+        // islands-safe raw Popup the page owns (a Flyout-hosted TextBox gets no keypresses — the
+        // documented text-input trap), parented into Root() and anchored under the invoking element.
+        void _SetTabAgentTags(const TerminalApp::Tab& tab, const std::vector<std::wstring>& tags); // low-level: resolve each tag's color (user-picked tag-colors.json > name-hash) + write TabStatus.AgentTagsSpec as "name\t#AARRGGBB" lines (idempotent); UI thread
+        void _RefreshTabTags(const std::wstring& sessionId); // re-read GetSessionTags(sid) and (re)assert the badges + the tooltip's tag row on this window's hosting tab; map-miss no-op. Called at bind/launch + on toggle
+        void _RefreshAllTabTags(); // re-assert badges on EVERY hosted tab — the recolor fan-out (an explicit swatch pick recoloring an existing tag repaints each hosted carrier)
+        void _OpenTagEditorForTab(const TerminalApp::Tab& tab); // context-menu "Tags" (WT tab menu): open the panel for this tab's session, anchored under its TabViewItem
+        void _OpenTagEditorForElement(const std::wstring& sessionId, const winrt::Windows::UI::Xaml::FrameworkElement& anchor); // the Sessions-row / Triage-Board-card / Explorer-tree-row "Tags" items: open for ANY session id, anchored under the clicked element
+        void _OpenTagEditorAt(const std::wstring& sessionId, double x, double y); // the shared open: place + show at root-relative (x, y), deferred past the invoking flyout's close (its refocus must not fight the name box); re-randomizes the color pre-pick
+        void _EnsureTagEditorPopup(); // lazily build the panel ONCE (card + [name box | +] row + color-picker swatches + hint + tag list) and parent it into Root(); wires Esc / Enter / outside-press dismissal
         void _RebuildTagEditorList(); // re-list the GLOBAL tag universe (CollectGlobalTags — max session activity desc) with this session's on/off state per row + the "K of N tags" footer
-        void _CommitTagEditorAdd(); // the "+" button / Enter: normalize the typed name; an existing tag just applies to this session, a NEW name is cap-gated (AppSettings::maxTags)
+        void _CommitTagEditorAdd(); // the "+" button / Enter: normalize the typed name; an existing tag just applies to this session, a NEW name is cap-gated (AppSettings::maxTags) + takes the picker's color (an explicit pick also recolors an existing tag); re-randomizes the pick after a successful add
         void _UpdateTagEditorAddState(); // TextChanged: show the "+" only when the box holds a usable name; disable + hint when a NEW name would exceed the cap
+        void _SelectTagEditorColor(const std::wstring& hex, bool userPicked); // ring the matching swatch + paint the "+" with the pick; userPicked marks an EXPLICIT choice (the only kind allowed to recolor an existing tag)
+        void _RandomizeTagEditorColor(); // roll a fresh random (non-explicit) pre-pick — on every panel open and after every added tag; always moves off the current pick
         void _ToggleSessionTag(const std::wstring& sessionId, const std::wstring& tag); // add/remove one tag on a session (SessionStore) + refresh its tab badges + re-render the panel list
         void _CloseTagEditorPopup(); // dismiss the panel (Esc / outside press / tab switch)
-        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagEditorPopup{ nullptr }; // the Tag panel (bookmark tags) — built once, parented into Root()
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagEditorPopup{ nullptr }; // the Tags panel (bookmark tags) — built once, parented into Root()
         winrt::Windows::UI::Xaml::Controls::Border _tagEditorCard{ nullptr }; // the panel card (the outside-press dismissal's inside/outside boundary)
         winrt::Windows::UI::Xaml::Controls::TextBox _tagEditorBox{ nullptr }; // row 1: the focusable "name the tag" box
-        winrt::Windows::UI::Xaml::Controls::Button _tagEditorAddBtn{ nullptr }; // row 1: the "+" beside the box — appears once text is typed
+        winrt::Windows::UI::Xaml::Controls::Button _tagEditorAddBtn{ nullptr }; // row 1: the "+" beside the box — appears once text is typed; wears the picked color as its background
+        winrt::Windows::UI::Xaml::Controls::StackPanel _tagEditorSwatchRow{ nullptr }; // row 2: the color-picker swatches (one per kTagPalette color; the pick ringed white)
+        std::wstring _tagEditorPickedHex; // the picker's current "#AARRGGBB" (random pre-pick or an explicit swatch tap)
+        bool _tagEditorUserPicked{ false }; // true only after an explicit swatch tap this open — gates the existing-tag recolor
         winrt::Windows::UI::Xaml::Controls::TextBlock _tagEditorHint{ nullptr }; // the cap message ("Tag limit reached (N)"), collapsed until relevant
         winrt::Windows::UI::Xaml::Controls::StackPanel _tagEditorList{ nullptr }; // the tag rows (sorted by max session activity desc)
         winrt::Windows::UI::Xaml::Controls::TextBlock _tagEditorCount{ nullptr }; // the dim "K of N tags" footer

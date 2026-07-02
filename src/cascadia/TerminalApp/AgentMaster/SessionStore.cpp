@@ -557,4 +557,134 @@ namespace Agentmaster
     {
         return LoadAllSessionTagsIn(StoreDir());
     }
+
+    // ===== typed convenience: the TAG COLORS (tag-colors.json — see SessionStore.h) ==========
+
+    namespace
+    {
+        std::wstring TagColorsPath(const std::wstring& stateDir)
+        {
+            return stateDir + L"\\tag-colors.json";
+        }
+
+        // "#RRGGBB" / "#AARRGGBB" shape only — enforced on write AND load so a mangled file can
+        // never feed a garbage color into the UI (the reader falls back to the name hash instead).
+        bool ValidTagColorHex(const std::wstring& hex)
+        {
+            if ((hex.size() != 7 && hex.size() != 9) || hex[0] != L'#')
+            {
+                return false;
+            }
+            for (size_t i = 1; i < hex.size(); ++i)
+            {
+                const wchar_t c = hex[i];
+                if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F')))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    std::map<std::wstring, std::wstring> LoadAllTagColorsIn(const std::wstring& stateDir)
+    {
+        std::map<std::wstring, std::wstring> out;
+        if (stateDir.empty())
+        {
+            return out;
+        }
+        const std::string bytes = ReadWhole(TagColorsPath(stateDir), 1u << 20);
+        if (bytes.empty())
+        {
+            return out; // no file yet / unreadable — every tag falls back to its hash color
+        }
+        const auto parsed = json::Parse(Utf8ToWide(bytes.data(), bytes.size()));
+        if (!parsed || parsed->type != json::Value::Type::Obj)
+        {
+            return out;
+        }
+        for (const auto& [k, v] : parsed->members)
+        {
+            if (v.type != json::Value::Type::Str || !ValidTagColorHex(v.str))
+            {
+                continue;
+            }
+            // Keys are stored folded already, but re-fold defensively so a hand-edited casing
+            // still lands on the tag's case-insensitive identity.
+            const std::wstring folded = FoldTagName(NormalizeTagName(k));
+            if (!folded.empty())
+            {
+                out[folded] = v.str;
+            }
+        }
+        return out;
+    }
+
+    std::wstring GetTagColorIn(const std::wstring& stateDir, const std::wstring& tag)
+    {
+        const std::wstring folded = FoldTagName(NormalizeTagName(tag));
+        if (folded.empty())
+        {
+            return {};
+        }
+        const auto all = LoadAllTagColorsIn(stateDir);
+        const auto it = all.find(folded);
+        return it == all.end() ? std::wstring{} : it->second;
+    }
+
+    bool SetTagColorIn(const std::wstring& stateDir, const std::wstring& tag, const std::wstring& hexOrEmpty)
+    {
+        if (stateDir.empty())
+        {
+            return false;
+        }
+        const std::wstring folded = FoldTagName(NormalizeTagName(tag));
+        if (folded.empty())
+        {
+            return false;
+        }
+        if (!hexOrEmpty.empty() && !ValidTagColorHex(hexOrEmpty))
+        {
+            return false; // malformed color — refuse rather than store garbage
+        }
+        auto all = LoadAllTagColorsIn(stateDir);
+        const auto it = all.find(folded);
+        if (hexOrEmpty.empty())
+        {
+            if (it == all.end())
+            {
+                return true; // nothing to remove — no write
+            }
+            all.erase(it);
+        }
+        else
+        {
+            if (it != all.end() && it->second == hexOrEmpty)
+            {
+                return true; // unchanged — dedup the write
+            }
+            all[folded] = hexOrEmpty;
+        }
+        json::Value o = json::Value::MkObj();
+        for (const auto& [k, v] : all)
+        {
+            o.Set(k, json::Value::MkStr(v));
+        }
+        ::CreateDirectoryW(stateDir.c_str(), nullptr); // idempotent (tests point at a fresh temp dir)
+        return AtomicWriteUtf8(TagColorsPath(stateDir), json::Dump(o));
+    }
+
+    std::map<std::wstring, std::wstring> LoadAllTagColors()
+    {
+        return LoadAllTagColorsIn(AgentmasterStateDir());
+    }
+    std::wstring GetTagColor(const std::wstring& tag)
+    {
+        return GetTagColorIn(AgentmasterStateDir(), tag);
+    }
+    bool SetTagColor(const std::wstring& tag, const std::wstring& hex)
+    {
+        return SetTagColorIn(AgentmasterStateDir(), tag, hex);
+    }
 }

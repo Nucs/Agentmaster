@@ -1991,6 +1991,29 @@ namespace winrt::TerminalApp::implementation
                     rowMenu.Items().Append(editTitle);
                 }
 
+                // Tags — the bookmark-tags panel (the WT tab menu's "Tags" twin) for this row's
+                // session. Works for CLOSED / never-managed on-disk sessions too (the SessionStore
+                // is id-keyed): the tag filters this page's tag chips immediately, and the bookmark
+                // badges appear whenever a tab hosts the session. Anchored under the clicked row
+                // (the row element may be recycled by a re-render before the deferred open — the
+                // page guards the transform and falls back). Grouped with Favorite / Edit Title
+                // (session metadata), above the Hide separator.
+                {
+                    MenuFlyoutItem tagsItem;
+                    tagsItem.Text(L"Tags");
+                    SessSetTip(tagsItem, L"Bookmark tags for this session \x2014 add a tag (pick its color) or toggle existing ones; tags show as small bookmarks on the session's tab and filter this list via the tag chips above.");
+                    const auto rowAnchor = rowB; // captured for the deferred open's placement
+                    tagsItem.Click([this, rid, rowAnchor](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rowAnchor]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_OpenTagEditorForElement(rid, rowAnchor);
+                            }
+                        });
+                    });
+                    rowMenu.Items().Append(tagsItem);
+                }
+
                 rowMenu.Items().Append(MenuFlyoutSeparator{});
 
                 // Hide / Unhide — toggles AppSettings.hiddenSessionIds. A revealed hidden row (only

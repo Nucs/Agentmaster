@@ -2725,6 +2725,40 @@ void TestSessionTags()
         std::filesystem::remove_all(std::filesystem::path{ store }, ec);
     }
 
+    // --- tag COLORS: the profile-level tag-colors.json (the tag editor's color picker) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am_tagcolors_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+
+        CHECK(GetTagColorIn(dir, L"bug").empty(), "tag colors: unset tag reads \"\" (hash fallback)");
+        CHECK(LoadAllTagColorsIn(dir).empty(), "tag colors: no file -> empty map");
+        CHECK(SetTagColorIn(dir, L"Bug", L"#FF112233"), "tag colors: store a #AARRGGBB");
+        CHECK(GetTagColorIn(dir, L"bug") == L"#FF112233", "tag colors: keyed by the FOLDED name (case-insensitive identity)");
+        CHECK(GetTagColorIn(dir, L"  BUG  ") == L"#FF112233", "tag colors: lookup normalizes first (trim + fold)");
+        CHECK(!SetTagColorIn(dir, L"Bug", L"red"), "tag colors: a non-hex value is refused");
+        CHECK(!SetTagColorIn(dir, L"Bug", L"#GG112233"), "tag colors: bad hex digits refused");
+        CHECK(!SetTagColorIn(dir, L"Bug", L"#123"), "tag colors: wrong length refused");
+        CHECK(GetTagColorIn(dir, L"bug") == L"#FF112233", "tag colors: the stored value survives refused writes");
+        CHECK(SetTagColorIn(dir, L"Bug", L"#FF112233"), "tag colors: an unchanged re-set is a dedup'd success");
+        CHECK(SetTagColorIn(dir, L"perf", L"#4FC3F7"), "tag colors: a legacy #RRGGBB shape is accepted too");
+        {
+            const auto all = LoadAllTagColorsIn(dir);
+            CHECK(all.size() == 2 && all.at(L"bug") == L"#FF112233" && all.at(L"perf") == L"#4FC3F7", "tag colors: LoadAll gathers both, folded-keyed");
+        }
+        CHECK(SetTagColorIn(dir, L"BUG", L""), "tag colors: \"\" removes the entry (back to the hash)");
+        CHECK(GetTagColorIn(dir, L"bug").empty(), "tag colors: removed entry reads \"\"");
+        CHECK(SetTagColorIn(dir, L"bug", L""), "tag colors: removing an absent entry is a no-op success");
+        CHECK(LoadAllTagColorsIn(dir).size() == 1, "tag colors: the other entry survives a remove");
+        CHECK(!SetTagColorIn(dir, L"   ", L"#FF112233"), "tag colors: a blank tag name is refused");
+        CHECK(!SetTagColorIn(L"", L"bug", L"#FF112233"), "tag colors: an empty state dir is refused");
+        CHECK(GetTagColorIn(L"", L"bug").empty(), "tag colors: an empty state dir reads \"\"");
+
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
     // --- CollectGlobalTags: fold-merge + max activity + count + ordering + display casing ---
     {
         std::unordered_map<std::wstring, std::vector<std::wstring>> tagsBySession{
