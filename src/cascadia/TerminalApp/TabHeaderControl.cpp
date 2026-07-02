@@ -111,6 +111,16 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (bookmark tags): keep the overlay badge row pinned to the title's first
+        // character + the 3/4-height line as the header lays out/resizes (leading indicator icons
+        // appearing/disappearing shift the title's x; the first layout establishes the real height).
+        HeaderRootGrid().SizeChanged([weakThis = get_weak()](auto&&, auto&&) {
+            if (auto self = weakThis.get())
+            {
+                self->_PositionTagBadges();
+            }
+        });
+
         // We'll only process the KeyUp event if we received an initial KeyDown event first.
         // Avoids issue immediately closing the tab rename when we see the enter KeyUp event that was
         // sent to the command palette to trigger the openTabRenamer action in the first place.
@@ -269,14 +279,16 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (bookmark tags): rebuild the HeaderTagBookmarks row from TabStatus.AgentTagsSpec —
-    // one small bookmark-ribbon Polygon per '\n'-separated tag name, bottom-anchored after the title
-    // (see the XAML note). Each ribbon is filled with the tag's stable color (TagColorFor — the same
-    // name always wears the same color, everywhere) over a thin black stroke (legible on any per-dir
-    // tab color, like the status dot) and carries ITS OWN tooltip naming the tag. Change-gated on the
-    // rendered spec so the frequent re-asserts (bind/launch/refresh paths) rebuild nothing; capped at
-    // 8 badges so a heavily-tagged session can't balloon the tab strip (hover any badge for its name;
-    // the cap is presentation-only — every tag stays stored + listed in the Tag panel).
+    // Agentmaster (bookmark tags): rebuild the HeaderTagBookmarks overlay row from
+    // TabStatus.AgentTagsSpec — one small bookmark-ribbon Polygon per '\n'-separated tag name. Each
+    // ribbon is filled with the tag's stable color (TagColorFor — the same name always wears the same
+    // color, everywhere) over a thin black stroke (legible on any per-dir tab color, like the status
+    // dot). Hovering a badge raises TagBadgeHoverBegin(tag, badge) / TagBadgeHoverEnd — the PAGE
+    // shows the rich tag panel there (every session carrying the tag + status, click == jump), which
+    // a ToolTip cannot do (tooltips are non-interactive; AgentSetTip's are hit-test-invisible on
+    // purpose). Change-gated on the rendered spec so the frequent re-asserts (bind/launch/refresh
+    // paths) rebuild nothing; capped at 20 badges (the layout-neutral overlay costs no strip width —
+    // the tab's own clip is the real bound; every tag stays stored + listed in the Tags panel).
     void TabHeaderControl::_UpdateTagBadges()
     {
         const auto status = TabStatus();
@@ -292,7 +304,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         panel.Children().Clear();
-        constexpr size_t kMaxBadges = 8;
+        constexpr size_t kMaxBadges = 20;
         std::wstring_view rest{ spec };
         size_t shown = 0;
         while (!rest.empty() && shown < kMaxBadges)
@@ -304,22 +316,73 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-            // A classic bookmark ribbon: a 6x9 rectangle with a notch cut up into the bottom edge.
+            // A classic bookmark ribbon: a 5x7 rectangle with a notch cut up into the bottom edge —
+            // sized to the header's bottom quarter (the overlay's 3/4-height anchor, _PositionTagBadges).
             winrt::Windows::UI::Xaml::Shapes::Polygon ribbon;
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 0.0f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
-            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 5.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 5.0f, 7.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 2.5f, 4.9f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 7.0f });
             ribbon.Fill(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ TagColorFor(name) });
             ribbon.Stroke(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
             ribbon.StrokeThickness(0.75);
-            // Hit-testable ON PURPOSE: the tooltip needs hover. Presses still bubble to the
-            // TabViewItem (nothing here handles them), so tab click/drag are unaffected.
-            AgentSetTip(ribbon, winrt::hstring{ name });
+            // Hit-testable ON PURPOSE: the hover panel needs enter/leave. Presses still bubble to
+            // the TabViewItem (nothing here handles them), so tab click/drag are unaffected.
+            const winrt::hstring tagName{ name };
+            ribbon.PointerEntered([weakThis = get_weak(), tagName](const winrt::Windows::Foundation::IInspectable& s, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    if (const auto el = s.try_as<winrt::Windows::UI::Xaml::UIElement>())
+                    {
+                        self->TagBadgeHoverBegin.raise(tagName, el);
+                    }
+                }
+            });
+            ribbon.PointerExited([weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->TagBadgeHoverEnd.raise();
+                }
+            });
             panel.Children().Append(ribbon);
             ++shown;
         }
+        _PositionTagBadges();
+    }
+
+    // Agentmaster (bookmark tags): pin the overlay badge row at (title's first character x,
+    // 3/4 of the header height). The host Canvas sits at the root grid's top-left with zero size
+    // (layout-neutral — badges never widen the tab), so Canvas.Left/Top position the row in grid
+    // coordinates. The title x comes from a live transform (leading indicator icons shift it);
+    // before the first layout — or mid-rename, when the title TextBlock is collapsed — sensible
+    // fallbacks / the last position hold (fallback x: just past the 18px status-dot slot).
+    void TabHeaderControl::_PositionTagBadges()
+    {
+        const auto row = HeaderTagBookmarks();
+        if (!row)
+        {
+            return;
+        }
+        double x = 20.0; // fallback: just past the status-dot slot
+        try
+        {
+            if (const auto title = HeaderTextBlock(); title && title.Visibility() == winrt::Windows::UI::Xaml::Visibility::Visible && title.ActualWidth() > 0)
+            {
+                const auto pt = title.TransformToVisual(HeaderRootGrid()).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+                x = pt.X;
+            }
+        }
+        catch (...)
+        {
+        }
+        double h = HeaderRootGrid() ? HeaderRootGrid().ActualHeight() : 0.0;
+        if (h <= 0)
+        {
+            h = 22.0; // pre-layout fallback == the dot wrap's height (the row's usual tallest child)
+        }
+        winrt::Windows::UI::Xaml::Controls::Canvas::SetLeft(row, x);
+        winrt::Windows::UI::Xaml::Controls::Canvas::SetTop(row, std::floor(h * 0.75));
     }
 
     // Method Description:

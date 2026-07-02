@@ -2616,6 +2616,22 @@ namespace winrt::TerminalApp::implementation
             page->_OpenTagEditorForTab(*tab);
         });
 
+        // Agentmaster (bookmark tags): hovering a header bookmark badge -> the rich tag hover panel
+        // (every session carrying the tag, title + status dot; a live row's click jumps to its tab).
+        // The page owns the popup + the hover-intent timers; the header only announces enter/leave.
+        hostingTab.TagBadgeHoverBegin([weakThis](const winrt::hstring& tag, const WUX::UIElement& anchor) {
+            if (auto page{ weakThis.get() })
+            {
+                page->_OnTagBadgeHoverBegin(tag, anchor);
+            }
+        });
+        hostingTab.TagBadgeHoverEnd([weakThis]() {
+            if (auto page{ weakThis.get() })
+            {
+                page->_OnTagBadgeHoverEnd();
+            }
+        });
+
         // Agentmaster (eager-init): context-menu "Activate Tab" -> start this tab's DORMANT session's
         // claude IN PLACE (no focus change). _ActivateDormantSession is a no-op if it already started.
         hostingTab.ActivateSessionRequested([weakTab, weakThis]() {

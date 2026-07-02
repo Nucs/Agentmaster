@@ -7,6 +7,7 @@
 #include "Tab.h"
 #include "SettingsPaneContent.h"
 #include "Tab.g.cpp"
+#include "TabHeaderControl.h" // Agentmaster (bookmark tags): get_self — the badge-hover til::events aren't projected
 #include "Utils.h"
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
@@ -108,6 +109,28 @@ namespace winrt::TerminalApp::implementation
                 tab->RequestFocusActiveControl.raise();
             }
         });
+
+        // Agentmaster (bookmark tags): forward the header's per-badge hover begin/end up to the page,
+        // which owns the rich tag hover panel (the sessions carrying that tag, click == jump to its
+        // tab). The header control is a leaf — it knows badges, not the registry — so it only
+        // announces "the pointer is over tag T of this tab" and the page does the data + popup work.
+        // Via get_self: these are impl-side til::events (not projected — same-module access, like the
+        // page's own _GetTabImpl calls onto us).
+        if (const auto headerImpl = winrt::get_self<TabHeaderControl>(_headerControl))
+        {
+            headerImpl->TagBadgeHoverBegin([weakThis = get_weak()](const winrt::hstring& tag, const WUX::UIElement& anchor) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->TagBadgeHoverBegin.raise(tag, anchor);
+                }
+            });
+            headerImpl->TagBadgeHoverEnd([weakThis = get_weak()]() {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->TagBadgeHoverEnd.raise();
+                }
+            });
+        }
 
         _UpdateHeaderControlMaxWidth();
 
@@ -2114,7 +2137,7 @@ namespace winrt::TerminalApp::implementation
                     tab->TagEditorRequested.raise();
                 }
             });
-            _tagMenuItem.Text(L"Tag");
+            _tagMenuItem.Text(L"Tags");
             _tagMenuItem.Icon(tagSymbol);
             _tagMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
             WUX::Controls::ToolTipService::SetToolTip(_tagMenuItem, box_value(winrt::hstring{ L"Bookmark-tag this session \x2014 name a new tag or toggle existing ones; each tag shows as a small bookmark at the bottom of the tab" }));

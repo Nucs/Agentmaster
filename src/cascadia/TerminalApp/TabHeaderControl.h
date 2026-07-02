@@ -32,6 +32,14 @@ namespace winrt::TerminalApp::implementation
         til::event<TerminalApp::TitleChangeRequestedArgs> TitleChangeRequested;
         til::typed_event<> RenameEnded;
 
+        // Agentmaster (bookmark tags): the pointer entered/left one of the header's bookmark badges.
+        // The Tab forwards these to the page, which shows the rich tag hover panel (the sessions
+        // carrying that tag + their status, click == jump to the tab) anchored at the badge — a
+        // clickable popup, which a ToolTip can never be. Begin carries the tag name + the badge
+        // element (the page transforms it into its own Root() space for placement).
+        til::event<winrt::delegate<winrt::hstring /*tag*/, winrt::Windows::UI::Xaml::UIElement /*anchor*/>> TagBadgeHoverBegin;
+        til::event<winrt::delegate<>> TagBadgeHoverEnd;
+
         til::property_changed_event PropertyChanged;
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(double, RenamerMaxWidth, PropertyChanged.raise);
@@ -52,10 +60,16 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster (bookmark tags): rebuild the HeaderTagBookmarks row — one small bookmark
         // Polygon per tag in TabStatus.AgentTagsSpec ('\n'-joined names), each filled with its
-        // stable TagColorFor color and carrying its own tooltip (the tag name). Driven through the
-        // SAME TabStatus PropertyChanged subscription as the pending-dots pulse; change-gated on
-        // _renderedTagsSpec so a re-assert of an unchanged spec rebuilds nothing.
+        // stable TagColorFor color and raising TagBadgeHoverBegin/End on pointer enter/leave (the
+        // page's rich hover panel). Driven through the SAME TabStatus PropertyChanged subscription
+        // as the pending-dots pulse; change-gated on _renderedTagsSpec so a re-assert of an
+        // unchanged spec rebuilds nothing.
         void _UpdateTagBadges();
+        // Position the overlay row: left == the title's first-character x (fallback: just past the
+        // status-dot slot), top == ~3/4 of the header height (the badges occupy the bottom quarter,
+        // over the title's descender zone). Runs after every badge rebuild + on the root grid's
+        // SizeChanged (the title shifts when leading indicator icons appear/disappear).
+        void _PositionTagBadges();
         winrt::hstring _renderedTagsSpec;
 
         bool _receivedKeyDown{ false };

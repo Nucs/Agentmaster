@@ -14,7 +14,8 @@
              MinHeight="16"
              mc:Ignorable="d">
 
-    <Grid HorizontalAlignment="Left">
+    <Grid x:Name="HeaderRootGrid"
+          HorizontalAlignment="Left">
         <!--  Agentmaster (Linked Lenses): the "selected/active" pill — a filled accent background
               drawn BEHIND the header content (first Grid child, so the icon/dot/title render on top).
               The Grid sizes to the header StackPanel; the NEGATIVE Margin then grows the pill OUTWARD
@@ -335,22 +336,30 @@
                 <mtu:TextMenuFlyout />
             </TextBox.ContextFlyout>
         </TextBox>
-        <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, trailing
-              the title and anchored at the BOTTOM of the header row (the row is ~22px tall — the dot
-              wrap; a 9px bookmark bottom-aligned occupies its bottom ~40%, the "little bookmark at the
-              bottom" look) so the badges hang at the tab's lower edge without overlapping the title
-              text (they take their own horizontal slot in this StackPanel rather than overlaying).
-              The Polygons are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec —
-              tag count varies, each badge is colored by the stable per-tag TagColorFor and carries its
-              own tooltip (the tag name) — riding the same TabStatus PropertyChanged pipeline as the
-              pending-dots animation. Hit-test stays ON (tooltips need hover); pointer presses still
-              bubble to the TabViewItem, so tab click/drag are unaffected (like the title TextBlock).  -->
-        <StackPanel x:Name="HeaderTagBookmarks"
-                    Orientation="Horizontal"
-                    Spacing="2"
-                    Margin="6,0,0,1"
-                    HorizontalAlignment="Left"
-                    VerticalAlignment="Bottom" />
         </StackPanel>
+        <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, drawn as
+              an OVERLAY over the header's bottom quarter — the row starts at the title's FIRST
+              CHARACTER x-position with each bookmark's TOP at ~3/4 of the header height (positioned in
+              code-behind, _PositionTagBadges). A LAYOUT-NEUTRAL overlay on purpose: the host Canvas is
+              0x0 (a Canvas neither sizes to nor clips its children), so however many badges show, the
+              tab measures exactly as if they weren't there — which is what lets MORE than a few tags
+              stay visible (the earlier in-flow trailing row consumed strip width and got clipped after
+              ~3 badges on a width-capped tab; an overlay spans the whole tab up to ITS clip instead).
+              The Polygons are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec —
+              tag count varies, each badge colored by the stable per-tag TagColorFor — riding the same
+              TabStatus PropertyChanged pipeline as the pending-dots animation. Hovering a badge raises
+              TagBadgeHoverBegin/End: the PAGE shows the rich tag panel (every session carrying the tag,
+              title + status dot, click == jump to its tab) — richer than a ToolTip, which cannot take
+              clicks. Hit-test ON for the hover; presses still bubble to the TabViewItem (tab click/drag
+              unaffected). Drawn LAST, so the ribbons render over the title's descender zone.  -->
+        <Canvas x:Name="HeaderTagBookmarksHost"
+                Width="0"
+                Height="0"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Top">
+            <StackPanel x:Name="HeaderTagBookmarks"
+                        Orientation="Horizontal"
+                        Spacing="2" />
+        </Canvas>
     </Grid>
 </UserControl>

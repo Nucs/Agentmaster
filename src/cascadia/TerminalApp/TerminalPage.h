@@ -824,6 +824,25 @@ namespace winrt::TerminalApp::implementation
         std::wstring _tagEditorSessionId; // the session the open panel edits
         bool _tagEditorOutsideHooked{ false }; // the Root() outside-press dismissal handler is registered (once)
         std::vector<::Agentmaster::GlobalTagInfo> _tagEditorUniverse; // the global tag universe CACHED at open/toggle — the per-keystroke cap check must not re-scan the session-store dir
+        // Agentmaster (bookmark tags): the rich TAG HOVER PANEL — hovering a tab-header bookmark
+        // badge opens a popup listing EVERY session carrying that tag (title + status dot; a LIVE
+        // row click jumps to its tab via _ActivateClaudeSession — cross-window). A popup rather
+        // than a ToolTip because a tooltip can't take clicks (AgentSetTip's are hit-test-invisible
+        // by design). Open/close ride hover-intent timers (the Sessions range-popup recipe): a
+        // short open delay so panning the strip doesn't flash panels, a grace close so the pointer
+        // can cross the badge->panel gap (panel-enter cancels it).
+        void _OnTagBadgeHoverBegin(const winrt::hstring& tag, const winrt::Windows::UI::Xaml::UIElement& anchor); // badge enter: cancel the grace close, arm the open delay
+        void _OnTagBadgeHoverEnd(); // badge exit: cancel a pending open; grace-close an open panel
+        void _EnsureTagHoverPopup(); // lazily build the popup + card + the two timers, parent into Root()
+        void _ShowTagHoverPanelNow(); // the open timer fired: gather the tag's sessions + render rows + place at the pending anchor
+        void _CloseTagHoverPopup(); // dismiss (grace timer / a row jump / tab switch)
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagHoverPopup{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::Border _tagHoverCard{ nullptr }; // the hover-keepalive boundary (enter cancels the grace close)
+        winrt::Windows::UI::Xaml::Controls::StackPanel _tagHoverBody{ nullptr }; // header + session rows, rebuilt per show
+        winrt::Windows::UI::Xaml::DispatcherTimer _tagHoverOpenTimer{ nullptr }; // one-shot ~160ms open delay
+        winrt::Windows::UI::Xaml::DispatcherTimer _tagHoverCloseTimer{ nullptr }; // one-shot ~300ms grace close
+        winrt::hstring _tagHoverPendingTag; // the tag to show when the open timer fires
+        winrt::Windows::UI::Xaml::UIElement _tagHoverPendingAnchor{ nullptr }; // the hovered badge (transformed into Root() space for placement)
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.

@@ -1241,6 +1241,371 @@ namespace winrt::TerminalApp::implementation
         _tagEditorSessionId.clear();
     }
 
+    // ==================================================================================
+    // Agentmaster (bookmark tags): the rich TAG HOVER PANEL. Hovering a tab-header
+    // bookmark badge opens a popup listing EVERY session carrying that tag — each row a
+    // status dot (the Triage palette for a LIVE session; a hollow gray ring for a closed
+    // one) + the session's title — and clicking a LIVE row JUMPS to its tab
+    // (_ActivateClaudeSession — the cross-window activate). A popup rather than a ToolTip
+    // because a tooltip can never take clicks (AgentSetTip's are hit-test-invisible by
+    // design). Hover-intent timers give it tooltip ergonomics without the flash: a ~160ms
+    // open delay (panning the strip opens nothing) and a ~300ms grace close that
+    // panel-enter cancels (the pointer can cross the badge->panel gap) — the Sessions
+    // range-popup recipe.
+    // ==================================================================================
+
+    // Badge enter (via Tab <- TabHeaderControl): remember what to show, cancel any pending
+    // grace close, and (re)arm the open delay. Re-entering another badge mid-delay simply
+    // re-targets the pending tag. Runs INSIDE pointer-event dispatch, so it must not touch
+    // the visual tree — it only creates the two timers (lazily; not tree work) and arms the
+    // open delay; the popup's Root() append happens on the timer's clean dispatcher tick
+    // (_ShowTagHoverPanelNow -> _EnsureTagHoverPopup), per the islands defer discipline.
+    void TerminalPage::_OnTagBadgeHoverBegin(const winrt::hstring& tag, const WUX::UIElement& anchor)
+    {
+        if (tag.empty() || !anchor)
+        {
+            return;
+        }
+        if (!_tagHoverOpenTimer)
+        {
+            _tagHoverOpenTimer = WUX::DispatcherTimer{};
+            _tagHoverOpenTimer.Interval(std::chrono::milliseconds{ 160 });
+            _tagHoverOpenTimer.Tick([weak = get_weak()](auto&&, auto&&) {
+                if (const auto page = weak.get())
+                {
+                    if (page->_tagHoverOpenTimer)
+                    {
+                        page->_tagHoverOpenTimer.Stop(); // one-shot
+                    }
+                    page->_ShowTagHoverPanelNow();
+                }
+            });
+        }
+        if (!_tagHoverCloseTimer)
+        {
+            _tagHoverCloseTimer = WUX::DispatcherTimer{};
+            _tagHoverCloseTimer.Interval(std::chrono::milliseconds{ 300 });
+            _tagHoverCloseTimer.Tick([weak = get_weak()](auto&&, auto&&) {
+                if (const auto page = weak.get())
+                {
+                    if (page->_tagHoverCloseTimer)
+                    {
+                        page->_tagHoverCloseTimer.Stop(); // one-shot
+                    }
+                    page->_CloseTagHoverPopup();
+                }
+            });
+        }
+        _tagHoverPendingTag = tag;
+        _tagHoverPendingAnchor = anchor;
+        _tagHoverCloseTimer.Stop();
+        _tagHoverOpenTimer.Stop();
+        _tagHoverOpenTimer.Start(); // one-shot; restarts the delay on each badge enter
+    }
+
+    // Badge exit: a pending (not yet shown) panel is simply cancelled; an OPEN panel gets the
+    // grace close — cancelled again if the pointer arrives on the panel itself.
+    void TerminalPage::_OnTagBadgeHoverEnd()
+    {
+        if (_tagHoverOpenTimer)
+        {
+            _tagHoverOpenTimer.Stop();
+        }
+        if (_tagHoverPopup && _tagHoverPopup.IsOpen() && _tagHoverCloseTimer)
+        {
+            _tagHoverCloseTimer.Start();
+        }
+    }
+
+    // Build the popup + card ONCE and parent it into Root() (the tag editor's recipe;
+    // root-relative offsets). The card is the hover-keepalive boundary. Called only from the
+    // open timer's tick (a clean dispatcher pass), never from inside pointer dispatch — the
+    // Root() append is a tree mutation.
+    void TerminalPage::_EnsureTagHoverPopup()
+    {
+        if (_tagHoverPopup)
+        {
+            return;
+        }
+
+        _tagHoverBody = StackPanel{};
+        _tagHoverBody.Spacing(2);
+        _tagHoverBody.MinWidth(220);
+        _tagHoverBody.MaxWidth(360);
+
+        ScrollViewer scroll; // a heavily-used tag can carry many sessions — bound the height
+        scroll.MaxHeight(320);
+        scroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        scroll.Content(_tagHoverBody);
+
+        _tagHoverCard = Border{};
+        _tagHoverCard.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark
+        _tagHoverCard.Background(SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x26, 0x26, 0x26) });
+        _tagHoverCard.BorderBrush(SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x3A, 0x3A, 0x3A) });
+        _tagHoverCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        _tagHoverCard.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 6, 6, 6, 6 });
+        _tagHoverCard.Padding(Thickness{ 8, 6, 8, 6 });
+        _tagHoverCard.Child(scroll);
+        // The keepalive: entering the card cancels the grace close; leaving it re-arms it.
+        _tagHoverCard.PointerEntered([weak = get_weak()](auto&&, auto&&) {
+            if (const auto page = weak.get())
+            {
+                if (page->_tagHoverCloseTimer)
+                {
+                    page->_tagHoverCloseTimer.Stop();
+                }
+            }
+        });
+        _tagHoverCard.PointerExited([weak = get_weak()](auto&&, auto&&) {
+            if (const auto page = weak.get())
+            {
+                if (page->_tagHoverCloseTimer)
+                {
+                    page->_tagHoverCloseTimer.Start();
+                }
+            }
+        });
+
+        _tagHoverPopup = Windows::UI::Xaml::Controls::Primitives::Popup{};
+        _tagHoverPopup.Child(_tagHoverCard);
+        _tagHoverPopup.HorizontalAlignment(HorizontalAlignment::Left);
+        _tagHoverPopup.VerticalAlignment(VerticalAlignment::Top);
+        Grid::SetRow(_tagHoverPopup, 0);
+        Grid::SetRowSpan(_tagHoverPopup, 3); // span the whole Root grid
+        Root().Children().Append(_tagHoverPopup);
+    }
+
+    // The open delay elapsed on a badge: gather every session carrying the pending tag (the
+    // durable store — one sparse scan on hover, not per tick), render the rows, and place the
+    // panel just under the badge. LIVE sessions first (activity desc), then closed ones.
+    void TerminalPage::_ShowTagHoverPanelNow()
+    {
+        if (_tagHoverPendingTag.empty() || !_tagHoverPendingAnchor)
+        {
+            return;
+        }
+        _EnsureTagHoverPopup(); // safe here: the open timer's tick is a clean dispatcher pass
+        if (!_tagHoverPopup || !_tagHoverBody)
+        {
+            return;
+        }
+        const std::wstring tag{ _tagHoverPendingTag };
+        const std::wstring folded = ::Agentmaster::FoldTagName(tag);
+
+        struct HoverRow
+        {
+            std::wstring sid;
+            std::wstring title;
+            ::Agentmaster::SessionState state{ ::Agentmaster::SessionState::Idle };
+            bool live{ false };
+            int64_t activity{ 0 };
+        };
+        std::vector<HoverRow> rows;
+        for (const auto& [sid, tags] : ::Agentmaster::LoadAllSessionTags())
+        {
+            bool has = false;
+            for (const auto& t : tags)
+            {
+                if (::Agentmaster::FoldTagName(t) == folded)
+                {
+                    has = true;
+                    break;
+                }
+            }
+            if (!has)
+            {
+                continue;
+            }
+            HoverRow r;
+            r.sid = sid;
+            if (_sessionRegistry)
+            {
+                if (const auto s = _sessionRegistry->Get(sid))
+                {
+                    r.title = s->title;
+                    r.state = s->state;
+                    r.live = s->live;
+                    r.activity = (std::max)(s->lastActivityUnixMs, s->convLastActivityUnixMs);
+                }
+            }
+            if (r.title.empty())
+            {
+                r.title = ::Agentmaster::GetStoredSessionTitle(sid); // a closed / never-loaded session's durable title
+            }
+            if (r.title.empty())
+            {
+                r.title = ::Agentmaster::ShortId(sid); // last resort: the first-8 id convention
+            }
+            rows.push_back(std::move(r));
+        }
+        std::sort(rows.begin(), rows.end(), [](const HoverRow& a, const HoverRow& b) {
+            if (a.live != b.live)
+            {
+                return a.live; // live (jumpable) sessions first
+            }
+            if (a.activity != b.activity)
+            {
+                return a.activity > b.activity;
+            }
+            return a.title < b.title;
+        });
+
+        _tagHoverBody.Children().Clear();
+        {
+            // Header: the tag's bookmark ribbon + its name + the carrier count.
+            StackPanel h;
+            h.Orientation(Orientation::Horizontal);
+            h.Spacing(6);
+            Windows::UI::Xaml::Shapes::Polygon ribbon;
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
+            ribbon.Fill(SolidColorBrush{ TagColorFor(tag) });
+            ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+            ribbon.StrokeThickness(0.75);
+            ribbon.VerticalAlignment(VerticalAlignment::Center);
+            h.Children().Append(ribbon);
+            TextBlock name;
+            name.Text(winrt::hstring{ tag });
+            name.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            name.VerticalAlignment(VerticalAlignment::Center);
+            h.Children().Append(name);
+            TextBlock count;
+            count.Text(winrt::hstring{ L"\x00B7 " + std::to_wstring(rows.size()) + L" session" + (rows.size() == 1 ? L"" : L"s") });
+            count.FontSize(11);
+            count.Opacity(0.55);
+            count.VerticalAlignment(VerticalAlignment::Center);
+            h.Children().Append(count);
+            _tagHoverBody.Children().Append(h);
+        }
+        for (const auto& r : rows)
+        {
+            Button row;
+            row.HorizontalAlignment(HorizontalAlignment::Stretch);
+            row.HorizontalContentAlignment(HorizontalAlignment::Left);
+            row.Background(SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
+            row.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            row.Padding(Thickness{ 6, 3, 6, 3 });
+
+            StackPanel h;
+            h.Orientation(Orientation::Horizontal);
+            h.Spacing(6);
+            // The status indicator: the session's Triage state color when LIVE (the same
+            // AgentStatusColorFor palette as its tab dot), a hollow gray ring when closed.
+            winrt::Windows::UI::Xaml::Shapes::Ellipse dot;
+            dot.Width(9);
+            dot.Height(9);
+            dot.VerticalAlignment(VerticalAlignment::Center);
+            if (r.live)
+            {
+                dot.Fill(SolidColorBrush{ AgentStatusColorFor(r.state) });
+                dot.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+            }
+            else
+            {
+                dot.Fill(SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
+                dot.Stroke(SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x80, 0x80, 0x80) });
+            }
+            dot.StrokeThickness(1);
+            h.Children().Append(dot);
+            // The title — first line only (titles can be multi-line), display-capped.
+            std::wstring title = r.title;
+            if (const size_t nl = title.find_first_of(L"\r\n"); nl != std::wstring::npos)
+            {
+                title.resize(nl);
+            }
+            if (title.size() > 56)
+            {
+                title.resize(56);
+                title += L"\x2026";
+            }
+            TextBlock name;
+            name.Text(winrt::hstring{ title });
+            name.VerticalAlignment(VerticalAlignment::Center);
+            name.Opacity(r.live ? 1.0 : 0.6);
+            h.Children().Append(name);
+            if (!r.live)
+            {
+                TextBlock closed;
+                closed.Text(L"\x00B7 closed");
+                closed.FontSize(11);
+                closed.Opacity(0.45);
+                closed.VerticalAlignment(VerticalAlignment::Center);
+                h.Children().Append(closed);
+            }
+            row.Content(h);
+            if (r.live)
+            {
+                const winrt::hstring sidH{ r.sid };
+                row.Click([weak = get_weak(), sidH](auto&&, auto&&) {
+                    if (const auto page = weak.get())
+                    {
+                        // Defer — the jump switches tabs (which also dismisses this panel).
+                        page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak, sidH]() {
+                            if (const auto p = weak.get())
+                            {
+                                p->_CloseTagHoverPopup();
+                                p->_ActivateClaudeSession(sidH); // logs [nav] activate; cross-window
+                            }
+                        });
+                    }
+                });
+            }
+            else
+            {
+                row.IsEnabled(false); // closed sessions have no tab to jump to (resume from Sessions)
+            }
+            _tagHoverBody.Children().Append(row);
+        }
+
+        // Place just under the badge (root-relative — the tag editor's anchor recipe), clamped
+        // so the card can't hang past the window's right edge.
+        double x = 8;
+        double y = 40;
+        try
+        {
+            const auto pt = _tagHoverPendingAnchor.TransformToVisual(Root()).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+            x = pt.X - 8;
+            y = pt.Y + 12;
+        }
+        CATCH_LOG();
+        try
+        {
+            const double rootW = Root().ActualWidth();
+            if (rootW > 380 && x > rootW - 380)
+            {
+                x = rootW - 380;
+            }
+        }
+        catch (...)
+        {
+        }
+        _tagHoverPopup.HorizontalOffset(std::max(0.0, x));
+        _tagHoverPopup.VerticalOffset(std::max(0.0, y));
+        _tagHoverPopup.IsOpen(true);
+    }
+
+    // Dismiss the hover panel (grace timer / a row jump / tab switch). Idempotent.
+    void TerminalPage::_CloseTagHoverPopup()
+    {
+        if (_tagHoverOpenTimer)
+        {
+            _tagHoverOpenTimer.Stop();
+        }
+        if (_tagHoverCloseTimer)
+        {
+            _tagHoverCloseTimer.Stop();
+        }
+        if (_tagHoverPopup && _tagHoverPopup.IsOpen())
+        {
+            _tagHoverPopup.IsOpen(false);
+        }
+        _tagHoverPendingTag = {};
+        _tagHoverPendingAnchor = nullptr;
+    }
+
     // Agentmaster (tab status dot): the registry-observer reaction (bounced to this window's UI
     // thread by the engine-init observer). A session state change recolors its hosting tab's dot in
     // place; live=false hides it (the liveness sweep also hides explicitly before it drops the

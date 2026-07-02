@@ -1548,9 +1548,11 @@ namespace winrt::TerminalApp::implementation
             {
                 const auto tab{ _tabs.GetAt(selectedIndex) };
                 _UpdatedSelectedTab(tab);
-                // Agentmaster (bookmark tags): a tab switch dismisses the Tag panel — it is anchored
-                // under the tab it was opened for, which the switch just left behind.
+                // Agentmaster (bookmark tags): a tab switch dismisses the Tags panel — it is anchored
+                // under the tab it was opened for, which the switch just left behind. The hover panel
+                // likewise (its badge anchor belongs to the strip layout that is about to change).
                 _CloseTagEditorPopup();
+                _CloseTagHoverPopup();
                 // Agentmaster (tab status-dot red flash): switching TO a tab is a "visit" — the current
                 // tab is always considered visited, so stop any red flash on the now-focused tab.
                 _VisitTabClearFlash(tab);
