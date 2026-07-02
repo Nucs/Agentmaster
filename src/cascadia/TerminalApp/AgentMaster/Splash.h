@@ -199,10 +199,13 @@ namespace Agentmaster::Splash
                 wchar_t exePath[MAX_PATH]{};
                 if (::GetModuleFileNameW(nullptr, exePath, MAX_PATH))
                 {
-                    HICON big = nullptr, small = nullptr;
-                    ::ExtractIconExW(exePath, 0, &big, &small, 1);
-                    wc.hIcon = big; // may be null => default
-                    wc.hIconSm = small;
+                    // NB: don't name a local `small` — <rpcndr.h> (pulled into WinRT TUs like
+                    // TerminalPage.cpp via the PCH) does `#define small char`, so `small` would
+                    // expand to `char` and break the whole header in those TUs (macro collision).
+                    HICON bigIcon = nullptr, smallIcon = nullptr;
+                    ::ExtractIconExW(exePath, 0, &bigIcon, &smallIcon, 1);
+                    wc.hIcon = bigIcon; // may be null => default
+                    wc.hIconSm = smallIcon;
                 }
                 ::RegisterClassExW(&wc);
             });
@@ -244,7 +247,8 @@ namespace Agentmaster::Splash
             HWND hwnd = ::CreateWindowExW(
                 exStyle,
                 EnsureClass(),
-                L"Agentmaster",
+                L"", // no caption title text — the card body already shows the bolded "Agentmaster"; the
+                     // title bar keeps just the app icon + the minimize/close buttons
                 style,
                 x, y, W, H,
                 nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
