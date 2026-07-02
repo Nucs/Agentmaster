@@ -338,6 +338,19 @@ namespace winrt::TerminalApp::implementation
         // the shared engine — the Manager's fleet-wide "Activate All" in ANOTHER window fans out here, and
         // this window eager-inits its own dormant controls. Detached in ~TerminalPage (Rule #10).
         uint64_t _windowActivateAllToken{ 0 };
+        // Agentmaster (eager-init / "Activate All Tabs" PACING): waking N dormant tabs in one burst spawns
+        // N claude.exe + N swapchains on one UI-thread pass and freezes the app (enough of them, the PC),
+        // so the wake is DRIP-FED: _activateAllQueue holds the session ids still to wake and
+        // _activateAllTimer paces them — kActivateAllSpacingMs (500ms) between wakes, at most
+        // kActivateAllBatchSize (4) wakes per kActivateAllBatchPeriodMs (10s) batch (constants in
+        // TerminalPage.AgentObserver.cpp). Only a REAL wake consumes a pacing slot (an id that started/
+        // closed meanwhile skips free at pop time); a second "Activate All" while dripping MERGES
+        // (dedupes) into the running queue instead of bursting. The timer self-stops when the queue
+        // drains, in ~TerminalPage, and on a dead page (weak Tick). UI thread only.
+        std::vector<std::wstring> _activateAllQueue;
+        winrt::Windows::UI::Xaml::DispatcherTimer _activateAllTimer{ nullptr };
+        int _activateAllBatchWoken{ 0 }; // wakes in the current 4-per-10s batch
+        int _activateAllWokenTotal{ 0 }; // total woken by the running drip (the drained-log count)
         // Agentmaster (cross-window settings broadcast): this window's settings sink on the shared
         // engine — a GLOBAL settings change in ANOTHER window (the cog Save, or the Explorer-Tree /
         // Triage-Board sort toggle) hops to this window's UI thread and re-applies it live (the sort
@@ -858,7 +871,8 @@ namespace winrt::TerminalApp::implementation
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.
-        int _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): eager-init every dormant managed tab hosted in THIS window; returns the count woken. The receiving half of the activate-all fan-out.
+        void _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): DRIP-FEED-wake every dormant managed tab hosted in THIS window — 500ms between wakes, 4 wakes per 10s batch — so a many-tab activate never bursts N claude.exe spawns onto one UI pass. Merges into a running drip. The receiving half of the activate-all fan-out.
+        void _ActivateAllDripStep(); // Agentmaster (eager-init pacing): one drip step — pop queued ids until one actually wakes, then re-arm _activateAllTimer (500ms in-batch; the long post-batch gap after the 4th wake so batches start 10s apart); self-stops + logs the total when the queue drains
         void _TrackSessionStarted(const std::wstring& sessionId); // Agentmaster (eager-init): mark SessionInfo::started true the moment this session's control initializes (already started => now; else one-shot on TermControl.Initialized) so a focused tab's dot flips full without the ~2s liveness-sweep lag
         void _ScheduleSplashDismiss(); // Agentmaster (splash): start the deferred-dismiss watcher at the end of _OnFirstLayout — the restored tabs init LAZILY after, so dismissing there uncovers a blank window
         void _TickSplashDismiss(); // Agentmaster (splash): the watcher tick — dismiss the launch splash once the foreground terminal is connected AND the UI thread has been responsive ~1.5s (or a hard timeout)

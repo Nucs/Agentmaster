@@ -178,6 +178,12 @@ namespace winrt::TerminalApp::implementation
         {
             _promptNavRefreshTimer.Stop();
         }
+        // Agentmaster (eager-init "Activate All Tabs" pacing): stop a mid-flight activate-all drip —
+        // its queue dies with the page; the weak Tick would no-op anyway (UI thread, safe).
+        if (_activateAllTimer)
+        {
+            _activateAllTimer.Stop();
+        }
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
         // get_weak() + an agile dispatcher), this keeps the engine's sink list bounded (Rule #10).

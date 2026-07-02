@@ -3096,36 +3096,101 @@ namespace winrt::TerminalApp::implementation
         return ok;
     }
 
-    // Agentmaster (eager-init / "Activate All Tabs"): eager-init every dormant managed tab hosted in THIS
-    // window. Returns the count woken. The local actuator behind the Manager's "Activate All Tabs (N)"
-    // button AND the receiving half of the cross-window fan-out (ActivateAllDormantInOtherWindows).
-    int TerminalPage::_ActivateAllDormantTabsLocal()
+    // Agentmaster (eager-init / "Activate All Tabs" pacing): the drip cadence. Waking a dormant tab
+    // spawns a claude.exe + a swapchain on the UI thread — a burst of N at once freezes the app (and
+    // enough of them, the PC) — so wakes are spaced kActivateAllSpacingMs apart, at most
+    // kActivateAllBatchSize per kActivateAllBatchPeriodMs window: t=0/0.5/1.0/1.5s, then the next four
+    // at t=10/10.5/11/11.5s, ... (the post-batch gap = period − (size−1)·spacing = 8.5s).
+    static constexpr int kActivateAllSpacingMs = 500;
+    static constexpr int kActivateAllBatchSize = 4;
+    static constexpr int kActivateAllBatchPeriodMs = 10000;
+
+    // Agentmaster (eager-init / "Activate All Tabs"): DRIP-FEED-wake every dormant managed tab hosted in
+    // THIS window. The local actuator behind the Manager's "Activate All Tabs (N)" button AND the
+    // receiving half of the cross-window fan-out (ActivateAllDormantInOtherWindows). NOT a burst: the
+    // hosted ids are queued and _ActivateAllDripStep wakes them one at a time on _activateAllTimer's
+    // cadence (the k-constants above). Invoked while a drip is already pacing it just MERGES (dedupes)
+    // the current ids into the queue — the tail rides the same paced stream, so a re-click / a
+    // cross-window echo can never burst. Dormancy is (re)checked at WAKE time, not enqueue time: an id
+    // that started/closed meanwhile is skipped for free (never consumes a pacing slot).
+    void TerminalPage::_ActivateAllDormantTabsLocal()
     {
-        if (_claudeTabs.empty())
-        {
-            return 0;
-        }
-        // Snapshot the ids first — _ActivateDormantSession doesn't mutate _claudeTabs, but iterate a copy
-        // so a concurrent bind/erase can't invalidate the iterator.
-        std::vector<std::wstring> ids;
-        ids.reserve(_claudeTabs.size());
+        // Merge this window's hosted ids into the drip queue (dedupe against what's still queued).
         for (const auto& [id, weak] : _claudeTabs)
         {
-            ids.push_back(id);
-        }
-        int woke = 0;
-        for (const auto& id : ids)
-        {
-            if (_ActivateDormantSession(id))
+            if (std::find(_activateAllQueue.begin(), _activateAllQueue.end(), id) == _activateAllQueue.end())
             {
-                ++woke;
+                _activateAllQueue.push_back(id);
             }
         }
-        if (woke > 0)
+        if (_activateAllQueue.empty())
         {
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[activate-all] window " + _windowId + L" woke " + std::to_wstring(woke) + L" dormant tab(s)\n");
+            return;
         }
-        return woke;
+        if (_activateAllTimer && _activateAllTimer.IsEnabled())
+        {
+            return; // a drip is already pacing — the merged ids extended it, nothing to start
+        }
+        _activateAllBatchWoken = 0;
+        _activateAllWokenTotal = 0;
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[activate-all] window " + _windowId + L" drip-start candidates=" + std::to_wstring(_activateAllQueue.size()) + L" (" + std::to_wstring(kActivateAllSpacingMs) + L"ms apart, " + std::to_wstring(kActivateAllBatchSize) + L" per " + std::to_wstring(kActivateAllBatchPeriodMs / 1000) + L"s)\n");
+        _ActivateAllDripStep(); // wake the first immediately (the click should feel responsive); the timer paces the rest
+    }
+
+    // Agentmaster (eager-init / "Activate All Tabs" pacing): one drip step — pop queued ids until one
+    // actually WAKES (only a real wake, i.e. a claude.exe spawn, consumes a pacing slot), then re-arm
+    // the timer for the next step: 500ms within a batch, or the long post-batch gap after the 4th wake
+    // so consecutive batches start a full 10s apart. Self-stops when the queue drains (and logs the
+    // run's total, matching the old burst log). UI thread only.
+    void TerminalPage::_ActivateAllDripStep()
+    {
+        while (!_activateAllQueue.empty())
+        {
+            const std::wstring id = std::move(_activateAllQueue.front());
+            _activateAllQueue.erase(_activateAllQueue.begin());
+            if (_ActivateDormantSession(id))
+            {
+                ++_activateAllWokenTotal;
+                ++_activateAllBatchWoken;
+                break;
+            }
+        }
+        if (_activateAllQueue.empty())
+        {
+            if (_activateAllTimer)
+            {
+                _activateAllTimer.Stop();
+            }
+            if (_activateAllWokenTotal > 0)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[activate-all] window " + _windowId + L" woke " + std::to_wstring(_activateAllWokenTotal) + L" dormant tab(s) (paced)\n");
+                _activateAllWokenTotal = 0;
+            }
+            return;
+        }
+        int delayMs = kActivateAllSpacingMs;
+        if (_activateAllBatchWoken >= kActivateAllBatchSize)
+        {
+            delayMs = kActivateAllBatchPeriodMs - (kActivateAllBatchSize - 1) * kActivateAllSpacingMs; // the next batch starts one full period after this one began
+            _activateAllBatchWoken = 0;
+        }
+        if (!_activateAllTimer)
+        {
+            _activateAllTimer = WUX::DispatcherTimer{};
+            _activateAllTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_ActivateAllDripStep();
+                }
+                else if (const auto t = sender.try_as<WUX::DispatcherTimer>())
+                {
+                    t.Stop(); // page destroyed — stop ticking (UI thread, safe)
+                }
+            });
+        }
+        _activateAllTimer.Stop(); // a DispatcherTimer is periodic — Stop→Interval→Start makes each gap exact and one-shot-like
+        _activateAllTimer.Interval(std::chrono::milliseconds(delayMs));
+        _activateAllTimer.Start();
     }
 
     // Agentmaster (eager-init): flip SessionInfo::started true the moment this session's control STARTS its
