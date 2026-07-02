@@ -142,6 +142,19 @@ Quick reference (full table in `reference/exception-codes.md`):
 - **`0xC000041D` — STATUS_FATAL_USER_CALLBACK_EXCEPTION.** An exception thrown through a kernel→user
   callback (a window proc / XAML callback). Usually the **escalation** of a primary AV a moment earlier —
   find the earlier dump/event at the same offset (that's the root; this is the death rattle).
+- **`0xC0000374` — STATUS_HEAP_CORRUPTION.** `ExceptionInformation[0]` points at ntdll's
+  `HEAP_FAILURE_INFORMATION` — read it from a FULL dump with `dumpmem` (`{u32 Version; u32 Size;
+  u32 FailureType; …; pvoid Heap; pvoid Address; …}`), then hexdump the block it names (overrun bytes
+  often contain the WRITER'S data). The corruption was planted EARLIER than the reporting stack — the
+  detector fires on a later alloc/free. A named Address "not present in Memory64ListStream" on a full
+  dump == a **decommitted page** (heap metadata pointing into freed space). **Before deep heap
+  forensics:** a DETERMINISTIC startup `0xC0000374` inside the XamlTypeInfo / type-activation machinery,
+  on a binary built incrementally AFTER a mid-compile out-of-memory failure (C1076 "internal heap limit"
+  / C3859 "Failed to create virtual memory for PCH"), has been a **poisoned incremental build** — the
+  failed run leaves ABI-mixed objs/tlogs and the next incremental link mixes them (verified 2026-07:
+  three identical startup crashes, zero changed code on the stack). Run the discriminating experiment
+  first: purge `obj/x64/<cfg>/TerminalApp*` + both `Generated Files` dirs + the layout `resources.pri`,
+  clean-rebuild, relaunch — vanishing with zero source changes == build state, not code.
 
 ## 7. Common Agentmaster crash CLASSES + the fix shape (from real dumps)
 
@@ -185,6 +198,7 @@ MSYS_NO_PATHCONV=1 ./scripts/dumpourscan.exe "<abs>\test\sample-crash.dmp" "<abs
 - `scripts/dumpwalk2.cpp` — ordered `StackWalkEx` walk; serves stack/memory from the dump; DbgHelp symbols.
 - `scripts/dumpourscan.cpp` — 512 KiB stack scan for OUR frames (DIA-symbolized) + exception params + module histogram; optional module filter.
 - `scripts/dumpstack.cpp` — naive inline-stack scan + DIA symbolize (fallback for small/odd dumps).
+- `scripts/dumpmem.cpp` — hexdump arbitrary virtual memory FROM a full dump (`dumpmem <dmp> <hexAddr> <bytes>`; hex + wchar + ascii columns) — the `0xC0000374` heap-forensics companion (read the `HEAP_FAILURE_INFORMATION`, then the corrupt block). Build: `cl /nologo /std:c++20 /EHsc /W3 dumpmem.cpp` in `scripts\` (no DIA needed).
 - `scripts/hangwalk.cpp` — per-thread walk/scan for HANG dumps (no exception stream; procdump `-h`).
 - `scripts/diasym.cpp` — symbolize a single `<pdb> <rva>` (e.g. a WER fault offset).
 - `scripts/makedump.cpp` — the fixture generator (a safe, tiny crash dump reproducing the UAF signature).
