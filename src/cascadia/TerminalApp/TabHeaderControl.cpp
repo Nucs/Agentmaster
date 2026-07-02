@@ -112,8 +112,10 @@ namespace winrt::TerminalApp::implementation
         });
 
         // Agentmaster (bookmark tags): keep the overlay badge row pinned to the title's first
-        // character + the 3/4-height line as the header lays out/resizes (leading indicator icons
-        // appearing/disappearing shift the title's x; the first layout establishes the real height).
+        // character + the hosting tab's bottom edge as the header lays out/resizes (leading
+        // indicator icons appearing/disappearing shift the title's x; the first layout establishes
+        // the real geometry; _PositionTagBadges also hooks the TabViewItem's own SizeChanged for
+        // strip-height changes this grid never sees).
         HeaderRootGrid().SizeChanged([weakThis = get_weak()](auto&&, auto&&) {
             if (auto self = weakThis.get())
             {
@@ -328,7 +330,7 @@ namespace winrt::TerminalApp::implementation
                 continue;
             }
             // A classic bookmark ribbon: a 5x7 rectangle with a notch cut up into the bottom edge —
-            // sized to the header's bottom quarter (the overlay's 3/4-height anchor, _PositionTagBadges).
+            // pinned flush with the tab's bottom edge (_PositionTagBadges), notch pointing down.
             winrt::Windows::UI::Xaml::Shapes::Polygon ribbon;
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
             ribbon.Points().Append(winrt::Windows::Foundation::Point{ 5.0f, 0.0f });
@@ -362,12 +364,23 @@ namespace winrt::TerminalApp::implementation
         _PositionTagBadges();
     }
 
-    // Agentmaster (bookmark tags): pin the overlay badge row at (title's first character x,
-    // 3/4 of the header height). The host Canvas sits at the root grid's top-left with zero size
-    // (layout-neutral — badges never widen the tab), so Canvas.Left/Top position the row in grid
-    // coordinates. The title x comes from a live transform (leading indicator icons shift it);
-    // before the first layout — or mid-rename, when the title TextBlock is collapsed — sensible
-    // fallbacks / the last position hold (fallback x: just past the 18px status-dot slot).
+    // Agentmaster (bookmark tags): pin the overlay badge row at (title's first character x, the
+    // TAB's bottom edge) — the "bookmark hanging out of the book" placement. The ribbons sit FLUSH
+    // with the hosting TabViewItem's bottom: below EVERY title line (the old 3/4-of-header-height
+    // anchor landed mid-text on a wrapped multi-line title), straddling the title block's bottom on
+    // a tight header. Flush rather than the literal 30%-in/70%-below overhang because pixels BELOW
+    // the tab rectangle can never render — the tab strip's ScrollViewer (TabViewListView) clips at
+    // its viewport, whose bottom coincides with the tab's bottom edge (the TabView is
+    // VerticalAlignment=Bottom and list items stretch), so an overhang would just be cut off;
+    // flush-bottom is the maximum "coming out" that stays visible. The host Canvas sits at the root
+    // grid's top-left with zero size (layout-neutral — badges never widen the tab), so
+    // Canvas.Left/Top position the row in grid coordinates. The tab bottom is resolved by walking up
+    // to the TabViewItem ancestor and transforming its height into grid space; its SizeChanged is
+    // hooked (re-hooked if the header ever re-parents — a tear-out) because the STRIP growing for
+    // ANOTHER tab's wrapped title resizes every equal-height TabViewItem without resizing THIS
+    // header's grid. The title x comes from a live transform (leading indicator icons shift it);
+    // pre-layout — or before the ancestor resolves — sensible fallbacks hold until the next
+    // SizeChanged re-pins (fallback x: just past the 18px status-dot slot).
     void TabHeaderControl::_PositionTagBadges()
     {
         const auto row = HeaderTagBookmarks();
@@ -387,13 +400,60 @@ namespace winrt::TerminalApp::implementation
         catch (...)
         {
         }
-        double h = HeaderRootGrid() ? HeaderRootGrid().ActualHeight() : 0.0;
-        if (h <= 0)
+        constexpr double kBadgeHeight = 7.0; // the ribbon Polygon's height (_UpdateTagBadges)
+        double top = 0.0;
+        bool pinned = false;
+        try
         {
-            h = 22.0; // pre-layout fallback == the dot wrap's height (the row's usual tallest child)
+            if (const auto grid = HeaderRootGrid())
+            {
+                // Find the hosting TabViewItem — the visible tab rectangle whose bottom edge we pin to.
+                winrt::Microsoft::UI::Xaml::Controls::TabViewItem tvi{ nullptr };
+                auto d = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(grid);
+                while (d && !tvi)
+                {
+                    tvi = d.try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+                    if (!tvi)
+                    {
+                        d = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(d);
+                    }
+                }
+                if (tvi && tvi.ActualHeight() > kBadgeHeight)
+                {
+                    const auto bottom = tvi.TransformToVisual(grid).TransformPoint(winrt::Windows::Foundation::Point{ 0.0f, static_cast<float>(tvi.ActualHeight()) });
+                    // 1px inset above flush: at fractional DPI scales the floor'd flush position can
+                    // land the ribbon's last row past the strip's clip, shaving the notch tips.
+                    top = std::floor(bottom.Y - kBadgeHeight - 1.0);
+                    pinned = top > 0.0;
+                    if (pinned && _badgeTabViewItem.get() != tvi)
+                    {
+                        _badgeTabViewItem = tvi;
+                        _badgeTviSizeRevoker = tvi.SizeChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
+                            if (auto self = weakThis.get())
+                            {
+                                self->_PositionTagBadges();
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+        if (!pinned)
+        {
+            // Pre-layout / ancestor not resolvable yet: straddle the header block's bottom (~2px in,
+            // the rest in the tab's lower padding) until a SizeChanged re-pins to the real tab bottom.
+            double h = HeaderRootGrid() ? HeaderRootGrid().ActualHeight() : 0.0;
+            if (h <= 0)
+            {
+                h = 22.0; // the dot wrap's height (the row's usual tallest child)
+            }
+            top = std::floor(h - 2.0);
         }
         winrt::Windows::UI::Xaml::Controls::Canvas::SetLeft(row, x);
-        winrt::Windows::UI::Xaml::Controls::Canvas::SetTop(row, std::floor(h * 0.75));
+        winrt::Windows::UI::Xaml::Controls::Canvas::SetTop(row, top);
     }
 
     // Method Description:

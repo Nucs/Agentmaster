@@ -338,20 +338,24 @@
         </TextBox>
         </StackPanel>
         <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, drawn as
-              an OVERLAY over the header's bottom quarter — the row starts at the title's FIRST
-              CHARACTER x-position with each bookmark's TOP at ~3/4 of the header height (positioned in
-              code-behind, _PositionTagBadges). A LAYOUT-NEUTRAL overlay on purpose: the host Canvas is
-              0x0 (a Canvas neither sizes to nor clips its children), so however many badges show, the
-              tab measures exactly as if they weren't there — which is what lets MORE than a few tags
-              stay visible (the earlier in-flow trailing row consumed strip width and got clipped after
-              ~3 badges on a width-capped tab; an overlay spans the whole tab up to ITS clip instead).
-              The Polygons are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec —
-              tag count varies, each badge colored by the stable per-tag TagColorFor — riding the same
+              an OVERLAY pinned to the TAB'S BOTTOM EDGE — the row starts at the title's FIRST
+              CHARACTER x-position with each ribbon FLUSH against the hosting TabViewItem's bottom
+              (positioned in code-behind, _PositionTagBadges), below EVERY title line, so a wrapped
+              multi-line title is never overlapped. Flush rather than overhanging: the tab strip's
+              ScrollViewer clips at the tab's bottom edge, so pixels below the tab rectangle can never
+              render — flush-bottom is the maximum "bookmark coming out of the book" that stays
+              visible. A LAYOUT-NEUTRAL overlay on purpose: the host Canvas is 0x0 (a Canvas neither
+              sizes to nor clips its children), so however many badges show, the tab measures exactly
+              as if they weren't there — which is what lets MORE than a few tags stay visible (the
+              earlier in-flow trailing row consumed strip width and got clipped after ~3 badges on a
+              width-capped tab; an overlay spans the whole tab up to ITS clip instead). The Polygons
+              are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec — tag count
+              varies, each badge colored by the spec-carried resolved color — riding the same
               TabStatus PropertyChanged pipeline as the pending-dots animation. Hovering a badge raises
               TagBadgeHoverBegin/End: the PAGE shows the rich tag panel (every session carrying the tag,
               title + status dot, click == jump to its tab) — richer than a ToolTip, which cannot take
               clicks. Hit-test ON for the hover; presses still bubble to the TabViewItem (tab click/drag
-              unaffected). Drawn LAST, so the ribbons render over the title's descender zone.  -->
+              unaffected). Drawn LAST, so the ribbons render over anything at the tab's bottom edge.  -->
         <Canvas x:Name="HeaderTagBookmarksHost"
                 Width="0"
                 Height="0"

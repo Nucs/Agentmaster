@@ -66,11 +66,19 @@ namespace winrt::TerminalApp::implementation
         // unchanged spec rebuilds nothing.
         void _UpdateTagBadges();
         // Position the overlay row: left == the title's first-character x (fallback: just past the
-        // status-dot slot), top == ~3/4 of the header height (the badges occupy the bottom quarter,
-        // over the title's descender zone). Runs after every badge rebuild + on the root grid's
-        // SizeChanged (the title shifts when leading indicator icons appear/disappear).
+        // status-dot slot), top == the hosting TabViewItem's BOTTOM edge minus the ribbon height —
+        // the ribbons sit FLUSH with the tab's bottom (below every title line; the strip's
+        // ScrollViewer clips anything past that edge, so a true below-tab overhang can't render).
+        // Runs after every badge rebuild, on the root grid's SizeChanged (the title shifts when
+        // leading indicator icons appear/disappear), and on the TabViewItem's SizeChanged (the strip
+        // growing for ANOTHER tab's wrapped title resizes every equal-height tab without resizing
+        // THIS header's grid).
         void _PositionTagBadges();
         winrt::hstring _renderedTagsSpec;
+        // The TabViewItem ancestor the badges are pinned to + its SizeChanged hook (re-resolved when
+        // the header re-parents, e.g. a tab torn out into another window).
+        winrt::weak_ref<winrt::Microsoft::UI::Xaml::Controls::TabViewItem> _badgeTabViewItem;
+        winrt::Windows::UI::Xaml::FrameworkElement::SizeChanged_revoker _badgeTviSizeRevoker{};
 
         bool _receivedKeyDown{ false };
         bool _renameCancelled{ false };
