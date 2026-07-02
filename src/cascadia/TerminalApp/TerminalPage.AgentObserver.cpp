@@ -1163,7 +1163,10 @@ namespace winrt::TerminalApp::implementation
                 activity[s.id] = std::max(s.lastActivityUnixMs, s.convLastActivityUnixMs);
             }
         }
-        _tagEditorUniverse = ::Agentmaster::CollectGlobalTags(::Agentmaster::LoadAllSessionTags(), activity);
+        // The universe = every session's tags ∪ the durable KNOWN-TAG registry (tags.json), so a tag
+        // whose last carrier was untagged stays listed at ·0 — re-appliable — until its row's ✕
+        // explicitly deletes it (tag removal is deliberate, never a side effect of an untag).
+        _tagEditorUniverse = ::Agentmaster::CollectGlobalTags(::Agentmaster::LoadAllSessionTags(), activity, ::Agentmaster::LoadKnownTags());
         const auto storedColors = ::Agentmaster::LoadAllTagColors(); // picker-chosen colors (hash fallback per row)
 
         std::unordered_set<std::wstring> mine; // folded — this session's tags
@@ -1187,7 +1190,9 @@ namespace winrt::TerminalApp::implementation
 
             Button row;
             row.HorizontalAlignment(HorizontalAlignment::Stretch);
-            row.HorizontalContentAlignment(HorizontalAlignment::Left);
+            // Stretch (not Left): the content is a Grid whose star column pins the ✕ delete button
+            // to the row's RIGHT edge on a 0-carrier tag; the name stack left-aligns inside col 0.
+            row.HorizontalContentAlignment(HorizontalAlignment::Stretch);
             row.Background(SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
             row.BorderThickness(Thickness{ 0, 0, 0, 0 });
             row.Padding(Thickness{ 6, 3, 6, 3 });
@@ -1195,6 +1200,7 @@ namespace winrt::TerminalApp::implementation
             StackPanel h;
             h.Orientation(Orientation::Horizontal);
             h.Spacing(6);
+            h.HorizontalAlignment(HorizontalAlignment::Left);
 
             TextBlock check; // reserves its slot either way, so names align on/off
             check.Text(on ? winrt::hstring{ L"\x2713" } : winrt::hstring{ L" " });
@@ -1226,9 +1232,53 @@ namespace winrt::TerminalApp::implementation
             count.VerticalAlignment(VerticalAlignment::Center);
             h.Children().Append(count);
 
-            row.Content(h);
-            AgentSetTip(row, winrt::hstring{ (on ? L"Remove tag \x201C" + info.name + L"\x201D from this session" : L"Tag this session \x201C" + info.name + L"\x201D") });
             const winrt::hstring tagName{ info.name };
+
+            // Row content: [ check·ribbon·name·count ......... (✕) ] — the ✕ DELETE button appears
+            // ONLY on a 0-carrier tag (removal is a big deal: while any session carries the tag it
+            // cannot be deleted, only untagged; once nothing carries it, this ✕ is the ONE removal
+            // path — an untag alone no longer vanishes it from the list).
+            Grid rowGrid;
+            {
+                ColumnDefinition c0;
+                c0.Width(GridLength{ 1, GridUnitType::Star });
+                ColumnDefinition c1;
+                c1.Width(GridLength{ 0, GridUnitType::Auto });
+                rowGrid.ColumnDefinitions().Append(c0);
+                rowGrid.ColumnDefinitions().Append(c1);
+            }
+            Grid::SetColumn(h, 0);
+            rowGrid.Children().Append(h);
+            if (info.sessionCount == 0)
+            {
+                Button del; // a Button INSIDE the row Button: the inner click never fires the row toggle
+                del.Content(winrt::box_value(winrt::hstring{ L"\x2715" }));
+                del.FontSize(10);
+                del.Padding(Thickness{ 4, 0, 4, 1 });
+                del.Margin(Thickness{ 8, 0, 0, 0 });
+                del.Background(SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
+                del.BorderThickness(Thickness{ 0, 0, 0, 0 });
+                del.Opacity(0.55);
+                del.VerticalAlignment(VerticalAlignment::Center);
+                AgentSetTip(del, winrt::hstring{ L"Delete tag \x201C" + info.name + L"\x201D \x2014 no session carries it anymore. This removes the name from the tag list (its color is remembered if you ever re-create it)." });
+                del.Click([weak = get_weak(), tagName](auto&&, auto&&) {
+                    if (const auto page = weak.get())
+                    {
+                        // Defer — the delete rebuilds this very list (a tree mutation under the click).
+                        page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak, tagName]() {
+                            if (const auto p = weak.get())
+                            {
+                                p->_RemoveGlobalTag(std::wstring{ tagName });
+                            }
+                        });
+                    }
+                });
+                Grid::SetColumn(del, 1);
+                rowGrid.Children().Append(del);
+            }
+
+            row.Content(rowGrid);
+            AgentSetTip(row, winrt::hstring{ (on ? L"Remove tag \x201C" + info.name + L"\x201D from this session" : L"Tag this session \x201C" + info.name + L"\x201D") });
             row.Click([weak = get_weak(), tagName](auto&&, auto&&) {
                 if (const auto page = weak.get())
                 {
@@ -1375,6 +1425,13 @@ namespace winrt::TerminalApp::implementation
         }
         if (::Agentmaster::AddSessionTag(_tagEditorSessionId, canonical))
         {
+            // A created tag enters the durable KNOWN-TAG registry (tags.json), so later untagging
+            // its last carrier leaves it listed at ·0 (re-appliable) instead of vanishing — only
+            // the tag row's ✕ deletes it (removal is deliberate).
+            if (!exists)
+            {
+                ::Agentmaster::RegisterKnownTag(canonical);
+            }
             // The picker's color: a NEW tag always takes the current pick (the random pre-pick IS
             // the color shown on the "+" the user just pressed); an EXISTING tag is recolored only
             // by an EXPLICIT swatch pick this open — the deliberate recolor path — never by the
@@ -1425,6 +1482,14 @@ namespace winrt::TerminalApp::implementation
                 break;
             }
         }
+        if (has)
+        {
+            // Untagging must never vanish the tag from the universe (removal is a big deal — only
+            // the tag row's ✕ deletes): make sure it's in the durable registry BEFORE the remove,
+            // which also self-heals pre-registry tags at the one moment the derived union could
+            // lose them (this session might be the last carrier).
+            ::Agentmaster::RegisterKnownTag(tag);
+        }
         const bool changed = has ? ::Agentmaster::RemoveSessionTag(sessionId, tag) : ::Agentmaster::AddSessionTag(sessionId, tag);
         if (changed)
         {
@@ -1446,6 +1511,28 @@ namespace winrt::TerminalApp::implementation
             _RebuildSessionsTagChips();
             _RenderSessionsTable();
         }
+        if (_tagEditorPopup && _tagEditorPopup.IsOpen())
+        {
+            _RebuildTagEditorList();
+            _UpdateTagEditorAddState();
+        }
+    }
+
+    // The tag-list row's ✕ (rendered only on a 0-carrier tag): EXPLICITLY delete the tag. This is
+    // the ONE removal path — untagging a tag's last session keeps it listed (·0) on purpose. Only
+    // the registry entry is dropped: if a session gained the tag meanwhile (another window), the
+    // derived union keeps it alive — a carried tag can never be deleted. Its tag-colors.json entry
+    // is kept (a re-created tag REGAINS its color — the documented feature); the freed name also
+    // frees a slot under the AppSettings::maxTags cap.
+    void TerminalPage::_RemoveGlobalTag(const std::wstring& tag)
+    {
+        if (tag.empty())
+        {
+            return;
+        }
+        ::Agentmaster::UnregisterKnownTag(tag);
+        // Nav audit: the deliberate tag deletion (distinct from a per-session "tag remove").
+        ::Agentmaster::LogNav(L"tag delete \"" + tag + L"\"");
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {
             _RebuildTagEditorList();

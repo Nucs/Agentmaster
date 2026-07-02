@@ -2759,6 +2759,54 @@ void TestSessionTags()
         std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
     }
 
+    // --- the KNOWN-TAG registry (tags.json): a tag survives 0 carriers until explicitly removed ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am_tagreg_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+
+        CHECK(LoadKnownTagsIn(dir).empty(), "tag registry: no file -> empty");
+        CHECK(RegisterKnownTagIn(dir, L"Bug"), "tag registry: register a tag");
+        CHECK(RegisterKnownTagIn(dir, L"  bug "), "tag registry: a CI/normalized re-register is a no-op success");
+        {
+            const auto k = LoadKnownTagsIn(dir);
+            CHECK(k.size() == 1 && k[0] == L"Bug", "tag registry: registered once, creation casing kept");
+        }
+        CHECK(RegisterKnownTagIn(dir, L"perf"), "tag registry: register a second tag");
+        CHECK(!RegisterKnownTagIn(dir, L"   "), "tag registry: a blank name is refused");
+        CHECK(UnregisterKnownTagIn(dir, L"BUG"), "tag registry: unregister is case-insensitive");
+        {
+            const auto k = LoadKnownTagsIn(dir);
+            CHECK(k.size() == 1 && k[0] == L"perf", "tag registry: the other tag survives an unregister");
+        }
+        CHECK(UnregisterKnownTagIn(dir, L"bug"), "tag registry: unregistering an absent tag is a no-op success");
+        CHECK(UnregisterKnownTagIn(dir, L"perf"), "tag registry: empty the registry");
+        CHECK(LoadKnownTagsIn(dir).empty(), "tag registry: an emptied registry reads empty (a valid [] file)");
+        CHECK(!RegisterKnownTagIn(L"", L"bug"), "tag registry: an empty state dir is refused");
+        CHECK(!UnregisterKnownTagIn(L"", L"bug"), "tag registry: an empty state dir is refused (unregister)");
+
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
+    }
+
+    // --- CollectGlobalTags + the registry: a 0-carrier known tag stays listed (count 0, sorts last) ---
+    {
+        std::unordered_map<std::wstring, std::vector<std::wstring>> tbs{
+            { L"s1", { L"bug" } },
+        };
+        std::unordered_map<std::wstring, int64_t> act{
+            { L"s1", 1000 },
+        };
+        const std::vector<std::wstring> known{ L"Idea", L"BUG" }; // Idea uncarried; BUG carried (casing differs)
+        const auto u = CollectGlobalTags(tbs, act, known);
+        CHECK(u.size() == 2, "tag registry: an uncarried known tag adds ONE row; a carried known tag never duplicates");
+        CHECK(u[0].name == L"bug" && u[0].sessionCount == 1 && u[0].lastActivityUnixMs == 1000, "tag registry: a carried tag keeps its carrier casing/count/activity");
+        CHECK(u[1].name == L"Idea" && u[1].sessionCount == 0 && u[1].lastActivityUnixMs == 0, "tag registry: the uncarried known tag lists at count 0 / activity 0 (sorts last), registry casing");
+        // The 2-arg overload is unchanged: no registry -> the uncarried tag doesn't exist.
+        CHECK(CollectGlobalTags(tbs, act).size() == 1, "tag registry: the 2-arg overload stays purely session-derived");
+    }
+
     // --- CollectGlobalTags: fold-merge + max activity + count + ordering + display casing ---
     {
         std::unordered_map<std::wstring, std::vector<std::wstring>> tagsBySession{

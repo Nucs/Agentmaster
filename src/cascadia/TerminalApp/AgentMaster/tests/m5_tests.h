@@ -151,7 +151,7 @@ void TestProcessInspectParse();
 void TestTranscriptResolve();
 void TestCodexObserve();
 void TestTranscriptStore();
-void TestSessionTags(); // bookmark tags: normalize/fold/encode/decode + the store CRUD + the tag-colors store (tag-colors.json) + CollectGlobalTags + the maxTags clamp/round-trip
+void TestSessionTags(); // bookmark tags: normalize/fold/encode/decode + the store CRUD + the tag-colors store (tag-colors.json) + the known-tag registry (tags.json — a tag survives 0 carriers) + CollectGlobalTags (incl. the registry overload) + the maxTags clamp/round-trip
 void TestInferWorkingDirectory(); // tab color modes: the pure inferred-workdir picker (majority-deepest over tool-touched paths)
 void TestConversationLineage();
 void TestSessionSearch();

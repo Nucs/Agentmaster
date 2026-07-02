@@ -411,6 +411,14 @@ namespace Agentmaster
         const std::unordered_map<std::wstring, std::vector<std::wstring>>& tagsBySession,
         const std::unordered_map<std::wstring, int64_t>& activityBySession)
     {
+        return CollectGlobalTags(tagsBySession, activityBySession, {});
+    }
+
+    std::vector<GlobalTagInfo> CollectGlobalTags(
+        const std::unordered_map<std::wstring, std::vector<std::wstring>>& tagsBySession,
+        const std::unordered_map<std::wstring, int64_t>& activityBySession,
+        const std::vector<std::wstring>& knownTags)
+    {
         // folded name -> merged info (display casing from the highest-activity carrier).
         struct Merged
         {
@@ -444,6 +452,23 @@ namespace Agentmaster
                     m.display = name;
                     m.displayActivity = activity;
                 }
+            }
+        }
+        // The registry's 0-carrier tags: add each known name NO session carries — count 0, activity
+        // 0 (sorts last), the registry's casing. A carried known tag keeps its carrier-derived entry.
+        for (const auto& rawKnown : knownTags)
+        {
+            const std::wstring name = NormalizeTagName(rawKnown);
+            if (name.empty())
+            {
+                continue;
+            }
+            const std::wstring folded = FoldTagName(name);
+            if (merged.find(folded) == merged.end())
+            {
+                auto& m = merged[folded];
+                m.display = name;
+                m.displayActivity = 0;
             }
         }
         std::vector<std::pair<std::wstring, Merged>> rows(merged.begin(), merged.end());
@@ -686,5 +711,118 @@ namespace Agentmaster
     bool SetTagColor(const std::wstring& tag, const std::wstring& hex)
     {
         return SetTagColorIn(AgentmasterStateDir(), tag, hex);
+    }
+
+    // ===== the KNOWN-TAG registry (tags.json — see SessionStore.h) ===========================
+
+    namespace
+    {
+        std::wstring KnownTagsPath(const std::wstring& stateDir)
+        {
+            return stateDir + L"\\tags.json";
+        }
+
+        bool WriteKnownTags(const std::wstring& stateDir, const std::vector<std::wstring>& known)
+        {
+            json::Value a = json::Value::MkArr();
+            for (const auto& k : known)
+            {
+                a.Push(json::Value::MkStr(k));
+            }
+            ::CreateDirectoryW(stateDir.c_str(), nullptr); // idempotent (tests point at a fresh temp dir)
+            return AtomicWriteUtf8(KnownTagsPath(stateDir), json::Dump(a));
+        }
+    }
+
+    std::vector<std::wstring> LoadKnownTagsIn(const std::wstring& stateDir)
+    {
+        std::vector<std::wstring> out;
+        if (stateDir.empty())
+        {
+            return out;
+        }
+        const std::string bytes = ReadWhole(KnownTagsPath(stateDir), 1u << 20);
+        if (bytes.empty())
+        {
+            return out; // no registry yet — the universe is purely session-derived
+        }
+        const auto parsed = json::Parse(Utf8ToWide(bytes.data(), bytes.size()));
+        if (!parsed || parsed->type != json::Value::Type::Arr)
+        {
+            return out; // malformed -> "no registry" (never crashes the caller)
+        }
+        std::unordered_set<std::wstring> seen; // folded — CI dedupe, order-preserving
+        for (const auto& e : parsed->arr)
+        {
+            if (e.type != json::Value::Type::Str)
+            {
+                continue;
+            }
+            const std::wstring name = NormalizeTagName(e.str);
+            if (!name.empty() && seen.insert(FoldTagName(name)).second)
+            {
+                out.push_back(name);
+            }
+        }
+        return out;
+    }
+
+    bool RegisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag)
+    {
+        if (stateDir.empty())
+        {
+            return false;
+        }
+        const std::wstring name = NormalizeTagName(tag);
+        if (name.empty())
+        {
+            return false;
+        }
+        auto known = LoadKnownTagsIn(stateDir);
+        const std::wstring folded = FoldTagName(name);
+        for (const auto& k : known)
+        {
+            if (FoldTagName(k) == folded)
+            {
+                return true; // already known — no write
+            }
+        }
+        known.push_back(name);
+        return WriteKnownTags(stateDir, known);
+    }
+
+    bool UnregisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag)
+    {
+        if (stateDir.empty())
+        {
+            return false;
+        }
+        const std::wstring folded = FoldTagName(NormalizeTagName(tag));
+        if (folded.empty())
+        {
+            return false;
+        }
+        auto known = LoadKnownTagsIn(stateDir);
+        const size_t before = known.size();
+        known.erase(std::remove_if(known.begin(), known.end(), [&](const std::wstring& k) { return FoldTagName(k) == folded; }),
+                    known.end());
+        if (known.size() == before)
+        {
+            return true; // wasn't known — no write
+        }
+        return WriteKnownTags(stateDir, known); // an emptied registry writes "[]" (still a valid file)
+    }
+
+    std::vector<std::wstring> LoadKnownTags()
+    {
+        return LoadKnownTagsIn(AgentmasterStateDir());
+    }
+    bool RegisterKnownTag(const std::wstring& tag)
+    {
+        return RegisterKnownTagIn(AgentmasterStateDir(), tag);
+    }
+    bool UnregisterKnownTag(const std::wstring& tag)
+    {
+        return UnregisterKnownTagIn(AgentmasterStateDir(), tag);
     }
 }

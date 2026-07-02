@@ -54,12 +54,13 @@ namespace Agentmaster
 
     // The TAGS field key (bookmark tags). A durable, ordered list of user-named tags on a session —
     // the tab strip renders one small bookmark glyph per tag at the bottom of the session's tab
-    // header, and the tab context menu's "Tag" panel adds/toggles them. The value is the tag list
+    // header, and the tab context menu's "Tags" panel adds/toggles them. The value is the tag list
     // JSON-encoded into ONE string (the store's documented "richer data" escape hatch: values are
     // strings) via EncodeTagList/DecodeTagList; an empty list removes the key, keeping the store
-    // sparse. The GLOBAL tag universe is DERIVED — it is the union of every session's tags (no
-    // separate registry file), so a tag exists exactly while >=1 session carries it, and the
-    // AppSettings::maxTags cap gates only the creation of a NEW name.
+    // sparse. The GLOBAL tag universe is the union of every session's tags PLUS the durable
+    // KNOWN-TAG registry (tags.json, below): untagging a tag's last carrier no longer vanishes it —
+    // it stays listed at 0 carriers, re-appliable, until EXPLICITLY removed (the tag list row's ✕).
+    // The AppSettings::maxTags cap gates only the creation of a NEW name.
     inline constexpr const wchar_t* kSessionStoreTagsKey = L"tags";
 
     // ===== testable core (explicit store dir) ================================================
@@ -128,6 +129,10 @@ namespace Agentmaster
     // absent from `activityBySession`) + how many sessions carry it. Sorted by lastActivity DESC
     // (the tab menu's ordering), folded-name ASC as the deterministic tiebreak. The display `name`
     // is the casing used by the highest-activity carrier (lexicographically smallest on a tie).
+    // The 3-arg overload additionally folds in `knownTags` (the durable registry, below): a known
+    // tag NO session carries still lists — sessionCount 0, activity 0 (so it sorts last) — with the
+    // registry's casing; a known tag that IS carried takes its carriers' casing/count as usual
+    // (never duplicated).
     struct GlobalTagInfo
     {
         std::wstring name;
@@ -137,6 +142,31 @@ namespace Agentmaster
     std::vector<GlobalTagInfo> CollectGlobalTags(
         const std::unordered_map<std::wstring, std::vector<std::wstring>>& tagsBySession,
         const std::unordered_map<std::wstring, int64_t>& activityBySession);
+    std::vector<GlobalTagInfo> CollectGlobalTags(
+        const std::unordered_map<std::wstring, std::vector<std::wstring>>& tagsBySession,
+        const std::unordered_map<std::wstring, int64_t>& activityBySession,
+        const std::vector<std::wstring>& knownTags);
+
+    // ===== the KNOWN-TAG registry (tags.json — a tag survives 0 carriers) ====================
+    //
+    // TAG REMOVAL IS A BIG DEAL, so it is never implicit: untagging a tag's last session must NOT
+    // vanish the tag from the universe — it stays listed (0 carriers), re-appliable next time, until
+    // the user EXPLICITLY deletes it via the ✕ on its tag-list row. The registry is what carries a
+    // 0-carrier tag across that gap: a PROFILE-LEVEL JSON array of display-cased names
+    // (<stateDir>\tags.json, beside tag-colors.json), CI-deduped. Tags are registered when created
+    // (the editor's "+") and — self-healing for pre-registry tags — at the moment of any untag (the
+    // only moment the derived union could lose one). The ✕ only UNREGISTERS: a tag that gained a
+    // carrier meanwhile (another window) simply stays alive via the derived union — a carried tag
+    // can never be deleted. Its color entry (tag-colors.json) is kept on purpose: a re-created tag
+    // REGAINS its color (the documented tag-colors feature).
+    std::vector<std::wstring> LoadKnownTagsIn(const std::wstring& stateDir); // display-cased, CI-deduped, registration order
+    bool RegisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // add (no-op success when already known); false on bad input / write error
+    bool UnregisterKnownTagIn(const std::wstring& stateDir, const std::wstring& tag); // the explicit ✕ (CI; no-op success when absent)
+
+    // ---- live wrappers (resolve AgentmasterStateDir()) ----
+    std::vector<std::wstring> LoadKnownTags();
+    bool RegisterKnownTag(const std::wstring& tag);
+    bool UnregisterKnownTag(const std::wstring& tag);
 
     // ---- testable store cores (explicit store dir) ----
     std::vector<std::wstring> GetSessionTagsIn(const std::wstring& storeDir, const std::wstring& sessionId);
