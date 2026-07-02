@@ -137,6 +137,31 @@ namespace Agentmaster
         Star = 1 // the status dot as the foreground of a white, golden-tipped star (drawn behind the dot)
     };
 
+    // Agentmaster (tab color modes): HOW a managed session's tab gets its color — the cog's TABS
+    // "Tab coloring" dropdown. Rule #12's "ONE color per working directory" becomes the DEFAULT of
+    // three modes rather than the only behavior:
+    //   * WorkingDirectory — the original: every tab in a working dir shares that dir's PERMANENT
+    //     color (dir-colors.json; user picks fan out to the whole dir).
+    //   * Individual — every managed session gets its OWN color, dealt collision-free against the
+    //     other OPEN sessions' colors and PERSISTED on the session record (SessionInfo::tabColorHex,
+    //     sessions.json) so it survives close/restore; a user pick recolors ONLY that session.
+    //   * InferredWorkingDirectory — WorkingDirectory semantics, but keyed by the directory the
+    //     session ACTUALLY works in, INFERRED from the files its tool calls read/edit/create
+    //     (InferWorkingDirectory over TranscriptStats::pathsAccessed — the deepest directory a
+    //     majority of the touched paths share, re-detected as the transcript grows). Until an
+    //     inference exists (no file ops yet; or a Codex session — its rollout isn't path-parsed)
+    //     the launch cwd keys the color, exactly like WorkingDirectory.
+    // GLOBAL app setting (AppSettings::tabColorMode), persisted to settings.json, applied live on
+    // cog Save + the cross-window broadcast (every window repaints its hosted managed tabs).
+    // Serialized as a string token (Persistence ToString / TabColorModeFromString); a missing key
+    // => WorkingDirectory (the prior behavior).
+    enum class TabColorMode
+    {
+        WorkingDirectory = 0, // default: one shared color per working directory (Rule #12 classic)
+        Individual = 1, // every managed tab/session wears its own color
+        InferredWorkingDirectory = 2 // shared color, keyed by the dir inferred from the files the session touches
+    };
+
     // When a queued prompt is allowed to fire.
     enum class PromptGate
     {
@@ -269,6 +294,27 @@ namespace Agentmaster
         std::wstring title; // task / display name
         std::wstring workingDir; // the "M" axis: which working directory
         std::wstring branch; // git branch / worktree
+        // Agentmaster (tab color modes — TabColorMode::Individual): this session's OWN tab color
+        // ("#RRGGBB"; empty = none dealt/picked yet). Only meaningful while the GLOBAL
+        // AppSettings::tabColorMode is Individual: dealt collision-free against the other OPEN
+        // sessions' colors on first paint (_ApplySessionTabColor -> ChooseSessionAutoColor) and
+        // set by a user color pick on the tab (no dir fan-out — individual). PERSISTED
+        // (sessions.json) so a session keeps ITS color across close/restore — the per-session
+        // analog of dir-colors.json's per-folder permanence (Rule #12). Kept (dormant) while the
+        // mode is dir-keyed, so switching back to Individual restores the same colors. A tab-color
+        // RESET clears it (the next launch deals a fresh one).
+        std::wstring tabColorHex;
+        // Agentmaster (tab color modes — TabColorMode::InferredWorkingDirectory): the working
+        // directory this session was INFERRED to actually work in — the deepest directory a
+        // majority of its tool-touched paths (files read/edited/created + searched dirs) share
+        // (InferWorkingDirectory over the transcript's pathsAccessed). Re-detected as the
+        // transcript grows (TerminalPage::_ScanInferredTabColors, mtime-gated off the scanner
+        // tick) and updated through the registry; empty until the session has file ops (the
+        // launch cwd then keys the color) and always empty for Codex (its rollout isn't
+        // path-parsed). PERSISTED (sessions.json) — a derived CACHE, like the title — so a
+        // reopened session wears its inferred color immediately instead of flipping from the cwd
+        // color after the first scan. Only consulted while tabColorMode is InferredWorkingDirectory.
+        std::wstring inferredWorkingDir;
         // Agentmaster (Codex managed-session support): which coding agent this session is. Default
         // Claude, so every existing record/path is byte-for-byte unchanged. A Codex session rides the
         // SAME managed path as Claude (immediate card at launch, registry record, archive/restore,
@@ -593,6 +639,13 @@ namespace Agentmaster
         // + cross-window broadcast (every hosted favorited tab is re-asserted). A missing key => Crown
         // (the prior behavior). Tab-strip ONLY — see FavoriteIcon.
         FavoriteIcon favoriteIcon{ FavoriteIcon::Crown };
+        // Agentmaster (tab color modes): HOW managed tabs are colored — shared per working
+        // directory (default, Rule #12 classic), individual per tab/session, or shared per the
+        // INFERRED working directory (detected from the files the session reads/edits/creates).
+        // See TabColorMode. GLOBAL across windows; applied live on Save + cross-window broadcast
+        // (TerminalPage::_ReapplyManagedTabColors repaints every hosted managed tab). A missing
+        // key => WorkingDirectory (the prior behavior).
+        TabColorMode tabColorMode{ TabColorMode::WorkingDirectory };
         // Agentmaster (status-dot RED FLASH RING color): the COLOR — with OPACITY in the alpha byte —
         // of the "unread" ring that pulses around a managed session's tab status dot when it leaves
         // Running for a needs-you state (Idle / WaitingForInput / NeedsApproval) on an unvisited tab

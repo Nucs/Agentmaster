@@ -734,6 +734,7 @@ namespace winrt::TerminalApp::implementation
                     self->_ObserverProbe(); // Fleet Observer: publish this window's roster + bind via the correlation table (PULL; no hooks needed)
                     self->_SweepClaudeLiveness(); // then archive dead tabs (all self-marshal to the UI thread)
                     self->_ScanPendingInput(); // PENDING_INPUT.md: record each live Claude tab's unsent input-box draft
+                    self->_ScanInferredTabColors(); // tab color modes: re-infer each Claude tab's ACTUAL workdir + recolor (no-op unless the mode is InferredWorkingDirectory; throttled + mtime-gated inside)
                 }
             });
         }
@@ -1039,6 +1040,10 @@ namespace winrt::TerminalApp::implementation
                 // changed) pair to every hosted overlay so the badge/summary dim<->bright updates live; other
                 // windows pick it up via the broadcast below.
                 self->_RefreshOverlayOpacities();
+                // Tab color mode is GLOBAL — repaint THIS window's managed tabs per the (possibly
+                // changed) mode now (per-dir / individual / inferred); other windows repaint via the
+                // broadcast below, and the board/chips re-resolve on their next rebuild.
+                self->_ReapplyManagedTabColors();
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -1208,6 +1213,9 @@ namespace winrt::TerminalApp::implementation
         // Per-tab overlay rest/hover opacities are GLOBAL (TAB_OVERLAY.md) — apply a change made in another
         // window to this window's overlays live too.
         _RefreshOverlayOpacities();
+        // Tab color mode is GLOBAL — a mode change made in another window repaints THIS window's
+        // managed tabs live too (the source window already repainted its own in the Save handler).
+        _ReapplyManagedTabColors();
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))

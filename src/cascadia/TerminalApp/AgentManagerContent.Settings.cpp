@@ -994,6 +994,18 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setMaxTags, L"How many distinct bookmark tags may exist across all sessions (the tab right-click \x2192 Tag panel). Blank or 0 resets to 20; capped at 40. Tags already applied are never removed by lowering this.");
         panel.Children().Append(_setMaxTags);
 
+        // Tab color modes: HOW managed tabs get their color — shared per working dir (the classic
+        // Rule-#12 behavior, default), individual per tab, or shared per the INFERRED working dir
+        // (detected from the files the session reads/edits/creates). GLOBAL (AppSettings::tabColorMode);
+        // applied live on Save + cross-window broadcast (TerminalPage::_ReapplyManagedTabColors).
+        _setTabColorMode = ComboBox{};
+        _setTabColorMode.Header(winrt::box_value(L"Tab coloring"));
+        _setTabColorMode.Items().Append(winrt::box_value(L"Shared per working directory")); // index 0 == TabColorMode::WorkingDirectory (default)
+        _setTabColorMode.Items().Append(winrt::box_value(L"Individual per tab")); // index 1 == TabColorMode::Individual
+        _setTabColorMode.Items().Append(winrt::box_value(L"Inferred working directory")); // index 2 == TabColorMode::InferredWorkingDirectory
+        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.");
+        panel.Children().Append(_setTabColorMode);
+
         // TABS: the "status flashing color" — color (and OPACITY) of the unread FLASH RING that pulses
         // around a managed session's tab status dot when it leaves Running for a needs-you state on an
         // unvisited tab (and the manual "Mark Unread" ring). To keep the cog SHORT, this is a COMPACT
@@ -1574,6 +1586,13 @@ namespace winrt::TerminalApp::implementation
         {
             _setMaxTags.Text(winrt::hstring{ std::to_wstring(_appSettings.maxTags) });
         }
+        if (_setTabColorMode)
+        {
+            // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory.
+            _setTabColorMode.SelectedIndex(_appSettings.tabColorMode == TabColorMode::Individual ? 1 :
+                                               _appSettings.tabColorMode == TabColorMode::InferredWorkingDirectory ? 2 :
+                                                                                                                     0);
+        }
         if (_setFlashRingPicker)
         {
             // The status flashing color (with opacity in the alpha byte). Malformed/empty -> default (80% red).
@@ -1906,6 +1925,13 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             _appSettings.maxTags = ClampMaxTags(v); // blank/0 -> 20 (default), >40 -> 40
+        }
+        if (_setTabColorMode)
+        {
+            // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory.
+            _appSettings.tabColorMode = _setTabColorMode.SelectedIndex() == 1 ? TabColorMode::Individual :
+                                        _setTabColorMode.SelectedIndex() == 2 ? TabColorMode::InferredWorkingDirectory :
+                                                                                TabColorMode::WorkingDirectory;
         }
         if (_setFlashRingPicker)
         {

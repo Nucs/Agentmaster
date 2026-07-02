@@ -268,6 +268,28 @@ namespace Agentmaster
         return FavoriteIcon::Crown; // default + unknown token -> Crown (the prior behavior)
     }
 
+    std::wstring ToString(TabColorMode m)
+    {
+        switch (m)
+        {
+        case TabColorMode::Individual:
+            return L"individual";
+        case TabColorMode::InferredWorkingDirectory:
+            return L"inferredWorkingDirectory";
+        case TabColorMode::WorkingDirectory:
+        default:
+            return L"workingDirectory";
+        }
+    }
+    TabColorMode TabColorModeFromString(std::wstring_view s)
+    {
+        if (s == L"individual")
+            return TabColorMode::Individual;
+        if (s == L"inferredWorkingDirectory")
+            return TabColorMode::InferredWorkingDirectory;
+        return TabColorMode::WorkingDirectory; // default + unknown token -> the prior (per-dir) behavior
+    }
+
     std::wstring ToString(PromptStatus s)
     {
         switch (s)
@@ -426,6 +448,19 @@ namespace Agentmaster
         o.Set(L"title", json::Value::MkStr(s.title));
         o.Set(L"workingDir", json::Value::MkStr(s.workingDir));
         o.Set(L"branch", json::Value::MkStr(s.branch));
+        // Agentmaster (tab color modes): the session's OWN color (Individual mode) + the inferred
+        // working dir (InferredWorkingDirectory mode) — both PERSISTED so a reopened session wears
+        // the same color immediately (per-session permanence / no cwd->inferred color flip). Both
+        // omitted when empty (the default + every pre-feature record), so an untouched
+        // sessions.json is byte-unchanged.
+        if (!s.tabColorHex.empty())
+        {
+            o.Set(L"tabColorHex", json::Value::MkStr(s.tabColorHex));
+        }
+        if (!s.inferredWorkingDir.empty())
+        {
+            o.Set(L"inferredWorkingDir", json::Value::MkStr(s.inferredWorkingDir));
+        }
         o.Set(L"state", json::Value::MkStr(ToString(s.state)));
         o.Set(L"lastActivityUnixMs", json::Value::MkNum(static_cast<double>(s.lastActivityUnixMs)));
         o.Set(L"external", json::Value::MkBool(s.external));
@@ -475,6 +510,8 @@ namespace Agentmaster
         s.title = v.StrAt(L"title");
         s.workingDir = v.StrAt(L"workingDir");
         s.branch = v.StrAt(L"branch");
+        s.tabColorHex = v.StrAt(L"tabColorHex"); // PERSISTED (tab color modes): the session's own color; absent => "" (none dealt)
+        s.inferredWorkingDir = v.StrAt(L"inferredWorkingDir"); // PERSISTED (tab color modes): the inferred workdir cache; absent => "" (not inferred yet)
         s.state = SessionStateFromString(v.StrAt(L"state", L"Idle"));
         s.lastActivityUnixMs = v.I64At(L"lastActivityUnixMs");
         s.external = v.BoolAt(L"external", false);
@@ -554,6 +591,7 @@ namespace Agentmaster
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
+        o.Set(L"tabColorMode", json::Value::MkStr(ToString(s.tabColorMode)));
         o.Set(L"flashRingColor", json::Value::MkStr(s.flashRingColor));
         o.Set(L"pendingDotsLightColor", json::Value::MkStr(s.pendingDotsLightColor));
         o.Set(L"pendingDotsDarkColor", json::Value::MkStr(s.pendingDotsDarkColor));
@@ -619,6 +657,7 @@ namespace Agentmaster
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
         s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
+        s.tabColorMode = TabColorModeFromString(v.StrAt(L"tabColorMode", L"workingDirectory")); // tab color modes: absent/unknown => shared-per-working-dir (the prior behavior)
         // Status-dot flash-ring color (with opacity in the alpha byte). Absent => "#CCFF0000" (red at
         // 80% opacity). Stored verbatim; the UI-layer parser (ParseArgbHexColor) falls back to that
         // default on a malformed value, so a hand-edited garbage string self-heals on next save.
@@ -1502,6 +1541,52 @@ namespace Agentmaster
         }
         SaveDirColors(colors); // permanent
         return chosen;
+    }
+
+    std::wstring ChooseSessionAutoColor(const std::wstring& sessionId,
+                                        const std::vector<std::pair<std::wstring, std::wstring>>& liveSessionColors,
+                                        const std::unordered_set<std::wstring>& activeColors)
+    {
+        // Tab color modes (Individual): the per-SESSION deal — ChooseDirColor's collision-avoiding
+        // walk, keyed by the session id over the LIVE sessions' colors instead of the folder map.
+        // Deliberately NO disk write and NO dir-colors.json involvement: the pick persists on the
+        // SessionInfo record (the caller's registry Update -> sessions.json autosave), so Individual
+        // mode never claims folder-palette slots (a mode switch back to per-dir coloring finds the
+        // folder map exactly as it left it). The lock is only for the shared color seed.
+        std::lock_guard guard{ g_dirColorMtx };
+        EnsureColorSeedLocked();
+        return ChooseDirColor(sessionId, liveSessionColors, activeColors, g_colorSeed);
+    }
+
+    std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s)
+    {
+        // The dir that KEYS a session's color under `mode` (grouping + user-pick fan-out). Only
+        // InferredWorkingDirectory diverges — and only once an inference EXISTS (until then the
+        // launch cwd keys it, so a fresh session behaves exactly like WorkingDirectory mode).
+        // Individual mode returns the working dir too: its callers branch on the mode BEFORE any
+        // dir grouping (there is no dir key for per-session colors).
+        if (mode == TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty())
+        {
+            return s.inferredWorkingDir;
+        }
+        return s.workingDir;
+    }
+
+    std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s)
+    {
+        // The ONE read-side resolution of "what color does this session's tab wear" — shared by the
+        // board title band / Sessions-page chip / pending-dots contrast so every surface matches the
+        // tab. Individual => the session's own persisted color; a session with none dealt yet (or a
+        // pre-feature/archived record) falls through to the dir-keyed precedence, matching the tab
+        // until its first Individual paint deals one. Dir modes => persisted dir color, else the
+        // deterministic AutoDirColorHex preview (the existing board/chip precedence).
+        if (mode == TabColorMode::Individual && !s.tabColorHex.empty())
+        {
+            return s.tabColorHex;
+        }
+        const std::wstring keyDir = SessionColorKeyDir(mode, s);
+        const auto persisted = GetDirColor(keyDir);
+        return persisted ? *persisted : AutoDirColorHex(keyDir);
     }
 
     std::vector<std::pair<std::wstring, std::wstring>>

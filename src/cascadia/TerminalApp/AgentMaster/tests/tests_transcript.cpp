@@ -2780,3 +2780,131 @@ void TestSessionTags()
 // "|---|---|" rule rows, and (2) DE-FRAMES data rows: "│ Name │ Age │" -> "Name · Age" (strip the
 // │/| bars + padding, rejoin cells with " · " = U+00B7, drop empty cells). Box-drawing chars + the dot
 // are written as \x escapes / a built separator so the test is source-encoding independent.
+
+// --- InferWorkingDirectory (tab color modes): the pure inferred-workdir picker ---
+// Every tool-touched path votes for its ancestor DIRECTORY chain (leaf excluded); the inferred
+// dir is the DEEPEST directory with a STRICT MAJORITY (>50%) of the voting paths — the "most
+// common shared path, ranked+picked by occurrence" — which keeps a stray one-off read from
+// dragging the pick to the drive root the way a plain longest-common-prefix would, while depth
+// preference keeps it from settling on a too-shallow ancestor. Roots never win; no majority or
+// no usable paths => the fallback (launch cwd).
+void TestInferWorkingDirectory()
+{
+    std::wprintf(L"[infer working directory]\n");
+    const std::wstring cwd = L"K:\\fallback";
+
+    // Empty / unusable inputs -> the fallback.
+    CHECK(InferWorkingDirectory({}, cwd) == cwd, "no paths -> fallback cwd");
+    CHECK(InferWorkingDirectory({ L"" }, cwd) == cwd, "empty path -> fallback cwd");
+    CHECK(InferWorkingDirectory({ L"src\\a\\f.cs", L"src\\b\\g.cs" }, cwd) == cwd, "relative paths never vote -> fallback");
+    CHECK(InferWorkingDirectory({ L"K:\\rootfile.txt" }, cwd) == cwd, "a drive-root file has no candidate dir -> fallback");
+
+    // One file: its parent chain is 100% — the deepest ancestor (its immediate parent) wins.
+    CHECK(InferWorkingDirectory({ L"K:\\repo\\src\\f.cs" }, cwd) == L"K:\\repo\\src", "single file -> its parent dir");
+
+    // All files under one subtree: the deepest FULLY-shared dir wins (not the shallower repo root).
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\repo\\src\\app\\a.cs",
+            L"K:\\repo\\src\\app\\b.cs",
+            L"K:\\repo\\src\\app\\sub\\c.cs",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\src\\app", "deepest majority dir wins (sub only holds 1/3)");
+    }
+
+    // Stray-path robustness: a minority of out-of-repo reads must NOT drag the pick toward the
+    // root (the longest-common-prefix failure mode) — the repo subtree keeps its strict majority.
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\repo\\src\\a.cs",
+            L"K:\\repo\\src\\b.cs",
+            L"K:\\repo\\src\\c.cs",
+            L"C:\\Users\\me\\.claude\\CLAUDE.md", // the classic stray read
+            L"C:\\Windows\\Temp\\t.tmp",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\src", "stray minority reads don't drag the pick off the majority subtree");
+    }
+
+    // Majority ranking across sibling subtrees: neither sibling has >50%, their shared parent does.
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\repo\\src\\area1\\a.cs",
+            L"K:\\repo\\src\\area1\\b.cs",
+            L"K:\\repo\\src\\area2\\c.cs",
+            L"K:\\repo\\src\\area2\\d.cs",
+            L"K:\\repo\\docs\\readme.md",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\src", "siblings below majority -> their shared parent (4/5) wins");
+    }
+
+    // Dominant deep subtree: a dir with a strict majority beats its own (also-majority) ancestors
+    // by depth — the "most reoccurring occurrence" picks the deepest dominant dir.
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\repo\\src\\hot\\a.cs",
+            L"K:\\repo\\src\\hot\\b.cs",
+            L"K:\\repo\\src\\hot\\c.cs",
+            L"K:\\repo\\src\\d.cs",
+            L"K:\\repo\\e.cs",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\src\\hot", "a deep 3/5-majority dir beats its shallower ancestors");
+    }
+
+    // Exactly half is NOT a majority (strict >50%): 2 of 4 under each of two drives -> fallback.
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\one\\a.cs",
+            L"K:\\one\\b.cs",
+            L"C:\\two\\c.cs",
+            L"C:\\two\\d.cs",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == cwd, "a 50/50 drive split has no strict majority -> fallback");
+    }
+
+    // Separator + case insensitivity (Rule #8): variants collapse onto one key; the returned
+    // spelling is the FIRST seen (its case preserved, separators normalized to backslash).
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:/Repo/Src/a.cs",
+            L"k:\\repo\\src\\b.cs",
+            L"K:\\REPO\\SRC\\c.cs",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\Repo\\Src", "case/slash variants collapse; first-seen case kept, separators normalized");
+    }
+
+    // Deduped input contract: pathsAccessed is a per-file SET, so one hot file can't stuff the
+    // ballot — but the same file listed once among siblings still counts once per file.
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\repo\\hot\\same.cs", // one distinct file
+            L"K:\\repo\\cold\\a.cs",
+            L"K:\\repo\\cold\\b.cs",
+            L"K:\\repo\\cold\\c.cs",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\cold", "per-file votes: the 3-file dir outweighs the 1-file dir");
+    }
+
+    // UNC: candidates start below the \\server\share root; the share root itself never wins.
+    {
+        const std::vector<std::wstring> paths = {
+            L"\\\\nas\\share\\proj\\a.cs",
+            L"\\\\nas\\share\\proj\\b.cs",
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"\\\\nas\\share\\proj", "UNC: deepest majority below the share root");
+        CHECK(InferWorkingDirectory({ L"\\\\nas\\share" }, cwd) == cwd, "UNC share root alone has no candidate -> fallback");
+    }
+
+    // A searched DIRECTORY input (Grep/Glob path) votes one level shallower (its own parent) —
+    // acceptable by design; here it reinforces the same subtree.
+    {
+        const std::vector<std::wstring> paths = {
+            L"K:\\repo\\src\\a.cs",
+            L"K:\\repo\\src\\b.cs",
+            L"K:\\repo\\src", // a dir input: votes K:\repo (parent chain), not itself
+        };
+        CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\src", "a dir input can't demote the file majority");
+    }
+
+    // Trailing separators are tolerated (a dir input with a trailing slash).
+    CHECK(InferWorkingDirectory({ L"K:\\repo\\src\\f.cs", L"K:\\repo\\src\\g.cs\\" }, cwd) == L"K:\\repo\\src", "trailing separator tolerated");
+}

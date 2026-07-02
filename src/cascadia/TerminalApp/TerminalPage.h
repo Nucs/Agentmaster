@@ -357,6 +357,19 @@ namespace winrt::TerminalApp::implementation
         // kPendingClearConfirmTicks consecutive scans, so a single mid-repaint frame can't flicker the
         // indicator off. Keyed by sessionId; entries are pruned with their tab in the liveness sweep.
         std::unordered_map<std::wstring, int> _pendingClearStreak;
+        // Agentmaster (tab color modes — InferredWorkingDirectory): per-session state for the
+        // inferred-workdir scan (_ScanInferredTabColors): the resolved transcript path (globbed once,
+        // cached), the transcript mtime the last inference ran at (re-infer only when it GREW), and a
+        // per-session next-run throttle (a busy transcript grows every tick — the sidecar accumulate is
+        // incremental, but there's no need to re-infer more than every ~15s). Touched UI-thread only;
+        // entries pruned with their tab. Sized like _claudeTabs (a handful).
+        struct InferredColorScan
+        {
+            std::wstring transcriptPath; // resolved once (empty => not on disk yet — retry next pass)
+            int64_t lastMtimeMs{ 0 }; // transcript mtime at the last inference
+            int64_t nextRunMs{ 0 }; // GetTickCount64 floor for the next inference (throttle)
+        };
+        std::unordered_map<std::wstring, InferredColorScan> _inferredColorScan;
         // Agentmaster (OBSERVER.md §11d): wtSession -> a registry-LESS "claude · unlinked" pending
         // overlay for a tab whose claude the observer correlated but can't resolve a conversation id
         // for yet (never prompted). Keyed by WT_SESSION (there is no sessionId). Replaced by the real
@@ -739,7 +752,7 @@ namespace winrt::TerminalApp::implementation
         void _DropPendingOverlay(const std::wstring& wtSession); // Agentmaster: collapse + release this window's observe badge for a tab (bound / claude exited / tab gone)
         void _SetTabAgentDot(const TerminalApp::Tab& tab, const std::optional<winrt::Windows::UI::Color>& color, bool dormant = false); // Agentmaster (tab status dot): show/recolor (nullopt = hide) the tab-strip "[icon] ● <title>" dot via Tab.TabStatus(); dormant=true => the half-hollow "not started" variant; idempotent on unchanged color+presentation
         void _SetTabPending(const TerminalApp::Tab& tab, bool on, const std::optional<winrt::Windows::UI::Color>& dotsColor = std::nullopt); // Agentmaster (PENDING_INPUT.md): show/hide the unsent-draft "3 dots" pulse below a tab's status dot via Tab.TabStatus().AgentPendingVisible, painting them dotsColor (the contrast-picked pending color) when shown; idempotent (no-ops when visibility + color are unchanged); UI thread
-        winrt::Windows::UI::Color _PendingDotsColorForTab(const TerminalApp::Tab& tab, const std::wstring& workingDir); // Agentmaster (PENDING_INPUT.md): contrast-pick the "3 dots" color from the tab's CURRENT effective header background (selected/unselected aware) over the session's per-dir color; UI thread
+        winrt::Windows::UI::Color _PendingDotsColorForTab(const TerminalApp::Tab& tab, const ::Agentmaster::SessionInfo& info); // Agentmaster (PENDING_INPUT.md): contrast-pick the "3 dots" color from the tab's CURRENT effective header background (selected/unselected aware) over the session's MODE-AWARE tab color (ResolveSessionColorHex — per-dir / individual / inferred); UI thread
         void _RefreshPendingDotsContrast(); // Agentmaster (PENDING_INPUT.md): re-pick the "3 dots" color for tabs currently showing a draft (no buffer read) so they re-contrast on a selected<->unselected shift; called from _OnTabSelectionChanged; UI thread
         void _UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant); // Agentmaster (tab status dot): the registry-observer reaction — recolor (or hide, !live) the hosting tab's dot; dormant => the half-hollow "not started" variant; UI thread; no-op when this window doesn't host the session
         void _UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId); // Agentmaster (tab tooltip): build + host the rich session hover tooltip — a dark, summary-style card (● title · folder/branch header, state·age·why line, kind·model·perm line, then the session-end.js Summary box with NUMBERED messages + files, Cascadia Mono) — on a managed session's tab; clears it when the session is gone/archived; UI thread
@@ -852,8 +865,10 @@ namespace winrt::TerminalApp::implementation
         void _SetClaudeTabTextPinned(const winrt::com_ptr<Tab>& tabImpl, const winrt::hstring& title); // Agentmaster (Rule #11): pin a tab title from a registry-driven source WITHOUT bouncing back into the tab->registry mirror (the _pinningClaudeTabTitle latch makes the synchronous _UpdateTitle re-entry a no-op)
         bool _pinningClaudeTabTitle{ false }; // Agentmaster: true while WE programmatically pin a Claude tab's title (registry->tab); makes the synchronous _SyncClaudeTitleFromTab re-entry skip the write-back so the two sync directions can't ping-pong (the /clear re-home title-swap + [Unknown] notify flood)
         void _ApplyDirColorToTab(const TerminalApp::Tab& tab, const std::wstring& dir); // Agentmaster: paint a tab from its working dir's persisted/auto color
-        void _ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex); // Agentmaster: recolor every live tab in a dir
-        void _OnClaudeTabColorChanged(const TerminalApp::Tab& tab); // Agentmaster: user changed a tab color -> persist per dir + propagate to same-dir tabs
+        void _ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex); // Agentmaster: recolor every live tab whose session's color-KEY dir matches (mode-aware: the cwd, or the inferred dir under InferredWorkingDirectory)
+        void _ApplySessionTabColor(const TerminalApp::Tab& tab, const std::wstring& sessionId, const std::wstring& dir); // Agentmaster (tab color modes): THE mode-aware paint seam every managed-tab launch/restore/bind routes through — per-dir (default), per-session (Individual: deals + persists the session's own color), or per-INFERRED-dir
+        void _ReapplyManagedTabColors(); // Agentmaster (tab color modes): repaint every hosted managed tab per the CURRENT AppSettings::tabColorMode (cog Save + cross-window broadcast — the _RefreshFlashRingBrush idiom)
+        void _OnClaudeTabColorChanged(const TerminalApp::Tab& tab); // Agentmaster: user changed a tab color -> persist per the ACTIVE color mode (dir map + same-key fan-out; Individual writes the session record alone, no fan-out)
         winrt::Windows::Foundation::IAsyncAction _ArchiveAndCloseClaudeTab(TerminalApp::Tab tab, std::wstring sessionId, bool skipConfirm); // Agentmaster: confirm -> archive bookkeeping -> close
         void _ArchiveWindowSessionsOnTeardown(); // Agentmaster (lifecycle gap #1): on window close/quit, archive this window's live sessions (live=false + unbind injector -> claude.exe exits) so they don't linger as phantom cards / orphaned processes
         // Agentmaster (permanent remove — record-only, transcript on disk KEPT): the trash-icon seam
@@ -876,6 +891,8 @@ namespace winrt::TerminalApp::implementation
         winrt::fire_and_forget _ObserverProbe(); // Agentmaster: the Fleet Observer UI lane — publish this window's tab roster, then bind via the observer's correlation table (replaces _DiscoverClaudeTabsByCwd; OBSERVER.md §10)
         winrt::Windows::Foundation::IAsyncAction _ScanPendingInputImpl(); // Agentmaster (terminate-net): the body of _ScanPendingInput, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _ScanPendingInput(); // Agentmaster (PENDING_INPUT.md): read each bound Claude tab's unsent input-box draft from its buffer + record it on the session (scanner-ticked)
+        winrt::Windows::Foundation::IAsyncAction _ScanInferredTabColorsImpl(); // Agentmaster (terminate-net): the body of _ScanInferredTabColors, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
+        winrt::fire_and_forget _ScanInferredTabColors(); // Agentmaster (tab color modes — InferredWorkingDirectory): mtime-gated, throttled off-thread re-inference of each hosted Claude session's ACTUAL working dir from its tool-touched paths (the sessions-index sidecar), recoloring the tab when the inference changes (scanner-ticked; no-op in the other modes)
         winrt::Windows::Foundation::IAsyncAction _RefreshObserverDataImpl(); // Agentmaster (terminate-net): the body of _RefreshObserverData, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _RefreshObserverData(); // Agentmaster: the Explorer Tree "refresh" button's action — Wake the observer (force a survey now) + re-probe + force a Manager redraw once it lands
         void _BindClaudeSessionToTab(const TerminalApp::Tab& hostTab, const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn, const std::wstring& id, const std::wstring& cwd, const std::wstring& origin); // Agentmaster: shared bind tail for adoption + discovery

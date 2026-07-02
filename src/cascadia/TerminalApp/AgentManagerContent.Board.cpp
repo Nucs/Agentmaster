@@ -151,18 +151,19 @@ namespace winrt::TerminalApp::implementation
         stack.Spacing(2);
 
         // Agentmaster: a colored TITLE BAND across the top of the card, painted the session's
-        // working-directory color — the SAME permanent color the dir's terminal TABS wear (Rule
-        // #12 / dir-colors.json) — so a card reads its folder at a glance and clusters with its
+        // TAB color — the SAME color its terminal tab wears under the active tab-color MODE
+        // (ResolveSessionColorHex: the working dir's permanent color by default [Rule #12 /
+        // dir-colors.json], the session's OWN color under Individual, the INFERRED dir's under
+        // InferredWorkingDirectory) — so a card reads its group at a glance and clusters with its
         // siblings across the state columns. Its TOP corners follow the card's rounding while its
         // BOTTOM is a straight edge (square corners) where it meets the neutral body: it covers
         // ONLY the title. The title text flips black/white for contrast (PreferDarkTextOn) so it
         // stays legible on a LIGHT or DARK band. Falls back to the neutral card fill (white text)
-        // if the dir has no resolvable color. Persisted color first (matches the tab exactly),
-        // else the deterministic auto color — the same precedence the Sessions-page chip uses.
+        // if no color resolves. Persisted color first (matches the tab exactly), else the
+        // deterministic auto color — the same precedence the Sessions-page chip uses.
         std::optional<Color> bandColor;
         {
-            const auto hex = ::Agentmaster::GetDirColor(s.workingDir);
-            bandColor = HexToColor(hex ? *hex : ::Agentmaster::AutoDirColorHex(s.workingDir));
+            bandColor = HexToColor(::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, s));
         }
         const std::wstring_view fullTitle = s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title };
         auto titleText = Text(OneLine(fullTitle), 14, true, 1.0);

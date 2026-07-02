@@ -996,6 +996,126 @@ namespace Agentmaster
         return true;
     }
 
+    // ===== inferred working directory (tab color modes) ======================================
+
+    std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths, const std::wstring& fallbackDir)
+    {
+        // Every tool-touched path votes for its whole ancestor DIRECTORY chain (the leaf itself is
+        // excluded: tool paths are mostly files, and a searched-dir input just votes one level
+        // shallower). Candidates begin ONE SEGMENT BELOW the path's root token — a drive root
+        // ("K:") or a UNC share root ("\\server\share") can never win. The winner is the DEEPEST
+        // candidate with a STRICT majority (>50%) of the voting paths; monotone ancestor counts
+        // make the majority set a root-anchored chain, so "deepest majority" is unambiguous. See
+        // the header doc for the rationale (stray-path robustness vs a longest-common-prefix).
+        struct DirVote
+        {
+            int count{};
+            size_t depth{}; // segments below the root token (1 == "K:\source")
+            std::wstring spelling; // first-seen original spelling (the returned form)
+        };
+        std::unordered_map<std::wstring, DirVote> votes; // keyed by NormDirKey (Rule #8)
+        int total = 0; // paths that cast at least one vote
+        constexpr size_t kMaxSegmentsPerPath = 64; // sanity bound; real paths are far shallower
+
+        for (const auto& raw : paths)
+        {
+            if (raw.empty())
+            {
+                continue;
+            }
+            // Separator-normalize a copy (keep the original case — the SPELLING we return); strip
+            // trailing separators so a dir input and its file sibling agree on segmentation.
+            std::wstring p = raw;
+            for (auto& ch : p)
+            {
+                if (ch == L'/')
+                {
+                    ch = L'\\';
+                }
+            }
+            while (!p.empty() && p.back() == L'\\')
+            {
+                p.pop_back();
+            }
+            // The root token: everything candidates must reach BELOW — a UNC share root
+            // ("\\server\share") or a drive root ("K:"). A path with NEITHER (a relative tool
+            // path like "src\cascadia", or a POSIX-absolute one) casts no vote: its prefixes
+            // aren't real directory keys here, and a relative-token majority must never become
+            // the inferred dir.
+            size_t rootEnd = 0;
+            if (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\')
+            {
+                const size_t serverSep = p.find(L'\\', 2); // after "\\server"
+                const size_t shareSep = (serverSep == std::wstring::npos) ? std::wstring::npos : p.find(L'\\', serverSep + 1);
+                if (shareSep == std::wstring::npos)
+                {
+                    continue; // just "\\server" or "\\server\share" — no parent chain below the root
+                }
+                rootEnd = shareSep; // the share root "\\server\share"
+            }
+            else if (p.size() >= 2 && p[1] == L':')
+            {
+                rootEnd = 2; // the drive root "K:"
+            }
+            else
+            {
+                continue; // relative / rootless — never a vote
+            }
+            // Collect the separator positions PAST the root token; each separator terminates one
+            // ancestor prefix (the segment run before it). The LEAF (past the last separator) is
+            // deliberately not a candidate.
+            bool voted = false;
+            size_t depth = 0;
+            for (size_t i = rootEnd; i < p.size() && depth < kMaxSegmentsPerPath; ++i)
+            {
+                if (p[i] != L'\\')
+                {
+                    continue;
+                }
+                if (i == rootEnd)
+                {
+                    continue; // the separator right after the root ("K:\") delimits no candidate yet
+                }
+                ++depth; // "K:\source\Agentmaster\f.cs": sep after "source" -> depth 1, after "Agentmaster" -> 2
+                const std::wstring prefix = p.substr(0, i);
+                const std::wstring key = NormDirKey(prefix);
+                auto& v = votes[key];
+                if (v.count == 0)
+                {
+                    v.depth = depth;
+                    v.spelling = prefix;
+                }
+                ++v.count;
+                voted = true;
+            }
+            if (voted)
+            {
+                ++total;
+            }
+        }
+        if (total == 0)
+        {
+            return fallbackDir; // nothing usable touched yet
+        }
+        const DirVote* best = nullptr;
+        const std::wstring* bestKey = nullptr;
+        for (const auto& [key, v] : votes)
+        {
+            if (v.count * 2 <= total)
+            {
+                continue; // not a strict majority — a minority subtree / stray path
+            }
+            if (!best ||
+                v.depth > best->depth || // deepest majority wins
+                (v.depth == best->depth && key < *bestKey)) // same depth (case-variant spellings collapse via NormDirKey, so a genuine tie is two distinct dirs) -> lexicographic determinism
+            {
+                best = &v;
+                bestKey = &key;
+            }
+        }
+        return best ? best->spelling : fallbackDir; // no majority (e.g. split across drives) -> the launch cwd
+    }
+
     // ===== cheap row facts (head + growing tail) =============================================
 
     TranscriptQuickFacts ReadTranscriptQuickFacts(const std::wstring& path, int64_t fileBirthMs)
