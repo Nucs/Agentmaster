@@ -628,6 +628,60 @@ dark Manager fill, so cards use the LIGHT color. Applied live + cross-window via
 idiom. **Follow-ups:** an off-switch setting, placeholder/dim-attribute filtering, and a `pauseOnHumanInput`
 autorunner tie-in (PENDING_INPUT.md §4/§6).
 
+**Bookmark TAGS — user-named, colored labels on a session, shown as little BOOKMARK RIBBONS on its tab +
+everywhere the session appears; lib-compiled green + engine-tested (1523/1523 incl. tag CRUD, the tag-colors
+store, and the known-tag registry). Rides the next deploy cycle.** A tag is a durable, case-insensitive
+name a user attaches to a session; a session can carry many, and each shows as a small bookmark glyph
+color-coded to the tag. Persistence is three files under the ACTIVE PROFILE, all in `SessionStore.{h,cpp}`
+(the generalized per-session KV): the per-session list (`session-store/<sid>.json` `tags` key,
+JSON-array-encoded), the **known-tag registry** `tags.json` (a durable, CI-deduped array of display-cased
+names — the reason a tag SURVIVES losing its last carrier, below), and `tag-colors.json` (folded-name →
+`#AARRGGBB`, the picker's chosen colors). The GLOBAL tag universe is `CollectGlobalTags(sessions ∪ registry)`
+— fold-merged, each tag stamped with max-carrier-activity + carrier count, sorted activity-desc; a registry
+tag no session carries lists at **·0** (sorts last).
+- **The tab badges (TAB_OVERLAY-adjacent, `TabHeaderControl`).** Every managed tab renders one bookmark
+  **ribbon per tag**, hosted in an **always-open PARENTED `Popup`** (`HeaderTagBookmarksPopup`) so the row can
+  **OVERHANG the tab's bottom edge** — ~30% of each 6.5×9.3 ribbon above the tab's bottom line, ~70% hanging
+  BELOW it (the "bookmark out of the book" look). The overhang is only renderable because a parented popup's
+  child draws in the island's POPUP ROOT, outside the tab strip's ScrollViewer clip (whose viewport bottom IS
+  the tab's bottom edge — an in-tree element can't paint past it). The row is fed by
+  `TerminalTabStatus::AgentTagsSpec` — the producer `TerminalPage::_SetTabAgentTags` resolves each tag's color
+  ONCE (user-picked > name-hash) and writes `'\n'`-joined **`name\t#AARRGGBB`** lines, so every consumer (the
+  badges, the tooltip chip row) parses the same resolution with no store I/O. `_UpdateTagBadges` rebuilds
+  (change-gated on `_renderedTagsSpec`, cap 20); `_PositionTagBadges` places + tracks it. Hovering a ribbon
+  raises `TagBadgeHoverBegin/End` → the page's **rich hover panel** (`_ShowTagHoverPanelNow`): a popup listing
+  EVERY session carrying the tag with its status dot (the Triage palette for a live session, a hollow gray ring
+  for a closed one), and clicking a live row JUMPS to its tab (`_ActivateClaudeSession`, cross-window) — richer
+  than a `ToolTip`, which can't take clicks. A popup-hosted badge no longer bubbles presses to the tab, so a
+  badge `Tapped` explicitly selects it (click-to-switch preserved).
+- **The Tags panel (`_OpenTagEditorAt`, an islands-safe raw `Popup` parented into `Root()`).** A `[name box | +]`
+  row (Enter or **+** adds), a **color-picker swatch row** (one swatch per palette color, the pick ringed white
+  + painted onto the **+**; **pre-picked RANDOM on open and re-rolled after every add**), the global tag list
+  (each row `[✓][ribbon][name][·count]`), and a "K of N tags" footer. A NEW tag takes the current pick + enters
+  `tags.json`; an EXISTING tag is recolored only by an EXPLICIT swatch tap (never the roulette). **TAG REMOVAL
+  IS EXPLICIT** (Correctness Rule #17): toggling a tag off its LAST session keeps it listed at ·0 (re-appliable);
+  only the **✕** on a 0-carrier row deletes it (`_RemoveGlobalTag` → `UnregisterKnownTag`; a carried tag shows
+  no ✕ and can never be deleted — the derived union keeps it alive; its color entry is kept so a re-created tag
+  regains its color). Opened from the **WT tab context menu** ("Tags"), a **Sessions-page row** right-click, and
+  a **Triage-Board card / Explorer-tree row** right-click (`AgentManagerContent::SetTagsHandler` →
+  `_OpenTagEditorForElement`, anchored under the clicked element).
+- **Everywhere else.** The rich **tab TOOLTIP** shows a tag-chip row (each name over a 2px **colored underscore**
+  — XAML can't color a text-decoration underline separately, so a thin colored `Border` is the practical
+  underscore). The **Sessions browser** gained a **Tags column** (col 5, after Branch) rendering the same
+  hoverable ribbons + the same hover panel, plus a filter-chips row under the search toggles (gently-rounded
+  rectangles, `_RebuildSessionsTagChips` — a tag facet that ANDs with the search/scope filters). A global
+  **`AppSettings::maxTags`** (default 20, ceiling 40; Settings cog → TABS) caps only NEW-name creation.
+- **Islands crash lessons (both in Gotchas).** The popup cost two `0xC000027B` fail-fasts, both now excluded by
+  construction: **(1)** opening the popup on a not-yet-rooted header throws (`E_UNEXPECTED`, no `XamlRoot`) — a
+  restored tagged tab asserts its badges BEFORE its header enters the tree — so the open is gated on
+  `IsLoaded()`+`XamlRoot()` + re-armed on `Loaded`; **(2)** mutating the popup SYNCHRONOUSLY from a
+  layout-driven trigger (`SizeChanged`/`LayoutUpdated`/`ViewChanged`) re-enters the pass and trips XAML's
+  `E_LAYOUTCYCLE` (`0x88000FA8`) detector — so `_PositionTagBadges` is now a **coalescing scheduler**
+  (`_badgeReposQueued` + one dispatcher tick) and the reads + gated mutations run in `_PositionTagBadgesNow` on
+  a CLEAN tick after layout settles. **Cross-window caveat** (like the favorite crown): badge/chip/column paints
+  are same-window instant; another window catches up on next bind/launch/gather (the panel/editor/chips always
+  read the store fresh).
+
 What works, by area:
 - **Engine (M5, `AgentMaster/`; M9 process singleton).** Thread-safe `SessionRegistry` (single
   source of truth; **token-based** observers — `AddObserver`→token + `RemoveObserver` — and
@@ -1315,7 +1369,10 @@ What works, by area:
   the right of `⚙ sent/total`), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
-  broadcast), and (TABS section) **`tabColorMode`** (the **Tab coloring** dropdown — HOW managed tabs get
+  broadcast), and (TABS section) **`maxTags`** (the **Max bookmark tags (global)** box — the ceiling on how
+  many DISTINCT bookmark-tag names can exist across all sessions; default **20**, clamped 1–40 by
+  `ClampMaxTags`; gates only the creation of a NEW name in the Tags panel, never applying/removing an
+  existing one), and (TABS section) **`tabColorMode`** (the **Tab coloring** dropdown — HOW managed tabs get
   their color: **Shared per working directory** default [the classic Rule-#12 per-dir permanence] ·
   **Individual per tab** [each session dealt + KEEPS its own color, persisted on the record —
   `SessionInfo::tabColorHex`; a user pick recolors only that session, a reset re-deals next launch] ·
@@ -1569,6 +1626,12 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `SessionSearch.{h,cpp}` (the two-phase search: pure regex/match/snippet primitives + the
     history.jsonl accelerator + the rg-prefiltered, scope-attributed content scan with in-process
     fallback),
+    `SessionStore.{h,cpp}` (the generalized DURABLE per-session KV — `session-store/<sid>.json`,
+    one file per session: the `title` / `favorite` / `tags` keys; plus the **bookmark-tag**
+    primitives — `NormalizeTagName`/`FoldTagName`, list encode/decode, per-session tag CRUD, the
+    profile-level **known-tag registry** `tags.json` (Load/Register/UnregisterKnownTag — keeps a
+    0-carrier tag alive) + `tag-colors.json` color map (Load/Get/SetTagColor), and `CollectGlobalTags`
+    (the sessions ∪ registry universe)),
     `PromptAnchor.h` (header-only, pure — the **summary-panel JUMP resolver**, SUMMARY_JUMP.md:
     given the linearized terminal buffer + the conversation's prompts, resolves each to a buffer
     location with whitespace-tolerant fuzzy matching, backoff, partial "match as much as possible"
@@ -1610,9 +1673,13 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
     overlay's hand-synced palette copy). Also the shared `#AARRGGBB` color parse/format
-    (`ParseArgbHexColor` / `FormatArgbHexColor`, for `flashRingColor` + the pending-dots colors) and the
+    (`ParseArgbHexColor` / `FormatArgbHexColor`, for `flashRingColor` + the pending-dots colors), the
     pending-dots contrast pick (`BackgroundIsLight` / `PendingDotsColorFor` — WCAG luminance, used by the
-    tab strip + board card so the unsent-draft "3 dots" are never invisible; PENDING_INPUT.md).
+    tab strip + board card so the unsent-draft "3 dots" are never invisible; PENDING_INPUT.md), and the
+    **bookmark-tag** color palette + resolvers (`kTagPalette`/`TagPaletteColor` — the picker's swatches;
+    `TagColorFor` — the stable name-hash fallback; `ResolveTagDisplayColor` — the ONE user-picked >
+    name-hash resolution every tag renderer shares: the `AgentTagsSpec` producer, the Tags panel/hover
+    panel, and the Sessions Tags column).
   - `src/cascadia/TerminalApp/AgentTipHelpers.h` — the ONE islands-safe hover-tooltip recipe
     (`AgentSetTip` / `AgentCloseTipOn`, a fast-open `DispatcherTimer`; `ToolTipService`'s auto-dismiss
     is unreliable under XAML Islands), shared by `AgentManagerContent` + the Archive/Sessions pages
@@ -1630,7 +1697,9 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `_LaunchCodexSession`/`_SpawnCodexSession`/`_AdoptExternalCodex` mirror the Claude seams — tab-title
     sync, smart naming + per-dir tab color), **Observer** (the per-tab overlay/badge, bind/reconcile/
     liveness incl. the managed-Codex state reconcile `_ReconcileManagedCodex`, the UI lane
-    `_ObserverProbe`), **WindowRecord** (M10 capture/flush/restore + reopen saved windows; Codex tab refs),
+    `_ObserverProbe`; also the **bookmark-tag UI** — `_SetTabAgentTags`/`_RefreshTabTags` badge spec, the
+    Tags editor panel + color picker `_OpenTagEditorAt`/`_CommitTagEditorAdd`/`_RemoveGlobalTag`, and the
+    rich `_ShowTagHoverPanelNow` hover panel), **WindowRecord** (M10 capture/flush/restore + reopen saved windows; Codex tab refs),
     **SessionsPage** (the full-window Sessions browser — SESSIONS.md — incl. the ★ favorite column +
     filter + `_ToggleSessionFavorite`, FAVORITES.md). Declarations stay in `TerminalPage.h`.
   - small touches in `TerminalPage.{h,cpp}` (~20 integration seams left in the `.cpp`:
@@ -1643,8 +1712,11 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `AgentStatusBrush`-bound Ellipse in the indicator row, plus the **FAVORITE marker** `Path`s — the
     `AgentFavoriteVisible`-bound gold **crown** at the dot's NW *or* the `AgentFavoriteStarVisible`-bound
     white, golden-tipped **star** behind the dot, mutually exclusive, chosen by the cog's
-    `AppSettings::favoriteIcon` — FAVORITES.md §5a); registrations in
-    `TerminalAppLib.vcxproj`.
+    `AppSettings::favoriteIcon` — FAVORITES.md §5a; **and the bookmark-TAG badges** — an always-open
+    parented `HeaderTagBookmarksPopup` (the below-tab 30/70 overhang) whose ribbons are (re)built by
+    `_UpdateTagBadges` from `TerminalTabStatus::AgentTagsSpec` and placed by the coalescing
+    `_PositionTagBadges` → `_PositionTagBadgesNow` scheduler; hover raises `TagBadgeHoverBegin/End`);
+    registrations in `TerminalAppLib.vcxproj`.
   - `src/cascadia/wt/shim.cpp` + `wt.vcxproj` (the `agentmaster <verb>` overload, CLI.md §2): the
     alias-target launcher shim is now **console-subsystem + dual-mode** (`SubSystem=Console`) — it
     execs `agentmaster-cli.exe` for a CLI verb / leading CLI-flag and forwards everything else to
@@ -1677,7 +1749,10 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   pipe's connect timeout; the bridge-side hooks.log only sees lines that ARRIVED), `sessions.json` (persisted fleet),
   `templates.json` (saved plans), `recent-dirs.json` (path-picker MRU), `dir-colors.json`
   (the **permanent** per-working-directory tab color map, schema **v2** — both user picks and
-  auto-assigned colors, so a folder keeps its color across restarts), `sessions-index/<sid>.json` (the Sessions browser's
+  auto-assigned colors, so a folder keeps its color across restarts), `session-store/<sid>.json`
+  (the durable per-session KV — the `title` / `favorite` / `tags` keys), `tags.json` (the **bookmark-tag
+  registry** — the durable CI-deduped name list that keeps a 0-carrier tag alive until its ✕ deletes it),
+  `tag-colors.json` (the tag color picker's folded-name → `#AARRGGBB` map), `sessions-index/<sid>.json` (the Sessions browser's
   per-session search/stats sidecar cache — `(size,mtime)`-keyed, incrementally re-accumulated
   from the stored byte offset), `settings.json`
   (the Settings cog's `AppSettings`, incl. the updater's `allowUpdatePrerelease` / `updateSkippedVersion` /
@@ -2118,6 +2193,23 @@ build **binlog uploads as an artifact** to diagnose the first run.
   (select the tab) — which is *why* startup ARCHIVES instead of auto-launching (Rule #6): no
   startup tabs ⇒ nothing to lazily-not-start, and a user Restore opens one focused tab that
   initializes normally.
+- **A parented `Popup` that OVERHANGS its parent's clip renders — but mutating it wrong fail-fasts twice
+  (`0xC000027B`).** The bookmark-tag badges hang BELOW the tab's bottom edge by living in an always-open
+  `Popup` parented into the tab header (a popup child draws in the island's POPUP ROOT, outside the tab
+  strip ScrollViewer's clip — the only way in-tree-invisible pixels below the tab can paint). Two ways it
+  killed the app, both diagnosed from the dumps (`tools/dumpstowed2` — the stowed backtraces named the
+  exact frames): **(1) opening an UNROOTED popup throws** (`IsOpen(true)` → `E_UNEXPECTED`, no `XamlRoot`)
+  — a restored tab asserts its badges (via a `TabStatus` property → PropertyChanged) BEFORE its header
+  enters the visual tree, so the open had no root; gate every open on `HeaderRootGrid().IsLoaded()` +
+  `.XamlRoot()` and re-arm on the header's `Loaded`. **(2) mutating the popup SYNCHRONOUSLY inside a
+  layout-driven handler is a LAYOUT CYCLE** (`E_LAYOUTCYCLE 0x88000FA8`): the placement triggers are all
+  layout passes (`SizeChanged` / `LayoutUpdated` / the strip `ScrollViewer.ViewChanged`), and writing
+  `HorizontalOffset`/`IsOpen` re-invalidates layout → re-enters the pass; while the strip is still
+  settling the mid-pass geometry reads shift each iteration so the "unchanged" gates never latch and XAML's
+  ~250-iteration detector fail-fasts. Fix: never touch the popup from inside the pass — make the trigger a
+  **coalescing scheduler** (a `bool` + one `Dispatcher().RunAsync`) and do the reads + gated mutations on
+  the CLEAN tick after layout settles (the `_ApplyRenamerMaxWidth` cycle-safety lesson, again). Both
+  guards + a `CATCH_LOG` on the whole popup tail now live in `TabHeaderControl::_PositionTagBadgesNow`.
 - **Working-dir comparison must be filesystem-aware** (else the Explorer Tree forks one dir
   into multiple roots). Windows is case-INsensitive (`C:\…\Desktop` == `…\desktop`) and
   treats `/`≡`\`; POSIX is case-SENSITIVE with `\` a literal char. Route every dir
@@ -2460,6 +2552,16 @@ build **binlog uploads as an artifact** to diagnose the first run.
     `cleanupPeriodDays` is seeded to ~never so Claude never sweeps). Never add a destructive close
     path, a manifest write that can legitimately empty the file, a capture that runs AFTER
     `_claudeTabs` is cleared, or a `sessions.json` prune that drops a record with a live transcript.
+17. **A bookmark TAG is removed only EXPLICITLY, and its color/name resolution is single-source.** Untagging
+    a tag's LAST carrier must NEVER delete the tag — it stays in the universe at ·0 (re-appliable) via the
+    durable known-tag registry (`tags.json`), and only the ✕ on a 0-carrier row deletes it
+    (`UnregisterKnownTag`). A tag any session still carries can NOT be deleted (the derived union keeps it
+    alive), so the ✕ is shown only on 0-carrier rows. A deleted tag KEEPS its `tag-colors.json` entry (a
+    re-created name regains its color). Creation is capped by `AppSettings::maxTags` (applying/removing an
+    existing tag is never capped). Every surface resolves a tag's color through the ONE
+    `ResolveTagDisplayColor` (user-picked `tag-colors.json` > `TagColorFor` name-hash), and the tab badges +
+    tooltip read it from the resolved `AgentTagsSpec` (`name\t#AARRGGBB`) the producer wrote — never
+    re-resolve per consumer, or the same tag can wear two colors.
 
 ## Conventions
 
