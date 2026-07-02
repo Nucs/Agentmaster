@@ -741,7 +741,15 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             {
                 const std::wstring prompt = L"Reopen your " + std::to_wstring(reopenIdx.size()) +
                                             L" previous Agentmaster windows?\r\n\r\n(Choose No to start with a single window; the Manager's “Reopen Windows” button can bring the rest back later.)";
-                doRestore = ::MessageBoxW(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION) == IDYES;
+                // MB_TOPMOST + MB_SETFOREGROUND are LOAD-BEARING, not cosmetic: this box is the ONLY
+                // user-facing surface the process has at this point — no terminal window exists yet, the
+                // splash deliberately starts AFTER this prompt (a TOPMOST splash would cover it), and a
+                // null-owner MessageBox from a freshly launched process (which has no foreground rights
+                // when started from a shell/alias/automation) opens BEHIND the current foreground window.
+                // The launch then sits blocked on an invisible modal with zero taskbar presence — the
+                // 2026-07-03 "dev is not launching" report: a 3-window reopen stalled 74s until the box
+                // was found and clicked (hooks.log: reopen-scan +566ms -> prelude-done +74573ms).
+                doRestore = ::MessageBoxW(nullptr, prompt.c_str(), L"Agentmaster", MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES;
             }
 
             if (doRestore)
