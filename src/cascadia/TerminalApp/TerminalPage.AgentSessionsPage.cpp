@@ -1799,23 +1799,6 @@ namespace winrt::TerminalApp::implementation
                     rowMenu.Items().Append(resume);
                 }
 
-                // Edit Title — the durable per-session title (persisted in the SessionStore; for an
-                // OPEN session it routes through the live rename so the tab + Explorer/board lens track
-                // it, Rule #11). Opens the SAME in-place editor the slow-double-click gesture does — a
-                // ContentDialog text box gets no keypresses under XAML Islands, so editing is inline.
-                MenuFlyoutItem editTitle;
-                editTitle.Text(L"Edit Title");
-                SessSetTip(editTitle, L"Rename this session \x2014 edits the title in place and remembers it (persisted per session).");
-                editTitle.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
-                        if (auto self = weak.get())
-                        {
-                            self->_BeginSessionsRename(rid);
-                        }
-                    });
-                });
-                rowMenu.Items().Append(editTitle);
-
                 MenuFlyoutItem forkBtn;
                 forkBtn.Text(L"Fork here");
                 SessSetTip(forkBtn, L"Fork into a NEW BACKGROUND tab (claude --resume --fork-session) \x2014 the original is untouched; the list stays open");
@@ -1930,6 +1913,26 @@ namespace winrt::TerminalApp::implementation
                         });
                     });
                     rowMenu.Items().Append(favItem);
+                }
+
+                // Edit Title — the durable per-session title (persisted in the SessionStore; for an
+                // OPEN session it routes through the live rename so the tab + Explorer/board lens track
+                // it, Rule #11). Opens the SAME in-place editor the slow-double-click gesture does — a
+                // ContentDialog text box gets no keypresses under XAML Islands, so editing is inline.
+                // Placed directly below Favorite (grouped with it, above the Hide separator).
+                {
+                    MenuFlyoutItem editTitle;
+                    editTitle.Text(L"Edit Title");
+                    SessSetTip(editTitle, L"Rename this session \x2014 edits the title in place and remembers it (persisted per session).");
+                    editTitle.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
+                            if (auto self = weak.get())
+                            {
+                                self->_BeginSessionsRename(rid);
+                            }
+                        });
+                    });
+                    rowMenu.Items().Append(editTitle);
                 }
 
                 rowMenu.Items().Append(MenuFlyoutSeparator{});
