@@ -249,10 +249,9 @@ namespace winrt::TerminalApp::implementation
             return cut == std::wstring::npos ? std::wstring{} : projects.substr(0, cut) + L"\\history.jsonl";
         }
 
-        // The page's table columns (FAVORITES.md adds the leftmost ★ column; the bookmark-tags
-        // Tags column sits right after it — before the status chip + title — HEADER-LESS and a fixed
-        // 4-ribbon width so it reads as a clean adornment beside the star):
-        // 0=★ favorite · 1=Tags (fixed 4-ribbon cell, no header) · 2=color/live chip · 3=Title ·
+        // The page's table columns. The bookmark-tags Tags column is the LEFTMOST (a fixed 4-ribbon,
+        // HEADER-LESS adornment), then the ★ favorite column, then the status chip + title etc.:
+        // 0=Tags (fixed 4-ribbon cell, no header) · 1=★ favorite · 2=color/live chip · 3=Title ·
         // 4=Directory · 5=Branch · 6=Created · 7=Active · 8=Msgs·Tools · 9=Ctx (context tokens) ·
         // 10=Hits (populated while searching).
         void SessAddColumns(Grid& g, bool showHits)
@@ -262,8 +261,8 @@ namespace winrt::TerminalApp::implementation
                 c.Width(GridLengthHelper::FromValueAndType(v, t));
                 g.ColumnDefinitions().Append(c);
             };
-            col(22, GridUnitType::Pixel); // ★ favorite (leftmost; clickable)
-            col(44, GridUnitType::Pixel); // tags — FIXED for exactly 4 bookmark ribbons in a row (6.5px each + 2px gaps, centered); >4 shows 3 ribbons + a dim "+N"
+            col(44, GridUnitType::Pixel); // tags (leftmost) — FIXED for exactly 4 bookmark ribbons in a row (6.5px each + 2px gaps, centered); >4 shows 3 ribbons + a dim "+N"
+            col(22, GridUnitType::Pixel); // ★ favorite (clickable)
             col(26, GridUnitType::Pixel); // chip (color/live status)
             col(2.2, GridUnitType::Star); // title
             col(1.6, GridUnitType::Star); // directory

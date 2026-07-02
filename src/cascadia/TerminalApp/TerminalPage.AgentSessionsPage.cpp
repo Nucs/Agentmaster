@@ -1210,10 +1210,10 @@ namespace winrt::TerminalApp::implementation
             Grid::SetColumn(b, col);
             _sessionsHeaderRow.Children().Append(b);
         };
-        addHeader(0, L"", false, L"Favorite \x2014 click the star to keep / find a session (the star column).");
-        // Tags (col 1): NO header text (like the star + chip columns) — a headerless, fixed 4-ribbon
-        // adornment. The tip is inert (an empty header cell has no hit area); the ribbons carry the hover.
-        addHeader(1, L"", false, L"");
+        // Tags (col 0, leftmost): NO header text (like the star + chip columns) — a headerless, fixed
+        // 4-ribbon adornment. The tip is inert (an empty header cell has no hit area); the ribbons carry the hover.
+        addHeader(0, L"", false, L"");
+        addHeader(1, L"", false, L"Favorite \x2014 click the star to keep / find a session (the star column).");
         addHeader(2, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
         addHeader(3, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
         addHeader(4, L"Directory", true, L"The session's working directory. Click to sort.");
@@ -1482,12 +1482,12 @@ namespace winrt::TerminalApp::implementation
                         }
                     });
                 });
-                Grid::SetColumn(starCell, 0);
+                Grid::SetColumn(starCell, 1);
                 g.Children().Append(starCell);
             }
-            // Tags (col 1): the session's BOOKMARK ribbons — the same hoverable badges its tab wears,
-            // colors resolved the same way (user-picked > name-hash). Placed right after the ★ star
-            // (before the status chip + title), HEADER-LESS, in a FIXED 4-ribbon-wide cell: up to 4
+            // Tags (col 0, leftmost): the session's BOOKMARK ribbons — the same hoverable badges its tab
+            // wears, colors resolved the same way (user-picked > name-hash). The LEFTMOST column (before
+            // the ★ star + the status chip + title), HEADER-LESS, in a FIXED 4-ribbon-wide cell: up to 4
             // ribbons render CENTERED; a 5th-or-more collapses the 4th slot into a dim "+N" so the cell
             // never grows. Hovering a ribbon opens the rich per-tag panel (every carrier + status dot;
             // click a live row to jump) — the tab badges' exact behavior, wired straight to the page's
@@ -1536,7 +1536,7 @@ namespace winrt::TerminalApp::implementation
                     more.IsHitTestVisible(false);
                     tagsCell.Children().Append(more);
                 }
-                Grid::SetColumn(tagsCell, 1);
+                Grid::SetColumn(tagsCell, 0);
                 g.Children().Append(tagsCell);
             }
             {
