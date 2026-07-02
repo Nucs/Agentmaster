@@ -1051,6 +1051,10 @@ namespace winrt::TerminalApp::implementation
                     s.updateSkippedVersion = disk.updateSkippedVersion;
                     s.updatePostponedUntilUnixMs = disk.updatePostponedUntilUnixMs;
                 }
+                // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change
+                // BEFORE adopting `s`, for the scan-state reset below.
+                const bool inferInputsChanged = self->_appSettings.tabColorMode != s.tabColorMode ||
+                                                self->_appSettings.inferGitRoot != s.inferGitRoot;
                 self->_appSettings = s;
                 ::Agentmaster::SaveAppSettings(s);
                 // Apply the (possibly changed) GLOBAL rename-commit mode to every window's tab
@@ -1077,6 +1081,15 @@ namespace winrt::TerminalApp::implementation
                 // changed) mode now (per-dir / individual / inferred); other windows repaint via the
                 // broadcast below, and the board/chips re-resolve on their next rebuild.
                 self->_ReapplyManagedTabColors();
+                // Inferred-workdir inputs changed (the mode, or "Use .git folder to infer"): drop the
+                // per-session scan gates (lastMtime/throttle) so every hosted session RE-INFERS under
+                // the new rule now — a quiet transcript would otherwise keep its old inference until
+                // its next write — and kick one scan pass immediately (it self-gates on the mode).
+                if (inferInputsChanged)
+                {
+                    self->_inferredColorScan.clear();
+                    self->_ScanInferredTabColors();
+                }
                 // Waiting-for-you "unread" model: push the (possibly changed) WaitingForInput -> Idle
                 // timeout to the process-wide scanner so it applies immediately, not next launch.
                 if (self->_scanner)
@@ -1230,6 +1243,10 @@ namespace winrt::TerminalApp::implementation
     // re-sorts. A no-op for the content if the Manager tab isn't built yet (the page copy still updates).
     void TerminalPage::_ApplyBroadcastSettings(const ::Agentmaster::AppSettings& settings)
     {
+        // Inferred-workdir inputs (mode / "Use .git folder to infer") — capture the change BEFORE
+        // adopting the broadcast, for the scan-state reset below.
+        const bool inferInputsChanged = _appSettings.tabColorMode != settings.tabColorMode ||
+                                        _appSettings.inferGitRoot != settings.inferGitRoot;
         _appSettings = settings;
         // Agentmaster: the tab-strip close affordances (show-X / middle-click close) are GLOBAL, so a
         // change made in another window must re-apply to THIS window's tabs live (the source window
@@ -1249,6 +1266,13 @@ namespace winrt::TerminalApp::implementation
         // Tab color mode is GLOBAL — a mode change made in another window repaints THIS window's
         // managed tabs live too (the source window already repainted its own in the Save handler).
         _ReapplyManagedTabColors();
+        // Inferred-workdir inputs changed in another window: re-infer THIS window's hosted sessions
+        // under the new rule too (the Save-handler twin — drop the scan gates + kick one pass).
+        if (inferInputsChanged)
+        {
+            _inferredColorScan.clear();
+            _ScanInferredTabColors();
+        }
         if (const auto ipc = _agentManagerContent.get())
         {
             if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))

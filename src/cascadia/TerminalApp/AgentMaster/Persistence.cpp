@@ -593,6 +593,7 @@ namespace Agentmaster
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
         o.Set(L"tabColorMode", json::Value::MkStr(ToString(s.tabColorMode)));
+        o.Set(L"inferGitRoot", json::Value::MkBool(s.inferGitRoot));
         o.Set(L"flashRingColor", json::Value::MkStr(s.flashRingColor));
         o.Set(L"pendingDotsLightColor", json::Value::MkStr(s.pendingDotsLightColor));
         o.Set(L"pendingDotsDarkColor", json::Value::MkStr(s.pendingDotsDarkColor));
@@ -661,6 +662,7 @@ namespace Agentmaster
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
         s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
         s.tabColorMode = TabColorModeFromString(v.StrAt(L"tabColorMode", L"workingDirectory")); // tab color modes: absent/unknown => shared-per-working-dir (the prior behavior)
+        s.inferGitRoot = v.BoolAt(L"inferGitRoot", true); // "Use .git folder to infer": absent => ON (the inferred dir snaps to the enclosing git root)
         // Status-dot flash-ring color (with opacity in the alpha byte). Absent => "#CCFF0000" (red at
         // 80% opacity). Stored verbatim; the UI-layer parser (ParseArgbHexColor) falls back to that
         // default on a malformed value, so a hand-edited garbage string self-heals on next save.

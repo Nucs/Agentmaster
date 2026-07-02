@@ -658,6 +658,19 @@ namespace Agentmaster
         // (TerminalPage::_ReapplyManagedTabColors repaints every hosted managed tab). A missing
         // key => WorkingDirectory (the prior behavior).
         TabColorMode tabColorMode{ TabColorMode::WorkingDirectory };
+        // Agentmaster (tab color modes — "Use .git folder to infer"): whether the inferred-workdir
+        // detection SNAPS to the enclosing git repository root. ON (default): each tool-touched
+        // path resolves to its nearest ancestor holding a `.git` entry (dir, or a worktree /
+        // submodule FILE — the nearest wins, so worktree work keys the worktree, not the outer
+        // checkout), and a git root carrying the strict majority of the votes IS the inferred dir
+        // — never a subfolder of it. The repo is the working area: a session concentrated in
+        // `repo\src\x` then infers `repo`, which normally equals its launch cwd, so the inferred
+        // mode agrees with shared-per-directory coloring for in-repo sessions (switching modes
+        // doesn't recolor). No git majority (or OFF) => the plain deepest-majority directory vote
+        // (InferWorkingDirectory / FindGitRootForDir). Only consulted while tabColorMode is
+        // InferredWorkingDirectory; a change clears the scan gate so live sessions re-infer.
+        // GLOBAL; persisted "inferGitRoot"; a missing key => ON.
+        bool inferGitRoot{ true };
         // Agentmaster (status-dot RED FLASH RING color): the COLOR — with OPACITY in the alpha byte —
         // of the "unread" ring that pulses around a managed session's tab status dot when it leaves
         // Running for a needs-you state (Idle / WaitingForInput / NeedsApproval) on an unvisited tab

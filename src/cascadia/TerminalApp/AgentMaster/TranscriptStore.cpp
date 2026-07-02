@@ -1198,7 +1198,9 @@ namespace Agentmaster
 
     // ===== inferred working directory (tab color modes) ======================================
 
-    std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths, const std::wstring& fallbackDir)
+    std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths,
+                                       const std::wstring& fallbackDir,
+                                       const std::function<std::wstring(const std::wstring&)>& gitRootOf)
     {
         // Every tool-touched path votes for its whole ancestor DIRECTORY chain (the leaf itself is
         // excluded: tool paths are mostly files, and a searched-dir input just votes one level
@@ -1207,6 +1209,9 @@ namespace Agentmaster
         // candidate with a STRICT majority (>50%) of the voting paths; monotone ancestor counts
         // make the majority set a root-anchored chain, so "deepest majority" is unambiguous. See
         // the header doc for the rationale (stray-path robustness vs a longest-common-prefix).
+        // With `gitRootOf` (the "Use .git folder to infer" arm), each voting path's PARENT dir
+        // also resolves to its enclosing git root; a strict-majority git ROOT preempts the
+        // ancestor pick — the repo, not the subfolder, is the working area (header doc).
         struct DirVote
         {
             int count{};
@@ -1214,6 +1219,7 @@ namespace Agentmaster
             std::wstring spelling; // first-seen original spelling (the returned form)
         };
         std::unordered_map<std::wstring, DirVote> votes; // keyed by NormDirKey (Rule #8)
+        std::unordered_map<std::wstring, DirVote> gitVotes; // git roots (depth unused), same keying — disjoint per path
         int total = 0; // paths that cast at least one vote
         constexpr size_t kMaxSegmentsPerPath = 64; // sanity bound; real paths are far shallower
 
@@ -1266,6 +1272,7 @@ namespace Agentmaster
             // deliberately not a candidate.
             bool voted = false;
             size_t depth = 0;
+            std::wstring parentDir; // the DEEPEST prefix == the path's parent dir (the git-arm probe point)
             for (size_t i = rootEnd; i < p.size() && depth < kMaxSegmentsPerPath; ++i)
             {
                 if (p[i] != L'\\')
@@ -1287,15 +1294,66 @@ namespace Agentmaster
                 }
                 ++v.count;
                 voted = true;
+                parentDir = prefix;
             }
             if (voted)
             {
                 ++total;
+                // The git arm: this path's parent dir -> its enclosing git root (empty = not in a
+                // repo). Same eligibility as the ancestor votes (a path that cast none resolves
+                // nothing), one resolve per path — nested repos land on the NEAREST root, so the
+                // per-root tallies are disjoint. A bare drive/share-root result is ignored (a
+                // root can never win, matching the ancestor arm's contract).
+                if (gitRootOf)
+                {
+                    std::wstring root = gitRootOf(parentDir);
+                    for (auto& ch : root)
+                    {
+                        if (ch == L'/')
+                        {
+                            ch = L'\\';
+                        }
+                    }
+                    while (!root.empty() && root.back() == L'\\')
+                    {
+                        root.pop_back();
+                    }
+                    bool belowRoot = false; // >=1 segment below the root token (same bar as the vote candidates)
+                    if (root.size() >= 2 && root[0] == L'\\' && root[1] == L'\\')
+                    {
+                        const size_t serverSep = root.find(L'\\', 2);
+                        const size_t shareSep = (serverSep == std::wstring::npos) ? std::wstring::npos : root.find(L'\\', serverSep + 1);
+                        belowRoot = shareSep != std::wstring::npos && shareSep + 1 < root.size();
+                    }
+                    else if (root.size() >= 4 && root[1] == L':' && root[2] == L'\\')
+                    {
+                        belowRoot = true; // "K:\a" at minimum
+                    }
+                    if (belowRoot)
+                    {
+                        auto& g = gitVotes[NormDirKey(root)];
+                        if (g.count == 0)
+                        {
+                            g.spelling = root;
+                        }
+                        ++g.count;
+                    }
+                }
             }
         }
         if (total == 0)
         {
             return fallbackDir; // nothing usable touched yet
+        }
+        // Git arm first: a git root carrying the strict majority of the voting paths IS the
+        // inferred dir — never refined deeper (the repo is the working area). Disjoint per-path
+        // tallies mean at most ONE root can exceed half, so no tiebreak exists here.
+        for (const auto& kv : gitVotes)
+        {
+            if (kv.second.count * 2 > total)
+            {
+                return kv.second.spelling;
+            }
         }
         const DirVote* best = nullptr;
         const std::wstring* bestKey = nullptr;
@@ -1314,6 +1372,63 @@ namespace Agentmaster
             }
         }
         return best ? best->spelling : fallbackDir; // no majority (e.g. split across drives) -> the launch cwd
+    }
+
+    std::wstring FindGitRootForDir(const std::wstring& dir)
+    {
+        // Walk UP from `dir` probing each ancestor for a `.git` entry — a DIRECTORY (normal
+        // checkout) or a FILE (worktree / submodule: `.claude\worktrees\<x>\.git` is a file
+        // pointing at the main repo's gitdir — for our purpose the worktree IS the root: it's a
+        // distinct working area, and the NEAREST `.git` wins so worktree work never keys the
+        // outer checkout). GetFileAttributesW catches both forms in one probe. Deliberately
+        // stops ABOVE the drive/UNC-share root: a root-level repo could never win the inference
+        // vote (roots never win, InferWorkingDirectory's contract), so probing it would only
+        // cost IO to produce an ignored answer.
+        std::wstring p = dir;
+        for (auto& ch : p)
+        {
+            if (ch == L'/')
+            {
+                ch = L'\\';
+            }
+        }
+        while (!p.empty() && p.back() == L'\\')
+        {
+            p.pop_back();
+        }
+        size_t rootEnd = 0; // end of the root token ("K:" or "\\server\share") — never probed
+        if (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\')
+        {
+            const size_t serverSep = p.find(L'\\', 2);
+            const size_t shareSep = (serverSep == std::wstring::npos) ? std::wstring::npos : p.find(L'\\', serverSep + 1);
+            if (shareSep == std::wstring::npos)
+            {
+                return {}; // just "\\server" / "\\server\share" — nothing below a root to probe
+            }
+            rootEnd = shareSep;
+        }
+        else if (p.size() >= 2 && p[1] == L':')
+        {
+            rootEnd = 2;
+        }
+        else
+        {
+            return {}; // relative / rootless — no anchored ancestor chain
+        }
+        while (p.size() > rootEnd + 1) // strictly below the root token
+        {
+            if (::GetFileAttributesW((p + L"\\.git").c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                return p; // nearest enclosing repo (dir or worktree/submodule file)
+            }
+            const size_t lastSep = p.find_last_of(L'\\');
+            if (lastSep == std::wstring::npos || lastSep <= rootEnd)
+            {
+                break; // next cut would be the root itself
+            }
+            p.resize(lastSep);
+        }
+        return {};
     }
 
     // ===== cheap row facts (head + growing tail) =============================================

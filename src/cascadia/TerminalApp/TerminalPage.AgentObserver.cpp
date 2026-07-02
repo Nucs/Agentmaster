@@ -281,6 +281,7 @@ namespace
                                                                   const std::wstring& folderBranch,
                                                                   const std::wstring& stateText,
                                                                   const std::wstring& metaText,
+                                                                  const std::wstring& inferredDir,
                                                                   const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
                                                                   double tagsOpacity,
                                                                   const winrt::hstring& bodyText)
@@ -362,6 +363,21 @@ namespace
             mt.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
             mt.Text(winrt::hstring{ metaText });
             col.Children().Append(mt);
+        }
+        // Inferred working directory (tab color modes): where the session's tool calls say it
+        // ACTUALLY works — shown only when an inference exists that differs from the launch cwd
+        // (SessionInfo::inferredWorkingDir is stored empty otherwise), as the FULL path (the header
+        // shows only the cwd's leaf; the whole point of this line is the "it's working somewhere
+        // else" detail).
+        if (!inferredDir.empty())
+        {
+            TextBlock inf;
+            inf.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            inf.FontSize(11);
+            inf.TextWrapping(TextWrapping::Wrap);
+            inf.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
+            inf.Text(winrt::hstring{ L"inferred \x2192 " + inferredDir });
+            col.Children().Append(inf);
         }
         // Bookmark TAGS — each tag's name over a 2px UNDERSCORE in its picked color (the badge
         // ribbon's color; user-picked > name-hash, resolved by the spec producer). An underline
@@ -2037,6 +2053,11 @@ namespace winrt::TerminalApp::implementation
             folderBranch = folderBranch.empty() ? s.branch : (folderBranch + L"/" + s.branch);
         }
 
+        // The INFERRED working directory (tab color modes) — non-empty only when the scan detected
+        // the session working somewhere OTHER than its launch cwd (stored empty when they agree),
+        // so "present" already means "worth showing".
+        const std::wstring inferredDir = s.inferredWorkingDir;
+
         const std::wstring title = s.title.empty() ? std::wstring{ L"(untitled)" } : s.title;
 
         // Bookmark TAGS — parsed off the tab's own AgentTagsSpec ("name\t#AARRGGBB" lines; the
@@ -2094,6 +2115,8 @@ namespace winrt::TerminalApp::implementation
         sig += L'\x1f';
         sig += metaText;
         sig += L'\x1f';
+        sig += inferredDir;
+        sig += L'\x1f';
         sig += tagsSpec;
         sig += L'\x1f';
         // The tooltip tag-row opacity rides the sig (rounded to the slider's 1% grain) so a cog
@@ -2107,7 +2130,7 @@ namespace winrt::TerminalApp::implementation
         sig += std::to_wstring(bodyMtime);
         if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig });
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, inferredDir, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig });
             _tabTooltipSig[sessionId] = sig;
         }
 
@@ -4485,8 +4508,28 @@ namespace winrt::TerminalApp::implementation
         {
             co_return;
         }
+        const bool useGit = _appSettings.inferGitRoot; // "Use .git folder to infer" — snapshot on the UI thread
 
         co_await winrt::resume_background();
+        // The git-root resolver for the inference's git arm ("Use .git folder to infer"): the real
+        // FindGitRootForDir walk, memoized per NormDirKey ACROSS this whole batch — sessions in one
+        // pass overwhelmingly share ancestor chains, so the per-pass filesystem cost collapses to a
+        // handful of GetFileAttributesW probes (and the pass itself is mtime-gated + ~15s-throttled).
+        std::unordered_map<std::wstring, std::wstring> gitMemo; // NormDirKey(dir) -> git root ("" == not in a repo)
+        std::function<std::wstring(const std::wstring&)> gitRootOf;
+        if (useGit)
+        {
+            gitRootOf = [&gitMemo](const std::wstring& d) -> std::wstring {
+                const std::wstring key = ::Agentmaster::NormDirKey(d);
+                if (const auto it = gitMemo.find(key); it != gitMemo.end())
+                {
+                    return it->second;
+                }
+                std::wstring root = ::Agentmaster::FindGitRootForDir(d);
+                gitMemo.emplace(key, root);
+                return root;
+            };
+        }
         struct InferResult
         {
             std::wstring id;
@@ -4529,7 +4572,7 @@ namespace winrt::TerminalApp::implementation
             ref.mtimeMs = mtimeMs;
             ref.birthMs = toUnixMs(fad.ftCreationTime);
             const auto entry = ::Agentmaster::LoadOrRefreshSessionIndex(ref); // sidecar-cached; reads only the appended suffix
-            const std::wstring inferred = entry.valid ? ::Agentmaster::InferWorkingDirectory(entry.stats.pathsAccessed, c.workingDir) : c.workingDir;
+            const std::wstring inferred = entry.valid ? ::Agentmaster::InferWorkingDirectory(entry.stats.pathsAccessed, c.workingDir, gitRootOf) : c.workingDir;
             results.push_back({ c.id, inferred, c.workingDir, mtimeMs, true });
         }
 

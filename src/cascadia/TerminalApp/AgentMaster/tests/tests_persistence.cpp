@@ -351,6 +351,7 @@ void TestAppSettings()
         in.tabRenameCommitMode = TabRenameCommitMode::ClickAwayOrEnter; // non-default (default is ClickAwayOrShiftEnter)
         in.favoriteIcon = FavoriteIcon::Star; // non-default (default is Crown)
         in.tabColorMode = TabColorMode::Individual; // non-default (default is WorkingDirectory) — tab color modes
+        in.inferGitRoot = false; // non-default (default true) — "Use .git folder to infer" OFF
         in.flashRingColor = L"#8000FF00"; // non-default (default #CCFF0000) — 50%-opaque green flash ring (alpha byte = opacity)
         in.pendingDotsLightColor = L"#FF112233"; // non-default (default #FFE0A92B) — pending "3 dots" shown on a DARK tab/card bg
         in.pendingDotsDarkColor = L"#FF445566"; // non-default (default #FF5A3E00) — pending "3 dots" shown on a LIGHT tab/card bg
@@ -382,6 +383,7 @@ void TestAppSettings()
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrEnter, "settings tabRenameCommitMode round-trip");
         CHECK(out.favoriteIcon == FavoriteIcon::Star, "settings favoriteIcon round-trip");
         CHECK(out.tabColorMode == TabColorMode::Individual, "settings tabColorMode round-trip");
+        CHECK(out.inferGitRoot == false, "settings inferGitRoot round-trip (stored OFF)");
         CHECK(out.flashRingColor == L"#8000FF00", "settings flashRingColor round-trip");
         CHECK(out.pendingDotsLightColor == L"#FF112233", "settings pendingDotsLightColor round-trip");
         CHECK(out.pendingDotsDarkColor == L"#FF445566", "settings pendingDotsDarkColor round-trip");
@@ -420,6 +422,7 @@ void TestAppSettings()
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
         CHECK(out.favoriteIcon == FavoriteIcon::Crown, "settings favoriteIcon default (Crown) on empty");
         CHECK(out.tabColorMode == TabColorMode::WorkingDirectory, "settings tabColorMode default (shared per working dir) on empty");
+        CHECK(out.inferGitRoot == true, "settings inferGitRoot default ON (\"Use .git folder to infer\") on empty");
         CHECK(out.flashRingColor == L"#CCFF0000", "settings flashRingColor default (80% red) on empty");
         CHECK(out.pendingDotsLightColor == L"#FFE0A92B", "settings pendingDotsLightColor default (gold, on dark) on empty");
         CHECK(out.pendingDotsDarkColor == L"#FF5A3E00", "settings pendingDotsDarkColor default (amber, on light) on empty");

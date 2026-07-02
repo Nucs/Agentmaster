@@ -3096,4 +3096,124 @@ void TestInferWorkingDirectory()
 
     // Trailing separators are tolerated (a dir input with a trailing slash).
     CHECK(InferWorkingDirectory({ L"K:\\repo\\src\\f.cs", L"K:\\repo\\src\\g.cs\\" }, cwd) == L"K:\\repo\\src", "trailing separator tolerated");
+
+    // --- the git-root arm ("Use .git folder to infer", AppSettings::inferGitRoot) -------------
+    // A FAKE resolver (pure — no filesystem): dir -> its enclosing git root. Layout: K:\repoA
+    // (a checkout), K:\repoA\.claude\worktrees\wt (a NESTED worktree — nearest root wins),
+    // K:\repoB (a second checkout); everything else is outside any repo.
+    {
+        const auto low = [](std::wstring s) {
+            for (auto& c : s)
+            {
+                c = (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : (c == L'/' ? L'\\' : c);
+            }
+            return s;
+        };
+        const auto fakeGit = [low](const std::wstring& d) -> std::wstring {
+            const std::wstring k = low(d);
+            if (k.rfind(L"k:\\repoa\\.claude\\worktrees\\wt", 0) == 0)
+            {
+                return L"K:\\repoA\\.claude\\worktrees\\wt";
+            }
+            if (k.rfind(L"k:\\repoa", 0) == 0)
+            {
+                return L"K:\\repoA";
+            }
+            if (k.rfind(L"k:\\repob", 0) == 0)
+            {
+                return L"K:\\repoB";
+            }
+            return {};
+        };
+
+        // The reported "switching modes suddenly recolors" case: work CONCENTRATED in a repo
+        // subfolder infers the REPO (== the usual launch cwd), never the subfolder — while the
+        // classic arm (no resolver) picks the deep majority dir.
+        const std::vector<std::wstring> inRepo = {
+            L"K:\\repoA\\src\\cascadia\\a.cpp",
+            L"K:\\repoA\\src\\cascadia\\b.cpp",
+            L"K:\\repoA\\doc\\c.md",
+        };
+        CHECK(InferWorkingDirectory(inRepo, cwd, fakeGit) == L"K:\\repoA", "git arm: a repo-majority snaps to the repo ROOT, never deeper");
+        CHECK(InferWorkingDirectory(inRepo, cwd) == L"K:\\repoA\\src\\cascadia", "no resolver: the classic deepest-majority pick is unchanged");
+        CHECK(InferWorkingDirectory(inRepo, cwd, {}) == L"K:\\repoA\\src\\cascadia", "an EMPTY resolver == the classic two-arg behavior");
+
+        // Nested worktree: per-path NEAREST root — worktree paths tally the worktree, outer-repo
+        // paths the checkout; the worktree's 3/4 strict majority keys the worktree root.
+        const std::vector<std::wstring> wt = {
+            L"K:\\repoA\\.claude\\worktrees\\wt\\src\\a.cpp",
+            L"K:\\repoA\\.claude\\worktrees\\wt\\src\\b.cpp",
+            L"K:\\repoA\\.claude\\worktrees\\wt\\doc\\c.md",
+            L"K:\\repoA\\src\\d.cpp",
+        };
+        CHECK(InferWorkingDirectory(wt, cwd, fakeGit) == L"K:\\repoA\\.claude\\worktrees\\wt", "git arm: a nested worktree majority keys the WORKTREE, not the outer checkout");
+
+        // Two repos split 2/2: neither root has a strict majority; the ancestor arm has none
+        // either (split across top dirs) -> fallback cwd.
+        const std::vector<std::wstring> split = {
+            L"K:\\repoA\\src\\a.cpp",
+            L"K:\\repoA\\src\\b.cpp",
+            L"K:\\repoB\\src\\c.cpp",
+            L"K:\\repoB\\src\\d.cpp",
+        };
+        CHECK(InferWorkingDirectory(split, cwd, fakeGit) == cwd, "git arm: a 50/50 repo split has no majority -> fallback");
+
+        // Out-of-repo votes DILUTE the git tally but a 3/5 repo majority still snaps to the root.
+        const std::vector<std::wstring> diluted = {
+            L"K:\\repoA\\src\\a.cpp",
+            L"K:\\repoA\\src\\b.cpp",
+            L"K:\\repoA\\tools\\c.ps1",
+            L"C:\\Users\\me\\.claude\\CLAUDE.md",
+            L"C:\\Windows\\Temp\\t.tmp",
+        };
+        CHECK(InferWorkingDirectory(diluted, cwd, fakeGit) == L"K:\\repoA", "git arm: 3/5 in one repo still snaps to its root");
+
+        // Work mostly OUTSIDE any repo: the 1/4 repo tally has no majority -> the ancestor arm
+        // decides exactly as before (the notes dir's 3/4 deepest majority).
+        const std::vector<std::wstring> notes = {
+            L"C:\\notes\\x\\a.md",
+            L"C:\\notes\\x\\b.md",
+            L"C:\\notes\\x\\c.md",
+            L"K:\\repoA\\src\\f.cs",
+        };
+        CHECK(InferWorkingDirectory(notes, cwd, fakeGit) == L"C:\\notes\\x", "git arm: no repo majority -> the ancestor majority-deepest decides");
+
+        // A resolver yielding a BARE ROOT is ignored (roots never win — same bar as the ancestor
+        // arm): the ancestor pick proceeds untouched.
+        const auto rootGit = [](const std::wstring&) -> std::wstring { return L"K:\\"; };
+        CHECK(InferWorkingDirectory({ L"K:\\junk\\x\\a.txt", L"K:\\junk\\x\\b.txt" }, cwd, rootGit) == L"K:\\junk\\x", "git arm: a bare drive-root resolver result is rejected");
+        const auto shareGit = [](const std::wstring&) -> std::wstring { return L"\\\\nas\\share"; };
+        CHECK(InferWorkingDirectory({ L"\\\\nas\\share\\proj\\a.cs", L"\\\\nas\\share\\proj\\b.cs" }, cwd, shareGit) == L"\\\\nas\\share\\proj", "git arm: a bare UNC-share resolver result is rejected");
+
+        // Resolver spelling is normalized (separators -> backslash, trailing sep stripped); a
+        // below-share UNC root is a valid winner.
+        const auto slashGit = [](const std::wstring&) -> std::wstring { return L"K:/repoA/"; };
+        CHECK(InferWorkingDirectory({ L"K:\\repoA\\src\\a.cpp" }, cwd, slashGit) == L"K:\\repoA", "git arm: resolver spelling separator-normalized + trailing sep stripped");
+        const auto uncGit = [](const std::wstring&) -> std::wstring { return L"\\\\nas\\share\\proj"; };
+        CHECK(InferWorkingDirectory({ L"\\\\nas\\share\\proj\\deep\\a.cs", L"\\\\nas\\share\\proj\\deep\\b.cs" }, cwd, uncGit) == L"\\\\nas\\share\\proj", "git arm: a below-share UNC git root wins");
+    }
+
+    // --- FindGitRootForDir (the REAL resolver; filesystem smoke) -------------------------------
+    {
+        CHECK(FindGitRootForDir(L"relative\\x").empty(), "FindGitRootForDir: relative input -> none");
+        CHECK(FindGitRootForDir(L"K:\\").empty(), "FindGitRootForDir: a bare drive root -> none (never probed)");
+        CHECK(FindGitRootForDir(L"\\\\server\\share").empty(), "FindGitRootForDir: a bare UNC share -> none");
+        // The harness runs from the repo's tests dir (run-m5-tests.bat cd's there), so the walk-up
+        // from the CURRENT dir must land on a dir that actually holds a .git entry (dir or file —
+        // this covers the worktree-file form when run from a worktree checkout). Tolerant when run
+        // from outside any repo: only the contract "non-empty => holds .git" is asserted.
+        wchar_t cd[MAX_PATH]{};
+        if (::GetCurrentDirectoryW(MAX_PATH, cd) > 0)
+        {
+            const std::wstring root = FindGitRootForDir(cd);
+            if (!root.empty())
+            {
+                CHECK(::GetFileAttributesW((root + L"\\.git").c_str()) != INVALID_FILE_ATTRIBUTES, "FindGitRootForDir: returned dir holds a .git entry");
+            }
+            else
+            {
+                CHECK(true, "FindGitRootForDir: cwd outside any repo (tolerated)");
+            }
+        }
+    }
 }

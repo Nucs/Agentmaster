@@ -1025,6 +1025,23 @@ namespace winrt::TerminalApp::implementation
         _setTabColorMode.Items().Append(winrt::box_value(L"Inferred working directory")); // index 2 == TabColorMode::InferredWorkingDirectory
         AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.");
         panel.Children().Append(_setTabColorMode);
+        // Tab color modes — "Use .git folder to infer" (AppSettings::inferGitRoot, default ON): the
+        // inferred working dir SNAPS to the enclosing git repository root (the folder holding .git —
+        // a worktree's .git FILE counts, nearest wins), so an in-repo session infers the repo — which
+        // normally equals its launch cwd, keeping the inferred mode's colors in step with
+        // shared-per-directory. Off: the plain deepest-majority folder of the touched files. Only
+        // meaningful in the Inferred mode, so it's enabled only while that mode is selected.
+        _setInferGitRoot = ToggleSwitch{};
+        _setInferGitRoot.Header(winrt::box_value(L"Use .git folder to infer"));
+        AgentSetTip(_setInferGitRoot, L"When inferring the working directory, treat the enclosing git repository as the answer: if most of the files a session touches live under one repo (the nearest folder holding .git \x2014 a worktree counts as its own repo), that repo root is the inferred directory \x2014 so an in-repo session keeps the same color as in \x201Cshared per working directory\x201D. When off, the deepest folder holding the majority of the touched files is used as-is. Default on; applies while \x201CTab coloring\x201D is \x201CInferred working directory\x201D.");
+        _setInferGitRoot.IsEnabled(false); // enabled by the combo handler / the seed when Inferred is selected
+        _setTabColorMode.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) {
+            if (_setInferGitRoot && _setTabColorMode)
+            {
+                _setInferGitRoot.IsEnabled(_setTabColorMode.SelectedIndex() == 2); // 2 == InferredWorkingDirectory
+            }
+        });
+        panel.Children().Append(_setInferGitRoot);
 
         // TABS: the "status flashing color" — color (and OPACITY) of the unread FLASH RING that pulses
         // around a managed session's tab status dot when it leaves Running for a needs-you state on an
@@ -1620,6 +1637,14 @@ namespace winrt::TerminalApp::implementation
                                                _appSettings.tabColorMode == TabColorMode::InferredWorkingDirectory ? 2 :
                                                                                                                      0);
         }
+        if (_setInferGitRoot)
+        {
+            _setInferGitRoot.IsOn(_appSettings.inferGitRoot);
+            // Meaningful only in the Inferred mode (the combo's SelectionChanged keeps this in step
+            // with later user picks; set explicitly here so the seed never depends on the handler
+            // having fired for the programmatic SelectedIndex above).
+            _setInferGitRoot.IsEnabled(_appSettings.tabColorMode == TabColorMode::InferredWorkingDirectory);
+        }
         if (_setFlashRingPicker)
         {
             // The status flashing color (with opacity in the alpha byte). Malformed/empty -> default (80% red).
@@ -1964,6 +1989,12 @@ namespace winrt::TerminalApp::implementation
             _appSettings.tabColorMode = _setTabColorMode.SelectedIndex() == 1 ? TabColorMode::Individual :
                                         _setTabColorMode.SelectedIndex() == 2 ? TabColorMode::InferredWorkingDirectory :
                                                                                 TabColorMode::WorkingDirectory;
+        }
+        if (_setInferGitRoot)
+        {
+            // Read back even while disabled (mode != Inferred): the toggle still holds the user's
+            // stored preference, and dropping it here would silently reset it to the default.
+            _appSettings.inferGitRoot = _setInferGitRoot.IsOn();
         }
         if (_setFlashRingPicker)
         {

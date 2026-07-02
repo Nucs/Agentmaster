@@ -1391,10 +1391,28 @@ What works, by area:
   Files\App\x.exe` — so prose after a path is never swallowed and a space-carrying LEAF truncates at
   the space with its parent, the thing the vote uses, exact; `f.cs:123` line refs stop at the colon,
   `,;=&`+quotes/wildcards terminate, unbalanced `)`/`]` + sentence dots trim; per-line cap 8 shared
-  with the field extraction — these also enrich the Sessions 📁/📄 scopes). **The loop:** re-detected
+  with the field extraction — these also enrich the Sessions 📁/📄 scopes). **The git snap** (the
+  **Use .git folder to infer** toggle right under the dropdown — `AppSettings::inferGitRoot`, default
+  **ON**, enabled only while the mode is Inferred, read back even when disabled): each voting path's
+  PARENT dir resolves to its **nearest enclosing git root** (`FindGitRootForDir` — walk-up probing for
+  a `.git` DIR or worktree/submodule FILE, nearest wins so worktree work keys the WORKTREE, never a
+  bare drive/share root; memoized per NormDirKey across the scan batch), and a git root holding the
+  same strict majority of the voting paths IS the inferred dir — **as-is, never deeper**: the repo is
+  ONE working area, so an in-repo session infers the repo root == (normally) its launch cwd, which
+  keeps the Inferred mode's colors IN STEP with Shared-per-directory (the "switching modes suddenly
+  recolors my tab" fix — colors now differ only when a session genuinely works OUTSIDE its cwd's
+  repo). Disjoint per-path tallies ⇒ at most one root can exceed half (no tiebreak); no git majority
+  (cross-repo split / mostly non-repo paths) or OFF ⇒ the ancestor majority-deepest above; the
+  resolver is INJECTED (`InferWorkingDirectory`'s 3rd arg) so the picker stays pure/testable.
+  **The loop:** re-detected
   mtime-gated + ~15s-throttled off the scanner tick (`_ScanInferredTabColors`, reading the Sessions
   sidecar incrementally), cached persisted on `SessionInfo::inferredWorkingDir` (stored EMPTY when ==
-  cwd) so a reopened session wears its color immediately; `[infer-dir]` logs each change. **Fork
+  cwd) so a reopened session wears its color immediately; `[infer-dir]` logs each change; a
+  mode/`inferGitRoot` change (cog Save AND the cross-window broadcast) CLEARS `_inferredColorScan` +
+  kicks one pass, so every hosted session re-infers under the new rule instead of waiting out its
+  mtime gate; **the rich tab TOOLTIP surfaces a non-empty inference** as a dim full-path
+  `inferred → <dir>` row under the meta line (it's stored only when ≠ cwd, so "present" already means
+  "working somewhere else"). **Fork
   lineage:** a fork INHERITS its source's inference at launch (registry copy in `_LaunchClaudeSession`
   — a fork's own transcript doesn't exist until its first turn, and its content-to-be is a verbatim
   copy of the parent's, so parent color parity from the first frame — the "forked session got a

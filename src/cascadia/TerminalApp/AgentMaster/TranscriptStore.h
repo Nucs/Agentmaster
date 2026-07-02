@@ -264,7 +264,34 @@ namespace Agentmaster
     // separator-normalized and compared by NormDirKey (case-insensitive on Windows, Rule #8); the
     // returned spelling is the first-seen original. No majority anywhere (paths split across
     // drives) or no usable paths => `fallbackDir` (the session's launch cwd). Pure.
-    std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths, const std::wstring& fallbackDir);
+    //
+    // `gitRootOf` — the "Use .git folder to infer" arm (AppSettings::inferGitRoot, default ON).
+    // When provided, it maps a DIRECTORY to its enclosing git ROOT (the nearest ancestor holding a
+    // `.git` entry — dir or worktree/submodule FILE; empty = not in a repo). Each voting path's
+    // PARENT dir resolves through it, the git roots are tallied, and a git root holding the same
+    // STRICT MAJORITY of the voting paths IS the inferred dir — as-is, never deeper: a repo is ONE
+    // working area, so a session concentrated in `repo\src\cascadia` infers `repo`, which normally
+    // == its launch cwd (the "switching modes suddenly recolors my tab" fix — the shared-per-dir
+    // and inferred modes then agree on the key). Nested repos (a worktree under the main checkout)
+    // resolve per-path to the NEAREST root, so worktree work keys the worktree, not the outer
+    // repo. Tallies are disjoint per path => at most one root can hold a strict majority (no
+    // tiebreak needed). A resolver result that is a bare drive/share root is ignored (roots never
+    // win, same as the ancestor arm). No git majority (paths split across repos, or mostly
+    // outside any repo) => fall through to the ancestor majority-deepest above. The resolver is
+    // injected so this stays PURE (the real caller wraps FindGitRootForDir, memoized); {} == the
+    // classic two-arg behavior.
+    std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths,
+                                       const std::wstring& fallbackDir,
+                                       const std::function<std::wstring(const std::wstring&)>& gitRootOf = {});
+
+    // The REAL git-root resolver behind InferWorkingDirectory's `gitRootOf` (filesystem-touching —
+    // inject it, don't call it from pure code): walk UP from `dir` to the nearest ancestor
+    // containing a `.git` entry — a directory (a normal checkout) OR a file (a worktree /
+    // submodule, e.g. this repo's `.claude\worktrees\<x>\.git`) — and return that ancestor.
+    // Stops ABOVE the drive/UNC-share root (a root-level repo could never win the vote anyway, so
+    // it is never probed/returned); relative / rootless input => empty. One GetFileAttributesW
+    // per ancestor level — callers batch-memoize per NormDirKey (the inferred-color scan does).
+    std::wstring FindGitRootForDir(const std::wstring& dir);
 
     // ===== cheap row facts: head + growing-tail windows, never a full read ===================
 
