@@ -158,7 +158,11 @@ post-rewrite — the old manual-open members/methods listed in §9's history are
      `_WireAgentToolTipUnload()` (no-op after the first time). From here **`ToolTipService` owns
      open/close** — hover opens (after the system delay), pointer-exit closes. We wire nothing else.
   3. If `_agentToolTip.IsOpen()` → return (a safe READ — do NOT swap `Content` while the framework is
-     showing it). Else `_agentToolTip.Content(_agentToolTipContent)` — swap only while closed.
+     showing it). Else — closed-only mutations: re-assert **`PlacementRect` = the tab's own bounds**
+     (`{0,0,ActualWidth,ActualHeight}`; a hover-opened AUTOMATIC tooltip otherwise places itself relative
+     to the **pointer**, so `Placement(Bottom)` alone read "below the cursor" — the explicit rect anchors
+     the card centered under the TAB; re-asserted each refresh since tab widths drift), then
+     `_agentToolTip.Content(_agentToolTipContent)`.
 
 ### 4c. Open / close = the FRAMEWORK
 There are no open/dismiss timers, no pointer-loss handlers, no manual `IsOpen`, and no cross-tab

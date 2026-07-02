@@ -245,9 +245,11 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _agentToolTipSig{};
         // The ONE reused ToolTip object (swap its Content only while CLOSED; re-creating + re-SetToolTip on
         // each ~2s refresh would flicker/replace the framework's open tip while hovered). Configured once:
-        // pinned Dark + Placement Bottom + hit-test-invisible. FRAMEWORK-MANAGED — ToolTipService owns
-        // open/close; we NEVER drive IsOpen (that was the crash source — see _UpdateAgentToolTip and
-        // doc/agentmaster/HANDOVER_tab-tooltip.md). Detached + nulled on an owner recycle/unload/shutdown.
+        // pinned Dark + Placement Bottom + hit-test-invisible, anchored to the TAB via PlacementRect (an
+        // automatic hover tooltip otherwise places itself relative to the POINTER). FRAMEWORK-MANAGED —
+        // ToolTipService owns open/close; we NEVER drive IsOpen (that was the crash source — see
+        // _UpdateAgentToolTip and doc/agentmaster/HANDOVER_tab-tooltip.md). Detached + nulled on an owner
+        // recycle/unload/shutdown.
         winrt::Windows::UI::Xaml::Controls::ToolTip _agentToolTip{ nullptr };
         bool _agentToolTipUnloadWired{ false }; // the owner Unloaded -> detach handler is wired once per tab
 

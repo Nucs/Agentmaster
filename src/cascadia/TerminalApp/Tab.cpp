@@ -336,11 +336,12 @@ namespace winrt::TerminalApp::implementation
         // strip) is always IsLoaded()+rooted, so steady-state is unaffected. Complements the Unloaded detach
         // (_WireAgentToolTipUnload -> _DetachAgentToolTip): a recycle drops the ref so a later RELOAD of the
         // same owner rebuilds a FRESH tooltip here instead of reusing a stale one (the crash #4 lesson).
-        if (const auto owner = TabViewItem(); !owner || !owner.IsLoaded() || !owner.XamlRoot())
+        const auto owner = TabViewItem();
+        if (!owner || !owner.IsLoaded() || !owner.XamlRoot())
         {
             return;
         }
-        else if (!_agentToolTip)
+        if (!_agentToolTip)
         {
             _agentToolTip = WUX::Controls::ToolTip{};
             _agentToolTip.RequestedTheme(WUX::ElementTheme::Dark);
@@ -360,6 +361,18 @@ namespace winrt::TerminalApp::implementation
         if (_agentToolTip.IsOpen())
         {
             return;
+        }
+        // Anchor the popup to the TAB, not the cursor (a closed-only mutation, like Content below): a
+        // hover-opened AUTOMATIC tooltip places itself relative to the POINTER — Placement(Bottom) alone
+        // reads "below the cursor", so the card landed wherever inside the tab the mouse happened to sit
+        // (the old manual path opened programmatically, which the framework places target-relative; going
+        // framework-managed changed the anchor). An explicit PlacementRect (the tab's own bounds, in the
+        // placement target's coordinate space) overrides pointer placement, so Placement(Bottom) centers
+        // the card directly under the TAB. Re-asserted each closed refresh — tab widths drift with tab
+        // add/remove/rename and window resize.
+        if (const auto w = static_cast<float>(owner.ActualWidth()), h = static_cast<float>(owner.ActualHeight()); w > 0 && h > 0)
+        {
+            _agentToolTip.PlacementRect(winrt::Windows::Foundation::IReference<winrt::Windows::Foundation::Rect>{ winrt::Windows::Foundation::Rect{ 0, 0, w, h } });
         }
         _agentToolTip.Content(_agentToolTipContent); // host the page-built card on the reused object
     }
