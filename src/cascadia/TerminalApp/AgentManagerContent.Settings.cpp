@@ -984,6 +984,15 @@ namespace winrt::TerminalApp::implementation
         _setFavoriteIcon.Items().Append(winrt::box_value(L"Star")); // index 1 == FavoriteIcon::Star
         AgentSetTip(_setFavoriteIcon, L"The marker shown on a favorited (\x2605) session's live tab, over its status dot \x2014 Crown (default, a small gold crown at the dot's corner) or Star (the status dot becomes the centre of a white, golden-tipped star).");
         panel.Children().Append(_setFavoriteIcon);
+        // TABS (bookmark tags): the GLOBAL cap on distinct tags (the tab context menu's "Tag" panel
+        // refuses to create a NEW name past it; existing tags are never dropped by lowering it).
+        // Default 20, hard ceiling 40 — ClampMaxTags is shared with the Persistence load, so a
+        // hand-edited settings.json self-heals identically.
+        _setMaxTags = TextBox{};
+        _setMaxTags.Header(winrt::box_value(L"Max bookmark tags (global)"));
+        _setMaxTags.PlaceholderText(L"20");
+        AgentSetTip(_setMaxTags, L"How many distinct bookmark tags may exist across all sessions (the tab right-click \x2192 Tag panel). Blank or 0 resets to 20; capped at 40. Tags already applied are never removed by lowering this.");
+        panel.Children().Append(_setMaxTags);
 
         // TABS: the "status flashing color" — color (and OPACITY) of the unread FLASH RING that pulses
         // around a managed session's tab status dot when it leaves Running for a needs-you state on an
@@ -1561,6 +1570,10 @@ namespace winrt::TerminalApp::implementation
             // Items: 0 == Crown (default), 1 == Star.
             _setFavoriteIcon.SelectedIndex(_appSettings.favoriteIcon == FavoriteIcon::Star ? 1 : 0);
         }
+        if (_setMaxTags)
+        {
+            _setMaxTags.Text(winrt::hstring{ std::to_wstring(_appSettings.maxTags) });
+        }
         if (_setFlashRingPicker)
         {
             // The status flashing color (with opacity in the alpha byte). Malformed/empty -> default (80% red).
@@ -1880,6 +1893,19 @@ namespace winrt::TerminalApp::implementation
         {
             // Items: 0 == Crown (default), 1 == Star.
             _appSettings.favoriteIcon = _setFavoriteIcon.SelectedIndex() == 1 ? FavoriteIcon::Star : FavoriteIcon::Crown;
+        }
+        if (_setMaxTags)
+        {
+            const std::wstring t{ _setMaxTags.Text() };
+            uint32_t v = 0;
+            for (const wchar_t c : t)
+            {
+                if (c >= L'0' && c <= L'9' && v < 1000)
+                {
+                    v = v * 10 + static_cast<uint32_t>(c - L'0');
+                }
+            }
+            _appSettings.maxTags = ClampMaxTags(v); // blank/0 -> 20 (default), >40 -> 40
         }
         if (_setFlashRingPicker)
         {

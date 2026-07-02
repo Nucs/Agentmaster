@@ -2603,6 +2603,19 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (bookmark tags): context-menu "Tag" -> open the tag panel for THIS tab's managed
+        // session (name a new tag / toggle existing ones), anchored under the tab. No-op on a
+        // non-session tab (the item is hidden there — see the flyout Opening handler below).
+        hostingTab.TagEditorRequested([weakTab, weakThis]() {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            page->_OpenTagEditorForTab(*tab);
+        });
+
         // Agentmaster (eager-init): context-menu "Activate Tab" -> start this tab's DORMANT session's
         // claude IN PLACE (no focus change). _ActivateDormantSession is a no-op if it already started.
         hostingTab.ActivateSessionRequested([weakTab, weakThis]() {
@@ -2700,6 +2713,7 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentCopyMenuVisible(isSession, isCodex);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
+                    tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too
                     // Agentmaster (eager-init): "Activate Tab" — shown ONLY when this session is DORMANT (its
                     // claude hasn't started: the control is still NotConnected). Read the live control state
                     // (the authority), so a tab that started since the last reconcile stops offering it.

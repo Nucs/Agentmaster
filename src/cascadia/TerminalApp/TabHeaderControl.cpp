@@ -8,10 +8,12 @@
 #include "TabHeaderControl.g.cpp"
 
 #include "AgentTipHelpers.h" // Agentmaster: islands-safe hover tooltip for the tab-strip status dot
+#include "AgentStatusColors.h" // Agentmaster (bookmark tags): TagColorFor — the stable per-tag color
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <string_view>
 
 using namespace winrt;
 using namespace winrt::Microsoft::UI::Xaml;
@@ -214,6 +216,7 @@ namespace winrt::TerminalApp::implementation
         if (status == _pendingHookedStatus)
         {
             _UpdatePendingAnimation();
+            _UpdateTagBadges();
             return; // already hooked to this exact status (or both null)
         }
         _pendingStatusRevoker.revoke(); // detach the previous status (no-op if none)
@@ -228,10 +231,17 @@ namespace winrt::TerminalApp::implementation
                     {
                         self->_UpdatePendingAnimation();
                     }
+                    // Agentmaster (bookmark tags): the same one subscription also rebuilds the
+                    // bookmark badges when the tag spec changes (no second revoker to juggle).
+                    if (n.empty() || n == L"AgentTagsSpec")
+                    {
+                        self->_UpdateTagBadges();
+                    }
                 }
             });
         }
         _UpdatePendingAnimation();
+        _UpdateTagBadges();
     }
 
     // Agentmaster (PENDING_INPUT.md): run the 3-dot pulse iff this tab currently has a pending draft.
@@ -256,6 +266,59 @@ namespace winrt::TerminalApp::implementation
         }
         catch (...)
         {
+        }
+    }
+
+    // Agentmaster (bookmark tags): rebuild the HeaderTagBookmarks row from TabStatus.AgentTagsSpec —
+    // one small bookmark-ribbon Polygon per '\n'-separated tag name, bottom-anchored after the title
+    // (see the XAML note). Each ribbon is filled with the tag's stable color (TagColorFor — the same
+    // name always wears the same color, everywhere) over a thin black stroke (legible on any per-dir
+    // tab color, like the status dot) and carries ITS OWN tooltip naming the tag. Change-gated on the
+    // rendered spec so the frequent re-asserts (bind/launch/refresh paths) rebuild nothing; capped at
+    // 8 badges so a heavily-tagged session can't balloon the tab strip (hover any badge for its name;
+    // the cap is presentation-only — every tag stays stored + listed in the Tag panel).
+    void TabHeaderControl::_UpdateTagBadges()
+    {
+        const auto status = TabStatus();
+        const winrt::hstring spec = status ? status.AgentTagsSpec() : winrt::hstring{};
+        if (spec == _renderedTagsSpec)
+        {
+            return; // unchanged — the common re-assert costs nothing
+        }
+        _renderedTagsSpec = spec;
+        const auto panel = HeaderTagBookmarks();
+        if (!panel)
+        {
+            return;
+        }
+        panel.Children().Clear();
+        constexpr size_t kMaxBadges = 8;
+        std::wstring_view rest{ spec };
+        size_t shown = 0;
+        while (!rest.empty() && shown < kMaxBadges)
+        {
+            const size_t nl = rest.find(L'\n');
+            const std::wstring_view name = rest.substr(0, nl);
+            rest = (nl == std::wstring_view::npos) ? std::wstring_view{} : rest.substr(nl + 1);
+            if (name.empty())
+            {
+                continue;
+            }
+            // A classic bookmark ribbon: a 6x9 rectangle with a notch cut up into the bottom edge.
+            winrt::Windows::UI::Xaml::Shapes::Polygon ribbon;
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
+            ribbon.Fill(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ TagColorFor(name) });
+            ribbon.Stroke(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+            ribbon.StrokeThickness(0.75);
+            // Hit-testable ON PURPOSE: the tooltip needs hover. Presses still bubble to the
+            // TabViewItem (nothing here handles them), so tab click/drag are unaffected.
+            AgentSetTip(ribbon, winrt::hstring{ name });
+            panel.Children().Append(ribbon);
+            ++shown;
         }
     }
 

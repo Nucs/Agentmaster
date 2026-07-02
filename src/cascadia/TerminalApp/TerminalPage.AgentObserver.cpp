@@ -35,7 +35,8 @@
 #include "../../types/inc/utils.hpp" // GuidToPlainString (WT_SESSION keys)
 
 #include "AgentManagerContent.h" // push the External census / RefreshNow
-#include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot)
+#include "AgentStatusColors.h" // AgentStatusColorFor — the shared state->color palette (tab dot); TagColorFor (bookmark tags)
+#include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltips on the Tag panel's rows
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
 #include "Tab.h" // get_self<Tab> -> CurrentEffectiveTabBackground (pending-dots contrast)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
@@ -672,6 +673,552 @@ namespace winrt::TerminalApp::implementation
                 _SetTabAgentFavorite(tab, ::Agentmaster::IsSessionFavorite(sessionId));
             }
         }
+    }
+
+    // ==================================================================================
+    // Agentmaster (bookmark tags): the tab-header BOOKMARK badges + the tab context
+    // menu's "Tag" panel. A tag is a durable SessionStore "tags" entry (like the favorite
+    // star: same-window instant, cross-window catches up on the tab's next bind); the tab
+    // strip renders one small bookmark ribbon per tag at the bottom of the header
+    // (TabHeaderControl::_UpdateTagBadges, fed through TabStatus.AgentTagsSpec), and the
+    // panel — first row a focusable name box with a "+" that appears once you type, below
+    // it EVERY global tag sorted by max(session activity) desc, click-toggled on this
+    // session — is an islands-safe raw Popup parented into Root() (a Flyout-hosted
+    // TextBox gets no keypresses under XAML Islands — the documented text-input trap the
+    // Templates row + the Sessions range popup both dodged the same way). The GLOBAL cap
+    // (AppSettings::maxTags, default 20, ceiling 40) gates only the creation of a NEW
+    // name; applying an existing tag is always allowed.
+    // ==================================================================================
+
+    // Low-level: write the session's tag list onto a tab's TabStatus as the '\n'-joined
+    // spec the header control renders from. The observable no-ops when unchanged, so the
+    // frequent re-asserts (launch/bind/refresh) are free. UI thread.
+    void TerminalPage::_SetTabAgentTags(const TerminalApp::Tab& tab, const std::vector<std::wstring>& tags)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            if (const auto status = tab.TabStatus())
+            {
+                std::wstring spec;
+                for (const auto& t : tags)
+                {
+                    if (t.empty())
+                    {
+                        continue;
+                    }
+                    if (!spec.empty())
+                    {
+                        spec.push_back(L'\n');
+                    }
+                    spec += t;
+                }
+                status.AgentTagsSpec(winrt::hstring{ spec });
+            }
+        }
+        CATCH_LOG();
+    }
+
+    // Re-read the durable store and (re)assert the badges on the tab THIS window hosts for
+    // sessionId. A map-miss is a cheap no-op (hosted elsewhere / not open). Called where a
+    // managed tab is set up (launch + bind/adopt/re-home) and after every panel toggle.
+    void TerminalPage::_RefreshTabTags(const std::wstring& sessionId)
+    {
+        if (sessionId.empty())
+        {
+            return;
+        }
+        const auto it = _claudeTabs.find(sessionId);
+        if (it == _claudeTabs.end())
+        {
+            return;
+        }
+        if (const auto tab = it->second.get())
+        {
+            _SetTabAgentTags(tab, ::Agentmaster::GetSessionTags(sessionId));
+        }
+    }
+
+    // Context-menu "Tag": open the panel for this tab's managed session, anchored under its
+    // TabViewItem. The open is DEFERRED one dispatcher tick: the context flyout's Closed
+    // handler tosses focus back to the terminal control (Tab.cpp), and that refocus must land
+    // BEFORE the panel opens + focuses its name box, or it would steal the box's focus.
+    void TerminalPage::_OpenTagEditorForTab(const TerminalApp::Tab& tab)
+    {
+        const auto sid = _ClaudeSessionForTab(tab);
+        if (sid.empty())
+        {
+            return;
+        }
+        // Anchor: the tab item's bottom-left, root-relative (the Sessions range-popup recipe —
+        // a top/left-aligned parented Popup's offsets are root-relative).
+        double x = 8;
+        double y = 40;
+        try
+        {
+            if (const auto tvi = tab.TabViewItem())
+            {
+                const auto pt = tvi.TransformToVisual(Root()).TransformPoint(winrt::Windows::Foundation::Point{ 0, 0 });
+                x = pt.X;
+                y = pt.Y + tvi.ActualHeight() + 2;
+            }
+        }
+        CATCH_LOG();
+        const winrt::hstring sidH{ sid };
+        Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), sidH, x, y]() {
+            const auto page = weak.get();
+            if (!page)
+            {
+                return;
+            }
+            page->_tagEditorSessionId = std::wstring{ sidH };
+            page->_EnsureTagEditorPopup();
+            if (!page->_tagEditorPopup)
+            {
+                return;
+            }
+            // Clamp the anchor so the ~280px card never hangs past the window's right edge.
+            double cx = x;
+            try
+            {
+                const double rootW = page->Root().ActualWidth();
+                if (rootW > 300 && cx > rootW - 300)
+                {
+                    cx = rootW - 300;
+                }
+            }
+            catch (...)
+            {
+            }
+            page->_tagEditorPopup.HorizontalOffset(std::max(0.0, cx));
+            page->_tagEditorPopup.VerticalOffset(std::max(0.0, y));
+            page->_tagEditorBox.Text(L"");
+            page->_RebuildTagEditorList();
+            page->_UpdateTagEditorAddState();
+            page->_tagEditorPopup.IsOpen(true);
+            // Focus the name box one tick AFTER the open — on the FIRST open the popup's child has
+            // only just been realized, and a same-tick Focus on a not-yet-laid-out TextBox can no-op.
+            page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak]() {
+                if (const auto p = weak.get())
+                {
+                    if (p->_tagEditorPopup && p->_tagEditorPopup.IsOpen() && p->_tagEditorBox)
+                    {
+                        p->_tagEditorBox.Focus(FocusState::Programmatic);
+                    }
+                }
+            });
+        });
+    }
+
+    // Build the panel ONCE and parent it into Root() (row-span across the whole page so the
+    // root-relative offsets can place it anywhere). Dismissal is deliberately POINTER-based —
+    // Esc, tab switch, or any press OUTSIDE the card (a Root() handledEventsToo hook) — never
+    // focus-based: the context flyout's close refocuses the terminal asynchronously, and a
+    // focus-loss dismissal would race it and close the panel the instant it opened.
+    void TerminalPage::_EnsureTagEditorPopup()
+    {
+        if (_tagEditorPopup)
+        {
+            return;
+        }
+
+        StackPanel body;
+        body.Spacing(6);
+        body.Width(260);
+
+        // Row 1 — [ tag name box | + ]: the "+" appears only once the box holds a usable name
+        // (_UpdateTagEditorAddState), and Enter commits like clicking it.
+        Grid nameRow;
+        {
+            ColumnDefinition c0;
+            c0.Width(GridLength{ 1, GridUnitType::Star });
+            ColumnDefinition c1;
+            c1.Width(GridLength{ 0, GridUnitType::Auto });
+            nameRow.ColumnDefinitions().Append(c0);
+            nameRow.ColumnDefinitions().Append(c1);
+        }
+        _tagEditorBox = TextBox{};
+        _tagEditorBox.PlaceholderText(L"tag name");
+        _tagEditorBox.VerticalAlignment(VerticalAlignment::Center);
+        AgentSetTip(_tagEditorBox, L"Name a new bookmark tag for this session \x2014 press + (or Enter) to add it. Existing tags are toggled from the list below.");
+        _tagEditorBox.TextChanged([weak = get_weak()](auto&&, auto&&) {
+            if (const auto page = weak.get())
+            {
+                page->_UpdateTagEditorAddState();
+            }
+        });
+        _tagEditorBox.KeyDown([weak = get_weak()](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
+            const auto page = weak.get();
+            if (!page)
+            {
+                return;
+            }
+            if (e.Key() == VirtualKey::Enter)
+            {
+                e.Handled(true);
+                // Defer — the commit rebuilds the tag list (a tree mutation under an input event).
+                page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak]() {
+                    if (const auto p = weak.get())
+                    {
+                        p->_CommitTagEditorAdd();
+                    }
+                });
+            }
+            else if (e.Key() == VirtualKey::Escape)
+            {
+                e.Handled(true);
+                page->_CloseTagEditorPopup();
+            }
+        });
+        Grid::SetColumn(_tagEditorBox, 0);
+        nameRow.Children().Append(_tagEditorBox);
+
+        _tagEditorAddBtn = Button{};
+        _tagEditorAddBtn.Content(winrt::box_value(winrt::hstring{ L"+" }));
+        _tagEditorAddBtn.Margin(Thickness{ 6, 0, 0, 0 });
+        _tagEditorAddBtn.VerticalAlignment(VerticalAlignment::Center);
+        _tagEditorAddBtn.Visibility(Visibility::Collapsed); // appears once the box holds a usable name
+        AgentSetTip(_tagEditorAddBtn, L"Add this tag to the session (a new tag counts toward the global tag limit \x2014 Settings cog \x2192 Max bookmark tags)");
+        _tagEditorAddBtn.Click([weak = get_weak()](auto&&, auto&&) {
+            if (const auto page = weak.get())
+            {
+                // Defer — the commit rebuilds the tag list (the pointer-handler tree-mutation rule).
+                page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak]() {
+                    if (const auto p = weak.get())
+                    {
+                        p->_CommitTagEditorAdd();
+                    }
+                });
+            }
+        });
+        Grid::SetColumn(_tagEditorAddBtn, 1);
+        nameRow.Children().Append(_tagEditorAddBtn);
+        body.Children().Append(nameRow);
+
+        // The cap message — shown by _UpdateTagEditorAddState when the typed name is NEW and the
+        // universe is already at AppSettings::maxTags.
+        _tagEditorHint = TextBlock{};
+        _tagEditorHint.FontSize(11);
+        _tagEditorHint.Opacity(0.7);
+        _tagEditorHint.TextWrapping(TextWrapping::Wrap);
+        _tagEditorHint.Visibility(Visibility::Collapsed);
+        body.Children().Append(_tagEditorHint);
+
+        // The global tag list (every tag on any session, max-activity-desc), scrollable past ~7 rows.
+        ScrollViewer listScroll;
+        listScroll.MaxHeight(240);
+        listScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Auto);
+        _tagEditorList = StackPanel{};
+        _tagEditorList.Spacing(2);
+        listScroll.Content(_tagEditorList);
+        body.Children().Append(listScroll);
+
+        // The dim "K of N tags" footer (the cap made visible without hunting the cog).
+        _tagEditorCount = TextBlock{};
+        _tagEditorCount.FontSize(11);
+        _tagEditorCount.Opacity(0.55);
+        body.Children().Append(_tagEditorCount);
+
+        _tagEditorCard = Border{};
+        _tagEditorCard.RequestedTheme(ElementTheme::Dark); // Agentmaster surfaces are always dark
+        _tagEditorCard.Background(SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x26, 0x26, 0x26) });
+        _tagEditorCard.BorderBrush(SolidColorBrush{ winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x3A, 0x3A, 0x3A) });
+        _tagEditorCard.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        _tagEditorCard.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 6, 6, 6, 6 });
+        _tagEditorCard.Padding(Thickness{ 10, 8, 10, 8 });
+        _tagEditorCard.Child(body);
+        // Esc anywhere in the card (a focused row button, the list, ...) closes; the box's own
+        // KeyDown above already handles it while typing (both are idempotent).
+        _tagEditorCard.KeyDown([weak = get_weak()](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
+            if (e.Key() == VirtualKey::Escape)
+            {
+                e.Handled(true);
+                if (const auto page = weak.get())
+                {
+                    page->_CloseTagEditorPopup();
+                }
+            }
+        });
+
+        _tagEditorPopup = Windows::UI::Xaml::Controls::Primitives::Popup{};
+        _tagEditorPopup.Child(_tagEditorCard);
+        // Top/left aligned so HorizontalOffset/VerticalOffset are root-relative (the path-picker /
+        // Sessions range-popup recipe).
+        _tagEditorPopup.HorizontalAlignment(HorizontalAlignment::Left);
+        _tagEditorPopup.VerticalAlignment(VerticalAlignment::Top);
+        Grid::SetRow(_tagEditorPopup, 0);
+        Grid::SetRowSpan(_tagEditorPopup, 3); // span the whole Root grid (tab row + infobars + content)
+        Root().Children().Append(_tagEditorPopup);
+
+        // Outside-press dismissal: ONE handledEventsToo hook on Root() (registered once, inert while
+        // the panel is closed). A press whose source chain reaches the card is INSIDE (keep open);
+        // anything else — terminal, tab strip, toolbar — closes it. Popup open/close is not a tree
+        // mutation, so the synchronous close inside a pointer handler is safe (AgentTipHelpers doc).
+        if (!_tagEditorOutsideHooked)
+        {
+            _tagEditorOutsideHooked = true;
+            Root().AddHandler(
+                UIElement::PointerPressedEvent(),
+                winrt::box_value(WUX::Input::PointerEventHandler{ [weak = get_weak()](const IInspectable&, const WUX::Input::PointerRoutedEventArgs& e) {
+                    const auto page = weak.get();
+                    if (!page || !page->_tagEditorPopup || !page->_tagEditorPopup.IsOpen())
+                    {
+                        return;
+                    }
+                    auto d = e.OriginalSource().try_as<DependencyObject>();
+                    while (d)
+                    {
+                        if (const auto b = d.try_as<Border>(); b && b == page->_tagEditorCard)
+                        {
+                            return; // pressed inside the card — keep it open
+                        }
+                        d = VisualTreeHelper::GetParent(d);
+                    }
+                    page->_CloseTagEditorPopup();
+                } }),
+                true /* handledEventsToo — tab items / the terminal handle their presses */);
+        }
+    }
+
+    // Re-list the GLOBAL tag universe with this session's on/off state per row. Each row =
+    // [✓?][bookmark ribbon][name][· sessionCount], sorted by max(session activity) desc
+    // (CollectGlobalTags — activity from the shared registry: the max of the hook-driven
+    // lastActivityUnixMs and the transcript-derived convLastActivityUnixMs). Click toggles the
+    // tag on the session being edited. Also refreshes the cached universe the per-keystroke
+    // cap check reads (_tagEditorUniverse — never re-scan the store dir on TextChanged).
+    void TerminalPage::_RebuildTagEditorList()
+    {
+        if (!_tagEditorList)
+        {
+            return;
+        }
+        _tagEditorList.Children().Clear();
+
+        std::unordered_map<std::wstring, int64_t> activity;
+        if (_sessionRegistry)
+        {
+            for (const auto& s : _sessionRegistry->Snapshot())
+            {
+                activity[s.id] = std::max(s.lastActivityUnixMs, s.convLastActivityUnixMs);
+            }
+        }
+        _tagEditorUniverse = ::Agentmaster::CollectGlobalTags(::Agentmaster::LoadAllSessionTags(), activity);
+
+        std::unordered_set<std::wstring> mine; // folded — this session's tags
+        for (const auto& t : ::Agentmaster::GetSessionTags(_tagEditorSessionId))
+        {
+            mine.insert(::Agentmaster::FoldTagName(t));
+        }
+
+        if (_tagEditorUniverse.empty())
+        {
+            TextBlock none;
+            none.Text(L"No tags yet \x2014 type a name above and press +.");
+            none.FontSize(11);
+            none.Opacity(0.6);
+            none.TextWrapping(TextWrapping::Wrap);
+            _tagEditorList.Children().Append(none);
+        }
+        for (const auto& info : _tagEditorUniverse)
+        {
+            const bool on = mine.count(::Agentmaster::FoldTagName(info.name)) > 0;
+
+            Button row;
+            row.HorizontalAlignment(HorizontalAlignment::Stretch);
+            row.HorizontalContentAlignment(HorizontalAlignment::Left);
+            row.Background(SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
+            row.BorderThickness(Thickness{ 0, 0, 0, 0 });
+            row.Padding(Thickness{ 6, 3, 6, 3 });
+
+            StackPanel h;
+            h.Orientation(Orientation::Horizontal);
+            h.Spacing(6);
+
+            TextBlock check; // reserves its slot either way, so names align on/off
+            check.Text(on ? winrt::hstring{ L"\x2713" } : winrt::hstring{ L" " });
+            check.Width(14);
+            h.Children().Append(check);
+
+            Windows::UI::Xaml::Shapes::Polygon ribbon; // the same 6x9 bookmark the tab header wears
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 0.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 6.0f, 9.0f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 3.0f, 6.3f });
+            ribbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.0f });
+            ribbon.Fill(SolidColorBrush{ TagColorFor(info.name) });
+            ribbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+            ribbon.StrokeThickness(0.75);
+            ribbon.VerticalAlignment(VerticalAlignment::Center);
+            h.Children().Append(ribbon);
+
+            TextBlock name;
+            name.Text(winrt::hstring{ info.name });
+            name.VerticalAlignment(VerticalAlignment::Center);
+            name.Opacity(on ? 1.0 : 0.85);
+            h.Children().Append(name);
+
+            TextBlock count; // how many sessions carry it — the tag's "weight"
+            count.Text(winrt::hstring{ L"\x00B7 " + std::to_wstring(info.sessionCount) });
+            count.FontSize(11);
+            count.Opacity(0.5);
+            count.VerticalAlignment(VerticalAlignment::Center);
+            h.Children().Append(count);
+
+            row.Content(h);
+            AgentSetTip(row, winrt::hstring{ (on ? L"Remove tag \x201C" + info.name + L"\x201D from this session" : L"Tag this session \x201C" + info.name + L"\x201D") });
+            const winrt::hstring tagName{ info.name };
+            row.Click([weak = get_weak(), tagName](auto&&, auto&&) {
+                if (const auto page = weak.get())
+                {
+                    // Defer — the toggle rebuilds this very list (a tree mutation under the click).
+                    page->Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak, tagName]() {
+                        if (const auto p = weak.get())
+                        {
+                            p->_ToggleSessionTag(p->_tagEditorSessionId, std::wstring{ tagName });
+                        }
+                    });
+                }
+            });
+            _tagEditorList.Children().Append(row);
+        }
+
+        if (_tagEditorCount)
+        {
+            const uint32_t cap = ::Agentmaster::ClampMaxTags(_appSettings.maxTags);
+            _tagEditorCount.Text(winrt::hstring{ std::to_wstring(_tagEditorUniverse.size()) + L" of " + std::to_wstring(cap) + L" tags" });
+        }
+    }
+
+    // TextChanged: show the "+" only when the box holds a usable (normalized non-empty) name, and
+    // gate it — disabled + a hint — when that name is NEW while the universe already sits at the
+    // cap. Reads the CACHED universe (no store-dir scan per keystroke).
+    void TerminalPage::_UpdateTagEditorAddState()
+    {
+        if (!_tagEditorBox || !_tagEditorAddBtn)
+        {
+            return;
+        }
+        const std::wstring name = ::Agentmaster::NormalizeTagName(std::wstring{ _tagEditorBox.Text() });
+        if (name.empty())
+        {
+            _tagEditorAddBtn.Visibility(Visibility::Collapsed);
+            if (_tagEditorHint)
+            {
+                _tagEditorHint.Visibility(Visibility::Collapsed);
+            }
+            return;
+        }
+        const std::wstring folded = ::Agentmaster::FoldTagName(name);
+        bool exists = false;
+        for (const auto& info : _tagEditorUniverse)
+        {
+            if (::Agentmaster::FoldTagName(info.name) == folded)
+            {
+                exists = true;
+                break;
+            }
+        }
+        const uint32_t cap = ::Agentmaster::ClampMaxTags(_appSettings.maxTags);
+        const bool blocked = !exists && _tagEditorUniverse.size() >= cap;
+        _tagEditorAddBtn.Visibility(Visibility::Visible);
+        _tagEditorAddBtn.IsEnabled(!blocked);
+        if (_tagEditorHint)
+        {
+            if (blocked)
+            {
+                _tagEditorHint.Text(winrt::hstring{ L"Tag limit reached (" + std::to_wstring(cap) + L"). Untag it everywhere to retire a tag, or raise the limit in Settings \x2192 Max bookmark tags." });
+            }
+            _tagEditorHint.Visibility(blocked ? Visibility::Visible : Visibility::Collapsed);
+        }
+    }
+
+    // The "+" / Enter: add the typed tag to the session being edited. An existing name (case-
+    // insensitive) just APPLIES it — reusing the canonical stored casing — while a NEW name is
+    // cap-gated (the "+" is already disabled then; this re-check is the belt for a stale cache).
+    void TerminalPage::_CommitTagEditorAdd()
+    {
+        if (_tagEditorSessionId.empty() || !_tagEditorBox)
+        {
+            return;
+        }
+        const std::wstring name = ::Agentmaster::NormalizeTagName(std::wstring{ _tagEditorBox.Text() });
+        if (name.empty())
+        {
+            return;
+        }
+        const std::wstring folded = ::Agentmaster::FoldTagName(name);
+        bool exists = false;
+        std::wstring canonical = name;
+        for (const auto& info : _tagEditorUniverse)
+        {
+            if (::Agentmaster::FoldTagName(info.name) == folded)
+            {
+                exists = true;
+                canonical = info.name; // reuse the established casing — one tag, one spelling
+                break;
+            }
+        }
+        const uint32_t cap = ::Agentmaster::ClampMaxTags(_appSettings.maxTags);
+        if (!exists && _tagEditorUniverse.size() >= cap)
+        {
+            _UpdateTagEditorAddState(); // re-assert the hint; never create past the cap
+            return;
+        }
+        if (::Agentmaster::AddSessionTag(_tagEditorSessionId, canonical))
+        {
+            // Nav audit: the user tagged a session from the tab menu's Tag panel ((new) == this
+            // name just entered the global universe).
+            ::Agentmaster::LogNav(L"tag add \"" + canonical + L"\" sid=" + ::Agentmaster::ShortId(_tagEditorSessionId) + (exists ? L"" : L" (new)"));
+            _RefreshTabTags(_tagEditorSessionId);
+        }
+        _tagEditorBox.Text(L"");
+        _RebuildTagEditorList();
+        _UpdateTagEditorAddState();
+    }
+
+    // Toggle one tag on a session (the panel's row click): remove when it carries it, else add.
+    // Durable (SessionStore) + instant on this window's tab badges + the open panel.
+    void TerminalPage::_ToggleSessionTag(const std::wstring& sessionId, const std::wstring& tag)
+    {
+        if (sessionId.empty() || tag.empty())
+        {
+            return;
+        }
+        const std::wstring folded = ::Agentmaster::FoldTagName(::Agentmaster::NormalizeTagName(tag));
+        bool has = false;
+        for (const auto& t : ::Agentmaster::GetSessionTags(sessionId))
+        {
+            if (::Agentmaster::FoldTagName(t) == folded)
+            {
+                has = true;
+                break;
+            }
+        }
+        const bool changed = has ? ::Agentmaster::RemoveSessionTag(sessionId, tag) : ::Agentmaster::AddSessionTag(sessionId, tag);
+        if (changed)
+        {
+            // Nav audit: the panel's row toggle (add == applying an existing global tag here).
+            ::Agentmaster::LogNav((has ? L"tag remove \"" : L"tag add \"") + tag + L"\" sid=" + ::Agentmaster::ShortId(sessionId));
+            _RefreshTabTags(sessionId);
+        }
+        if (_tagEditorPopup && _tagEditorPopup.IsOpen())
+        {
+            _RebuildTagEditorList();
+            _UpdateTagEditorAddState();
+        }
+    }
+
+    // Dismiss the panel (Esc / a press outside the card / a tab switch). Idempotent.
+    void TerminalPage::_CloseTagEditorPopup()
+    {
+        if (_tagEditorPopup && _tagEditorPopup.IsOpen())
+        {
+            _tagEditorPopup.IsOpen(false);
+        }
+        _tagEditorSessionId.clear();
     }
 
     // Agentmaster (tab status dot): the registry-observer reaction (bounced to this window's UI
@@ -2658,6 +3205,7 @@ namespace winrt::TerminalApp::implementation
         }
         _TrackSessionStarted(id); // Agentmaster (eager-init): clear the dormant flag once this control's connection starts
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
+        _RefreshTabTags(id); // bookmark tags: show the session's bookmark badges on bind/adopt/re-home
         _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");

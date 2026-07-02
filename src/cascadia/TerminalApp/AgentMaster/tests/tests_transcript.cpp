@@ -2633,6 +2633,147 @@ void TestSessionSearch()
     }
 }
 
+// --- Bookmark tags (SessionStore "tags" key + the pure tag primitives) -----------------------
+// The tab strip's bookmark badges + the tab menu's Tag panel ride these: NormalizeTagName /
+// FoldTagName canonicalize a user-typed name, Encode/DecodeTagList JSON-pack the list into the ONE
+// store value, Add/Remove/Get/SetSessionTagsIn are the durable CRUD (empty list => key removed =>
+// sparse store), CollectGlobalTags derives the GLOBAL universe (fold-merged, max-activity-stamped,
+// sorted desc — the panel's ordering), and ClampMaxTags is the settings cap band (default 20,
+// ceiling 40) shared by the Persistence load and the cog Save.
+void TestSessionTags()
+{
+    std::wprintf(L"\n[TestSessionTags]\n");
+
+    // --- NormalizeTagName: trim + control-strip + length cap ---
+    CHECK(NormalizeTagName(L"  bug  ") == L"bug", "tags: normalize trims surrounding spaces");
+    CHECK(NormalizeTagName(L"a\tb\nc") == L"abc", "tags: normalize strips control chars (tab/newline)");
+    CHECK(NormalizeTagName(L"   ").empty(), "tags: whitespace-only normalizes to empty");
+    CHECK(NormalizeTagName(L"").empty(), "tags: empty stays empty");
+    CHECK(NormalizeTagName(L"perf hot-path") == L"perf hot-path", "tags: internal spaces/punctuation kept as typed");
+    {
+        const std::wstring longName(100, L'x');
+        CHECK(NormalizeTagName(longName).size() == kMaxTagNameLength, "tags: over-long name capped at kMaxTagNameLength");
+    }
+
+    // --- FoldTagName: the case-insensitive identity ---
+    CHECK(FoldTagName(L"Bug") == FoldTagName(L"bUG"), "tags: fold is case-insensitive");
+    CHECK(FoldTagName(L"Bug") != FoldTagName(L"Bugs"), "tags: fold keeps distinct names distinct");
+
+    // --- Encode/Decode: JSON round-trip, tolerant decode, CI dedupe preserving order ---
+    CHECK(EncodeTagList({}).empty(), "tags: an empty list encodes to \"\" (key removed; sparse store)");
+    {
+        const auto rt = DecodeTagList(EncodeTagList({ L"bug", L"perf", L"UI polish" }));
+        CHECK(rt.size() == 3 && rt[0] == L"bug" && rt[1] == L"perf" && rt[2] == L"UI polish", "tags: encode->decode round-trips order + content");
+    }
+    CHECK(DecodeTagList(L"not json").empty(), "tags: malformed value decodes to no tags (never throws)");
+    CHECK(DecodeTagList(L"{\"a\":1}").empty(), "tags: a non-array JSON value decodes to no tags");
+    {
+        const auto d = DecodeTagList(L"[\"bug\", 7, \"BUG\", \"  \", \"perf\"]");
+        CHECK(d.size() == 2 && d[0] == L"bug" && d[1] == L"perf", "tags: decode skips non-strings/blank + CI-dedupes, order preserved");
+    }
+
+    // --- the store CRUD (explicit temp dir, like the SessionStore tests) ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring store = std::wstring{ tmp } + L"am_tags_" + std::to_wstring(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+
+        const std::wstring a = L"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const std::wstring b = L"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        CHECK(GetSessionTagsIn(store, a).empty(), "tags: an untagged session reads no tags");
+        CHECK(AddSessionTagIn(store, a, L"bug"), "tags: add the first tag");
+        CHECK(AddSessionTagIn(store, a, L"  perf  "), "tags: add a second (normalized) tag");
+        CHECK(!AddSessionTagIn(store, a, L"BUG"), "tags: a case-variant duplicate add is a no-op (false)");
+        {
+            const auto t = GetSessionTagsIn(store, a);
+            CHECK(t.size() == 2 && t[0] == L"bug" && t[1] == L"perf", "tags: stored in add order, normalized");
+        }
+        CHECK(AddSessionTagIn(store, b, L"Bug"), "tags: a second session may carry the same tag (its own casing)");
+
+        // the tags key coexists with a title on the same record (the generalized store).
+        CHECK(SetSessionStoreFieldIn(store, a, L"title", L"T"), "tags: a title coexists on the same record");
+        CHECK(GetSessionTagsIn(store, a).size() == 2, "tags: title write left the tags intact");
+
+        {
+            const auto all = LoadAllSessionTagsIn(store);
+            CHECK(all.size() == 2 && all.at(a).size() == 2 && all.at(b).size() == 1, "tags: LoadAll gathers both sessions' tags in one scan");
+        }
+
+        CHECK(RemoveSessionTagIn(store, a, L"BUG"), "tags: remove is case-insensitive");
+        CHECK(!RemoveSessionTagIn(store, a, L"bug"), "tags: removing an absent tag is a no-op (false)");
+        {
+            const auto t = GetSessionTagsIn(store, a);
+            CHECK(t.size() == 1 && t[0] == L"perf", "tags: the other tag survives a remove");
+        }
+        // removing b's last tag removes the KEY (and the record file — b had nothing else).
+        CHECK(RemoveSessionTagIn(store, b, L"bug"), "tags: remove b's only tag");
+        CHECK(GetSessionStoreFieldIn(store, b, kSessionStoreTagsKey).empty(), "tags: an emptied list removed the key");
+        {
+            const auto all = LoadAllSessionTagsIn(store);
+            CHECK(all.size() == 1 && all.count(a) == 1, "tags: LoadAll no longer lists the untagged session");
+        }
+        // SetSessionTagsIn canonicalizes: dupes folded, blanks dropped.
+        CHECK(SetSessionTagsIn(store, a, { L"One", L"one", L" ", L"two" }), "tags: bulk set ok");
+        {
+            const auto t = GetSessionTagsIn(store, a);
+            CHECK(t.size() == 2 && t[0] == L"One" && t[1] == L"two", "tags: bulk set stored canonical (CI-deduped, blanks dropped)");
+        }
+
+        std::filesystem::remove_all(std::filesystem::path{ store }, ec);
+    }
+
+    // --- CollectGlobalTags: fold-merge + max activity + count + ordering + display casing ---
+    {
+        std::unordered_map<std::wstring, std::vector<std::wstring>> tagsBySession{
+            { L"s1", { L"bug", L"perf" } },
+            { L"s2", { L"BUG" } }, // the same tag as s1's "bug", different casing — s2 is more active
+            { L"s3", { L"idea" } }, // s3 has NO activity entry -> 0
+        };
+        std::unordered_map<std::wstring, int64_t> activity{
+            { L"s1", 1000 },
+            { L"s2", 5000 },
+        };
+        const auto u = CollectGlobalTags(tagsBySession, activity);
+        CHECK(u.size() == 3, "tags: universe fold-merges case variants (3 distinct tags)");
+        CHECK(u[0].lastActivityUnixMs == 5000 && FoldTagName(u[0].name) == L"bug", "tags: sorted by max activity desc (bug via s2 first)");
+        CHECK(u[0].name == L"BUG", "tags: display casing = the highest-activity carrier's");
+        CHECK(u[0].sessionCount == 2, "tags: sessionCount counts every carrier across casings");
+        CHECK(u[1].name == L"perf" && u[1].lastActivityUnixMs == 1000, "tags: perf second (activity 1000)");
+        CHECK(u[2].name == L"idea" && u[2].lastActivityUnixMs == 0, "tags: a session absent from the activity map stamps 0 (sorts last)");
+    }
+    {
+        // determinism on a full tie: activity equal -> folded-name ASC.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> tbs{
+            { L"s1", { L"zeta", L"alpha" } },
+        };
+        const auto u = CollectGlobalTags(tbs, {});
+        CHECK(u.size() == 2 && u[0].name == L"alpha" && u[1].name == L"zeta", "tags: activity tie breaks by folded name asc");
+    }
+
+    // --- ClampMaxTags + the settings round-trip ---
+    CHECK(ClampMaxTags(0) == 20, "tags: cap 0/absent -> the 20 default");
+    CHECK(ClampMaxTags(1) == 1, "tags: cap floor is 1");
+    CHECK(ClampMaxTags(20) == 20, "tags: the default passes through");
+    CHECK(ClampMaxTags(40) == 40, "tags: the ceiling passes through");
+    CHECK(ClampMaxTags(41) == 40, "tags: over-ceiling clamps to 40");
+    {
+        AppSettings s;
+        CHECK(s.maxTags == 20, "tags: AppSettings default is 20");
+        s.maxTags = 33;
+        const auto back = AppSettingsFromJson(ToJson(s));
+        CHECK(back.maxTags == 33, "tags: maxTags round-trips through settings.json");
+        auto o = json::Value::MkObj();
+        o.Set(L"maxTags", json::Value::MkNum(999));
+        CHECK(AppSettingsFromJson(o).maxTags == 40, "tags: a hand-edited over-ceiling value self-heals to 40 on load");
+        auto z = json::Value::MkObj();
+        z.Set(L"maxTags", json::Value::MkNum(0));
+        CHECK(AppSettingsFromJson(z).maxTags == 20, "tags: a stored 0 self-heals to the 20 default");
+    }
+}
+
 // --- StripSummaryTableRules: COLLAPSE a one-line message's embedded tables (drop rules + de-frame) ---
 // When a summary message is flattened to one line (wrap-off panel / the always-one-line Sessions
 // detail), an embedded table is pure noise. The collapser (1) DROPS box-drawing "├──┼──┤" / markdown

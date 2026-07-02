@@ -454,6 +454,7 @@ namespace winrt::TerminalApp::implementation
                 _SetTabAgentDot(tab, AgentStatusColorFor(s->state), !s->started && !s->external);
             }
             _RefreshTabFavoriteCrown(spec.sessionId); // FAVORITES.md: show the gold crown if this session is starred
+            _RefreshTabTags(spec.sessionId); // bookmark tags: show the session's bookmark badges the instant its tab appears
             _TrackSessionStarted(spec.sessionId); // Agentmaster (eager-init): flip SessionInfo::started true the instant this control initializes (focused tab => no half-hollow flash)
         }
 
@@ -1118,6 +1119,7 @@ namespace winrt::TerminalApp::implementation
             {
                 _SetTabAgentDot(tab, AgentStatusColorFor(s->state));
             }
+            _RefreshTabTags(handleId); // bookmark tags: a managed Codex tab wears its badges too
         }
 
         const std::wstring tag = !forkUuid.empty() ? L"[codex-fork] " : (!resumeUuid.empty() ? L"[codex-resume] " : (restored ? L"[codex-restore-fresh] " : L"[codex-spawn] "));

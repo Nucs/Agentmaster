@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cwctype>
 #include <string>
 #include <string_view>
 
@@ -145,5 +146,37 @@ namespace winrt::TerminalApp::implementation
         const auto light = ParseArgbHexColor(lightHex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B));
         const auto dark = ParseArgbHexColor(darkHex, winrt::Windows::UI::ColorHelper::FromArgb(0xFF, 0x5A, 0x3E, 0x00));
         return BackgroundIsLight(bg) ? dark : light;
+    }
+
+    // Agentmaster (bookmark tags): the STABLE per-tag color — a case-insensitive FNV-1a of the tag
+    // name picks from a fixed, distinguishable mini-palette, so the same tag wears the same color on
+    // every tab / in the Tag panel, across windows and restarts, with no persisted state. Two tags on
+    // one tab thus read apart at a glance (the tooltip still names each). Deliberately avoids plain
+    // gray (the "observed-only" status-dot color) so a bookmark never reads as an unmanaged dot.
+    inline winrt::Windows::UI::Color TagColorFor(std::wstring_view name)
+    {
+        uint32_t h = 2166136261u; // FNV-1a over the case-folded UTF-16 code units
+        for (const wchar_t c : name)
+        {
+            const auto folded = static_cast<uint32_t>(std::towlower(c));
+            h = (h ^ (folded & 0xFF)) * 16777619u;
+            h = (h ^ ((folded >> 8) & 0xFF)) * 16777619u;
+        }
+        static constexpr uint8_t kTagPalette[][3] = {
+            { 0x4F, 0xC3, 0xF7 }, // light blue
+            { 0xAB, 0x47, 0xBC }, // purple
+            { 0xFF, 0x70, 0x43 }, // deep orange
+            { 0x9C, 0xCC, 0x65 }, // light green
+            { 0xFF, 0xCA, 0x28 }, // amber
+            { 0x26, 0xA6, 0x9A }, // teal
+            { 0xEC, 0x40, 0x7A }, // pink
+            { 0x7E, 0x57, 0xC2 }, // deep purple
+            { 0x66, 0xBB, 0x6A }, // green
+            { 0xFF, 0xA7, 0x26 }, // orange
+            { 0x29, 0xB6, 0xF6 }, // blue
+            { 0xEF, 0x53, 0x50 }, // soft red
+        };
+        const auto& p = kTagPalette[h % (sizeof(kTagPalette) / sizeof(kTagPalette[0]))];
+        return winrt::Windows::UI::ColorHelper::FromArgb(0xFF, p[0], p[1], p[2]);
     }
 }

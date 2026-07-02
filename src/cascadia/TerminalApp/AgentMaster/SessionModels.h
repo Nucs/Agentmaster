@@ -560,6 +560,12 @@ namespace Agentmaster
         // How many recent working directories the Launch path-picker's "RECENT" section
         // remembers (in recent-dirs.json) and lists. Default 10. (0/garbage falls back to 10.)
         uint32_t recentDirsLimit{ 10 };
+        // Agentmaster (bookmark tags): how many DISTINCT tags may exist GLOBALLY (the tag universe
+        // is the union of every session's SessionStore "tags" lists — a tag lives while >=1 session
+        // carries it). The cap gates only the creation of a NEW tag name from the tab menu's Tag
+        // panel; tags already applied are never dropped by lowering it. Default 20, configurable in
+        // the cog up to the hard ceiling 40 (ClampMaxTags below — load + save both clamp).
+        uint32_t maxTags{ 20 };
 
         // --- Tab strip ---
         // Agentmaster: show the close (x) button on terminal tabs. ON (default) keeps the theme's
@@ -720,6 +726,18 @@ namespace Agentmaster
         uint32_t envDefaultsVersion{ 0 };
         bool claudeCleanupDaysSeeded{ false };
     };
+
+    // Agentmaster (bookmark tags): clamp AppSettings::maxTags into its valid band — the cog allows
+    // 1..40 (hard ceiling 40); 0/absent/garbage falls back to the 20 default. Shared by the
+    // Persistence load and the cog Save so a hand-edited settings.json self-heals identically.
+    inline uint32_t ClampMaxTags(uint32_t v)
+    {
+        if (v < 1)
+        {
+            return 20;
+        }
+        return v > 40 ? 40 : v;
+    }
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====
     // The WindowEmperor runs every window in one process, so window-level UI state is

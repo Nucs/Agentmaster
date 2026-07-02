@@ -10,6 +10,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cwctype>
 #include <string>
 
 namespace Agentmaster
@@ -309,5 +311,250 @@ namespace Agentmaster
             out.insert(sid);
         }
         return out;
+    }
+
+    // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ====================
+
+    std::wstring NormalizeTagName(const std::wstring& raw)
+    {
+        std::wstring out;
+        out.reserve(raw.size());
+        for (const wchar_t c : raw)
+        {
+            if (c >= 0x20) // strip control chars (incl. the \n/\t that would break the tab-strip spec join)
+            {
+                out.push_back(c);
+            }
+        }
+        const auto isSpace = [](wchar_t c) { return c == L' ' || c == 0x00A0; };
+        size_t b = 0;
+        size_t e = out.size();
+        while (b < e && isSpace(out[b]))
+        {
+            ++b;
+        }
+        while (e > b && isSpace(out[e - 1]))
+        {
+            --e;
+        }
+        out = out.substr(b, e - b);
+        if (out.size() > kMaxTagNameLength)
+        {
+            out.resize(kMaxTagNameLength);
+            // A trim can re-expose trailing whitespace — drop it so the capped name stays clean.
+            while (!out.empty() && isSpace(out.back()))
+            {
+                out.pop_back();
+            }
+        }
+        return out;
+    }
+
+    std::wstring FoldTagName(const std::wstring& name)
+    {
+        std::wstring out;
+        out.reserve(name.size());
+        for (const wchar_t c : name)
+        {
+            out.push_back(static_cast<wchar_t>(std::towlower(c)));
+        }
+        return out;
+    }
+
+    std::wstring EncodeTagList(const std::vector<std::wstring>& tags)
+    {
+        if (tags.empty())
+        {
+            return {}; // "" removes the key — the store stays sparse
+        }
+        json::Value a = json::Value::MkArr();
+        for (const auto& t : tags)
+        {
+            a.Push(json::Value::MkStr(t));
+        }
+        return json::Dump(a);
+    }
+
+    std::vector<std::wstring> DecodeTagList(const std::wstring& value)
+    {
+        std::vector<std::wstring> out;
+        if (value.empty())
+        {
+            return out;
+        }
+        const auto parsed = json::Parse(value);
+        if (!parsed || parsed->type != json::Value::Type::Arr)
+        {
+            return out; // malformed / non-array -> "no tags" (never crashes the caller)
+        }
+        std::unordered_set<std::wstring> seen; // folded — CI dedupe, order-preserving
+        for (const auto& e : parsed->arr)
+        {
+            if (e.type != json::Value::Type::Str)
+            {
+                continue;
+            }
+            const std::wstring name = NormalizeTagName(e.str);
+            if (name.empty())
+            {
+                continue;
+            }
+            if (seen.insert(FoldTagName(name)).second)
+            {
+                out.push_back(name);
+            }
+        }
+        return out;
+    }
+
+    std::vector<GlobalTagInfo> CollectGlobalTags(
+        const std::unordered_map<std::wstring, std::vector<std::wstring>>& tagsBySession,
+        const std::unordered_map<std::wstring, int64_t>& activityBySession)
+    {
+        // folded name -> merged info (display casing from the highest-activity carrier).
+        struct Merged
+        {
+            std::wstring display;
+            int64_t displayActivity{ -1 }; // activity of the carrier whose casing `display` is
+            int64_t maxActivity{ 0 };
+            uint32_t count{ 0 };
+        };
+        std::unordered_map<std::wstring, Merged> merged;
+        for (const auto& [sid, tags] : tagsBySession)
+        {
+            int64_t activity = 0;
+            if (const auto it = activityBySession.find(sid); it != activityBySession.end())
+            {
+                activity = it->second;
+            }
+            for (const auto& rawTag : tags)
+            {
+                const std::wstring name = NormalizeTagName(rawTag);
+                if (name.empty())
+                {
+                    continue;
+                }
+                auto& m = merged[FoldTagName(name)];
+                ++m.count;
+                m.maxActivity = (std::max)(m.maxActivity, activity); // parenthesized — windows.h's max macro
+                // Display casing: the most-active carrier wins; on an exact activity tie the
+                // lexicographically smaller casing wins, so the result is input-order independent.
+                if (activity > m.displayActivity || (activity == m.displayActivity && (m.display.empty() || name < m.display)))
+                {
+                    m.display = name;
+                    m.displayActivity = activity;
+                }
+            }
+        }
+        std::vector<std::pair<std::wstring, Merged>> rows(merged.begin(), merged.end());
+        std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+            if (a.second.maxActivity != b.second.maxActivity)
+            {
+                return a.second.maxActivity > b.second.maxActivity; // most recently active first
+            }
+            return a.first < b.first; // folded-name ASC — deterministic tiebreak
+        });
+        std::vector<GlobalTagInfo> out;
+        out.reserve(rows.size());
+        for (auto& [folded, m] : rows)
+        {
+            out.push_back(GlobalTagInfo{ std::move(m.display), m.maxActivity, m.count });
+        }
+        return out;
+    }
+
+    std::vector<std::wstring> GetSessionTagsIn(const std::wstring& storeDir, const std::wstring& sessionId)
+    {
+        return DecodeTagList(GetSessionStoreFieldIn(storeDir, sessionId, kSessionStoreTagsKey));
+    }
+
+    bool SetSessionTagsIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::vector<std::wstring>& tags)
+    {
+        // Round through decode(encode(...)) semantics by normalizing + deduping here, so the
+        // stored value is always canonical (what GetSessionTagsIn would return).
+        std::vector<std::wstring> canon;
+        std::unordered_set<std::wstring> seen;
+        for (const auto& raw : tags)
+        {
+            const std::wstring name = NormalizeTagName(raw);
+            if (!name.empty() && seen.insert(FoldTagName(name)).second)
+            {
+                canon.push_back(name);
+            }
+        }
+        return SetSessionStoreFieldIn(storeDir, sessionId, kSessionStoreTagsKey, EncodeTagList(canon));
+    }
+
+    bool AddSessionTagIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& tag)
+    {
+        const std::wstring name = NormalizeTagName(tag);
+        if (name.empty())
+        {
+            return false;
+        }
+        auto tags = GetSessionTagsIn(storeDir, sessionId);
+        const std::wstring folded = FoldTagName(name);
+        for (const auto& t : tags)
+        {
+            if (FoldTagName(t) == folded)
+            {
+                return false; // already tagged (case-insensitive) — no write
+            }
+        }
+        tags.push_back(name);
+        return SetSessionTagsIn(storeDir, sessionId, tags);
+    }
+
+    bool RemoveSessionTagIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& tag)
+    {
+        const std::wstring folded = FoldTagName(NormalizeTagName(tag));
+        if (folded.empty())
+        {
+            return false;
+        }
+        auto tags = GetSessionTagsIn(storeDir, sessionId);
+        const size_t before = tags.size();
+        tags.erase(std::remove_if(tags.begin(), tags.end(), [&](const std::wstring& t) { return FoldTagName(t) == folded; }),
+                   tags.end());
+        if (tags.size() == before)
+        {
+            return false; // wasn't tagged — no write
+        }
+        return SetSessionTagsIn(storeDir, sessionId, tags);
+    }
+
+    std::unordered_map<std::wstring, std::vector<std::wstring>> LoadAllSessionTagsIn(const std::wstring& storeDir)
+    {
+        std::unordered_map<std::wstring, std::vector<std::wstring>> out;
+        for (const auto& [sid, value] : LoadAllSessionStoreFieldIn(storeDir, kSessionStoreTagsKey))
+        {
+            auto tags = DecodeTagList(value);
+            if (!tags.empty())
+            {
+                out.emplace(sid, std::move(tags));
+            }
+        }
+        return out;
+    }
+
+    std::vector<std::wstring> GetSessionTags(const std::wstring& sessionId)
+    {
+        return GetSessionTagsIn(StoreDir(), sessionId);
+    }
+    bool SetSessionTags(const std::wstring& sessionId, const std::vector<std::wstring>& tags)
+    {
+        return SetSessionTagsIn(StoreDir(), sessionId, tags);
+    }
+    bool AddSessionTag(const std::wstring& sessionId, const std::wstring& tag)
+    {
+        return AddSessionTagIn(StoreDir(), sessionId, tag);
+    }
+    bool RemoveSessionTag(const std::wstring& sessionId, const std::wstring& tag)
+    {
+        return RemoveSessionTagIn(StoreDir(), sessionId, tag);
+    }
+    std::unordered_map<std::wstring, std::vector<std::wstring>> LoadAllSessionTags()
+    {
+        return LoadAllSessionTagsIn(StoreDir());
     }
 }

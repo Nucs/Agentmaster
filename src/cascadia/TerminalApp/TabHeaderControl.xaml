@@ -335,6 +335,22 @@
                 <mtu:TextMenuFlyout />
             </TextBox.ContextFlyout>
         </TextBox>
+        <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, trailing
+              the title and anchored at the BOTTOM of the header row (the row is ~22px tall — the dot
+              wrap; a 9px bookmark bottom-aligned occupies its bottom ~40%, the "little bookmark at the
+              bottom" look) so the badges hang at the tab's lower edge without overlapping the title
+              text (they take their own horizontal slot in this StackPanel rather than overlaying).
+              The Polygons are BUILT IN CODE-BEHIND (_UpdateTagBadges) from TabStatus.AgentTagsSpec —
+              tag count varies, each badge is colored by the stable per-tag TagColorFor and carries its
+              own tooltip (the tag name) — riding the same TabStatus PropertyChanged pipeline as the
+              pending-dots animation. Hit-test stays ON (tooltips need hover); pointer presses still
+              bubble to the TabViewItem, so tab click/drag are unaffected (like the title TextBlock).  -->
+        <StackPanel x:Name="HeaderTagBookmarks"
+                    Orientation="Horizontal"
+                    Spacing="2"
+                    Margin="6,0,0,1"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Bottom" />
         </StackPanel>
     </Grid>
 </UserControl>

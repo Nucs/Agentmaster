@@ -42,6 +42,7 @@ namespace winrt::Microsoft::Terminal::Settings
 // TerminalPage can hold them by shared_ptr; SessionModels.h (value types) is included
 // because restore passes a SessionInfo by value.
 #include "AgentMaster/SessionModels.h"
+#include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
 #include <optional>
 namespace Agentmaster
@@ -774,6 +775,30 @@ namespace winrt::TerminalApp::implementation
         void _SetTabAgentFavorite(const TerminalApp::Tab& tab, bool on); // Agentmaster (FAVORITES.md §5a): show/hide the FAVORITE marker (CROWN or STAR per AppSettings::favoriteIcon) over a tab's status dot via Tab.TabStatus(); the two markers are mutually exclusive; UI thread, idempotent
         void _RefreshTabFavoriteCrown(const std::wstring& sessionId); // Agentmaster (FAVORITES.md): re-read IsSessionFavorite(sid) and (re)assert the marker on this window's hosting tab; no-op when this window doesn't host the session. Called at bind/launch + on toggle (same-window instant; cross-window catches up on next bind)
         void _RefreshAllFavoriteIcons(); // Agentmaster (FAVORITES.md §5a): re-assert the favorite marker on every hosted tab — used when the GLOBAL favoriteIcon (Crown<->Star) changes (cog Save / cross-window broadcast) so the glyph switches live
+        // Agentmaster (bookmark tags): the tab-header BOOKMARK badges + the tab context menu's "Tag"
+        // panel. Tags are the durable SessionStore "tags" key (like the favorite star — same-window
+        // instant, cross-window catches up on next bind); the panel is an islands-safe raw Popup the
+        // page owns (a Flyout-hosted TextBox gets no keypresses — the documented text-input trap),
+        // parented into Root() and anchored under the invoking tab.
+        void _SetTabAgentTags(const TerminalApp::Tab& tab, const std::vector<std::wstring>& tags); // low-level: join + write TabStatus.AgentTagsSpec (idempotent); UI thread
+        void _RefreshTabTags(const std::wstring& sessionId); // re-read GetSessionTags(sid) and (re)assert the badges on this window's hosting tab; map-miss no-op. Called at bind/launch + on toggle
+        void _OpenTagEditorForTab(const TerminalApp::Tab& tab); // context-menu "Tag": open the panel for this tab's session, anchored under its TabViewItem (deferred past the flyout close so its refocus can't fight the panel)
+        void _EnsureTagEditorPopup(); // lazily build the panel ONCE (card + [name box | +] row + hint + tag list) and parent it into Root(); wires Esc / Enter / outside-press dismissal
+        void _RebuildTagEditorList(); // re-list the GLOBAL tag universe (CollectGlobalTags — max session activity desc) with this session's on/off state per row + the "K of N tags" footer
+        void _CommitTagEditorAdd(); // the "+" button / Enter: normalize the typed name; an existing tag just applies to this session, a NEW name is cap-gated (AppSettings::maxTags)
+        void _UpdateTagEditorAddState(); // TextChanged: show the "+" only when the box holds a usable name; disable + hint when a NEW name would exceed the cap
+        void _ToggleSessionTag(const std::wstring& sessionId, const std::wstring& tag); // add/remove one tag on a session (SessionStore) + refresh its tab badges + re-render the panel list
+        void _CloseTagEditorPopup(); // dismiss the panel (Esc / outside press / tab switch)
+        winrt::Windows::UI::Xaml::Controls::Primitives::Popup _tagEditorPopup{ nullptr }; // the Tag panel (bookmark tags) — built once, parented into Root()
+        winrt::Windows::UI::Xaml::Controls::Border _tagEditorCard{ nullptr }; // the panel card (the outside-press dismissal's inside/outside boundary)
+        winrt::Windows::UI::Xaml::Controls::TextBox _tagEditorBox{ nullptr }; // row 1: the focusable "name the tag" box
+        winrt::Windows::UI::Xaml::Controls::Button _tagEditorAddBtn{ nullptr }; // row 1: the "+" beside the box — appears once text is typed
+        winrt::Windows::UI::Xaml::Controls::TextBlock _tagEditorHint{ nullptr }; // the cap message ("Tag limit reached (N)"), collapsed until relevant
+        winrt::Windows::UI::Xaml::Controls::StackPanel _tagEditorList{ nullptr }; // the tag rows (sorted by max session activity desc)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _tagEditorCount{ nullptr }; // the dim "K of N tags" footer
+        std::wstring _tagEditorSessionId; // the session the open panel edits
+        bool _tagEditorOutsideHooked{ false }; // the Root() outside-press dismissal handler is registered (once)
+        std::vector<::Agentmaster::GlobalTagInfo> _tagEditorUniverse; // the global tag universe CACHED at open/toggle — the per-keystroke cap check must not re-scan the session-store dir
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.

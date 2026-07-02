@@ -43,11 +43,20 @@ namespace winrt::TerminalApp::implementation
         // lookup) and started ONLY while TabStatus.AgentPendingVisible is true, so an idle fleet never
         // holds the compositor at 60fps. TabStatus is assigned by the Tab AFTER construction, so
         // _HookTabStatusForPending (re)subscribes to its PropertyChanged whenever TabStatus changes.
+        // (The same one subscription also feeds the bookmark-tag badges below.)
         void _HookTabStatusForPending();
         void _UpdatePendingAnimation();
         winrt::Windows::UI::Xaml::Media::Animation::Storyboard _pendingDotsStoryboard{ nullptr };
         winrt::TerminalApp::TerminalTabStatus _pendingHookedStatus{ nullptr };
         winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker _pendingStatusRevoker{};
+
+        // Agentmaster (bookmark tags): rebuild the HeaderTagBookmarks row — one small bookmark
+        // Polygon per tag in TabStatus.AgentTagsSpec ('\n'-joined names), each filled with its
+        // stable TagColorFor color and carrying its own tooltip (the tag name). Driven through the
+        // SAME TabStatus PropertyChanged subscription as the pending-dots pulse; change-gated on
+        // _renderedTagsSpec so a re-assert of an unchanged spec rebuilds nothing.
+        void _UpdateTagBadges();
+        winrt::hstring _renderedTagsSpec;
 
         bool _receivedKeyDown{ false };
         bool _renameCancelled{ false };

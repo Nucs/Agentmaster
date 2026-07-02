@@ -68,6 +68,7 @@ int wmain()
     TestTranscriptResolve();
     TestCodexObserve();
     TestTranscriptStore();
+    TestSessionTags();
     TestConversationLineage();
     TestSessionSearch();
     TestProcessInspectLive();

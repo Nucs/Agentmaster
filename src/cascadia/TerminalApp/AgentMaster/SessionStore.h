@@ -29,10 +29,12 @@
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace Agentmaster
 {
@@ -49,6 +51,16 @@ namespace Agentmaster
     // sessions get a file. Keyed by the session id the Sessions page uses (the Claude conversation
     // uuid), so a favorite survives Close and applies to never-managed on-disk sessions alike.
     inline constexpr const wchar_t* kSessionStoreFavoriteKey = L"favorite";
+
+    // The TAGS field key (bookmark tags). A durable, ordered list of user-named tags on a session —
+    // the tab strip renders one small bookmark glyph per tag at the bottom of the session's tab
+    // header, and the tab context menu's "Tag" panel adds/toggles them. The value is the tag list
+    // JSON-encoded into ONE string (the store's documented "richer data" escape hatch: values are
+    // strings) via EncodeTagList/DecodeTagList; an empty list removes the key, keeping the store
+    // sparse. The GLOBAL tag universe is DERIVED — it is the union of every session's tags (no
+    // separate registry file), so a tag exists exactly while >=1 session carries it, and the
+    // AppSettings::maxTags cap gates only the creation of a NEW name.
+    inline constexpr const wchar_t* kSessionStoreTagsKey = L"tags";
 
     // ===== testable core (explicit store dir) ================================================
 
@@ -91,4 +103,55 @@ namespace Agentmaster
     // The set of every favorited session id, in ONE sparse directory scan (only favorited/titled
     // sessions have a file). The Sessions page reads this off-thread to drive the star + filter.
     std::unordered_set<std::wstring> LoadAllFavoriteSessions();
+
+    // ===== typed convenience: the TAGS (bookmark tags on a session's tab) ===================
+    //
+    // Pure primitives first (all unit-tested standalone):
+
+    // Canonicalize a user-typed tag name: control chars stripped, surrounding whitespace trimmed,
+    // internal runs kept as typed, capped at kMaxTagNameLength chars. "" == not a usable tag.
+    inline constexpr size_t kMaxTagNameLength = 48;
+    std::wstring NormalizeTagName(const std::wstring& raw);
+
+    // Case-fold a (normalized) tag name to its case-INSENSITIVE identity key: "Bug" and "bug" are
+    // the same tag (first-seen/most-active display casing wins — see CollectGlobalTags).
+    std::wstring FoldTagName(const std::wstring& name);
+
+    // Tag list <-> the ONE store value: a JSON string array ("" for an empty list, so the key is
+    // removed and the store stays sparse). Decode is tolerant — non-array / malformed input yields
+    // an empty list; entries are re-normalized + case-insensitively deduped preserving order.
+    std::wstring EncodeTagList(const std::vector<std::wstring>& tags);
+    std::vector<std::wstring> DecodeTagList(const std::wstring& value);
+
+    // The GLOBAL tag universe, derived from every session's tags: fold-merged case-insensitively,
+    // each tag stamped with the MAX lastActivity across the sessions carrying it (0 for a session
+    // absent from `activityBySession`) + how many sessions carry it. Sorted by lastActivity DESC
+    // (the tab menu's ordering), folded-name ASC as the deterministic tiebreak. The display `name`
+    // is the casing used by the highest-activity carrier (lexicographically smallest on a tie).
+    struct GlobalTagInfo
+    {
+        std::wstring name;
+        int64_t lastActivityUnixMs{ 0 };
+        uint32_t sessionCount{ 0 };
+    };
+    std::vector<GlobalTagInfo> CollectGlobalTags(
+        const std::unordered_map<std::wstring, std::vector<std::wstring>>& tagsBySession,
+        const std::unordered_map<std::wstring, int64_t>& activityBySession);
+
+    // ---- testable store cores (explicit store dir) ----
+    std::vector<std::wstring> GetSessionTagsIn(const std::wstring& storeDir, const std::wstring& sessionId);
+    bool SetSessionTagsIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::vector<std::wstring>& tags);
+    // Add/remove ONE tag (case-insensitive identity; add appends at the end, keeping the session's
+    // tag order = the order the user added them). Return true when the stored list CHANGED.
+    bool AddSessionTagIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& tag);
+    bool RemoveSessionTagIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& tag);
+    // Every tagged session (sid -> its decoded tag list), in ONE sparse directory scan.
+    std::unordered_map<std::wstring, std::vector<std::wstring>> LoadAllSessionTagsIn(const std::wstring& storeDir);
+
+    // ---- live wrappers (resolve <AgentmasterStateDir>\session-store) ----
+    std::vector<std::wstring> GetSessionTags(const std::wstring& sessionId);
+    bool SetSessionTags(const std::wstring& sessionId, const std::vector<std::wstring>& tags);
+    bool AddSessionTag(const std::wstring& sessionId, const std::wstring& tag);
+    bool RemoveSessionTag(const std::wstring& sessionId, const std::wstring& tag);
+    std::unordered_map<std::wstring, std::vector<std::wstring>> LoadAllSessionTags();
 }

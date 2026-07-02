@@ -64,6 +64,11 @@ namespace winrt::TerminalApp::implementation
         // pointed here by TerminalPage::_SetTabPending just before AgentPendingVisible flips true; null
         // until the tab first shows a draft (the dots are collapsed until then). Replaces Fill="#E0A92B".
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, AgentPendingBrush, PropertyChanged.raise, nullptr);
+        // Agentmaster (bookmark tags): the '\n'-joined tag-name spec behind the tab-header BOOKMARK
+        // badges (see the idl note) — written by TerminalPage::_SetTabAgentTags, consumed by
+        // TabHeaderControl's code-behind (_UpdateTagBadges) via the same PropertyChanged pipeline as
+        // the pending-dots animation. "" (the default) == no tags, no badges.
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, AgentTagsSpec, PropertyChanged.raise);
     };
 }
 

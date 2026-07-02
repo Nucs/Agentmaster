@@ -150,6 +150,7 @@ void TestProcessInspectParse();
 void TestTranscriptResolve();
 void TestCodexObserve();
 void TestTranscriptStore();
+void TestSessionTags(); // bookmark tags: normalize/fold/encode/decode + the store CRUD + CollectGlobalTags + the maxTags clamp/round-trip
 void TestConversationLineage();
 void TestSessionSearch();
 void TestProcessInspectLive();

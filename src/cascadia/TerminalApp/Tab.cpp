@@ -2094,6 +2094,33 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
+            // "Tag" (Agentmaster, bookmark tags) — open the TAG PANEL for this tab's session: a
+            // first-row text box names a NEW tag (a "+" appears beside it once you type) over the
+            // list of every existing tag, sorted by max(session activity) desc, click-toggled on
+            // this session. The panel is an islands-safe raw Popup the PAGE owns — NOT a
+            // MenuFlyoutSubItem hosting a TextBox, because a text box inside a Flyout gets no
+            // keypresses under XAML Islands (the documented text-input trap; the Templates row and
+            // the Sessions range popup learned the same lesson). Built COLLAPSED — the page shows it
+            // (SetAgentTagVisible at flyout-open) only on a managed agent-session tab, like
+            // "Favorite". Raises TagEditorRequested; the page resolves THIS tab's session + anchors
+            // the panel under the tab.
+            Controls::FontIcon tagSymbol;
+            tagSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            tagSymbol.Glyph(L"\xE8A4"); // Bookmarks — matches the tab-header bookmark badges
+
+            _tagMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->TagEditorRequested.raise();
+                }
+            });
+            _tagMenuItem.Text(L"Tag");
+            _tagMenuItem.Icon(tagSymbol);
+            _tagMenuItem.Visibility(WUX::Visibility::Collapsed); // shown only on a managed agent-session tab (page-driven)
+            WUX::Controls::ToolTipService::SetToolTip(_tagMenuItem, box_value(winrt::hstring{ L"Bookmark-tag this session \x2014 name a new tag or toggle existing ones; each tag shows as a small bookmark at the bottom of the tab" }));
+        }
+
+        {
             // "Activate Tab (Shift+Click)" (Agentmaster, eager-init) — start this tab's DORMANT session's
             // claude IN PLACE (TermControl::InitializeWithSize), without switching the view. A WT background/
             // restored tab spawns its child lazily, only when first SHOWN, so a window-restored tab never
@@ -2246,6 +2273,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
         contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
+        contextMenuFlyout.Items().Append(_tagMenuItem); // Agentmaster (bookmark tags): "Tag" — session-only, beside "Favorite"
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets rename/session ops apart from the layout group
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
@@ -2432,6 +2460,16 @@ namespace winrt::TerminalApp::implementation
 
         _favoriteMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
         _favoriteMenuItem.Text(isFavorite ? L"Unfavorite" : L"Favorite");
+    }
+
+    // Agentmaster (bookmark tags): show/hide the "Tag" item. Like SetAgentFavoriteState, the page
+    // resolves whether THIS tab hosts a managed agent session and calls this at flyout-open, so the
+    // item appears only on a linked Claude/Codex tab (never a plain shell / the pinned Manager tab).
+    void Tab::SetAgentTagVisible(bool visible)
+    {
+        ASSERT_UI_THREAD();
+
+        _tagMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
     }
 
     // Agentmaster (eager-init): show/hide the "Activate Tab" item — shown ONLY when this tab's managed
