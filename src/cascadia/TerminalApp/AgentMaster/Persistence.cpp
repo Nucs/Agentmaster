@@ -587,6 +587,7 @@ namespace Agentmaster
         o.Set(L"serverCacheMinutes", json::Value::MkNum(s.serverCacheMinutes));
         o.Set(L"recentDirsLimit", json::Value::MkNum(s.recentDirsLimit));
         o.Set(L"maxTags", json::Value::MkNum(s.maxTags));
+        o.Set(L"tooltipTagsOpacity", json::Value::MkNum(s.tooltipTagsOpacity));
         o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
@@ -653,6 +654,8 @@ namespace Agentmaster
         // Bookmark-tag global cap: absent => 20; clamped to the cog's 1..40 band (a hand-edited
         // 0/garbage self-heals to the default, an over-ceiling value to 40).
         s.maxTags = ClampMaxTags(v.U32At(L"maxTags", 20));
+        // Tooltip tag-chip opacity: absent => 0.9 (90% solid); clamped to the cog slider's 0.1..1.0 band.
+        s.tooltipTagsOpacity = ClampTooltipTagsOpacity(v.NumAt(L"tooltipTagsOpacity", 0.9));
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)

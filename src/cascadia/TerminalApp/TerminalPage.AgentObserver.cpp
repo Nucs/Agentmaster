@@ -282,6 +282,7 @@ namespace
                                                                   const std::wstring& stateText,
                                                                   const std::wstring& metaText,
                                                                   const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
+                                                                  double tagsOpacity,
                                                                   const winrt::hstring& bodyText)
     {
         using namespace winrt::Windows::UI::Xaml;
@@ -375,6 +376,9 @@ namespace
             tagRows.Orientation(Orientation::Vertical);
             tagRows.Spacing(3);
             tagRows.Margin(ThicknessHelper::FromLengths(0, 3, 0, 0));
+            // The user-configurable tag-row opacity (cog TABS slider; default 0.9 = 90% solid). One
+            // Opacity on the whole tag-rows panel fades name + colored underscore together.
+            tagRows.Opacity(tagsOpacity);
             StackPanel line{ nullptr };
             size_t lineChars = 0;
             constexpr size_t kTagLineBudget = 52; // ~mono-11 chars that fit the 460px card minus padding
@@ -2073,10 +2077,18 @@ namespace winrt::TerminalApp::implementation
         sig += L'\x1f';
         sig += tagsSpec;
         sig += L'\x1f';
+        // The tooltip tag-row opacity rides the sig (rounded to the slider's 1% grain) so a cog
+        // change re-hosts an already-built tooltip on the next tick, not only on a content change.
+        const double tagsOpacity = ::Agentmaster::ClampTooltipTagsOpacity(_appSettings.tooltipTagsOpacity);
+        if (!tagChips.empty())
+        {
+            sig += std::to_wstring(static_cast<int>(tagsOpacity * 100.0 + 0.5));
+            sig += L'\x1f';
+        }
         sig += std::to_wstring(bodyMtime);
         if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, tagChips, bodyText), winrt::hstring{ sig });
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig });
             _tabTooltipSig[sessionId] = sig;
         }
 

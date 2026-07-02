@@ -616,6 +616,14 @@ namespace Agentmaster
         // panel; tags already applied are never dropped by lowering it. Default 20, configurable in
         // the cog up to the hard ceiling 40 (ClampMaxTags below — load + save both clamp).
         uint32_t maxTags{ 20 };
+        // Agentmaster (bookmark tags): the OPACITY of the bookmark-tag chips rendered in the rich
+        // tab TOOLTIP (the name + its colored underscore), 0..1. A cog slider (10..100%); default
+        // 0.9 (90% solid) — a hair of translucency so a dense tag row reads as secondary to the
+        // title/state above it without disappearing. ONLY the tooltip's tag row honors it (the
+        // tab-strip badge ribbons + the Sessions column stay fully opaque — they're the primary
+        // affordance). ClampTooltipTagsOpacity below bands it on load + save (0/absent/garbage ->
+        // 0.9), so a missing key reproduces the default.
+        double tooltipTagsOpacity{ 0.9 };
 
         // --- Tab strip ---
         // Agentmaster: show the close (x) button on terminal tabs. ON (default) keeps the theme's
@@ -794,6 +802,23 @@ namespace Agentmaster
             return 20;
         }
         return v > 40 ? 40 : v;
+    }
+
+    // Agentmaster (bookmark tags): clamp AppSettings::tooltipTagsOpacity into 0.1..1.0 — the cog
+    // slider's 10..100% band. A non-finite / <=0 value (absent key, hand-edit) falls back to the
+    // 0.9 default; anything above 1 pins to fully solid. Shared by the Persistence load and the cog
+    // Save so a hand-edited settings.json self-heals identically (the ClampMaxTags idiom).
+    inline double ClampTooltipTagsOpacity(double v)
+    {
+        if (!(v > 0.0)) // NaN or <= 0 -> the default
+        {
+            return 0.9;
+        }
+        if (v < 0.1)
+        {
+            return 0.1;
+        }
+        return v > 1.0 ? 1.0 : v;
     }
 
     // ===== Workspace persistence (M10; see doc/agentmaster/PERSISTENCE.md) =====

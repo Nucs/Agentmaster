@@ -2854,6 +2854,27 @@ void TestSessionTags()
         z.Set(L"maxTags", json::Value::MkNum(0));
         CHECK(AppSettingsFromJson(z).maxTags == 20, "tags: a stored 0 self-heals to the 20 default");
     }
+
+    // --- ClampTooltipTagsOpacity + the settings round-trip (the tooltip tag-chip opacity slider) ---
+    CHECK(ClampTooltipTagsOpacity(0.0) == 0.9, "tags: opacity 0/absent -> the 0.9 (90%) default");
+    CHECK(ClampTooltipTagsOpacity(-1.0) == 0.9, "tags: a negative opacity -> the 0.9 default");
+    CHECK(ClampTooltipTagsOpacity(0.05) == 0.1, "tags: opacity floor is 0.1 (10%)");
+    CHECK(ClampTooltipTagsOpacity(0.5) == 0.5, "tags: an in-band opacity passes through");
+    CHECK(ClampTooltipTagsOpacity(1.0) == 1.0, "tags: the 1.0 ceiling passes through");
+    CHECK(ClampTooltipTagsOpacity(2.0) == 1.0, "tags: over-ceiling opacity clamps to 1.0");
+    {
+        AppSettings s;
+        CHECK(s.tooltipTagsOpacity > 0.899 && s.tooltipTagsOpacity < 0.901, "tags: AppSettings tooltipTagsOpacity default is 0.9");
+        s.tooltipTagsOpacity = 0.4;
+        const auto back = AppSettingsFromJson(ToJson(s));
+        CHECK(back.tooltipTagsOpacity > 0.399 && back.tooltipTagsOpacity < 0.401, "tags: tooltipTagsOpacity round-trips through settings.json");
+        auto hi = json::Value::MkObj();
+        hi.Set(L"tooltipTagsOpacity", json::Value::MkNum(5.0));
+        CHECK(AppSettingsFromJson(hi).tooltipTagsOpacity == 1.0, "tags: a hand-edited over-ceiling opacity self-heals to 1.0 on load");
+        auto lo = json::Value::MkObj();
+        lo.Set(L"tooltipTagsOpacity", json::Value::MkNum(0.0));
+        CHECK(AppSettingsFromJson(lo).tooltipTagsOpacity == 0.9, "tags: a stored 0 opacity self-heals to the 0.9 default");
+    }
 }
 
 // --- StripSummaryTableRules: COLLAPSE a one-line message's embedded tables (drop rules + de-frame) ---

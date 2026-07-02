@@ -994,6 +994,26 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setMaxTags, L"How many distinct bookmark tags may exist across all sessions (the tab right-click \x2192 Tag panel). Blank or 0 resets to 20; capped at 40. Tags already applied are never removed by lowering this.");
         panel.Children().Append(_setMaxTags);
 
+        // TABS (bookmark tags): the OPACITY of the tag chips in the rich tab TOOLTIP (each tag's name
+        // over its colored underscore), 10..100%. GLOBAL (AppSettings::tooltipTagsOpacity); default
+        // 90% (0.9). Only the tooltip's tag row honors it — the tab-strip badge ribbons + the
+        // Sessions Tags column stay fully solid (they're the primary affordance). The header shows
+        // the live percent; the value is read back on Save (÷100 -> 0..1, ClampTooltipTagsOpacity).
+        _setTooltipTagsOpacity = Slider{};
+        _setTooltipTagsOpacity.Minimum(10);
+        _setTooltipTagsOpacity.Maximum(100);
+        _setTooltipTagsOpacity.StepFrequency(1);
+        _setTooltipTagsOpacity.Header(winrt::box_value(L"Tag opacity in tooltip \x2014 90%"));
+        AgentSetTip(_setTooltipTagsOpacity, L"How solid the bookmark-tag chips look in a tab's hover tooltip \x2014 10% (faint) to 100% (fully solid). Default 90%. Affects the tooltip only; the tab's bookmark ribbons and the Sessions Tags column stay solid.");
+        _setTooltipTagsOpacity.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
+            if (_setTooltipTagsOpacity)
+            {
+                const int pct = static_cast<int>(_setTooltipTagsOpacity.Value() + 0.5);
+                _setTooltipTagsOpacity.Header(winrt::box_value(winrt::hstring{ L"Tag opacity in tooltip \x2014 " + std::to_wstring(pct) + L"%" }));
+            }
+        });
+        panel.Children().Append(_setTooltipTagsOpacity);
+
         // Tab color modes: HOW managed tabs get their color — shared per working dir (the classic
         // Rule-#12 behavior, default), individual per tab, or shared per the INFERRED working dir
         // (detected from the files the session reads/edits/creates). GLOBAL (AppSettings::tabColorMode);
@@ -1586,6 +1606,13 @@ namespace winrt::TerminalApp::implementation
         {
             _setMaxTags.Text(winrt::hstring{ std::to_wstring(_appSettings.maxTags) });
         }
+        if (_setTooltipTagsOpacity)
+        {
+            // 0..1 -> the slider's 10..100% band; setting Value fires ValueChanged, which refreshes
+            // the "\x2026 N%" header.
+            const int pct = static_cast<int>(::Agentmaster::ClampTooltipTagsOpacity(_appSettings.tooltipTagsOpacity) * 100.0 + 0.5);
+            _setTooltipTagsOpacity.Value(static_cast<double>(pct));
+        }
         if (_setTabColorMode)
         {
             // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory.
@@ -1925,6 +1952,11 @@ namespace winrt::TerminalApp::implementation
                 }
             }
             _appSettings.maxTags = ClampMaxTags(v); // blank/0 -> 20 (default), >40 -> 40
+        }
+        if (_setTooltipTagsOpacity)
+        {
+            // The slider is 10..100(%); store 0..1, clamped (shared with the Persistence load).
+            _appSettings.tooltipTagsOpacity = ClampTooltipTagsOpacity(_setTooltipTagsOpacity.Value() / 100.0);
         }
         if (_setTabColorMode)
         {
