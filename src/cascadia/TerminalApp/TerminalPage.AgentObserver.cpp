@@ -1173,6 +1173,11 @@ namespace winrt::TerminalApp::implementation
             // name just entered the global universe).
             ::Agentmaster::LogNav(L"tag add \"" + canonical + L"\" sid=" + ::Agentmaster::ShortId(_tagEditorSessionId) + (exists ? L"" : L" (new)"));
             _RefreshTabTags(_tagEditorSessionId);
+            // Sessions page live-sync (the _ToggleSessionTag idiom): reflect the new tag into an
+            // open page's cache + header chips + table; no-ops when the page was never built.
+            _sessionsTags[_tagEditorSessionId] = ::Agentmaster::GetSessionTags(_tagEditorSessionId);
+            _RebuildSessionsTagChips();
+            _RenderSessionsTable();
         }
         _tagEditorBox.Text(L"");
         _RebuildTagEditorList();
@@ -1203,6 +1208,20 @@ namespace winrt::TerminalApp::implementation
             // Nav audit: the panel's row toggle (add == applying an existing global tag here).
             ::Agentmaster::LogNav((has ? L"tag remove \"" : L"tag add \"") + tag + L"\" sid=" + ::Agentmaster::ShortId(sessionId));
             _RefreshTabTags(sessionId);
+            // Sessions page live-sync (the _ToggleSessionFavorite idiom): keep an open page's tag
+            // cache + header chips + table in step without a re-gather. All three are no-ops when
+            // the page was never built (null hosts).
+            auto tags = ::Agentmaster::GetSessionTags(sessionId);
+            if (tags.empty())
+            {
+                _sessionsTags.erase(sessionId);
+            }
+            else
+            {
+                _sessionsTags[sessionId] = std::move(tags);
+            }
+            _RebuildSessionsTagChips();
+            _RenderSessionsTable();
         }
         if (_tagEditorPopup && _tagEditorPopup.IsOpen())
         {

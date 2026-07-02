@@ -108,6 +108,7 @@ namespace winrt::TerminalApp::implementation
             };
             hrow(0, GridUnitType::Auto); // 0: Back · title · search
             hrow(0, GridUnitType::Auto); // 1: the filters
+            hrow(0, GridUnitType::Auto); // 2: the bookmark-tag chips (collapsed while no tags exist)
         }
 
         // TOP row — its columns MIRROR the body below (table 0.6* · divider · detail 0.4*) so the
@@ -408,6 +409,45 @@ namespace winrt::TerminalApp::implementation
 
         // (filtersRow — holding the left-packed controls bar + the right-pinned chip — was appended to
         // the header above; bar/chip live inside it, so nothing more to mount here.)
+
+        // TAG CHIPS row (bookmark tags) — a third header line under the filter toggles: every GLOBAL
+        // tag (the union of all sessions' SessionStore "tags" lists) as a blue, partially-transparent
+        // toggle chip, sorted by max(session activity) desc like the tab menu's Tag panel. Clicking a
+        // chip toggles that tag as a row-filter FACET (a row must carry ALL selected tags — facets
+        // AND); an active tag also reads in the right-pinned "✕ filter: …" chip beside the toggles,
+        // exactly like the dir/branch facets. The whole row collapses while no tags exist (the Auto
+        // header row then takes no height), and horizontal-scrolls past a screenful of chips (the
+        // global cap is 20–40, so wrap machinery isn't warranted). Columns mirror the filters row so
+        // the chips span exactly the table width. Content is rebuilt by _RebuildSessionsTagChips —
+        // at gather (tags load off-thread beside the favorites), on a chip toggle, on clear, and on
+        // a tab-menu Tag-panel change (_ToggleSessionTag live-syncs an open page).
+        Grid tagsRow;
+        tagsRow.Margin(Thickness{ 0, 6, 0, 0 });
+        {
+            const auto gcol = [&](double v, GridUnitType t) {
+                ColumnDefinition c;
+                c.Width(GridLengthHelper::FromValueAndType(v, t));
+                tagsRow.ColumnDefinitions().Append(c);
+            };
+            gcol(0.6, GridUnitType::Star); // == body table column (the chips live here)
+            gcol(0, GridUnitType::Auto); // == body divider footprint
+            gcol(0.4, GridUnitType::Star); // == body detail column (alignment space)
+        }
+        Grid::SetRow(tagsRow, 2);
+        header.Children().Append(tagsRow);
+        _sessTagChipsScroll = ScrollViewer{};
+        _sessTagChipsScroll.HorizontalScrollBarVisibility(ScrollBarVisibility::Auto);
+        _sessTagChipsScroll.VerticalScrollBarVisibility(ScrollBarVisibility::Disabled);
+        _sessTagChipsScroll.HorizontalScrollMode(ScrollMode::Enabled);
+        _sessTagChipsScroll.VerticalScrollMode(ScrollMode::Disabled);
+        _sessTagChipsScroll.Visibility(Visibility::Collapsed); // shown by _RebuildSessionsTagChips once tags exist
+        _sessTagChipsPanel = StackPanel{};
+        _sessTagChipsPanel.Orientation(Orientation::Horizontal);
+        _sessTagChipsPanel.Spacing(6);
+        _sessTagChipsScroll.Content(_sessTagChipsPanel);
+        Grid::SetColumn(_sessTagChipsScroll, 0);
+        tagsRow.Children().Append(_sessTagChipsScroll);
+
         Grid::SetRow(header, 0);
         host.Children().Append(header);
 
@@ -919,6 +959,9 @@ namespace winrt::TerminalApp::implementation
         // (only favorited/titled sessions have a file). Drives the ★ column + the "Favorite" filter.
         // Assigned to the member on the foreground resume below (this is the background pass).
         auto favorites = ::Agentmaster::LoadAllFavoriteSessions();
+        // Bookmark tags: the durable per-session tag lists, the same store + the same one sparse
+        // scan idiom. Drives the header TAG CHIPS row + the tag facet of the row filter.
+        auto sessionTags = ::Agentmaster::LoadAllSessionTags();
         (void)now;
 
         co_await winrt::resume_foreground(Dispatcher());
@@ -931,6 +974,7 @@ namespace winrt::TerminalApp::implementation
         self->_sessionsRows = std::move(rows);
         self->_sessionsEntries = std::move(entries);
         self->_sessionsFavorites = std::move(favorites); // FAVORITES.md: the ★ set drives the star column + the Favorite filter
+        self->_sessionsTags = std::move(sessionTags); // bookmark tags: sid -> tags, behind the TAG CHIPS row + the tag facet
         // A session OPEN in any Agentmaster window (live in the process-wide registry) shows its
         // REAL tab title — SessionInfo.title, the ONE value Explorer name / tab / persistence all
         // share (Rule #11) — instead of the transcript-derived PickDisplayTitle: an in-app rename
@@ -958,6 +1002,7 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
+        self->_RebuildSessionsTagChips(); // bookmark tags: (re)list the header chips from the fresh tag load (also prunes a facet whose tag vanished)
         self->_RunSessionsSearch(); // re-applies the current query (incl. the empty one) + renders
     }
 

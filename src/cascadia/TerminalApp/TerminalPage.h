@@ -524,6 +524,13 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<std::wstring, std::vector<std::wstring>> _sessionsHitSnippets; // sid -> display snippets
         std::unordered_set<std::wstring> _sessionsFastIds; // fast-phase (title/dir/paths) matches
         std::unordered_set<std::wstring> _sessionsFavorites; // FAVORITES.md: the favorited session ids (SessionStore "favorite" key), loaded off-thread in _RefreshSessionsRows; drives the ★ column + the "Favorite" filter
+        // Bookmark tags on the Sessions page: sid -> its tag list (SessionStore "tags" key), loaded
+        // off-thread in the gather beside the favorites; drives the header TAG CHIPS row + the tag
+        // facet of the row filter. Live-synced by _ToggleSessionTag (the tab-menu Tag panel) so an
+        // open page reflects a toggle without a re-gather.
+        std::unordered_map<std::wstring, std::vector<std::wstring>> _sessionsTags;
+        winrt::Windows::UI::Xaml::Controls::ScrollViewer _sessTagChipsScroll{ nullptr }; // the TAG CHIPS row host (header row 2, table-width) — collapsed while no tags exist; horizontal-scrolls past ~a screenful of chips
+        winrt::Windows::UI::Xaml::Controls::StackPanel _sessTagChipsPanel{ nullptr }; // the chips themselves — one blue, partially-transparent toggle chip per GLOBAL tag, rebuilt by _RebuildSessionsTagChips
         std::wstring _sessionsSelectedId;
         int _sessionsSortColumn{ 6 }; // default: Active (last activity), newest first — col 6 after the leftmost ★ column shifted everything +1 (FAVORITES.md)
         bool _sessionsSortAscending{ false };
@@ -606,7 +613,12 @@ namespace winrt::TerminalApp::implementation
             std::wstring timeLabel; // "day 2026-06-20" / "week of 2026-06-15" / "month 2026-06"
             bool hasFamily{ false };
             std::unordered_set<std::wstring> familyIds; // ForkFamily — the connected fork-graph component
-            bool Any() const { return hasDir || hasBranch || timeGran != TimeGran::None || hasFamily; }
+            // Bookmark tags (the header chips row): the SELECTED tag names, in click order. Matched
+            // case-insensitively (FoldTagName); multiple selected tags NARROW (a row must carry ALL
+            // of them — facets AND, like every other dimension). Rides this struct so the ✕ chip /
+            // "Clear filters" / the "· filtered" count line all cover it for free.
+            std::vector<std::wstring> tags;
+            bool Any() const { return hasDir || hasBranch || timeGran != TimeGran::None || hasFamily || !tags.empty(); }
         };
         _SessionsRowFilterState _sessionsRowFilter;
 
@@ -939,6 +951,8 @@ namespace winrt::TerminalApp::implementation
         void _ApplySessionsRowFilter(int kind, const std::wstring& anchorId); // toggle the dimension's facet to the anchor row's value (or OFF if the anchor already matches it); re-renders
         void _ClearSessionsRowFilter(); // drop EVERY facet (the chip click / submenu "Clear filters") + re-render
         bool _SessionsRowPassesRowFilter(const _SessionsRow& r) const; // the AND-predicate over all active facets (true == keep) — the render chokepoint calls this
+        void _RebuildSessionsTagChips(); // bookmark tags: re-list the header TAG CHIPS row from _sessionsTags (CollectGlobalTags — max row activity desc), selected state from _sessionsRowFilter.tags; prunes selected tags whose last carrier vanished; collapses the row when no tags exist
+        void _ToggleSessionsTagFilter(const std::wstring& tag); // bookmark tags: flip one tag in the facet (case-insensitive), then chip + chips row + table re-render
         bool _SessionsRowFilterMatchesAnchor(int kind, const _SessionsRow& r) const; // does the facet for `kind`'s dimension exist AND equal row r's value? (drives the submenu ✓ + the apply-toggle direction)
         std::unordered_set<std::wstring> _ComputeForkFamily(const std::wstring& anchorId) const; // the connected fork-graph component containing anchorId, over the gathered rows (forkedFromId edges, undirected)
         void _UpdateSessionsFilterChip(); // refresh the "✕ filter: …" chip's label + visibility from _sessionsRowFilter

@@ -580,6 +580,34 @@ namespace winrt::TerminalApp::implementation
         {
             return false;
         }
+        // Bookmark tags (the header chips row): a row must carry ALL selected tags — the facets-AND
+        // rule every other dimension follows, so stacking chips NARROWS. Case-insensitive
+        // (FoldTagName), against the gather-loaded _sessionsTags (an untagged row can't match).
+        if (!f.tags.empty())
+        {
+            const auto it = _sessionsTags.find(r.id);
+            if (it == _sessionsTags.end())
+            {
+                return false;
+            }
+            for (const auto& want : f.tags)
+            {
+                const std::wstring folded = ::Agentmaster::FoldTagName(want);
+                bool has = false;
+                for (const auto& t : it->second)
+                {
+                    if (::Agentmaster::FoldTagName(t) == folded)
+                    {
+                        has = true;
+                        break;
+                    }
+                }
+                if (!has)
+                {
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -745,11 +773,13 @@ namespace winrt::TerminalApp::implementation
         _RenderSessionsTable();
     }
 
-    // Drop EVERY facet (the chip click, and the submenu's "Clear filters") + re-render.
+    // Drop EVERY facet (the chip click, and the submenu's "Clear filters") + re-render. Also
+    // re-styles the header TAG CHIPS row (the cleared tag facet must read deselected there).
     void TerminalPage::_ClearSessionsRowFilter()
     {
         _sessionsRowFilter = _SessionsRowFilterState{};
         _UpdateSessionsFilterChip();
+        _RebuildSessionsTagChips();
         _RenderSessionsTable();
     }
 
@@ -792,9 +822,129 @@ namespace winrt::TerminalApp::implementation
         {
             add(L"fork family (" + std::to_wstring(f.familyIds.size()) + L")");
         }
+        for (const auto& t : f.tags)
+        {
+            add(L"tag \x201C" + t + L"\x201D"); // bookmark tags: each selected chip reads here too
+        }
         _sessFilterChip.Content(winrt::box_value(winrt::hstring{ L"\x2715 " + parts }));
         SessSetTip(_sessFilterChip, winrt::hstring{ L"Active row filter (AND-ed with the search) \x2014 " + parts + L". Click to clear it." });
         _sessFilterChip.Visibility(Visibility::Visible);
+    }
+
+    // ===== the header TAG CHIPS row (bookmark tags) ==========================================
+    // Re-list the chips under the filter toggles: one blue, partially-transparent ToggleButton
+    // chip per GLOBAL tag (the union of every session's SessionStore "tags" — _sessionsTags,
+    // loaded in the gather), sorted by max(session activity) desc like the tab menu's Tag panel
+    // (activity here from the GATHERED rows, so it covers every on-disk session, not just the
+    // registry). A chip's checked state mirrors the tag facet (_sessionsRowFilter.tags); the
+    // native ToggleButton checked visual (the solid accent fill) is the "selected" look over the
+    // translucent-blue rest state. Also PRUNES selected tags whose last carrier vanished (a
+    // re-gather after untagging everywhere), so a stale facet can't strand the table empty with
+    // no chip left to click it off. Collapses the whole row while no tags exist.
+    void TerminalPage::_RebuildSessionsTagChips()
+    {
+        if (!_sessTagChipsPanel || !_sessTagChipsScroll)
+        {
+            return; // the page was never built
+        }
+        _sessTagChipsPanel.Children().Clear();
+
+        std::unordered_map<std::wstring, int64_t> activity;
+        for (const auto& r : _sessionsRows)
+        {
+            activity[r.id] = r.lastActivityMs;
+        }
+        const auto universe = ::Agentmaster::CollectGlobalTags(_sessionsTags, activity);
+
+        // Prune facet tags that no longer exist in the universe (their chips are about to vanish).
+        {
+            std::unordered_set<std::wstring> live;
+            for (const auto& info : universe)
+            {
+                live.insert(::Agentmaster::FoldTagName(info.name));
+            }
+            auto& sel = _sessionsRowFilter.tags;
+            const size_t before = sel.size();
+            sel.erase(std::remove_if(sel.begin(), sel.end(), [&](const std::wstring& t) { return live.count(::Agentmaster::FoldTagName(t)) == 0; }),
+                      sel.end());
+            if (sel.size() != before)
+            {
+                _UpdateSessionsFilterChip(); // the ✕ chip must drop the vanished tag too
+            }
+        }
+
+        if (universe.empty())
+        {
+            _sessTagChipsScroll.Visibility(Visibility::Collapsed); // the Auto header row takes no height
+            return;
+        }
+        _sessTagChipsScroll.Visibility(Visibility::Visible);
+
+        std::unordered_set<std::wstring> selected;
+        for (const auto& t : _sessionsRowFilter.tags)
+        {
+            selected.insert(::Agentmaster::FoldTagName(t));
+        }
+        for (const auto& info : universe)
+        {
+            const bool on = selected.count(::Agentmaster::FoldTagName(info.name)) > 0;
+            Primitives::ToggleButton chip;
+            chip.MinWidth(0);
+            chip.MinHeight(0);
+            chip.Padding(Thickness{ 10, 2, 10, 3 });
+            chip.CornerRadius(winrt::Windows::UI::Xaml::CornerRadius{ 10, 10, 10, 10 }); // pill
+            chip.FontSize(12);
+            chip.BorderThickness(Thickness{ 1, 1, 1, 1 });
+            // The requested look: a blue, PARTIALLY TRANSPARENT chip at rest. The checked state
+            // deliberately keeps the ToggleButton's native solid-accent fill (the same "selected"
+            // language as the 👤/🤖/📁 toggles above), so selection reads instantly.
+            chip.Background(SessBrush(0x42, 0x00, 0x78, 0xD4));
+            chip.BorderBrush(SessBrush(0x66, 0x4F, 0xA3, 0xE3));
+            chip.IsChecked(on);
+            chip.Content(winrt::box_value(winrt::hstring{ info.name }));
+            SessSetTip(chip, winrt::hstring{ (on ? L"Stop filtering by tag \x201C" + info.name + L"\x201D" :
+                                                   L"Show only sessions tagged \x201C" + info.name + L"\x201D") +
+                                             L" \x2014 " + std::to_wstring(info.sessionCount) +
+                                             L" session(s) carry it. Chips stack (AND) with each other and the search; active tags also read in the \x2715 filter chip on the right." });
+            const winrt::hstring tagName{ info.name };
+            chip.Click([this, tagName](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
+                // Defer — the toggle rebuilds this very chips row + the table (the page's
+                // pointer-handler tree-mutation discipline).
+                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), tagName]() {
+                    if (const auto self = weak.get())
+                    {
+                        self->_ToggleSessionsTagFilter(std::wstring{ tagName });
+                    }
+                });
+            });
+            _sessTagChipsPanel.Children().Append(chip);
+        }
+    }
+
+    // Flip one tag in the row-filter facet (case-insensitive identity), then refresh the three
+    // surfaces that show it: the ✕ filter chip (right), the chips row (selected styling), and the
+    // table (the facet composes AND at the render chokepoint). Deliberately UNLOGGED — a pure
+    // view-filter toggle, like the other row-filter facets.
+    void TerminalPage::_ToggleSessionsTagFilter(const std::wstring& tag)
+    {
+        if (tag.empty())
+        {
+            return;
+        }
+        auto& sel = _sessionsRowFilter.tags;
+        const std::wstring folded = ::Agentmaster::FoldTagName(tag);
+        const auto it = std::find_if(sel.begin(), sel.end(), [&](const std::wstring& t) { return ::Agentmaster::FoldTagName(t) == folded; });
+        if (it != sel.end())
+        {
+            sel.erase(it);
+        }
+        else
+        {
+            sel.push_back(tag);
+        }
+        _UpdateSessionsFilterChip();
+        _RebuildSessionsTagChips();
+        _RenderSessionsTable();
     }
 
     // ===== the generic window-level page-overlay seam (_agentPageOverlays) ===================
