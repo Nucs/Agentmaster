@@ -1391,7 +1391,16 @@ What works, by area:
   Files\App\x.exe` — so prose after a path is never swallowed and a space-carrying LEAF truncates at
   the space with its parent, the thing the vote uses, exact; `f.cs:123` line refs stop at the colon,
   `,;=&`+quotes/wildcards terminate, unbalanced `)`/`]` + sentence dots trim; per-line cap 8 shared
-  with the field extraction — these also enrich the Sessions 📁/📄 scopes). **The git snap** (the
+  with the field extraction — these also enrich the Sessions 📁/📄 scopes). **Machine-TEMP paths
+  never vote** (`ExcludePathsUnderRoots` over `CollectMachineTempRoots` — the effective user temp
+  via `GetTempPathW` long-formed + `<windir>\Temp` — applied in the scan just before the infer, per
+  candidate): a Claude session scratches under `%TEMP%` constantly (heredoc scripts, outputs, its
+  per-session scratchpad dir), and a proven live case had a session whose ONLY captured path was one
+  scratchpad `pr-body.md` — a 1/1 "majority" that inferred the SCRATCHPAD dir and recolored the tab
+  off its repo (no git root above temp, so the git snap couldn't catch it); temp is scratch by
+  definition, so it's excluded from the vote — possibly emptying the corpus, which lands the honest
+  cwd fallback. Inference-time ONLY: the sidecar keeps the full set, the Sessions 📁/📄 scopes still
+  match temp paths. **The git snap** (the
   **Use .git folder to infer** toggle right under the dropdown — `AppSettings::inferGitRoot`, default
   **ON**, enabled only while the mode is Inferred, read back even when disabled): each voting path's
   PARENT dir resolves to its **nearest enclosing git root** (`FindGitRootForDir` — walk-up probing for

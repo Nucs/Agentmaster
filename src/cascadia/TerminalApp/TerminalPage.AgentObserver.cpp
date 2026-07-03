@@ -4528,6 +4528,13 @@ namespace winrt::TerminalApp::implementation
         const bool useGit = _appSettings.inferGitRoot; // "Use .git folder to infer" — snapshot on the UI thread
 
         co_await winrt::resume_background();
+        // The machine's temp roots — paths under them NEVER vote (ExcludePathsUnderRoots below): a
+        // Claude session scratches under %TEMP% constantly (heredoc scripts, outputs, its per-session
+        // scratchpad dir), and a proven live case had a session whose ONLY captured path was one
+        // scratchpad pr-body.md — a 1/1 "majority" that inferred the SCRATCHPAD dir and recolored the
+        // tab off its repo (no git root above temp, so the git snap couldn't catch it). Collected once
+        // per pass; the sidecar keeps the full set (the Sessions 📁/📄 scopes still match temp paths).
+        const std::vector<std::wstring> tempRoots = ::Agentmaster::CollectMachineTempRoots();
         // The git-root resolver for the inference's git arm ("Use .git folder to infer"): the real
         // FindGitRootForDir walk, memoized per NormDirKey ACROSS this whole batch — sessions in one
         // pass overwhelmingly share ancestor chains, so the per-pass filesystem cost collapses to a
@@ -4589,7 +4596,13 @@ namespace winrt::TerminalApp::implementation
             ref.mtimeMs = mtimeMs;
             ref.birthMs = toUnixMs(fad.ftCreationTime);
             const auto entry = ::Agentmaster::LoadOrRefreshSessionIndex(ref); // sidecar-cached; reads only the appended suffix
-            const std::wstring inferred = entry.valid ? ::Agentmaster::InferWorkingDirectory(entry.stats.pathsAccessed, c.workingDir, gitRootOf) : c.workingDir;
+            std::wstring inferred = c.workingDir;
+            if (entry.valid)
+            {
+                auto votePaths = entry.stats.pathsAccessed; // copy — the sidecar keeps the FULL set for the search scopes
+                ::Agentmaster::ExcludePathsUnderRoots(votePaths, tempRoots); // temp scratch never votes (may empty the corpus -> honest cwd fallback)
+                inferred = ::Agentmaster::InferWorkingDirectory(votePaths, c.workingDir, gitRootOf);
+            }
             results.push_back({ c.id, inferred, c.workingDir, mtimeMs, true });
         }
 

@@ -1431,6 +1431,87 @@ namespace Agentmaster
         return {};
     }
 
+    void ExcludePathsUnderRoots(std::vector<std::wstring>& paths, const std::vector<std::wstring>& roots)
+    {
+        if (paths.empty() || roots.empty())
+        {
+            return;
+        }
+        // Fold once (lowercase + backslash + no trailing sep) — the same normalization NormDirKey
+        // applies, done locally so a root and a path fold identically.
+        const auto fold = [](const std::wstring& s) {
+            std::wstring f = s;
+            for (auto& c : f)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+                else if (c == L'/')
+                {
+                    c = L'\\';
+                }
+            }
+            while (!f.empty() && f.back() == L'\\')
+            {
+                f.pop_back();
+            }
+            return f;
+        };
+        std::vector<std::wstring> foldedRoots;
+        foldedRoots.reserve(roots.size());
+        for (const auto& r : roots)
+        {
+            if (std::wstring fr = fold(r); !fr.empty())
+            {
+                foldedRoots.push_back(std::move(fr));
+            }
+        }
+        if (foldedRoots.empty())
+        {
+            return;
+        }
+        paths.erase(std::remove_if(paths.begin(), paths.end(), [&](const std::wstring& raw) {
+                        const std::wstring p = fold(raw);
+                        for (const auto& r : foldedRoots)
+                        {
+                            // Segment-boundary containment: the root itself, or root + '\' + more —
+                            // "c:\temp" must never swallow "c:\temperature\x".
+                            if (p.size() == r.size() ? p == r :
+                                                       (p.size() > r.size() && p[r.size()] == L'\\' && p.compare(0, r.size(), r) == 0))
+                            {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }),
+                    paths.end());
+    }
+
+    std::vector<std::wstring> CollectMachineTempRoots()
+    {
+        std::vector<std::wstring> out;
+        wchar_t tmp[MAX_PATH + 2]{};
+        if (const DWORD n = ::GetTempPathW(MAX_PATH + 1, tmp); n > 0 && n <= MAX_PATH + 1)
+        {
+            std::wstring t{ tmp, n };
+            // An 8.3 spelling ("RUNNER~1") would defeat the prefix match against the long-form
+            // paths transcripts carry — long-form it (best-effort; on failure keep the original).
+            wchar_t longForm[1024]{};
+            if (const DWORD ln = ::GetLongPathNameW(t.c_str(), longForm, 1024); ln > 0 && ln < 1024)
+            {
+                t.assign(longForm, ln);
+            }
+            out.push_back(std::move(t));
+        }
+        wchar_t win[MAX_PATH + 1]{};
+        if (const UINT wn = ::GetWindowsDirectoryW(win, MAX_PATH); wn > 0 && wn <= MAX_PATH)
+        {
+            out.push_back(std::wstring{ win, wn } + L"\\Temp"); // services/system-context scratch
+        }
+        return out;
+    }
+
     // ===== cheap row facts (head + growing tail) =============================================
 
     TranscriptQuickFacts ReadTranscriptQuickFacts(const std::wstring& path, int64_t fileBirthMs)

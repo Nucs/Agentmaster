@@ -293,6 +293,28 @@ namespace Agentmaster
     // per ancestor level — callers batch-memoize per NormDirKey (the inferred-color scan does).
     std::wstring FindGitRootForDir(const std::wstring& dir);
 
+    // Drop every path that lives under any of `roots` (filesystem-aware: case-insensitive,
+    // separator-normalized, SEGMENT-boundary matched — "C:\Temp" never swallows
+    // "C:\Temperature\x"; a path equal to a root is dropped too). In-place; empty roots = no-op.
+    // The inference-vote NOISE filter: a Claude session scratches under the machine temp
+    // constantly (scripts, outputs, its per-session scratchpad dir), and those writes are
+    // tool-touched paths like any other — a proven live failure had a session whose ONLY
+    // captured path was one scratchpad `pr-body.md`, a 1/1 "majority" that inferred the
+    // scratchpad dir (no git root above temp, so the git snap couldn't save it) and recolored
+    // the tab off its repo. Temp is scratch BY DEFINITION, never a working directory, so the
+    // inferred-color scan excludes it from the vote — the corpus that remains (possibly empty →
+    // the honest cwd fallback) is what the session actually works ON. Applied ONLY at inference
+    // time: the sidecar keeps the full set, so the Sessions 📁/📄 search scopes still match temp
+    // paths. Pure.
+    void ExcludePathsUnderRoots(std::vector<std::wstring>& paths, const std::vector<std::wstring>& roots);
+
+    // The machine's transient scratch roots for ExcludePathsUnderRoots (Win32, not pure): the
+    // effective user temp dir (GetTempPathW — resolves TMP > TEMP > USERPROFILE; long-formed via
+    // GetLongPathNameW so an 8.3 "RUNNER~1" spelling still prefix-matches the long paths
+    // transcripts carry) plus the system "<windir>\Temp". Best-effort — a lookup that fails just
+    // contributes nothing.
+    std::vector<std::wstring> CollectMachineTempRoots();
+
     // ===== cheap row facts: head + growing-tail windows, never a full read ===================
 
     // The browse-row essentials, extracted without reading the body: `created` from the FIRST

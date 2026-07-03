@@ -3193,6 +3193,104 @@ void TestInferWorkingDirectory()
         CHECK(InferWorkingDirectory({ L"\\\\nas\\share\\proj\\deep\\a.cs", L"\\\\nas\\share\\proj\\deep\\b.cs" }, cwd, uncGit) == L"\\\\nas\\share\\proj", "git arm: a below-share UNC git root wins");
     }
 
+    // --- ExcludePathsUnderRoots (the temp-scratch vote filter) ---------------------------------
+    // The live NumSharp regression: a session whose ONLY captured path was one scratchpad write
+    // under %TEMP% inferred the SCRATCHPAD dir (a 1/1 "majority"; no git root above temp). Temp
+    // paths must never vote — filtered out, the corpus empties and the honest cwd fallback wins.
+    {
+        const std::vector<std::wstring> tempRoots = {
+            L"C:\\Users\\ELI\\AppData\\Local\\Temp",
+            L"C:\\Windows\\Temp",
+        };
+
+        // Segment-boundary containment: the root itself + descendants go; a SIBLING sharing the
+        // prefix chars ("C:\Temperature") stays.
+        {
+            std::vector<std::wstring> paths = {
+                L"C:\\Temp\\x\\y.txt",
+                L"C:\\Temp",
+                L"C:\\Temperature\\probe.log",
+                L"K:\\repo\\src\\f.cs",
+            };
+            ExcludePathsUnderRoots(paths, { L"C:\\Temp" });
+            CHECK(paths.size() == 2 && paths[0] == L"C:\\Temperature\\probe.log" && paths[1] == L"K:\\repo\\src\\f.cs",
+                  "ExcludePathsUnderRoots: root + descendants dropped; prefix-sibling dir survives");
+        }
+        // Case / separator / trailing-sep variants fold together (Rule #8).
+        {
+            std::vector<std::wstring> paths = {
+                L"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\K--source-NumSharp\\1ffb3335\\scratchpad\\pr-body.md",
+                L"c:/users/eli/appdata/local/temp/other.tmp",
+                L"K:\\source\\NumSharp\\src\\a.cs",
+            };
+            ExcludePathsUnderRoots(paths, { L"c:/USERS/eli/AppData/Local/Temp/" });
+            CHECK(paths.size() == 1 && paths[0] == L"K:\\source\\NumSharp\\src\\a.cs",
+                  "ExcludePathsUnderRoots: case/slash/trailing-sep variants all fold onto the root");
+        }
+        // Empty roots / empty paths are no-ops.
+        {
+            std::vector<std::wstring> paths = { L"C:\\Temp\\a.txt" };
+            ExcludePathsUnderRoots(paths, {});
+            CHECK(paths.size() == 1, "ExcludePathsUnderRoots: empty roots -> no-op");
+            std::vector<std::wstring> none;
+            ExcludePathsUnderRoots(none, tempRoots);
+            CHECK(none.empty(), "ExcludePathsUnderRoots: empty paths -> no-op");
+        }
+
+        // THE regression, end-to-end (pure): the lone scratchpad write filters away -> empty
+        // corpus -> InferWorkingDirectory falls back to the launch cwd (K:\source\NumSharp).
+        {
+            const std::wstring nsCwd = L"K:\\source\\NumSharp";
+            std::vector<std::wstring> paths = {
+                L"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\K--source-NumSharp\\1ffb3335\\scratchpad\\pr-body.md",
+            };
+            CHECK(InferWorkingDirectory(paths, nsCwd) != nsCwd, "regression precondition: unfiltered, the lone temp path WOULD hijack the inference");
+            ExcludePathsUnderRoots(paths, tempRoots);
+            CHECK(paths.empty(), "regression: the lone scratchpad path is filtered away");
+            CHECK(InferWorkingDirectory(paths, nsCwd) == nsCwd, "regression: empty corpus -> the honest cwd fallback (NumSharp)");
+        }
+        // Temp-FLOOD vs a repo minority: unfiltered, the deep scratchpad chain out-votes the repo;
+        // filtered, the repo's 2/2 snaps to its git root.
+        {
+            const auto repoGit = [](const std::wstring& d) -> std::wstring {
+                std::wstring k = d;
+                for (auto& ch : k)
+                {
+                    ch = (ch >= L'A' && ch <= L'Z') ? static_cast<wchar_t>(ch - L'A' + L'a') : (ch == L'/' ? L'\\' : ch);
+                }
+                return k.rfind(L"k:\\source\\numsharp", 0) == 0 ? L"K:\\source\\NumSharp" : std::wstring{};
+            };
+            std::vector<std::wstring> paths = {
+                L"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\enc\\sid\\scratchpad\\a.bat",
+                L"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\enc\\sid\\scratchpad\\b.py",
+                L"C:\\Users\\ELI\\AppData\\Local\\Temp\\claude\\enc\\sid\\scratchpad\\c.txt",
+                L"K:\\source\\NumSharp\\src\\nd\\x.cs",
+                L"K:\\source\\NumSharp\\test\\y.cs",
+            };
+            ExcludePathsUnderRoots(paths, tempRoots);
+            CHECK(paths.size() == 2, "temp flood: the 3 scratchpad votes are gone, the 2 repo votes remain");
+            CHECK(InferWorkingDirectory(paths, cwd, repoGit) == L"K:\\source\\NumSharp", "temp flood: the remaining repo majority snaps to the repo root");
+        }
+
+        // CollectMachineTempRoots (Win32 smoke): at least the user temp; every root absolute; the
+        // first one exists on disk (it's this process's own temp dir).
+        {
+            const auto roots = CollectMachineTempRoots();
+            CHECK(!roots.empty(), "CollectMachineTempRoots: yields at least the user temp dir");
+            bool absOk = true;
+            for (const auto& r : roots)
+            {
+                absOk = absOk && r.size() >= 3 && r[1] == L':';
+            }
+            CHECK(absOk, "CollectMachineTempRoots: every root is drive-absolute");
+            if (!roots.empty())
+            {
+                const DWORD attrs = ::GetFileAttributesW(roots.front().c_str());
+                CHECK(attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY), "CollectMachineTempRoots: the user temp root exists");
+            }
+        }
+    }
+
     // --- FindGitRootForDir (the REAL resolver; filesystem smoke) -------------------------------
     {
         CHECK(FindGitRootForDir(L"relative\\x").empty(), "FindGitRootForDir: relative input -> none");
