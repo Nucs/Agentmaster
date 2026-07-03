@@ -50,6 +50,7 @@
 #include "TerminalPage.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
+#include "AgentStatusColors.h" // ResolveTagDisplayColor — the per-tag bookmark-ribbon color (the tag filter chips' leading icon)
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
 #include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
 #include "AgentMaster/Persistence.h" // GetDirColor / AutoDirColorHex (the per-dir color chip)
@@ -885,6 +886,9 @@ namespace winrt::TerminalApp::implementation
         {
             selected.insert(::Agentmaster::FoldTagName(t));
         }
+        // Per-tag DISPLAY colors (user-picked > name-hash), ONE disk read like _RenderSessionsTable —
+        // for the leading bookmark ribbon each chip now shows (matching the Tags column / tab badges).
+        const auto tagColors = ::Agentmaster::LoadAllTagColors();
         for (const auto& info : universe)
         {
             const bool on = selected.count(::Agentmaster::FoldTagName(info.name)) > 0;
@@ -903,7 +907,31 @@ namespace winrt::TerminalApp::implementation
             chip.Background(SessBrush(0x42, 0x00, 0x78, 0xD4));
             chip.BorderBrush(SessBrush(0x66, 0x4F, 0xA3, 0xE3));
             chip.IsChecked(on);
-            chip.Content(winrt::box_value(winrt::hstring{ info.name }));
+            // Content: a leading BOOKMARK RIBBON in the tag's own color (the same 6.5x9.3 shape the Tags
+            // column + the tab badges draw) before the name — so a filter chip reads as that exact tag's
+            // bookmark, and its color ties it to the ribbons in the list. (per request: (<bookmark> tag).)
+            {
+                StackPanel chipContent;
+                chipContent.Orientation(Orientation::Horizontal);
+                chipContent.Spacing(6);
+                chipContent.VerticalAlignment(VerticalAlignment::Center);
+                winrt::Windows::UI::Xaml::Shapes::Polygon chipRibbon; // the tab badges' 6.5x9.3 bookmark shape
+                chipRibbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 0.0f });
+                chipRibbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 0.0f });
+                chipRibbon.Points().Append(winrt::Windows::Foundation::Point{ 6.5f, 9.3f });
+                chipRibbon.Points().Append(winrt::Windows::Foundation::Point{ 3.25f, 6.5f });
+                chipRibbon.Points().Append(winrt::Windows::Foundation::Point{ 0.0f, 9.3f });
+                chipRibbon.Fill(SolidColorBrush{ ResolveTagDisplayColor(info.name, tagColors) });
+                chipRibbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
+                chipRibbon.StrokeThickness(0.75);
+                chipRibbon.VerticalAlignment(VerticalAlignment::Center);
+                chipContent.Children().Append(chipRibbon);
+                TextBlock chipLabel; // no explicit Foreground — inherits the ToggleButton's (adapts to the checked/hover states)
+                chipLabel.Text(winrt::hstring{ info.name });
+                chipLabel.VerticalAlignment(VerticalAlignment::Center);
+                chipContent.Children().Append(chipLabel);
+                chip.Content(chipContent);
+            }
             SessSetTip(chip, winrt::hstring{ (on ? L"Stop filtering by tag \x201C" + info.name + L"\x201D" :
                                                    L"Show only sessions tagged \x201C" + info.name + L"\x201D") +
                                              L" \x2014 " + std::to_wstring(info.sessionCount) +
