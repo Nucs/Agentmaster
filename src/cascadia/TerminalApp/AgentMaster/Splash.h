@@ -26,10 +26,12 @@
 // genuinely slow launch.
 //
 // WINDOW: a NORMAL top-level window — dark caption, the app icon, a TASKBAR button, and MINIMIZE +
-// CLOSE buttons (WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX + WS_EX_APPWINDOW) — kept WS_EX_TOPMOST so it
-// covers the still-building main window. Shown SW_SHOWNOACTIVATE so it never steals foreground; the
-// user can minimize or close it early (close => DefWindowProc => WM_DESTROY => the thread exits), and
-// the settle-watch dismisses it automatically when the window is ready.
+// CLOSE buttons (WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX + WS_EX_APPWINDOW). It is NOT topmost: it is
+// shown ACTIVATED (SW_SHOWNORMAL) so Windows brings it to the foreground ONCE when it appears, but the
+// still-building main window can come forward and cover it as soon as it's ready (a topmost splash used
+// to sit stubbornly above every window, including ones the user switched to). The user can minimize or
+// close it early (close => DefWindowProc => WM_DESTROY => the thread exits), and the settle-watch
+// dismisses it automatically when the window is ready.
 
 #pragma once
 
@@ -229,12 +231,14 @@ namespace Agentmaster::Splash
 
             // A NORMAL top-level window (not a tool-window overlay): a real caption with the app title +
             // a MINIMIZE and CLOSE button (WS_SYSMENU | WS_MINIMIZEBOX), and a TASKBAR button
-            // (WS_EX_APPWINDOW, and crucially NO WS_EX_TOOLWINDOW). Still WS_EX_TOPMOST so it keeps
-            // covering the building main window; no WS_MAXIMIZEBOX / WS_THICKFRAME (a fixed-size loading
-            // window). Sized so the CLIENT area equals the card — AdjustWindowRectExForDpi grows the rect
-            // by the DPI-scaled caption + borders so the card content isn't squeezed under the title bar.
+            // (WS_EX_APPWINDOW, and crucially NO WS_EX_TOOLWINDOW). NOT topmost — it is brought to the
+            // foreground once at show time (SW_SHOWNORMAL below) instead of being pinned above every
+            // window, so the main window (and anything else the user switches to) can cover it; no
+            // WS_MAXIMIZEBOX / WS_THICKFRAME (a fixed-size loading window). Sized so the CLIENT area equals
+            // the card — AdjustWindowRectExForDpi grows the rect by the DPI-scaled caption + borders so the
+            // card content isn't squeezed under the title bar.
             const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-            const DWORD exStyle = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+            const DWORD exStyle = WS_EX_APPWINDOW;
             RECT wr{ 0, 0, Scaled(kBaseCardW), Scaled(kBaseCardH) };
             ::AdjustWindowRectExForDpi(&wr, style, FALSE, exStyle, g_dpi);
             const int W = wr.right - wr.left;
@@ -278,10 +282,12 @@ namespace Agentmaster::Splash
                 ::DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
             }
             g_hwnd.store(hwnd);
-            // Show WITHOUT stealing foreground from the launching main window — the user can still click
-            // the window, its taskbar button, or its minimize/close as usual. Topmost keeps it above the
-            // (blank, still-building) main window until the settle-watch or the user dismisses it.
-            ::ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // Show ACTIVATED so Windows brings the loading window to the foreground ONCE when it appears —
+            // we're a freshly-launched foreground process, so normal activation succeeds here and no
+            // explicit SetForegroundWindow is needed. It is NOT topmost, so the (blank, still-building)
+            // main window can come forward and cover it as soon as it's ready; the user can also click its
+            // taskbar button or minimize/close it as usual.
+            ::ShowWindow(hwnd, SW_SHOWNORMAL);
             ::UpdateWindow(hwnd); // paint the card synchronously now (no longer layered) so there's no blank flash on show
             ::SetTimer(hwnd, kAnimTimerId, kAnimIntervalMs, nullptr);
 
