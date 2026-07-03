@@ -23,6 +23,8 @@
 // the original anonymous namespace relied on the using-directives above it).
 #pragma once
 
+#include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped Win32 writer CopyTextToClipboard routes through
+
 namespace
 {
     // Geometric, monochrome glyphs only (match the Manager / Triage Board; no wide color emoji).
@@ -204,22 +206,20 @@ namespace
         ::PlaySoundW(L"SystemAsterisk", nullptr, SND_ALIAS | SND_ASYNC);
     }
 
-    // Put text on the system clipboard (row 3's copy menu). Mirrors AgentManagerContent's
-    // CopyTextToClipboard. Flush so the content survives the app losing focus (it can refuse —
-    // non-fatal). WinRT Clipboard is STA, so call this on the UI thread. Plays the confirmation
-    // chime once the copy actually lands. Best-effort.
+    // Put text on the system clipboard (row 3's copy menu, incl. the shared CopySessionField behind
+    // the Triage Board's Copy submenu). Routes through the robust, retry-looped Win32 writer
+    // (AgentClipboard.h) rather than the WinRT Clipboard (SetContent/Flush): the latter opens the OLE
+    // clipboard once with NO retry, so it silently LOST the copy whenever the FOCUSED terminal tab was
+    // an active clipboard user contending for it (the "Copy Summary does not work well in a focused
+    // tab" report — every copy here shared that flaw). Call on the UI thread. Plays the confirmation
+    // chime only once the copy ACTUALLY lands (a genuine failure — clipboard wedged past the ~10s
+    // backoff — is silent, matching reality). Best-effort.
     void CopyTextToClipboard(const std::wstring& text)
     {
-        try
+        if (winrt::TerminalApp::implementation::RobustCopyTextToClipboard(text))
         {
-            winrt::Windows::ApplicationModel::DataTransfer::DataPackage pkg;
-            pkg.RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Copy);
-            pkg.SetText(winrt::hstring{ text });
-            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
-            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
             PlayActionSound(); // "copy is done" feedback (every row-3 copy routes through here)
         }
-        CATCH_LOG();
     }
 
     // Collect the user's live text selection across the summary panel (title / times line / body runs are

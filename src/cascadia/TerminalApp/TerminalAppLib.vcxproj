@@ -169,6 +169,7 @@
     </ClInclude>
     <!-- Agentmaster -->
     <ClInclude Include="AgentManagerContent.h" />
+    <ClInclude Include="AgentClipboard.h" />
     <ClInclude Include="AgentCopyActions.h" />
     <ClInclude Include="AgentStatusColors.h" />
     <ClInclude Include="AgentTipHelpers.h" />

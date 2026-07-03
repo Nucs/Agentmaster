@@ -26,6 +26,8 @@
 // just as the original anonymous namespace relied on the using-directives above it).
 #pragma once
 
+#include "AgentClipboard.h" // RobustCopyTextToClipboard — the retry-looped Win32 writer CopyTextToClipboard routes through
+
 namespace
 {
     // Agentmaster (cog "Overlay opacity" dual-thumb slider): the track + dot geometry, shared by the build
@@ -153,20 +155,14 @@ namespace
         return luminance > 0.179;
     }
 
-    // Agentmaster: put text on the system clipboard (the context menus' "Copy Session Id"). Mirrors
-    // the Archive page's ArchiveCopyToClipboard. Flush so the content survives the app losing focus
-    // (it can refuse — non-fatal). Best-effort.
+    // Agentmaster: put text on the system clipboard (the context menus' "Copy Session Id"). Routes
+    // through the robust, retry-looped Win32 writer (AgentClipboard.h) rather than the WinRT Clipboard
+    // (SetContent/Flush): the latter opens the OLE clipboard once with NO retry, so it silently lost
+    // the copy whenever a FOCUSED terminal tab was contending for it (the same flaw behind the "Copy
+    // ... does not work well in a focused tab" report). Call on the UI thread. Best-effort.
     void CopyTextToClipboard(const std::wstring& text)
     {
-        try
-        {
-            winrt::Windows::ApplicationModel::DataTransfer::DataPackage pkg;
-            pkg.RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Copy);
-            pkg.SetText(winrt::hstring{ text });
-            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(pkg);
-            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::Flush();
-        }
-        CATCH_LOG();
+        winrt::TerminalApp::implementation::RobustCopyTextToClipboard(text);
     }
 
     // Agentmaster (native-exe-only policy): a modal file picker for locating claude.exe. COM is already
