@@ -925,6 +925,11 @@ namespace winrt::TerminalApp::implementation
                 chipRibbon.Stroke(SolidColorBrush{ winrt::Windows::UI::Colors::Black() });
                 chipRibbon.StrokeThickness(0.75);
                 chipRibbon.VerticalAlignment(VerticalAlignment::Center);
+                // Nudge the ribbon DOWN 3px — the geometric center sits optically high beside the
+                // text's ink; a render-transform shifts only the visual (no layout math to break).
+                TranslateTransform chipRibbonNudge;
+                chipRibbonNudge.Y(3.0);
+                chipRibbon.RenderTransform(chipRibbonNudge);
                 chipContent.Children().Append(chipRibbon);
                 TextBlock chipLabel; // no explicit Foreground — inherits the ToggleButton's (adapts to the checked/hover states)
                 chipLabel.Text(winrt::hstring{ info.name });
