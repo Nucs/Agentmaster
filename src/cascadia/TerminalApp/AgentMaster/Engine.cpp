@@ -21,8 +21,10 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <mutex> // Agentmaster: guards the log observer's per-id dedup map (notify fires from several threads)
 #include <random>
 #include <string>
+#include <unordered_map> // Agentmaster: per-id last-logged [Unknown] line, to dedup the pull/transient notify flood
 
 namespace Agentmaster
 {
@@ -75,6 +77,30 @@ namespace Agentmaster
                            s.lastMessageWasQuestion ? 1 : 0,
                            s.workingDir.c_str());
                 ::OutputDebugStringW(line);
+                // Agentmaster: the PUSH event stream (named hooks — SessionStart / UserPromptSubmit /
+                // Stop / Notification / ...) is ALWAYS logged; it is the state machine's audit trail.
+                // But a HookEvent::Unknown notify carries no event semantics — it is "some fact changed"
+                // from a PULL / transient path (a pending-input draft flip, a rename, an enrichment
+                // refresh, a triage move), and those paths already log their OWN contextual tag
+                // ([pending] / [nav] / ...). Logging an [Unknown] line here TOO produced a flood: ~98%
+                // of [Unknown] lines were byte-identical consecutive repeats of the same id's same
+                // (state,question,dir) — a pending-draft appear/clear alone re-emitted the identical
+                // line — which grew hooks.log by hundreds of MB. So DEDUPE Unknown: skip it when this
+                // id's line is unchanged since the last [Unknown] we logged for it (the first [Unknown]
+                // after any real state/dir change still lands, so pull-driven transitions are recorded
+                // once). Thread-safe — notify is raised from several engine threads.
+                if (ev == HookEvent::Unknown)
+                {
+                    static std::mutex s_unknownMtx;
+                    static std::unordered_map<std::wstring, std::wstring> s_lastUnknownLine; // id -> last [Unknown] body
+                    std::lock_guard lk{ s_unknownMtx };
+                    auto& prev = s_lastUnknownLine[s.id];
+                    if (prev == line)
+                    {
+                        return; // identical to the last [Unknown] for this id -> nothing new to record
+                    }
+                    prev = line;
+                }
                 AppendStateLog(L"hooks.log", line);
             });
 

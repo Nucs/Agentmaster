@@ -1131,7 +1131,31 @@ namespace Agentmaster
 
     void SaveSessions(const std::vector<SessionInfo>& sessions)
     {
-        WriteAllUtf8(AgentmasterStateDir() + L"\\sessions.json", SerializeSessions(sessions));
+        const std::wstring content = SerializeSessions(sessions);
+        // Agentmaster: skip the write when the serialized fleet is byte-identical to the last SUCCESSFUL
+        // save. The registry autosave observer (Engine.cpp) fires on EVERY _notify — including notifies
+        // that changed only a TRANSIENT, non-persisted field (a pending-input draft appear/clear, a
+        // per-hook UI reaction, an enrichment refresh), which serialize to the SAME json. Without this,
+        // each was a redundant full WriteAllUtf8 = a temp-file write + a forced FlushFileBuffers platter
+        // flush + an atomic rename (measured hundreds of thousands of times in a long-lived instance —
+        // real SSD wear + IO). A no-op write can never advance durability, so skipping an identical one
+        // is always safe (Rule #16: the on-disk file already holds exactly this content). `s_last` is
+        // updated only after a SUCCESSFUL write, so a failed save ([persist-fail]) is retried next notify
+        // rather than silently latched off. Thread-safe: SaveSessions fires from several engine threads.
+        static std::mutex s_lastMtx;
+        static std::wstring s_last;
+        {
+            std::lock_guard lk{ s_lastMtx };
+            if (content == s_last)
+            {
+                return; // nothing PERSISTED changed since the last save -> no forced disk write
+            }
+        }
+        if (WriteAllUtf8(AgentmasterStateDir() + L"\\sessions.json", content))
+        {
+            std::lock_guard lk{ s_lastMtx };
+            s_last = content;
+        }
     }
     std::vector<SessionInfo> LoadSessions()
     {
