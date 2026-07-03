@@ -1316,6 +1316,13 @@ namespace winrt::TerminalApp::implementation
     {
         const auto pointerProps = e.GetCurrentPoint(nullptr).Properties();
 
+        // Agentmaster (Shift+Click background-activate): defensively clear any one-shot select-veto left
+        // over from a prior press. In the normal case the press's own SelectionChanged already consumed
+        // it (below), but a press whose selection never fired (e.g. clicking the already-selected tab)
+        // could otherwise leave it armed onto this press. A fresh Shift+Click re-arms it below.
+        _suppressTabSelectForActivate = false;
+        _tabSelectRevertTo = nullptr;
+
         // Agentmaster (eager-init): Shift+Left-Click a managed agent-session tab = "Activate Tab" ONLY —
         // ACTIVATE without switching. If the session is DORMANT this starts its claude IN PLACE (a
         // background/restored tab spawns its child lazily, only when first SHOWN, so a window-restored
@@ -1326,20 +1333,20 @@ namespace winrt::TerminalApp::implementation
         // where you are), matching the Manager board-card / Explorer-tree Shift+Click twin
         // (AgentManagerContent), which likewise suppresses the select/jump on Shift regardless of state. A
         // NON-session tab (pwsh/cmd/Manager) has nothing to activate, so it falls through to a normal switch.
-        // Suppressing the switch: a MUX TabViewItem (a ListViewItem) defers selection to its OWN pointer-
-        // RELEASE (so a press-drag can reorder instead of select), and the TabView captures the pointer
-        // internally to drive it (see the middle-click note below) — so we STEAL that capture here (capture
-        // isn't ref-counted, last-wins) and the release-driven selection never fires. UWP auto-releases a
-        // mouse capture when the button comes up, so nothing is left captured.
+        //
+        // Modifier read: use the pointer event's own KeyModifiers() — under XAML Islands
+        // CoreWindow::GetForCurrentThread() can be null (see AgentManagerContent::ShiftHeld), which would
+        // silently drop the gesture and let the tab switch. The event args carry the true modifier state.
+        //
+        // Suppressing the switch: a MUX TabViewItem (a ListViewItem) drives its selection on its OWN
+        // pointer-RELEASE, and the TabView re-captures the pointer internally AFTER this bubbling
+        // PointerPressed handler runs (see the middle-click note below) — so neither e.Handled(true) nor a
+        // press-time CapturePointer steal reliably stops the release-driven selection (the reason this used
+        // to still switch). Instead we ARM a one-shot veto that _OnTabSelectionChanged uses to snap the
+        // selection back to the previously-focused tab BEFORE any content-swap side effects run.
         if (pointerProps.IsLeftButtonPressed())
         {
-            bool shiftHeld = false;
-            if (const auto inputWindow = CoreWindow::GetForCurrentThread())
-            {
-                shiftHeld = WI_IsFlagSet(inputWindow.GetKeyState(VirtualKey::Shift), CoreVirtualKeyStates::Down) ||
-                            WI_IsFlagSet(inputWindow.GetKeyState(VirtualKey::LeftShift), CoreVirtualKeyStates::Down) ||
-                            WI_IsFlagSet(inputWindow.GetKeyState(VirtualKey::RightShift), CoreVirtualKeyStates::Down);
-            }
+            const bool shiftHeld = WI_IsFlagSet(e.KeyModifiers(), winrt::Windows::System::VirtualKeyModifiers::Shift);
             if (shiftHeld)
             {
                 if (const auto tab = _GetTabByTabViewItem(sender))
@@ -1347,9 +1354,13 @@ namespace winrt::TerminalApp::implementation
                     if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())
                     {
                         _ActivateDormantSession(sid); // wake it if dormant; a no-op if already running / not hosted here
-                        if (const auto tabViewItem = sender.try_as<MUX::Controls::TabViewItem>())
+                        // Arm the veto only when the press would actually CHANGE the selection (a different
+                        // tab). Clicking the already-selected session tab raises no SelectionChanged, so
+                        // arming there would leave the flag stranded onto the next click.
+                        if (_tabView.SelectedItem() != sender)
                         {
-                            tabViewItem.CapturePointer(e.Pointer()); // steal capture so the TabView's release-driven switch never fires (auto-released on button-up)
+                            _tabSelectRevertTo = _tabView.SelectedItem();
+                            _suppressTabSelectForActivate = true;
                         }
                         _middleClickClosePending = false;
                         e.Handled(true);
@@ -1540,8 +1551,39 @@ namespace winrt::TerminalApp::implementation
     // - eventArgs: the event's constituent arguments
     void TerminalPage::_OnTabSelectionChanged(const IInspectable& sender, const WUX::Controls::SelectionChangedEventArgs& /*eventArgs*/)
     {
+        // Agentmaster (Shift+Click background-activate): our own selection-revert (below) re-enters this
+        // handler synchronously — no-op it so the revert doesn't run the switch side effects.
+        if (_revertingTabSelection)
+        {
+            return;
+        }
+
         if (!_rearranging && !_removing)
         {
+            // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab
+            // ACTIVATES the session in place and must NOT switch to it. The MUX TabViewItem selected
+            // itself on pointer-release regardless of the press handler, so deterministically REVERT the
+            // selection to the tab focused before the press — BEFORE _UpdatedSelectedTab swaps the tab
+            // content. Consumed one-shot; the guarded revert's re-entrant SelectionChanged early-returns
+            // above, and the old tab's content was never detached, so the revert needs no re-attach.
+            if (_suppressTabSelectForActivate)
+            {
+                _suppressTabSelectForActivate = false;
+                const auto restore = _tabSelectRevertTo;
+                _tabSelectRevertTo = nullptr;
+                if (restore)
+                {
+                    _revertingTabSelection = true;
+                    auto clearReverting = wil::scope_exit([this]() noexcept { _revertingTabSelection = false; });
+                    try
+                    {
+                        _tabView.SelectedItem(restore);
+                    }
+                    CATCH_LOG();
+                }
+                return; // never run the switch (content swap / focus) for a Shift+Click-activated tab
+            }
+
             auto tabView = sender.as<MUX::Controls::TabView>();
             auto selectedIndex = tabView.SelectedIndex();
             if (selectedIndex >= 0 && selectedIndex < gsl::narrow_cast<int32_t>(_tabs.Size()))

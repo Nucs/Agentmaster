@@ -677,6 +677,16 @@ namespace winrt::TerminalApp::implementation
         std::optional<int> _rearrangeTo{};
         bool _removing{ false };
 
+        // Agentmaster (Shift+Click background-activate): a Shift+Click on a managed session tab must
+        // ACTIVATE the session in place WITHOUT switching to it. A MUX TabViewItem drives its selection
+        // on pointer-RELEASE (after our press handler), so the switch can't be cancelled at press time;
+        // _OnTabPointerPressed instead ARMS a one-shot veto here and _OnTabSelectionChanged snaps the
+        // selection back to _tabSelectRevertTo before any content-swap side effects run.
+        // _revertingTabSelection guards the revert's own re-entrant SelectionChanged.
+        bool _suppressTabSelectForActivate{ false };
+        bool _revertingTabSelection{ false };
+        winrt::Windows::Foundation::IInspectable _tabSelectRevertTo{ nullptr };
+
         bool _activated{ false };
         bool _visible{ true };
 
