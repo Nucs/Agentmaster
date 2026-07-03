@@ -52,6 +52,12 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster (eager-init / "Activate All Tabs"): (allWindows) -> wake every dormant managed tab.
         // allWindows=false => this window only; true => this window + fan out to every other window.
         void SetActivateAllHandler(std::function<void(bool)> handler);
+        // Agentmaster (eager-init / "Activate All Tabs" PACING): the page drives a DRIP-FED wake (500ms
+        // apart, 4 per 10s), so the operation runs for many seconds — the page calls this true when its
+        // drip starts and false when it drains, so the Manager makes the "in progress" state obvious:
+        // the button relabels "Activating N tabs…" + goes disabled, and the launch/cwd box is disabled
+        // (a clear "busy, hands off" cue). UI thread only.
+        void SetActivateAllBusy(bool busy);
         // Agentmaster (Linked Lenses): report a pointer enter/leave on a managed session's board card
         // / tree row (id, entering). The PAGE owns the effective-hover bookkeeping (so it can't desync
         // from a missed PointerExited on a keyboard tab-switch) and pills that session's terminal tab
@@ -734,6 +740,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::Button _sessionsBtn{ nullptr }; // Agentmaster (Sessions page): "Sessions" -> the global on-disk sessions browser (the sole history view; FAVORITES.md)
         winrt::Windows::UI::Xaml::Controls::Button _reopenBtn{ nullptr }; // Agentmaster (M10): "Reopen Windows (N)" -> reopen saved-but-not-open windows (shown only when N>0)
         winrt::Windows::UI::Xaml::Controls::Button _activateAllBtn{ nullptr }; // Agentmaster (eager-init): "Activate All Tabs (N)" -> wake this window's dormant tabs (shown only when N>0)
+        bool _activateAllBusy{ false }; // Agentmaster (eager-init pacing): true while the page's drip is waking this window's tabs — relabels/disables _activateAllBtn + disables _cwdBox (SetActivateAllBusy)
         winrt::Windows::UI::Xaml::Controls::Button _keepAwakeBtn{ nullptr }; // Agentmaster: tri-mode "Keep Awake" button -> SetThreadExecutionState keeps the PC + display from sleeping
         // Agentmaster: the user-selected keep-awake mode. Off = sleep normally; Always = always hold the
         // execution-state flag; WhileRunning = hold ONLY while a live session is actively Running (so the

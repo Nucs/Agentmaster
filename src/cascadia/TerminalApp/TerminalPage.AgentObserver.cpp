@@ -3157,7 +3157,23 @@ namespace winrt::TerminalApp::implementation
         _activateAllBatchWoken = 0;
         _activateAllWokenTotal = 0;
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[activate-all] window " + _windowId + L" drip-start candidates=" + std::to_wstring(_activateAllQueue.size()) + L" (" + std::to_wstring(kActivateAllSpacingMs) + L"ms apart, " + std::to_wstring(kActivateAllBatchSize) + L" per " + std::to_wstring(kActivateAllBatchPeriodMs / 1000) + L"s)\n");
+        _SetActivateAllBusy(true); // the Manager shows "Activating N tabs…" (disabled button + disabled cwd box) until the queue drains
         _ActivateAllDripStep(); // wake the first immediately (the click should feel responsive); the timer paces the rest
+    }
+
+    // Agentmaster (eager-init / "Activate All Tabs" pacing): flip THIS window's Manager content into / out
+    // of its "busy" state (disabled "Activating N tabs…" button + disabled launch/cwd box) so a paced
+    // wake that runs for many seconds is visibly in progress. The Manager tab is non-closable, so the
+    // content outlives the drip; a null get() (mid-teardown) simply no-ops. UI thread only.
+    void TerminalPage::_SetActivateAllBusy(bool busy)
+    {
+        if (const auto ipc = _agentManagerContent.get())
+        {
+            if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
+            {
+                mgr->SetActivateAllBusy(busy);
+            }
+        }
     }
 
     // Agentmaster (eager-init / "Activate All Tabs" pacing): one drip step — pop queued ids until one
@@ -3189,6 +3205,7 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[activate-all] window " + _windowId + L" woke " + std::to_wstring(_activateAllWokenTotal) + L" dormant tab(s) (paced)\n");
                 _activateAllWokenTotal = 0;
             }
+            _SetActivateAllBusy(false); // drip done — restore the button's normal label + re-enable the cwd box
             return;
         }
         int delayMs = kActivateAllSpacingMs;

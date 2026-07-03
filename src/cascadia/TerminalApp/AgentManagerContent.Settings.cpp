@@ -414,9 +414,44 @@ namespace winrt::TerminalApp::implementation
         // dormant tabs. Reads SessionInfo::started (maintained by the page from ConnectionState()).
         const auto [thisWindow, fleet] = _DormantCounts();
         (void)fleet;
+        if (_activateAllBusy)
+        {
+            // The page's drip is running (500ms apart, 4 per 10s) — the operation takes many seconds, so
+            // make it unmistakably "in progress": relabel + DISABLE the button (it stays put, showing the
+            // remaining count ticking down as each tab wakes — a live progress readout), and keep it
+            // visible even at 0 (SetActivateAllBusy(false) reverts to the normal hide-when-idle rule).
+            _activateAllBtn.Content(winrt::box_value(winrt::hstring{ L"Activating " } + winrt::to_hstring(thisWindow) + L" tab" + (thisWindow == 1 ? L"" : L"s") + L"\x2026"));
+            _activateAllBtn.IsEnabled(false);
+            _activateAllBtn.Visibility(Visibility::Visible);
+            _ReflowLaunchBar();
+            return;
+        }
+        _activateAllBtn.IsEnabled(true);
         _activateAllBtn.Content(winrt::box_value(winrt::hstring{ L"Activate All Tabs (" } + winrt::to_hstring(thisWindow) + L")"));
         _activateAllBtn.Visibility(thisWindow > 0 ? Visibility::Visible : Visibility::Collapsed);
         _ReflowLaunchBar(); // the button just appeared/vanished/relabeled -> re-fit the row
+    }
+
+    // Agentmaster (eager-init / "Activate All Tabs" PACING): the page toggles this around its drip so the
+    // Manager shows the operation is running. Disable the launch/cwd box (the user's "hands off, busy"
+    // cue — the path picker is closed first so it can't linger over a disabled box), and refresh the
+    // button into / out of its "Activating N tabs…" disabled state. Idempotent; UI thread only.
+    void AgentManagerContent::SetActivateAllBusy(bool busy)
+    {
+        if (_activateAllBusy == busy)
+        {
+            return;
+        }
+        _activateAllBusy = busy;
+        if (_cwdBox)
+        {
+            if (busy)
+            {
+                _ClosePathPicker(); // don't leave the dropdown hanging over a greyed-out box
+            }
+            _cwdBox.IsEnabled(!busy);
+        }
+        _UpdateActivateAllButton();
     }
 
     void AgentManagerContent::_OnActivateAllTabs()
