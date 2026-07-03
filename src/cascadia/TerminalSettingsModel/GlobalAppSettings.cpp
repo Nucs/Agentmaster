@@ -168,13 +168,15 @@ void GlobalAppSettings::LayerJson(const Json::Value& json, const OriginTag origi
     _fixupsAppliedDuringLoad = JsonUtils::GetValueForKey(json, LegacyInputServiceWarningKey, _InputServiceWarning) || _fixupsAppliedDuringLoad;
     _fixupsAppliedDuringLoad = JsonUtils::GetValueForKey(json, LegacyWarnAboutLargePasteKey, _WarnAboutLargePaste) || _fixupsAppliedDuringLoad;
     _fixupsAppliedDuringLoad = JsonUtils::GetValueForKey(json, LegacyWarnAboutMultiLinePasteKey, _WarnAboutMultiLinePaste) || _fixupsAppliedDuringLoad;
-    // GH#6549 - Migrate legacy "confirmCloseAllTabs" boolean to the new
-    // "confirmOnClose" enum. true -> Automatic, false -> Never.
+    // GH#6549 - Migrate legacy "confirmCloseAllTabs" boolean to the new "confirmOnClose" enum.
+    // Agentmaster: upstream mapped false -> Never, but "Never" (fully suppress close confirmations) is
+    // no longer an allowed value here — a close confirmation must never be permanently suppressible — so
+    // BOTH true and false migrate to Automatic (the coercion below enforces this for every source).
     {
         std::optional<bool> legacyConfirmClose;
         if (JsonUtils::GetValueForKey(json, LegacyConfirmCloseAllTabsKey, legacyConfirmClose))
         {
-            _ConfirmOnClose = legacyConfirmClose.value() ? ConfirmOnClose::Automatic : ConfirmOnClose::Never;
+            _ConfirmOnClose = ConfirmOnClose::Automatic;
             _fixupsAppliedDuringLoad = true;
         }
     }
@@ -185,6 +187,18 @@ void GlobalAppSettings::LayerJson(const Json::Value& json, const OriginTag origi
 
     MTSM_GLOBAL_SETTINGS(GLOBAL_SETTINGS_LAYER_JSON)
 #undef GLOBAL_SETTINGS_LAYER_JSON
+
+    // Agentmaster: "Never" (fully suppress close confirmations) is not an allowed value. A close
+    // confirmation must never be permanently suppressible — the window-close decision prompt in
+    // particular guards detaching + archiving live agent sessions — so any persisted, hand-edited, or
+    // legacy-migrated "never" is coerced to "automatic" here, at the one point every settings layer
+    // funnels through (so the SUI, the settings file, and the migration above are all covered). The
+    // fixup flag makes the on-disk "never" get rewritten to "automatic" too, so it truly stops existing.
+    if (_ConfirmOnClose.has_value() && _ConfirmOnClose.value() == ConfirmOnClose::Never)
+    {
+        _ConfirmOnClose = ConfirmOnClose::Automatic;
+        _fixupsAppliedDuringLoad = true;
+    }
 
     // GH#11975 We only want to allow sensible values and prevent crashes, so we are clamping those values
     // We only want to assign if the value did change through clamping,

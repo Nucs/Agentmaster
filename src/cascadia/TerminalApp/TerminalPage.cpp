@@ -1157,9 +1157,9 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Displays the unified close confirmation dialog configured for the
-    //   given scenario. Resets the "don't ask me again" checkbox before showing.
-    //   If the user confirms and checked "don't ask me again", sets
-    //   confirmOnClose to Never and writes settings to disk.
+    //   given scenario. (Agentmaster: the "don't ask again" checkbox was removed;
+    //   close confirmations are never permanently suppressible, so this no longer
+    //   writes confirmOnClose=Never — a persisted "never" is coerced to "automatic".)
     // - Only one dialog can be visible at a time. If another dialog is visible
     //   when this is called, nothing happens. See _ShowDialog for details
     winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowConfirmCloseDialog(ConfirmCloseDialogKind kind)
@@ -1200,11 +1200,12 @@ namespace winrt::TerminalApp::implementation
         dialog.PrimaryButtonText(primary);
         dialog.CloseButtonText(RS_(L"ConfirmCloseDialog_Cancel"));
 
-        // BODGY: After a ContentDialog is dismissed, FindName() can no longer
-        // resolve children inside it. Use Content() to get the checkbox directly.
-        const auto checkbox = dialog.Content().as<CheckBox>();
-        checkbox.IsChecked(false);
-
+        // Agentmaster: the "don't ask again" checkbox has been removed from this dialog (TerminalPage.xaml)
+        // and with it the code path that set ConfirmOnClose=Never. That single escape hatch silently
+        // disabled EVERY close confirmation — including the window-close decision prompt — which must never
+        // be permanently suppressible. There is therefore no longer any writer of ConfirmOnClose::Never
+        // here; a persisted/legacy/hand-edited "never" is coerced to "automatic" on load
+        // (GlobalAppSettings::LayerJson), so this dialog can no longer be turned off.
         auto result = ContentDialogResult::None;
         if (auto presenter{ _dialogPresenter.get() })
         {
@@ -1218,12 +1219,6 @@ namespace winrt::TerminalApp::implementation
             if (!strong)
             {
                 co_return ContentDialogResult::None;
-            }
-
-            if (result == ContentDialogResult::Primary && checkbox.IsChecked().Value())
-            {
-                _settings.GlobalSettings().ConfirmOnClose(ConfirmOnClose::Never);
-                _settings.WriteSettingsToDisk();
             }
         }
 
@@ -2925,6 +2920,17 @@ namespace winrt::TerminalApp::implementation
     //   signal that we want to close everything.
     safe_void_coroutine TerminalPage::RequestQuit()
     {
+        // Agentmaster (re-entrancy guard): if a close/quit dialog is already modal, bail instead of
+        // tearing the app down under it. The OS window frame delivers ✕ / Alt+F4 / quit keybindings while
+        // a ContentDialog blocks only the XAML content, so this can re-enter; falling through would skip
+        // the confirm and quit, bypassing the user's choice. (Symmetric to CloseWindow's guard. The
+        // CloseWindow "Close All Windows" path resets _displayingCloseDialog to false before calling us,
+        // so that legitimate escalation still proceeds.)
+        if (_displayingCloseDialog)
+        {
+            co_return;
+        }
+
         const auto setting = _settings.GlobalSettings().ConfirmOnClose();
         if (setting != ConfirmOnClose::Never && !_displayingCloseDialog)
         {
@@ -3091,11 +3097,15 @@ namespace winrt::TerminalApp::implementation
         // closing a window is NON-DESTRUCTIVE — _FlushWindowRecord saves its geometry/lens/ordered tabs to
         // windows/<id>.json and _ArchiveWindowSessionsOnTeardown archives every managed session (kept
         // resumable; nothing on disk is touched) — so the dialog SAYS SO, and it adds a "Close All Windows"
-        // escalation that quits the whole app via RequestQuit (which raises its OWN second confirm). Shown
-        // only when _ShouldWarnOnClose() warrants a confirm; with confirms off we fall straight through to
-        // the non-destructive close below (the record is still flushed + sessions archived — nothing lost).
-        if (_ShouldWarnOnClose() &&
-            !_displayingCloseDialog)
+        // escalation that quits the whole app via RequestQuit (which raises its OWN second confirm). This
+        // decision prompt is ALWAYS shown — deliberately NOT gated on _ShouldWarnOnClose()/ConfirmOnClose,
+        // because closing a window (and thereby detaching + archiving its live agent sessions) is a call
+        // the user must always get to make; there is no "Never" mode that can silently suppress it (see the
+        // ConfirmOnClose coercion in GlobalAppSettings::LayerJson and the removed "don't ask again"
+        // checkbox). The only guard is re-entrancy (_displayingCloseDialog); with no presenter we still
+        // fall through to the non-destructive close below (the record is flushed + sessions archived —
+        // nothing lost).
+        if (!_displayingCloseDialog)
         {
             if (_newTabButton && _newTabButton.Flyout())
             {
@@ -3174,6 +3184,15 @@ namespace winrt::TerminalApp::implementation
                 }
                 // Primary ("Close Window") -> fall through to the non-destructive close below.
             }
+        }
+        else
+        {
+            // Agentmaster (re-entrancy guard): a "Close this window?" dialog is ALREADY modal. The OS
+            // window frame keeps delivering ✕ / Alt+F4 / the closeWindow keybinding while a ContentDialog
+            // blocks only the XAML content, so CloseWindow can re-enter here. Bail — do NOT fall through
+            // to the teardown below, which would close the window out from under the open prompt and
+            // silently bypass the user's Cancel / Close / Close-All choice. The in-flight dialog owns it.
+            co_return;
         }
 
         // Agentmaster (M10 window-grouped restore): capture this window's record ONE LAST TIME while it

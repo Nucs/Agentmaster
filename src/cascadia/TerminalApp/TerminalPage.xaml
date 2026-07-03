@@ -87,12 +87,14 @@
                            Grid.Row="2"
                            x:Load="False" />
 
+        <!-- Agentmaster: the "don't ask again" (DontAskAgainCheckBox) content was removed. Checking it set
+             ConfirmOnClose=Never, which silently disabled EVERY close confirmation (including the
+             window-close decision prompt). Close prompts must never be permanently suppressible, so this
+             dialog now shows only its title + Close/Cancel buttons. -->
         <ContentDialog x:Name="ConfirmCloseDialog"
                        Grid.Row="2"
                        x:Load="False"
-                       DefaultButton="Primary">
-            <CheckBox x:Uid="DontAskAgainCheckBox" />
-        </ContentDialog>
+                       DefaultButton="Primary" />
 
         <ContentDialog x:Name="CloseReadOnlyDialog"
                        x:Uid="CloseReadOnlyDialog"
