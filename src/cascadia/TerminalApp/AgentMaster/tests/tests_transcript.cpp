@@ -2971,12 +2971,14 @@ void TestExtractPathsFromText()
 }
 
 // --- InferWorkingDirectory (tab color modes): the pure inferred-workdir picker ---
-// Every tool-touched path votes for its ancestor DIRECTORY chain (leaf excluded); the inferred
-// dir is the DEEPEST directory with a STRICT MAJORITY (>50%) of the voting paths — the "most
-// common shared path, ranked+picked by occurrence" — which keeps a stray one-off read from
-// dragging the pick to the drive root the way a plain longest-common-prefix would, while depth
-// preference keeps it from settling on a too-shallow ancestor. Roots never win; no majority or
-// no usable paths => the fallback (launch cwd).
+// RANKED BY OCCURRENCE: every tool-touched path votes for its ancestor DIRECTORY chain (leaf
+// excluded) and belongs to one disjoint WORK CLUSTER (its git root via the injected resolver,
+// else its top-level dir); clusters are ranked by vote count — the STRICT top wins (plurality;
+// a tied top => the fallback cwd). A git cluster answers its repo root AS-IS; a non-git cluster
+// answers by LOCAL-MAJORITY DESCENT (a child takes the pick from its base only while it holds
+// >50% of the base's own paths — the base-vs-path priority). Keeps a stray one-off read from
+// dragging the pick to the drive root the way a plain longest-common-prefix would. Roots never
+// win; no usable paths => the fallback (launch cwd).
 void TestInferWorkingDirectory()
 {
     std::wprintf(L"[infer working directory]\n");
@@ -3148,15 +3150,25 @@ void TestInferWorkingDirectory()
         };
         CHECK(InferWorkingDirectory(wt, cwd, fakeGit) == L"K:\\repoA\\.claude\\worktrees\\wt", "git arm: a nested worktree majority keys the WORKTREE, not the outer checkout");
 
-        // Two repos split 2/2: neither root has a strict majority; the ancestor arm has none
-        // either (split across top dirs) -> fallback cwd.
+        // Two repos split 2/2: a TIED top rank has no single "most reoccurring" cluster -> fallback.
         const std::vector<std::wstring> split = {
             L"K:\\repoA\\src\\a.cpp",
             L"K:\\repoA\\src\\b.cpp",
             L"K:\\repoB\\src\\c.cpp",
             L"K:\\repoB\\src\\d.cpp",
         };
-        CHECK(InferWorkingDirectory(split, cwd, fakeGit) == cwd, "git arm: a 50/50 repo split has no majority -> fallback");
+        CHECK(InferWorkingDirectory(split, cwd, fakeGit) == cwd, "git arm: a 50/50 repo split is a tied top rank -> fallback");
+
+        // Plurality — the RANKING headline: 3 vs 2 across two repos needs no majority; the
+        // most-occurrences repo wins (the old strict-majority rule fell back to the cwd here).
+        const std::vector<std::wstring> plurality = {
+            L"K:\\repoA\\src\\a.cpp",
+            L"K:\\repoA\\src\\b.cpp",
+            L"K:\\repoA\\doc\\c.md",
+            L"K:\\repoB\\src\\d.cpp",
+            L"K:\\repoB\\src\\e.cpp",
+        };
+        CHECK(InferWorkingDirectory(plurality, cwd, fakeGit) == L"K:\\repoA", "ranking: a 3-vs-2 repo plurality picks the most-occurrences repo (no majority bar)");
 
         // Out-of-repo votes DILUTE the git tally but a 3/5 repo majority still snaps to the root.
         const std::vector<std::wstring> diluted = {
@@ -3168,15 +3180,15 @@ void TestInferWorkingDirectory()
         };
         CHECK(InferWorkingDirectory(diluted, cwd, fakeGit) == L"K:\\repoA", "git arm: 3/5 in one repo still snaps to its root");
 
-        // Work mostly OUTSIDE any repo: the 1/4 repo tally has no majority -> the ancestor arm
-        // decides exactly as before (the notes dir's 3/4 deepest majority).
+        // Work mostly OUTSIDE any repo: a repo cluster is ranked like any other, so the 1-vote
+        // repo loses to the 3-vote notes cluster, whose descent lands its concentrated subdir.
         const std::vector<std::wstring> notes = {
             L"C:\\notes\\x\\a.md",
             L"C:\\notes\\x\\b.md",
             L"C:\\notes\\x\\c.md",
             L"K:\\repoA\\src\\f.cs",
         };
-        CHECK(InferWorkingDirectory(notes, cwd, fakeGit) == L"C:\\notes\\x", "git arm: no repo majority -> the ancestor majority-deepest decides");
+        CHECK(InferWorkingDirectory(notes, cwd, fakeGit) == L"C:\\notes\\x", "ranking: a 1-vote repo can't outrank the 3-vote notes cluster");
 
         // A resolver yielding a BARE ROOT is ignored (roots never win — same bar as the ancestor
         // arm): the ancestor pick proceeds untouched.
@@ -3191,6 +3203,61 @@ void TestInferWorkingDirectory()
         CHECK(InferWorkingDirectory({ L"K:\\repoA\\src\\a.cpp" }, cwd, slashGit) == L"K:\\repoA", "git arm: resolver spelling separator-normalized + trailing sep stripped");
         const auto uncGit = [](const std::wstring&) -> std::wstring { return L"\\\\nas\\share\\proj"; };
         CHECK(InferWorkingDirectory({ L"\\\\nas\\share\\proj\\deep\\a.cs", L"\\\\nas\\share\\proj\\deep\\b.cs" }, cwd, uncGit) == L"\\\\nas\\share\\proj", "git arm: a below-share UNC git root wins");
+    }
+
+    // --- occurrence RANKING: clusters by count + the base-vs-child local-majority descent ------
+    {
+        // Non-git plurality between top-level clusters, then descent within the winner: docs(3)
+        // outranks tools(2); inside docs, p holds 2 of its 3 paths (a local majority) -> docs\p.
+        {
+            const std::vector<std::wstring> paths = {
+                L"K:\\docs\\p\\a.md",
+                L"K:\\docs\\p\\b.md",
+                L"K:\\docs\\q\\c.md",
+                L"K:\\tools\\t1.ps1",
+                L"K:\\tools\\t2.ps1",
+            };
+            CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\docs\\p", "ranking: the 3-vote cluster outranks the 2-vote one; descent lands its majority subdir");
+        }
+        // Base-vs-child by occurrence: hot holds 7 of the repo's OWN 12 paths (a local majority)
+        // -> hot takes the pick from its base, even at only 7/20 of the whole corpus (the old
+        // global-majority rule stopped at the repo).
+        {
+            std::vector<std::wstring> paths;
+            for (int i = 0; i < 7; ++i)
+            {
+                paths.push_back(L"K:\\repo\\hot\\f" + std::to_wstring(i) + L".cs");
+            }
+            for (int i = 0; i < 5; ++i)
+            {
+                paths.push_back(L"K:\\repo\\m" + std::to_wstring(i) + L".cs");
+            }
+            for (int i = 0; i < 8; ++i)
+            {
+                paths.push_back(L"C:\\o\\g" + std::to_wstring(i) + L".txt");
+            }
+            CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo\\hot", "ranking: a child with the majority of its BASE's paths takes the pick (7 of repo's 12)");
+        }
+        // ...and when NO child dominates its base (a 2/2/1 sibling split), the BASE keeps it.
+        {
+            const std::vector<std::wstring> paths = {
+                L"K:\\repo\\a\\1.cs",
+                L"K:\\repo\\a\\2.cs",
+                L"K:\\repo\\b\\3.cs",
+                L"K:\\repo\\b\\4.cs",
+                L"K:\\repo\\c\\5.cs",
+            };
+            CHECK(InferWorkingDirectory(paths, cwd) == L"K:\\repo", "ranking: no child holds a majority of the base's paths -> the base keeps the pick");
+        }
+        // A 1/1/1 three-way top tie has no "most reoccurring" cluster -> fallback.
+        {
+            const std::vector<std::wstring> paths = {
+                L"K:\\x\\a.txt",
+                L"C:\\y\\b.txt",
+                L"D:\\z\\c.txt",
+            };
+            CHECK(InferWorkingDirectory(paths, cwd) == cwd, "ranking: a three-way 1/1/1 top tie -> fallback");
+        }
     }
 
     // --- ExcludePathsUnderRoots (the temp-scratch vote filter) ---------------------------------

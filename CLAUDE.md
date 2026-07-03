@@ -1377,12 +1377,18 @@ What works, by area:
   **Individual per tab** [each session dealt + KEEPS its own color, persisted on the record —
   `SessionInfo::tabColorHex`; a user pick recolors only that session, a reset re-deals next launch] ·
   **Inferred working directory** [per-dir semantics keyed by the dir the session ACTUALLY works in.
-  **The inference:** every tool-touched path VOTES for its whole ancestor-directory chain (leaf
-  excluded) and the inferred dir = the DEEPEST directory holding a STRICT MAJORITY (>50%) of the
-  voting paths (`InferWorkingDirectory` — "the most common shared path, ranked by occurrence": the
-  majority bar is what keeps a stray one-off read (~/.claude files, temp dirs) from dragging the pick
-  to the drive root the way a longest-common-prefix would; drive/UNC roots + relative paths never
-  vote/win; ties break lexicographically; no majority ⇒ the launch cwd). **The votes** =
+  **The inference — RANKED BY OCCURRENCE** (`InferWorkingDirectory`): every tool-touched path VOTES
+  for its whole ancestor-directory chain (leaf excluded) and belongs to exactly ONE disjoint **work
+  CLUSTER** — its enclosing git root (the snap, below) else its top-level dir below the drive/share
+  root; clusters are **RANKED by vote count** and the STRICT top wins — plurality, no majority bar
+  (40/35/25 across three repos picks the 40; a TIED top ⇒ the launch cwd). A git cluster answers its
+  repo root AS-IS; a non-git cluster answers by **LOCAL-MAJORITY DESCENT** — a child takes the pick
+  from its BASE only while it holds >50% of the base's own paths — the base-vs-path priority by
+  occurrence: a 60/40 sibling split stays on the shared base, a stray one-off read (~/.claude files)
+  can never drag the pick to the drive root the way a longest-common-prefix would, and the old
+  deepest-global-majority rule is subsumed (a global majority is always the top cluster; the descent
+  reproduces its deep pick exactly when concentration is real). Drive/UNC roots + relative paths
+  never vote/win. **The votes** =
   `TranscriptStats::pathsAccessed` (deduped per-FILE, cap 512): the canonical tool path fields
   (Read/Edit/Write/Grep/Glob `file_path`/`notebook_path`/`path`) **plus absolute paths MINED from
   shell `command` strings** (`ExtractPathsFromText` — a QUOTED path is taken whole, spaces + leaf
@@ -1405,14 +1411,14 @@ What works, by area:
   **ON**, enabled only while the mode is Inferred, read back even when disabled): each voting path's
   PARENT dir resolves to its **nearest enclosing git root** (`FindGitRootForDir` — walk-up probing for
   a `.git` DIR or worktree/submodule FILE, nearest wins so worktree work keys the WORKTREE, never a
-  bare drive/share root; memoized per NormDirKey across the scan batch), and a git root holding the
-  same strict majority of the voting paths IS the inferred dir — **as-is, never deeper**: the repo is
-  ONE working area, so an in-repo session infers the repo root == (normally) its launch cwd, which
-  keeps the Inferred mode's colors IN STEP with Shared-per-directory (the "switching modes suddenly
-  recolors my tab" fix — colors now differ only when a session genuinely works OUTSIDE its cwd's
-  repo). Disjoint per-path tallies ⇒ at most one root can exceed half (no tiebreak); no git majority
-  (cross-repo split / mostly non-repo paths) or OFF ⇒ the ancestor majority-deepest above; the
-  resolver is INJECTED (`InferWorkingDirectory`'s 3rd arg) so the picker stays pure/testable.
+  bare drive/share root; memoized per NormDirKey across the scan batch), and a git-root CLUSTER that
+  ranks top answers the repo root — **as-is, never deeper**: the repo is ONE working area, so an
+  in-repo session infers the repo root == (normally) its launch cwd, which keeps the Inferred mode's
+  colors IN STEP with Shared-per-directory (the "switching modes suddenly recolors my tab" fix —
+  colors now differ only when a session genuinely works OUTSIDE its cwd's repo). Repos are clusters
+  like any other ⇒ a cross-repo session picks its most-occurrences repo (plurality), and a repo
+  outranked by a bigger non-repo cluster loses honestly; OFF ⇒ every path clusters by its top-level
+  dir; the resolver is INJECTED (`InferWorkingDirectory`'s 3rd arg) so the picker stays pure/testable.
   **The loop:** re-detected
   mtime-gated + ~15s-throttled off the scanner tick (`_ScanInferredTabColors`, reading the Sessions
   sidecar incrementally), cached persisted on `SessionInfo::inferredWorkingDir` (stored EMPTY when ==

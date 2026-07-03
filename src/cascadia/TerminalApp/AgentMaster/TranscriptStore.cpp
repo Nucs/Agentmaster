@@ -1202,24 +1202,36 @@ namespace Agentmaster
                                        const std::wstring& fallbackDir,
                                        const std::function<std::wstring(const std::wstring&)>& gitRootOf)
     {
-        // Every tool-touched path votes for its whole ancestor DIRECTORY chain (the leaf itself is
-        // excluded: tool paths are mostly files, and a searched-dir input just votes one level
-        // shallower). Candidates begin ONE SEGMENT BELOW the path's root token — a drive root
-        // ("K:") or a UNC share root ("\\server\share") can never win. The winner is the DEEPEST
-        // candidate with a STRICT majority (>50%) of the voting paths; monotone ancestor counts
-        // make the majority set a root-anchored chain, so "deepest majority" is unambiguous. See
-        // the header doc for the rationale (stray-path robustness vs a longest-common-prefix).
-        // With `gitRootOf` (the "Use .git folder to infer" arm), each voting path's PARENT dir
-        // also resolves to its enclosing git root; a strict-majority git ROOT preempts the
-        // ancestor pick — the repo, not the subfolder, is the working area (header doc).
+        // THE RANKING ("ranked and picked by the most reoccurring occurrence"). Every tool-touched
+        // path votes for its whole ancestor DIRECTORY chain (the leaf itself is excluded: tool
+        // paths are mostly files, and a searched-dir input just votes one level shallower);
+        // candidates begin ONE SEGMENT BELOW the path's root token — a drive root ("K:") or a UNC
+        // share root ("\\server\share") can never win. Each voting path then belongs to exactly
+        // one WORK CLUSTER — its enclosing git root (the `gitRootOf` arm) or, outside any repo,
+        // its top-level directory below the root token — and the clusters are RANKED by how many
+        // paths they hold: the STRICT top cluster wins (a tie for the top has no single "most
+        // common" answer -> fallbackDir). A GIT cluster answers its repo root AS-IS (never
+        // deeper — the repo is one working area); a non-git cluster answers by LOCAL-MAJORITY
+        // DESCENT from its top dir — step into a child only while that child holds the strict
+        // majority (>50%) of ITS PARENT's paths — which is what prioritizes between a path and
+        // its BASES by occurrence: the base keeps the pick unless one child genuinely
+        // concentrates it (so a stray one-off read can never drag the pick toward the drive
+        // root, and a 60/40 sibling split stays on the shared base). See the header doc.
         struct DirVote
         {
             int count{};
             size_t depth{}; // segments below the root token (1 == "K:\source")
             std::wstring spelling; // first-seen original spelling (the returned form)
         };
+        // A work cluster: the disjoint per-path grouping the ranking runs over.
+        struct Cluster
+        {
+            int count{};
+            bool git{}; // true == `spelling` is a git ROOT (answered as-is); false == descend from it
+            std::wstring spelling; // the git root, or the top-level dir (== that votes[] spelling)
+        };
         std::unordered_map<std::wstring, DirVote> votes; // keyed by NormDirKey (Rule #8)
-        std::unordered_map<std::wstring, DirVote> gitVotes; // git roots (depth unused), same keying — disjoint per path
+        std::unordered_map<std::wstring, Cluster> clusters; // keyed by NormDirKey of the cluster anchor
         int total = 0; // paths that cast at least one vote
         constexpr size_t kMaxSegmentsPerPath = 64; // sanity bound; real paths are far shallower
 
@@ -1272,6 +1284,7 @@ namespace Agentmaster
             // deliberately not a candidate.
             bool voted = false;
             size_t depth = 0;
+            std::wstring firstPrefix; // the depth-1 dir — the NON-git cluster anchor
             std::wstring parentDir; // the DEEPEST prefix == the path's parent dir (the git-arm probe point)
             for (size_t i = rootEnd; i < p.size() && depth < kMaxSegmentsPerPath; ++i)
             {
@@ -1294,84 +1307,137 @@ namespace Agentmaster
                 }
                 ++v.count;
                 voted = true;
+                if (depth == 1)
+                {
+                    firstPrefix = prefix;
+                }
                 parentDir = prefix;
             }
-            if (voted)
+            if (!voted)
             {
-                ++total;
-                // The git arm: this path's parent dir -> its enclosing git root (empty = not in a
-                // repo). Same eligibility as the ancestor votes (a path that cast none resolves
-                // nothing), one resolve per path — nested repos land on the NEAREST root, so the
-                // per-root tallies are disjoint. A bare drive/share-root result is ignored (a
-                // root can never win, matching the ancestor arm's contract).
-                if (gitRootOf)
+                continue;
+            }
+            ++total;
+            // Cluster assignment. Git arm: this path's parent dir -> its enclosing git root
+            // (empty = not in a repo); nested repos land on the NEAREST root, so per-cluster
+            // tallies stay disjoint. A bare drive/share-root result is ignored (a root can never
+            // win) — such a path clusters by its top-level dir like any non-repo path.
+            std::wstring clusterKey;
+            std::wstring clusterSpelling;
+            bool clusterGit = false;
+            if (gitRootOf)
+            {
+                std::wstring root = gitRootOf(parentDir);
+                for (auto& ch : root)
                 {
-                    std::wstring root = gitRootOf(parentDir);
-                    for (auto& ch : root)
+                    if (ch == L'/')
                     {
-                        if (ch == L'/')
-                        {
-                            ch = L'\\';
-                        }
-                    }
-                    while (!root.empty() && root.back() == L'\\')
-                    {
-                        root.pop_back();
-                    }
-                    bool belowRoot = false; // >=1 segment below the root token (same bar as the vote candidates)
-                    if (root.size() >= 2 && root[0] == L'\\' && root[1] == L'\\')
-                    {
-                        const size_t serverSep = root.find(L'\\', 2);
-                        const size_t shareSep = (serverSep == std::wstring::npos) ? std::wstring::npos : root.find(L'\\', serverSep + 1);
-                        belowRoot = shareSep != std::wstring::npos && shareSep + 1 < root.size();
-                    }
-                    else if (root.size() >= 4 && root[1] == L':' && root[2] == L'\\')
-                    {
-                        belowRoot = true; // "K:\a" at minimum
-                    }
-                    if (belowRoot)
-                    {
-                        auto& g = gitVotes[NormDirKey(root)];
-                        if (g.count == 0)
-                        {
-                            g.spelling = root;
-                        }
-                        ++g.count;
+                        ch = L'\\';
                     }
                 }
+                while (!root.empty() && root.back() == L'\\')
+                {
+                    root.pop_back();
+                }
+                bool belowRoot = false; // >=1 segment below the root token (same bar as the vote candidates)
+                if (root.size() >= 2 && root[0] == L'\\' && root[1] == L'\\')
+                {
+                    const size_t serverSep = root.find(L'\\', 2);
+                    const size_t shareSep = (serverSep == std::wstring::npos) ? std::wstring::npos : root.find(L'\\', serverSep + 1);
+                    belowRoot = shareSep != std::wstring::npos && shareSep + 1 < root.size();
+                }
+                else if (root.size() >= 4 && root[1] == L':' && root[2] == L'\\')
+                {
+                    belowRoot = true; // "K:\a" at minimum
+                }
+                if (belowRoot)
+                {
+                    clusterKey = NormDirKey(root);
+                    clusterSpelling = std::move(root);
+                    clusterGit = true;
+                }
             }
+            if (clusterKey.empty())
+            {
+                clusterKey = NormDirKey(firstPrefix);
+                clusterSpelling = firstPrefix;
+            }
+            auto& cl = clusters[clusterKey];
+            if (cl.count == 0)
+            {
+                cl.git = clusterGit;
+                cl.spelling = std::move(clusterSpelling);
+            }
+            ++cl.count;
         }
         if (total == 0)
         {
             return fallbackDir; // nothing usable touched yet
         }
-        // Git arm first: a git root carrying the strict majority of the voting paths IS the
-        // inferred dir — never refined deeper (the repo is the working area). Disjoint per-path
-        // tallies mean at most ONE root can exceed half, so no tiebreak exists here.
-        for (const auto& kv : gitVotes)
+        // RANK the clusters by occurrences — the strict top wins. A tied top (a 50/50 split across
+        // two repos or two drives) has no single "most reoccurring" cluster -> the launch cwd.
+        const Cluster* top = nullptr;
+        int secondCount = 0;
+        for (const auto& kv : clusters)
         {
-            if (kv.second.count * 2 > total)
+            if (!top || kv.second.count > top->count)
             {
-                return kv.second.spelling;
+                secondCount = top ? top->count : 0;
+                top = &kv.second;
+            }
+            else if (kv.second.count > secondCount)
+            {
+                secondCount = kv.second.count;
             }
         }
-        const DirVote* best = nullptr;
-        const std::wstring* bestKey = nullptr;
-        for (const auto& [key, v] : votes)
+        if (!top || top->count <= secondCount)
         {
-            if (v.count * 2 <= total)
-            {
-                continue; // not a strict majority — a minority subtree / stray path
-            }
-            if (!best ||
-                v.depth > best->depth || // deepest majority wins
-                (v.depth == best->depth && key < *bestKey)) // same depth (case-variant spellings collapse via NormDirKey, so a genuine tie is two distinct dirs) -> lexicographic determinism
-            {
-                best = &v;
-                bestKey = &key;
-            }
+            return fallbackDir; // tied top rank
         }
-        return best ? best->spelling : fallbackDir; // no majority (e.g. split across drives) -> the launch cwd
+        if (top->git)
+        {
+            return top->spelling; // the repo root, as-is (never a subfolder of it)
+        }
+        // Local-majority descent inside the winning cluster: from its top dir, step into the child
+        // holding the strict majority of the CURRENT dir's paths; stop where no child does — that
+        // base then IS the answer. Sibling counts are disjoint (each path passes through exactly
+        // one child), so a majority child is necessarily the unique maximum: tied children can
+        // never clear the bar, and the base keeps the pick.
+        std::wstring curKey = NormDirKey(top->spelling);
+        const auto curIt = votes.find(curKey);
+        if (curIt == votes.end())
+        {
+            return fallbackDir; // structurally unreachable (every clustered path voted its depth-1 dir)
+        }
+        const DirVote* cur = &curIt->second;
+        for (;;)
+        {
+            const DirVote* bestChild = nullptr;
+            const std::wstring* bestChildKey = nullptr;
+            for (const auto& [key, v] : votes)
+            {
+                if (v.depth != cur->depth + 1 ||
+                    key.size() <= curKey.size() ||
+                    key[curKey.size()] != L'\\' ||
+                    key.compare(0, curKey.size(), curKey) != 0)
+                {
+                    continue; // not a direct child of the current dir
+                }
+                if (!bestChild || v.count > bestChild->count ||
+                    (v.count == bestChild->count && key < *bestChildKey)) // determinism only — a tie can never descend
+                {
+                    bestChild = &v;
+                    bestChildKey = &key;
+                }
+            }
+            if (!bestChild || bestChild->count * 2 <= cur->count)
+            {
+                break; // no child concentrates a majority of this base's paths — the base wins
+            }
+            cur = bestChild;
+            curKey = *bestChildKey;
+        }
+        return cur->spelling;
     }
 
     std::wstring FindGitRootForDir(const std::wstring& dir)

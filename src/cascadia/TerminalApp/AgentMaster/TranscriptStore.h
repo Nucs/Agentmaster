@@ -251,35 +251,45 @@ namespace Agentmaster
     // Infer the directory a session ACTUALLY works in from its tool-touched paths — the files it
     // read / edited / created, the dirs it searched, AND the absolute paths its shell commands
     // named (ExtractPathsFromText above): TranscriptStats::pathsAccessed, already a deduped
-    // per-file set (so one file edited 50 times votes once). Every path votes for its
-    // whole ancestor DIRECTORY chain (its leaf excluded — tool paths are mostly files), and the
-    // inferred dir is the DEEPEST directory holding a STRICT MAJORITY (>50%) of the votes: "the
-    // most common shared path, ranked+picked by occurrence". Ancestor counts are monotone
-    // (a parent's count >= a child's), so the majority set is a root-anchored chain and "deepest
-    // majority" is well-defined; requiring the majority is what keeps a stray one-off read (a
-    // ~/.claude settings file, a temp dir) from dragging the pick toward the drive root the way a
-    // plain longest-common-prefix would, while depth preference keeps it from settling on a
-    // too-shallow ancestor. Drive/UNC roots themselves never win (candidates start one segment
-    // below the root token); a count/depth tie breaks lexicographically (determinism). Paths are
-    // separator-normalized and compared by NormDirKey (case-insensitive on Windows, Rule #8); the
-    // returned spelling is the first-seen original. No majority anywhere (paths split across
-    // drives) or no usable paths => `fallbackDir` (the session's launch cwd). Pure.
+    // per-file set (so one file edited 50 times votes once).
     //
-    // `gitRootOf` — the "Use .git folder to infer" arm (AppSettings::inferGitRoot, default ON).
-    // When provided, it maps a DIRECTORY to its enclosing git ROOT (the nearest ancestor holding a
-    // `.git` entry — dir or worktree/submodule FILE; empty = not in a repo). Each voting path's
-    // PARENT dir resolves through it, the git roots are tallied, and a git root holding the same
-    // STRICT MAJORITY of the voting paths IS the inferred dir — as-is, never deeper: a repo is ONE
-    // working area, so a session concentrated in `repo\src\cascadia` infers `repo`, which normally
-    // == its launch cwd (the "switching modes suddenly recolors my tab" fix — the shared-per-dir
-    // and inferred modes then agree on the key). Nested repos (a worktree under the main checkout)
-    // resolve per-path to the NEAREST root, so worktree work keys the worktree, not the outer
-    // repo. Tallies are disjoint per path => at most one root can hold a strict majority (no
-    // tiebreak needed). A resolver result that is a bare drive/share root is ignored (roots never
-    // win, same as the ancestor arm). No git majority (paths split across repos, or mostly
-    // outside any repo) => fall through to the ancestor majority-deepest above. The resolver is
-    // injected so this stays PURE (the real caller wraps FindGitRootForDir, memoized); {} == the
-    // classic two-arg behavior.
+    // THE RANKING ("ranked and picked by the most reoccurring occurrence"). Every path votes for
+    // its whole ancestor DIRECTORY chain (its leaf excluded — tool paths are mostly files), and
+    // belongs to exactly one WORK CLUSTER: its enclosing git ROOT (when `gitRootOf` is provided)
+    // or, outside any repo, its TOP-LEVEL directory below the drive/UNC-share root. Clusters are
+    // disjoint (each path counts in exactly one), so ranking them by occurrence count is
+    // well-defined — the monotone ancestor counts that make raw per-directory ranking degenerate
+    // (a base always holds >= its child, so "most occurrences" alone would always answer the
+    // shallowest dir) don't apply across clusters. The pick:
+    //   1. The STRICT top-ranked cluster wins — plurality, no majority needed (40/35/25 across
+    //      three repos picks the 40). A tie for the top has no single "most common" answer =>
+    //      `fallbackDir` (the launch cwd).
+    //   2. A GIT cluster answers its repo root AS-IS (never deeper — the repo is ONE working
+    //      area, so an in-repo session infers the repo == normally its launch cwd, keeping the
+    //      Inferred mode's colors in step with shared-per-directory).
+    //   3. A NON-git cluster answers by LOCAL-MAJORITY DESCENT — from the cluster's top dir,
+    //      step into a child only while that child holds the STRICT majority (>50%) of ITS
+    //      PARENT's paths, and answer where the descent stops. This is the base-vs-path
+    //      prioritization by occurrence: the BASE keeps the pick unless one child genuinely
+    //      concentrates it (a 60/40 sibling split stays on the shared base; a stray one-off read
+    //      can never drag the pick toward the drive root the way a longest-common-prefix would;
+    //      sibling counts are disjoint, so a majority child is the unique max — tied children
+    //      never descend).
+    // Drive/UNC roots never vote or win; relative / rootless paths are ignored; paths are
+    // separator-normalized and compared by NormDirKey (case-insensitive on Windows, Rule #8);
+    // returned spellings are first-seen originals. No usable paths or a tied top => fallbackDir.
+    // (The old strict-majority-of-total rule is SUBSUMED: a global-majority dir's cluster is
+    // necessarily the strict top, and the descent reproduces the deep pick exactly when the
+    // concentration is real.) Pure.
+    //
+    // `gitRootOf` — the "Use .git folder to infer" arm (AppSettings::inferGitRoot, default ON):
+    // maps a DIRECTORY to its enclosing git ROOT (the nearest ancestor holding a `.git` entry —
+    // dir or worktree/submodule FILE; empty = not in a repo). Each voting path's PARENT dir
+    // resolves through it; nested repos (a worktree under the main checkout) land on the NEAREST
+    // root, so worktree work keys the worktree, not the outer repo. A resolver result that is a
+    // bare drive/share root is ignored (that path clusters by its top-level dir instead). The
+    // resolver is injected so this stays PURE (the real caller wraps FindGitRootForDir,
+    // memoized); {} == cluster every path by its top-level dir.
     std::wstring InferWorkingDirectory(const std::vector<std::wstring>& paths,
                                        const std::wstring& fallbackDir,
                                        const std::function<std::wstring(const std::wstring&)>& gitRootOf = {});
