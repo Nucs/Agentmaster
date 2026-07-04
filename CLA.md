@@ -1,15 +1,11 @@
 # Agentmaster Contributor License Agreement (CLA)
 
-> **DRAFT — NOT YET LEGAL ADVICE.** This agreement is what preserves the
-> project's ability to offer a **commercial license** alongside the AGPL (see
-> [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)). It is modeled on the
-> structure of the **Harmony Individual CLA (HA-CLA-I), "inbound = any"
-> variant**, and the **Apache Individual CLA (ICLA)**. Before you rely on it,
-> **replace this draft with the authoritative text of a vetted template**
-> (generate one at <https://www.harmonyagreements.org/> or adapt the Apache
-> ICLA) and have it reviewed by counsel — the wording of the license grant
-> below is the single clause our commercial dual-licensing depends on, so it is
-> worth a real review.
+> This is the Contributor License Agreement for the **Agentmaster** project. It
+> lets the project offer a **commercial license** alongside the AGPL (see
+> [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)) by granting the maintainer the
+> right to relicense contributions (§2). It is adapted from the **Harmony
+> Individual CLA (HA-CLA-I, "inbound = any")** and the **Apache Individual CLA
+> (ICLA)**. By submitting a Contribution, you agree to these terms.
 
 By submitting a Contribution to the Agentmaster project ("the Project"), You
 accept and agree to the following terms for any past and future Contributions
@@ -110,9 +106,7 @@ Contributions, and We are **not obligated to accept or use** any Contribution.
 
 ## 7. Miscellaneous
 
-This Agreement is governed by the laws of **[JURISDICTION — REQUIRED: set to the
-maintainer's jurisdiction of residence/incorporation, or a neutral, well-understood
-forum, with counsel, before the CLA gate is relied upon]**, excluding its
+This Agreement is governed by the laws of **the State of Israel**, excluding its
 conflict-of-laws rules. **We may assign this Agreement and the licenses granted to
 Us, in whole or in part, to any successor to the stewardship of the Project or any
 acquirer of the Project or substantially all of its assets.** This Agreement sets
@@ -130,7 +124,5 @@ check passes.
 
 ---
 
-*Template lineage: Harmony Agreements HA-CLA-I (CC BY 4.0) and the Apache
-Software Foundation Individual CLA. This DRAFT adapts their structure; the
-operative text must be finalized with legal counsel before the CLA gate is
-relied upon.*
+*Agentmaster CLA v1.0 (2026). Adapted from the Harmony Agreements HA-CLA-I
+(CC BY 4.0) and the Apache Software Foundation Individual CLA.*

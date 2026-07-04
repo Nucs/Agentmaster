@@ -44,4 +44,4 @@ claim ownership of that third-party code.
 ---
 
 > This document is an offer to negotiate, not a license grant in itself. The
-> binding terms are those of the signed commercial agreement. Not legal advice.
+> binding terms are those of the signed commercial agreement.

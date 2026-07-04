@@ -35,5 +35,4 @@ nominative (to identify the upstream project) and does not imply endorsement.
 ---
 
 > Trademark rights are separate from the software license. The `LICENSE` file
-> covers the code; this file covers the name and marks. Not legal advice —
-> have trademark usage reviewed by counsel before relying on it commercially.
+> covers the code; this file covers the name and marks.
