@@ -707,6 +707,30 @@ void TestTabColorModes()
         CHECK(SessionColorKeyDir(TabColorMode::Individual, s) == L"K:\\repo", "key dir: individual mode returns the working dir (callers branch on the mode before grouping)");
     }
 
+    // --- EffectiveWorkingDir: the ONE "which directory does this session WORK in" answer, shared
+    // by every semantic surface (tree grouping / dir scope / board card / launch pre-aim /
+    // Open-New-Here / overlay subline+Open Path+Copy Path). SessionColorKeyDir DELEGATES to it,
+    // so a card/row can never sit in one directory group while its tab wears another group's color. ---
+    {
+        SessionInfo s;
+        s.id = L"sid-eff";
+        s.workingDir = L"K:\\launchcwd";
+        CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, s) == L"K:\\launchcwd", "effective dir: default mode -> the launch cwd");
+        CHECK(EffectiveWorkingDir(TabColorMode::InferredWorkingDirectory, s) == L"K:\\launchcwd", "effective dir: inferred mode, no inference yet -> the launch cwd (fresh session behaves classic)");
+        s.inferredWorkingDir = L"Q:\\other\\repo";
+        CHECK(EffectiveWorkingDir(TabColorMode::InferredWorkingDirectory, s) == L"Q:\\other\\repo", "effective dir: inferred mode + an inference -> the INFERRED dir (where the session actually works)");
+        CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, s) == L"K:\\launchcwd", "effective dir: default mode ignores a dormant inference (mode switch restores cwd semantics)");
+        CHECK(EffectiveWorkingDir(TabColorMode::Individual, s) == L"K:\\launchcwd", "effective dir: Individual mode ignores the inference too (its scan never runs there)");
+        // The never-drift contract: the color key IS the effective dir, in every mode x inference state.
+        for (const auto mode : { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory })
+        {
+            CHECK(SessionColorKeyDir(mode, s) == EffectiveWorkingDir(mode, s), "never-drift: SessionColorKeyDir == EffectiveWorkingDir (with an inference)");
+            SessionInfo bare = s;
+            bare.inferredWorkingDir.clear();
+            CHECK(SessionColorKeyDir(mode, bare) == EffectiveWorkingDir(mode, bare), "never-drift: SessionColorKeyDir == EffectiveWorkingDir (no inference)");
+        }
+    }
+
     // --- ResolveSessionColorHex: the one read-side resolution every display surface shares ---
     {
         SeedDirColors(0xA11CE5EEull); // deterministic probe orders (no disk write — the seed is in-memory)

@@ -716,6 +716,14 @@ namespace
         o.Set(L"id", json::Value::MkStr(s.id));
         o.Set(L"title", json::Value::MkStr(s.title));
         o.Set(L"workingDir", json::Value::MkStr(s.workingDir));
+        if (!s.inferredWorkingDir.empty())
+        {
+            // Inferred working dir (tab color modes): the dir the session's tool calls say it ACTUALLY
+            // works in — persisted on the record, stored empty when it agrees with the launch cwd, so
+            // "present" already means "working somewhere else". A raw introspection FACT (unconditional
+            // on the app's tabColorMode — the CLI reports what's known, not a mode-resolved view).
+            o.Set(L"inferredWorkingDir", json::Value::MkStr(s.inferredWorkingDir));
+        }
         if (lc && !lc->facts.cwd.empty() && !IEquals(lc->facts.cwd, s.workingDir))
         {
             o.Set(L"liveCwd", json::Value::MkStr(lc->facts.cwd));
@@ -1148,7 +1156,9 @@ namespace
             {
                 continue; // default: only OPEN (live) sessions, like the Board
             }
-            if (!a.dirFilter.empty() && !IContainsPath(s.workingDir, a.dirFilter))
+            // --dir matches the launch cwd OR the inferred working dir (a session detected working in
+            // X is findable by `--dir X` even when it launched elsewhere) — additive, never fewer rows.
+            if (!a.dirFilter.empty() && !IContainsPath(s.workingDir, a.dirFilter) && !(!s.inferredWorkingDir.empty() && IContainsPath(s.inferredWorkingDir, a.dirFilter)))
             {
                 continue;
             }
@@ -1439,6 +1449,12 @@ namespace
         OutLn(L"╾─ " + Trunc(js.StrAt(L"title"), 80) + L" ──");
         OutLn(L"  id:        " + js.StrAt(L"id"));
         OutLn(L"  dir:       " + js.StrAt(L"workingDir") + (js.Find(L"liveCwd") ? L"   (live: " + js.StrAt(L"liveCwd") + L")" : L""));
+        if (js.Find(L"inferredWorkingDir"))
+        {
+            // Present only when the inferred-workdir scan detected the session working somewhere
+            // OTHER than its launch cwd (the record stores empty when they agree).
+            OutLn(L"  works in:  " + js.StrAt(L"inferredWorkingDir"));
+        }
         if (!js.StrAt(L"branch").empty())
         {
             OutLn(L"  branch:    " + js.StrAt(L"branch"));

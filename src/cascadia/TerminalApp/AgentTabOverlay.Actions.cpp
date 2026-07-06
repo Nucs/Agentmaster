@@ -256,8 +256,11 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        // Prefer the persisted M-axis workingDir; fall back to the live PEB cwd (same as row 2).
-        std::wstring dir = !info->workingDir.empty() ? info->workingDir : info->liveCwd;
+        // The session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir under the Inferred
+        // tab-color mode, else the persisted M-axis workingDir; the same resolution as row 2); fall
+        // back to the live PEB cwd. Opens where the session actually WORKS — the folder row 2 names.
+        const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(static_cast<::Agentmaster::TabColorMode>(_tabColorMode), *info);
+        std::wstring dir = !effDir.empty() ? effDir : info->liveCwd;
         if (!dir.empty())
         {
             // Nav audit: the user clicked the overlay's folder button (Open Path) — opens the session's
@@ -275,7 +278,7 @@ namespace winrt::TerminalApp::implementation
     // helpers; both menus call it so they can never drift apart. `which` is the copy-menu code (see the
     // header). Synchronous clipboard writes (cases 0-4) run on the calling UI thread; the transcript /
     // summary cases (5/6) read off-thread and hop back via `dispatcher`.
-    void CopySessionField(SessionRegistry& registry, const std::wstring& sessionId, int which, const DispatcherQueue& dispatcher, bool wrapNewlines, bool truncate)
+    void CopySessionField(SessionRegistry& registry, const std::wstring& sessionId, int which, const DispatcherQueue& dispatcher, bool wrapNewlines, bool truncate, int tabColorMode)
     {
         if (sessionId.empty())
         {
@@ -304,9 +307,10 @@ namespace winrt::TerminalApp::implementation
             }
             break;
         }
-        case 1: // Copy Path — the session's working directory
+        case 1: // Copy Path — the session's EFFECTIVE working directory (the inferred dir under the Inferred tab-color mode, else the launch cwd — matches the overlay subline / Open Path)
         {
-            const std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+            const std::wstring effDir = EffectiveWorkingDir(static_cast<TabColorMode>(tabColorMode), s);
+            const std::wstring dir = !effDir.empty() ? effDir : s.liveCwd;
             if (!dir.empty())
             {
                 CopyTextToClipboard(dir);
@@ -348,8 +352,9 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         // Delegate to the shared action (reused by the Triage Board's Copy submenu); the overlay's
-        // mirrored GLOBAL flags drive the Summary case so its render matches the displayed panel.
-        CopySessionField(*_registry, _sessionId, which, _dispatcher, _summaryWrapNewlines, _summaryTruncate);
+        // mirrored GLOBAL flags drive the Summary case so its render matches the displayed panel,
+        // and the mirrored tab-color mode drives the Path case's effective-work-dir resolution.
+        CopySessionField(*_registry, _sessionId, which, _dispatcher, _summaryWrapNewlines, _summaryTruncate, _tabColorMode);
     }
 
 }

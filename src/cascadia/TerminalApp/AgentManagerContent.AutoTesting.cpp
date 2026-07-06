@@ -124,7 +124,7 @@ namespace winrt::TerminalApp::implementation
             titleRow.Children().Append(statePill);
         }
         _planHeaderHost.Children().Append(titleRow);
-        _planHeaderHost.Children().Append(Text(winrt::hstring{ sel->workingDir }, 12, false, 0.6));
+        _planHeaderHost.Children().Append(Text(winrt::hstring{ _WorkDirOf(*sel) }, 12, false, 0.6)); // the EFFECTIVE work dir — matches the tree group / board card / tab color
 
         // reflect autorunner mode on the header toggle
         _UpdateAutorunnerButton(sel->autorunner.mode, true);
@@ -485,9 +485,12 @@ namespace winrt::TerminalApp::implementation
         // value's RED/disabled state even though a valid working dir now shows (the reported bug).
         if (_cwdBox && _registry && !id.empty())
         {
-            if (const auto s = _registry->Get(id); s && !s->workingDir.empty())
+            // Pre-aim Launch / Open-New-Session with the session's EFFECTIVE work dir (_WorkDirOf):
+            // under the Inferred mode a new session opens where the selected one actually WORKS,
+            // matching the dir its card/row/tab color show — else the launch cwd, as before.
+            if (const auto s = _registry->Get(id); s && !_WorkDirOf(*s).empty())
             {
-                _cwdBox.Text(winrt::hstring{ s->workingDir });
+                _cwdBox.Text(winrt::hstring{ _WorkDirOf(*s) });
                 _ValidateLaunchBox();
             }
         }
@@ -1468,7 +1471,7 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto sel = _Selected(_registry->Snapshot()))
             {
-                dir = sel->workingDir;
+                dir = _WorkDirOf(*sel);
             }
         }
         if (dir.empty())
@@ -1478,7 +1481,9 @@ namespace winrt::TerminalApp::implementation
         int applied = 0;
         for (const auto& s : _registry->Snapshot())
         {
-            if (PathEq(s.workingDir, dir))
+            // Match by the EFFECTIVE work dir (_WorkDirOf) — the same key the tree groups and the
+            // scope filters by, so a broadcast hits exactly the sessions shown under that group.
+            if (PathEq(_WorkDirOf(s), dir))
             {
                 _registry->Update(s.id, [&](SessionInfo& ss) { ::Agentmaster::AppendTemplateToQueue(ss.queue, tmpl); });
                 ++applied;

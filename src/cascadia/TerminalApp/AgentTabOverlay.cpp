@@ -401,11 +401,15 @@ namespace winrt::TerminalApp::implementation
 
         // Row 2: "<root workdir folder>/<branch>" — the leaf of the session's working dir joined with
         // its git branch (e.g. C:/folder/myworkdir + "feature/issue123" -> "myworkdir/feature/issue123").
-        // Prefer the persisted M-axis workingDir (the dir the session belongs to); fall back to the live
-        // PEB cwd. Hidden when neither a folder nor a branch is known.
+        // Shows the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir under the
+        // Inferred tab-color mode when the scan detected the session working OUTSIDE its launch cwd,
+        // else the persisted M-axis workingDir); fall back to the live PEB cwd. Hidden when neither a
+        // folder nor a branch is known.
         if (_subline)
         {
-            std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+            const bool inferredShown = static_cast<::Agentmaster::TabColorMode>(_tabColorMode) == ::Agentmaster::TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty();
+            const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(static_cast<::Agentmaster::TabColorMode>(_tabColorMode), s);
+            std::wstring dir = !effDir.empty() ? effDir : s.liveCwd;
             while (!dir.empty() && (dir.back() == L'/' || dir.back() == L'\\'))
             {
                 dir.pop_back(); // strip trailing separators so the leaf isn't empty
@@ -429,13 +433,18 @@ namespace winrt::TerminalApp::implementation
                 _subline.Text(winrt::hstring{ sub });
                 // Row 2 is width-capped + ellipsized and shows only the leaf folder; the tooltip names
                 // what it is and reveals the FULL working path (+ branch) behind it (the Archive-page
-                // reveal-behind-truncation pattern).
+                // reveal-behind-truncation pattern). When the shown dir is the INFERRED one, the tip
+                // also carries the launch cwd so neither directory is ever hidden.
                 std::wstring detail = dir;
                 if (!s.branch.empty())
                 {
                     detail = detail.empty() ? s.branch : (detail + L"  " + kDot + L"  " + s.branch);
                 }
-                const std::wstring tip = std::wstring{ L"Working directory \x00B7 git branch\n" } + detail;
+                std::wstring tip = std::wstring{ inferredShown ? L"Inferred working directory \x00B7 git branch\n" : L"Working directory \x00B7 git branch\n" } + detail;
+                if (inferredShown && !s.workingDir.empty())
+                {
+                    tip += L"\nlaunched in " + s.workingDir;
+                }
                 AgentSetTip(_subline, winrt::hstring{ tip });
                 _subline.Visibility(Visibility::Visible);
             }
@@ -559,6 +568,25 @@ namespace winrt::TerminalApp::implementation
         if (_summaryRoot)
         {
             _summaryRoot.Opacity(_restOpacity);
+        }
+    }
+
+    // Agentmaster (inferred working dir): adopt the GLOBAL tab-color MODE (seeded on attach, broadcast
+    // by _ReapplyManagedTabColors on a cog Save / cross-window apply). It keys the EFFECTIVE work dir
+    // the badge shows/acts on — row 2's "<workdir folder>/<branch>" subline, Open Path, and Copy Path
+    // resolve through EffectiveWorkingDir, so under InferredWorkingDirectory they follow the dir the
+    // session actually works in (the same dir its tab color / board card / tree group key on). A
+    // change re-renders a LINKED badge (an observe badge shows no dir — nothing to redo).
+    void AgentTabOverlay::SetTabColorMode(int mode)
+    {
+        if (_tabColorMode == mode)
+        {
+            return;
+        }
+        _tabColorMode = mode;
+        if (!_pending && !_sessionId.empty() && _registry)
+        {
+            _Refresh(); // repaint row 2 under the new mode
         }
     }
 

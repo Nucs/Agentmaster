@@ -2498,11 +2498,13 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: context-menu "New Session Here" -> spawn a managed agent session in THIS tab's
         // working directory (a new, independent conversation). Pick the dir: a managed Claude/Codex
-        // tab uses its recorded workingDir (a claude/codex tab emits no OSC cwd, so the live control
-        // cwd would be empty); otherwise the live OSC-reported cwd of the active control (a shell tab
-        // 'cd'd somewhere). Spawn the SAME agent kind the tab hosts — Codex for a managed codex tab,
-        // else Claude (the default for shells / unmanaged tabs). An empty dir falls back to
-        // %USERPROFILE% inside the launch seam.
+        // tab uses its EFFECTIVE work dir (EffectiveWorkingDir — the inferred dir under the Inferred
+        // tab-color mode, else its recorded workingDir; a claude/codex tab emits no OSC cwd, so the
+        // live control cwd would be empty), matching the Manager's Open-New-Session-Here; otherwise
+        // the live OSC-reported cwd of the active control (a shell tab 'cd'd somewhere). Spawn the
+        // SAME agent kind the tab hosts — Codex for a managed codex tab, else Claude (the default
+        // for shells / unmanaged tabs). An empty dir falls back to %USERPROFILE% inside the launch
+        // seam.
         hostingTab.NewSessionHereRequested([weakTab, weakThis]() {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };
@@ -2516,7 +2518,7 @@ namespace winrt::TerminalApp::implementation
             {
                 if (const auto s = page->_sessionRegistry->Get(sid))
                 {
-                    dir = s->workingDir;
+                    dir = ::Agentmaster::EffectiveWorkingDir(page->_appSettings.tabColorMode, *s);
                     codex = (s->kind == ::Agentmaster::AgentKind::Codex);
                 }
             }
@@ -2694,7 +2696,8 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             CopySessionField(*page->_sessionRegistry, sid, which, DispatcherQueue::GetForCurrentThread(),
-                             page->_appSettings.summaryPanelWrapNewlines, page->_appSettings.summaryPanelTruncate);
+                             page->_appSettings.summaryPanelWrapNewlines, page->_appSettings.summaryPanelTruncate,
+                             static_cast<int>(page->_appSettings.tabColorMode));
         });
 
         // Agentmaster: the "Copy >" submenu is session-only — show it exactly where the per-tab overlay's

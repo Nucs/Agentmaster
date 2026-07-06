@@ -206,6 +206,16 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    std::wstring AgentManagerContent::_WorkDirOf(const ::Agentmaster::SessionInfo& s) const
+    {
+        // Agentmaster (inferred working dir): the ONE dir this Manager groups/scopes/displays a
+        // session by — the effective work dir under the CURRENT tab-color mode (Persistence.h:
+        // the inferred dir when the Inferred mode knows one, else the launch cwd). Every tree/
+        // board/Auto-Testing dir read routes here so a card can never sit in a different group
+        // than its tab color says. Launch/resume/fork keep reading s.workingDir directly.
+        return ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s);
+    }
+
     void AgentManagerContent::SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry)
     {
         // Detach any previous observer (defensive — SetRegistry is normally called exactly once).

@@ -404,6 +404,14 @@ namespace winrt::TerminalApp::implementation
         void _OnSplitterMoved(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e, bool vertical);
         void _OnSplitterReleased(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
 
+        // Agentmaster (inferred working dir): the session's EFFECTIVE working directory under the
+        // CURRENT tab-color mode — ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s).
+        // The ONE dir every Manager surface groups/scopes/displays/opens-here by, so the tree, the
+        // board, the Auto Testing, and the tab color always tell the same story: the inferred dir
+        // when the Inferred mode detected the session working OUTSIDE its launch cwd, else the cwd.
+        // Launch/resume/fork mechanics keep reading s.workingDir (the terminal's real cwd).
+        std::wstring _WorkDirOf(const ::Agentmaster::SessionInfo& s) const;
+
         // Explorer-tree session actions: right-click context menu (Rename / Archive, then Open New
         // Session Here in the row's cwd as the last item) + double-click to activate. `anchor` is the
         // element the menu is attached to (board card / tree row / the card's ⋯ button) — the Tags

@@ -31,13 +31,19 @@ namespace winrt::TerminalApp::implementation
     //   6 = Summary               (the FULL session-end.js box — analyzed off-thread)
     // wrapNewlines / truncate are the GLOBAL summary-panel flags (AppSettings::summaryPanelWrapNewlines /
     // summaryPanelTruncate) that govern how the Summary (case 6) renders its messages; they are
-    // ignored by the other cases. A no-op for an unknown session id or an empty field. The clipboard
-    // write happens on the UI thread (cases 0-4 synchronously; 5/6 hop back via `dispatcher`), so call
-    // this from the UI thread and pass that thread's DispatcherQueue.
+    // ignored by the other cases. tabColorMode is the GLOBAL AppSettings::tabColorMode as an int
+    // (this header stays engine-include-free): case 1 (Path) resolves the session's EFFECTIVE work
+    // dir through it (EffectiveWorkingDir — the INFERRED dir under InferredWorkingDirectory, else
+    // the launch cwd), matching the overlay subline / board card / tree group; the default 0
+    // (WorkingDirectory) reproduces the prior launch-cwd copy. A no-op for an unknown session id or
+    // an empty field. The clipboard write happens on the UI thread (cases 0-4 synchronously; 5/6
+    // hop back via `dispatcher`), so call this from the UI thread and pass that thread's
+    // DispatcherQueue.
     void CopySessionField(::Agentmaster::SessionRegistry& registry,
                           const std::wstring& sessionId,
                           int which,
                           const winrt::Windows::System::DispatcherQueue& dispatcher,
                           bool wrapNewlines,
-                          bool truncate);
+                          bool truncate,
+                          int tabColorMode = 0);
 }

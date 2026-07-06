@@ -94,6 +94,17 @@ namespace winrt::TerminalApp::implementation
         // Enforces rest <= hover defensively. Call on the UI thread.
         void SetOverlayOpacities(double rest, double hover);
 
+        // Agentmaster (inferred working dir): the GLOBAL tab-color MODE (AppSettings::tabColorMode as
+        // an int — ::Agentmaster::TabColorMode's numeric values; kept as int so this header stays
+        // engine-include-free), mirrored in by the page — on attach (seed) and on cog Save / cross-
+        // window broadcast (_ReapplyManagedTabColors). Row 2 (the "<workdir folder>/<branch>" subline),
+        // Open Path, and Copy Path resolve the session's EFFECTIVE work dir through it
+        // (EffectiveWorkingDir: the INFERRED dir under InferredWorkingDirectory when the scan detected
+        // the session working outside its launch cwd, else the persisted workingDir) — so the badge
+        // tells the same directory story as the tab color / board card / tree group. A change
+        // re-renders a linked badge. Call on the UI thread.
+        void SetTabColorMode(int mode);
+
         // Agentmaster (TAB_OVERLAY.md summary panel): whether the panel preserves a message's real
         // newlines (true) or collapses each message to one line with a literal "\n" (false, the default
         // session-end.js look). A GLOBAL setting (AppSettings::summaryPanelWrapNewlines), mirrored in here
@@ -215,6 +226,7 @@ namespace winrt::TerminalApp::implementation
         bool _hoverWired{ false }; // _WireHover ran once (Initialize / first ShowActivity)
         double _restOpacity{ 0.50 }; // GLOBAL AppSettings::tabOverlayRestOpacity mirror (dim, at rest) — page-driven (seed + Save/broadcast)
         double _hoverOpacity{ 1.0 }; // GLOBAL AppSettings::tabOverlayHoverOpacity mirror (bright, on hover / copy-menu-open) — page-driven
+        int _tabColorMode{ 0 }; // GLOBAL AppSettings::tabColorMode mirror as int (0 == WorkingDirectory) — page-driven; keys the EFFECTIVE work dir the subline/Open Path/Copy Path show (SetTabColorMode)
         std::wstring _lastActivitySig; // last kind rendered by ShowActivity (skip redundant re-renders)
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         uint64_t _observerToken{ 0 }; // ::Agentmaster::ObserverToken (uint64_t; avoid the header here)

@@ -138,6 +138,9 @@ namespace winrt::TerminalApp::implementation
 
         // Ordered, de-duplicated working directories. Paths that differ only by case (on
         // Windows) collapse into one root; the first-seen spelling becomes its display name.
+        // Grouped by the EFFECTIVE work dir (_WorkDirOf — the inferred dir under the Inferred tab-
+        // color mode, else the launch cwd), so a session detected working OUTSIDE its cwd sits
+        // under the directory it actually works in — the same key its tab color wears.
         std::vector<std::wstring> dirs;
         for (const auto& s : scoped)
         {
@@ -145,9 +148,9 @@ namespace winrt::TerminalApp::implementation
             {
                 continue; // closed sessions are shown in the Sessions browser, not the tree (FAVORITES.md)
             }
-            if (std::find_if(dirs.begin(), dirs.end(), [&](const std::wstring& d) { return PathEq(d, s.workingDir); }) == dirs.end())
+            if (std::find_if(dirs.begin(), dirs.end(), [&](const std::wstring& d) { return PathEq(d, _WorkDirOf(s)); }) == dirs.end())
             {
-                dirs.push_back(s.workingDir);
+                dirs.push_back(_WorkDirOf(s));
             }
         }
 
@@ -183,7 +186,7 @@ namespace winrt::TerminalApp::implementation
                 DirAgg agg;
                 for (const auto& s : scoped)
                 {
-                    if (s.live && PathEq(s.workingDir, dir))
+                    if (s.live && PathEq(_WorkDirOf(s), dir))
                     {
                         const auto k = MakeSortKey(s);
                         agg.maxCreated = (std::max)(agg.maxCreated, k.created);
@@ -235,7 +238,7 @@ namespace winrt::TerminalApp::implementation
         std::stable_partition(dirs.begin(), dirs.end(), [&](const std::wstring& d) {
             for (const auto& s : scoped)
             {
-                if (s.live && PathEq(s.workingDir, d) && isLocal(s))
+                if (s.live && PathEq(_WorkDirOf(s), d) && isLocal(s))
                 {
                     return true;
                 }
@@ -258,7 +261,7 @@ namespace winrt::TerminalApp::implementation
             int count = 0;
             for (const auto& s : scoped)
             {
-                if (s.live && PathEq(s.workingDir, dir))
+                if (s.live && PathEq(_WorkDirOf(s), dir))
                 {
                     ++count;
                 }
@@ -323,7 +326,7 @@ namespace winrt::TerminalApp::implementation
                 std::vector<const SessionInfo*> localRows, outsideRows;
                 for (const auto& s : scoped)
                 {
-                    if (s.live && PathEq(s.workingDir, dir))
+                    if (s.live && PathEq(_WorkDirOf(s), dir))
                     {
                         (isLocal(s) ? localRows : outsideRows).push_back(&s);
                     }
@@ -548,7 +551,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
-                rowBtn.ContextFlyout(_MakeSessionMenu(id, s.workingDir, rowBtn)); // the row anchors its Tags panel
+                rowBtn.ContextFlyout(_MakeSessionMenu(id, _WorkDirOf(s), rowBtn)); // the row anchors its Tags panel; Open-New-Here targets the EFFECTIVE work dir (the group this row sits under)
                 AgentSetTip(rowBtn, L"Click to select this session \x2014 double-click or Enter jumps to its live tab; F2 renames, Del archives, right-click for more.");
                 // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
                 // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
@@ -1548,9 +1551,11 @@ namespace winrt::TerminalApp::implementation
                     if (self->_registry)
                     {
                         // The Summary case renders with this window's GLOBAL summary-panel flags, so a
-                        // copied Summary matches what the panels show (wrap/truncate).
+                        // copied Summary matches what the panels show (wrap/truncate); the tab-color
+                        // mode drives the Path case's effective-work-dir resolution.
                         CopySessionField(*self->_registry, id, which, self->_dispatcher,
-                                         self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate);
+                                         self->_appSettings.summaryPanelWrapNewlines, self->_appSettings.summaryPanelTruncate,
+                                         static_cast<int>(self->_appSettings.tabColorMode));
                     }
                 }
             });
@@ -1818,11 +1823,13 @@ namespace winrt::TerminalApp::implementation
             if (const auto s = _registry->Get(id))
             {
                 // Un-collapse the session's directory group (PathEq-aware: the collapsed set keeps
-                // the first-seen spelling, which can differ from workingDir by case/slashes).
+                // the first-seen spelling, which can differ from workingDir by case/slashes). The
+                // group key is the EFFECTIVE work dir (_WorkDirOf) — the dir the tree renders this
+                // row under — not necessarily the launch cwd.
                 bool uncollapsed = false;
                 for (auto it = _collapsedDirs.begin(); it != _collapsedDirs.end();)
                 {
-                    if (PathEq(*it, s->workingDir))
+                    if (PathEq(*it, _WorkDirOf(*s)))
                     {
                         it = _collapsedDirs.erase(it);
                         uncollapsed = true;

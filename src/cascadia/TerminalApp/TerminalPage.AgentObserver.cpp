@@ -281,7 +281,7 @@ namespace
                                                                   const std::wstring& folderBranch,
                                                                   const std::wstring& stateText,
                                                                   const std::wstring& metaText,
-                                                                  const std::wstring& inferredDir,
+                                                                  const std::wstring& dirDetailLine,
                                                                   const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
                                                                   double tagsOpacity,
                                                                   const winrt::hstring& bodyText)
@@ -364,19 +364,20 @@ namespace
             mt.Text(winrt::hstring{ metaText });
             col.Children().Append(mt);
         }
-        // Inferred working directory (tab color modes): where the session's tool calls say it
-        // ACTUALLY works — shown only when an inference exists that differs from the launch cwd
-        // (SessionInfo::inferredWorkingDir is stored empty otherwise), as the FULL path (the header
-        // shows only the cwd's leaf; the whole point of this line is the "it's working somewhere
-        // else" detail).
-        if (!inferredDir.empty())
+        // Directory detail (tab color modes / inferred working dir): the SECOND directory the header
+        // leaf can't carry, pre-composed by the caller as a full line — under the Inferred mode the
+        // header shows the INFERRED dir's leaf, so this reads "launched in → <cwd>" (the full path);
+        // in the other modes an existing (dormant) inference still reads "inferred → <inferred dir>".
+        // Shown only when the two dirs actually differ (SessionInfo::inferredWorkingDir is stored
+        // empty when the inference lands on the cwd).
+        if (!dirDetailLine.empty())
         {
             TextBlock inf;
             inf.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
             inf.FontSize(11);
             inf.TextWrapping(TextWrapping::Wrap);
             inf.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
-            inf.Text(winrt::hstring{ L"inferred \x2192 " + inferredDir });
+            inf.Text(winrt::hstring{ dirDetailLine });
             col.Children().Append(inf);
         }
         // Bookmark TAGS — each tag's name over a 2px UNDERSCORE in its picked color (the badge
@@ -2036,8 +2037,13 @@ namespace winrt::TerminalApp::implementation
         const std::wstring metaText = TtJoin(metaParts, L"  \x00B7  ");
 
         // Header (right side): the leaf working-dir folder + "/" + git branch (the overlay subline) -- the
-        // full path is too long to read at a glance, so show only the folder name and the branch.
-        std::wstring dir = !s.workingDir.empty() ? s.workingDir : s.liveCwd;
+        // full path is too long to read at a glance, so show only the folder name and the branch. The
+        // dir is the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir under the
+        // Inferred tab-color mode, else the launch cwd), matching the overlay subline / board card /
+        // tree group; the dim detail line below carries whichever dir the header leaf can't.
+        const bool inferredActive = _appSettings.tabColorMode == ::Agentmaster::TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty();
+        const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s);
+        std::wstring dir = !effDir.empty() ? effDir : s.liveCwd;
         while (!dir.empty() && (dir.back() == L'/' || dir.back() == L'\\'))
         {
             dir.pop_back();
@@ -2053,10 +2059,20 @@ namespace winrt::TerminalApp::implementation
             folderBranch = folderBranch.empty() ? s.branch : (folderBranch + L"/" + s.branch);
         }
 
-        // The INFERRED working directory (tab color modes) — non-empty only when the scan detected
-        // the session working somewhere OTHER than its launch cwd (stored empty when they agree),
-        // so "present" already means "worth showing".
-        const std::wstring inferredDir = s.inferredWorkingDir;
+        // The directory DETAIL line — non-empty only when the scan detected the session working
+        // somewhere OTHER than its launch cwd (SessionInfo::inferredWorkingDir is stored empty when
+        // they agree), so "present" already means "worth showing". Under the Inferred mode the header
+        // already names the inferred dir, so the detail carries the LAUNCH cwd ("launched in → …");
+        // in the other modes it keeps the classic "inferred → …" full inferred path.
+        std::wstring dirDetailLine;
+        if (inferredActive && !s.workingDir.empty())
+        {
+            dirDetailLine = L"launched in \x2192 " + s.workingDir;
+        }
+        else if (!s.inferredWorkingDir.empty())
+        {
+            dirDetailLine = L"inferred \x2192 " + s.inferredWorkingDir;
+        }
 
         const std::wstring title = s.title.empty() ? std::wstring{ L"(untitled)" } : s.title;
 
@@ -2115,7 +2131,7 @@ namespace winrt::TerminalApp::implementation
         sig += L'\x1f';
         sig += metaText;
         sig += L'\x1f';
-        sig += inferredDir;
+        sig += dirDetailLine;
         sig += L'\x1f';
         sig += tagsSpec;
         sig += L'\x1f';
@@ -2130,7 +2146,7 @@ namespace winrt::TerminalApp::implementation
         sig += std::to_wstring(bodyMtime);
         if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, inferredDir, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig });
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig });
             _tabTooltipSig[sessionId] = sig;
         }
 
@@ -2921,6 +2937,11 @@ namespace winrt::TerminalApp::implementation
         // (AppSettings::tabOverlayRestOpacity / tabOverlayHoverOpacity) — seed this overlay; the cog's
         // "Overlay opacity" slider re-applies them live via _RefreshOverlayOpacities (Save + broadcast).
         overlay->SetOverlayOpacities(_appSettings.tabOverlayRestOpacity, _appSettings.tabOverlayHoverOpacity);
+        // Tab-color MODE (inferred working dir): a GLOBAL setting (AppSettings::tabColorMode) — seed
+        // this overlay so its subline / Open Path / Copy Path resolve the session's EFFECTIVE work dir
+        // (the inferred dir under the Inferred mode); a cog Save re-applies it live via
+        // _ReapplyManagedTabColors (the same broadcast that repaints the tabs).
+        overlay->SetTabColorMode(static_cast<int>(_appSettings.tabColorMode));
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {

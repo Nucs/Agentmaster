@@ -1587,18 +1587,27 @@ namespace Agentmaster
         return ChooseDirColor(sessionId, liveSessionColors, activeColors, g_colorSeed);
     }
 
-    std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s)
+    std::wstring EffectiveWorkingDir(TabColorMode mode, const SessionInfo& s)
     {
-        // The dir that KEYS a session's color under `mode` (grouping + user-pick fan-out). Only
+        // The session's EFFECTIVE working directory — where it semantically WORKS. Only
         // InferredWorkingDirectory diverges — and only once an inference EXISTS (until then the
-        // launch cwd keys it, so a fresh session behaves exactly like WorkingDirectory mode).
-        // Individual mode returns the working dir too: its callers branch on the mode BEFORE any
-        // dir grouping (there is no dir key for per-session colors).
+        // launch cwd answers, so a fresh session behaves exactly like WorkingDirectory mode).
+        // Individual mode returns the working dir too: its color callers branch on the mode BEFORE
+        // any dir grouping, and the inference scan runs only while the mode is Inferred, so a
+        // dormant (stale) inference from a previous mode never leaks into grouping/display.
         if (mode == TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty())
         {
             return s.inferredWorkingDir;
         }
         return s.workingDir;
+    }
+
+    std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s)
+    {
+        // The dir that KEYS a session's color under `mode` (grouping + user-pick fan-out) == the
+        // effective work dir — ONE truth (Persistence.h), so the Manager's directory grouping and
+        // the tab's color key can never drift apart.
+        return EffectiveWorkingDir(mode, s);
     }
 
     std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s)

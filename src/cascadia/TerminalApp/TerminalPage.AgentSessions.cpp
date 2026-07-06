@@ -2016,6 +2016,13 @@ namespace winrt::TerminalApp::implementation
             {
                 _ApplySessionTabColor(tab, id, info->workingDir);
             }
+            // Mirror the (possibly changed) mode into the session's linked overlay too — its subline /
+            // Open Path / Copy Path resolve the EFFECTIVE work dir through it, so a mode flip re-renders
+            // the badge onto the same dir story the tab color just repainted to (a no-op when unchanged).
+            if (const auto ovIt = _claudeOverlays.find(id); ovIt != _claudeOverlays.end() && ovIt->second)
+            {
+                ovIt->second->SetTabColorMode(static_cast<int>(_appSettings.tabColorMode));
+            }
         }
     }
 
