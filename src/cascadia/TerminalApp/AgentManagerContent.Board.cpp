@@ -310,9 +310,17 @@ namespace winrt::TerminalApp::implementation
         }
         {
             // The working dir reads as plain gray text under the title; name it AND explain the
-            // per-directory color (a non-obvious concept) in one tip.
-            auto dirText = Text(winrt::hstring{ s.workingDir }, 11, false, 0.6);
-            AgentSetTip(dirText, L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color.", kCardTipDelay);
+            // per-directory color (a non-obvious concept) in one tip. Shows the EFFECTIVE work dir
+            // (_WorkDirOf) — the same key the title-band color and the Explorer-Tree group use; when
+            // the Inferred mode detected the session working OUTSIDE its launch cwd, the tip carries
+            // the launch cwd so neither dir is ever hidden.
+            const std::wstring effDir = _WorkDirOf(s);
+            auto dirText = Text(winrt::hstring{ effDir }, 11, false, 0.6);
+            const bool diverged = !PathEq(effDir, s.workingDir);
+            AgentSetTip(dirText,
+                        diverged ? winrt::hstring{ L"Inferred working directory \x2014 detected from the files this session touches (it launched in " + s.workingDir + L"). Every session in this folder shares the title-band color." } :
+                                   winrt::hstring{ L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color." },
+                        kCardTipDelay);
             stack.Children().Append(dirText);
         }
 
@@ -410,14 +418,21 @@ namespace winrt::TerminalApp::implementation
             }
 
             // Agentmaster (Waiting-for-you "unread" model): a ⚡ "still server-cached" hint. Claude's
-            // server-side prompt cache stays warm for ~serverCacheMinutes after the last turn, so a
-            // follow-up within the window reuses the cached prefix (cheaper & faster). Purely cosmetic;
-            // shown only while the card is inside that window. The board's periodic refresh (a 30s
-            // timer + every registry event) clears it once the window lapses.
+            // server-side prompt cache stays warm for ~serverCacheMinutes after the last REAL API
+            // turn, so a follow-up within the window reuses the cached prefix (cheaper & faster).
+            // Purely cosmetic; shown only while the card is inside that window. The board's periodic
+            // refresh (a 30s timer + every registry event) clears it once the window lapses.
+            // Keyed on the TWO API-turn signals via the pure ServerCacheStillWarm (SessionModels.h)
+            // — the transcript's line-derived conv activity + the hook-side IsApiTurnEvidence stamp —
+            // deliberately NOT the lastActivityUnixMs decay anchor, which a launch/adopt/resume
+            // SessionStart and the "Move to Waiting-for-you" triage promote stamp "now" with ZERO
+            // API traffic (the reported ⚡ false positives: a just-adopted / just-launched /
+            // manually-promoted card read "still cached" though no request was ever made).
+            // Claude-only — the cache (and this tooltip's copy) are Claude's; a managed Codex
+            // never shows it.
             {
                 const uint32_t cacheMin = _appSettings.serverCacheMinutes ? _appSettings.serverCacheMinutes : 5;
-                const int64_t effLast = s.convLastActivityUnixMs ? s.convLastActivityUnixMs : s.lastActivityUnixMs;
-                if (s.live && effLast > 0 && (NowMs() - effLast) < static_cast<int64_t>(cacheMin) * 60000)
+                if (::Agentmaster::ServerCacheStillWarm(s, cacheMin, NowMs()))
                 {
                     auto cacheGlyph = Text(L"\x26A1", 11, false, 0.95); // ⚡ warm cache
                     cacheGlyph.Foreground(Fill(0xFF, 0xFF, 0xC1, 0x07)); // amber
@@ -466,7 +481,7 @@ namespace winrt::TerminalApp::implementation
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
         AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)", kCardTipDelay);
-        dotsBtn.Flyout(_MakeSessionMenu(s.id, s.workingDir, dotsBtn)); // a click opens the session menu (the button anchors its Tags panel)
+        dotsBtn.Flyout(_MakeSessionMenu(s.id, _WorkDirOf(s), dotsBtn)); // a click opens the session menu (the button anchors its Tags panel); Open-New-Here targets the effective work dir
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
         // Agentmaster: the body carries the inset the card used to own (card Padding is now 0 so
@@ -669,7 +684,7 @@ namespace winrt::TerminalApp::implementation
         // Right-click (or context key / long-press): the SAME menu as the Explorer-Tree session
         // row — Rename… / Archive… / Open New Session Here — one card/row, one action set
         // (Linked Lenses). The menu acts on the captured id/cwd, never "the selected session".
-        card.ContextFlyout(_MakeSessionMenu(id, s.workingDir, card)); // the card anchors its Tags panel
+        card.ContextFlyout(_MakeSessionMenu(id, _WorkDirOf(s), card)); // the card anchors its Tags panel; Open-New-Here targets the effective work dir
         // Agentmaster: tag + register the card so _Refresh can RESTORE keyboard focus onto it after
         // a rebuild (a title/state change recreates every card). "b:" marks the board lens, so the
         // focused element's id + lens are read off its Tag alone — no visual-tree ancestry walk.
@@ -1023,9 +1038,9 @@ namespace winrt::TerminalApp::implementation
                 {
                     continue; // LOCAL scope: hosted by another window
                 }
-                if (!_scopeDir.empty() && !PathEq(s.workingDir, _scopeDir))
+                if (!_scopeDir.empty() && !PathEq(_WorkDirOf(s), _scopeDir))
                 {
-                    continue;
+                    continue; // dir scope keys on the EFFECTIVE work dir — the tree group the user clicked
                 }
                 const bool isIdleDone = (s.state == SessionState::Idle || s.state == SessionState::Done);
                 const bool match = (col.state == SessionState::Idle) ? isIdleDone : (s.state == col.state);

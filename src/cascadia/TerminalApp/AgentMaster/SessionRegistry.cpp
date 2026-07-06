@@ -350,6 +350,17 @@ namespace Agentmaster
             {
                 s.lastActivityUnixMs = msg.ts; // monotonic: a stale event must not regress the decay anchor
             }
+            // Agentmaster (⚡ server-cache hint): the API-turn evidence stamp — the same monotonic
+            // wire-ts discipline as the decay anchor above, but ONLY for events that mean Claude just
+            // made a real API request (IsApiTurnEvidence: never SessionStart/SessionEnd, never a
+            // synthesized quiescent Stop). Keeping the two timestamps apart is the whole point: the
+            // anchor is "when did this card last demand attention" (SessionStart + the UI triage
+            // moves stamp it), this is "when was the server-side prompt cache last touched"
+            // (ServerCacheStillWarm reads it) — conflating them showed ⚡ on adopt/launch/promote.
+            if (msg.ts > s.lastTurnUnixMs && IsApiTurnEvidence(msg))
+            {
+                s.lastTurnUnixMs = msg.ts;
+            }
             if (s.workingDir.empty() && !msg.cwd.empty())
             {
                 s.workingDir = msg.cwd;

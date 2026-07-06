@@ -234,6 +234,97 @@ void TestOrderedStateMachine()
         CHECK(reg.Get(L"ord-1")->lastMessageWasQuestion, "registry: a FRESH Stop's question bit applies");
         CHECK(advances.load() == 1, "registry: exactly one advance for the whole batch");
     }
+    { // ⚡ server-cache hint (IsApiTurnEvidence + lastTurnUnixMs + ServerCacheStillWarm): the hint keys
+      // on REAL API-turn evidence only — never the decay anchor, which SessionStart (launch / --resume /
+      // ADOPT / /clear) and the UI's "Move to Waiting-for-you" triage promote stamp "now" with zero API
+      // traffic (the reported false positives).
+        HookMessage probe;
+        probe.event = HookEvent::SubagentStop;
+        CHECK(IsApiTurnEvidence(probe), "cache: SubagentStop is turn evidence");
+        probe.event = HookEvent::Notification;
+        CHECK(IsApiTurnEvidence(probe), "cache: Notification (permission ask / recon-error carrier) is turn evidence");
+        probe.event = HookEvent::Stop;
+        probe.quiescentStop = true;
+        CHECK(!IsApiTurnEvidence(probe), "cache: a synthesized quiescent Stop is reconciliation-timed, NOT turn evidence");
+        probe.quiescentStop = false;
+        CHECK(IsApiTurnEvidence(probe), "cache: a REAL Stop (clean turn end) is turn evidence");
+        probe.event = HookEvent::Unknown;
+        CHECK(!IsApiTurnEvidence(probe), "cache: Unknown is not turn evidence");
+
+        SessionRegistry reg;
+        auto s = MakeSession(L"cache-1");
+        s.live = true;
+        reg.Upsert(s);
+
+        auto start = at(HookEvent::SessionStart, 1000);
+        start.sessionId = L"cache-1";
+        reg.OnHookEvent(start);
+        auto g = reg.Get(L"cache-1");
+        CHECK(g && g->lastActivityUnixMs == 1000, "cache: SessionStart still drives the decay anchor (unchanged)");
+        CHECK(g && g->lastTurnUnixMs == 0, "cache: SessionStart never stamps turn evidence (launch/resume/adopt/clear send no API request)");
+        CHECK(g && !ServerCacheStillWarm(*g, 5, 1500), "cache: a just-launched/adopted/resumed session shows NO warm-cache hint");
+
+        auto ups = at(HookEvent::UserPromptSubmit, 2000);
+        ups.sessionId = L"cache-1";
+        reg.OnHookEvent(ups);
+        g = reg.Get(L"cache-1");
+        CHECK(g && g->lastTurnUnixMs == 2000, "cache: UserPromptSubmit stamps turn evidence (the API request fires on submit)");
+        CHECK(g && ServerCacheStillWarm(*g, 5, 2000 + 4 * 60000), "cache: warm inside the serverCacheMinutes window");
+        CHECK(g && !ServerCacheStillWarm(*g, 5, 2000 + 5 * 60000), "cache: lapses once the window elapses");
+
+        auto qstop = at(HookEvent::Stop, 300000);
+        qstop.sessionId = L"cache-1";
+        qstop.quiescentStop = true;
+        reg.OnHookEvent(qstop);
+        g = reg.Get(L"cache-1");
+        CHECK(g && g->lastTurnUnixMs == 2000, "cache: a quiescent recon Stop refreshes the anchor but NOT the turn evidence");
+        CHECK(g && g->lastActivityUnixMs == 300000, "cache: (the anchor did move — decay semantics intact)");
+
+        auto realStop = at(HookEvent::Stop, 300001);
+        realStop.sessionId = L"cache-1";
+        reg.OnHookEvent(realStop);
+        g = reg.Get(L"cache-1");
+        CHECK(g && g->lastTurnUnixMs == 300001, "cache: a REAL Stop stamps turn evidence (cache just re-written at turn end)");
+
+        auto end = at(HookEvent::SessionEnd, 400000);
+        end.sessionId = L"cache-1";
+        reg.OnHookEvent(end);
+        g = reg.Get(L"cache-1");
+        CHECK(g && g->lastTurnUnixMs == 300001, "cache: SessionEnd never stamps turn evidence");
+
+        // The "Move to Waiting-for-you" triage promote (both UI surfaces) restarts ONLY the decay
+        // anchor — the ⚡ must not light off it (the exact reported false positive).
+        reg.Update(L"cache-1", [](SessionInfo& si) {
+            si.state = SessionState::WaitingForInput;
+            si.manualUnread = false;
+            si.lastActivityUnixMs = 10000000; // the triage move stamps "now"
+            si.readUnixMs = 0;
+        });
+        g = reg.Get(L"cache-1");
+        CHECK(g && !ServerCacheStillWarm(*g, 5, 10000000 + 1000), "cache: a triage 'Move to Waiting-for-you' never lights the warm-cache hint");
+
+        // Pure-gate edges: transcript-derived signal / archived / Codex / anchor-only.
+        SessionInfo pure;
+        pure.live = true;
+        pure.kind = AgentKind::Claude;
+        pure.convLastActivityUnixMs = 100000; // the observer's line-derived transcript activity
+        CHECK(ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: transcript-derived conv activity lights the hint (hook-less sessions)");
+        pure.live = false;
+        CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: an archived (!live) session never shows it");
+        pure.live = true;
+        pure.kind = AgentKind::Codex;
+        CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: a managed Codex never shows the Claude cache hint");
+        pure.kind = AgentKind::Claude;
+        pure.convLastActivityUnixMs = 0;
+        pure.lastTurnUnixMs = 0;
+        pure.lastActivityUnixMs = 100000; // decay-anchor-only (the SessionStart / triage-move shape)
+        CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 1), "cache: the decay anchor alone never lights it (the old false positive)");
+        pure.lastTurnUnixMs = 100000;
+        pure.convLastActivityUnixMs = 200000;
+        CHECK(ServerCacheStillWarm(pure, 5, 200000 + 60000) && !ServerCacheStillWarm(pure, 5, 200000 + 5 * 60000),
+              "cache: the freshest of the two turn signals wins");
+        CHECK(!ServerCacheStillWarm(pure, 0, 200000 + 1), "cache: 0 minutes -> never (callers normalize, belt anyway)");
+    }
 }
 
 void TestWire()

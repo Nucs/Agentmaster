@@ -1366,7 +1366,13 @@ What works, by area:
   value [tuned for the old 5-min cache window] is **invalidated** → existing installs fall back to the 1h
   default; the old key is ignored + dropped on next save), `serverCacheMinutes` (Claude's server-side
   prompt-cache lifetime, default **5**, drives ONLY the Triage-Board card's **⚡ "still cached"** hint shown to
-  the right of `⚙ sent/total`), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
+  the right of `⚙ sent/total` — keyed on **REAL API-turn evidence** via the pure `ServerCacheStillWarm`
+  (SessionModels.h): the transcript's line-derived conv activity + the hook-side `lastTurnUnixMs` stamp
+  (`IsApiTurnEvidence`, HookEvents.h — never `SessionStart`/`SessionEnd`/a synthesized quiescent Stop),
+  deliberately NOT the `lastActivityUnixMs` decay anchor, which launch/adopt/resume `SessionStart`s and the
+  "Move to Waiting-for-you" triage promote stamp "now" with ZERO API traffic — the old ⚡ false positives
+  ("shows right after adopting / after Move to Waiting-for-you / on a never-prompted launch"); Claude-only —
+  a managed Codex never shows it), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
   broadcast), and (TABS section) **`maxTags`** (the **Max bookmark tags (global)** box — the ceiling on how
@@ -1440,7 +1446,24 @@ What works, by area:
   history overrides it; Codex ⇒ never inferred (rollouts aren't path-parsed — cwd keys its color)];
   GLOBAL, applied live on Save + cross-window broadcast via `_ReapplyManagedTabColors`; every color
   read-surface — board title band, Sessions chip, pending-dots contrast — resolves through the shared
-  `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab), and (TABS section)
+  `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab. **The inferred dir is the
+  session's EFFECTIVE working dir everywhere the UI asks "where does this session belong", not just
+  its color** (`EffectiveWorkingDir(mode, s)` in Persistence — the ONE semantic resolver;
+  `SessionColorKeyDir` DELEGATES to it so grouping and color can never drift): the Explorer-Tree
+  **grouping** + dir **scope** + rename-uncollapse, the board card's **dir line** (tip carries
+  `launched in <cwd>` when divergent) + scope filter, the Auto-Testing **header dir** +
+  **apply-template-to-dir broadcast**, the **selection pre-aim** into the Launch box, every
+  **Open New Session Here** (tree/board rows via `_WorkDirOf`, the WT tab menu), the per-tab
+  overlay's **row-2 subline** + **Open Path** + the shared **Copy Path** (`CopySessionField` case 1,
+  mode threaded as a defaulted param; the overlay mirrors the mode via
+  `AgentTabOverlay::SetTabColorMode`, seeded on attach + re-broadcast by `_ReapplyManagedTabColors`),
+  and the rich tab **tooltip** (header leaf = effective dir; the dim detail row flips to
+  `launched in → <cwd>` under the Inferred mode, staying `inferred → <dir>` in the others). The
+  **terminal's cwd keeps owning the MECHANICS** — spawn/resume/fork/restart cwd, hook + transcript
+  correlation (`EncodeCwdToProjectDir`), per-dir env, recent-dirs MRU, persistence, the summary box's
+  `Dir:` — so launching, restoring, and correlation are byte-identical to before; the `agentmaster`
+  CLI stays fact-based (an `inferredWorkingDir` JSON field + a `works in:` line on `show` + `--dir`
+  matching either dir, unconditional on the mode)), and (TABS section)
   **`flashRingColor`** (the **Status flashing color** picker — a
   `muxc::ColorPicker` with its **alpha slider enabled**, so one control sets both the hue AND the
   **opacity** of the tab status-dot **"unread" flash ring**; stored `#AARRGGBB`, **default red at 80%

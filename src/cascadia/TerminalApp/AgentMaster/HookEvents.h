@@ -145,6 +145,44 @@ namespace Agentmaster
         int errorStatus{ 0 };
     };
 
+    // Agentmaster (⚡ server-cache hint, SessionModels.h ServerCacheStillWarm) — PURE + unit-tested.
+    // Does this hook event EVIDENCE a real API request just made for this conversation? That — and
+    // only that — is what writes/refreshes Claude's server-side prompt cache, so only these events
+    // may stamp SessionInfo::lastTurnUnixMs (the hook-side half of the Triage-Board ⚡ hint).
+    // Deliberately EXCLUDED:
+    //   • SessionStart — fires at launch / `--resume` (restore, Sessions-page resume, ADOPT) /
+    //     an in-session /clear or /compact. NONE of those send an API request (a resume doesn't
+    //     touch the API until the next prompt), yet each stamps the decay anchor "now" — the exact
+    //     "⚡ right after adopting" false positive.
+    //   • SessionEnd — claude exiting; its last turn's Stop already counted.
+    //   • A synthesized QUIESCENT Stop — reconciliation-TIMED, not turn-timed: recon-stop fires ≥2s
+    //     after quiescence, the presence-idle release 5–30s late, and recon-error-release on a
+    //     double-ESC rewind that involves NO API call at all. A REAL Stop (the turn's clean end,
+    //     cache just re-written) counts.
+    // INCLUDED: UserPromptSubmit (the request fires on submit), Pre-/PostToolUse (mid-turn),
+    // SubagentStop (a subagent turn just completed inside the parent's), and Notification (a
+    // permission ask / idle nudge arrives mid- or moments-after-turn; the scanner's recon-error
+    // synth rides Notification too — the failed request WAS an API attempt moments ago).
+    inline bool IsApiTurnEvidence(const HookMessage& m) noexcept
+    {
+        switch (m.event)
+        {
+        case HookEvent::UserPromptSubmit:
+        case HookEvent::PreToolUse:
+        case HookEvent::PostToolUse:
+        case HookEvent::SubagentStop:
+        case HookEvent::Notification:
+            return true;
+        case HookEvent::Stop:
+            return !m.quiescentStop; // a real turn-end counts; a reconciliation-timed synth does not
+        case HookEvent::SessionStart:
+        case HookEvent::SessionEnd:
+        case HookEvent::Unknown:
+        default:
+            return false;
+        }
+    }
+
     // The hook-driven state machine (DESIGN §7). PURE — depends only on the current
     // state and the incoming event. This encodes Correctness Rule #1: "waiting" is three
     // distinct states, and only a clean `Stop` produces WaitingForInput (ready for the

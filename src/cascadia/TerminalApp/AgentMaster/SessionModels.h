@@ -336,7 +336,31 @@ namespace Agentmaster
         // Persisted.
         std::wstring codexSessionId;
         SessionState state{ SessionState::Idle };
+        // The Waiting-for-you "unread" DECAY ANCHOR (wall-clock ms, PERSISTED). Stamped monotonically
+        // by EVERY hook's wire `ts` — SessionStart included — and deliberately RESTARTED by the UI's
+        // plain "Move to Waiting-for-you" triage promote (both the tab-menu and board-card surfaces),
+        // so it means "when did this card last demand attention", NOT "when did Claude last talk to
+        // the API". Display surfaces fall back to it for the "-lastActivityAgo" adornment / MOST
+        // ACTIVE sort when the transcript timing is unresolved. It must NEVER feed the ⚡
+        // server-cache hint (that is lastTurnUnixMs + convLastActivityUnixMs — ServerCacheStillWarm
+        // below): a launch/adopt/resume SessionStart or a triage move stamps this "now" with zero
+        // API traffic, which was exactly the reported ⚡ false positive.
         int64_t lastActivityUnixMs{ 0 };
+        // Agentmaster (⚡ server-cache hint): the last hook-time EVIDENCE OF A REAL API TURN —
+        // stamped monotonically by SessionRegistry::OnHookEvent from the wire `ts`, but ONLY for
+        // events that mean Claude actually just made an API request (IsApiTurnEvidence, HookEvents.h:
+        // UserPromptSubmit / Pre-/PostToolUse / Notification / SubagentStop / a REAL Stop). NEVER
+        // stamped by SessionStart (launch / --resume / adopt / /clear send no request), SessionEnd,
+        // a synthesized quiescent Stop (reconciliation-timed — incl. the no-API double-ESC
+        // recon-error-release), or any UI mutation (the triage moves / Mark Unread). Feeds the
+        // Triage-Board ⚡ "still server-cached" hint together with the transcript-derived
+        // convLastActivityUnixMs (ServerCacheStillWarm takes the freshest of the two): the hook side
+        // lights the ⚡ the instant a prompt is submitted (the observer's transcript enrichment is
+        // silent + survey-lagged), the transcript side covers hook-less (observer-adopted) sessions.
+        // Transient (NOT persisted; Persistence.cpp must not write it) — after a reopen there is
+        // nothing to follow up INTO until the session is resumed, and a resumed session's truth is
+        // re-derived from the transcript within one survey.
+        int64_t lastTurnUnixMs{ 0 };
         // True for a session ADOPTED from a claude we did NOT launch (typed into a `+` tab,
         // not Launched by the Manager). It is observe-only until the app correlates it to its
         // ConPTY (via the WT_SESSION tabToken) and binds an injector. Cleared once it is
@@ -510,6 +534,35 @@ namespace Agentmaster
         std::vector<QueuedPrompt> queue; // the Auto Testing
         AutorunnerState autorunner{};
     };
+
+    // Agentmaster (the Triage-Board ⚡ "still server-cached" hint) — PURE + unit-tested. Claude's
+    // server-side prompt cache stays warm ~cacheMinutes after the last REAL API request, so a
+    // follow-up inside the window reuses the cached prefix (cheaper & faster). "Real API request"
+    // is the operative phrase — the hint reads ONLY the two API-turn signals:
+    //   • convLastActivityUnixMs — the transcript's LINE-DERIVED last activity (real user/assistant
+    //     line timestamps; a `--resume`'s untimestamped trailer appends never move it), fed by the
+    //     Fleet Observer. Note a fork/adopt of a recently-active conversation legitimately reads
+    //     warm: the cache is PREFIX-keyed, so the duplicated history IS still cached for the new
+    //     session — that ⚡ is a true positive.
+    //   • lastTurnUnixMs — the hook-time turn evidence (IsApiTurnEvidence, HookEvents.h), which
+    //     lights the hint the moment a prompt is submitted and covers a session whose transcript
+    //     the observer can't resolve.
+    // Deliberately NOT lastActivityUnixMs (the Waiting-for-you decay anchor): SessionStart at
+    // launch / adopt / resume / /clear and the "Move to Waiting-for-you" triage promote stamp that
+    // anchor "now" with zero API traffic — the reported ⚡ false positives ("shows right after
+    // adopting / after Move to Waiting-for-you / on a never-prompted launch") this predicate
+    // exists to exclude. Codex never shows the hint: the tooltip copy ("Claude's prompt cache")
+    // and both signals are Claude-specific (a managed Codex has no hooks and its conv timing is
+    // never fed), and before this gate a Codex card could ⚡ off a bare triage-move stamp.
+    inline bool ServerCacheStillWarm(const SessionInfo& s, uint32_t cacheMinutes, int64_t nowMs) noexcept
+    {
+        if (!s.live || s.kind != AgentKind::Claude || cacheMinutes == 0)
+        {
+            return false;
+        }
+        const int64_t last = (s.convLastActivityUnixMs > s.lastTurnUnixMs) ? s.convLastActivityUnixMs : s.lastTurnUnixMs;
+        return last > 0 && (nowMs - last) < static_cast<int64_t>(cacheMinutes) * 60000;
+    }
 
     // A reusable plan (DESIGN §10 "Plans across the fleet"): a named sequence of prompts
     // that can be applied to any session or broadcast to many. Persisted separately.
