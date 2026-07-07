@@ -26,11 +26,13 @@
 //   - two custom attached DependencyProperties (tip text + optional open delay) — plain sparse
 //     property-store values that die with the element; NO service, NO registration;
 //   - three CAPTURE-LESS pointer handlers (Entered/Moved/Exited) that route to the shared host.
-// Everything stateful lives in ONE per-UI-thread host: one ToolTip control, one one-shot open
-// timer, one 1 s watchdog (armed only while a tip is open), and two weak element refs. The
-// framework's ToolTipService is touched ONLY for the duration of a real, user-driven hover-open
-// (SetToolTip(owner, tip) right before IsOpen(true); SetToolTip(owner, nullptr) on close), so
-// its per-registration bookkeeping is bounded by actual hovers — not by rebuild churn.
+// Everything stateful lives in ONE per-UI-thread host (heap-allocated + deliberately leaked —
+// no XAML refs in a destructing thread_local): one ToolTip control, one one-shot open timer,
+// one 1 s watchdog (armed only while a tip is open), a weak ref to the armed element, and a
+// STRONG ref to the open owner (held only while its tip is open, so close can ALWAYS detach).
+// The framework's ToolTipService is touched ONLY for the duration of a real, user-driven
+// hover-open (SetToolTip(owner, tip) right before IsOpen(true); SetToolTip(owner, nullptr) on
+// close), so its per-registration bookkeeping is bounded by actual hovers — not rebuild churn.
 //
 // Behavior preserved from the old recipe:
 //  - OPEN FAST: ~1/3 of the system tooltip hover time (SPI_GETMOUSEHOVERTIME, default 400 ms
@@ -109,24 +111,58 @@ namespace winrt::TerminalApp::implementation
         // The per-UI-thread shared tip host — the ONLY stateful part of the recipe. thread_local
         // (not process-global): every window's XAML tree lives on a UI thread, and pointer events,
         // DispatcherTimers, and the ToolTip itself are all thread-affine.
+        //
+        // (A raw DispatcherTimer pair rather than the codebase's ThrottledFunc: ThrottledFunc bakes
+        // its delay in at construction, which can't serve the per-element delay override — the
+        // board cards' 4 s hold-back vs the ~133 ms default — without one instance per delay.)
         struct TipHost
         {
             winrt::Windows::UI::Xaml::Controls::ToolTip tip{ nullptr }; // created lazily, reused forever
             winrt::Windows::UI::Xaml::DispatcherTimer openTimer{ nullptr }; // one-shot hover-rest timer
             winrt::Windows::UI::Xaml::DispatcherTimer watchdog{ nullptr }; // runs ONLY while a tip is open
             winrt::weak_ref<winrt::Windows::UI::Xaml::UIElement> armed{ nullptr }; // element awaiting open
-            winrt::weak_ref<winrt::Windows::UI::Xaml::UIElement> openOwner{ nullptr }; // element whose tip is open
+            // The element whose tip is OPEN — a STRONG ref ON PURPOSE, held only for the open
+            // duration (a real hover): it guarantees CloseOpenTip can ALWAYS detach the shared tip
+            // from its owner (SetToolTip(owner, nullptr)). With a weak ref, an owner rebuilt away
+            // and fully released while its tip was open would resolve null at close, and that
+            // hover's ToolTipService registration — the very thing the islands leak class never
+            // tears down — would be left attached forever.
+            winrt::Windows::UI::Xaml::UIElement openOwner{ nullptr };
         };
 
         inline TipHost& Host()
         {
-            static thread_local TipHost host;
-            return host;
+            // Heap-allocated and DELIBERATELY LEAKED (one small struct per UI thread, alive for the
+            // process): a plain `thread_local TipHost` would run its destructor at CRT thread/process
+            // teardown and Release XAML objects (the ToolTip + timers) potentially AFTER the XAML
+            // runtime / COM apartment for the thread is gone — a shutdown-crash class. The codebase
+            // keeps no winrt refs in thread_local statics anywhere else; this is why.
+            static thread_local TipHost* host = new TipHost();
+            return *host;
+        }
+
+        // True while el is still in the live tree — the authoritative "safe to open / keep a tip
+        // on it" test (an owner-less ToolTip open is a stowed 0xC000027B fail-fast in
+        // Windows.UI.Xaml.dll; the open-tick and the watchdog MUST apply the identical rule).
+        inline bool StillLoaded(const winrt::Windows::UI::Xaml::UIElement& el)
+        {
+            if (const auto fe = el.try_as<winrt::Windows::UI::Xaml::FrameworkElement>())
+            {
+                return fe.IsLoaded();
+            }
+            return true; // not a FrameworkElement (no IsLoaded) — assume live
+        }
+
+        // The one per-element tip-text read (the boxing contract in one place).
+        inline winrt::hstring TipTextOf(const winrt::Windows::UI::Xaml::UIElement& el)
+        {
+            return winrt::unbox_value_or<winrt::hstring>(el.GetValue(TipTextProperty()), winrt::hstring{});
         }
 
         // Close the currently-open shared tip (if any) and detach it from its owner. The service
         // attachment is removed as soon as the hover ends, so ToolTipService's islands-broken
-        // per-registration bookkeeping never accumulates beyond the one live hover.
+        // per-registration bookkeeping never accumulates beyond the one live hover. The strong
+        // openOwner ref guarantees the detach always runs (see TipHost).
         inline void CloseOpenTip()
         {
             auto& h = Host();
@@ -144,9 +180,9 @@ namespace winrt::TerminalApp::implementation
                 {
                 }
             }
-            if (const auto owner = h.openOwner.get())
+            if (h.openOwner)
             {
-                winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(owner, nullptr);
+                winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(h.openOwner, nullptr);
             }
             h.openOwner = nullptr;
         }
@@ -156,26 +192,19 @@ namespace winrt::TerminalApp::implementation
         inline void OnOpenTimerTick()
         {
             auto& h = Host();
-            if (h.openTimer)
-            {
-                h.openTimer.Stop(); // one-shot: open once, then idle until the next hover
-            }
+            h.openTimer.Stop(); // one-shot (the tick can only come FROM openTimer): open once, then idle until the next hover
             const auto el = h.armed.get();
             if (!el)
             {
                 return;
             }
             // An element detached by a board / table rebuild while the one-shot was pending must
-            // NOT be opened on: an owner-less ToolTip open is a stowed fail-fast (0xC000027B) in
-            // Windows.UI.Xaml.dll. IsLoaded is the authoritative "still in the live tree" test.
-            if (const auto fe = el.try_as<winrt::Windows::UI::Xaml::FrameworkElement>())
+            // NOT be opened on (the 0xC000027B owner-less-open fail-fast — see StillLoaded).
+            if (!StillLoaded(el))
             {
-                if (!fe.IsLoaded())
-                {
-                    return;
-                }
+                return;
             }
-            const auto text = winrt::unbox_value_or<winrt::hstring>(el.GetValue(TipTextProperty()), winrt::hstring{});
+            const auto text = TipTextOf(el);
             if (text.empty())
             {
                 return;
@@ -221,16 +250,8 @@ namespace winrt::TerminalApp::implementation
                 winrt::Windows::UI::Xaml::DispatcherTimer wd;
                 wd.Interval(std::chrono::milliseconds{ 1000 });
                 wd.Tick([](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::Foundation::IInspectable&) {
-                    const auto owner = Host().openOwner.get();
-                    bool ownerGone = !owner;
-                    if (!ownerGone)
-                    {
-                        if (const auto fe = owner.try_as<winrt::Windows::UI::Xaml::FrameworkElement>())
-                        {
-                            ownerGone = !fe.IsLoaded();
-                        }
-                    }
-                    if (ownerGone)
+                    const auto& owner = Host().openOwner;
+                    if (!owner || !StillLoaded(owner))
                     {
                         CloseOpenTip();
                     }
@@ -270,7 +291,7 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            if (winrt::unbox_value_or<winrt::hstring>(el.GetValue(TipTextProperty()), winrt::hstring{}).empty())
+            if (TipTextOf(el).empty())
             {
                 return;
             }
@@ -307,8 +328,7 @@ namespace winrt::TerminalApp::implementation
             // is inside it: re-arm it here when nothing is armed. While the INNER element is armed
             // the outer's bubbled moves land in the branch above (armed != el) and change nothing —
             // the innermost tip always wins.
-            if (!h.armed.get() &&
-                !winrt::unbox_value_or<winrt::hstring>(el.GetValue(TipTextProperty()), winrt::hstring{}).empty())
+            if (!h.armed.get() && !TipTextOf(el).empty())
             {
                 ArmOpenTimer(el);
             }
@@ -330,31 +350,21 @@ namespace winrt::TerminalApp::implementation
                 }
                 h.armed = nullptr;
             }
-            if (h.openOwner.get() == el)
+            if (h.openOwner == el)
             {
                 CloseOpenTip();
             }
         }
     }
 
-    // Force-close el's tooltip. Covers both the shared host tip (when el is its current owner)
-    // and any legacy explicit ToolTip attached to el. No-op when none / not open.
+    // Force-close el's tooltip — i.e. the shared host tip, when el is its current owner (the ONLY
+    // explicit ToolTip that can exist on these surfaces in the host model). No-op otherwise.
     inline void AgentCloseTipOn(const winrt::Windows::UI::Xaml::UIElement& el)
     {
+        auto& h = agent_tip_details::Host();
+        if (h.openOwner == el)
         {
-            auto& h = agent_tip_details::Host();
-            if (h.openOwner.get() == el)
-            {
-                agent_tip_details::CloseOpenTip();
-                return;
-            }
-        }
-        if (const auto tt = winrt::Windows::UI::Xaml::Controls::ToolTipService::GetToolTip(el))
-        {
-            if (const auto open = tt.try_as<winrt::Windows::UI::Xaml::Controls::ToolTip>())
-            {
-                open.IsOpen(false);
-            }
+            agent_tip_details::CloseOpenTip();
         }
     }
 
@@ -382,6 +392,14 @@ namespace winrt::TerminalApp::implementation
         }
         if (alreadyWired)
         {
+            // If THIS element's tip is showing right now, reflect the new text immediately (the
+            // old recipe's live-update behavior — e.g. the Sessions "✕ filter" chip re-tipped on
+            // every render while hovered); otherwise the host reads the DP fresh at open time.
+            auto& h = atd::Host();
+            if (h.tip && h.openOwner == el)
+            {
+                h.tip.Content(winrt::box_value(tip));
+            }
             return;
         }
         el.PointerEntered([](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
@@ -403,6 +421,19 @@ namespace winrt::TerminalApp::implementation
     // pages mount their rows/detail hosts inside ScrollViewers.
     inline void AgentCloseTipsIn(const winrt::Windows::UI::Xaml::UIElement& root)
     {
+        // A host about to be hidden also cancels any PENDING open (the armed one-shot): without
+        // this, hovering an element and hiding its page within the open delay pops the tip over a
+        // COLLAPSED element ~133 ms later (Visibility toggles keep IsLoaded true, so the tick's
+        // liveness gate doesn't catch it). Unconditional on purpose — canceling a pending open is
+        // always safe; the next pointer move over a tipped element re-arms (OnTipPointerMoved).
+        {
+            auto& h = agent_tip_details::Host();
+            if (h.openTimer)
+            {
+                h.openTimer.Stop();
+            }
+            h.armed = nullptr;
+        }
         AgentCloseTipOn(root);
         if (const auto panel = root.try_as<winrt::Windows::UI::Xaml::Controls::Panel>())
         {

@@ -1764,7 +1764,7 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
   - `src/cascadia/TerminalApp/AgentTipHelpers.h` — the ONE islands-safe hover-tooltip recipe
     (`AgentSetTip` / `AgentCloseTipOn`; `ToolTipService`'s auto-dismiss is unreliable under XAML
     Islands), shared by `AgentManagerContent` + the Sessions page + the per-tab overlay + the tab
-    strip (thin TU-local wrappers `SessSetTip`/`ArchiveSetTip` delegate here). Architecture: ONE
+    strip (thin TU-local wrappers like `SessSetTip` delegate here). Architecture: ONE
     per-UI-thread tip HOST (one shared `ToolTip` + one one-shot open timer + a 1s while-open
     watchdog); per element only two attached DPs (text + delay) + three capture-less pointer
     handlers, and `SetToolTip` is attached only for the duration of a real hover-open — see the
