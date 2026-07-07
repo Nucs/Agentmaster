@@ -1762,9 +1762,13 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     name-hash resolution every tag renderer shares: the `AgentTagsSpec` producer, the Tags panel/hover
     panel, and the Sessions Tags column).
   - `src/cascadia/TerminalApp/AgentTipHelpers.h` — the ONE islands-safe hover-tooltip recipe
-    (`AgentSetTip` / `AgentCloseTipOn`, a fast-open `DispatcherTimer`; `ToolTipService`'s auto-dismiss
-    is unreliable under XAML Islands), shared by `AgentManagerContent` + the Archive/Sessions pages
-    (thin TU-local wrappers `SessSetTip`/`ArchiveSetTip` delegate here).
+    (`AgentSetTip` / `AgentCloseTipOn`; `ToolTipService`'s auto-dismiss is unreliable under XAML
+    Islands), shared by `AgentManagerContent` + the Sessions page + the per-tab overlay + the tab
+    strip (thin TU-local wrappers `SessSetTip`/`ArchiveSetTip` delegate here). Architecture: ONE
+    per-UI-thread tip HOST (one shared `ToolTip` + one one-shot open timer + a 1s while-open
+    watchdog); per element only two attached DPs (text + delay) + three capture-less pointer
+    handlers, and `SetToolTip` is attached only for the duration of a real hover-open — see the
+    per-element-ToolTip LEAK gotcha (the 68 GB prod freeze) before touching this.
   - `src/cascadia/TerminalApp/AgentCopyActions.h` — the ONE shared `CopySessionField` action
     (Session Id · working-dir Path · Branch · Claude/Codex Launch CLI · Transcript · Summary) behind
     BOTH the per-tab overlay's copy menu (`AgentTabOverlay`) AND the Triage Board / Explorer-tree
@@ -2291,6 +2295,24 @@ build **binlog uploads as an artifact** to diagnose the first run.
   **coalescing scheduler** (a `bool` + one `Dispatcher().RunAsync`) and do the reads + gated mutations on
   the CLEAN tick after layout settles (the `_ApplyRenamerMaxWidth` cycle-safety lesson, again). Both
   guards + a `CATCH_LOG` on the whole popup tail now live in `TabHeaderControl::_PositionTagBadgesNow`.
+- **A per-element `ToolTip` on rebuilt elements is a process-killing LEAK under XAML Islands — never
+  `ToolTipService.SetToolTip` at BUILD time on any Manager-rebuilt surface.** The framework-side
+  registration `SetToolTip` creates is never torn down under islands (the same broken bookkeeping that
+  makes its auto-dismiss unreliable — the reason `AgentTipHelpers.h` exists), so every tipped element a
+  board/tree/page rebuild recreates stays PEGGED with its whole element tree. Measured in the prod
+  instance 2026-07-06: ~100 tips/refresh × a registry-notify rebuild cadence × 2 windows × 36 h ≈
+  **7.5 M live tip clusters ≈ 68 GB of committed heap** → system commit exhausted (WER event 2004 named
+  the process at 72.8 GB) → XAML's composition pipeline took fatal allocation failures and latched dead →
+  the "window pumps messages but never repaints and reacts to nothing" freeze (`IsHungAppWindow` stays
+  FALSE — the app logic, hooks, autorunner all keep running; only pixels stop). The heap census pinned it
+  conclusively: the two `AgentSetTip` handler-delegate vtables + its `make_shared` control block at
+  ~1:1:1 × millions, plus ~1.5 B `Windows.UI.Xaml.dll` object refs. `AgentTipHelpers.h` therefore keeps
+  ALL tip state in ONE per-UI-thread host (one shared `ToolTip`, one open timer, a while-open watchdog);
+  per element only two attached DPs + three CAPTURE-LESS handlers, and the service is touched only for
+  the duration of a real hover-open (`SetToolTip(owner, tip)` right before `IsOpen(true)`,
+  `SetToolTip(owner, nullptr)` on close — bounded by human hovers, not rebuild churn). Don't reintroduce
+  per-element `ToolTip` objects, per-element capturing handlers, or build-time `SetToolTip` — and treat
+  any per-element allocation on a per-refresh-rebuilt surface as a leak until proven torn down.
 - **Working-dir comparison must be filesystem-aware** (else the Explorer Tree forks one dir
   into multiple roots). Windows is case-INsensitive (`C:\…\Desktop` == `…\desktop`) and
   treats `/`≡`\`; POSIX is case-SENSITIVE with `\` a literal char. Route every dir
