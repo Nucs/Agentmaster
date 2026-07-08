@@ -1077,6 +1077,7 @@ namespace winrt::TerminalApp::implementation
         void _UpdateTitle(const Tab& tab);
         void _UpdateTabIcon(Tab& tab);
         void _UpdateAllTabIcons(); // Agentmaster: re-apply the GLOBAL "Show icons on tabs" (AppSettings::showTabIcon) to every tab live (cog Save + cross-window broadcast — the _updateAllTabCloseButtons twin)
+        void _UpdateReservedTabTitleLines(); // Agentmaster: push the MAX title-line-count across ALL tabs to every header's line-reserver, so the tab strip's height stays consistent regardless of virtualization (a multi-line title tab scrolled out of view no longer snaps the row shorter). Called on any title change + tab add/remove.
         void _UpdateTabView();
         void _UpdateTabWidthMode();
         void _SetBackgroundImage(const winrt::Microsoft::Terminal::Settings::Model::IAppearanceConfig& newAppearance);
