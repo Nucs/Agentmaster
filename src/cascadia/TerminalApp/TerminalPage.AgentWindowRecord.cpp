@@ -354,11 +354,15 @@ namespace winrt::TerminalApp::implementation
         // is persisted HERE in the window record (NOT the dir-color map — Rule #12 is dir-keyed). Read it
         // LIVE like geometry; if the Manager tab is gone (a teardown flush has no live tab), keep the value
         // already copied from _windowRecord rather than wiping a good color (the geometry-fallback idiom).
+        // GetPersistableTabColor, not GetRuntimeTabColor: while the NoColor ("Remove colors") mode has the
+        // color SUSPENDED (visual shed, value parked on the tab), a save must still record the parked
+        // color — the mode hides colors, it never voids them (an autosave during the mode would otherwise
+        // wipe the Manager color from the record for good).
         if (_managerTab)
         {
             if (const auto mgr = _GetTabImpl(_managerTab))
             {
-                const auto c = mgr->GetRuntimeTabColor();
+                const auto c = mgr->GetPersistableTabColor();
                 rec.managerTabColor = c ? _WindowRecordColorToHex(*c) : std::wstring{};
             }
         }

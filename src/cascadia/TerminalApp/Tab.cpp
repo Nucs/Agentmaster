@@ -786,12 +786,18 @@ namespace winrt::TerminalApp::implementation
             state.args.emplace(state.args.begin(), std::move(newTabAction));
         }
 
-        if (_runtimeTabColor)
+        // Agentmaster (tab color modes — NoColor/"Remove colors"): persist the runtime color OR the
+        // suspended one — a capture/tear-out taken while the mode has the color parked must record
+        // the color the tab HAD (the mode hides colors, it never voids them). In a colored mode
+        // _suspendedTabColor is always empty, so this is byte-identical to the old _runtimeTabColor
+        // read. A torn-out/moved tab recreated in another window replays the setColor there and the
+        // destination's NoColor chokepoint immediately re-parks it — the color survives the move.
+        if (const auto persistColor = _runtimeTabColor ? _runtimeTabColor : _suspendedTabColor)
         {
             ActionAndArgs setColorAction{};
             setColorAction.Action(ShortcutAction::SetTabColor);
 
-            SetTabColorArgs setColorArgs{ _runtimeTabColor.value() };
+            SetTabColorArgs setColorArgs{ persistColor.value() };
             setColorAction.Args(setColorArgs);
 
             state.args.emplace_back(std::move(setColorAction));
@@ -2628,6 +2634,42 @@ namespace winrt::TerminalApp::implementation
         _RecalculateAndApplyTabColor();
         _tabStatus.TabColorIndicator(GetTabColor().value_or(Windows::UI::Colors::Transparent()));
         TabColorChanged.raise(); // Agentmaster: propagate the reset to same-dir tabs + drop the persisted color
+    }
+
+    // Agentmaster (tab color modes — NoColor/"Remove colors"): park (suspended=true) or restore
+    // (false) this tab's runtime color. Parking sheds the VISUAL exactly like ResetRuntimeTabColor
+    // but keeps the value in _suspendedTabColor, so persistence (GetPersistableTabColor /
+    // BuildStartupActions' setColor fold) still records the color the tab HAD — the mode never
+    // voids anything — and leaving the mode brings it back. Deliberately raises NO TabColorChanged
+    // in either direction: nothing conceptually changed (the color is parked, not removed), the
+    // page's color-changed handler is what CALLS this (re-entrancy would loop), and the restore is
+    // immediately followed by the mode repaint for managed tabs anyway. Both directions are no-ops
+    // when there's nothing to park/restore, so strip-wide sweeps are idempotent. A color set while
+    // parked (runtime non-empty on resume) wins over the parked one — latest intent rules.
+    void Tab::SetTabColorSuspended(bool suspended)
+    {
+        ASSERT_UI_THREAD();
+
+        if (suspended)
+        {
+            if (_runtimeTabColor)
+            {
+                _suspendedTabColor = _runtimeTabColor;
+                _runtimeTabColor.reset();
+                _RecalculateAndApplyTabColor();
+                _tabStatus.TabColorIndicator(GetTabColor().value_or(Windows::UI::Colors::Transparent()));
+            }
+        }
+        else if (_suspendedTabColor)
+        {
+            if (!_runtimeTabColor)
+            {
+                _runtimeTabColor = _suspendedTabColor;
+                _RecalculateAndApplyTabColor();
+                _tabStatus.TabColorIndicator(GetTabColor().value_or(Windows::UI::Colors::Transparent()));
+            }
+            _suspendedTabColor.reset();
+        }
     }
 
     winrt::Windows::UI::Xaml::Media::Brush Tab::_BackgroundBrush()

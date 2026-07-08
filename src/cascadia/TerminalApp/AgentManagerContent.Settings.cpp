@@ -1059,9 +1059,10 @@ namespace winrt::TerminalApp::implementation
 
         // Tab color modes: HOW managed tabs get their color — shared per working dir (the classic
         // Rule-#12 behavior, default), individual per tab, shared per the INFERRED working dir
-        // (detected from the files the session reads/edits/creates), or "Remove colors" (no tab is
-        // colored; the saved colors are kept, just not loaded, and "Change tab color" is disabled
-        // on session tabs). GLOBAL (AppSettings::tabColorMode);
+        // (detected from the files the session reads/edits/creates), or "Remove colors" (STRIP-WIDE:
+        // no tab is colored — shell + Manager tabs' colors are SUSPENDED, not voided — and "Change
+        // tab color" is disabled on every tab; saved colors are kept, just not loaded). GLOBAL
+        // (AppSettings::tabColorMode);
         // applied live on Save + cross-window broadcast (TerminalPage::_ReapplyManagedTabColors).
         _setTabColorMode = ComboBox{};
         _setTabColorMode.Header(winrt::box_value(L"Tab coloring"));
@@ -1069,7 +1070,7 @@ namespace winrt::TerminalApp::implementation
         _setTabColorMode.Items().Append(winrt::box_value(L"Individual per tab")); // index 1 == TabColorMode::Individual
         _setTabColorMode.Items().Append(winrt::box_value(L"Inferred working directory")); // index 2 == TabColorMode::InferredWorkingDirectory
         _setTabColorMode.Items().Append(winrt::box_value(L"Remove colors")); // index 3 == TabColorMode::NoColor
-        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.\n\x2022 Remove colors: no tab is colored and \x201C" L"Change tab color\x201D is disabled on session tabs; the saved folder/session colors are KEPT \x2014 switch back to any other mode and they return exactly as they were.");
+        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.\n\x2022 Remove colors: NO tab is colored \x2014 session tabs, shell tabs (e.g. a PowerShell tab that kept a color), and the Manager tab alike \x2014 and \x201C" L"Change tab color\x201D is disabled on every tab. Nothing is deleted: folder/session colors and a shell tab's own color are kept (just not shown) \x2014 switch back to any other mode and they return exactly as they were.");
         panel.Children().Append(_setTabColorMode);
         // Tab color modes — "Use .git folder to infer" (AppSettings::inferGitRoot, default ON): the
         // inferred working dir SNAPS to the enclosing git repository root (the folder holding .git —

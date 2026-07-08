@@ -1463,15 +1463,24 @@ What works, by area:
   pass (~2s) infers; `/clear` ⇒ honestly no inference (cwd color) until the new conversation touches
   files; restore-FRESH keeps the dead conversation's inference as a CONTINUITY seed until the new
   history overrides it; Codex ⇒ never inferred (rollouts aren't path-parsed — cwd keys its color)] ·
-  **Remove colors** [`TabColorMode::NoColor`: NO tab is colored — the paint seam RESETS any runtime
-  color and disables the tab's **Change tab color** menu item + the `openTabColorPicker` action on
-  managed session tabs (`Tab::SetColorPickerEnabled`, re-armed the moment a colored mode repaints;
-  shell/Manager tabs stay recolorable) — while the persisted colors (`dir-colors.json` +
-  `SessionInfo::tabColorHex`) are **KEPT, never read and never dropped** (`ResolveSessionColorHex`
-  answers empty so board band / Sessions chip / pending-dots render neutral; a NoColor guard in
-  `_OnClaudeTabColorChanged` swallows the reset so nothing persists/un-persists), so switching back
-  restores exactly the prior colors; grouping/dir semantics stay classic (`EffectiveWorkingDir` ⇒
-  cwd)];
+  **Remove colors** [`TabColorMode::NoColor`: NO tab is colored, **STRIP-WIDE** — a managed tab is
+  RESET by the paint seam (its color re-derives from the maps on exit), and every OTHER tab's
+  runtime color — an **ex-claude pwsh tab** still wearing its exited session's dir paint (archive
+  drops it from `_claudeTabs`, the tab lives on — the reported gap), a user-colored/restored shell
+  tab, the Manager tab's per-window tint — is **SUSPENDED, not reset** (`Tab::SetTabColorSuspended`:
+  visual shed, value PARKED on the tab in `_suspendedTabColor`, raises no `TabColorChanged`;
+  restored on leaving the mode by the `_ReapplyManagedTabColors` strip sweep). **Change tab color**
+  + the `openTabColorPicker` action are disabled on EVERY tab (`Tab::SetColorPickerEnabled` —
+  seeded at tab registration, swept on mode change, re-asserted at flyout-open), and any color that
+  lands mid-mode (a window-restore's replayed `setColor` action, the Manager record re-tint at
+  claim, a `setTabColor` keybinding, a tear-out recreated here) is immediately parked by the
+  `_OnClaudeTabColorChanged` chokepoint (`TabColorChanged` is wired for every tab). Persistence is
+  NEVER voided: `dir-colors.json` + `SessionInfo::tabColorHex` are neither read nor written
+  (`ResolveSessionColorHex` answers empty so board band / Sessions chip / pending-dots render
+  neutral), a shell tab's `actionsJson` `setColor` persists the PARKED color
+  (`BuildStartupActions`' runtime-else-suspended fold), and the window record's `managerTabColor`
+  captures through `GetPersistableTabColor` — so switching back restores exactly the prior colors;
+  grouping/dir semantics stay classic (`EffectiveWorkingDir` ⇒ cwd)];
   GLOBAL, applied live on Save + cross-window broadcast via `_ReapplyManagedTabColors`; every color
   read-surface — board title band, Sessions chip, pending-dots contrast — resolves through the shared
   `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab. **The inferred dir is the
@@ -2571,11 +2580,14 @@ build **binlog uploads as an artifact** to diagnose the first run.
     working dir** (`InferredWorkingDirectory` — the SAME dir machinery keyed by
     `SessionInfo::inferredWorkingDir` when known, else the cwd; `SessionColorKeyDir` is the one key
     resolver, `ResolveSessionColorHex` the one read-side resolution every display surface shares).
-    The fourth mode, **Remove colors** (`NoColor`), SUSPENDS painting rather than re-keying it: no
-    managed tab is colored (the paint seam resets any runtime color), "Change tab color" +
-    `openTabColorPicker` are disabled on session tabs (`Tab::SetColorPickerEnabled`), and the
-    persisted maps are neither read nor WRITTEN (`ResolveSessionColorHex` ⇒ empty; the
-    `_OnClaudeTabColorChanged` NoColor guard swallows every color event) — permanence upheld by
+    The fourth mode, **Remove colors** (`NoColor`), SUSPENDS painting rather than re-keying it,
+    STRIP-WIDE: a managed tab is reset (re-derivable from the maps), every NON-managed tab's
+    runtime color — ex-claude shell tabs, user-colored/restored pwsh tabs, the Manager tab — is
+    PARKED on the tab (`Tab::SetTabColorSuspended`; persistence still records the parked value via
+    `GetPersistableTabColor` / `BuildStartupActions`' fold), "Change tab color" +
+    `openTabColorPicker` are disabled on EVERY tab (`Tab::SetColorPickerEnabled`), any color
+    landing mid-mode is parked by the `_OnClaudeTabColorChanged` chokepoint, and the persisted maps
+    are neither read nor WRITTEN (`ResolveSessionColorHex` ⇒ empty) — permanence upheld by
     abstinence: switching back to any colored mode restores exactly the prior colors.
     Every paint routes through `_ApplySessionTabColor` (the mode dispatch); everything below is the
     DEFAULT (dir-keyed) mode's contract, which the inferred mode inherits over its key. Every Claude

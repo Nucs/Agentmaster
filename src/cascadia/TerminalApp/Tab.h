@@ -83,6 +83,14 @@ namespace winrt::TerminalApp::implementation
 
         std::optional<winrt::Windows::UI::Color> GetTabColor();
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
+        // Agentmaster (tab color modes — NoColor/"Remove colors"): the color persistence should
+        // record for this tab — the LIVE runtime color, or (while the NoColor mode has it
+        // suspended) the PARKED one. Read by the window-record capture (the Manager tab's
+        // per-window color) so a save taken while "Remove colors" is active persists the color the
+        // tab HAD instead of voiding it; BuildStartupActions applies the same fold for a shell
+        // tab's setColor action. Visual reads (GetTabColor) deliberately do NOT see the parked color.
+        std::optional<winrt::Windows::UI::Color> GetPersistableTabColor() const noexcept { return _runtimeTabColor ? _runtimeTabColor : _suspendedTabColor; }
+        void SetTabColorSuspended(bool suspended); // Agentmaster (NoColor): park/restore the runtime color — shed the visual, KEEP the value for persistence; raises no TabColorChanged
         void SetRuntimeTabColor(const winrt::Windows::UI::Color& color);
         void ResetRuntimeTabColor();
         // Agentmaster (PENDING_INPUT.md): the tab's CURRENT effective header background — what actually
@@ -144,7 +152,7 @@ namespace winrt::TerminalApp::implementation
         void SetAgentTagVisible(bool visible); // Agentmaster (bookmark tags): show/hide the "Tag" item (managed agent-session tabs only; page-driven at flyout-open, like Favorite)
         void SetAgentActivateVisible(bool visible); // Agentmaster (eager-init): show/hide the "Activate Tab" item (shown only when this tab's managed session is DORMANT — its claude hasn't started; page-driven at flyout-open from ConnectionState())
         void SetFavoriteAndCloseAllVisible(bool visible); // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item (shown only when the window hosts >=1 managed session; page-driven at flyout-open)
-        void SetColorPickerEnabled(bool enabled); // Agentmaster (tab color modes — NoColor/"Remove colors"): gray/restore the "Change tab color..." context-menu item AND gate AttachColorPicker (the openTabColorPicker action), so a managed tab can't be recolored while the mode is NoColor. TOGGLEABLE (unlike the Manager tab's one-shot disables) — driven by the mode-aware paint seam (_ApplySessionTabColor) + refreshed at flyout-open
+        void SetColorPickerEnabled(bool enabled); // Agentmaster (tab color modes — NoColor/"Remove colors"): gray/restore the "Change tab color..." context-menu item AND gate AttachColorPicker (the openTabColorPicker action), so NO tab — managed, shell, or the Manager tab — can be recolored while the mode is NoColor. TOGGLEABLE (unlike the Manager tab's one-shot disables) — seeded at tab registration, swept strip-wide on a mode change (_ReapplyManagedTabColors), re-asserted by the managed paint seam (_ApplySessionTabColor) + at flyout-open
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
@@ -278,6 +286,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Microsoft::Terminal::Settings::Model::IconStyle _lastIconStyle;
         winrt::hstring _lastIconPath{};
         std::optional<winrt::Windows::UI::Color> _runtimeTabColor{};
+        // Agentmaster (tab color modes — NoColor/"Remove colors"): the runtime color PARKED while
+        // the mode is active — the visual is shed (_runtimeTabColor cleared) but the value is kept
+        // here so persistence (GetPersistableTabColor / BuildStartupActions) still records it and
+        // leaving the mode restores it (SetTabColorSuspended(false)). Never rendered.
+        std::optional<winrt::Windows::UI::Color> _suspendedTabColor{};
         winrt::TerminalApp::TabHeaderControl _headerControl{};
         winrt::TerminalApp::TerminalTabStatus _tabStatus{};
 
