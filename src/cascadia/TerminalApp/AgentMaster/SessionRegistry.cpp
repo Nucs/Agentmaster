@@ -124,6 +124,11 @@ namespace Agentmaster
                 _order.push_back(id);
             }
             _sessions[id] = std::move(info);
+            // Agentmaster (bounded queue history): a queue persisted before the cap existed (or one
+            // carrying a long session's worth of Typed captures) trims on load; the append seams in
+            // OnHookEvent / NoteExternalPrompt keep it bounded live. TrimQueueHistory never drops
+            // queued WORK — only the oldest completed history (SessionModels.h).
+            TrimQueueHistory(_sessions[id].queue);
             snapshot = _sessions[id];
         }
         _notify(snapshot, HookEvent::Unknown);
@@ -403,6 +408,7 @@ namespace Agentmaster
                     typed.attempts = 1;
                     typed.sentAtUnixMs = now;
                     s.queue.push_back(std::move(typed));
+                    TrimQueueHistory(s.queue); // bounded history: only the OLDEST completed entries drop, never queued work
                 }
             }
 
@@ -752,6 +758,7 @@ namespace Agentmaster
             typed.attempts = 1;
             typed.sentAtUnixMs = now;
             s.queue.push_back(std::move(typed));
+            TrimQueueHistory(s.queue); // bounded history: only the OLDEST completed entries drop, never queued work
             snapshot = s;
             changed = true;
         }

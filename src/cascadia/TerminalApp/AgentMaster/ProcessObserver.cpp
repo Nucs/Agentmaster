@@ -298,6 +298,7 @@ namespace Agentmaster
 
     int64_t ProcessObserver::_LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs)
     {
+        _lineActivitySeenThisSurvey.insert(sid); // the survey-tail prune keeps exactly what this pass consulted
         auto& c = _lineActivityBySid[sid];
         if (c.mtime != mtimeMs) // transcript grew (or first sight) -> re-derive from the tail; else reuse
         {
@@ -371,6 +372,7 @@ namespace Agentmaster
         }
 
         const auto snap = SnapshotProcesses(); // the one ~10 ms call; reused for census + every tab tree
+        _lineActivitySeenThisSurvey.clear(); // fresh keep-set for this full survey's cache prune (survey tail)
 
         // 1) Read facts (PEB cwd/cmdline/env) + an initial AM_SESSION-based classification for every
         //    claude.exe. The classification is REFINED below: a claude correlated to one of OUR tabs
@@ -1093,6 +1095,51 @@ namespace Agentmaster
         for (auto it = _codexInfoByPid.begin(); it != _codexInfoByPid.end();)
         {
             it = (codexByPid.find(it->first) == codexByPid.end()) ? _codexInfoByPid.erase(it) : std::next(it);
+        }
+
+        // Agentmaster (bounded worker caches): prune the remaining per-run caches to what THIS survey
+        // saw — they were insert-only, so a long-running instance accumulated an entry for every
+        // session/pid that EVER existed (small next to the UI-cycle leak they rode along with, but
+        // genuinely unbounded). Same idiom as the _codexInfoByPid prune above: erase what the current
+        // pass didn't see. The logged-once pid sets prune to pids still alive in the snapshot ("log
+        // once" stays per-process-lifetime — a recycled pid IS a new process, so re-logging it once is
+        // correct); _extInfoCache prunes to the external sids this survey published (a vanished
+        // external's head-read cache is dead weight; a momentarily-unresolved sid re-reads once);
+        // _lineActivityBySid prunes to the sids the survey actually consulted (managed + external)
+        // via the _lineActivitySeenThisSurvey keep-set.
+        {
+            std::unordered_set<uint32_t> alivePids;
+            alivePids.reserve(snap.size());
+            for (const auto& e : snap)
+            {
+                alivePids.insert(e.pid);
+            }
+            const auto prunePidSet = [&alivePids](std::unordered_set<uint32_t>& set) {
+                for (auto it = set.begin(); it != set.end();)
+                {
+                    it = (alivePids.find(*it) == alivePids.end()) ? set.erase(it) : std::next(it);
+                }
+            };
+            prunePidSet(_pebDeniedLogged);
+            prunePidSet(_guiExcludedLogged);
+            prunePidSet(_orphanLogged);
+            std::unordered_set<std::wstring> liveExtSids;
+            liveExtSids.reserve(externalRows.size());
+            for (const auto& ex : externalRows)
+            {
+                if (!ex.sessionId.empty())
+                {
+                    liveExtSids.insert(ex.sessionId);
+                }
+            }
+            for (auto it = _extInfoCache.begin(); it != _extInfoCache.end();)
+            {
+                it = (liveExtSids.find(it->first) == liveExtSids.end()) ? _extInfoCache.erase(it) : std::next(it);
+            }
+            for (auto it = _lineActivityBySid.begin(); it != _lineActivityBySid.end();)
+            {
+                it = (_lineActivitySeenThisSurvey.find(it->first) == _lineActivitySeenThisSurvey.end()) ? _lineActivityBySid.erase(it) : std::next(it);
+            }
         }
 
         // 5) Publish the snapshots (copy-out readers hold no lock while iterating).

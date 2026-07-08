@@ -126,6 +126,7 @@ void TestRegistry();
 void TestRegistryFanout();
 void TestForkSourceIdEcho();
 void TestTypedCapture();
+void TestQueueHistoryTrim(); // bounded queue history: TrimQueueHistory (pure) + the registry append-seam cap
 void TestObserveClaude();
 void TestSupersedeStaleTabSiblings();
 // tests_spawn_sched.cpp

@@ -53,9 +53,12 @@ namespace
     // Agentmaster (PENDING_INPUT.md): a small animated "3 dots" cluster for a board card / row that has
     // an UNSENT draft — three goldenrod dots pulsing their opacity 0.3<->1.0 in a 160ms-phase-shifted
     // wave (the classic "typing"/waiting cue), mirroring the per-tab strip pulse. The storyboard targets
-    // the dots by ref (no name/resource lookup) and BEGINS on Loaded — so it runs only while the element
-    // is in the tree; a board rebuild drops the card and its storyboard. The Loaded closure keeps the
-    // storyboard alive. dotPx sizes the dots (cards: 5px). `color` is the contrast-picked pending-dots
+    // the dots by ref (no name/resource lookup), BEGINS on Loaded and STOPS on Unloaded. The Unloaded
+    // Stop() is load-bearing: a STARTED Forever storyboard is held by the XAML animation clock (it
+    // never completes), and that hold pins its target Ellipses — so a board rebuild alone did NOT
+    // release a dropped card's dots (one leaked cluster per unsent-draft card per rebuild). The Loaded
+    // closure keeps the storyboard alive by design; the pair is symmetric, so a row re-entering the
+    // tree re-Begins. dotPx sizes the dots (cards: 5px). `color` is the contrast-picked pending-dots
     // color (PendingDotsColorFor) — defaulting to the historical gold so a caller that doesn't care is
     // unchanged.
     StackPanel BuildPendingDots(double dotPx = 5.0, Color color = ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B))
@@ -95,6 +98,16 @@ namespace
             try
             {
                 sb.Begin();
+            }
+            catch (...)
+            {
+            }
+        });
+        // Release the animation clock's hold on the storyboard + its dot targets (header note above).
+        row.Unloaded([sb](auto&&, auto&&) {
+            try
+            {
+                sb.Stop();
             }
             catch (...)
             {

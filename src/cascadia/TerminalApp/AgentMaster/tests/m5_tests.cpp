@@ -48,6 +48,7 @@ int wmain()
     TestRegistryFanout();
     TestForkSourceIdEcho();
     TestTypedCapture();
+    TestQueueHistoryTrim();
     TestObserveClaude();
     TestSupersedeStaleTabSiblings();
     TestSpawnBuilders();

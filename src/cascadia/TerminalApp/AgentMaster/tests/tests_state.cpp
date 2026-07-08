@@ -710,6 +710,93 @@ void TestTypedCapture()
     CHECK(s && s->queue.size() == 5, "empty prompt body records nothing");
 }
 
+// Agentmaster (bounded queue history): TrimQueueHistory caps the RECORDED history without ever
+// dropping queued WORK — only completed (Sent/Skipped/Failed) entries go, oldest first; Pending
+// entries and entries some remaining entry still dependsOn are exempt (so the trim may leave the
+// queue above the cap). The registry applies it at every append seam (typed capture / reconciler
+// back-fill) and on Upsert, so an oversized persisted queue trims on load.
+void TestQueueHistoryTrim()
+{
+    std::wprintf(L"TrimQueueHistory (bounded Auto-Testing history):\n");
+
+    const auto mkSent = [](size_t n) {
+        std::vector<QueuedPrompt> q(n);
+        for (size_t i = 0; i < n; ++i)
+        {
+            q[i].id = L"p" + std::to_wstring(i);
+            q[i].status = PromptStatus::Sent;
+        }
+        return q;
+    };
+
+    // 1. Below the cap: untouched.
+    {
+        auto q = mkSent(5);
+        TrimQueueHistory(q, 10);
+        CHECK(q.size() == 5, "below-cap queue untouched");
+    }
+    // 2. Over the cap: oldest COMPLETED entries drop first, down to the cap.
+    {
+        auto q = mkSent(8);
+        TrimQueueHistory(q, 5);
+        CHECK(q.size() == 5, "over-cap queue trimmed to the cap");
+        CHECK(!q.empty() && q.front().id == L"p3", "oldest completed entries dropped first");
+        CHECK(!q.empty() && q.back().id == L"p7", "newest entries kept");
+    }
+    // 3. Pending is WORK, not history — never dropped, even when that leaves the queue above the cap.
+    {
+        auto q = mkSent(6);
+        for (auto& p : q)
+        {
+            p.status = PromptStatus::Pending;
+        }
+        q[1].status = PromptStatus::Sent; // the single trimmable entry
+        TrimQueueHistory(q, 3);
+        CHECK(q.size() == 5, "only the completed entry dropped; Pending never");
+        bool p1Gone = true;
+        for (const auto& p : q)
+        {
+            if (p.id == L"p1")
+            {
+                p1Gone = false;
+            }
+        }
+        CHECK(p1Gone, "the one Sent entry was the one dropped");
+    }
+    // 4. dependsOn pins its target: a completed entry a remaining entry depends on survives.
+    {
+        auto q = mkSent(4);
+        q[3].status = PromptStatus::Pending;
+        q[3].dependsOn = L"p0";
+        TrimQueueHistory(q, 2);
+        bool p0Alive = false;
+        for (const auto& p : q)
+        {
+            if (p.id == L"p0")
+            {
+                p0Alive = true;
+            }
+        }
+        CHECK(p0Alive, "a depended-on entry survives the trim");
+        CHECK(q.size() == 2, "the un-pinned completed entries (p1, p2) dropped");
+    }
+    // 5. The registry's typed-capture seam trims live: flood past the cap and the queue holds at the
+    //    cap (every recorded entry is Sent/Typed history, so nothing is exempt).
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"trim"));
+        const int total = static_cast<int>(kMaxQueueHistoryEntries) + 25;
+        for (int i = 0; i < total; ++i)
+        {
+            reg.OnHookEvent(UPS(L"trim", L"prompt #" + std::to_wstring(i)));
+        }
+        const auto s = reg.Get(L"trim");
+        CHECK(s && s->queue.size() == kMaxQueueHistoryEntries, "typed-capture seam holds the queue at the cap");
+        CHECK(s && !s->queue.empty() && s->queue.back().text == L"prompt #" + std::to_wstring(total - 1), "newest capture kept");
+        CHECK(s && !s->queue.empty() && s->queue.front().text == L"prompt #25", "oldest captures dropped");
+    }
+}
+
 // Fleet Observer O3 (OBSERVER.md §9): the provenance-aware PULL upsert. A claude observed
 // out-of-band enriches its record (facts) but NEVER overrides hook-owned state; first sight
 // creates an external+live record and fires adoption; a steady-state re-observe is a no-op.

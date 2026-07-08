@@ -227,6 +227,50 @@ namespace Agentmaster
         uint32_t enterRetries{ 0 };
     };
 
+    // Agentmaster (bounded queue history): the queue records EVERY message a session received
+    // (PromptOrigin — Typed captures ride alongside Autorun prompts, by design), so on a long-lived
+    // busy session it grew WITHOUT BOUND: each UserPromptSubmit / reconciler back-fill appended a
+    // full prompt BODY that then lived — and persisted, and was echo/dedup-scanned — for the record's
+    // lifetime. Cap the HISTORY, never the WORK: only completed entries (Sent / Skipped / Failed)
+    // are dropped, oldest first; a Pending (or legacy Held) entry is NEVER dropped (Rule #4/#6 —
+    // queued work and its statuses must survive), and neither is an entry some remaining entry still
+    // dependsOn (the chain must stay resolvable). 200 keeps every consumer honest — prompt-history
+    // navigation, the "sent" summary, the echo window's recent tail — while bounding the record; the
+    // trim may therefore leave the queue ABOVE the cap when the overflow is all pending work. PURE +
+    // total; the registry calls it at each append seam and on Upsert (so an oversized queue persisted
+    // by an older build trims on load).
+    inline constexpr size_t kMaxQueueHistoryEntries = 200;
+
+    inline void TrimQueueHistory(std::vector<QueuedPrompt>& queue, size_t maxEntries = kMaxQueueHistoryEntries)
+    {
+        if (queue.size() <= maxEntries)
+        {
+            return;
+        }
+        std::unordered_set<std::wstring> dependedOn;
+        for (const auto& p : queue)
+        {
+            if (p.dependsOn && !p.dependsOn->empty())
+            {
+                dependedOn.insert(*p.dependsOn);
+            }
+        }
+        size_t excess = queue.size() - maxEntries;
+        for (auto it = queue.begin(); excess > 0 && it != queue.end();)
+        {
+            const bool completed = it->status == PromptStatus::Sent || it->status == PromptStatus::Skipped || it->status == PromptStatus::Failed;
+            if (completed && dependedOn.find(it->id) == dependedOn.end())
+            {
+                it = queue.erase(it);
+                --excess;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
     // Agentmaster (#6 — multi-line submit): build the ConPTY input that types `text` into Claude's
     // Ink TUI and submits it as ONE message. A bare `text + CR` makes Ink submit on the FIRST embedded
     // line break (the WinUI compose TextBox emits CR per line), tearing a multi-line prompt across

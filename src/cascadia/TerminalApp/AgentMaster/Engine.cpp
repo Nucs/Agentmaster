@@ -94,6 +94,15 @@ namespace Agentmaster
                     static std::mutex s_unknownMtx;
                     static std::unordered_map<std::wstring, std::wstring> s_lastUnknownLine; // id -> last [Unknown] body
                     std::lock_guard lk{ s_unknownMtx };
+                    // Agentmaster (bounded dedup): the map held one line per session id for the
+                    // process LIFETIME (insert-only — unbounded across a long run's many ids). Past a
+                    // generous cap, reset it wholesale before admitting a NEW id: the cost is one
+                    // extra [Unknown] line per still-active id while the dedup re-primes — nothing
+                    // next to the flood the dedup exists to stop.
+                    if (s_lastUnknownLine.size() > 512 && s_lastUnknownLine.find(s.id) == s_lastUnknownLine.end())
+                    {
+                        s_lastUnknownLine.clear();
+                    }
                     auto& prev = s_lastUnknownLine[s.id];
                     if (prev == line)
                     {

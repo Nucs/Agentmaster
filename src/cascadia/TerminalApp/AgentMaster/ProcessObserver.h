@@ -112,8 +112,10 @@ namespace Agentmaster
 
         // Worker-thread-only cache (no lock) of an EXTERNAL session's transcript-derived title +
         // gitBranch, keyed by the resolved conversation id, so the per-external transcript head-read
-        // happens once (not every survey — the title doesn't change). Grows only with the distinct
-        // external sessions seen this run.
+        // happens once (not every survey — the title doesn't change). Pruned at each full survey's
+        // tail to the external sids that survey published — a vanished external's cache is dead
+        // weight (and a momentarily-unresolved sid just re-reads once), so it no longer grows with
+        // every external ever seen this run.
         //
         // Agentmaster: the cache also holds the idle RECAP (away_summary) — but unlike title/gitBranch
         // the recap is NOT a write-once fact (a new one appears each time the session re-idles), so it
@@ -174,6 +176,9 @@ namespace Agentmaster
         int64_t _lastFullSurveyMs{ 0 };
         std::wstring _lastRosterSig; // (wtSession:shellPid) of the last full survey's merged roster
         std::vector<std::pair<uint32_t, int64_t>> _lastCorrelated; // (pid, startUnixMs) correlated last full survey
+        // The three logged-once pid sets are pruned to still-alive pids at each full survey's tail
+        // (they were insert-only for the process lifetime); a recycled pid IS a new process, so its
+        // fresh one-line log after a prune is correct, not spam.
         std::unordered_set<uint32_t> _pebDeniedLogged; // pids whose PEB read was denied — logged once (O7)
         std::unordered_set<uint32_t> _guiExcludedLogged; // GUI claude pids (the desktop Electron app) skipped — logged once
         std::unordered_set<uint32_t> _orphanLogged; // orphaned claude pids (host terminal exited) skipped — logged once
@@ -186,14 +191,16 @@ namespace Agentmaster
         // mtime without being activity, so a restored tab focused after a restart would otherwise read
         // "active just now" (it only resumed). Keyed by session id; the tail is re-read only when the
         // transcript mtime advances, so an idle/just-resumed session costs ONLY the TranscriptTimes
-        // stat after the one read that settles it. Not pruned (mirrors _extInfoCache; bounded by the
-        // distinct conversation ids seen in a run). See _LineDerivedLastActivity.
+        // stat after the one read that settles it. Pruned at each full survey's tail to the sids that
+        // survey consulted (_lineActivitySeenThisSurvey below) — an archived/closed session's gate
+        // drops instead of accumulating for the process lifetime. See _LineDerivedLastActivity.
         struct LineActivity
         {
             int64_t mtime{ 0 }; // the transcript mtime the value was last derived at (the gate)
             int64_t lastActivityMs{ 0 }; // line-derived last-activity (0 == none found -> caller uses mtime)
         };
         std::unordered_map<std::wstring, LineActivity> _lineActivityBySid;
+        std::unordered_set<std::wstring> _lineActivitySeenThisSurvey; // the sids _LineDerivedLastActivity served THIS full survey — the prune's keep-set (worker-thread-only)
         // Worker-thread-only: the line-derived last-activity for `sid` (the value to publish as
         // convLastActivityUnixMs), gated by _lineActivityBySid against the transcript `mtimeMs` (from
         // TranscriptTimes) — which is also the fallback when no timestamped conversation line is found.
