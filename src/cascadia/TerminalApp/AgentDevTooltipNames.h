@@ -256,6 +256,22 @@ namespace winrt::TerminalApp::implementation
             // Resolve the meaningful element being pointed at: the nearest ancestor (incl. the leaf)
             // that is a Control, OR is x:Named, OR already owns a tooltip — i.e. the control, never
             // an inner TextBlock/Border. Bail if we somehow land inside a ToolTip popup.
+            //
+            // ⚠ A ContentPresenter is NEVER the target — walk PAST it. It is a control's template/
+            // content HOST, not "the thing you're pointing at": the stock Button ControlTemplate's
+            // root is literally x:Name="ContentPresenter" (and ScrollContentPresenter subclasses it),
+            // so the x:Name clause below used to stop the walk INSIDE every stock-templated Button —
+            // the tip read "⟦id⟧ ContentPresenter · ContentPresenter" instead of the Button — and the
+            // else-branch then installed a PERMANENT ToolTipService registration on that TEMPLATE
+            // CHILD. That registration is the dead-click bug (the per-tab overlay's "clicking the
+            // icon does nothing"): framework tooltip machinery attached to the button ITSELF is
+            // harmless (ButtonBase's class handler on the same element runs before instance
+            // handlers), but attached to a CHILD of the button it sits BELOW ButtonBase on the press
+            // route — a press it interferes with never reaches the button, so Click never fires. A
+            // tiny icon button is dwell-AIMED (hover, then click), so the devtip had always resolved
+            // + service-tipped the CP by click time, killing exactly the icon clicks while a quick
+            // swipe-click onto the padding still landed. Skipping CPs resolves the real control (the
+            // Button), where both the id display and the SetToolTip are correct + harmless.
             WUX::DependencyObject node = src.try_as<WUX::DependencyObject>();
             WUX::FrameworkElement target{ nullptr };
             IInspectable existing{ nullptr };
@@ -267,12 +283,15 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (const auto fe = node.try_as<WUX::FrameworkElement>())
                 {
-                    const auto tip = WUXC::ToolTipService::GetToolTip(fe);
-                    if (tip || fe.try_as<WUXC::Control>() || !fe.Name().empty())
+                    if (!fe.try_as<WUXC::ContentPresenter>())
                     {
-                        target = fe;
-                        existing = tip;
-                        break;
+                        const auto tip = WUXC::ToolTipService::GetToolTip(fe);
+                        if (tip || fe.try_as<WUXC::Control>() || !fe.Name().empty())
+                        {
+                            target = fe;
+                            existing = tip;
+                            break;
+                        }
                     }
                 }
                 node = WUX::Media::VisualTreeHelper::GetParent(node);

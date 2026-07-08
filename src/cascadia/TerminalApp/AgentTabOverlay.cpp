@@ -531,6 +531,26 @@ namespace winrt::TerminalApp::implementation
                 self->_SetExpanded(self->_pinned); // stay open while the copy menu is up
             }
         });
+        // ── DIAGNOSTIC (dead-click trace; the badge-root leg — see _BuildActionsRow's per-button
+        // traces for the story + removal note). handledEventsToo=true: logs every press that lands
+        // ANYWHERE in the badge subtree with the element it originated on + whether some descendant
+        // had already Handled it. If a glyph press shows here but NOT on its button, the eater sits
+        // between them; if it doesn't show at all, the hit landed outside our tree (a popup?).
+        _root.AddHandler(UIElement::PointerPressedEvent(),
+                         winrt::box_value(PointerEventHandler{ [](const IInspectable&, const PointerRoutedEventArgs& e) {
+                             std::wstring cls{ L"-" };
+                             if (const auto src = e.OriginalSource())
+                             {
+                                 cls = std::wstring{ winrt::get_class_name(src) };
+                                 if (const auto dot = cls.find_last_of(L'.'); dot != std::wstring::npos)
+                                 {
+                                     cls = cls.substr(dot + 1);
+                                 }
+                             }
+                             ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[overlay-hit] root press src=" } + cls + (e.Handled() ? L" handled=1\n" : L" handled=0\n"));
+                         } }),
+                         true /* handledEventsToo */);
+        // ── end DIAGNOSTIC ──
     }
 
     void AgentTabOverlay::_SetExpanded(bool on)
