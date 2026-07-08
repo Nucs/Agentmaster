@@ -57,6 +57,11 @@ static constexpr ULONG_PTR TERMINAL_HANDOFF_MAGIC = 0x4c414e494d524554; // 'TERM
 static constexpr ULONG_PTR TERMINAL_HANDOFF_MAGIC = 0x4d524554; // 'TERM'
 #endif
 
+// Agentmaster: the hourly in-app update autocheck — a WM_TIMER on the emperor's message window
+// (_window). The id is arbitrary but must be unique among _window's timers (it has no others).
+static constexpr UINT_PTR AM_UPDATE_CHECK_TIMER_ID = 0xA3D7;
+static constexpr UINT AM_UPDATE_CHECK_INTERVAL_MS = 60u * 60u * 1000u; // 1 hour
+
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 // A convenience function around CommandLineToArgv.
@@ -597,6 +602,7 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
     _setupGlobalHotkeys();
     _checkWindowsForNotificationIcon();
     _setupSessionPersistence(_app.Logic().Settings().GlobalSettings().ShouldUsePersistedLayout());
+    _setupUpdateAutocheck(); // Agentmaster: the hourly in-app update autocheck (twin of the startup check above)
     ::Agentmaster::Startup::Phase(L"window-setup (msg-window/hotkeys/notify-icon/persistence)", ::GetTickCount64() - _amSw);
 
     // When the settings change, we'll want to update our global hotkeys
@@ -1439,6 +1445,48 @@ LRESULT WindowEmperor::_messageHandler(HWND window, UINT const message, WPARAM c
         case WM_HOTKEY:
             _hotkeyPressed(static_cast<long>(wParam));
             return 0;
+        case WM_TIMER:
+            // Agentmaster: the hourly update autocheck (armed by _setupUpdateAutocheck). Run the
+            // bounded network round-trip + the modal prompt on a DETACHED background thread so the UI
+            // never blocks (the prompt is pure Win32, pumping its own nested loop, so it's safe off the
+            // UI thread; startup uses the same nullptr-owner prompt). The in-flight flag prevents
+            // stacking a second check/prompt while one is still showing (e.g. the user leaves the dialog
+            // open past the next tick); it lives in a shared_ptr and the worker captures ONLY that (never
+            // `this`), so a late finish after teardown can't dangle.
+            if (wParam == AM_UPDATE_CHECK_TIMER_ID)
+            {
+                auto expected = false;
+                if (_updateCheckInFlight->compare_exchange_strong(expected, true))
+                {
+                    try
+                    {
+                        std::thread([flag = _updateCheckInFlight]() {
+                            // RunPeriodicUpdateCheck is contractually no-throw (its whole body is
+                            // try/caught); store + TerminateProcess are noexcept — so this detached
+                            // worker never lets an exception escape (no std::terminate), and the flag
+                            // is always cleared before we might exit.
+                            const auto launched = ::Agentmaster::Updater::RunPeriodicUpdateCheck(nullptr);
+                            flag->store(false, std::memory_order_release);
+                            if (launched)
+                            {
+                                // The installer is running and waiting on our PID; exit so the package
+                                // isn't in use (like the startup update path + the single-instance handoff).
+                                TerminateProcess(GetCurrentProcess(), gsl::narrow_cast<UINT>(0));
+                            }
+                        }).detach();
+                    }
+                    catch (...)
+                    {
+                        // std::thread construction can throw (resource limits). Clear the guard we just
+                        // set so the NEXT tick can retry — otherwise a single failed spawn would wedge
+                        // the hourly check for the rest of the process lifetime.
+                        _updateCheckInFlight->store(false, std::memory_order_release);
+                        LOG_CAUGHT_EXCEPTION();
+                    }
+                }
+                return 0;
+            }
+            break;
         case WM_QUERYENDSESSION:
             // For WM_QUERYENDSESSION and WM_ENDSESSION, refer to:
             // https://docs.microsoft.com/en-us/windows/win32/rstmgr/guidelines-for-applications
@@ -1484,6 +1532,30 @@ void WindowEmperor::_setupSessionPersistence(bool enabled)
         _persistState(ApplicationState::SharedInstance());
     });
     _persistStateTimer.Start();
+}
+
+// Agentmaster (Updater.h): the hourly in-app update autocheck — the running-app twin of the startup
+// check (which already ran once, before the window-restoration prompt). Every hour we re-ask GitHub
+// for a newer release and, if one exists (and the user hasn't postponed/skipped it), show the SAME
+// Update-now / Postpone / Not-now prompt. On "Update now" the embedded installer launches and we exit
+// so the package isn't in use while it upgrades + relaunches (durability rules make the workspace
+// reopen on the updated relaunch — PERSISTENCE.md §13.5 / Rule #16).
+//
+// The tick is a plain Win32 WM_TIMER on the message window (_window) — the emperor thread's message
+// loop always pumps it, so it doesn't depend on the XAML DispatcherTimer (which our DefaultProfile
+// mode never starts). The check itself — the bounded network round-trip AND the modal TaskDialog —
+// runs on a DETACHED background thread (see the WM_TIMER handler) so the UI never blocks.
+void WindowEmperor::_setupUpdateAutocheck()
+{
+    // Gated to the published RELEASE install (or forced via AGENTMASTER_UPDATE_STARTUP) exactly like
+    // the startup check — a dev/unpackaged build never starts the timer at all.
+    if (!::Agentmaster::Updater::IsUpdaterChannel())
+    {
+        return;
+    }
+    // WM_TIMER is low priority (delivered only when the queue is otherwise idle), which is exactly
+    // right for an hourly, non-urgent check. _window exists by now (_createMessageWindow ran above).
+    SetTimer(_window.get(), AM_UPDATE_CHECK_TIMER_ID, AM_UPDATE_CHECK_INTERVAL_MS, nullptr);
 }
 
 void WindowEmperor::_persistState(const ApplicationState& state) const
