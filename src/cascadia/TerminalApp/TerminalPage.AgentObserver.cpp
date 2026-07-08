@@ -2822,26 +2822,55 @@ namespace winrt::TerminalApp::implementation
         }
 
         std::wstring desired;
+        std::wstring selection; // the pinned lens selection (independent of hover) — drives the "scroll the selected tab into view" pass below
         if (onManager)
         {
-            // Hover wins over the pinned lens selection (a preview); fall back to the selection,
-            // read live from the content so a restored/seeded selection is honored without caching.
-            std::wstring target = _managerHoverSessionId;
-            if (target.empty())
+            // The pinned lens selection, read live from the content so a restored/seeded selection is
+            // honored without caching.
+            if (const auto ipc = _agentManagerContent.get())
             {
-                if (const auto ipc = _agentManagerContent.get())
+                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
                 {
-                    if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
-                    {
-                        target = std::wstring{ mgr->SelectedSessionId() };
-                    }
+                    selection = std::wstring{ mgr->SelectedSessionId() };
                 }
             }
+            // Hover wins over the pinned lens selection (a live preview that follows the mouse).
+            const std::wstring target = _managerHoverSessionId.empty() ? selection : _managerHoverSessionId;
             // Only pill a session whose tab lives in THIS window (a GLOBAL-scope card can name a
             // session hosted elsewhere — that window pills it, not this one).
             if (!target.empty() && _claudeTabs.find(target) != _claudeTabs.end())
             {
                 desired = target;
+            }
+        }
+
+        // Agentmaster (Linked Lenses — selection follows into view): when the SELECTED session changes
+        // (a board card / tree row click) while the Manager tab is active, scroll the tab strip so its
+        // tab is visible — otherwise the selection pill can sit scrolled off-screen. Selection only: a
+        // hover preview must NOT scroll (it would jump the strip as the pointer slides across cards),
+        // and only a tab hosted in THIS window. Runs BEFORE the pill's no-change early-return so that
+        // clicking a card you were already hovering (pill unchanged, selection changed) still scrolls.
+        // _selectionBroughtIntoView is updated only while on the Manager tab, so an unchanged selection
+        // — a hover push, or a plain return to the board — never re-scrolls.
+        if (onManager && selection != _selectionBroughtIntoView)
+        {
+            _selectionBroughtIntoView = selection;
+            if (!selection.empty())
+            {
+                if (const auto it = _claudeTabs.find(selection); it != _claudeTabs.end())
+                {
+                    if (const auto t = it->second.get())
+                    {
+                        try
+                        {
+                            if (const auto tvi = t.TabViewItem())
+                            {
+                                tvi.StartBringIntoView(); // the same scroll-into-strip the active-tab switch uses
+                            }
+                        }
+                        CATCH_LOG();
+                    }
+                }
             }
         }
 

@@ -304,6 +304,13 @@ namespace winrt::TerminalApp::implementation
         // the mouse). Driven by _UpdateManagerSelectionHighlight / _SetTabSelectionPill.
         std::wstring _managerHoverSessionId;
         std::wstring _pilledSessionId;
+        // Agentmaster (Linked Lenses — selection follows into view): the managed session whose tab
+        // was last scrolled into the visible tab strip because it became the Manager SELECTION. When
+        // the selection changes (a board card / tree row click) while the Manager tab is active, its
+        // tab is brought into view (TabViewItem().StartBringIntoView) so the selection pill isn't left
+        // sitting scrolled off-screen. Tracked so an unchanged selection — a hover push, a plain
+        // return to the Manager tab — never re-scrolls; hover previews never scroll at all.
+        std::wstring _selectionBroughtIntoView;
 
         // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
         // the single source of truth; HooksBridge feeds it authoritative state from Claude
