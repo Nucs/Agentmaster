@@ -25,6 +25,26 @@ void TestStateMachine()
 {
     std::wprintf(L"State machine (Correctness Rule #1):\n");
     CHECK(NextSessionState(SessionState::Idle, Msg(L"a", HookEvent::SessionStart)) == SessionState::Idle, "SessionStart -> Idle");
+
+    // Agentmaster (the "Move to Waiting-for-you then activate the inactive tab resets to Idle/Done" bug):
+    // a SessionStart (fresh launch / --resume / a re-homed or background tab's LAZY claude start on FIRST
+    // activation / /clear / /compact) must PRESERVE an at-rest "needs-you" triage rather than clobber it
+    // to Idle. A resume/lazy-start reloads the conversation but does NOT continue the turn, so the tail
+    // still says Waiting/NeedsApproval — and a manual "Move to Waiting-for-you"/"Mark Unread" is an
+    // explicit cue the user set. A genuine new turn (UserPromptSubmit -> Running) still clears it.
+    CHECK(NextSessionState(SessionState::WaitingForInput, Msg(L"a", HookEvent::SessionStart)) == SessionState::WaitingForInput, "SessionStart PRESERVES WaitingForInput (a Move-to-Waiting / restored card survives activating the tab)");
+    CHECK(NextSessionState(SessionState::NeedsApproval, Msg(L"a", HookEvent::SessionStart)) == SessionState::NeedsApproval, "SessionStart PRESERVES NeedsApproval (survives a lazy-start/resume)");
+    CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::SessionStart)) == SessionState::Idle, "SessionStart from Running -> Idle (a /clear or restart mid-run resets)");
+    CHECK(NextSessionState(SessionState::Error, Msg(L"a", HookEvent::SessionStart)) == SessionState::Idle, "SessionStart from Error -> Idle (restart clears the error; scanner re-derives if still active)");
+    CHECK(NextSessionState(SessionState::Done, Msg(L"a", HookEvent::SessionStart)) == SessionState::Idle, "SessionStart from Done -> Idle (resumed => alive again)");
+    // Invariant: the SessionStart-preserve set MUST equal RestoredSessionState's preserved set — a
+    // lazy-start SessionStart IS a resume, so the two mappings must never drift (else the restore-seeded
+    // triage that RestoredSessionState kept would be undone on the first tab visit — the original bug).
+    for (auto st : { SessionState::Idle, SessionState::Running, SessionState::WaitingForInput, SessionState::NeedsApproval, SessionState::Error, SessionState::Done })
+    {
+        CHECK(NextSessionState(st, Msg(L"a", HookEvent::SessionStart)) == RestoredSessionState(st), "SessionStart mapping == RestoredSessionState mapping (a lazy-start SessionStart IS a resume)");
+    }
+
     CHECK(NextSessionState(SessionState::Idle, Msg(L"a", HookEvent::UserPromptSubmit)) == SessionState::Running, "UserPromptSubmit -> Running");
     CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::PreToolUse)) == SessionState::Running, "PreToolUse -> Running");
     CHECK(NextSessionState(SessionState::Running, Msg(L"a", HookEvent::Stop)) == SessionState::WaitingForInput, "Stop -> WaitingForInput");

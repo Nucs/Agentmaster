@@ -203,7 +203,26 @@ namespace Agentmaster
         switch (m.event)
         {
         case HookEvent::SessionStart:
-            return SessionState::Idle;
+            // Agentmaster (Rule #16 / #7): a SessionStart fires at fresh launch, at a `--resume` (crash/
+            // window restore, Sessions-page resume, adopt, AND a re-homed/background tab's LAZY claude
+            // start on FIRST ACTIVATION — the ConPTY spawns claude only on the control's first non-zero
+            // layout), and at an in-session /clear or /compact. A resume/lazy-start RELOADS the
+            // conversation but does NOT continue the turn — the transcript tail still reflects the same
+            // AT-REST state — so it must NOT clobber an at-rest "needs-you" triage (WaitingForInput /
+            // NeedsApproval). That state may have come from a real turn-complete, the persisted
+            // crash-restore seed (RestoredSessionState preserves the SAME two states — this mirrors it,
+            // because a lazy-start SessionStart IS a resume), or the user's explicit "Move to
+            // Waiting-for-you" / "Mark Unread" promote. Preserving it here is what makes those cues
+            // SURVIVE opening the tab: the lazy-start SessionStart used to reset them to Idle the instant
+            // you focused the tab (the reported "Move to Waiting-for-you then activate the inactive tab
+            // resets to Idle/Done" bug — a background/restored tab's claude fires SessionStart on the
+            // first visit). A genuine new turn (UserPromptSubmit -> Running) still clears it; every OTHER
+            // current state resets to Idle (fresh launch — a new record starts Idle anyway — plus a
+            // Running/Error/Done restart and a /clear from idle). Turn identity still resets in
+            // NextSessionStateOrdered (turns = {}).
+            return (current == SessionState::WaitingForInput || current == SessionState::NeedsApproval)
+                       ? current
+                       : SessionState::Idle;
         case HookEvent::UserPromptSubmit:
             return SessionState::Running;
         case HookEvent::PreToolUse:
