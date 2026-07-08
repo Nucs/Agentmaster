@@ -407,10 +407,15 @@ namespace winrt::TerminalApp::implementation
                     });
                     box.LostFocus([this](const IInspectable&, const RoutedEventArgs&) { _CommitRename(); });
                     // Focus + select-all once it is actually in the tree (Loaded) so the first
-                    // keystroke replaces the old name.
-                    box.Loaded([box](const IInspectable&, const RoutedEventArgs&) {
-                        box.Focus(FocusState::Programmatic);
-                        box.SelectAll();
+                    // keystroke replaces the old name. The box arrives as the SENDER — never capture
+                    // the element into its own handler (the row handlers' self-capture rule below):
+                    // box -> Loaded -> box was a refcount cycle leaking one TextBox per rename gesture.
+                    box.Loaded([](const IInspectable& sender, const RoutedEventArgs&) {
+                        if (const auto b = sender.try_as<TextBox>())
+                        {
+                            b.Focus(FocusState::Programmatic);
+                            b.SelectAll();
+                        }
                     });
                     _renameBox = box;
                     _treeHost.Children().Append(box);
@@ -1509,20 +1514,32 @@ namespace winrt::TerminalApp::implementation
         // Tags — the bookmark-tags panel for this session (the WT tab menu's "Tags" twin): name a
         // NEW tag (with the color picker) or toggle existing ones; each shows as a small bookmark on
         // the session's tab. The PAGE owns the panel (SetTagsHandler -> _OpenTagEditorForElement),
-        // anchored under the right-clicked card / row (`anchor` — captured at menu build; the page
-        // guards a recycled element and falls back to a default position). Deferred one tick like
-        // Rename so the closing flyout's focus restore can't fight the panel's name-box focus.
+        // anchored under the right-clicked card / row (`anchor` — WEAK-captured at menu build; the
+        // page guards a recycled/dead element and falls back to a default position). Deferred one tick
+        // like Rename so the closing flyout's focus restore can't fight the panel's name-box focus.
+        //
+        // The anchor capture MUST stay weak — it was the 23 GB leak (the ToolTip leak's sequel, same
+        // class — AgentTipHelpers.h). `anchor` IS this menu's host (the tree row / board card / its ⋯
+        // button), and that host holds this menu strongly via ContextFlyout/Flyout — so a strong
+        // `anchor` capture here closed a host -> flyout -> Click-delegate -> host REFCOUNT CYCLE that
+        // C++/WinRT (pure refcounting, no cycle collector) can never free. Every _Refresh rebuild
+        // (each registry notify + the 30 s backstop, board AND tree, ~N sessions a pass) then leaked
+        // the ENTIRE discarded row/card subtree — TextBlocks + their DWrite layouts, icons, brushes,
+        // this ~14-item menu — at ~85 MB/min on a busy fleet. The row handlers above already state the
+        // rule: never capture an element into a handler its own subtree owns.
         MenuFlyoutItem tagsItem;
         tagsItem.Text(L"Tags");
         tagsItem.Icon(glyphIcon(L"\xE8A4")); // Bookmarks — matches the WT tab menu's Tags item
         AgentSetTip(tagsItem, L"Bookmark tags for this session \x2014 add a tag (pick its color) or toggle existing ones; each tag shows as a small bookmark ribbon on the session's tab.");
-        tagsItem.Click([weak, disp, id, anchor](const IInspectable&, const RoutedEventArgs&) {
-            auto act = [weak, id, anchor]() {
+        const auto anchorWeak = anchor ? winrt::make_weak(anchor) : winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement>{};
+        tagsItem.Click([weak, disp, id, anchorWeak](const IInspectable&, const RoutedEventArgs&) {
+            auto act = [weak, id, anchorWeak]() {
                 if (auto self = weak.get())
                 {
                     if (self->_tagsHandler)
                     {
-                        self->_tagsHandler(winrt::hstring{ id }, anchor);
+                        // A dead anchor resolves null — _OpenTagEditorForElement default-positions.
+                        self->_tagsHandler(winrt::hstring{ id }, anchorWeak.get());
                     }
                 }
             };
