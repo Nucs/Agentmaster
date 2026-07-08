@@ -89,6 +89,57 @@ void TestSpawnBuilders()
         CHECK(hasPipe, "restart spec env carries CCMGR_HOOK_PIPE = the bridge pipe");
     }
 
+    // BuildClaudeRestartSpec RE-FORK (Agentmaster — "restart a fork loads a NEW claude session" fix).
+    // A never-messaged fork writes NO transcript until its first turn, so the old restart's fresh
+    // `--session-id <id>` form silently swapped the forked branch for an EMPTY conversation. With the
+    // session's persisted forkParentId threaded in, the spec re-forks from the source INTO the same id
+    // (the [restore->refork] recipe) — the own transcript, when it exists, still wins (resume, never
+    // re-fork off a divergent source), and a vanished source falls back to the fresh form. Stages a
+    // throwaway CLAUDE_CONFIG_DIR so ClaudeConversationExists sees exactly the fixtures.
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        AppSettings rst;
+        rst.skipPermissions = true;
+        const std::wstring cfg = (fs::temp_directory_path(ec) / (L"am-restart-refork-" + NewSessionId())).wstring();
+        wchar_t prevBuf[2048]{};
+        const DWORD prevN = ::GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevBuf, 2048);
+        const std::wstring prevCfg{ prevBuf, prevN };
+        ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", cfg.c_str());
+        const std::wstring proj = cfg + L"\\projects\\K--work-api";
+        auto touch = [](const std::wstring& p) {
+            std::error_code e2;
+            fs::create_directories(fs::path{ p }.parent_path(), e2);
+            std::ofstream f{ fs::path{ p }, std::ios::binary };
+            f << "{}\n";
+        };
+
+        const std::wstring parent = NewSessionId();
+        const std::wstring forkId = NewSessionId();
+        touch(proj + L"\\" + parent + L".jsonl"); // the SOURCE conversation exists on disk
+
+        // (a) fork with NO own transcript + a live source -> RE-FORK from the source into the SAME id.
+        const auto a = BuildClaudeRestartSpec(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", forkId, rst, L"C:\\bin\\claude.exe", parent);
+        CHECK(a.sessionId == forkId, "restart re-fork KEEPS the fork's id (never re-keys)");
+        CHECK(a.commandline.find(L"--resume " + parent + L" --fork-session --session-id " + forkId) != std::wstring::npos, "restart of a never-messaged fork RE-FORKS from its source into the same id");
+
+        // (b) the fork's OWN transcript exists -> plain resume wins (never re-fork a grown fork).
+        touch(proj + L"\\" + forkId + L".jsonl");
+        const auto b = BuildClaudeRestartSpec(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", forkId, rst, L"C:\\bin\\claude.exe", parent);
+        CHECK(b.commandline.find(L"--resume " + forkId) != std::wstring::npos, "restart of a fork WITH its own transcript resumes it");
+        CHECK(b.commandline.find(L"--fork-session") == std::wstring::npos, "own transcript wins over the fork link (no re-fork)");
+
+        // (c) fork link set but the SOURCE transcript is gone -> the fresh form (best possible).
+        const std::wstring ghostParent = NewSessionId();
+        const std::wstring fork2 = NewSessionId();
+        const auto c = BuildClaudeRestartSpec(L"K:/work/api", L"api", L"\\\\.\\pipe\\agentmaster.42", fork2, rst, L"C:\\bin\\claude.exe", ghostParent);
+        CHECK(c.commandline.find(L"--session-id " + fork2) != std::wstring::npos, "restart with a VANISHED fork source falls back to the fresh form (same id)");
+        CHECK(c.commandline.find(L"--fork-session") == std::wstring::npos, "no re-fork off a vanished source");
+
+        ::SetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", prevCfg.empty() ? nullptr : prevCfg.c_str());
+        fs::remove_all(fs::path{ cfg }, ec);
+    }
+
     // BuildClaudeSpawn fork id selection (Agentmaster — restoring a never-messaged fork). A GENUINE
     // fork mints a FRESH target id (!= the source); a RESTORE re-fork passes forkIntoSessionId so the
     // fork branches back into its EXISTING id (preserving identity across a restart instead of churning

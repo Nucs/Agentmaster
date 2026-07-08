@@ -340,11 +340,18 @@ namespace Agentmaster
 
     // Build a spec to RELAUNCH an existing managed conversation IN PLACE — the tab's connection died and
     // the user hit "Restart session" (WT's restartConnection). Unlike BuildClaudeSpawn it NEVER mints a
-    // new id and NEVER forks: it RESUMES <sessionId> (claude --resume <id>) when a transcript exists, else
-    // starts FRESH reusing <sessionId> (claude --session-id <id> — a never-prompted/early-crashed session
-    // wrote no transcript, so reusing the id is collision-free and keeps the registry/tab/injector binding
-    // stable). It must be used INSTEAD of replaying the original launch commandline, which is `--session-id
+    // new id: it KEEPS <sessionId> and picks the relaunch form from the CURRENT on-disk state —
+    //   * a transcript exists                      -> RESUME it (claude --resume <id>);
+    //   * none, but `forkParentId` still has one   -> RE-FORK from the parent INTO the same id
+    //     (claude --resume <parent> --fork-session --session-id <id> — the _LaunchClaudeSession
+    //     [restore->refork] recipe: a NEVER-MESSAGED fork writes no transcript until its first turn, so
+    //     a plain fresh relaunch would silently replace the forked branch with an EMPTY conversation);
+    //   * neither                                  -> FRESH reusing <sessionId> (claude --session-id <id>
+    //     — collision-free since the id is unused on disk, keeps the registry/tab/injector binding stable).
+    // It must be used INSTEAD of replaying the original launch commandline, which is `--session-id
     // <id>` for a fresh launch (collides with the now-existing transcript) or a `--fork-session` form for a
-    // fork (would re-fork). `claudeLauncher` is the resolved full path (BuildClaudeSpawn semantics).
-    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher = {});
+    // fork (would re-fork a since-grown id). `claudeLauncher` is the resolved full path (BuildClaudeSpawn
+    // semantics); `forkParentId` is the session's persisted fork SOURCE (SessionInfo::forkParentId; empty
+    // for a non-fork or once the fork produced content).
+    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher = {}, std::wstring_view forkParentId = {});
 }

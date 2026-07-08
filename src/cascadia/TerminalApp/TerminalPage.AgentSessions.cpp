@@ -1432,7 +1432,64 @@ namespace winrt::TerminalApp::implementation
             return false;
         }
         const auto oldConn = control.Connection();
-        const std::wstring managedId = _ManagedSessionForConnection(oldConn);
+        std::wstring managedId = _ManagedSessionForConnection(oldConn);
+        if (managedId.empty() && oldConn)
+        {
+            // The liveness sweep archives a session whose claude died and ERASES its _claudeTabs entry
+            // while deliberately leaving the dead pane open (the exit banner is for the user to read).
+            // The banner's Enter-to-restart then found no map entry, fell through to the upstream
+            // PROFILE replay, and the pane came back as a plain shell — the managed session silently
+            // unlinked from its own tab. Recover the identity from the registry instead: the dead
+            // connection's WT_SESSION is still the record's tabToken (stamped eagerly at launch/restart
+            // and by every hook). Gated on !external — an ADOPTED session's tabToken is the SHELL ConPTY
+            // the user typed `claude` into, and restarting that tab must replay the shell (upstream),
+            // not resurrect claude over it. Freshest-wins when one ConPTY hosted several conversations
+            // over time (an in-session /resume chain leaves superseded records with the same token).
+            const std::wstring wt = ::Microsoft::Console::Utils::GuidToPlainString(oldConn.SessionId());
+            int64_t bestFreshness = -1;
+            for (const auto& s : _sessionRegistry->Snapshot())
+            {
+                if (!s.external && !s.tabToken.empty() && ::Agentmaster::TabTokenEq(s.tabToken, wt))
+                {
+                    const int64_t freshness = std::max(s.lastActivityUnixMs, s.lastHookUnixMs);
+                    if (freshness > bestFreshness)
+                    {
+                        bestFreshness = freshness;
+                        managedId = s.id;
+                    }
+                }
+            }
+            if (!managedId.empty())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] " + managedId + L" resolved via tabToken " + wt + L" (tab was archived by the liveness sweep \x2014 restart revives it)\n");
+                // Re-link sessionId -> tab (the sweep erased it): resolve the tab hosting this pane so
+                // Activate / Close / title-sync work again right away; the observer would re-bind in ~2s
+                // anyway, this just removes the gap. Overlay/status-dot re-attach ride the observer bind.
+                for (const auto& t : _tabs)
+                {
+                    const auto impl = _GetTabImpl(t);
+                    const auto root = impl ? impl->GetRootPane() : nullptr;
+                    if (!root)
+                    {
+                        continue;
+                    }
+                    bool hostsPane = false;
+                    root->WalkTree([&](auto&& p) {
+                        if (const auto ctrl = p->GetTerminalControl(); ctrl && ctrl.Connection() == oldConn)
+                        {
+                            hostsPane = true;
+                            return true;
+                        }
+                        return false;
+                    });
+                    if (hostsPane)
+                    {
+                        _claudeTabs[managedId] = winrt::make_weak(t);
+                        break;
+                    }
+                }
+            }
+        }
         if (managedId.empty())
         {
             return false; // not a managed agent — let the upstream restart handle it
@@ -1448,6 +1505,7 @@ namespace winrt::TerminalApp::implementation
         const std::wstring dir = info->workingDir;
         const std::wstring title = info->title;
         const bool isCodex = (info->kind == ::Agentmaster::AgentKind::Codex);
+        bool reforked = false;
 
         TerminalConnection::ConptyConnection newConn{ nullptr };
         if (isCodex)
@@ -1476,12 +1534,18 @@ namespace winrt::TerminalApp::implementation
                 ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart-blocked] no native claude.exe; " + managedId + L"\n");
                 return true; // handled (refused) — don't fall through to the buggy replay
             }
-            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, ::Agentmaster::LoadAppSettings(), ::Agentmaster::SharedEngine().claudeExePath);
+            // Threading forkParentId lets the spec RE-FORK a never-messaged fork from its source into the
+            // SAME id (the [restore->refork] recipe) instead of replacing the forked branch with an empty
+            // fresh conversation — the reported "restart a fork -> loads a new claude session" loss.
+            const auto spec = ::Agentmaster::BuildClaudeRestartSpec(dir, title, _hooksBridge->PipeName(), managedId, ::Agentmaster::LoadAppSettings(), ::Agentmaster::SharedEngine().claudeExePath, info->forkParentId);
             // Re-host in pwsh (as the launch path does) so the relaunched session keeps the same
             // quit-to-pwsh-prompt behavior rather than dying into a dead pane.
             const std::wstring hostedCmd = ::Agentmaster::BuildPwshHostedCommandline(::Agentmaster::SharedEngine().pwshExePath, spec.commandline);
             newConn = _BuildAgentConnection(hostedCmd, dir, title, spec.env, /*inheritCursor*/ true);
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] claude " + managedId + (::Agentmaster::ClaudeConversationExists(managedId) ? L" (resume)" : L" (fresh)") + L"\n");
+            // Log the mode straight off the built artifact (no second transcript stat / no race).
+            reforked = spec.commandline.find(L"--fork-session") != std::wstring::npos;
+            const bool resumed = !reforked && spec.commandline.find(L"--resume ") != std::wstring::npos;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[restart] claude " + managedId + (reforked ? (L" (refork from " + info->forkParentId + L")") : (resumed ? L" (resume)" : L" (fresh)")) + L"\n");
         }
 
         if (!newConn)
@@ -1489,14 +1553,39 @@ namespace winrt::TerminalApp::implementation
             return true; // managed, but the rebuild failed — still don't replay the launch commandline
         }
 
-        // Tear the OLD connection down before swapping. A dead connection ignores this (restart's usual
-        // case); a still-running agent would otherwise be ORPHANED — the control just detaches from it.
-        if (oldConn)
-        {
-            oldConn.Close();
-        }
-        // Reset the terminal's VT state before attaching the new connection (the previous client may have
-        // left bracketed paste / mouse tracking / alternate buffer / kitty keyboard set).
+        // Re-stamp the session's HOST IDENTITY before the swap. The new connection has a NEW WT_SESSION;
+        // without this the record keeps the DEAD ConPTY's token and the liveness sweep — which pinpoints
+        // the session's pane BY tabToken — finds no such connection in the tab and ARCHIVES the freshly
+        // restarted session seconds later (clearing the injector + dropping the _claudeTabs entry; the
+        // observed [restart] -> [liveness] dead -> [discover]/[adopt] churn). Stamping eagerly (the launch
+        // path's idiom) also arms the --fork-session source-id echo guard for a RE-FORK, whose first
+        // SessionStart echoes the PARENT id on this new ConPTY. live=true revives an archived (banner-
+        // dead) record; the stale pid is dropped (the observer refills it from the new process); the
+        // display state is normalized exactly like a restore (Rule #16 — a relaunched claude does not
+        // continue the interrupted turn, so in-flight/ended states reset to Idle while the at-rest
+        // "needs you" states survive); the persistence observer rides this Update, so it also saves.
+        const std::wstring newWt = ::Microsoft::Console::Utils::GuidToPlainString(newConn.SessionId());
+        _sessionRegistry->Update(managedId, [&](::Agentmaster::SessionInfo& s) {
+            s.tabToken = newWt;
+            s.live = true;
+            s.pid = 0;
+            s.state = ::Agentmaster::RestoredSessionState(s.state);
+            s.lastMessageWasQuestion = ::Agentmaster::RestoredQuestionFlag(s.state, s.lastMessageWasQuestion);
+            s.pendingConfirmPromptId.clear();
+            s.pendingInput.clear(); // the old screen (and any unsent draft on it) is gone
+            if (reforked)
+            {
+                s.forkEchoConsumed = false; // re-arm: the re-forked process will echo the source id once
+            }
+        });
+
+        // Swap the connection — upstream's restart order. Deliberately NO explicit oldConn.Close() first:
+        // control.Connection() (ControlCore::_closeConnection) revokes the output/state handlers and THEN
+        // closes the old connection, so its teardown banner is raised into revoked handlers. An explicit
+        // pre-swap Close() runs while the control is still attached — ConptyConnection::Close() blocks on
+        // its output thread, whose exit handler (_LastConPtyClientDisconnected) reads the still-dying
+        // client's exit code as STILL_ACTIVE and prints "[process exited with code 259 (0x00000103)]" +
+        // "press Enter to restart" INTO the restarted pane (the reported banner). Same teardown, silent.
         control.HardResetWithoutErase();
         control.Connection(newConn);
         newConn.Start();
@@ -1504,8 +1593,7 @@ namespace winrt::TerminalApp::implementation
         // Re-point this session's stdin injector at the freshly-started connection (Claude only — Codex
         // has no injector in this phase). Correctness Rule #3 binds by sessionId; without this, Autorunner
         // / Send-now would keep writing to the replaced, dead connection. The observer won't fix it on its
-        // own: it sees the tab still bound to <id> (alreadyBound) and skips re-binding. The new connection
-        // has a NEW WT_SESSION; the next hook / observer tick refreshes the session's tabToken.
+        // own: it sees the tab still bound to <id> (alreadyBound) and skips re-binding.
         if (!isCodex)
         {
             const auto conn = newConn;
