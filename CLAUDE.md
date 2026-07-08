@@ -539,18 +539,31 @@ runs on **hand-copied binaries** until then (needs the dev instance closed); and
 the existing `WM_COPYDATA` handoff + a disk-poll confirm) and P3 (`watch` event stream + prompt-driving
 `enqueue`/`send-now`/`set-autorunner`) are designed + deferred** (CLI.md §4/§9).
 
-**In-app auto-updater (`Updater.h`) — implemented + wired (startup check + cog), header-only.** A
+**In-app auto-updater (`Updater.h`) — implemented + wired (startup check + hourly autocheck + cog),
+header-only.** A
 GitHub-release self-updater for our side-by-side packaged app, header-only pure-Win32 like
 `ProfileBootstrap.h` (so the WindowsTerminal EXE includes it without the engine lib). On launch the
 `WindowEmperor` runs `RunStartupUpdateCheck` **after the profile resolves and BEFORE the "Reopen your
 N windows?" prompt** — a bounded (≤6 s, on a worker so a slow network can't wedge launch) GitHub-API
 query for the newest release, gated to **packaged RELEASE installs** (dev/unpackaged skip unless
 `AGENTMASTER_UPDATE_STARTUP` is set). When a strictly-newer version exists it shows a TaskDialog —
-**Update now / Postpone (3·7·30 days) / Skip this version / Not now** (Cancel == Not now). **Update
+**Update now / Postpone (3·7·30 days) / Skip this version / Not now** (Cancel == Not now). **The same
+check re-runs every 1 h while the app is running** (`RunPeriodicUpdateCheck`, the shared
+`RunUpdateCheckAndPrompt` core): the `WindowEmperor` arms a plain Win32 **`WM_TIMER`** on its message
+window (`_setupUpdateAutocheck`, armed during window-setup — a `WM_TIMER`, NOT the XAML
+`DispatcherTimer`, which our DefaultProfile mode never starts) and each tick runs the identical
+bounded-network + prompt flow on a **DETACHED background thread** so neither the round-trip nor the
+modal prompt ever blocks the UI (the prompt is pure Win32 with a `nullptr` owner, pumping its own
+nested loop — the same one startup uses). An **in-flight guard** (a `shared_ptr<atomic<bool>>` the
+worker captures instead of `this`, so a late finish after teardown can't dangle) prevents stacking a
+second prompt while one is still showing; the same **postpone / skip / channel** gates apply, so a
+postponed-or-skipped version stays silent until it expires. **Update
 now** materializes a BAKED-IN installer (`am-update.cmd` + `am-update.ps1`, written into the active
 profile — never fetched) that downloads the `.msixbundle` + `.cer`, trusts the self-signed cert
 (elevating only if needed), `Add-AppxPackage`s it (with the VCLibs-dependency fallback), and
-relaunches; the app then quits so the package isn't in use. Only the **release** family is ever
+relaunches; the app then quits (`TerminateProcess`, like the single-instance handoff — durability
+rules reopen the workspace on the updated relaunch) so the package isn't in use. Only the **release**
+family is ever
 published, so a dev install that updates **graduates** to release. The Settings cog's **UPDATES**
 section is the manual twin — a "Check for updates" button, a "vX.Y.Z available!" label, and an "Allow
 pre-release versions" toggle (NOT startup-gated, available on any build). State persists in

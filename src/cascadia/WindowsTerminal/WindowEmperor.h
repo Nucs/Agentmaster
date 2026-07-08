@@ -66,6 +66,7 @@ private:
     void _unregisterHotKey(int index) noexcept;
     void _setupGlobalHotkeys();
     void _setupSessionPersistence(bool enabled);
+    void _setupUpdateAutocheck(); // Agentmaster: the hourly in-app update autocheck (Updater.h)
     void _persistState(const winrt::Microsoft::Terminal::Settings::Model::ApplicationState& state) const;
     void _finalizeSessionPersistence() const;
     void _checkWindowsForNotificationIcon();
@@ -82,6 +83,13 @@ private:
     bool _skipPersistence = false;
     bool _needsPersistenceCleanup = false;
     SafeDispatcherTimer _persistStateTimer;
+    // Agentmaster: the hourly update autocheck. A plain Win32 WM_TIMER on the message window (_window)
+    // fires on the emperor thread's message loop (rock-solid — the loop always pumps WM_TIMER, unlike
+    // the DispatcherTimer above, which our DefaultProfile mode never starts). Each tick runs the
+    // (bounded network + modal prompt) check on a DETACHED background thread so the UI never blocks.
+    // The in-flight flag prevents stacking a second check/prompt while one is showing; it lives in a
+    // shared_ptr so a late-finishing worker can clear it even after teardown (it never captures `this`).
+    std::shared_ptr<std::atomic<bool>> _updateCheckInFlight = std::make_shared<std::atomic<bool>>(false);
     std::optional<bool> _currentSystemThemeIsDark;
     int32_t _windowCount = 0;
     int32_t _messageBoxCount = 0;

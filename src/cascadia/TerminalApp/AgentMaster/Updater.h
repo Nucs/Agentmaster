@@ -956,13 +956,20 @@ namespace Agentmaster::Updater
         return IsPackaged() && !Profiles::IsDevPackage();
     }
 
-    // ============================ startup orchestration ============================
+    // ============================ check orchestration ============================
 
-    // The startup check (WindowEmperor, BEFORE the "Reopen your N windows?" prompt). Reads prefs,
-    // gates on identity + postpone + skip, checks GitHub (bounded), prompts, and applies the
-    // choice. Returns true IFF the installer was launched — the caller must then exit the process
-    // (TerminateProcess, like the single-instance handoff) so the package isn't in use.
-    inline bool RunStartupUpdateCheck(HWND owner)
+    // The shared check core, used by BOTH the startup check and the periodic (hourly) autocheck:
+    // reads prefs, gates on identity + postpone + skip, checks GitHub (bounded so a slow-but-present
+    // network can't wedge the caller), prompts (Update now / Postpone 3·7·30 / Skip / Not now), and
+    // applies the choice. Returns true IFF the installer was launched — the caller must then exit the
+    // process (TerminateProcess, like the single-instance handoff) so the package isn't in use while
+    // it upgrades + relaunches.
+    //
+    // Safe to call on the MAIN thread (startup, before the message loop) OR a BACKGROUND thread (the
+    // hourly autocheck): the network round-trip runs on its own worker bounded to kDeadlineMs, and the
+    // prompt is a modal Win32 TaskDialog that pumps its own nested message loop (independent of XAML,
+    // so a background-thread call never touches the UI thread). Never throws.
+    inline bool RunUpdateCheckAndPrompt(HWND owner)
     {
         try
         {
@@ -1019,7 +1026,23 @@ namespace Agentmaster::Updater
         }
         catch (...)
         {
-            return false; // an update check must never block startup
+            return false; // an update check must never throw into the caller (nor block startup)
         }
+    }
+
+    // The startup check (WindowEmperor, BEFORE the "Reopen your N windows?" prompt). Runs on the
+    // main thread — the bounded worker-and-poll inside the core keeps it from wedging launch.
+    inline bool RunStartupUpdateCheck(HWND owner)
+    {
+        return RunUpdateCheckAndPrompt(owner);
+    }
+
+    // The periodic autocheck (WindowEmperor's hourly WM_TIMER -> a detached background thread, so
+    // neither the network round-trip nor the modal prompt touch the UI thread). Identical flow +
+    // gates to the startup check; a distinct name only so it reads right at the call site. Returns
+    // true IFF the installer was launched — the caller then exits the process so it isn't in use.
+    inline bool RunPeriodicUpdateCheck(HWND owner)
+    {
+        return RunUpdateCheckAndPrompt(owner);
     }
 }
