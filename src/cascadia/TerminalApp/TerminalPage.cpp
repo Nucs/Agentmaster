@@ -2728,6 +2728,11 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too
+                    // Agentmaster (tab color modes — NoColor/"Remove colors"): a managed session tab
+                    // can't be recolored while the mode loads no colors. Refresh the gray at open —
+                    // both the session binding and the GLOBAL mode can change after the paint that
+                    // last set it (shell/Manager tabs stay recolorable in every mode).
+                    tab->SetColorPickerEnabled(!(isSession && page->_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor));
                     // Agentmaster (eager-init): "Activate Tab" — shown ONLY when this session is DORMANT (its
                     // claude hasn't started: the control is still NotConnected). Read the live control state
                     // (the authority), so a tab that started since the last reconcile stops offering it.

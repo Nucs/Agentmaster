@@ -1927,6 +1927,11 @@ namespace winrt::TerminalApp::implementation
     //     sessions.json autosave) so the synchronous _OnClaudeTabColorChanged re-entry the paint
     //     triggers sees it already stored and no-ops (the same settle-immediately contract the dir
     //     paint has vs GetDirColor).
+    //   * NoColor ("Remove colors") — the tab wears NOTHING: any painted runtime color is RESET and
+    //     "Change tab color" is disabled on the tab (SetColorPickerEnabled). The persisted colors
+    //     (dir-colors.json / tabColorHex) are deliberately untouched — the reset's synchronous
+    //     _OnClaudeTabColorChanged re-entry is swallowed by that handler's NoColor guard, so nothing
+    //     is dropped and switching back to a colored mode restores exactly the prior colors.
     // Never called for the Manager tab (its color is per-window, in the WindowRecord).
     void TerminalPage::_ApplySessionTabColor(const TerminalApp::Tab& tab, const std::wstring& sessionId, const std::wstring& dir)
     {
@@ -1935,6 +1940,18 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         const auto mode = _appSettings.tabColorMode;
+        if (const auto impl = _GetTabImpl(tab))
+        {
+            // The color picker follows the mode on every (re)paint — disabled under NoColor, re-armed
+            // the moment a colored mode repaints the fleet (_ReapplyManagedTabColors on cog Save /
+            // cross-window broadcast). Managed tabs only — shell tabs never route through here.
+            impl->SetColorPickerEnabled(mode != ::Agentmaster::TabColorMode::NoColor);
+            if (mode == ::Agentmaster::TabColorMode::NoColor)
+            {
+                impl->ResetRuntimeTabColor(); // shed any painted color; persisted colors stay (the guard above)
+                return;
+            }
+        }
         if (mode == ::Agentmaster::TabColorMode::Individual && _sessionRegistry)
         {
             const auto info = _sessionRegistry->Get(sessionId);
@@ -2094,6 +2111,16 @@ namespace winrt::TerminalApp::implementation
         if (id.empty())
         {
             return; // not a Claude session tab
+        }
+        // Tab color modes — NoColor ("Remove colors"): a managed tab wears no color and this mode
+        // NEVER writes color state, so the persisted dir/session colors survive it verbatim (the
+        // whole point — switching back restores them). This swallows our own ResetRuntimeTabColor
+        // repaint (which would otherwise DROP the dir's persisted color via SetDirColor(dir,
+        // nullopt)) and leaves a stray setTabColor action a visual-only transient (unpersisted;
+        // the next mode-aware repaint sheds it).
+        if (_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor)
+        {
+            return;
         }
         const auto info = _sessionRegistry->Get(id);
         if (!info)

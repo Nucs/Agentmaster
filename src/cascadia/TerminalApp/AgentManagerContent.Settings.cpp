@@ -1010,6 +1010,14 @@ namespace winrt::TerminalApp::implementation
         _setAlwaysShowHomeButton.Header(winrt::box_value(L"Always display Home button"));
         AgentSetTip(_setAlwaysShowHomeButton, L"Keep the tab-strip \x201CHome\x201D button (jump to the pinned Agent Manager tab) visible whenever you're on another tab. When off, it appears only once the Manager tab has scrolled out of view. Default on.");
         panel.Children().Append(_setAlwaysShowHomeButton);
+        // TABS: show the profile ICON on tabs (the leftmost glyph, before the status dot + title).
+        // GLOBAL (AppSettings::showTabIcon); applied live on Save via TerminalPage::_UpdateAllTabIcons +
+        // the cross-window broadcast. DEFAULT OFF — this app hides tab icons by default so the strip
+        // reads on the status dot + title; off forces IconStyle::Hidden so the icon takes no space.
+        _setShowTabIcon = ToggleSwitch{};
+        _setShowTabIcon.Header(winrt::box_value(L"Show icons on tabs"));
+        AgentSetTip(_setShowTabIcon, L"Show the profile icon at the left of each tab (before the status dot and title). When off (the default), the icon is hidden entirely and takes no space \x2014 the tab reads on its status dot + title. Default off.");
+        panel.Children().Append(_setShowTabIcon);
         // FAVORITES.md §5a: which glyph marks a FAVORITE (starred) session on its live tab — Crown
         // (default, a gold crown at the status dot's NW) or Star (the status dot foregrounded on a white,
         // golden-tipped star). GLOBAL across windows; applied live on Save + cross-window broadcast.
@@ -1050,15 +1058,18 @@ namespace winrt::TerminalApp::implementation
         panel.Children().Append(_setTooltipTagsOpacity);
 
         // Tab color modes: HOW managed tabs get their color — shared per working dir (the classic
-        // Rule-#12 behavior, default), individual per tab, or shared per the INFERRED working dir
-        // (detected from the files the session reads/edits/creates). GLOBAL (AppSettings::tabColorMode);
+        // Rule-#12 behavior, default), individual per tab, shared per the INFERRED working dir
+        // (detected from the files the session reads/edits/creates), or "Remove colors" (no tab is
+        // colored; the saved colors are kept, just not loaded, and "Change tab color" is disabled
+        // on session tabs). GLOBAL (AppSettings::tabColorMode);
         // applied live on Save + cross-window broadcast (TerminalPage::_ReapplyManagedTabColors).
         _setTabColorMode = ComboBox{};
         _setTabColorMode.Header(winrt::box_value(L"Tab coloring"));
         _setTabColorMode.Items().Append(winrt::box_value(L"Shared per working directory")); // index 0 == TabColorMode::WorkingDirectory (default)
         _setTabColorMode.Items().Append(winrt::box_value(L"Individual per tab")); // index 1 == TabColorMode::Individual
         _setTabColorMode.Items().Append(winrt::box_value(L"Inferred working directory")); // index 2 == TabColorMode::InferredWorkingDirectory
-        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.");
+        _setTabColorMode.Items().Append(winrt::box_value(L"Remove colors")); // index 3 == TabColorMode::NoColor
+        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.\n\x2022 Remove colors: no tab is colored and \x201C" L"Change tab color\x201D is disabled on session tabs; the saved folder/session colors are KEPT \x2014 switch back to any other mode and they return exactly as they were.");
         panel.Children().Append(_setTabColorMode);
         // Tab color modes — "Use .git folder to infer" (AppSettings::inferGitRoot, default ON): the
         // inferred working dir SNAPS to the enclosing git repository root (the folder holding .git —
@@ -1649,6 +1660,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setAlwaysShowHomeButton.IsOn(_appSettings.alwaysShowHomeButton);
         }
+        if (_setShowTabIcon)
+        {
+            _setShowTabIcon.IsOn(_appSettings.showTabIcon);
+        }
         if (_setFavoriteIcon)
         {
             // Items: 0 == Crown (default), 1 == Star.
@@ -1667,9 +1682,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setTabColorMode)
         {
-            // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory.
+            // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory, 3 == NoColor.
             _setTabColorMode.SelectedIndex(_appSettings.tabColorMode == TabColorMode::Individual ? 1 :
                                                _appSettings.tabColorMode == TabColorMode::InferredWorkingDirectory ? 2 :
+                                               _appSettings.tabColorMode == TabColorMode::NoColor                  ? 3 :
                                                                                                                      0);
         }
         if (_setInferGitRoot)
@@ -1995,6 +2011,10 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.alwaysShowHomeButton = _setAlwaysShowHomeButton.IsOn();
         }
+        if (_setShowTabIcon)
+        {
+            _appSettings.showTabIcon = _setShowTabIcon.IsOn();
+        }
         if (_setFavoriteIcon)
         {
             // Items: 0 == Crown (default), 1 == Star.
@@ -2020,9 +2040,10 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setTabColorMode)
         {
-            // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory.
+            // Items: 0 == WorkingDirectory (default), 1 == Individual, 2 == InferredWorkingDirectory, 3 == NoColor.
             _appSettings.tabColorMode = _setTabColorMode.SelectedIndex() == 1 ? TabColorMode::Individual :
                                         _setTabColorMode.SelectedIndex() == 2 ? TabColorMode::InferredWorkingDirectory :
+                                        _setTabColorMode.SelectedIndex() == 3 ? TabColorMode::NoColor :
                                                                                 TabColorMode::WorkingDirectory;
         }
         if (_setInferGitRoot)

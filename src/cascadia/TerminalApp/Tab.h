@@ -144,6 +144,7 @@ namespace winrt::TerminalApp::implementation
         void SetAgentTagVisible(bool visible); // Agentmaster (bookmark tags): show/hide the "Tag" item (managed agent-session tabs only; page-driven at flyout-open, like Favorite)
         void SetAgentActivateVisible(bool visible); // Agentmaster (eager-init): show/hide the "Activate Tab" item (shown only when this tab's managed session is DORMANT — its claude hasn't started; page-driven at flyout-open from ConnectionState())
         void SetFavoriteAndCloseAllVisible(bool visible); // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item (shown only when the window hosts >=1 managed session; page-driven at flyout-open)
+        void SetColorPickerEnabled(bool enabled); // Agentmaster (tab color modes — NoColor/"Remove colors"): gray/restore the "Change tab color..." context-menu item AND gate AttachColorPicker (the openTabColorPicker action), so a managed tab can't be recolored while the mode is NoColor. TOGGLEABLE (unlike the Manager tab's one-shot disables) — driven by the mode-aware paint seam (_ApplySessionTabColor) + refreshed at flyout-open
 
         til::event<winrt::delegate<void()>> RequestFocusActiveControl;
 
@@ -226,6 +227,12 @@ namespace winrt::TerminalApp::implementation
         // ActivateTabRenamer() so the double-tap / openTabRenamer-action paths are blocked too.
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _renameTabMenuItem{};
         bool _renameDisabled{ false };
+        // Agentmaster (tab color modes — NoColor/"Remove colors"): the "Change tab color..." item, kept
+        // as a member so SetColorPickerEnabled can gray/restore it per the GLOBAL tab-color mode (a
+        // TOGGLE, unlike the Manager tab's one-shot disables). _colorPickerDisabled also gates
+        // AttachColorPicker() so the openTabColorPicker action / command-palette path is blocked too.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _chooseColorMenuItem{};
+        bool _colorPickerDisabled{ false };
         // Agentmaster: the "Copy >" submenu (session id / path / branch / Claude & Codex launch CLI /
         // summary / transcript) mirroring the per-tab overlay's copy button. Kept as a member so the page
         // can show/hide it (SetAgentCopyMenuVisible) per whether this tab currently hosts a managed agent

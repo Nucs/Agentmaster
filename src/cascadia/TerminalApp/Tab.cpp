@@ -643,8 +643,12 @@ namespace winrt::TerminalApp::implementation
 
         if (_iconHidden != hide)
         {
-            if (hide)
+            if (hide || _lastIconStyle == IconStyle::Hidden)
             {
+                // Agentmaster: restore to HIDDEN when the icon style is Hidden — either the WT theme's
+                // "tab.iconStyle":"hidden" or our "Show icons on tabs" cog toggle (off). Without this,
+                // a progress ring finishing (HideIcon(false)) would re-show the profile icon on a tab
+                // whose icon is meant to stay hidden, until the next _UpdateTabIcon pass.
                 Icon({});
                 TabViewItem().IconSource(IconSource{ nullptr });
             }
@@ -1010,6 +1014,15 @@ namespace winrt::TerminalApp::implementation
     void Tab::AttachColorPicker(TerminalApp::ColorPickupFlyout& colorPicker)
     {
         ASSERT_UI_THREAD();
+
+        // Agentmaster (tab color modes — NoColor/"Remove colors"): the picker is disabled for this
+        // tab (SetColorPickerEnabled(false)). The context-menu item is grayed, but the
+        // openTabColorPicker ACTION (keybinding / command palette) lands here directly — refuse it
+        // too, so a managed tab can't be recolored while the mode loads no colors.
+        if (_colorPickerDisabled)
+        {
+            return;
+        }
 
         auto weakThis{ get_weak() };
 
@@ -1975,20 +1988,22 @@ namespace winrt::TerminalApp::implementation
         auto weakThis{ get_weak() };
 
         // "Change tab color..."
-        Controls::MenuFlyoutItem chooseColorMenuItem;
+        // Agentmaster: kept as a member (_chooseColorMenuItem) so the page can gray it per the
+        // GLOBAL tab-color mode (SetColorPickerEnabled — NoColor/"Remove colors" disables it).
         {
             Controls::FontIcon colorPickSymbol;
             colorPickSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
             colorPickSymbol.Glyph(L"\xE790");
 
-            chooseColorMenuItem.Click({ get_weak(), &Tab::_chooseColorClicked });
-            chooseColorMenuItem.Text(RS_(L"TabColorChoose"));
-            chooseColorMenuItem.Icon(colorPickSymbol);
+            _chooseColorMenuItem.Click({ get_weak(), &Tab::_chooseColorClicked });
+            _chooseColorMenuItem.Text(RS_(L"TabColorChoose"));
+            _chooseColorMenuItem.Icon(colorPickSymbol);
+            _chooseColorMenuItem.IsEnabled(!_colorPickerDisabled); // survives a menu rebuild with the toggle state intact
 
             const auto chooseColorToolTip = RS_(L"ChooseColorToolTip");
 
-            WUX::Controls::ToolTipService::SetToolTip(chooseColorMenuItem, box_value(chooseColorToolTip));
-            Automation::AutomationProperties::SetHelpText(chooseColorMenuItem, chooseColorToolTip);
+            WUX::Controls::ToolTipService::SetToolTip(_chooseColorMenuItem, box_value(chooseColorToolTip));
+            Automation::AutomationProperties::SetHelpText(_chooseColorMenuItem, chooseColorToolTip);
         }
 
         {
@@ -2300,7 +2315,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets rename/session ops apart from the layout group
         contextMenuFlyout.Items().Append(_splitTabMenuItem);
         _AppendMoveMenuItems(contextMenuFlyout);
-        contextMenuFlyout.Items().Append(chooseColorMenuItem); // Agentmaster: "Change tab color" moved below the "Move tab" submenu
+        contextMenuFlyout.Items().Append(_chooseColorMenuItem); // Agentmaster: "Change tab color" moved below the "Move tab" submenu
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Export tab" — sets the split/move layout group apart from export/find
         contextMenuFlyout.Items().Append(_exportTabMenuItem);
         contextMenuFlyout.Items().Append(_findMenuItem);
@@ -2406,6 +2421,20 @@ namespace winrt::TerminalApp::implementation
 
         _renameDisabled = true;
         _renameTabMenuItem.IsEnabled(false);
+    }
+
+    // Agentmaster (tab color modes — NoColor/"Remove colors"): enable/disable recoloring this tab.
+    // Grays the context-menu "Change tab color..." entry and sets _colorPickerDisabled, which
+    // AttachColorPicker() honors so the openTabColorPicker action / command-palette path is blocked
+    // too. Unlike the Manager tab's one-shot disables this is a TOGGLE — the mode-aware paint seam
+    // (TerminalPage::_ApplySessionTabColor) re-arms it the moment a colored mode repaints the tab,
+    // and the page refreshes it at flyout-open (the SetAgentCopyMenuVisible idiom).
+    void Tab::SetColorPickerEnabled(bool enabled)
+    {
+        ASSERT_UI_THREAD();
+
+        _colorPickerDisabled = !enabled;
+        _chooseColorMenuItem.IsEnabled(enabled);
     }
 
     // Agentmaster: show/hide the "Copy >" submenu (session id / path / branch / launch CLI / summary /
