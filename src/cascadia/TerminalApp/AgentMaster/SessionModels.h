@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "Activity.h" // RunningApp (Fleet Observer live-enrichment field on SessionInfo)
@@ -159,13 +160,21 @@ namespace Agentmaster
     //     content-to-be is a verbatim copy), so it wears the parent conversation's color from the
     //     first frame. Until an inference exists (no file ops yet; or a Codex session — its
     //     rollout isn't path-parsed) the launch cwd keys the color, exactly like WorkingDirectory.
-    //   * NoColor — the cog's "Remove colors": managed tabs wear NO color at all (any painted
-    //     runtime color is reset), and "Change tab color" is disabled on session tabs. The
-    //     persisted colors (dir-colors.json + SessionInfo::tabColorHex) are deliberately KEPT —
-    //     never read, never dropped — so switching back to any other mode restores exactly the
-    //     colors the fleet had (ResolveSessionColorHex answers empty; _OnClaudeTabColorChanged
-    //     never persists in this mode). Grouping/dir semantics are the classic WorkingDirectory
-    //     ones (EffectiveWorkingDir ignores a dormant inference here, like Individual).
+    //   * NoColor — the cog's "Remove colors": NO tab wears a color, STRIP-WIDE — managed tabs are
+    //     reset (their color re-derives from the maps on exit), while every OTHER tab's runtime
+    //     color (an ex-claude shell tab still wearing its exited session's dir paint, a
+    //     user-colored or restored pwsh tab, the Manager tab's per-window tint) is SUSPENDED:
+    //     visual shed, value PARKED on the tab (Tab::SetTabColorSuspended) and still recorded by
+    //     persistence (BuildStartupActions' setColor fold / GetPersistableTabColor), so leaving
+    //     the mode restores it. "Change tab color" + the openTabColorPicker action are disabled on
+    //     EVERY tab; a color that lands anyway (a restored tab's replayed setColor, a keybinding)
+    //     is immediately parked by the _OnClaudeTabColorChanged chokepoint. The persisted colors
+    //     (dir-colors.json + SessionInfo::tabColorHex + the record's managerTabColor + a shell
+    //     tab's actionsJson) are deliberately KEPT — never read for painting, never dropped — so
+    //     switching back to any other mode restores exactly the colors the fleet had
+    //     (ResolveSessionColorHex answers empty). Grouping/dir semantics are the classic
+    //     WorkingDirectory ones (EffectiveWorkingDir ignores a dormant inference here, like
+    //     Individual).
     // GLOBAL app setting (AppSettings::tabColorMode), persisted to settings.json, applied live on
     // cog Save + the cross-window broadcast (every window repaints its hosted managed tabs).
     // Serialized as a string token (Persistence ToString / TabColorModeFromString); a missing key

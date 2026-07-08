@@ -2700,6 +2700,12 @@ namespace winrt::TerminalApp::implementation
                              static_cast<int>(page->_appSettings.tabColorMode));
         });
 
+        // Agentmaster (tab color modes — NoColor/"Remove colors"): seed the picker state the moment
+        // the tab exists, so a tab created WHILE the mode is active refuses the openTabColorPicker
+        // action even before its context menu is ever opened (the Opening refresh below re-asserts
+        // it; the _ReapplyManagedTabColors sweep re-asserts it on a mode change).
+        hostingTab.SetColorPickerEnabled(_appSettings.tabColorMode != ::Agentmaster::TabColorMode::NoColor);
+
         // Agentmaster: the "Copy >" submenu is session-only — show it exactly where the per-tab overlay's
         // copy button appears (a managed Claude/Codex tab), never on a plain shell / Manager tab. A tab's
         // session binding can change after the menu is built (a '+' shell tab becomes a claude when you run
@@ -2728,11 +2734,12 @@ namespace winrt::TerminalApp::implementation
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too
-                    // Agentmaster (tab color modes — NoColor/"Remove colors"): a managed session tab
-                    // can't be recolored while the mode loads no colors. Refresh the gray at open —
-                    // both the session binding and the GLOBAL mode can change after the paint that
-                    // last set it (shell/Manager tabs stay recolorable in every mode).
-                    tab->SetColorPickerEnabled(!(isSession && page->_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor));
+                    // Agentmaster (tab color modes — NoColor/"Remove colors"): NO tab can be
+                    // recolored while the mode loads no colors — shell and Manager tabs included
+                    // ("remove colors" is strip-wide; a color set anyway would only be parked by
+                    // the _OnClaudeTabColorChanged chokepoint). Refresh the gray at open — the
+                    // GLOBAL mode can change after the sweep/seed that last set it.
+                    tab->SetColorPickerEnabled(page->_appSettings.tabColorMode != ::Agentmaster::TabColorMode::NoColor);
                     // Agentmaster (eager-init): "Activate Tab" — shown ONLY when this session is DORMANT (its
                     // claude hasn't started: the control is still NotConnected). Read the live control state
                     // (the authority), so a tab that started since the last reconcile stops offering it.

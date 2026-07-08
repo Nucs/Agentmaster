@@ -1948,7 +1948,16 @@ namespace winrt::TerminalApp::implementation
             impl->SetColorPickerEnabled(mode != ::Agentmaster::TabColorMode::NoColor);
             if (mode == ::Agentmaster::TabColorMode::NoColor)
             {
-                impl->ResetRuntimeTabColor(); // shed any painted color; persisted colors stay (the guard above)
+                // A MANAGED tab's color is mode-derived (dir-colors.json / tabColorHex — never
+                // lost), so it is plain-RESET, not parked. Drop any stale PARKED color first — a
+                // tab suspended as a SHELL tab that later became managed (a '+'-tab claude bound
+                // mid-mode) must not resurrect that ancient park in a future persistence fold
+                // (GetPersistableTabColor / BuildStartupActions prefer runtime, but a later NoColor
+                // reset would empty runtime and expose it). The restore-then-reset order nets
+                // colorless with the park cleared; the reset's TabColorChanged re-entry parks
+                // nothing (runtime already empty when it fires).
+                impl->SetTabColorSuspended(false);
+                impl->ResetRuntimeTabColor(); // shed any painted color; persisted colors stay (the chokepoint guard)
                 return;
             }
         }
@@ -2005,8 +2014,30 @@ namespace winrt::TerminalApp::implementation
     // color is already persisted (or is dealt+persisted first), so the synchronous
     // _OnClaudeTabColorChanged re-entries all no-op. Board cards / Sessions chips re-resolve on
     // their own next rebuild (ApplyExternalSettings ends in _Refresh()).
+    // NoColor ("Remove colors") is STRIP-WIDE, so a sweep over ALL tabs runs first: "no tab is
+    // colored" includes the tabs the managed loop can't see — an ex-claude pwsh tab still wearing
+    // the dir paint its exited session left (archived sessions leave _claudeTabs, the tab lives
+    // on), a user-colored shell tab, a restored shell tab whose actionsJson replayed a setColor,
+    // and the pinned Manager tab (its per-window record color). Entering the mode SUSPENDS each
+    // one's runtime color (parked on the tab — persistence still records it via
+    // GetPersistableTabColor / BuildStartupActions, nothing voided) and disables the color picker
+    // on every tab; leaving restores every parked color and re-arms the picker. Managed session
+    // tabs are deliberately NOT parked — their color is MODE-DERIVED (dir-colors.json /
+    // tabColorHex, never lost), so the mode dispatch below resets/repaints them instead.
     void TerminalPage::_ReapplyManagedTabColors()
     {
+        const bool noColor = _appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor;
+        for (const auto& tab : _tabs)
+        {
+            if (const auto impl = _GetTabImpl(tab))
+            {
+                impl->SetColorPickerEnabled(!noColor);
+                if (_ClaudeSessionForTab(tab).empty()) // non-managed only; managed tabs repaint below
+                {
+                    impl->SetTabColorSuspended(noColor);
+                }
+            }
+        }
         if (!_sessionRegistry || _claudeTabs.empty())
         {
             return;
@@ -2093,6 +2124,32 @@ namespace winrt::TerminalApp::implementation
     // persisted it), so only a genuine NEW user pick gets through to a re-persist + re-fan.
     void TerminalPage::_OnClaudeTabColorChanged(const TerminalApp::Tab& tab)
     {
+        // Tab color modes — NoColor ("Remove colors"): NO tab wears a color — not just managed
+        // ones — and this event (wired for EVERY tab) is the one chokepoint all color writes
+        // funnel through. Whatever just landed on ANY tab — a restored shell tab's replayed
+        // setColor action, the Manager tab's record re-tint at claim, a stray setTabColor
+        // keybinding, a torn-out tab recreated in this window — is immediately SUSPENDED: the
+        // visual is shed while the value stays PARKED on the tab (Tab::_suspendedTabColor), so
+        // persistence — a shell tab's actionsJson via BuildStartupActions' fold, the Manager color
+        // via GetPersistableTabColor — still records it and leaving the mode restores it. Nothing
+        // is read from or written to dir-colors.json / tabColorHex here, so the one-color-per-key
+        // maps survive the mode verbatim (the whole point — switching back restores exactly the
+        // prior colors). Loop-safe: SetTabColorSuspended raises no TabColorChanged, and
+        // re-suspending a colorless/parked tab is a no-op (our own ResetRuntimeTabColor repaints
+        // land here with nothing left to park). The Manager tab keeps its save-on-change semantics
+        // — the capture persists the PARKED value, exactly what it showed before the mode.
+        if (_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor)
+        {
+            if (const auto impl = _GetTabImpl(tab))
+            {
+                impl->SetTabColorSuspended(true);
+            }
+            if (_managerTab && tab == _managerTab)
+            {
+                _ScheduleWindowRecordSave();
+            }
+            return;
+        }
         // Agentmaster: the pinned Manager tab persists its color PER WINDOW (in the window record), not in
         // the dir-color map — it is a per-window singleton with no working dir (Rule #12 is dir-keyed). A
         // color change on it just schedules a window-record save (the capture reads the live color); there
@@ -2111,16 +2168,6 @@ namespace winrt::TerminalApp::implementation
         if (id.empty())
         {
             return; // not a Claude session tab
-        }
-        // Tab color modes — NoColor ("Remove colors"): a managed tab wears no color and this mode
-        // NEVER writes color state, so the persisted dir/session colors survive it verbatim (the
-        // whole point — switching back restores them). This swallows our own ResetRuntimeTabColor
-        // repaint (which would otherwise DROP the dir's persisted color via SetDirColor(dir,
-        // nullopt)) and leaves a stray setTabColor action a visual-only transient (unpersisted;
-        // the next mode-aware repaint sheds it).
-        if (_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor)
-        {
-            return;
         }
         const auto info = _sessionRegistry->Get(id);
         if (!info)
