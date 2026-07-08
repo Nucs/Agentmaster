@@ -87,6 +87,14 @@ namespace winrt::TerminalApp::implementation
             fi.FontFamily(FontFamily{ L"Segoe Fluent Icons" });
             fi.Glyph(glyph);
             fi.FontSize(12);
+            // CLICK-THROUGH the glyph: a hit-testable FontIcon sitting on the button's transparent
+            // background intercepts the pointer on the glyph's own pixels but does NOT reliably drive the
+            // ButtonBase press->release, so a click landing ON the icon (rather than the surrounding
+            // background) was lost. IsHitTestVisible(false) makes the glyph transparent to input, so EVERY
+            // click over the button — glyph or background — lands on the button itself (the one click
+            // target). The button still gets hover/tooltip (AgentSetTip is on `b`). (Codebase pattern: a
+            // decorative/content child is click-through so the parent is the sole hit target.)
+            fi.IsHitTestVisible(false);
             b.Content(fi);
             AgentSetTip(b, winrt::hstring{ tip });
             return b;

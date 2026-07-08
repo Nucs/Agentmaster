@@ -360,6 +360,10 @@ namespace winrt::TerminalApp::implementation
             t.VerticalAlignment(VerticalAlignment::Center);
             t.Foreground(modeBrush);
             t.Text(winrt::hstring{ ModeLabel(mode) });
+            // CLICK-THROUGH the label so a click on the text (not just the button background) still cycles
+            // the mode: the on-top TextBlock would otherwise catch the glyph-area pointer without driving
+            // the ButtonBase click. The button keeps hover + tooltip (AgentSetTip is on `b`).
+            t.IsHitTestVisible(false);
             b.Content(t);
             AgentSetTip(b, winrt::hstring{
                 L"Tests Autorunner \x2014 click to cycle Off \x2192 Semi \x2192 Full.\n"
