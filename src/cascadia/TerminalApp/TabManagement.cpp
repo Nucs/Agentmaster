@@ -1336,6 +1336,11 @@ namespace winrt::TerminalApp::implementation
         // re-evaluate the Manager nav buttons. Also a retry point for binding the internal scroller if
         // it wasn't realized at first layout.
         _UpdateManagerNavButtons();
+
+        // Agentmaster: a tab with a multi-line title being added or removed changes the tallest tab in
+        // the strip — re-reserve a consistent row height across all tabs (covers a new tab needing the
+        // current reserve applied, and a closed multi-line tab letting the row shrink back).
+        _UpdateReservedTabTitleLines();
     }
 
     void TerminalPage::_OnTabPointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e)

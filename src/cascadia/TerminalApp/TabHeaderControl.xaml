@@ -39,7 +39,8 @@
                 Background="{x:Bind TabStatus.AgentSelectionBrush, Mode=OneWay}"
                 Visibility="{x:Bind TabStatus.AgentSelectionVisible, Mode=OneWay}" />
         <StackPanel x:Name="HeaderStackPanel"
-                Orientation="Horizontal">
+                Orientation="Horizontal"
+                VerticalAlignment="Center">
         <mux:ProgressRing x:Name="HeaderProgressRing"
                           Width="15"
                           Height="15"
@@ -337,6 +338,25 @@
             </TextBox.ContextFlyout>
         </TextBox>
         </StackPanel>
+        <!--  Agentmaster (consistent multi-line tab-row height): an invisible height "reserver". The tab
+              strip's ListView stretches every tab to the tallest REALIZED tab, so a tab whose title has
+              embedded newlines (a multi-line rename) grew the WHOLE row only while it was on-screen —
+              scrolling it out (the ListView virtualizes it away) snapped the row shorter, scrolling back
+              grew it again. TerminalPage pushes the MAX title-line-count across ALL tabs (visible OR
+              scrolled-off) to every header via ReserveTitleLines(); this TextBlock then holds that many
+              blank lines so the header ALWAYS measures that tall. It INHERITS the title's font (no explicit
+              FontSize/FontFamily, exactly like HeaderTextBlock), so N blank lines == the exact height of an
+              N-line title at any DPI/scale — no pixel math. Lives in the Grid (NOT the horizontal
+              StackPanel) and its lines are zero-width, so it never shifts the title's x, the status dot, or
+              the tag-badge anchor; Collapsed at <=1 line, so a single-line strip is byte-identical to before.
+              Transparent + non-hit-test: a pure measuring shim.  -->
+        <TextBlock x:Name="HeaderTitleLineReserver"
+                   HorizontalAlignment="Left"
+                   VerticalAlignment="Center"
+                   IsHitTestVisible="False"
+                   Foreground="Transparent"
+                   TextWrapping="NoWrap"
+                   Visibility="Collapsed" />
         <!--  Agentmaster (bookmark tags): one small BOOKMARK ribbon per tag on this session, drawn
               OVERHANGING the tab's bottom edge — ~30% of each ribbon above the tab's bottom line,
               ~70% hanging BELOW it (a bookmark sticking out of the "book"), the row starting at the

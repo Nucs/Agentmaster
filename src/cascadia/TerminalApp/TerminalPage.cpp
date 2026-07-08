@@ -2350,6 +2350,11 @@ namespace winrt::TerminalApp::implementation
         // persisted record). Title changes on a Claude tab are user renames -> mirror them back
         // into the registry. No-op for non-Claude tabs and for our own pin/sync writes.
         _SyncClaudeTitleFromTab(tab);
+
+        // Agentmaster: a title may have gained/lost embedded newlines (a multi-line rename), changing
+        // the tallest tab in the strip — re-reserve a consistent row height across all tabs so it
+        // doesn't snap taller/shorter as that tab scrolls in and out of view.
+        _UpdateReservedTabTitleLines();
     }
 
     // Method Description:

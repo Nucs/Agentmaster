@@ -39,6 +39,7 @@
 #include "AgentTipHelpers.h" // AgentSetTip — the islands-safe hover tooltips on the Tag panel's rows
 #include "AgentTabOverlay.h" // build + own the per-tab overlays (complete com_ptr type)
 #include "Tab.h" // get_self<Tab> -> CurrentEffectiveTabBackground (pending-dots contrast)
+#include "TabHeaderControl.h" // get_self<TabHeaderControl> -> ReserveTitleLines (consistent multi-line tab-row height)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
@@ -2920,6 +2921,58 @@ namespace winrt::TerminalApp::implementation
                 if (const auto t = it->second.get())
                 {
                     _SetTabSelectionPill(t, true);
+                }
+            }
+        }
+    }
+
+    // Agentmaster (consistent multi-line tab-row height): the tab strip's ListView stretches every tab
+    // to the tallest REALIZED tab, so a tab whose title carries embedded newlines (a multi-line rename)
+    // grew the WHOLE row only WHILE it was on-screen — scrolling it out (the ListView virtualizes it
+    // away) snapped the row shorter, and scrolling back grew it again. Fix: compute the MAX title
+    // line-count across ALL tabs (visible OR scrolled-off) and reserve that height on EVERY header's
+    // invisible line-shim (TabHeaderControl::ReserveTitleLines), so the row measures that tall no matter
+    // which tabs are realized. With no multi-line title the max is 1 and every shim collapses -> the slim
+    // single-line strip, exactly as before. Cheap + idempotent (each header no-ops on an unchanged count);
+    // called on any tab title change (_UpdateTitle) and on tab add/remove (_OnTabItemsChanged). UI thread.
+    void TerminalPage::_UpdateReservedTabTitleLines()
+    {
+        int32_t maxLines = 1;
+        for (const auto& tab : _tabs)
+        {
+            if (!tab)
+            {
+                continue;
+            }
+            int32_t lines = 1;
+            for (const auto ch : tab.Title())
+            {
+                if (ch == L'\n')
+                {
+                    ++lines;
+                }
+            }
+            if (lines > maxLines)
+            {
+                maxLines = lines;
+            }
+        }
+        for (const auto& tab : _tabs)
+        {
+            if (!tab)
+            {
+                continue;
+            }
+            const auto tvi = tab.TabViewItem();
+            if (!tvi)
+            {
+                continue;
+            }
+            if (const auto header = tvi.Header().try_as<winrt::TerminalApp::TabHeaderControl>())
+            {
+                if (const auto impl = winrt::get_self<implementation::TabHeaderControl>(header))
+                {
+                    impl->ReserveTitleLines(maxLines); // self-guarded: only a real change touches the tree
                 }
             }
         }

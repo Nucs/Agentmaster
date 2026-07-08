@@ -29,6 +29,12 @@ namespace winrt::TerminalApp::implementation
 
         bool InRename();
 
+        // Agentmaster (consistent multi-line tab-row height): reserve `lines` worth of vertical space in
+        // this header (an invisible blank-line shim in the title's own font), so the tab strip measures a
+        // STABLE height regardless of which tabs the ListView has realized. TerminalPage pushes the max
+        // title-line-count across ALL tabs here; <=1 collapses the shim (the slim single-line strip).
+        void ReserveTitleLines(int32_t lines);
+
         til::event<TerminalApp::TitleChangeRequestedArgs> TitleChangeRequested;
         til::typed_event<> RenameEnded;
 
@@ -123,6 +129,11 @@ namespace winrt::TerminalApp::implementation
         void _ApplyRenamerMaxWidth();
         bool _renamerFitDone{ false };
         double _lastRootWidth{ -1.0 };
+
+        // Agentmaster (consistent multi-line tab-row height): the line count currently reserved by
+        // HeaderTitleLineReserver, so ReserveTitleLines() no-ops on an unchanged count (TerminalPage
+        // may push to every header on any title change; only a real change touches the tree).
+        int32_t _reservedTitleLines{ 1 };
     };
 }
 

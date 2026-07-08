@@ -261,6 +261,42 @@ namespace winrt::TerminalApp::implementation
         return Windows::UI::Xaml::Visibility::Visible == HeaderRenamerTextBox().Visibility();
     }
 
+    // Agentmaster (consistent multi-line tab-row height): reserve `lines` worth of vertical space so the
+    // tab strip measures a stable height regardless of which tabs the ListView has realized (see the
+    // HeaderTitleLineReserver comment in the .xaml). The reserver holds (lines-1) blank rows joined by
+    // newlines — each carrying a zero-width space so the empty row is guaranteed full line height — in the
+    // title's OWN inherited font, so the reserved height equals an N-line title exactly at any DPI. <=1
+    // collapses the shim (the slim single-line strip, unchanged). Idempotent: guarded on the last count so
+    // TerminalPage can push to every header on any title change and only a real change touches the tree.
+    void TabHeaderControl::ReserveTitleLines(int32_t lines)
+    {
+        const int32_t n = lines < 1 ? 1 : lines;
+        if (n == _reservedTitleLines)
+        {
+            return;
+        }
+        _reservedTitleLines = n;
+        const auto reserver = HeaderTitleLineReserver();
+        if (n <= 1)
+        {
+            reserver.Text(winrt::hstring{});
+            reserver.Visibility(Windows::UI::Xaml::Visibility::Collapsed);
+            return;
+        }
+        std::wstring text;
+        text.reserve(static_cast<size_t>(n) * 2);
+        for (int32_t i = 0; i < n; ++i)
+        {
+            if (i != 0)
+            {
+                text.push_back(L'\n');
+            }
+            text.push_back(static_cast<wchar_t>(0x200B)); // U+200B zero-width space: forces full line height, adds no width
+        }
+        reserver.Text(winrt::hstring{ text });
+        reserver.Visibility(Windows::UI::Xaml::Visibility::Visible);
+    }
+
     // Agentmaster (PENDING_INPUT.md): (re)subscribe to the current TabStatus's PropertyChanged so the
     // unsent-draft pulse starts/stops with AgentPendingVisible. TabStatus is set by the Tab AFTER this
     // control is constructed (and could, in principle, be re-assigned), so this runs both from the
