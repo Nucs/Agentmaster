@@ -1063,6 +1063,9 @@ namespace winrt::TerminalApp::implementation
                 // Apply the (possibly changed) tab-strip close affordances (show-X / middle-click
                 // close) to THIS window's tabs immediately; other windows get them via the broadcast.
                 self->_updateAllTabCloseButtons();
+                // Apply the (possibly changed) "Show icons on tabs" setting to THIS window's tabs now
+                // (show/hide the profile icon on every tab); other windows get it via the broadcast.
+                self->_UpdateAllTabIcons();
                 // Apply the (possibly changed) "Always display Home button" setting to THIS window's
                 // tab-strip nav buttons immediately; other windows get it via the broadcast.
                 self->_UpdateManagerNavButtons();
@@ -1252,6 +1255,9 @@ namespace winrt::TerminalApp::implementation
         // change made in another window must re-apply to THIS window's tabs live (the source window
         // already did so in its Save handler).
         _updateAllTabCloseButtons();
+        // Agentmaster: "Show icons on tabs" is GLOBAL too — re-apply a change made in another window to
+        // THIS window's tabs live (show/hide the profile icon on every tab).
+        _UpdateAllTabIcons();
         // Agentmaster: "Always display Home button" is GLOBAL too — re-evaluate this window's nav buttons.
         _UpdateManagerNavButtons();
         // FAVORITES.md §5a: the favorite marker (Crown <-> Star) is GLOBAL — re-assert it on every hosted

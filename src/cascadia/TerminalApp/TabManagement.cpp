@@ -263,9 +263,35 @@ namespace winrt::TerminalApp::implementation
         {
             const auto& icon{ content.Icon() };
             const auto theme = _settings.GlobalSettings().CurrentTheme();
-            const auto iconStyle = (theme && theme.Tab()) ? theme.Tab().IconStyle() : IconStyle::Default;
+            auto iconStyle = (theme && theme.Tab()) ? theme.Tab().IconStyle() : IconStyle::Default;
+
+            // Agentmaster: the cog's "Show icons on tabs" (AppSettings::showTabIcon, HIDDEN by default)
+            // overrides the theme — when off, force Hidden so the profile icon is dropped entirely and
+            // takes NO strip space, via the same IconStyle::Hidden path WT's own "tab.iconStyle":"hidden"
+            // theme uses (Tab::UpdateIcon -> Icon({}) + IconSource(nullptr)). Applied to every tab
+            // (incl. the pinned Manager tab); _UpdateAllTabIcons re-applies it live on a settings change.
+            if (!_appSettings.showTabIcon)
+            {
+                iconStyle = IconStyle::Hidden;
+            }
 
             tab.UpdateIcon(icon, iconStyle);
+        }
+    }
+
+    // Agentmaster: re-apply the GLOBAL "Show icons on tabs" (AppSettings::showTabIcon) setting to EVERY
+    // open tab live — the icon twin of _updateAllTabCloseButtons. _UpdateTabIcon reads the current
+    // _appSettings.showTabIcon, so this just re-runs it per tab; Tab::UpdateIcon early-outs when the
+    // (path, style) pair is unchanged, so a broadcast that didn't touch showTabIcon is a cheap no-op.
+    // Called from the cog Save handler (this window) and _ApplyBroadcastSettings (other windows).
+    void TerminalPage::_UpdateAllTabIcons()
+    {
+        for (const auto& tab : _tabs)
+        {
+            if (auto tabImpl{ _GetTabImpl(tab) })
+            {
+                _UpdateTabIcon(*tabImpl);
+            }
         }
     }
 
