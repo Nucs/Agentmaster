@@ -1533,13 +1533,19 @@ try {
         return spec;
     }
 
-    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher)
+    ClaudeSpawnSpec BuildClaudeRestartSpec(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view sessionId, const AppSettings& settings, std::wstring_view claudeLauncher, std::wstring_view forkParentId)
     {
         // Relaunch an EXISTING managed conversation IN PLACE (the tab's connection died and the user hit
-        // "Restart session"). Unlike BuildClaudeSpawn this NEVER mints a new id and NEVER forks:
+        // "Restart session"). Unlike BuildClaudeSpawn this NEVER mints a new id. The relaunch form is
+        // derived from the CURRENT on-disk state:
         //   * a transcript exists -> RESUME it (claude --resume <id>), continuing the conversation;
-        //   * no transcript yet    -> a FRESH launch that REUSES <id> (claude --session-id <id>). A
-        //     never-prompted / early-crashed session wrote no transcript, so reusing the id is a legit
+        //   * no transcript, but the session is a fork whose SOURCE transcript still exists -> RE-FORK
+        //     from the source INTO the same id (claude --resume <parent> --fork-session --session-id
+        //     <id> — the [restore->refork] recipe). A never-messaged fork writes NO transcript until its
+        //     first turn, so a plain fresh relaunch would silently swap the forked branch for an EMPTY
+        //     conversation (the reported "restart a fork -> a new claude session, not the current one").
+        //   * neither             -> a FRESH launch that REUSES <id> (claude --session-id <id>). A
+        //     never-prompted / early-crashed non-fork wrote no transcript, so reusing the id is a legit
         //     fresh start with no "session id already in use" collision — and keeping the id holds the
         //     registry / tab / injector binding stable across the restart (no re-key).
         //
@@ -1560,9 +1566,15 @@ try {
         spec.forwarderPath = forwarderPath;
 
         const bool resume = ClaudeConversationExists(spec.sessionId);
+        // Own transcript wins over the fork link (a fork that produced content is resumed, never
+        // re-forked off its now-divergent source); a vanished source falls through to fresh.
+        std::wstring forkFrom;
+        if (!resume && !forkParentId.empty() && ClaudeConversationExists(forkParentId))
+        {
+            forkFrom = std::wstring{ forkParentId };
+        }
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        // forkFromSessionId is empty: a restart resumes or starts fresh, it never forks.
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, {}, claudeLauncher);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFrom, claudeLauncher);
 
         AppendManagedClaudeEnv(spec, settings);
         return spec;

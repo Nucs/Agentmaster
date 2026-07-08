@@ -601,8 +601,10 @@ void TestRegistryFanout()
 // source-id echo — otherwise the bind/re-home path mistakes it for an in-session /resume, re-homes the
 // fork's tab off <new> onto the inactive <src>, and orphans the real fork (which gets every later
 // hook). The guard recognizes the echo precisely: a LIVE fork session carrying forkParentId == <src>
-// on the SAME ConPTY (the eagerly-stamped tabToken). It is one-shot: cleared once the fork emits under
-// its own id, so a LATER deliberate /resume back to <src> re-homes normally.
+// on the SAME ConPTY (the eagerly-stamped tabToken). It is one-shot via the TRANSIENT forkEchoConsumed
+// latch (consumed by the suppressed echo or any own-id hook), so a LATER deliberate /resume back to
+// <src> re-homes normally — while forkParentId (the never-messaged fork's RE-FORK link) survives until
+// an own-id hook proves the fork produced content (never on SessionStart/SessionEnd).
 void TestForkSourceIdEcho()
 {
     std::wprintf(L"SessionRegistry: --fork-session source-id SessionStart echo is ignored:\n");
@@ -652,13 +654,88 @@ void TestForkSourceIdEcho()
         fork2.forkParentId = L"src2-parent";
         reg.Upsert(fork2);
     }
-    reg.OnHookEvent(Msg(L"fork2-new", HookEvent::UserPromptSubmit)); // own-id hook -> retires the guard
-    CHECK(reg.Get(L"fork2-new") && reg.Get(L"fork2-new")->forkParentId.empty(), "fork-echo: own-id hook clears the one-shot guard");
+    reg.OnHookEvent(Msg(L"fork2-new", HookEvent::UserPromptSubmit)); // own-id CONTENT hook -> retires the guard AND the re-fork link
+    CHECK(reg.Get(L"fork2-new") && reg.Get(L"fork2-new")->forkParentId.empty(), "fork-echo: own-id content hook clears the re-fork link");
     HookMessage late = Msg(L"src2-parent", HookEvent::SessionStart);
     late.cwd = L"K:/x";
     late.tabToken = L"wt-fork2";
     reg.OnHookEvent(late);
     CHECK(reg.Get(L"src2-parent").has_value(), "fork-echo: after the guard retires a source-id SessionStart is processed");
+
+    // --- restart-refork hardening: the echo one-shot is the TRANSIENT forkEchoConsumed latch, NOT
+    // forkParentId — retiring the echo no longer destroys the re-fork link a never-messaged fork needs,
+    // and the content-less lifecycle hooks (SessionStart on a relaunch, SessionEnd at death) keep it. ---
+
+    // (1) the suppressed echo consumes the latch; a SECOND source-id SessionStart on the SAME ConPTY is
+    // a DELIBERATE in-session /resume and is processed — while the re-fork link survives.
+    {
+        SessionInfo fork3 = MakeSession(L"fork3-new");
+        fork3.live = true;
+        fork3.tabToken = L"wt-fork3";
+        fork3.forkParentId = L"src3-parent";
+        reg.Upsert(fork3);
+    }
+    HookMessage echo3 = Msg(L"src3-parent", HookEvent::SessionStart);
+    echo3.cwd = L"K:/x";
+    echo3.tabToken = L"wt-fork3";
+    reg.OnHookEvent(echo3);
+    CHECK(!reg.Get(L"src3-parent").has_value(), "fork-echo/latch: the startup echo is suppressed");
+    CHECK(reg.Get(L"fork3-new") && reg.Get(L"fork3-new")->forkEchoConsumed, "fork-echo/latch: suppression consumed the one-shot latch");
+    CHECK(reg.Get(L"fork3-new")->forkParentId == L"src3-parent", "fork-echo/latch: the re-fork link SURVIVES the suppressed echo");
+    reg.OnHookEvent(echo3); // the same shape again == a deliberate /resume <src> typed in the fork's tab
+    CHECK(reg.Get(L"src3-parent").has_value(), "fork-echo/latch: a post-echo source-id SessionStart is processed (deliberate /resume)");
+
+    // (2) an own-id SessionEnd (the process dying — e.g. killed by an in-place restart) KEEPS the
+    // re-fork link: the restart seam consults it moments later to re-fork the never-messaged fork
+    // instead of silently replacing the branch with an empty fresh conversation.
+    {
+        SessionInfo fork4 = MakeSession(L"fork4-new");
+        fork4.live = true;
+        fork4.tabToken = L"wt-fork4";
+        fork4.forkParentId = L"src4-parent";
+        reg.Upsert(fork4);
+    }
+    HookMessage end4 = Msg(L"fork4-new", HookEvent::SessionEnd);
+    end4.tabToken = L"wt-fork4"; // from the CURRENT host -> applies normally
+    reg.OnHookEvent(end4);
+    CHECK(reg.Get(L"fork4-new") && reg.Get(L"fork4-new")->state == SessionState::Done, "fork-refork: a current-host SessionEnd still applies (state Done)");
+    CHECK(reg.Get(L"fork4-new")->forkParentId == L"src4-parent", "fork-refork: SessionEnd does NOT clear the re-fork link");
+
+    // (3) an own-id SessionStart (a relaunch of the still-transcript-less fork) keeps the link too;
+    // (4) a CONTENT hook retires it (the fork's transcript exists now -> resume, never re-fork).
+    {
+        SessionInfo fork5 = MakeSession(L"fork5-new");
+        fork5.live = true;
+        fork5.tabToken = L"wt-fork5";
+        fork5.forkParentId = L"src5-parent";
+        reg.Upsert(fork5);
+    }
+    HookMessage start5 = Msg(L"fork5-new", HookEvent::SessionStart);
+    start5.tabToken = L"wt-fork5";
+    reg.OnHookEvent(start5);
+    CHECK(reg.Get(L"fork5-new") && reg.Get(L"fork5-new")->forkParentId == L"src5-parent", "fork-refork: an own-id SessionStart does NOT clear the re-fork link");
+    reg.OnHookEvent(Msg(L"fork5-new", HookEvent::UserPromptSubmit));
+    CHECK(reg.Get(L"fork5-new")->forkParentId.empty(), "fork-refork: a content hook (UserPromptSubmit) retires the re-fork link");
+
+    // (5) restart supersede: a SessionEnd from a ConPTY that is NO LONGER the session's host (the
+    // restart re-stamped tabToken to the NEW connection before the old process died) is DROPPED whole —
+    // it must neither mark the freshly-restarted session Done nor steal tabToken back to the dead
+    // ConPTY (which made the liveness sweep archive the live session seconds after its restart).
+    {
+        SessionInfo re = MakeSession(L"re-started", SessionState::Idle);
+        re.live = true;
+        re.tabToken = L"wt-new";
+        reg.Upsert(re);
+    }
+    HookMessage lateEnd = Msg(L"re-started", HookEvent::SessionEnd);
+    lateEnd.tabToken = L"wt-old"; // the SUPERSEDED host's dying breath
+    reg.OnHookEvent(lateEnd);
+    CHECK(reg.Get(L"re-started") && reg.Get(L"re-started")->state == SessionState::Idle, "stale-end: a superseded ConPTY's SessionEnd does not change state");
+    CHECK(reg.Get(L"re-started")->tabToken == L"wt-new", "stale-end: tabToken is not stolen back by the dead host");
+    HookMessage curEnd = Msg(L"re-started", HookEvent::SessionEnd);
+    curEnd.tabToken = L"WT-NEW"; // the CURRENT host really died (case-insensitive token match)
+    reg.OnHookEvent(curEnd);
+    CHECK(reg.Get(L"re-started")->state == SessionState::Done, "stale-end: the current host's SessionEnd applies normally");
 }
 
 void TestTypedCapture()

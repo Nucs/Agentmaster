@@ -34,34 +34,8 @@ namespace
     // human message that happens to repeat the text).
     constexpr int64_t kEchoWindowMs = 15000;
 
-    // Agentmaster: case-insensitive equality for a WT_SESSION / tabToken GUID string. The hook wire
-    // carries the token as-is from the WT_SESSION env, while the Fleet Observer reads the same value
-    // out of the PEB — the two can differ in case, so a tab can't be matched by ordinal compare.
-    bool TabTokenEq(const std::wstring& a, const std::wstring& b) noexcept
-    {
-        if (a.size() != b.size())
-        {
-            return false;
-        }
-        for (size_t i = 0; i < a.size(); ++i)
-        {
-            wchar_t ca = a[i];
-            wchar_t cb = b[i];
-            if (ca >= L'A' && ca <= L'Z')
-            {
-                ca = static_cast<wchar_t>(ca - L'A' + L'a');
-            }
-            if (cb >= L'A' && cb <= L'Z')
-            {
-                cb = static_cast<wchar_t>(cb - L'A' + L'a');
-            }
-            if (ca != cb)
-            {
-                return false;
-            }
-        }
-        return true;
-    }
+    // TabTokenEq (the case-insensitive WT_SESSION/tabToken compare this TU leans on everywhere)
+    // moved to SessionModels.h — the restart seam's tabToken fallback needed it too.
 
     // Agentmaster: a session's CONVERSATION-activity freshness — the newest of its real activity
     // signals (an authoritative hook, the transcript mtime, the hook-driven activity anchor).
@@ -261,12 +235,17 @@ namespace Agentmaster
             bool forkSourceEcho = false;
             {
                 std::lock_guard guard{ _mtx };
-                for (const auto& [sid, fs] : _sessions)
+                for (auto& [sid, fs] : _sessions)
                 {
-                    if (fs.live && !fs.forkParentId.empty() &&
+                    // The guard is armed only while the fork's startup echo is still EXPECTED
+                    // (!forkEchoConsumed): the echo fires exactly once, so consuming it here lets a
+                    // LATER deliberate `/resume <src>` in the fork's tab re-home normally — even on a
+                    // fork that never produced content (which keeps forkParentId for the re-fork seam).
+                    if (fs.live && !fs.forkParentId.empty() && !fs.forkEchoConsumed &&
                         TabTokenEq(fs.forkParentId, msg.sessionId) &&
                         TabTokenEq(fs.tabToken, msg.tabToken))
                     {
+                        fs.forkEchoConsumed = true; // one-shot: the startup echo has now happened
                         forkSourceEcho = true;
                         break;
                     }
@@ -275,6 +254,33 @@ namespace Agentmaster
             if (forkSourceEcho)
             {
                 AppendStateLog(L"hooks.log", L"[fork-echo] ignored source-id SessionStart " + msg.sessionId + L" (its fork already owns ConPTY " + msg.tabToken + L")\n");
+                return;
+            }
+        }
+
+        // Agentmaster (restart/re-home stale death notice): a SessionEnd arriving from a ConPTY that is
+        // NO LONGER this session's host is the OLD process's dying breath after an in-place "Restart
+        // session" (the restart seam re-stamped tabToken to the NEW connection before killing the old
+        // one) — or any other supersede. Applying it would mark the freshly-restarted session Done AND
+        // steal tabToken back to the dead ConPTY, which the liveness sweep then can't find in the tab
+        // (foundSessionConn=false) => the live session is wrongly archived seconds after its restart
+        // (the observed [restart] -> [SessionEnd] -> [liveness] dead cascade). Drop the event whole.
+        // Scoped to SessionEnd only: other mismatched-token hooks stay accepted — tabToken tracking
+        // across an in-session /resume re-home depends on them.
+        if (msg.event == HookEvent::SessionEnd && !msg.tabToken.empty())
+        {
+            bool staleHost = false;
+            {
+                std::lock_guard guard{ _mtx };
+                if (const auto it = _sessions.find(msg.sessionId); it != _sessions.end())
+                {
+                    const auto& cur = it->second.tabToken;
+                    staleHost = !cur.empty() && !TabTokenEq(cur, msg.tabToken);
+                }
+            }
+            if (staleHost)
+            {
+                AppendStateLog(L"hooks.log", L"[stale-end] ignored SessionEnd for " + msg.sessionId + L" from superseded ConPTY " + msg.tabToken + L" (session now hosted elsewhere \x2014 restarted/re-homed)\n");
                 return;
             }
         }
@@ -325,9 +331,16 @@ namespace Agentmaster
             // Agentmaster (--fork-session source-id echo): this hook is for the session's OWN id, so the
             // fork has settled past its startup window (where it echoed the SOURCE id). Retire the
             // one-shot echo guard — a LATER deliberate in-session /resume back to that exact source id
-            // should re-home normally, not be mistaken for the (already-passed) startup echo. The single
-            // startup SessionStart echo arrives BEFORE any own-id hook, so it was already suppressed.
-            if (!s.forkParentId.empty())
+            // should re-home normally, not be mistaken for the (already-passed) startup echo.
+            s.forkEchoConsumed = true;
+            // The RE-FORK link (forkParentId) is retired separately, and only by an own-id hook that
+            // proves the fork PRODUCED CONTENT (its own transcript exists now, so it must be resumed,
+            // never re-forked). SessionStart and SessionEnd prove nothing of the sort — a relaunch of a
+            // still-transcript-less fork fires SessionStart, and the dying process fires SessionEnd —
+            // and clearing on them destroyed the link exactly when the restart/restore re-fork seams
+            // needed it (a restarted never-messaged fork came back as an EMPTY conversation).
+            if (!s.forkParentId.empty() &&
+                msg.event != HookEvent::SessionStart && msg.event != HookEvent::SessionEnd)
             {
                 s.forkParentId.clear();
             }

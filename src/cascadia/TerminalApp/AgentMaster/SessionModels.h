@@ -88,6 +88,37 @@ namespace Agentmaster
         return restoredState == SessionState::Idle ? false : persistedFlag;
     }
 
+    // Agentmaster: case-insensitive equality for a WT_SESSION / tabToken GUID string. The hook wire
+    // carries the token as-is from the WT_SESSION env, while the Fleet Observer reads the same value
+    // out of the PEB and the app formats it from a connection's SessionId() — the producers can differ
+    // in case, so a tab can never be matched by ordinal compare. Shared here (was SessionRegistry.cpp-
+    // local) because both the registry and the restart seam's tabToken fallback resolve by it. PURE.
+    inline bool TabTokenEq(const std::wstring& a, const std::wstring& b) noexcept
+    {
+        if (a.size() != b.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            wchar_t ca = a[i];
+            wchar_t cb = b[i];
+            if (ca >= L'A' && ca <= L'Z')
+            {
+                ca = static_cast<wchar_t>(ca - L'A' + L'a');
+            }
+            if (cb >= L'A' && cb <= L'Z')
+            {
+                cb = static_cast<wchar_t>(cb - L'A' + L'a');
+            }
+            if (ca != cb)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     enum class AutorunnerMode
     {
         Off,
@@ -449,8 +480,9 @@ namespace Agentmaster
         //       re-homing the fork's tab off `<this.id>` onto `<src>` — so the tab tracks the wrong
         //       (inactive, source) conversation while the real fork (`<this.id>`, which gets every later
         //       hook) is orphaned. SessionRegistry::OnHookEvent uses it (with the eagerly-stamped
-        //       tabToken) to IGNORE that source-id startup echo. The guard is ONE-SHOT — cleared on the
-        //       fork's FIRST own-id hook, so a LATER deliberate `/resume <src>` re-homes normally.
+        //       tabToken) to IGNORE that source-id startup echo. The echo is ONE-SHOT — the transient
+        //       `forkEchoConsumed` below retires the guard once the echo was suppressed (or any own-id
+        //       hook proves startup passed), so a LATER deliberate `/resume <src>` re-homes normally.
         //   (2) Restoring a NEVER-MESSAGED fork — the reason this is now PERSISTED (it was transient
         //       before). A fork's OWN transcript (`<this.id>.jsonl`) is written only on its FIRST turn,
         //       so a fork the user created but never sent a message to has NO transcript on disk — and a
@@ -458,11 +490,25 @@ namespace Agentmaster
         //       the forked branch (and churning the id) on EVERY restart. With `<src>` persisted,
         //       _LaunchClaudeSession re-forks from it into the SAME id when the fork's own transcript is
         //       absent but the source's still exists — re-materializing the identical branch with its
-        //       identity (and the WindowRecord tab ref) intact. Gated on the fork being transcript-less,
-        //       so once the fork gets its own conversation, purpose (1)'s one-shot clear wipes this
-        //       (persisted on the next change) and it is never re-forked off a now-divergent source.
-        // Empty for a non-fork (and cleared once the fork has its own conversation).
+        //       identity (and the WindowRecord tab ref) intact. The in-place "Restart session"
+        //       (BuildClaudeRestartSpec) re-forks the same way. Gated on the fork being transcript-less,
+        //       so once the fork gets its own conversation it is resumed, never re-forked.
+        // Empty for a non-fork. Cleared ONLY on an own-id hook that proves the fork PRODUCED CONTENT
+        // (its own transcript now exists — UserPromptSubmit / Stop / a tool hook), NEVER on
+        // SessionStart or SessionEnd: a relaunch's SessionStart and the dying process's SessionEnd both
+        // fire on a still-transcript-less fork, and wiping the link there is exactly what silently
+        // turned a restarted never-messaged fork into an EMPTY conversation (the re-fork had no source).
         std::wstring forkParentId;
+        // Transient (NOT persisted) — the --fork-session source-id ECHO GUARD's one-shot latch. False
+        // while the guard is ARMED (a freshly launched / re-forked fork still expects its startup
+        // SessionStart to echo the SOURCE id); flipped true when that echo is suppressed OR any own-id
+        // hook arrives (startup passed — no echo can come anymore), after which a SessionStart for the
+        // source id on this ConPTY is a DELIBERATE `/resume <src>` and re-homes normally. Split from
+        // forkParentId so retiring the echo guard no longer destroys the re-fork link above (the old
+        // design cleared forkParentId itself, so the fork's own SessionEnd — an own-id hook — wiped the
+        // link right when the restart seam needed it). Re-armed (reset false) by the restart seam when
+        // it re-forks. Always false after a load (a restored fork's re-fork spawns a fresh echo).
+        bool forkEchoConsumed{ false };
         // Transient runtime flag (NOT persisted): is this session OPEN (has a live tab +
         // claude.exe this run) or ARCHIVED (shut down but kept restorable)? The Triage Board /
         // Explorer Tree show only Open (live) sessions; Archived (!live) ones are listed behind
