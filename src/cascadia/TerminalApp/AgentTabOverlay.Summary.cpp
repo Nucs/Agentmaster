@@ -113,6 +113,7 @@ namespace winrt::TerminalApp::implementation
         _summaryWrapIcon.Glyph(L"\x21B5"); // ↵ — the newline / line-wrap symbol
         _summaryWrapIcon.FontSize(11); // "same size as the font" (the times line is 11)
         _summaryWrapIcon.FontWeight(FontWeights::SemiBold()); // a touch bolder so the small glyph reads better
+        _summaryWrapIcon.IsHitTestVisible(false); // CLICK-THROUGH: a click on the glyph must land on wrapBtn, not be eaten by the icon (see the action-row mkIconBtn note)
         // Enlarge the glyph ~1-2px WITHOUT growing the times-bar row: a centered RenderTransform scale,
         // NOT a bigger FontSize. RenderTransform is applied AFTER layout, so the icon's measured box (and
         // thus the row's line height) is unchanged — the ↵ just renders a hair larger about its center.
@@ -153,6 +154,7 @@ namespace winrt::TerminalApp::implementation
         _summaryTruncateIcon.Glyph(L"\x2026"); // … — the truncate / elision symbol
         _summaryTruncateIcon.FontSize(11); // match the times font + the wrap toggle
         _summaryTruncateIcon.FontWeight(FontWeights::SemiBold());
+        _summaryTruncateIcon.IsHitTestVisible(false); // CLICK-THROUGH: glyph clicks land on truncBtn (see the action-row mkIconBtn note)
         {
             ScaleTransform truncScale{};
             truncScale.ScaleX(1.18); // same ~1-2px visual bump as the wrap toggle, row height unaffected
@@ -191,6 +193,7 @@ namespace winrt::TerminalApp::implementation
         _summaryPrevIcon.Glyph(L"\x23EE"); // ⏮ — "previous session(s)" (before /compact)
         _summaryPrevIcon.FontSize(11);
         _summaryPrevIcon.FontWeight(FontWeights::SemiBold());
+        _summaryPrevIcon.IsHitTestVisible(false); // CLICK-THROUGH: glyph clicks land on _summaryPrevBtn (see the action-row mkIconBtn note)
         {
             ScaleTransform prevScale{};
             prevScale.ScaleX(1.18);
@@ -228,6 +231,7 @@ namespace winrt::TerminalApp::implementation
         refreshIcon.FontSize(11);
         refreshIcon.FontWeight(FontWeights::SemiBold());
         refreshIcon.Foreground(Fill(0xFF, 0xB0, 0xB0, 0xB0)); // steady mid-gray (matches the dim toggle shade)
+        refreshIcon.IsHitTestVisible(false); // CLICK-THROUGH: glyph clicks land on refreshBtn (see the action-row mkIconBtn note)
         {
             ScaleTransform refreshScale{};
             refreshScale.ScaleX(1.18);
@@ -933,6 +937,7 @@ namespace winrt::TerminalApp::implementation
             ji.FontFamily(FontFamily{ L"Segoe UI Symbol" }); // a text font carrying U+25B8 (the icon font would tofu it)
             ji.Glyph(L"\x25B8"); // ▸ — "go to / jump"
             ji.FontSize(10);
+            ji.IsHitTestVisible(false); // CLICK-THROUGH: a click on the tiny ▸ glyph must land on the jump button jb, not be eaten by the icon (see the action-row mkIconBtn note)
             jb.Content(ji);
             AgentSetTip(jb, winrt::hstring{ L"Jump to where this prompt is on screen" });
             const auto weak = get_weak();
