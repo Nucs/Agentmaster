@@ -1276,8 +1276,14 @@ What works, by area:
     scanner refines the seed on its first pass, the Waiting-for-you decay treats a reopened session as
     UNREAD (`readUnixMs` resets to 0 → it keeps waiting until actually read, never instant-decaying off an
     ancient `lastActivity`), no flash-storm fires (the ring keys on a live Running→needs-you EDGE; a restore
-    is first-sight), and hooks own it live the instant the tab is activated (claude resumes → `SessionStart`
-    → Idle). Resume-vs-fresh is STILL transcript-gated, never state-gated (the gotcha stands). The
+    is first-sight), and hooks own it live — but the resume's `SessionStart` now **PRESERVES** these two
+    at-rest states (`NextSessionState` mirrors `RestoredSessionState`'s exact preserved set, since a
+    re-homed/background tab's LAZY `claude.exe` start on first activation IS a `--resume` that reloads
+    without continuing the turn), so the preserved seed **survives opening the tab** and only a genuine new
+    turn (`UserPromptSubmit → Running`) changes it. (It previously reset to `Idle` on the first visit — the
+    lazy-start `SessionStart→Idle` clobber, which ALSO silently undid a manual **Move to Waiting-for-you** /
+    **Mark Unread** promote on a not-yet-focused tab: the reported "mark it Waiting-for-you, activate the
+    inactive tab, it resets to Idle/Done" bug.) Resume-vs-fresh is STILL transcript-gated, never state-gated (the gotcha stands). The
     **companion question-guard flag** (`lastMessageWasQuestion`) is now persisted the same way and gated by
     `RestoredQuestionFlag`, so a crash while the agent was WaitingForInput on a clarifying question can't
     drop the guard and let the Autorunner auto-ANSWER it on reopen (the flag rides ONLY a preserved

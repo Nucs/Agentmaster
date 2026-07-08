@@ -51,8 +51,12 @@ namespace Agentmaster
     // NeedsApproval whose turn actually ended -> WaitingForInput; recon-run/recon-resume promote on fresh
     // work), the Waiting-for-you decay treats a reopened session as UNREAD (readUnixMs resets to 0) so a
     // restored WaitingForInput card keeps waiting until the user actually reads it (never instant-decays
-    // off an ancient lastActivity), and hooks own it live the instant the tab is activated (claude
-    // resumes -> SessionStart -> Idle). PURE + total.
+    // off an ancient lastActivity), and hooks own it live: the resume's SessionStart PRESERVES these two
+    // at-rest states (NextSessionState mirrors this exact set — a lazy-start SessionStart IS a resume, so
+    // it reloads without continuing the turn), so the preserved seed SURVIVES activating the tab; only a
+    // genuine new turn (UserPromptSubmit -> Running) changes it. (It used to reset to Idle on the
+    // first visit — the lazy-start SessionStart clobber that also lost a manual "Move to Waiting-for-you".)
+    // PURE + total.
     inline SessionState RestoredSessionState(SessionState persisted) noexcept
     {
         switch (persisted)
@@ -155,6 +159,13 @@ namespace Agentmaster
     //     content-to-be is a verbatim copy), so it wears the parent conversation's color from the
     //     first frame. Until an inference exists (no file ops yet; or a Codex session — its
     //     rollout isn't path-parsed) the launch cwd keys the color, exactly like WorkingDirectory.
+    //   * NoColor — the cog's "Remove colors": managed tabs wear NO color at all (any painted
+    //     runtime color is reset), and "Change tab color" is disabled on session tabs. The
+    //     persisted colors (dir-colors.json + SessionInfo::tabColorHex) are deliberately KEPT —
+    //     never read, never dropped — so switching back to any other mode restores exactly the
+    //     colors the fleet had (ResolveSessionColorHex answers empty; _OnClaudeTabColorChanged
+    //     never persists in this mode). Grouping/dir semantics are the classic WorkingDirectory
+    //     ones (EffectiveWorkingDir ignores a dormant inference here, like Individual).
     // GLOBAL app setting (AppSettings::tabColorMode), persisted to settings.json, applied live on
     // cog Save + the cross-window broadcast (every window repaints its hosted managed tabs).
     // Serialized as a string token (Persistence ToString / TabColorModeFromString); a missing key
@@ -163,7 +174,8 @@ namespace Agentmaster
     {
         WorkingDirectory = 0, // default: one shared color per working directory (Rule #12 classic)
         Individual = 1, // every managed tab/session wears its own color
-        InferredWorkingDirectory = 2 // shared color, keyed by the dir inferred from the files the session touches
+        InferredWorkingDirectory = 2, // shared color, keyed by the dir inferred from the files the session touches
+        NoColor = 3 // "Remove colors": no tab is colored; persisted colors kept but not loaded
     };
 
     // When a queued prompt is allowed to fire.
@@ -698,6 +710,15 @@ namespace Agentmaster
         // edge). Either way it hides while the Manager tab itself is active. GLOBAL across windows;
         // applied live on Save + cross-window broadcast. A missing key => true (checked by default).
         bool alwaysShowHomeButton{ true };
+        // Agentmaster: show the profile ICON on terminal tabs — the leftmost glyph in each tab, before
+        // the status dot + title. OFF (the DEFAULT here) hides it entirely so it takes NO strip space,
+        // via the same IconStyle::Hidden path WT's own theme "tab.iconStyle":"hidden" uses
+        // (TerminalPage::_UpdateTabIcon forces Hidden when this is off; _UpdateAllTabIcons re-applies it
+        // live to every tab). GLOBAL across windows; applied live on Save + cross-window broadcast.
+        // A missing key => false (HIDDEN) — deliberately NOT stock WT's default (icons shown): this app
+        // hides tab icons by default so the strip reads on the status dot + title. Flip it on to restore
+        // the profile icons. The pinned Manager tab follows this like any other tab.
+        bool showTabIcon{ false };
         // Agentmaster (FAVORITES.md §5a): the FAVORITE marker glyph on a live session's tab — Crown
         // (default, a gold crown at the status dot's north-west) or Star (the status dot foregrounded
         // on a white, golden-tipped star drawn behind it). GLOBAL across windows; applied live on Save
@@ -705,8 +726,9 @@ namespace Agentmaster
         // (the prior behavior). Tab-strip ONLY — see FavoriteIcon.
         FavoriteIcon favoriteIcon{ FavoriteIcon::Crown };
         // Agentmaster (tab color modes): HOW managed tabs are colored — shared per working
-        // directory (default, Rule #12 classic), individual per tab/session, or shared per the
-        // INFERRED working directory (detected from the files the session reads/edits/creates).
+        // directory (default, Rule #12 classic), individual per tab/session, shared per the
+        // INFERRED working directory (detected from the files the session reads/edits/creates),
+        // or NoColor ("Remove colors" — no tab colored, persisted colors kept but not loaded).
         // See TabColorMode. GLOBAL across windows; applied live on Save + cross-window broadcast
         // (TerminalPage::_ReapplyManagedTabColors repaints every hosted managed tab). A missing
         // key => WorkingDirectory (the prior behavior).
