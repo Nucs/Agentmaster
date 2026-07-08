@@ -2865,7 +2865,30 @@ namespace winrt::TerminalApp::implementation
                         {
                             if (const auto tvi = t.TabViewItem())
                             {
-                                tvi.StartBringIntoView(); // the same scroll-into-strip the active-tab switch uses
+                                // The MUX TabView's `<`/`>` scroll RepeatButtons OVERLAY the left/right
+                                // edges of the tab scroll area (they take no layout space), and the `+`
+                                // new-tab button sits right beside the `>`. A plain StartBringIntoView()
+                                // only guarantees the item's bounds enter the scroll VIEWPORT — which runs
+                                // UNDER those buttons — so a right-/left-edge tab is scrolled to but left
+                                // hidden behind the `>`/`<` (and, visually, the `+`). Bring a rect PADDED
+                                // on BOTH edges into view instead, so the tab lands clear of the overlay
+                                // buttons (~34px) whichever way the strip had to scroll.
+                                const double w = tvi.ActualWidth();
+                                const double h = tvi.ActualHeight();
+                                if (w > 0.0 && h > 0.0)
+                                {
+                                    constexpr double pad = 48.0; // > the ~34px TabView scroll button, on each edge
+                                    winrt::Windows::UI::Xaml::BringIntoViewOptions opts;
+                                    opts.AnimationDesired(true);
+                                    opts.TargetRect(winrt::Windows::Foundation::Rect{
+                                        static_cast<float>(-pad), 0.0f,
+                                        static_cast<float>(w + 2.0 * pad), static_cast<float>(h) });
+                                    tvi.StartBringIntoView(opts);
+                                }
+                                else
+                                {
+                                    tvi.StartBringIntoView(); // unrealized / zero-size fallback
+                                }
                             }
                         }
                         CATCH_LOG();
