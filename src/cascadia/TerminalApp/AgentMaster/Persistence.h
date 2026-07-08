@@ -246,11 +246,13 @@ namespace Agentmaster
     std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s);
     // Agentmaster (tab color modes): READ a session's tab color under `mode` — the one resolution
     // every display surface shares (board title band, Sessions-page chip, pending-dots contrast),
-    // so a card/chip always matches what the tab actually wears. Individual => the session's own
-    // persisted tabColorHex (falling back to the dir-keyed color while none is dealt yet); dir
-    // modes => the key dir's persisted color, else its AutoDirColorHex preview (the existing
-    // board/chip precedence). Read-only — never deals/persists (the tab PAINT seams do that:
-    // AssignDirAutoColor / TerminalPage::_ApplySessionTabColor's Individual deal).
+    // so a card/chip always matches what the tab actually wears. NoColor ("Remove colors") =>
+    // EMPTY (no surface wears a color; the persisted colors are kept on disk, just not read).
+    // Individual => the session's own persisted tabColorHex (falling back to the dir-keyed color
+    // while none is dealt yet); dir modes => the key dir's persisted color, else its
+    // AutoDirColorHex preview (the existing board/chip precedence). Read-only — never
+    // deals/persists (the tab PAINT seams do that: AssignDirAutoColor /
+    // TerminalPage::_ApplySessionTabColor's Individual deal).
     std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s);
     // One-time dir-colors.json upgrade (v1 -> v2): de-collide the persisted map (every folder keeps its
     // color where possible; duplicate palette colors are reassigned to free ones). Idempotent (version).

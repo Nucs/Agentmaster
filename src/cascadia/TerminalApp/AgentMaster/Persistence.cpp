@@ -276,6 +276,8 @@ namespace Agentmaster
             return L"individual";
         case TabColorMode::InferredWorkingDirectory:
             return L"inferredWorkingDirectory";
+        case TabColorMode::NoColor:
+            return L"noColor";
         case TabColorMode::WorkingDirectory:
         default:
             return L"workingDirectory";
@@ -287,6 +289,8 @@ namespace Agentmaster
             return TabColorMode::Individual;
         if (s == L"inferredWorkingDirectory")
             return TabColorMode::InferredWorkingDirectory;
+        if (s == L"noColor")
+            return TabColorMode::NoColor;
         return TabColorMode::WorkingDirectory; // default + unknown token -> the prior (per-dir) behavior
     }
 
@@ -591,6 +595,7 @@ namespace Agentmaster
         o.Set(L"showTabCloseButton", json::Value::MkBool(s.showTabCloseButton));
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
+        o.Set(L"showTabIcon", json::Value::MkBool(s.showTabIcon));
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
         o.Set(L"tabColorMode", json::Value::MkStr(ToString(s.tabColorMode)));
         o.Set(L"inferGitRoot", json::Value::MkBool(s.inferGitRoot));
@@ -660,6 +665,7 @@ namespace Agentmaster
         s.showTabCloseButton = v.BoolAt(L"showTabCloseButton", true); // absent => ON (theme-driven, the prior behavior)
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
+        s.showTabIcon = v.BoolAt(L"showTabIcon", false); // absent => OFF (tab icons HIDDEN by default — an Agentmaster override of stock WT, which shows them)
         s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
         s.tabColorMode = TabColorModeFromString(v.StrAt(L"tabColorMode", L"workingDirectory")); // tab color modes: absent/unknown => shared-per-working-dir (the prior behavior)
         s.inferGitRoot = v.BoolAt(L"inferGitRoot", true); // "Use .git folder to infer": absent => ON (the inferred dir snaps to the enclosing git root)
@@ -1592,9 +1598,10 @@ namespace Agentmaster
         // The session's EFFECTIVE working directory — where it semantically WORKS. Only
         // InferredWorkingDirectory diverges — and only once an inference EXISTS (until then the
         // launch cwd answers, so a fresh session behaves exactly like WorkingDirectory mode).
-        // Individual mode returns the working dir too: its color callers branch on the mode BEFORE
-        // any dir grouping, and the inference scan runs only while the mode is Inferred, so a
-        // dormant (stale) inference from a previous mode never leaks into grouping/display.
+        // Individual and NoColor modes return the working dir too: their color callers branch on
+        // the mode BEFORE any dir grouping, and the inference scan runs only while the mode is
+        // Inferred, so a dormant (stale) inference from a previous mode never leaks into
+        // grouping/display.
         if (mode == TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty())
         {
             return s.inferredWorkingDir;
@@ -1614,10 +1621,17 @@ namespace Agentmaster
     {
         // The ONE read-side resolution of "what color does this session's tab wear" — shared by the
         // board title band / Sessions-page chip / pending-dots contrast so every surface matches the
-        // tab. Individual => the session's own persisted color; a session with none dealt yet (or a
-        // pre-feature/archived record) falls through to the dir-keyed precedence, matching the tab
-        // until its first Individual paint deals one. Dir modes => persisted dir color, else the
-        // deterministic AutoDirColorHex preview (the existing board/chip precedence).
+        // tab. NoColor ("Remove colors") => EMPTY: the tab wears nothing, so every surface renders
+        // its neutral fallback — the persisted colors (dir-colors.json / tabColorHex) are KEPT on
+        // disk, just never read. Individual => the session's own persisted color; a session with
+        // none dealt yet (or a pre-feature/archived record) falls through to the dir-keyed
+        // precedence, matching the tab until its first Individual paint deals one. Dir modes =>
+        // persisted dir color, else the deterministic AutoDirColorHex preview (the existing
+        // board/chip precedence).
+        if (mode == TabColorMode::NoColor)
+        {
+            return {};
+        }
         if (mode == TabColorMode::Individual && !s.tabColorHex.empty())
         {
             return s.tabColorHex;

@@ -1439,7 +1439,13 @@ namespace winrt::TerminalApp::implementation
             // BOTH the live chip below AND the colored underline under the title, so a row reads
             // its group identity the way its terminal tab does.
             std::wstring chipHex;
-            if (reg && _appSettings.tabColorMode != ::Agentmaster::TabColorMode::WorkingDirectory)
+            if (_appSettings.tabColorMode == ::Agentmaster::TabColorMode::NoColor)
+            {
+                // "Remove colors": tabs wear no color, so the chip + title underline mirror that for
+                // EVERY row (registry-known AND pure on-disk) — chipHex stays empty and the neutral
+                // gray fallbacks below render. The persisted colors are neither read nor touched.
+            }
+            else if (reg && _appSettings.tabColorMode != ::Agentmaster::TabColorMode::WorkingDirectory)
             {
                 chipHex = ::Agentmaster::ResolveSessionColorHex(_appSettings.tabColorMode, *reg);
             }

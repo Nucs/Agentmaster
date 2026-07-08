@@ -364,6 +364,7 @@ void TestAppSettings()
         in.summaryPanelTruncate = false; // non-default (default true = truncate long messages)
         in.showTabCloseButton = false; // non-default (default true = show the X / theme-driven)
         in.closeTabOnMiddleClick = false; // non-default (default true = middle-click closes a tab)
+        in.showTabIcon = true; // non-default (default false = tab icons HIDDEN)
         in.waitingForYouTimeoutMinutes = 0; // 0 = never decay — MUST round-trip as 0, not fall back to the default
         in.serverCacheMinutes = 17; // non-default (default 5) — the ⚡ "still cached" window
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
@@ -395,6 +396,7 @@ void TestAppSettings()
         CHECK(out.summaryPanelTruncate == false, "settings summaryPanelTruncate round-trip");
         CHECK(out.showTabCloseButton == false, "settings showTabCloseButton round-trip");
         CHECK(out.closeTabOnMiddleClick == false, "settings closeTabOnMiddleClick round-trip");
+        CHECK(out.showTabIcon == true, "settings showTabIcon round-trip");
         CHECK(out.waitingForYouTimeoutMinutes == 0u, "settings waitingForYouTimeoutMinutes stored 0 (= never) round-trips as 0");
         CHECK(out.serverCacheMinutes == 17u, "settings serverCacheMinutes round-trip");
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
@@ -417,6 +419,7 @@ void TestAppSettings()
         CHECK(out.summaryPanelTruncate == true, "settings summaryPanelTruncate default true (truncate) on empty");
         CHECK(out.showTabCloseButton == true, "settings showTabCloseButton default true (show X) on empty");
         CHECK(out.closeTabOnMiddleClick == true, "settings closeTabOnMiddleClick default true (middle-click closes) on empty");
+        CHECK(out.showTabIcon == false, "settings showTabIcon default false (tab icons HIDDEN) on empty");
         CHECK(out.waitingForYouTimeoutMinutes == 4320u, "settings waitingForYouTimeoutMinutes default 4320 (3d Waiting-for-you timeout) on empty");
         CHECK(out.serverCacheMinutes == 5u, "settings serverCacheMinutes default 5 (server cache lifetime) on empty");
         CHECK(out.tabRenameCommitMode == TabRenameCommitMode::ClickAwayOrShiftEnter, "settings tabRenameCommitMode default (Shift+Enter) on empty");
@@ -692,6 +695,8 @@ void TestTabColorModes()
     CHECK(TabColorModeFromString(ToString(TabColorMode::WorkingDirectory)) == TabColorMode::WorkingDirectory, "tabColorMode workingDirectory round-trip");
     CHECK(TabColorModeFromString(ToString(TabColorMode::Individual)) == TabColorMode::Individual, "tabColorMode individual round-trip");
     CHECK(TabColorModeFromString(ToString(TabColorMode::InferredWorkingDirectory)) == TabColorMode::InferredWorkingDirectory, "tabColorMode inferredWorkingDirectory round-trip");
+    CHECK(TabColorModeFromString(ToString(TabColorMode::NoColor)) == TabColorMode::NoColor, "tabColorMode noColor round-trip");
+    CHECK(ToString(TabColorMode::NoColor) == L"noColor", "tabColorMode NoColor serializes as the 'noColor' token");
     CHECK(TabColorModeFromString(L"nonsense") == TabColorMode::WorkingDirectory, "tabColorMode unknown token -> WorkingDirectory (the prior behavior)");
 
     // --- SessionColorKeyDir: which dir KEYS a session's color under each mode ---
@@ -705,6 +710,7 @@ void TestTabColorModes()
         CHECK(SessionColorKeyDir(TabColorMode::InferredWorkingDirectory, s) == L"K:\\repo\\src\\area", "key dir: inferred mode with an inference -> the inferred dir");
         CHECK(SessionColorKeyDir(TabColorMode::WorkingDirectory, s) == L"K:\\repo", "key dir: default mode IGNORES a stored inference (mode switch keeps dir semantics)");
         CHECK(SessionColorKeyDir(TabColorMode::Individual, s) == L"K:\\repo", "key dir: individual mode returns the working dir (callers branch on the mode before grouping)");
+        CHECK(SessionColorKeyDir(TabColorMode::NoColor, s) == L"K:\\repo", "key dir: NoColor mode returns the working dir too (grouping keeps classic dir semantics)");
     }
 
     // --- EffectiveWorkingDir: the ONE "which directory does this session WORK in" answer, shared
@@ -721,8 +727,9 @@ void TestTabColorModes()
         CHECK(EffectiveWorkingDir(TabColorMode::InferredWorkingDirectory, s) == L"Q:\\other\\repo", "effective dir: inferred mode + an inference -> the INFERRED dir (where the session actually works)");
         CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, s) == L"K:\\launchcwd", "effective dir: default mode ignores a dormant inference (mode switch restores cwd semantics)");
         CHECK(EffectiveWorkingDir(TabColorMode::Individual, s) == L"K:\\launchcwd", "effective dir: Individual mode ignores the inference too (its scan never runs there)");
+        CHECK(EffectiveWorkingDir(TabColorMode::NoColor, s) == L"K:\\launchcwd", "effective dir: NoColor mode ignores the inference too (colors off, semantics classic)");
         // The never-drift contract: the color key IS the effective dir, in every mode x inference state.
-        for (const auto mode : { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory })
+        for (const auto mode : { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory, TabColorMode::NoColor })
         {
             CHECK(SessionColorKeyDir(mode, s) == EffectiveWorkingDir(mode, s), "never-drift: SessionColorKeyDir == EffectiveWorkingDir (with an inference)");
             SessionInfo bare = s;
@@ -748,6 +755,11 @@ void TestTabColorModes()
         const auto fallback = ResolveSessionColorHex(TabColorMode::Individual, bare);
         CHECK(fallback.size() == 7 && fallback[0] == L'#', "resolve: Individual with NO dealt color falls back to the dir-keyed precedence");
         CHECK(fallback == wd, "resolve: the Individual fallback IS the dir-keyed color (matches the tab until the first deal)");
+        // NoColor ("Remove colors"): EMPTY in every state — even with a dealt tabColorHex and a
+        // resolvable dir color on record, nothing is read (and, being read-only, nothing dropped):
+        // every display surface renders its neutral fallback, matching the uncolored tab.
+        CHECK(ResolveSessionColorHex(TabColorMode::NoColor, s).empty(), "resolve: NoColor -> empty even with a persisted session color (kept, not loaded)");
+        CHECK(ResolveSessionColorHex(TabColorMode::NoColor, bare).empty(), "resolve: NoColor -> empty for a bare session too (no dir-keyed fallback)");
     }
 
     // --- ChooseSessionAutoColor: the per-SESSION deal (Individual mode) ---

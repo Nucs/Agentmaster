@@ -1462,7 +1462,16 @@ What works, by area:
   it. **Other lifecycle seams:** resume of an unknown-on-disk id ⇒ its transcript exists, first scan
   pass (~2s) infers; `/clear` ⇒ honestly no inference (cwd color) until the new conversation touches
   files; restore-FRESH keeps the dead conversation's inference as a CONTINUITY seed until the new
-  history overrides it; Codex ⇒ never inferred (rollouts aren't path-parsed — cwd keys its color)];
+  history overrides it; Codex ⇒ never inferred (rollouts aren't path-parsed — cwd keys its color)] ·
+  **Remove colors** [`TabColorMode::NoColor`: NO tab is colored — the paint seam RESETS any runtime
+  color and disables the tab's **Change tab color** menu item + the `openTabColorPicker` action on
+  managed session tabs (`Tab::SetColorPickerEnabled`, re-armed the moment a colored mode repaints;
+  shell/Manager tabs stay recolorable) — while the persisted colors (`dir-colors.json` +
+  `SessionInfo::tabColorHex`) are **KEPT, never read and never dropped** (`ResolveSessionColorHex`
+  answers empty so board band / Sessions chip / pending-dots render neutral; a NoColor guard in
+  `_OnClaudeTabColorChanged` swallows the reset so nothing persists/un-persists), so switching back
+  restores exactly the prior colors; grouping/dir semantics stay classic (`EffectiveWorkingDir` ⇒
+  cwd)];
   GLOBAL, applied live on Save + cross-window broadcast via `_ReapplyManagedTabColors`; every color
   read-surface — board title band, Sessions chip, pending-dots contrast — resolves through the shared
   `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab. **The inferred dir is the
@@ -2562,6 +2571,12 @@ build **binlog uploads as an artifact** to diagnose the first run.
     working dir** (`InferredWorkingDirectory` — the SAME dir machinery keyed by
     `SessionInfo::inferredWorkingDir` when known, else the cwd; `SessionColorKeyDir` is the one key
     resolver, `ResolveSessionColorHex` the one read-side resolution every display surface shares).
+    The fourth mode, **Remove colors** (`NoColor`), SUSPENDS painting rather than re-keying it: no
+    managed tab is colored (the paint seam resets any runtime color), "Change tab color" +
+    `openTabColorPicker` are disabled on session tabs (`Tab::SetColorPickerEnabled`), and the
+    persisted maps are neither read nor WRITTEN (`ResolveSessionColorHex` ⇒ empty; the
+    `_OnClaudeTabColorChanged` NoColor guard swallows every color event) — permanence upheld by
+    abstinence: switching back to any colored mode restores exactly the prior colors.
     Every paint routes through `_ApplySessionTabColor` (the mode dispatch); everything below is the
     DEFAULT (dir-keyed) mode's contract, which the inferred mode inherits over its key. Every Claude
     tab in a dir
