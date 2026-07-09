@@ -610,12 +610,24 @@ namespace winrt::TerminalApp::implementation
         auto weak = get_weak();
         auto disp = _dispatcher;
         std::thread([weak, disp, sessionId, cwd, kind, rolloutPath]() {
-            // Whole transcript (maxBytes 0), cap the prompt count so a giant conversation stays
-            // bounded. Codex (Phase C1) reads its date-sharded rollout (the path carried on the row);
-            // Claude reads <projects>/<encode(cwd)>/<id>.jsonl. Both yield the human prompts in order.
-            std::vector<std::wstring> prompts = (kind == ::Agentmaster::AgentKind::Codex)
-                                                    ? ::Agentmaster::ReadCodexRolloutInfo(rolloutPath, 0, 1000).userPrompts
-                                                    : ::Agentmaster::ReadTranscriptInfo(cwd, sessionId, 0, 1000).userPrompts;
+            // Agentmaster (contained): a throw on this DETACHED thread == std::terminate == the whole
+            // app dies (the v0.6.x resume crash-loop class) — contain and degrade to an empty prompt
+            // list. The readers self-contain now; this nets the remaining glue (captures, vector copy).
+            std::vector<std::wstring> prompts;
+            try
+            {
+                // Whole transcript (maxBytes 0), cap the prompt count so a giant conversation stays
+                // bounded. Codex (Phase C1) reads its date-sharded rollout (the path carried on the row);
+                // Claude reads <projects>/<encode(cwd)>/<id>.jsonl. Both yield the human prompts in order.
+                prompts = (kind == ::Agentmaster::AgentKind::Codex)
+                              ? ::Agentmaster::ReadCodexRolloutInfo(rolloutPath, 0, 1000).userPrompts
+                              : ::Agentmaster::ReadTranscriptInfo(cwd, sessionId, 0, 1000).userPrompts;
+            }
+            catch (...)
+            {
+                prompts.clear();
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadExternalPlan read throw (no crash)\n");
+            }
             if (!disp)
             {
                 return;
@@ -631,9 +643,17 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                self->_externalPlanLoadedFor = sessionId;
-                self->_externalPlanPrompts = std::move(prompts);
-                self->_Refresh();
+                try
+                {
+                    self->_externalPlanLoadedFor = sessionId;
+                    self->_externalPlanPrompts = std::move(prompts);
+                    self->_Refresh();
+                }
+                catch (...)
+                {
+                    // A XAML throw here would fail-fast the app (0xC000027B) — contain it.
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadExternalPlan render throw (no crash)\n");
+                }
             });
         }).detach();
     }
@@ -1269,28 +1289,41 @@ namespace winrt::TerminalApp::implementation
         auto weak = get_weak();
         auto disp = _dispatcher;
         std::thread([weak, disp, id, dir, mtime]() {
+            // Agentmaster (contained): a throw on this DETACHED thread has no handler => std::terminate
+            // kills the whole app silently (the v0.6.x resume crash-loop). The engine helpers self-
+            // contain now, but the glue here (string builds, vector reverse, lambda captures) can still
+            // throw (std::bad_alloc) — contain it, degrade to an empty box, and ALWAYS post the
+            // completion so _summaryLoadingId can't wedge this id's future loads.
             std::wstring text;
-            const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(id);
-            if (!path.empty())
+            try
             {
-                auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
-                // Newest-first: reverse the chronological user messages so RenderSessionSummaryBox (which
-                // numbers in vector order) lists 1 = the most recent. Only MESSAGES are reordered.
-                std::reverse(a.userMsgs.begin(), a.userMsgs.end());
-                std::wstring planFile = a.planFilePath;
-                if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
+                const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(id);
+                if (!path.empty())
                 {
-                    // A plan-start session's plan file lives in its PARENT transcript (session-end.js).
-                    const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
-                    if (!parentPath.empty())
+                    auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                    // Newest-first: reverse the chronological user messages so RenderSessionSummaryBox (which
+                    // numbers in vector order) lists 1 = the most recent. Only MESSAGES are reordered.
+                    std::reverse(a.userMsgs.begin(), a.userMsgs.end());
+                    std::wstring planFile = a.planFilePath;
+                    if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
                     {
-                        planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                        // A plan-start session's plan file lives in its PARENT transcript (session-end.js).
+                        const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
+                        if (!parentPath.empty())
+                        {
+                            planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                        }
                     }
+                    // full=false: the trimmed, space-saving variant (the per-tab overlay's view) — omits the
+                    // id / Dir / Folder / Resume / Branch header (redundant for an already-selected session),
+                    // leaving the value-add (Recap, Tasks, Messages, Files). Fits the narrow pane.
+                    text = ::Agentmaster::RenderSessionSummaryBox(a, id, dir, path, L"claude --resume " + id, L"", L"", planFile, /*full*/ false);
                 }
-                // full=false: the trimmed, space-saving variant (the per-tab overlay's view) — omits the
-                // id / Dir / Folder / Resume / Branch header (redundant for an already-selected session),
-                // leaving the value-add (Recap, Tasks, Messages, Files). Fits the narrow pane.
-                text = ::Agentmaster::RenderSessionSummaryBox(a, id, dir, path, L"claude --resume " + id, L"", L"", planFile, /*full*/ false);
+            }
+            catch (...)
+            {
+                text.clear();
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSummaryForSession analyze throw (no crash)\n");
             }
             if (!disp)
             {
@@ -1302,22 +1335,35 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                // Cache the analyze regardless of current selection (a quick re-select stays warm).
-                self->_summaryCacheId = id;
-                self->_summaryCacheMtime = mtime;
-                self->_summaryCacheText = text;
-                if (self->_summaryLoadingId == id)
+                try
                 {
-                    self->_summaryLoadingId.clear();
+                    // Cache the analyze regardless of current selection (a quick re-select stays warm).
+                    self->_summaryCacheId = id;
+                    self->_summaryCacheMtime = mtime;
+                    self->_summaryCacheText = text;
+                    if (self->_summaryLoadingId == id)
+                    {
+                        self->_summaryLoadingId.clear();
+                    }
+                    // Render only if the Summary tab is still active AND this id is still the selected subject.
+                    if (!self->_appSettings.autoTestingShowsSummary || self->_selectedId != id)
+                    {
+                        return;
+                    }
+                    self->_RenderSummaryBox(text);
+                    self->_summaryShownId = id;
+                    self->_summaryShownMtime = mtime;
                 }
-                // Render only if the Summary tab is still active AND this id is still the selected subject.
-                if (!self->_appSettings.autoTestingShowsSummary || self->_selectedId != id)
+                catch (...)
                 {
-                    return;
+                    // A XAML throw in this dispatcher callback would otherwise fail-fast (0xC000027B) —
+                    // contain it; the loading marker is already cleared above so the pane can retry.
+                    if (self->_summaryLoadingId == id)
+                    {
+                        self->_summaryLoadingId.clear();
+                    }
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSummaryForSession render throw (no crash)\n");
                 }
-                self->_RenderSummaryBox(text);
-                self->_summaryShownId = id;
-                self->_summaryShownMtime = mtime;
             });
         }).detach();
     }

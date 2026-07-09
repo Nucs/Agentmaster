@@ -2422,24 +2422,39 @@ namespace winrt::TerminalApp::implementation
         const bool wrapNewlines = _appSettings.summaryPanelWrapNewlines;
         const bool truncate = _appSettings.summaryPanelTruncate;
         auto weakThis{ get_weak() };
+        // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
+        // the whole app dies silently (the v0.6.x resume crash-loop class). The INNER try degrades an
+        // analyze/render throw to an empty box while the normal completion still runs (it erases the
+        // loading marker, so the row can retry on the next growth); the OUTER catch covers the rare
+        // rest (a capture bad_alloc, resume_foreground at shutdown) — log, never crash.
+        try
+        {
         co_await winrt::resume_background();
 
         std::wstring text;
-        const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
-        if (!path.empty())
+        try
         {
-            const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
-            std::wstring planFile = a.planFilePath;
-            if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
+            const std::wstring path = ::Agentmaster::ResolveClaudeTranscriptPath(sessionId);
+            if (!path.empty())
             {
-                // A plan-start session's plan file lives in its PARENT transcript (session-end.js).
-                const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
-                if (!parentPath.empty())
+                const auto a = ::Agentmaster::AnalyzeSessionTranscript(path, 0 /* whole file */);
+                std::wstring planFile = a.planFilePath;
+                if (planFile.empty() && a.hasPlanContent && !a.parentSessionId.empty())
                 {
-                    planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                    // A plan-start session's plan file lives in its PARENT transcript (session-end.js).
+                    const std::wstring parentPath = ::Agentmaster::ResolveClaudeTranscriptPath(a.parentSessionId);
+                    if (!parentPath.empty())
+                    {
+                        planFile = ::Agentmaster::FindPlanFileInTranscript(parentPath);
+                    }
                 }
+                text = ::Agentmaster::RenderSessionSummaryBox(a, sessionId, dir, path, L"claude --resume " + sessionId, L"" /* no live glyph */, L"" /* empty label => header only for plan */, planFile, /*full*/ true, wrapNewlines, truncate);
             }
-            text = ::Agentmaster::RenderSessionSummaryBox(a, sessionId, dir, path, L"claude --resume " + sessionId, L"" /* no live glyph */, L"" /* empty label => header only for plan */, planFile, /*full*/ true, wrapNewlines, truncate);
+        }
+        catch (...)
+        {
+            text.clear();
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSessionsSummary analyze throw (no crash)\n");
         }
 
         co_await winrt::resume_foreground(Dispatcher());
@@ -2470,6 +2485,11 @@ namespace winrt::TerminalApp::implementation
         if (self->_sessionsSelectedId == sessionId && self->_sessionsPageVisible.load(std::memory_order_relaxed))
         {
             self->_ShowSessionsDetail(sessionId);
+        }
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSessionsSummary throw (no crash)\n");
         }
     }
 

@@ -33,7 +33,9 @@
 #include <wrl/client.h> // Microsoft::WRL::ComPtr
 
 #include <algorithm>
+#include <condition_variable> // the analyze-cache in-flight serialization (one whole-file analyze per key)
 #include <cwctype> // towlower (tab-name heuristics)
+#include <mutex> // the analyze-cache lock
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +47,74 @@
 
 namespace Agentmaster
 {
+    // Agentmaster (analyze footprint): elide huge base64 blobs (pasted-image "data" payloads) from raw
+    // transcript UTF-8 before the summary/display readers widen + parse it — see ProcessInspect.h. The
+    // scan is byte-level and ASCII-driven (base64 is pure ASCII, so it composes with UTF-8 safely): a
+    // candidate is a '"' followed by an unbroken [A-Za-z0-9+/]{kMinRun,} run (+ optional '=' padding)
+    // closed by another '"' — i.e. a JSON string whose ENTIRE value is one giant base64 run. Only such
+    // whole-string blobs are rewritten (prose/code strings break the run with spaces, escapes, or
+    // punctuation long before 4 KiB; a giant bare NUMBER outside a string never sits between quotes),
+    // so surrounding JSON stays valid and no displayed text field is ever altered. A blob whose closing
+    // quote is past the read window (a truncated head read cut mid-image) is left alone — its line
+    // fails json::Parse downstream anyway. Returns the input unchanged (zero-copy) when nothing
+    // qualifies. Pure + total.
+    std::string ScrubLargeBase64Payloads(std::string bytes)
+    {
+        static constexpr size_t kMinRun = 4096; // ~3 KiB of binary — no legit prose/code string is one unbroken run this long
+        const auto isB64 = [](unsigned char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/';
+        };
+        const size_t n = bytes.size();
+        std::string out; // built lazily on the FIRST elide; empty `out` + copied==0 => nothing elided yet
+        size_t copied = 0; // bytes [0, copied) already appended to `out` (meaningful only once eliding)
+        bool elided = false;
+        size_t i = 0;
+        while (i < n)
+        {
+            if (bytes[i] != '"')
+            {
+                ++i;
+                continue;
+            }
+            // Candidate string start: measure the base64 run right after the opening quote.
+            size_t j = i + 1;
+            while (j < n && isB64(static_cast<unsigned char>(bytes[j])))
+            {
+                ++j;
+            }
+            const size_t runLen = j - (i + 1);
+            size_t runEnd = j;
+            while (runEnd < n && bytes[runEnd] == '=' && runEnd - (i + 1) - runLen < 2)
+            {
+                ++runEnd; // up to two padding '='
+            }
+            if (runLen >= kMinRun && runEnd < n && bytes[runEnd] == '"')
+            {
+                // Whole-string blob: keep the quotes, replace the value with a short placeholder.
+                if (!elided)
+                {
+                    out.reserve(n / 4 + 64); // heuristics: image-heavy files shrink drastically
+                    elided = true;
+                }
+                out.append(bytes, copied, (i + 1) - copied);
+                out += "<base64 ";
+                out += std::to_string(runEnd - (i + 1));
+                out += " chars elided>";
+                copied = runEnd; // resume at the closing quote
+                i = runEnd + 1;
+                continue;
+            }
+            // Not a blob: skip past what we scanned (never rescan the run).
+            i = (j > i + 1) ? j : i + 1;
+        }
+        if (!elided)
+        {
+            return bytes; // common case (no images): untouched, no copy
+        }
+        out.append(bytes, copied, n - copied);
+        return out;
+    }
+
     static std::wstring ReadConversationTextImpl(std::wstring_view transcriptPath, bool codex, size_t maxBytes);
     // Agentmaster (extra-safe): never let a transcript-read throw escape into a background coroutine (the
     // copy-transcript action) -- contain it and return empty. See AnalyzeSessionTranscript.
@@ -67,7 +137,9 @@ namespace Agentmaster
             return {};
         }
         const std::wstring path{ transcriptPath };
-        const std::string bytes = ReadFileHead(path, maxBytes);
+        // Scrub pasted-image base64 blobs BEFORE widening (analyze-footprint; the copied text never
+        // contains image bytes anyway — the elide placeholder lives in fields no text block reads).
+        const std::string bytes = ScrubLargeBase64Payloads(ReadFileHead(path, maxBytes));
         if (bytes.empty())
         {
             return {};
@@ -678,19 +750,144 @@ namespace Agentmaster
     }
 
     static SessionSummary AnalyzeSessionTranscriptImpl(std::wstring_view transcriptPath, size_t maxBytes);
+
+    // Agentmaster (analyze footprint): the process-wide analyze cache + in-flight serialization.
+    // The summary surfaces (per-tab overlay panel, the Manager's release Summary pane, the Sessions
+    // detail + neighbor prefetches) all whole-file-analyze the SAME transcript within one tick of a
+    // resume's SessionStart; before this, one heavy file was read + widened + parsed 2-4x
+    // CONCURRENTLY — the transient burst (5-8x file size each) behind the v0.6.x resume crash-loop.
+    // Keyed by (path, maxBytes) and validated by (size, mtime): an append moves both => fresh analyze.
+    // A caller that finds its key IN FLIGHT blocks on the condvar and then serves the finisher's
+    // cached result — so N simultaneous consumers cost ONE analyze + N-1 copies. Kept tiny (4 slots,
+    // LRU): the point is collapsing a burst, not long-term caching. Throws inside the Impl release the
+    // in-flight key via RAII (waiters retry; nothing is cached), and the wrapper's catch still returns
+    // empty. Plain statics — the engine has no init order dependency on these (function-local scope).
+    namespace
+    {
+        struct AnalyzeCacheEntry
+        {
+            std::wstring path;
+            size_t maxBytes = 0;
+            int64_t size = -1;
+            int64_t mtime = -1;
+            uint64_t lastUse = 0;
+            SessionSummary result;
+        };
+        constexpr size_t kAnalyzeCacheSlots = 4;
+        std::mutex g_analyzeMutex;
+        std::condition_variable g_analyzeCv;
+        std::vector<AnalyzeCacheEntry> g_analyzeCache; // <= kAnalyzeCacheSlots entries
+        std::vector<std::pair<std::wstring, size_t>> g_analyzeInFlight; // keys being analyzed RIGHT NOW
+        uint64_t g_analyzeUseTick = 0;
+    }
+
+    static SessionSummary AnalyzeSessionTranscriptCached(std::wstring_view transcriptPath, size_t maxBytes)
+    {
+        // Stat first: no stat => no cache identity => analyze directly (the Impl's own read returns
+        // empty for a missing file, preserving the legacy "not found" result exactly).
+        const std::wstring path{ transcriptPath };
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad) ||
+            (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return AnalyzeSessionTranscriptImpl(transcriptPath, maxBytes);
+        }
+        ULARGE_INTEGER sz{}, mt{};
+        sz.LowPart = fad.nFileSizeLow;
+        sz.HighPart = fad.nFileSizeHigh;
+        mt.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+        mt.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+        const int64_t size = static_cast<int64_t>(sz.QuadPart);
+        const int64_t mtime = static_cast<int64_t>(mt.QuadPart);
+
+        std::unique_lock<std::mutex> lk(g_analyzeMutex);
+        for (;;)
+        {
+            for (auto& e : g_analyzeCache) // hit: same key, file unchanged since it was computed
+            {
+                if (e.maxBytes == maxBytes && e.size == size && e.mtime == mtime && e.path == path)
+                {
+                    e.lastUse = ++g_analyzeUseTick;
+                    return e.result; // a COPY — callers mutate their result freely
+                }
+            }
+            const auto key = std::make_pair(path, maxBytes);
+            if (std::find(g_analyzeInFlight.begin(), g_analyzeInFlight.end(), key) == g_analyzeInFlight.end())
+            {
+                g_analyzeInFlight.push_back(key);
+                break; // we analyze
+            }
+            g_analyzeCv.wait(lk); // someone else is analyzing this file — wait, then re-check the cache
+        }
+        lk.unlock();
+
+        // RAII: ALWAYS release the in-flight key + wake waiters — a throw below must not strand them.
+        struct InFlightGuard
+        {
+            std::wstring path;
+            size_t maxBytes;
+            ~InFlightGuard()
+            {
+                std::lock_guard<std::mutex> g(g_analyzeMutex);
+                const auto key = std::make_pair(path, maxBytes);
+                g_analyzeInFlight.erase(std::remove(g_analyzeInFlight.begin(), g_analyzeInFlight.end(), key),
+                                        g_analyzeInFlight.end());
+                g_analyzeCv.notify_all();
+            }
+        } guard{ path, maxBytes };
+
+        SessionSummary result = AnalyzeSessionTranscriptImpl(transcriptPath, maxBytes);
+
+        {
+            std::lock_guard<std::mutex> g(g_analyzeMutex);
+            AnalyzeCacheEntry* slot = nullptr;
+            for (auto& e : g_analyzeCache) // reuse this key's stale entry if present
+            {
+                if (e.maxBytes == maxBytes && e.path == path)
+                {
+                    slot = &e;
+                    break;
+                }
+            }
+            if (!slot && g_analyzeCache.size() < kAnalyzeCacheSlots)
+            {
+                slot = &g_analyzeCache.emplace_back();
+            }
+            if (!slot) // evict LRU
+            {
+                slot = &g_analyzeCache.front();
+                for (auto& e : g_analyzeCache)
+                {
+                    if (e.lastUse < slot->lastUse)
+                    {
+                        slot = &e;
+                    }
+                }
+            }
+            slot->path = path;
+            slot->maxBytes = maxBytes;
+            slot->size = size;
+            slot->mtime = mtime;
+            slot->lastUse = ++g_analyzeUseTick;
+            slot->result = result;
+        }
+        return result;
+    }
+
     // Agentmaster (extra-safe): a transcript parser must NEVER throw into its caller. Most callers run on
     // a BACKGROUND thread inside a fire_and_forget coroutine (the summary panel, alt-nav, the Sessions
     // browser) or the scanner thread, where an uncaught exception -- a malformed/partial .jsonl, an
     // unguarded substr, a std::bad_alloc on a huge file -- would unwind with no frame to catch it and
     // std::terminate the whole app, taking every session with it. This thin wrapper contains any throw
-    // and returns an empty result (== the existing "not found" path); the real work is the Impl below.
-    // OutputDebugString can't throw and needs no profile/logging dependency, so the engine stays pure for
-    // the test harness + CLI while a genuine parse bug stays discoverable (DebugView / a debugger).
+    // and returns an empty result (== the existing "not found" path); the real work is the Impl below
+    // (served through the burst-collapsing cache above). OutputDebugString can't throw and needs no
+    // profile/logging dependency, so the engine stays pure for the test harness + CLI while a genuine
+    // parse bug stays discoverable (DebugView / a debugger).
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes)
     {
         try
         {
-            return AnalyzeSessionTranscriptImpl(transcriptPath, maxBytes);
+            return AnalyzeSessionTranscriptCached(transcriptPath, maxBytes);
         }
         catch (...)
         {
@@ -699,9 +896,33 @@ namespace Agentmaster
         }
     }
 
+    static std::vector<ConversationSegment> CollectConversationLineageImpl(const std::wstring& sessionId,
+                                                                           const std::wstring& cwd,
+                                                                           int maxDepth);
+    // Agentmaster (extra-safe): the lineage walk re-reads the CURRENT transcript whole + up to
+    // maxDepth parent transcripts whole, always from a background fire_and_forget (the overlay's
+    // summary loader) — the same no-frame-to-catch context AnalyzeSessionTranscript's wrapper exists
+    // for. Its per-hop analyzes are already contained, but its OWN body (path resolution, quick-facts
+    // reads, vector splices) was not: a std::bad_alloc mid-walk was a process kill. Contain + return
+    // empty ("no parents"), the intended degradation.
     std::vector<ConversationSegment> CollectConversationLineage(const std::wstring& sessionId,
                                                                 const std::wstring& cwd,
                                                                 int maxDepth)
+    {
+        try
+        {
+            return CollectConversationLineageImpl(sessionId, cwd, maxDepth);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] CollectConversationLineage: swallowed exception (no crash)\n");
+            return {};
+        }
+    }
+
+    static std::vector<ConversationSegment> CollectConversationLineageImpl(const std::wstring& sessionId,
+                                                                           const std::wstring& cwd,
+                                                                           int maxDepth)
     {
         std::vector<ConversationSegment> lineage;
         if (sessionId.empty())
@@ -796,7 +1017,9 @@ namespace Agentmaster
         {
             return out;
         }
-        const std::string bytes = ReadFileHead(std::wstring{ transcriptPath }, maxBytes);
+        // Scrub pasted-image base64 blobs BEFORE widening — an image-heavy transcript otherwise costs
+        // 5-8x its file size in transient allocations for bytes no summary field ever reads.
+        const std::string bytes = ScrubLargeBase64Payloads(ReadFileHead(std::wstring{ transcriptPath }, maxBytes));
         if (bytes.empty())
         {
             return out;
@@ -1314,13 +1537,34 @@ namespace Agentmaster
         return std::wstring{ dur } + L" (" + hhmm(a) + L" -> " + hhmm(b) + L")";
     }
 
+    static std::wstring FindPlanFileInTranscriptImpl(std::wstring_view transcriptPath);
+    // Agentmaster (extra-safe): the plan-file scan whole-reads + widens + per-line-parses the PARENT
+    // transcript (which, being the pre-compact/plan conversation, is often the BIGGEST file in the
+    // chain), always from a background thread/coroutine with no frame to catch a throw — the exact
+    // uncontained-helper class behind the v0.6.x resume crash-loop (the tooltip lane's hardening
+    // comment named this function). Contain + return empty ("no plan file"), the intended degradation.
     std::wstring FindPlanFileInTranscript(std::wstring_view transcriptPath)
+    {
+        try
+        {
+            return FindPlanFileInTranscriptImpl(transcriptPath);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] FindPlanFileInTranscript: swallowed exception (no crash)\n");
+            return {};
+        }
+    }
+
+    static std::wstring FindPlanFileInTranscriptImpl(std::wstring_view transcriptPath)
     {
         if (transcriptPath.empty())
         {
             return {};
         }
-        const std::string bytes = ReadFileHead(std::wstring{ transcriptPath }, 0);
+        // Scrub pasted-image base64 blobs BEFORE widening (analyze-footprint) — a Write tool_use's
+        // file_path never lives inside an image payload.
+        const std::string bytes = ScrubLargeBase64Payloads(ReadFileHead(std::wstring{ transcriptPath }, 0));
         if (bytes.empty())
         {
             return {};

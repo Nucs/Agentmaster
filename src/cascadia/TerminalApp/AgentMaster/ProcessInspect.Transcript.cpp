@@ -260,7 +260,26 @@ namespace Agentmaster
         return TranscriptTimesIn(ClaudeProjectsDir(), cwd, sessionId, createdUnixMs, lastActivityUnixMs);
     }
 
+    static TranscriptInfo ReadTranscriptInfoInImpl(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts);
+    // Agentmaster (extra-safe): this whole-file reader materializes per-line facts for EVERY line and
+    // is called from detached background threads (the Manager's external-plan loader, the observer's
+    // title enrichment) with no frame to catch a throw — the same uncontained-helper class behind the
+    // v0.6.x resume crash-loop (a std::bad_alloc on a huge transcript == process death). Contain +
+    // return the empty "not found" result, the intended degradation.
     TranscriptInfo ReadTranscriptInfoIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
+    {
+        try
+        {
+            return ReadTranscriptInfoInImpl(projectsDir, cwd, sessionId, maxBytes, maxPrompts);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] ReadTranscriptInfoIn: swallowed exception (no crash)\n");
+            return {};
+        }
+    }
+
+    static TranscriptInfo ReadTranscriptInfoInImpl(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxBytes, size_t maxPrompts)
     {
         TranscriptInfo info;
         if (projectsDir.empty() || cwd.empty() || sessionId.empty())
@@ -278,7 +297,9 @@ namespace Agentmaster
         info.createdUnixMs = FileTimeToUnixMs(fad.ftCreationTime);
         info.lastActivityUnixMs = FileTimeToUnixMs(fad.ftLastWriteTime);
 
-        const std::string bytes = ReadFileHead(path, maxBytes);
+        // Scrub pasted-image base64 blobs BEFORE widening (analyze-footprint; titles/prompts never
+        // live inside an image payload).
+        const std::string bytes = ScrubLargeBase64Payloads(ReadFileHead(path, maxBytes));
         if (bytes.empty())
         {
             return info; // times only

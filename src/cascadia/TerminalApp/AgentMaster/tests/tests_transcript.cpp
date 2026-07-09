@@ -3382,3 +3382,123 @@ void TestInferWorkingDirectory()
         }
     }
 }
+
+// Agentmaster (analyze footprint): ScrubLargeBase64Payloads + the AnalyzeSessionTranscript cache —
+// the two halves of the v0.6.x resume crash-loop fix. The scrubber elides pasted-image base64 blobs
+// from the raw UTF-8 BEFORE widening (an image-heavy transcript cost 5-8x its size in transient
+// allocations for bytes no summary field reads); the cache collapses the resume-time burst (overlay
+// panel + Manager Summary pane + Sessions detail/prefetch all analyzing ONE file concurrently) into
+// one analyze + copies, keyed (path, maxBytes) and validated by (size, mtime).
+void TestAnalyzeFootprint()
+{
+    std::wprintf(L"Analyze footprint (base64 scrub + analyze cache):\n");
+
+    // --- ScrubLargeBase64Payloads (pure) ------------------------------------------------------
+    {
+        const std::string run(5000, 'A'); // an unbroken base64 run (image "data" payload shape)
+
+        // A whole-string blob is elided; the placeholder carries the length; siblings + JSON survive.
+        const std::string line = "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" + run + "\"},\"n\":7}";
+        const std::string scrubbed = ScrubLargeBase64Payloads(line);
+        CHECK(scrubbed.find(run) == std::string::npos, "scrub: a 5000-char whole-string base64 run is elided");
+        CHECK(scrubbed.find("<base64 5000 chars elided>") != std::string::npos, "scrub: the placeholder carries the elided length");
+        CHECK(scrubbed.find("image/png") != std::string::npos, "scrub: sibling fields are untouched");
+        {
+            const std::wstring wide(scrubbed.begin(), scrubbed.end()); // pure-ASCII content
+            const auto parsed = json::Parse(wide);
+            CHECK(parsed && parsed->type == json::Value::Type::Obj, "scrub: the scrubbed line still parses as JSON");
+            const auto* src = parsed ? parsed->Find(L"source") : nullptr;
+            CHECK(src && src->StrAt(L"media_type") == L"image/png", "scrub: parsed sibling value intact");
+        }
+
+        // '=' padding is part of the blob (placeholder counts it); the closing quote is required.
+        const std::string padded = "{\"data\":\"" + run + "==\"}";
+        const std::string scrubbedPad = ScrubLargeBase64Payloads(padded);
+        CHECK(scrubbedPad.find("<base64 5002 chars elided>") != std::string::npos, "scrub: '=' padding is elided with the run");
+
+        // Sub-threshold runs, prose-broken strings, and bare (unquoted) digit runs are untouched.
+        const std::string shortRun = "{\"data\":\"" + std::string(100, 'B') + "\"}";
+        CHECK(ScrubLargeBase64Payloads(shortRun) == shortRun, "scrub: a short (100-char) run is untouched");
+        const std::string prose = "{\"text\":\"" + std::string(3000, 'C') + " " + std::string(3000, 'D') + "\"}";
+        CHECK(ScrubLargeBase64Payloads(prose) == prose, "scrub: a space-broken long string is untouched (not a whole-string run)");
+        const std::string bigNum = "{\"n\":" + std::string(5000, '7') + "}";
+        CHECK(ScrubLargeBase64Payloads(bigNum) == bigNum, "scrub: a bare 5000-digit number (not quote-delimited) is untouched");
+
+        // A blob cut by EOF (truncated head read mid-image, no closing quote) is left alone.
+        const std::string cut = "{\"data\":\"" + run;
+        CHECK(ScrubLargeBase64Payloads(cut) == cut, "scrub: a truncated blob (no closing quote) is untouched");
+
+        // Two blobs on one line are BOTH elided; the bytes between them survive verbatim.
+        const std::string two = "{\"a\":\"" + run + "\",\"keep\":\"middle\",\"b\":\"" + std::string(4200, 'Z') + "\"}";
+        const std::string scrubbedTwo = ScrubLargeBase64Payloads(two);
+        CHECK(scrubbedTwo.find("<base64 5000 chars elided>") != std::string::npos && scrubbedTwo.find("<base64 4200 chars elided>") != std::string::npos, "scrub: two blobs in one line are both elided");
+        CHECK(scrubbedTwo.find("\"keep\":\"middle\"") != std::string::npos, "scrub: the bytes between two blobs survive verbatim");
+
+        // No candidates at all => the input comes back byte-identical (the zero-copy common case).
+        const std::string plain = "{\"type\":\"user\",\"message\":{\"content\":\"hello world\"}}";
+        CHECK(ScrubLargeBase64Payloads(plain) == plain, "scrub: a no-image line is byte-identical");
+    }
+
+    // --- end-to-end: the analyzer over an image-paste transcript --------------------------------
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring p = std::wstring{ tmp } + L"am_scrub_" + std::to_wstring(::GetCurrentProcessId()) + L".jsonl";
+        const std::string img(6000, 'Q');
+        MakeJsonl(p,
+                  std::string("{\"type\":\"user\",\"userType\":\"external\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"look at the shot\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"") + img + "\"}}]},\"timestamp\":\"2026-01-24T20:00:00.000Z\"}\n",
+                  1111, 1111);
+        const auto a = AnalyzeSessionTranscript(p, 0);
+        CHECK(a.found, "scrub e2e: image-paste transcript analyzes");
+        CHECK(a.userMsgs.size() == 1 && a.userMsgs[0] == L"look at the shot", "scrub e2e: the prompt's text block survives the image elide");
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path{ p }, ec);
+    }
+
+    // --- the analyze cache: hit / invalidation / key / copy semantics ---------------------------
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring p = std::wstring{ tmp } + L"am_acache_" + std::to_wstring(::GetCurrentProcessId()) + L".jsonl";
+        // Two payloads of IDENTICAL byte length (so size can't tell them apart — only mtime can).
+        const std::string lineA = "{\"type\":\"user\",\"userType\":\"external\",\"message\":{\"content\":\"cache-aaa\"},\"timestamp\":\"2026-01-24T20:00:00.000Z\"}\n";
+        const std::string lineB = "{\"type\":\"user\",\"userType\":\"external\",\"message\":{\"content\":\"cache-bbb\"},\"timestamp\":\"2026-01-24T20:00:00.000Z\"}\n";
+        CHECK(lineA.size() == lineB.size(), "cache fixture: payloads are size-identical by construction");
+
+        MakeJsonl(p, lineA, 111111, 111111);
+        const auto a1 = AnalyzeSessionTranscript(p, 0);
+        CHECK(a1.userMsgs.size() == 1 && a1.userMsgs[0] == L"cache-aaa", "cache: first analyze reads the file");
+
+        // Rewrite with DIFFERENT content but IDENTICAL (size, mtime): the cache must serve the OLD
+        // result — proof the hit path answers without re-reading. (A real transcript only APPENDS,
+        // so identical (size, mtime) with changed bytes cannot happen outside this fixture.)
+        MakeJsonl(p, lineB, 111111, 111111);
+        const auto a2 = AnalyzeSessionTranscript(p, 0);
+        CHECK(a2.userMsgs.size() == 1 && a2.userMsgs[0] == L"cache-aaa", "cache: identical (size,mtime) is served from the cache (no re-read)");
+
+        // Advance mtime: the entry is invalidated and a fresh analyze sees the new content.
+        MakeJsonl(p, lineB, 222222, 111111);
+        const auto a3 = AnalyzeSessionTranscript(p, 0);
+        CHECK(a3.userMsgs.size() == 1 && a3.userMsgs[0] == L"cache-bbb", "cache: an mtime change invalidates -> fresh analyze");
+
+        // A different maxBytes is a DIFFERENT key (a tail-capped read never collides with whole-file).
+        const auto a4 = AnalyzeSessionTranscript(p, 1u << 20);
+        CHECK(a4.userMsgs.size() == 1 && a4.userMsgs[0] == L"cache-bbb", "cache: a capped-read key analyzes correctly (no cross-key hit)");
+
+        // Callers get a COPY: mutating a returned result must not poison the cached entry.
+        auto a5 = AnalyzeSessionTranscript(p, 0);
+        a5.userMsgs.clear();
+        const auto a6 = AnalyzeSessionTranscript(p, 0);
+        CHECK(a6.userMsgs.size() == 1 && a6.userMsgs[0] == L"cache-bbb", "cache: callers mutate a COPY, never the cached result");
+
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path{ p }, ec);
+    }
+
+    // --- containment smoke: the wrapped helpers stay total on garbage/absent inputs -------------
+    {
+        CHECK(FindPlanFileInTranscript(L"").empty(), "contained: FindPlanFileInTranscript('') -> empty");
+        CHECK(FindPlanFileInTranscript(L"Z:\\no\\such\\file.jsonl").empty(), "contained: FindPlanFileInTranscript(absent) -> empty");
+        CHECK(CollectConversationLineage(L"no-such-session-id", L"C:\\nowhere", 4).empty(), "contained: CollectConversationLineage(absent) -> empty");
+    }
+}
