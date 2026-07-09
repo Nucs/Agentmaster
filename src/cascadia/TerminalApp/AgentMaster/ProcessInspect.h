@@ -408,9 +408,30 @@ namespace Agentmaster
         return s;
     }
 
+    // Agentmaster (analyze footprint): elide huge base64 blobs from raw transcript UTF-8 BEFORE it is
+    // widened + parsed for a SUMMARY/DISPLAY read. A pasted screenshot lands in the .jsonl as an image
+    // content block whose "data" string is one multi-MB base64 run; an image-paste-heavy conversation
+    // therefore costs the analyzer 5-8x the file size in transient allocations (wide copy + per-line
+    // json::Value trees + stored texts) for bytes NO summary consumer ever reads — a proven
+    // std::bad_alloc crash source (the v0.6.x resume crash-loop). This rewrites any JSON string whose
+    // ENTIRE value is a single >= 4 KiB base64 run to a short "<base64 N chars elided>" placeholder:
+    // the run can't contain a quote/backslash (base64 charset), and requiring quote-run-quote means
+    // prose/code strings (which break the run with spaces, escapes, or punctuation long before 4 KiB)
+    // are never touched — surrounding JSON stays valid. Zero-copy when nothing qualifies (the common,
+    // no-image case returns the input unchanged). Deliberately NOT applied to the SEARCH/index paths
+    // (TranscriptStore/SessionSearch read raw). Pure + total; exposed for tests. [Agentmaster]
+    std::string ScrubLargeBase64Payloads(std::string bytes);
+
     // Port of session-end.js parseTranscript: one forward pass over a Claude transcript .jsonl.
     // `maxBytes` 0 == the whole file. Filesystem only; `found` is false if the file can't be read.
     // Fills SessionSummary.previousSegments + compacted for in-file `/compact` boundaries.
+    // Agentmaster (analyze footprint): results are served from a small process-wide (path, maxBytes)
+    // + (size, mtime)-keyed cache, and CONCURRENT calls for the same key are SERIALIZED — the second
+    // caller waits and gets the first's cached result instead of duplicating a whole-file analyze.
+    // The summary surfaces (per-tab overlay panel, the Manager's release Summary pane, the Sessions
+    // detail + its neighbor prefetches) all fire within the same tick of a resume's SessionStart, so
+    // without this ONE transcript was read + widened + parsed 2-4x simultaneously (the memory burst
+    // behind the v0.6.x resume crash-loop). An append moves (size, mtime) => a fresh analyze.
     SessionSummary AnalyzeSessionTranscript(std::wstring_view transcriptPath, size_t maxBytes);
 
     // Agentmaster (conversation lineage): split a transcript's COMPLETE text into segments at each

@@ -1500,6 +1500,17 @@ namespace winrt::TerminalApp::implementation
     winrt::fire_and_forget AgentTabOverlay::_LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t prevMtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage)
     {
         auto strong = get_strong(); // keep the overlay alive across the co_await (it owns _summaryStack)
+        // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
+        // the whole app dies silently — and THIS lane (unlike its tooltip twin, hardened by be1d63b7f)
+        // had no containment at all: the v0.6.x resume crash-loop (a std::bad_alloc analyzing a huge
+        // image-paste transcript ~2-4s after the resumed claude's SessionStart) died exactly here. The
+        // engine helpers self-contain now; the try below nets the remaining glue (path resolution,
+        // lambda-capture copies, the TryEnqueue call) so the worst case is an empty panel + a log line,
+        // never a dead app. The INNER try keeps the normal completion running (it clears
+        // _summaryLoading, so the panel can't wedge); the OUTER catch covers a completion that never
+        // got posted and best-effort clears the flag from the UI thread.
+        try
+        {
         co_await winrt::resume_background();
 
         // Resolve the transcript path once (cached in _summaryPath across reloads). Claude: a shallow
@@ -1546,6 +1557,8 @@ namespace winrt::TerminalApp::implementation
         bool lineageComputed = false;
         if (!path.empty())
         {
+            try
+            {
             // Cheap stat: only do the heavy read+analyze when the transcript grew (mtime advanced) or
             // we've never loaded it (prevMtime == 0). A quiet tab thus costs one GetFileAttributesEx.
             WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -1603,6 +1616,19 @@ namespace winrt::TerminalApp::implementation
                 }
                 timesComputed = true;
             }
+            }
+            catch (...)
+            {
+                // Degrade to an empty panel (the placeholder line renders); `mtime` keeps the fresh
+                // stat taken above the throw, so the completion stores it and a broken transcript
+                // isn't re-analyzed in a hot loop every 5s tick — only real growth retries.
+                text.clear();
+                userMsgs.clear();
+                lineage.clear();
+                timesComputed = false;
+                lineageComputed = false;
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSummaryAsync analyze throw (no crash)\n");
+            }
         }
 
         // Hop back to the UI thread to publish (the StackPanel build + member writes are UI-thread only).
@@ -1611,6 +1637,10 @@ namespace winrt::TerminalApp::implementation
             disp.TryEnqueue([weak = get_weak(), text, userMsgs, path, cachePath, mtime, createdMs, lastUserMs, lastActivityMs, timesComputed, hasPrevious, sessionId, lineage, lineageComputed]() {
                 if (auto self = weak.get())
                 {
+                    // Agentmaster (contained): a XAML throw in this dispatcher callback would fail-fast
+                    // the app (0xC000027B stowed exception) — contain it and keep _summaryLoading sane.
+                    try
+                    {
                     if (timesComputed)
                     {
                         self->_summaryUserMsgs = userMsgs; // set BEFORE _SetSummaryContent so jump rows resolve the right prompt
@@ -1677,8 +1707,36 @@ namespace winrt::TerminalApp::implementation
                             }
                         }
                     }
+                    }
+                    catch (...)
+                    {
+                        self->_summaryLoading = false; // never wedge the panel on a failed publish
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSummaryAsync publish throw (no crash)\n");
+                    }
                 }
             });
+        }
+        }
+        catch (...)
+        {
+            // The completion never got posted (a capture-copy bad_alloc, a dispatcher throw) — log and
+            // best-effort clear the loading latch from the UI thread so the panel can load again.
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained _LoadSummaryAsync throw (no crash)\n");
+            try
+            {
+                if (auto disp = _dispatcher)
+                {
+                    disp.TryEnqueue([weak = get_weak()]() {
+                        if (auto self = weak.get())
+                        {
+                            self->_summaryLoading = false;
+                        }
+                    });
+                }
+            }
+            catch (...)
+            {
+            }
         }
     }
 }

@@ -345,7 +345,25 @@ namespace Agentmaster
         return out;
     }
 
+    static std::wstring RenderSessionSummaryBoxImpl(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate);
+    // Agentmaster (extra-safe): the renderers do NOT self-contain (the tab-tooltip lane's hardening
+    // comment said exactly that) yet run on background threads / fire_and_forget coroutines with no
+    // frame to catch a throw — a std::bad_alloc mid-string-build was a process kill (the v0.6.x
+    // resume crash-loop class). Contain + return empty (the caller's "nothing to render" path).
     std::wstring RenderSessionSummaryBox(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
+    {
+        try
+        {
+            return RenderSessionSummaryBoxImpl(a, id, cwd, transcriptPath, resumeCmd, liveGlyph, liveLabel, planFile, full, wrapNewlines, truncate);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] RenderSessionSummaryBox: swallowed exception (no crash)\n");
+            return {};
+        }
+    }
+
+    static std::wstring RenderSessionSummaryBoxImpl(const SessionSummary& a, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, const std::wstring& planFile, bool full, bool wrapNewlines, bool truncate)
     {
         std::wstring glyph = liveGlyph, label = liveLabel;
         const bool isPlan = a.hasPlanContent || a.hasExitPlanMode;
@@ -457,7 +475,22 @@ namespace Agentmaster
         return o;
     }
 
+    static std::wstring RenderCodexSummaryBoxImpl(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full);
+    // Agentmaster (extra-safe): same containment as RenderSessionSummaryBox above.
     std::wstring RenderCodexSummaryBox(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full)
+    {
+        try
+        {
+            return RenderCodexSummaryBoxImpl(info, id, cwd, transcriptPath, resumeCmd, liveGlyph, liveLabel, full);
+        }
+        catch (...)
+        {
+            OutputDebugStringW(L"[Agentmaster] RenderCodexSummaryBox: swallowed exception (no crash)\n");
+            return {};
+        }
+    }
+
+    static std::wstring RenderCodexSummaryBoxImpl(const CodexRolloutInfo& info, const std::wstring& id, const std::wstring& cwd, const std::wstring& transcriptPath, const std::wstring& resumeCmd, const std::wstring& liveGlyph, const std::wstring& liveLabel, bool full)
     {
         std::wstring o;
         const auto line = [&o](const std::wstring& s) { o += s; o += L"\n"; };

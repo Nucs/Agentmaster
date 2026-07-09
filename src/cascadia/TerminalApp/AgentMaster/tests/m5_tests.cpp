@@ -74,6 +74,7 @@ int wmain()
     TestExtractPathsFromText();
     TestInferWorkingDirectory();
     TestConversationLineage();
+    TestAnalyzeFootprint();
     TestSessionSearch();
     TestProcessInspectLive();
     TestBringToFrontHeuristics();
