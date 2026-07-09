@@ -1,11 +1,11 @@
-<!-- Agentmaster 0.6.2 release notes — PRE-RELEASE (NOT Latest; v0.6.1 stays Latest).
+<!-- Agentmaster 0.6.2 release notes — STABLE (becomes Latest; NOT a pre-release).
      Range: v0.6.1..HEAD = 14 commits. Last stable is 0.6.1, so this IS the full changelog since last stable.
-     RELEASING from HEAD = d2f9937bc. Tag v0.6.2 -> 0.6.2.0.
-     PRERELEASE mechanics: publish --draft=false --prerelease --latest=false (the stable 0.6.1 stays Latest).
+     RELEASING from d2f9937bc (tag v0.6.2). Tag v0.6.2 -> 0.6.2.0.
+     STABLE mechanics: publish --draft=false --latest (REPLACES 0.6.1 as Latest; no --prerelease).
      Assets: Agentmaster_0.6.2.0.msixbundle, _x64.zip, _arm64.zip, Agentmaster.cer. -->
-## Agentmaster 0.6.2 (pre-release)
+## Agentmaster 0.6.2
 
-**0.6.2 is a pre-release** building on 0.6.1. The headline is a **second major memory-leak fix** — a **23 GB Manager-rebuild leak** (following 0.6.1's tooltip-leak freeze) — alongside a batch of managed-tab, restart, and overlay fixes, plus three tab conveniences: a **"Remove colors"** coloring mode, an option to **hide the profile icon on tabs**, and a tab strip that **scrolls to reveal a selected session's tab**. Enable **Settings → Updates → "Allow pre-release versions"** to receive it automatically, or install from the assets below. The stable **0.6.1** remains the default for everyone else.
+**0.6.2 is a stable release** building on 0.6.1. The headline is a **second major memory-leak fix** — a **23 GB Manager-rebuild leak** (following 0.6.1's tooltip-leak freeze) — alongside a batch of managed-tab, restart, and overlay fixes, plus three tab conveniences: a **"Remove colors"** coloring mode, an option to **hide the profile icon on tabs**, and a tab strip that **scrolls to reveal a selected session's tab**. This build becomes the new default **Latest**.
 
 ## Fixes
 
@@ -22,15 +22,13 @@
 - **The tab strip reveals a selected session's tab.** Selecting a session on the Triage Board or Explorer tree now scrolls the tab strip so that session's terminal tab is visible — completing the tab-strip half of the Linked-Lenses selection sync (previously the highlight pill could sit scrolled off-screen with many tabs). It's virtualization-aware and lands the tab clear of the overlay's scroll / **+** buttons.
 - **Hourly update check.** With auto-update enabled, Agentmaster now re-checks for a new version **every hour while running**, not only at startup.
 
-## Install (pre-release)
+## Install
 
-> **This is a pre-release.** It is **not** offered as an automatic update unless you enable **Settings → Updates → "Allow pre-release versions."** The stable **0.6.1** stays the default Latest.
-
-**One command (PowerShell)** — install 0.6.2 (trusts the self-signed cert with a single UAC prompt):
+**One command (PowerShell)** — installs 0.6.2 (trusts the self-signed cert with a single UAC prompt):
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Nucs/Agentmaster/agentmaster/tools/Install-Agentmaster.ps1))) -Version 0.6.2
 ```
-Add `-Portable` (cert-free, no admin) or `-Launch` (start after install).
+Add `-Portable` (cert-free, no admin) or `-Launch` (start after install). 0.6.2 is now the default **Latest**, so a plain run (no `-Version`) also picks it up.
 
 **Portable (no cert):** download `Agentmaster_0.6.2.0_x64.zip` (or `_arm64`), unzip anywhere, run `agentmaster.exe`. Fully self-contained.
 
