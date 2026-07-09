@@ -215,6 +215,8 @@ namespace winrt::TerminalApp::implementation
         std::wstring _SummarySelectedText(); // the text the user selected in the summary panel (title / times / body runs) — feeds + gates the context menu's "Copy Selected Text"
         void _ToggleSummaryPrevious(); // previous-session button: invoke the page handler (flips the GLOBAL summaryPanelShowPrevious)
         void _UpdateSummaryPrevButtonVisual(); // recolor the previous-session icon: dim (off) / lighter (on), per _summaryShowPrevious
+        void _UpdateSummaryPencilVisual(); // recolor the badge PENCIL: dim (panel off) / lighter (on), per _summaryEnabled — the pencil always visibly answers its click, even on a tab whose panel has nothing to render
+        void _EnsureSummaryPlaceholder(); // when the panel is ENABLED but has NOTHING to render (a never-prompted session has no transcript; an unreconciled Codex has no rollout), show ONE dim placeholder line instead of collapsing — an invisible toggle reads as a dead button
         void _RefreshSummary(); // refresh button: force a re-analyze+render NOW (reset the mtime gate + re-pull) — a local action, no global setting
         void _UpdateSummary(const ::Agentmaster::SessionInfo& s); // _Refresh-driven: show/hide (per _summaryEnabled) + (re)load when grown
         winrt::fire_and_forget _LoadSummaryAsync(std::wstring transcriptPath, bool codex, std::wstring sessionId, std::wstring forkParentId, std::wstring cwd, std::wstring liveGlyph, std::wstring liveLabel, int64_t mtime, bool wrapNewlines, bool truncate, bool showPrevious, bool lineageCached, std::vector<::Agentmaster::ConversationSegment> cachedLineage); // analyze + render off-thread (wrapNewlines: preserve message newlines vs literal \n; truncate: limit each message; showPrevious: render pre-compaction previous session(s)), set text on the UI thread. lineageCached/cachedLineage: reuse the memoized cross-file (/clear + plan-restart) parents instead of re-walking. forkParentId: a never-messaged fork has no own transcript yet — fall back to the parent's (the fork inherits it verbatim until its first message)
@@ -253,6 +255,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryTruncateIcon{ nullptr }; // pinned top (right, LEFT of the wrap toggle): the truncate toggle glyph — recolored by _UpdateSummaryTruncateButtonVisual
         winrt::Windows::UI::Xaml::Controls::FontIcon _summaryPrevIcon{ nullptr }; // pinned top (right, LEFTMOST): the previous-session toggle glyph — recolored by _UpdateSummaryPrevButtonVisual
         winrt::Windows::UI::Xaml::Controls::Button _summaryPrevBtn{ nullptr }; // the previous-session toggle button — Collapsed unless the loaded summary has a previous segment (a /compact'ed session)
+        winrt::Windows::UI::Xaml::Controls::FontIcon _summaryPencilIcon{ nullptr }; // the badge action-row PENCIL glyph (summary-panel toggle) — recolored by _UpdateSummaryPencilVisual so the toggle state reads at the click point
         winrt::Windows::UI::Xaml::Controls::StackPanel _summaryStack{ nullptr };
         // Right-click "Copy Summary" context menu — built once (_BuildSummaryPanel) and shared as the
         // ContextFlyout of the panel root AND every selectable text block it renders (title / times line /
