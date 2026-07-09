@@ -304,12 +304,13 @@ namespace winrt::TerminalApp::implementation
         // the mouse). Driven by _UpdateManagerSelectionHighlight / _SetTabSelectionPill.
         std::wstring _managerHoverSessionId;
         std::wstring _pilledSessionId;
-        // Agentmaster (Linked Lenses — selection follows into view): the managed session whose tab
-        // was last scrolled into the visible tab strip because it became the Manager SELECTION. When
-        // the selection changes (a board card / tree row click) while the Manager tab is active, its
-        // tab is brought into view (TabViewItem().StartBringIntoView) so the selection pill isn't left
-        // sitting scrolled off-screen. Tracked so an unchanged selection — a hover push, a plain
-        // return to the Manager tab — never re-scrolls; hover previews never scroll at all.
+        // Agentmaster (Linked Lenses — selection follows into view): the last Manager SELECTION the
+        // reveal pass saw. When the selection changes WHILE the Manager tab is active (a board card /
+        // tree row click), the selected session's tab is revealed in the strip (_RevealTabInStrip) so
+        // the selection pill isn't left scrolled off-screen. Tracked on EVERY highlight pass — also
+        // off-Manager, where the selection follows tab switches via the funnel — so only an on-Manager
+        // selection CHANGE scrolls: hover previews, re-selects, and merely RETURNING to the Manager tab
+        // (after the selection moved underneath it) never yank the strip.
         std::wstring _selectionBroughtIntoView;
 
         // Agentmaster: the session-management engine (see AgentMaster/). SessionRegistry is
@@ -886,6 +887,9 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _tagHoverPendingTag; // the tag to show when the open timer fires
         winrt::Windows::UI::Xaml::UIElement _tagHoverPendingAnchor{ nullptr }; // the hovered badge (transformed into Root() space for placement)
         void _UpdateManagerSelectionHighlight(); // Agentmaster (Linked Lenses): re-evaluate which tab (if any) wears the pill — the hovered-or-selected managed session, only while the Manager tab is the active tab; called on lens change, hover, and tab switch
+        void _RevealTabInStrip(const winrt::TerminalApp::Tab& tab); // Agentmaster (Linked Lenses): scroll the tab strip so this tab is visible CLEAR of the `<`/`>` overlay scroll buttons; virtualization-aware — a derealized (scrolled-off) TabViewItem is realized via the TabListView's ScrollIntoView first, then fine-adjusted
+        bool _AdjustStripToRevealItem(const Microsoft::UI::Xaml::Controls::TabViewItem& tvi); // Agentmaster: the precise reveal pass — one ChangeView on _tabStripScrollViewer landing the item inside [pad, viewport-pad]; returns false while the item has no realized layout (virtualized out / pre-arrange) so the caller realizes it and retries
+        void _RevealTabRetryAdjust(Microsoft::UI::Xaml::Controls::TabViewItem tvi, int attempts); // Agentmaster: bounded Low-priority retries of _AdjustStripToRevealItem after ScrollIntoView — realization lands on a later layout pass, never this tick
         void _ActivateClaudeSession(winrt::hstring sessionId); // Agentmaster: jump to a session's tab — local first, then fan out to the hosting window (ActivateSessionInOtherWindows)
         bool _ActivateDormantSession(const std::wstring& sessionId); // Agentmaster (eager-init): start a DORMANT session's claude IN PLACE (no focus change) via TermControl::InitializeWithSize + SetStarted(true); returns true if it woke one (false: not hosted here / already started). UI thread.
         void _ActivateAllDormantTabsLocal(); // Agentmaster (eager-init): DRIP-FEED-wake every dormant managed tab hosted in THIS window — 500ms between wakes, 4 wakes per 10s batch — so a many-tab activate never bursts N claude.exe spawns onto one UI pass. Merges into a running drip. The receiving half of the activate-all fan-out.

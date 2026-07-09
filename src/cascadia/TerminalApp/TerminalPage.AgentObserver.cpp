@@ -2822,19 +2822,16 @@ namespace winrt::TerminalApp::implementation
             _managerHoverSessionId.clear();
         }
 
+        // The pinned lens selection (independent of hover), read live so a restored/seeded selection is
+        // honored without caching. Read UNCONDITIONALLY — not just on the Manager tab: the reveal
+        // tracking below must follow selection changes that happen while the Manager is HIDDEN (the
+        // tab-switch funnel reselects the session you switch to), or merely RETURNING to the Manager
+        // would read "selection changed" and surprise-scroll the strip.
+        const std::wstring selection = _ManagerSelectedSessionId();
+
         std::wstring desired;
-        std::wstring selection; // the pinned lens selection (independent of hover) — drives the "scroll the selected tab into view" pass below
         if (onManager)
         {
-            // The pinned lens selection, read live from the content so a restored/seeded selection is
-            // honored without caching.
-            if (const auto ipc = _agentManagerContent.get())
-            {
-                if (auto* const mgr = winrt::get_self<implementation::AgentManagerContent>(ipc))
-                {
-                    selection = std::wstring{ mgr->SelectedSessionId() };
-                }
-            }
             // Hover wins over the pinned lens selection (a live preview that follows the mouse).
             const std::wstring target = _managerHoverSessionId.empty() ? selection : _managerHoverSessionId;
             // Only pill a session whose tab lives in THIS window (a GLOBAL-scope card can name a
@@ -2846,54 +2843,22 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Agentmaster (Linked Lenses — selection follows into view): when the SELECTED session changes
-        // (a board card / tree row click) while the Manager tab is active, scroll the tab strip so its
-        // tab is visible — otherwise the selection pill can sit scrolled off-screen. Selection only: a
-        // hover preview must NOT scroll (it would jump the strip as the pointer slides across cards),
-        // and only a tab hosted in THIS window. Runs BEFORE the pill's no-change early-return so that
-        // clicking a card you were already hovering (pill unchanged, selection changed) still scrolls.
-        // _selectionBroughtIntoView is updated only while on the Manager tab, so an unchanged selection
-        // — a hover push, or a plain return to the board — never re-scrolls.
-        if (onManager && selection != _selectionBroughtIntoView)
+        // WHILE the Manager tab is up (a board card / tree row click), scroll the tab strip so its tab
+        // is visible — otherwise the selection pill can sit scrolled off-screen (or hidden under the
+        // `<`/`>` overlay buttons). Selection only — a hover preview must NOT scroll (it would jump the
+        // strip as the pointer slides across cards) — and only a tab hosted in THIS window. Runs BEFORE
+        // the pill's no-change early-return so clicking a card you were already hovering (pill
+        // unchanged, selection changed) still scrolls. The tracking updates on EVERY pass (see the
+        // selection read above), so only an on-Manager selection CHANGE reveals.
+        const bool selectionChanged = selection != _selectionBroughtIntoView;
+        _selectionBroughtIntoView = selection;
+        if (onManager && selectionChanged && !selection.empty())
         {
-            _selectionBroughtIntoView = selection;
-            if (!selection.empty())
+            if (const auto it = _claudeTabs.find(selection); it != _claudeTabs.end())
             {
-                if (const auto it = _claudeTabs.find(selection); it != _claudeTabs.end())
+                if (const auto t = it->second.get())
                 {
-                    if (const auto t = it->second.get())
-                    {
-                        try
-                        {
-                            if (const auto tvi = t.TabViewItem())
-                            {
-                                // The MUX TabView's `<`/`>` scroll RepeatButtons OVERLAY the left/right
-                                // edges of the tab scroll area (they take no layout space), and the `+`
-                                // new-tab button sits right beside the `>`. A plain StartBringIntoView()
-                                // only guarantees the item's bounds enter the scroll VIEWPORT — which runs
-                                // UNDER those buttons — so a right-/left-edge tab is scrolled to but left
-                                // hidden behind the `>`/`<` (and, visually, the `+`). Bring a rect PADDED
-                                // on BOTH edges into view instead, so the tab lands clear of the overlay
-                                // buttons (~34px) whichever way the strip had to scroll.
-                                const double w = tvi.ActualWidth();
-                                const double h = tvi.ActualHeight();
-                                if (w > 0.0 && h > 0.0)
-                                {
-                                    constexpr double pad = 48.0; // > the ~34px TabView scroll button, on each edge
-                                    winrt::Windows::UI::Xaml::BringIntoViewOptions opts;
-                                    opts.AnimationDesired(true);
-                                    opts.TargetRect(winrt::Windows::Foundation::Rect{
-                                        static_cast<float>(-pad), 0.0f,
-                                        static_cast<float>(w + 2.0 * pad), static_cast<float>(h) });
-                                    tvi.StartBringIntoView(opts);
-                                }
-                                else
-                                {
-                                    tvi.StartBringIntoView(); // unrealized / zero-size fallback
-                                }
-                            }
-                        }
-                        CATCH_LOG();
-                    }
+                    _RevealTabInStrip(t);
                 }
             }
         }
@@ -2926,6 +2891,131 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (Linked Lenses — reveal the selected tab): scroll the tab strip so this tab's
+    // TabViewItem is visible CLEAR of the `<`/`>` scroll RepeatButtons that OVERLAY the strip
+    // viewport's edges (~32px each; the `+` new-tab button sits just past the `>` and visually
+    // continues it). Two phases, because the strip VIRTUALIZES (ItemsStackPanel — see
+    // _UpdateManagerNavButtons: a scrolled-off tab's container is DEREALIZED, its ActualWidth reads 0
+    // and it isn't in the visual tree, so StartBringIntoView silently NO-OPS on it — the first
+    // version's bug: revealing only worked for nearby, still-realized tabs). Phase 1: a realized item
+    // gets one precise ChangeView on the strip's own ScrollViewer (_tabStripScrollViewer — the Home
+    // button's instrument) landing it inside [pad, viewport-pad]. Phase 2: a derealized item is
+    // realized through the virtualization-aware ListViewBase::ScrollIntoView (the TabListView is the
+    // scroller's nearest ListView ancestor), then the precise pass reruns on bounded Low-priority
+    // ticks once the container has laid out. Instant scroll (no animation), the Home button idiom —
+    // deterministic under the same-tick board rebuild a card click also triggers.
+    void TerminalPage::_RevealTabInStrip(const TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        try
+        {
+            const auto tvi = tab.TabViewItem();
+            if (!tvi)
+            {
+                return;
+            }
+            _EnsureTabStripScrollViewer();
+            if (_AdjustStripToRevealItem(tvi))
+            {
+                return; // realized — revealed in one precise pass
+            }
+            // Derealized (virtualized out). ListViewBase::ScrollIntoView realizes the container and
+            // rough-scrolls it into the viewport (WT inserts the TabViewItems directly into TabItems,
+            // so the item IS the TabViewItem). Fall back to StartBringIntoView when the template
+            // isn't resolvable (it can still help a realized-but-unarranged item).
+            ListView tabListView{ nullptr };
+            auto node = _tabStripScrollViewer ? VisualTreeHelper::GetParent(_tabStripScrollViewer) : DependencyObject{ nullptr };
+            while (node && !tabListView)
+            {
+                tabListView = node.try_as<ListView>();
+                node = VisualTreeHelper::GetParent(node);
+            }
+            if (tabListView)
+            {
+                tabListView.ScrollIntoView(tvi);
+            }
+            else
+            {
+                tvi.StartBringIntoView();
+            }
+            _RevealTabRetryAdjust(tvi, 8); // fine-adjust clear of the overlay buttons once realized
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster: the precise reveal pass — scroll the strip so `tvi` sits within
+    // [pad .. viewport-pad], clear of the `<`/`>` RepeatButtons overlaying the viewport edges. Returns
+    // false while the item has no realized layout (virtualized out / pre-arrange), so the caller can
+    // realize it first and retry; returning true includes the already-clear no-op case.
+    bool TerminalPage::_AdjustStripToRevealItem(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& tvi)
+    {
+        const auto& sv = _tabStripScrollViewer;
+        if (!sv || !tvi || !tvi.IsLoaded())
+        {
+            return false;
+        }
+        const double w = tvi.ActualWidth();
+        const double viewport = sv.ViewportWidth();
+        if (w <= 0.0 || viewport <= 0.0)
+        {
+            return false; // derealized container (virtualization) or the strip hasn't laid out yet
+        }
+        const auto origin = tvi.TransformToVisual(sv).TransformPoint({ 0.0f, 0.0f });
+        const double x = origin.X; // the item's left edge in viewport coordinates
+        // Clearance past the ~32px overlay scroll buttons. When the strip is too narrow for the tab
+        // plus both pads, split the leftover evenly instead of oscillating between the constraints.
+        double padL = 40.0;
+        double padR = 40.0;
+        if (padL + w + padR > viewport)
+        {
+            padL = padR = std::max(0.0, (viewport - w) / 2.0);
+        }
+        const double cur = sv.HorizontalOffset();
+        double target = cur;
+        if (x < padL)
+        {
+            target = cur + (x - padL); // hidden under (or scrolled past) the `<` — scroll left
+        }
+        else if (x + w > viewport - padR)
+        {
+            target = cur + (x + w) - (viewport - padR); // hidden under the `>` (and the adjacent `+`) — scroll right
+        }
+        target = std::clamp(target, 0.0, std::max(0.0, sv.ScrollableWidth()));
+        if (std::abs(target - cur) > 0.5)
+        {
+            sv.ChangeView(target, nullptr, nullptr, true); // instant — the Home button's ChangeView idiom
+        }
+        return true;
+    }
+
+    // Agentmaster: the deferred fine-adjust behind _RevealTabInStrip's phase 2. ScrollIntoView
+    // realizes a virtualized container on a LATER layout pass, never this tick — so retry the precise
+    // pass on Low priority (runs post-layout) a bounded number of times. If it never realizes (e.g.
+    // the tab closed mid-flight), ScrollIntoView already landed it roughly in view; stop silently.
+    void TerminalPage::_RevealTabRetryAdjust(winrt::Microsoft::UI::Xaml::Controls::TabViewItem tvi, int attempts)
+    {
+        if (!tvi || attempts <= 0)
+        {
+            return;
+        }
+        Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weakThis = get_weak(), tvi, attempts]() {
+            if (auto page = weakThis.get())
+            {
+                try
+                {
+                    if (!page->_AdjustStripToRevealItem(tvi))
+                    {
+                        page->_RevealTabRetryAdjust(tvi, attempts - 1);
+                    }
+                }
+                CATCH_LOG();
+            }
+        });
+    }
+
     // Agentmaster (consistent multi-line tab-row height): the tab strip's ListView stretches every tab
     // to the tallest REALIZED tab, so a tab whose title carries embedded newlines (a multi-line rename)
     // grew the WHOLE row only WHILE it was on-screen — scrolling it out (the ListView virtualizes it
@@ -2944,10 +3034,25 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
+            // Count RENDERED line breaks. A WinUI TextBox — the rename box, where multi-line titles
+            // are born — separates lines with a bare CR ('\r'), NOT LF: counting only '\n' saw every
+            // renamed multi-line title as ONE line, so the reserve never engaged and the row still
+            // snapped with virtualization (the reported bug). TextBlock breaks on CR, LF, and CRLF
+            // alike, so count all three (CRLF as one break).
             int32_t lines = 1;
-            for (const auto ch : tab.Title())
+            const auto title = tab.Title();
+            const wchar_t* s = title.c_str();
+            for (size_t i = 0; s[i] != L'\0'; ++i)
             {
-                if (ch == L'\n')
+                if (s[i] == L'\r')
+                {
+                    ++lines;
+                    if (s[i + 1] == L'\n')
+                    {
+                        ++i; // CRLF is one break
+                    }
+                }
+                else if (s[i] == L'\n')
                 {
                     ++lines;
                 }
