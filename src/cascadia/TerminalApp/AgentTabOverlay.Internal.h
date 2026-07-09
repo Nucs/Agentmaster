@@ -318,29 +318,40 @@ namespace
     // (WinRT Clipboard is UI-thread only). No-op when there is no transcript / nothing to copy.
     winrt::fire_and_forget CopyConversationAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId)
     {
-        co_await winrt::resume_background();
-        std::wstring path;
-        if (codex)
+        // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
+        // the whole app dies. ReadConversationText self-contains, but the glue (the whole-conversation
+        // capture COPY into the TryEnqueue lambda can be tens of MB — a std::bad_alloc candidate on the
+        // same huge transcripts that drove the v0.6.x resume crash-loop) did not. Degrade to no-copy.
+        try
         {
-            if (!codexId.empty())
+            co_await winrt::resume_background();
+            std::wstring path;
+            if (codex)
             {
-                path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexId);
+                if (!codexId.empty())
+                {
+                    path = ::Agentmaster::ResolveCodexRolloutPathIn(::Agentmaster::CodexDefaultHome(), codexId);
+                }
             }
+            else
+            {
+                path = ::Agentmaster::ResolveClaudeTranscriptPath(claudeId);
+            }
+            if (path.empty())
+            {
+                co_return; // no transcript yet (never prompted)
+            }
+            const std::wstring convo = ::Agentmaster::ReadConversationText(path, codex, 0 /* whole file */);
+            if (convo.empty() || !disp)
+            {
+                co_return;
+            }
+            disp.TryEnqueue([convo]() { CopyTextToClipboard(convo); });
         }
-        else
+        catch (...)
         {
-            path = ::Agentmaster::ResolveClaudeTranscriptPath(claudeId);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained CopyConversationAsync throw (no crash)\n");
         }
-        if (path.empty())
-        {
-            co_return; // no transcript yet (never prompted)
-        }
-        const std::wstring convo = ::Agentmaster::ReadConversationText(path, codex, 0 /* whole file */);
-        if (convo.empty() || !disp)
-        {
-            co_return;
-        }
-        disp.TryEnqueue([convo]() { CopyTextToClipboard(convo); });
     }
 
     // The project-folder name = basename(dirname(transcriptPath)) — session-end.js getFolderName.
@@ -802,6 +813,15 @@ namespace
     // UI thread, render full=true, then hop back to copy. No-op if there's no transcript / nothing to copy.
     winrt::fire_and_forget CopySummaryAsync(winrt::Windows::System::DispatcherQueue disp, bool codex, std::wstring claudeId, std::wstring codexId, std::wstring cwd, std::wstring resumeCmd, std::wstring glyph, std::wstring label, bool wrapNewlines, bool truncate)
     {
+        // Agentmaster (contained): an exception escaping this fire_and_forget == winrt::terminate() ==
+        // the whole app dies. The heavy helpers (analyze / lineage / plan-file) self-contain now, but
+        // this lane's own glue — the previous-segments splice, the times+box concat, the sentinel
+        // rewrite, the full-box capture COPY into TryEnqueue, and the OVERLAY-LOCAL RenderSummaryBox /
+        // RenderCodexSummary (independent implementations, NOT the wrapped shared renderers) — did
+        // not: a std::bad_alloc on the same huge transcripts that drove the v0.6.x resume crash-loop
+        // would have killed the app on a Copy-Summary click. Degrade to no-copy + a log line.
+        try
+        {
         co_await winrt::resume_background();
         const std::wstring id = codex ? codexId : claudeId;
         std::wstring path;
@@ -876,5 +896,10 @@ namespace
             text.replace(p, 1, std::wstring(48, L'\x2500')); // ──────────────────────────────────────────────── (48)
         }
         disp.TryEnqueue([text]() { CopyTextToClipboard(text); });
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[summary] contained CopySummaryAsync throw (no crash)\n");
+        }
     }
 }
