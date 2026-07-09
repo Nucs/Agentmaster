@@ -267,7 +267,14 @@ namespace winrt::TerminalApp::implementation
         if (auto pencilIcon = pencilBtn.Content().try_as<FontIcon>())
         {
             pencilIcon.FontFamily(FontFamily{ L"Segoe MDL2 Assets, Segoe Fluent Icons" });
+            // Keep the glyph so SetSummaryEnabled can recolor it: the pencil is a TOGGLE (the GLOBAL
+            // showSummaryPanel) and was the ONE toggle with no state visual — on a tab whose panel has
+            // nothing to render, a click changed NOTHING visible anywhere, which reads as a dead button
+            // (the "button not hit" report's residue: the log showed every CLICK firing + the setting
+            // flipping, invisibly). Now the glyph itself answers every click: dim OFF / lighter ON.
+            _summaryPencilIcon = pencilIcon;
         }
+        _UpdateSummaryPencilVisual(); // seed the pencil state color (default: dim/off; the page's SetSummaryEnabled seed re-paints)
         pencilBtn.Click([weak](const IInspectable&, const RoutedEventArgs&) {
             if (auto self = weak.get())
             {

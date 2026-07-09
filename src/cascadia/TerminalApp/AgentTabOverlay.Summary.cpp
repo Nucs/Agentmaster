@@ -1134,6 +1134,7 @@ namespace winrt::TerminalApp::implementation
         // every linked overlay in the window). _Refresh reads _summaryEnabled too, so the panel stays in
         // step on subsequent registry events.
         _summaryEnabled = on;
+        _UpdateSummaryPencilVisual(); // the badge pencil glyph answers the toggle INSTANTLY (dim off / lighter on) — even on a tab whose panel has nothing to render
         if (!_summaryRoot)
         {
             return; // no panel on the observe badge
@@ -1295,6 +1296,52 @@ namespace winrt::TerminalApp::implementation
                                                          : Fill(0xFF, 0x8C, 0x8C, 0x8C)); // OFF: dim (inactive)
     }
 
+    // Recolor the badge's PENCIL (the summary-panel toggle in the row-1 action strip) to reflect the
+    // GLOBAL showSummaryPanel — dim when OFF, lighter when ON, the same state language as the panel's
+    // wrap/truncate/previous toggles. The pencil was the ONE toggle in the overlay with NO state
+    // visual: on a tab whose panel has nothing to render (below), a click changed nothing visible
+    // anywhere — the "clicking the pencil does nothing / button not hit" report, where the diagnostic
+    // trace showed every CLICK firing and the setting flipping, invisibly. Driven by SetSummaryEnabled
+    // (the page's seed + every pencil-toggle broadcast), so all tabs' pencils stay in step.
+    void AgentTabOverlay::_UpdateSummaryPencilVisual()
+    {
+        if (!_summaryPencilIcon)
+        {
+            return;
+        }
+        _summaryPencilIcon.Foreground(_summaryEnabled ? Fill(0xFF, 0xE6, 0xE6, 0xE6)  // ON: lighter (panel shown)
+                                                      : Fill(0xFF, 0x8C, 0x8C, 0x8C)); // OFF: dim (panel hidden)
+    }
+
+    // Agentmaster (pencil feedback): when the panel is ENABLED for a linked session but there is
+    // NOTHING to render — a never-prompted session has no transcript yet (Claude creates <id>.jsonl on
+    // the first message; the reported repro was a tab opened ~30 s earlier), a Codex not yet reconciled
+    // has no rollout uuid — the panel used to stay collapsed by design ("just an empty box"), which
+    // made a perfectly-working pencil toggle read as a DEAD button. Render ONE dim placeholder line
+    // instead, so enabling the panel ALWAYS has a visible consequence and says WHY it's empty. Self-
+    // gated: enabled + an EMPTY body + no times line (a times-only panel is already visible); the
+    // first real load's _SetSummaryContent Clear()s it away, and _ApplySummaryVisibility's
+    // "collapse when empty" contract is untouched (the placeholder IS content).
+    void AgentTabOverlay::_EnsureSummaryPlaceholder()
+    {
+        if (!_summaryEnabled || !_summaryStack || _summaryStack.Children().Size() > 0)
+        {
+            return;
+        }
+        if (_summaryTimesText && !_summaryTimesText.Text().empty())
+        {
+            return; // a times line already makes the panel visible — no placeholder under it
+        }
+        TextBlock tb{};
+        tb.FontFamily(FontFamily{ L"Cascadia Mono" });
+        tb.FontSize(11);
+        tb.TextWrapping(TextWrapping::Wrap);
+        tb.Foreground(Fill(0xFF, 0x9E, 0x9E, 0x9E)); // dim — an empty-state note, not content
+        tb.Text(L"No conversation yet \x2014 the summary fills in after this session's first prompt.");
+        _summaryStack.Children().Append(tb);
+        _ApplySummaryVisibility(); // the body is non-empty now — the panel shows
+    }
+
     void AgentTabOverlay::SetSummaryShowPrevious(bool on)
     {
         // The show-previous mode is a GLOBAL setting (AppSettings::summaryPanelShowPrevious), mirrored into
@@ -1431,7 +1478,8 @@ namespace winrt::TerminalApp::implementation
         const std::wstring convId = codex ? (s.codexSessionId.empty() ? s.id : s.codexSessionId) : s.id;
         if (convId.empty())
         {
-            return; // a codex not yet reconciled (no rollout uuid) — nothing to analyze
+            _EnsureSummaryPlaceholder(); // a codex not yet reconciled (no rollout uuid) — nothing to analyze, but the enabled panel must still visibly answer the pencil
+            return;
         }
         // Agentmaster (never-messaged fork): a Claude fork has NO transcript of its own until its first
         // message, so its summary panel would be empty (the "fork's summary toggle does nothing" report).
@@ -1602,6 +1650,7 @@ namespace winrt::TerminalApp::implementation
                     self->_summaryMtime = mtime;
                     self->_summaryLoading = false;
                     self->_UpdateTimesLine(); // reflect the (possibly refreshed) instants right away
+                    self->_EnsureSummaryPlaceholder(); // a no-transcript session yields NO text/times — show the empty-state line instead of an invisible (dead-looking) toggle
                     const bool flagDirty = self->_summaryWrapDirty || self->_summaryTruncateDirty || self->_summaryPrevDirty;
                     if (flagDirty || self->_summaryReloadPending)
                     {
