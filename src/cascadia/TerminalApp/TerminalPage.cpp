@@ -2569,13 +2569,13 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        // Agentmaster (Waiting-for-you triage): context-menu "Move to Idle/Done" / "Move to Waiting-for-you"
-        // -> move THIS tab's managed session between the WaitingForInput and Idle/Done triage states. The
-        // tab-menu twin of the Manager board card's "Move to Idle/Done" plus its reverse. The page re-derives
-        // the direction from the session's LIVE state (the menu label was fixed at flyout-open), so a turn
-        // that advanced since then is never mis-moved. Explicitly separate from "Mark Unread" (no sticky
-        // flag, no ring flash). No-op on a non-session tab (the item is hidden there — see the Opening
-        // handler below).
+        // Agentmaster (Waiting-for-you + Error triage): context-menu "Move to Idle/Done" / "Move to
+        // Waiting-for-you" -> move THIS tab's managed session between the WaitingForInput/Error and
+        // Idle/Done triage states (an Error demote is the error DISMISSAL). The tab-menu twin of the
+        // Manager board card's "Move to Idle/Done" plus its reverse. The page re-derives the direction
+        // from the session's LIVE state (the menu label was fixed at flyout-open), so a turn that advanced
+        // since then is never mis-moved. Explicitly separate from "Mark Unread" (no sticky flag, no ring
+        // flash). No-op on a non-session tab (the item is hidden there — see the Opening handler below).
         hostingTab.TriageMoveRequested([weakTab, weakThis]() {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };
@@ -2757,12 +2757,14 @@ namespace winrt::TerminalApp::implementation
                         }
                     }
                     tab->SetAgentActivateVisible(dormant);
-                    // Agentmaster (Waiting-for-you triage): the status-adaptive "Move to Idle/Done" /
+                    // Agentmaster (Waiting-for-you + Error triage): the status-adaptive "Move to Idle/Done" /
                     // "Move to Waiting-for-you" item — shown only when this session is in a triage state.
-                    // Waiting-for-you -> offer the demote ("Move to Idle/Done"); Idle/Done -> offer the plain
-                    // promote ("Move to Waiting-for-you"); Running / NeedsApproval / Error -> hidden.
+                    // Waiting-for-you -> offer the demote ("Move to Idle/Done"); Error -> offer the same
+                    // demote as the error DISMISSAL (error-specific tooltip); Idle/Done -> offer the plain
+                    // promote ("Move to Waiting-for-you"); Running / NeedsApproval -> hidden.
                     bool triageVisible = false;
                     bool triageToIdle = false;
+                    bool triageFromError = false;
                     if (isSession && page->_sessionRegistry)
                     {
                         if (const auto triageInfo = page->_sessionRegistry->Get(sid))
@@ -2772,6 +2774,11 @@ namespace winrt::TerminalApp::implementation
                             case ::Agentmaster::SessionState::WaitingForInput:
                                 triageVisible = true;
                                 triageToIdle = true;
+                                break;
+                            case ::Agentmaster::SessionState::Error:
+                                triageVisible = true;
+                                triageToIdle = true;
+                                triageFromError = true;
                                 break;
                             case ::Agentmaster::SessionState::Idle:
                             case ::Agentmaster::SessionState::Done:
@@ -2783,7 +2790,7 @@ namespace winrt::TerminalApp::implementation
                             }
                         }
                     }
-                    tab->SetAgentTriageMoveState(triageVisible, triageToIdle);
+                    tab->SetAgentTriageMoveState(triageVisible, triageToIdle, triageFromError);
                     // Agentmaster (FAVORITES.md): "★ Favorite & close all tabs" is a WINDOW-scope action —
                     // show it whenever this window hosts >=1 managed session (not just when THIS tab is one),
                     // since it stars every session in the window. Nothing to favorite otherwise -> hidden.

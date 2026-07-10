@@ -579,6 +579,21 @@ namespace Agentmaster
         // SessionRegistry::OnHookEvent. Empty/0 whenever the session is not in Error.
         std::wstring errorMessage;
         int errorStatus{ 0 };
+        // Agentmaster (Error triage dismissal — Transient, NOT persisted; Persistence.cpp must not
+        // write it): the user manually moved this session's Error card to Idle/Done (the triage
+        // "Move to Idle/Done", offered on an Error session like on a Waiting-for-you one). Error is
+        // LEVEL-derived — the scanner's recon-error re-asserts it every pass while the API error is
+        // still the active leaf — so a plain state flip would bounce back within one pass; this flag
+        // suppresses re-deriving Error off the UNCHANGED, acknowledged tail. It expires WITH the error
+        // it acknowledged: the scanner clears it the moment it consumes a fresh TURN event (the
+        // conversation moved — a retry, or a NEW error line, itself a turn event, re-fires normally),
+        // and a fresh Error entry clears it too (SessionRegistry::OnHookEvent's apiError branch), so a
+        // stale ack can never mask a later, undismissed error. Set ONLY by the UI triage moves (the
+        // board/tree menu + the tab menu), which also clear errorMessage/errorStatus (the "Empty/0
+        // outside Error" invariant above) — a resumed/reopened session honestly re-derives Error from
+        // the tail (the RestoredSessionState philosophy), like the rest of the unread-model family
+        // (readUnixMs / manualUnread).
+        bool errorDismissed{ false };
         // Transient (NOT persisted; Persistence.cpp must not write it): the Claude Code idle RECAP —
         // the latest {"type":"system","subtype":"away_summary"} body the SessionScanner tailed from this
         // session's transcript, normalized (NormalizeRecapText: the "(disable recaps in /config)" hint

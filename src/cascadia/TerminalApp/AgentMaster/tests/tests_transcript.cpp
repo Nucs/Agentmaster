@@ -361,6 +361,47 @@ void TestTranscriptScan()
         // Recovery CLEARS the preserved reason, so a recovered card never shows a stale error.
         CHECK(recovered && recovered->errorMessage.empty() && recovered->errorStatus == 0, "recovery clears errorMessage + errorStatus");
     }
+    // Agentmaster (Error triage dismissal — the "Move to Idle/Done" offered on an Error card): the manual
+    // demote's registry mutation (the SAME mutator both UI surfaces apply: Error -> Idle + the
+    // errorDismissed ack the scanner's recon-error gate suppresses off + the preserved reason dropped, per
+    // the "Empty/0 outside Error" invariant), and the ack's EXPIRY on a fresh Error entry — OnHookEvent's
+    // apiError branch clears it, so a later, undismissed error is never mis-suppressed by a stale ack.
+    {
+        SessionRegistry reg;
+        reg.Upsert(MakeSession(L"err2", SessionState::Running));
+        HookMessage synthErr = Msg(L"err2", HookEvent::Notification);
+        synthErr.apiError = true;
+        synthErr.errorMessage = L"API Error: Overloaded";
+        synthErr.errorStatus = 529;
+        synthErr.ts = 1000;
+        reg.OnHookEvent(synthErr);
+        // The UI triage move's mutator (board/tree menu + tab menu): re-check under the lock, demote, ack.
+        reg.Update(L"err2", [](SessionInfo& s) {
+            if (s.state == SessionState::Error)
+            {
+                s.state = SessionState::Idle;
+                s.manualUnread = false;
+                s.errorDismissed = true;
+                s.errorMessage.clear();
+                s.errorStatus = 0;
+            }
+        });
+        const auto dismissed = reg.Get(L"err2");
+        CHECK(dismissed && dismissed->state == SessionState::Idle, "error dismissal: Error -> Idle (the manual Move to Idle/Done)");
+        CHECK(dismissed && dismissed->errorDismissed, "error dismissal: the ack is recorded (recon-error suppresses off it)");
+        CHECK(dismissed && dismissed->errorMessage.empty() && dismissed->errorStatus == 0, "error dismissal: the preserved reason drops (Empty/0 outside Error)");
+        // A FRESH Error entry consumes the stale ack — the new error is a new fact the user hasn't acked.
+        HookMessage nextErr = Msg(L"err2", HookEvent::Notification);
+        nextErr.apiError = true;
+        nextErr.errorMessage = L"API Error: Server is temporarily limiting requests · Rate limited";
+        nextErr.errorStatus = 429;
+        nextErr.ts = 2000;
+        reg.OnHookEvent(nextErr);
+        const auto reErrored = reg.Get(L"err2");
+        CHECK(reErrored && reErrored->state == SessionState::Error, "a fresh apiError entry re-lands Error after a dismissal");
+        CHECK(reErrored && !reErrored->errorDismissed, "a fresh Error entry clears the stale dismissal ack");
+        CHECK(reErrored && reErrored->errorStatus == 429, "the fresh entry re-preserves the new failure reason");
+    }
     // UpdateQuiet mutates the record (and, by contract, fires no observer — exercised here for the mutation)
     {
         SessionRegistry reg;

@@ -2098,13 +2098,14 @@ namespace winrt::TerminalApp::implementation
         }
 
         {
-            // "Move to Idle/Done" / "Move to Waiting-for-you" (Agentmaster, Waiting-for-you triage) — a
-            // status-adaptive manual state move: the tab-menu twin of the Triage Board card's "Move to
+            // "Move to Idle/Done" / "Move to Waiting-for-you" (Agentmaster, Waiting-for-you + Error triage)
+            // — a status-adaptive manual state move: the tab-menu twin of the Triage Board card's "Move to
             // Idle/Done", plus its reverse. Built COLLAPSED with a placeholder label; the page shows it and
             // sets the direction-specific text + icon at flyout-open (SetAgentTriageMoveState) only on a
-            // managed agent-session tab that is currently Waiting-for-you or Idle/Done. EXPLICITLY separate
-            // from "Mark Unread": the promote direction is a plain column move (no sticky flag, no ring
-            // flash). Raises TriageMoveRequested; the page re-derives the direction from the LIVE state.
+            // managed agent-session tab that is currently Waiting-for-you, Error, or Idle/Done (an Error
+            // demote is the error DISMISSAL). EXPLICITLY separate from "Mark Unread": the promote direction
+            // is a plain column move (no sticky flag, no ring flash). Raises TriageMoveRequested; the page
+            // re-derives the direction from the LIVE state.
             _triageMoveMenuItem.Click([weakThis](auto&&, auto&&) {
                 if (auto tab{ weakThis.get() })
                 {
@@ -2315,7 +2316,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_renameTabMenuItem);
         contextMenuFlyout.Items().Append(_copySessionSubMenu); // Agentmaster: "Copy >" directly below "Rename Tab" (hidden unless this tab hosts a managed session)
         contextMenuFlyout.Items().Append(_markUnreadMenuItem); // Agentmaster: "Mark Unread" — session-only, grouped under "Copy >"
-        contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
+        contextMenuFlyout.Items().Append(_triageMoveMenuItem); // Agentmaster (Waiting-for-you + Error triage): status-adaptive "Move to Idle/Done" / "Move to Waiting-for-you" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_favoriteMenuItem); // Agentmaster (FAVORITES.md): "Favorite"/"Unfavorite" — session-only, beside "Mark Unread"
         contextMenuFlyout.Items().Append(_tagMenuItem); // Agentmaster (bookmark tags): "Tag" — session-only, beside "Favorite"
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "Split tab" — sets rename/session ops apart from the layout group
@@ -2478,12 +2479,13 @@ namespace winrt::TerminalApp::implementation
         _markUnreadMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
     }
 
-    // Agentmaster (Waiting-for-you triage): show/hide the status-adaptive triage-move item AND set its
-    // label + icon by direction. toIdle == this session is Waiting-for-you (offer "Move to Idle/Done", the
-    // demote); else it is Idle/Done (offer "Move to Waiting-for-you", the plain promote). Page-driven at
-    // flyout-open — the page owns the registry state lookup and re-derives the direction from the LIVE
-    // state on click. Hidden for any non-triage state (Running / NeedsApproval / Error).
-    void Tab::SetAgentTriageMoveState(bool visible, bool toIdle)
+    // Agentmaster (Waiting-for-you + Error triage): show/hide the status-adaptive triage-move item AND set
+    // its label + icon by direction. toIdle == this session is Waiting-for-you or Error (offer "Move to
+    // Idle/Done", the demote — fromError picks the error-dismissal tooltip); else it is Idle/Done (offer
+    // "Move to Waiting-for-you", the plain promote). Page-driven at flyout-open — the page owns the
+    // registry state lookup and re-derives the direction from the LIVE state on click. Hidden for the
+    // remaining non-triage states (Running / NeedsApproval).
+    void Tab::SetAgentTriageMoveState(bool visible, bool toIdle, bool fromError)
     {
         ASSERT_UI_THREAD();
 
@@ -2497,8 +2499,15 @@ namespace winrt::TerminalApp::implementation
         if (toIdle)
         {
             _triageMoveMenuItem.Text(L"Move to Idle/Done");
-            icon.Glyph(L"\xE73E"); // CheckMark — "I've handled this; stop waiting on me" (matches the board card)
-            WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Dismiss this \x201CWaiting-for-you\x201D session to Idle / Done (it returns to Waiting-for-you on its next turn)" }));
+            icon.Glyph(L"\xE73E"); // CheckMark — "I've handled this; stop waiting on me / stop flagging this error" (matches the board card)
+            if (fromError)
+            {
+                WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Dismiss this errored session to Idle / Done \x2014 acknowledges the API error (it returns to Error if a new one lands)" }));
+            }
+            else
+            {
+                WUX::Controls::ToolTipService::SetToolTip(_triageMoveMenuItem, box_value(winrt::hstring{ L"Dismiss this \x201CWaiting-for-you\x201D session to Idle / Done (it returns to Waiting-for-you on its next turn)" }));
+            }
         }
         else
         {

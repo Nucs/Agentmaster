@@ -358,6 +358,11 @@ namespace Agentmaster
             {
                 s.errorMessage = msg.errorMessage;
                 s.errorStatus = msg.errorStatus;
+                // A fresh Error entry consumes any stale manual dismissal (the triage "Move to
+                // Idle/Done" on a PRIOR error): this error is a new fact the user hasn't acked, so
+                // the scanner's dismissal gate must never suppress it off a leftover flag (e.g. a
+                // rewind back onto an undismissed error after an earlier one was dismissed).
+                s.errorDismissed = false;
             }
             else if (s.state != SessionState::Error)
             {

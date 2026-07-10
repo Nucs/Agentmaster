@@ -2420,12 +2420,12 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (Waiting-for-you triage): the tab context-menu's status-adaptive triage move — the
-    // tab-menu twin of the Manager board card's "Move to Idle/Done", plus its reverse. EXPLICITLY separate
-    // from "Mark Unread": neither direction sets the sticky manualUnread flag or flashes the red ring. The
-    // direction is re-derived HERE from the session's LIVE state (the menu label was fixed at flyout-open),
-    // and each registry mutation re-checks the state under the lock, so a turn that advanced since the menu
-    // opened simply no-ops rather than mis-moving.
+    // Agentmaster (Waiting-for-you + Error triage): the tab context-menu's status-adaptive triage move —
+    // the tab-menu twin of the Manager board card's "Move to Idle/Done", plus its reverse. EXPLICITLY
+    // separate from "Mark Unread": neither direction sets the sticky manualUnread flag or flashes the red
+    // ring. The direction is re-derived HERE from the session's LIVE state (the menu label was fixed at
+    // flyout-open), and each registry mutation re-checks the state under the lock, so a turn that advanced
+    // since the menu opened simply no-ops rather than mis-moving.
     void TerminalPage::_MoveSessionTriageState(const std::wstring& sessionId)
     {
         if (sessionId.empty() || !_sessionRegistry)
@@ -2475,7 +2475,32 @@ namespace winrt::TerminalApp::implementation
             });
             ::Agentmaster::LogNav(L"triage-move " + ::Agentmaster::ShortId(sessionId) + L" -> waiting");
         }
-        // else: not a triage state (Running / NeedsApproval / Error) — nothing to move (the item is hidden).
+        else if (info->state == SessionState::Error)
+        {
+            // Dismiss Error -> Idle/Done. Mirror the board card's mutator: Error is LEVEL-derived (the
+            // scanner's recon-error re-asserts it off the unchanged error tail every pass), so besides
+            // the state flip this records the errorDismissed ack — the recon-error gate then suppresses
+            // the re-derivation until the conversation actually moves (a retry / a NEW error re-fires
+            // normally) — and drops the preserved failure reason (the "Empty/0 outside Error"
+            // invariant). Also stamp read + clear the unread mark/ring like the Waiting demote: "Move
+            // to Idle/Done" is an explicit "I've handled this", acknowledging the attention without a
+            // tab visit. The Update guard re-checks the live state, so a race to Running never demotes.
+            _ClearSessionUnread(sessionId); // drop the manual mark (+ ring if not auto-flashing)
+            _StopAgentFlash(sessionId); // drop any lingering automatic flash too
+            _sessionRegistry->Update(sessionId, [](::Agentmaster::SessionInfo& s) {
+                if (s.state == SessionState::Error)
+                {
+                    s.state = SessionState::Idle;
+                    s.manualUnread = false;
+                    s.readUnixMs = TtNowMs();
+                    s.errorDismissed = true;
+                    s.errorMessage.clear();
+                    s.errorStatus = 0;
+                }
+            });
+            ::Agentmaster::LogNav(L"triage-move " + ::Agentmaster::ShortId(sessionId) + L" -> idle/done (error dismissed)");
+        }
+        // else: not a triage state (Running / NeedsApproval) — nothing to move (the item is hidden).
     }
 
     // Agentmaster (Mark Unread): drop a session's manual unread mark + hide its ring UNLESS the automatic

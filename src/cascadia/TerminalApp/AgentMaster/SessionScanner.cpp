@@ -578,6 +578,21 @@ namespace Agentmaster
             st.lastSize = size;
         }
 
+        // Agentmaster (Error triage dismissal — expiry): the manual "Move to Idle/Done" on an Error
+        // card acknowledged THE error that was standing when the user clicked; the ack lasts only
+        // until the conversation MOVES. A freshly consumed TURN event is that move — a retry (clears
+        // lastWasApiError -> recon-run below re-lights Running), or a NEW error line (itself a turn
+        // event) that must re-fire recon-error — so retire the flag HERE, at consumption time, not in
+        // the synth gate: the new error's own pass fails the 2s quiescence and only a LATER quiet pass
+        // fires it, by which point a per-pass "saw a turn event" bypass would have expired. Quiet — the
+        // flag is display-independent bookkeeping; the visible state comes from the synths below.
+        // (Bookkeeping-only appends — turn_duration / away_summary lineage — are NOT turn events, so a
+        // post-dismissal idle recap can never resurrect the acknowledged error.)
+        if (consumedTurnEvent && s.errorDismissed)
+        {
+            _registry->UpdateQuiet(s.id, [](SessionInfo& ss) { ss.errorDismissed = false; });
+        }
+
         // Missed/folded-UserPromptSubmit reconciliation — the Running MIRROR of the missed-Stop
         // synthesis below. A turn whose UserPromptSubmit was dropped (the forwarder is
         // fire-and-forget) or FOLDED (the prompt was typed/queued mid-turn, so its hook landed
@@ -711,7 +726,13 @@ namespace Agentmaster
         if (ShouldSynthesizeError(s.state, errorIsActiveLeaf, quietForMs))
         {
             const auto fresh = _registry->Get(s.id);
-            if (fresh && fresh->state != SessionState::Error && fresh->state != SessionState::Done)
+            // Manual dismissal gate (the triage "Move to Idle/Done" on an Error card): the user
+            // acknowledged THIS error, so don't re-derive Error off the UNCHANGED tail — without this,
+            // Error being level-derived would bounce the flip to Idle back within one pass. The flag
+            // was retired at consumption time above the moment any turn event moved the conversation
+            // (and a fresh Error entry clears it in OnHookEvent), so a genuinely NEW error re-fires
+            // here normally. Still early-return: the (acknowledged) errored tail owns this pass.
+            if (fresh && !fresh->errorDismissed && fresh->state != SessionState::Error && fresh->state != SessionState::Done)
             {
                 HookMessage err;
                 err.event = HookEvent::Notification; // neutral carrier; the apiError flag drives the transition

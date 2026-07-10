@@ -1329,7 +1329,8 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: resolve the session's kind + state ONCE so this menu can mirror the WT tab's
         // right-click session ops (New Session Here / Restart session / Fork session — kind-aware:
-        // Codex spawns/forks codex, not claude) and offer the Waiting-for-you triage "Move to Idle/Done".
+        // Codex spawns/forks codex, not claude) and offer the triage "Move to Idle/Done" (on a
+        // Waiting-for-you card, and — as the error DISMISSAL — on an Error card).
         // Read at flyout-creation time — each _Refresh rebuilds the card so the menu tracks the latest
         // state; the click handlers re-resolve where it matters (the Move-to-Idle mutator re-checks under
         // the registry lock).
@@ -1418,17 +1419,29 @@ namespace winrt::TerminalApp::implementation
         });
         menu.Items().Append(jump);
 
-        // Move to Idle/Done — Waiting-for-you triage only. The immediate, user-driven twin of the timed
-        // WaitingForInput -> Idle decay (SessionScanner::_maybeDecayWaiting): demote this card so it
-        // leaves the "Waiting-for-you" column for "Idle / Done". A deliberate state transition layered on
-        // the hook-derived machine (the decay sets the SAME state the SAME way, so it sticks — the scanner
-        // only re-promotes to Waiting/Running on NEW turn activity, never bouncing a quiescent Idle back).
-        if (state == SessionState::WaitingForInput)
+        // Move to Idle/Done — Waiting-for-you AND Error triage. For a Waiting card it is the immediate,
+        // user-driven twin of the timed WaitingForInput -> Idle decay (SessionScanner::_maybeDecayWaiting):
+        // demote this card so it leaves the "Waiting-for-you" column for "Idle / Done". A deliberate state
+        // transition layered on the hook-derived machine (the decay sets the SAME state the SAME way, so it
+        // sticks — the scanner only re-promotes to Waiting/Running on NEW turn activity, never bouncing a
+        // quiescent Idle back). For an ERROR card it is the manual DISMISSAL: Error is level-derived (the
+        // scanner re-asserts it off the unchanged error tail every pass), so the mutator also sets the
+        // errorDismissed ack — the recon-error gate then suppresses the re-derivation until the
+        // conversation actually moves (a retry / a NEW error re-fires normally) — and clears
+        // errorMessage/errorStatus (the "Empty/0 outside Error" invariant).
+        if (state == SessionState::WaitingForInput || state == SessionState::Error)
         {
             MenuFlyoutItem moveIdle;
             moveIdle.Text(L"Move to Idle/Done");
-            moveIdle.Icon(glyphIcon(L"\xE73E")); // CheckMark — "I've handled this; stop waiting on me"
-            AgentSetTip(moveIdle, L"Dismiss this \x201CWaiting-for-you\x201D card to the Idle / Done column \x2014 the manual version of the unread-timeout decay. It returns to Waiting-for-you on the session's next turn.");
+            moveIdle.Icon(glyphIcon(L"\xE73E")); // CheckMark — "I've handled this; stop waiting on me / stop flagging this error"
+            if (state == SessionState::Error)
+            {
+                AgentSetTip(moveIdle, L"Dismiss this errored card to the Idle / Done column \x2014 acknowledges the API error. It returns to Error if a new API error lands.");
+            }
+            else
+            {
+                AgentSetTip(moveIdle, L"Dismiss this \x201CWaiting-for-you\x201D card to the Idle / Done column \x2014 the manual version of the unread-timeout decay. It returns to Waiting-for-you on the session's next turn.");
+            }
             moveIdle.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
                 auto act = [weak, id]() {
                     auto self = weak.get();
@@ -1439,13 +1452,24 @@ namespace winrt::TerminalApp::implementation
                     // Re-check under the registry lock against the LIVE record: a new turn may have moved
                     // the state since the menu was built — never demote a session that is now Running.
                     // Stamp readUnixMs (mark it read) + clear manualUnread so a prior "Mark Unread" can't
-                    // keep it pinned, mirroring the decay's read-gated semantics.
+                    // keep it pinned, mirroring the decay's read-gated semantics. An Error card
+                    // additionally records the dismissal ack (so the scanner's level-derived Error can't
+                    // bounce the flip back) and drops the preserved failure reason.
                     self->_registry->Update(id, [](SessionInfo& s) {
                         if (s.state == SessionState::WaitingForInput)
                         {
                             s.state = SessionState::Idle;
                             s.manualUnread = false;
                             s.readUnixMs = NowMs();
+                        }
+                        else if (s.state == SessionState::Error)
+                        {
+                            s.state = SessionState::Idle;
+                            s.manualUnread = false;
+                            s.readUnixMs = NowMs();
+                            s.errorDismissed = true;
+                            s.errorMessage.clear();
+                            s.errorStatus = 0;
                         }
                     });
                 };
