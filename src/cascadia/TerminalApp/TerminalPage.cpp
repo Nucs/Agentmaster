@@ -2131,7 +2131,7 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (Manager-tab tab nav): the Manager tab hosts custom XAML content, and its pane content
     // does NOT take keyboard focus on activation — so after you switch to the Manager tab, focus sits on
     // the tab HEADER (outside the pane). A PreviewKeyDown wired ONLY to the pane root never fires then,
-    // which made the tab-switching chords (alt+left/right, ctrl+tab, shift+home) do nothing from the
+    // which made the tab-switching chords (alt+left/right, ctrl+tab, ctrl+home) do nothing from the
     // Manager tab until you first clicked an element in the pane. So this handler is also wired to the
     // page ROOT grid (TerminalPage.xaml, x:Name="Root") — the common ancestor of BOTH the tab strip and
     // the pane content — so it tunnels through whatever has focus (tab header OR pane). It stays wired to
@@ -2151,13 +2151,13 @@ namespace winrt::TerminalApp::implementation
         // Reliable "are we on the Agent Manager tab?" check. This handler is wired to the page Root and so
         // fires for EVERY tab; off the Manager tab we must do nothing and let the focused control / a
         // terminal's own ActionMap handle the key. (When invoked from the pane-root wiring this is always
-        // true; it matters for the Root wiring, which is what makes shift+home work from the tab header.)
+        // true; it matters for the Root wiring, which is what makes ctrl+home work from the tab header.)
         if (!_managerTab || _GetFocusedTab() != _managerTab)
         {
             return;
         }
         // The page Root also sees keys for an open command palette / suggestions overlay (they render over
-        // the active tab, which may be the Manager tab) — don't steal shift+home etc. from their text box.
+        // the active tab, which may be the Manager tab) — don't steal ctrl+home etc. from their text box.
         if (_commandPaletteIs(Visibility::Visible) || _suggestionsControlIs(Visibility::Visible))
         {
             return;
@@ -2198,7 +2198,7 @@ namespace winrt::TerminalApp::implementation
         case ShortcutAction::NextTab:
         case ShortcutAction::PrevTab:
         case ShortcutAction::SwitchToTab:
-        case ShortcutAction::AgentToggleManagerTab: // Agentmaster: shift+home home/back toggle — tunnel it past the Manager's text boxes (which would eat shift+home as select-to-line-start)
+        case ShortcutAction::AgentToggleManagerTab: // Agentmaster: ctrl+home home/back toggle — tunnel it past the Manager's text boxes (which would eat ctrl+home as move-to-start-of-text)
             break;
         default:
             return;

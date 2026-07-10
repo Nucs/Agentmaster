@@ -630,7 +630,7 @@ namespace winrt::TerminalApp::implementation
         bool _externalCollapsed{ false };
 
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::Button _focusSink{ nullptr }; // Agentmaster: invisible, caret-less keyboard-focus sink so the pane-root key handlers (alt+left/right, ctrl+tab, shift+home) fire on tab switch — see Focus()
+        winrt::Windows::UI::Xaml::Controls::Button _focusSink{ nullptr }; // Agentmaster: invisible, caret-less keyboard-focus sink so the pane-root key handlers (alt+left/right, ctrl+tab, ctrl+home) fire on tab switch — see Focus()
         winrt::Windows::UI::Xaml::Controls::StackPanel _boardHost{ nullptr }; // horizontal columns
         winrt::Windows::UI::Xaml::Controls::TextBlock _boardScope{ nullptr }; // Agentmaster: "[scope: <dir>]" — shown ONLY while a directory is scoped (the old "[all directories]" placeholder is gone; it was display-only)
         winrt::Windows::UI::Xaml::Controls::Button _showAllBtn{ nullptr }; // Agentmaster: the board's "Show all" — collapsed while already showing all (empty scope), shown once a dir is scoped

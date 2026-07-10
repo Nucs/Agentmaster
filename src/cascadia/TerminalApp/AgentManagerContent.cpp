@@ -147,7 +147,7 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: an INVISIBLE, caret-less keyboard-focus SINK, parked-on by Focus() when this pane
         // is activated. The Manager pane's key handlers (_KeyDownHandler / _ManagerPaneNavPreviewKeyDown —
-        // alt+left/right, ctrl+tab, shift+home) are routed events on the pane ROOT and only fire when
+        // alt+left/right, ctrl+tab, ctrl+home) are routed events on the pane ROOT and only fire when
         // keyboard focus is INSIDE the pane subtree; Focus() used to leave focus untouched (to avoid a
         // blinking caret in the cwd box), which left focus on the tab HEADER after a tab switch, so those
         // chords did nothing until you clicked an element in the pane. A 1x1, opacity-0, no-focus-visual
@@ -568,7 +568,7 @@ namespace winrt::TerminalApp::implementation
         // cwd box. The host calls IPaneContent::Focus whenever the Manager pane is activated (app open, tab
         // open, tab switch). We must put focus SOMEWHERE inside the pane subtree, or the pane-root routed
         // key handlers (_KeyDownHandler / _ManagerPaneNavPreviewKeyDown — alt+left/right, ctrl+tab,
-        // shift+home) never fire (focus stays on the tab header), the bug where those chords did nothing
+        // ctrl+home) never fire (focus stays on the tab header), the bug where those chords did nothing
         // until you clicked an element. Focusing the cwd box was the ORIGINAL behavior but it put a blinking
         // caret in it on every open (and popped the path-picker) — which the user disliked — so we focus a
         // 1x1, opacity-0, no-focus-visual Button instead: keyboard works immediately, NOTHING looks focused,

@@ -544,7 +544,7 @@ namespace winrt::TerminalApp::implementation
                 // Scratchpad / tasks panes) has NO TermControl, so the terminal-only Focus above no-ops
                 // and NOTHING in the tab gets keyboard focus on a tab switch. Focus the active pane's
                 // CONTENT (-> IPaneContent::Focus) so its own key handlers work: the Manager tab's
-                // shift+home / tab-nav chords are routed KeyDown events that fire only from a focused
+                // ctrl+home / tab-nav chords are routed KeyDown events that fire only from a focused
                 // element, and with NO focused element the whole tab swallowed them until the user
                 // clicked something. (Terminal tabs take the if-branch above and are unaffected.)
                 content.Focus(_focusState);

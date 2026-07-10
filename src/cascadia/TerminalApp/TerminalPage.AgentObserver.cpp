@@ -3832,7 +3832,7 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster (shift+home "home / jump-back" toggle): do EXACTLY what the tab-strip nav buttons do —
+    // Agentmaster (ctrl+home "home / jump-back" toggle): do EXACTLY what the tab-strip nav buttons do —
     // they are the SOURCE OF TRUTH, so this routes through their click handlers instead of reinventing the
     // logic (an earlier version used _mruTabs, which ignored the selected card). Off the Manager tab -> the
     // "Home" button (_OnManagerHomeButtonClick): jump to the pinned Manager tab. On the Manager tab -> the
