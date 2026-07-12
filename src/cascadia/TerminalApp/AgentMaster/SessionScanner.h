@@ -54,6 +54,8 @@ namespace Agentmaster
     inline constexpr int64_t kScanDiscoverMs = 1500; // idle keep-ticking cadence (drives each window's observer probe + liveness sweep when nothing is live)
     inline constexpr int64_t kScanRunRepairFreshMs = 15000; // a consumed turn event must be this FRESH (file mtime) to synthesize a missed UserPromptSubmit — a stalled/late scan must not revive an old write (belt+suspenders BEHIND the primed-cursor gate below, which is what actually blocks the history replay: mtime alone cannot — a window closed mid-turn and reopened within the window replays a FRESH file)
     inline constexpr int64_t kScanSubagentFreshMs = 15000; // a SUBAGENT/tool-result side file written within this window == the turn is actively working inside a Task/Agent subagent (the parent <id>.jsonl is quiescent) -> hold/synthesize Running (SubagentActivityUnixMs, ProcessInspect)
+    inline constexpr int64_t kScanExternalWorkGraceMs = 20000; // "OUTLIVED the turn" proof margin: external work counts as OUTLIVING a FINISHED/aborted turn only when it postdates the parent transcript's last write by MORE than this — separating genuinely ongoing background work (an in-process TEAMMATE / a run_in_background Agent writing subagents/*.jsonl for minutes-hours after the lead's end_turn; a live SHELL job keeping presence "shell"/"busy") from turn-tail RESIDUE (a classic subagent's final flush lands us-before end_turn and post-Esc dying subagents keep flushing up to kScanSubagentFreshMs; "busy" lingers a ~2s S-lane tick after a real Stop). Must exceed kScanSubagentFreshMs so an interrupted turn's dying flushes can NEVER read as outliving it (the 291 MB-log oscillation class)
+    static_assert(kScanExternalWorkGraceMs > kScanSubagentFreshMs, "outlive margin must exceed the dying-subagent flush window, or post-Esc residue promotes Waiting->Running and oscillates against recon-stop");
 
     // One reconciled record extracted from a transcript .jsonl line (the PURE parser's output).
     struct TranscriptEvent
@@ -199,11 +201,26 @@ namespace Agentmaster
     // in NeedsApproval when its post-approval Stop hook was dropped. The turn is OVER when the tail
     // is a TERMINAL stop_reason (end_turn / …) or the user INTERRUPTED it. Requires the transcript
     // to have gone quiescent first (a mid-turn pause is not the end).
-    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs) noexcept
+    // `externalWorkOngoing` (default false == the classic behavior): external work — an in-process
+    // TEAMMATE / background Agent still writing side files, or a live SHELL job per claude's own
+    // heartbeat — has provably OUTLIVED the turn's end (the kScanExternalWorkGraceMs proof, computed
+    // once in _reconcileSession and shared with ShouldSynthesizeRunningFromExternalWork so the two
+    // gates key on the SAME expression and stay MUTUALLY EXCLUSIVE — promotion active <=> demotion
+    // held, never both). While it holds, a RUNNING session is NOT demoted to WaitingForInput even on a
+    // terminal tail: "a shell or agent or teammate still running" reads Running. Scoped to Running
+    // ONLY — the NeedsApproval release (an answered/approved session whose post-turn Stop was dropped)
+    // still fires, landing Waiting, from where the external-work promotion re-lights Running on the
+    // next pass; holding orange "needs you" for the whole background run would be worse than a
+    // one-pass bounce.
+    inline bool ShouldSynthesizeStop(SessionState state, std::wstring_view lastStopReason, bool interrupted, int64_t quietForMs, bool externalWorkOngoing = false) noexcept
     {
         if (state != SessionState::Running && state != SessionState::NeedsApproval)
         {
             return false; // only a turn-in-progress / blocked-on-user state has a turn to end
+        }
+        if (state == SessionState::Running && externalWorkOngoing)
+        {
+            return false; // a teammate / background agent / live shell OUTLIVES the turn — keep Running (the promotion's hold mirror)
         }
         if (quietForMs < kScanStopQuiescenceMs)
         {
@@ -374,10 +391,25 @@ namespace Agentmaster
     // the one signal that covers BOTH spawn cases. The S-lane validates it against pid liveness before
     // publishing it onto SessionInfo.presenceStatus (Rule #13: a display FACT — the OBSERVER never
     // sets state), which is exactly why the SCANNER — the engine's state authority — may read it as a
-    // state INPUT here without violating that rule. "idle"/"waiting"/"shell"/"" are NOT "working".
+    // state INPUT here without violating that rule. "idle"/"waiting"/"shell"/"" are NOT a TURN in
+    // progress — but see PresenceIsWorking below for the broader "actively doing something" signal.
     inline bool PresenceIsBusy(std::wstring_view presenceStatus) noexcept
     {
         return presenceStatus == L"busy";
+    }
+
+    // PURE: is Claude's presence heartbeat reporting this session actively DOING SOMETHING — a turn in
+    // flight ("busy") OR a live SHELL job ("shell")? claude sets status "shell" while it owns a running
+    // shell task (measured live: sessions carrying hours-old cmd.exe/bash.exe children report "shell"
+    // with a quiet transcript), so "a shell is still running" is claude's OWN pid-validated fact, not an
+    // inference of ours. This is the scanner's ACTIVITY signal — the quiescence fold, the external-work
+    // promotion, and the Waiting->Idle decay block all key on it — while PresenceIsBusy above stays the
+    // narrow turn-in-flight predicate and PresenceIsAtRest below the release ("idle"-only, so a "shell"
+    // heartbeat still never releases a turn). "waiting" (claude asking the USER to answer/approve) is
+    // deliberately NOT working — it overlaps the NeedsApproval "needs you" semantics.
+    inline bool PresenceIsWorking(std::wstring_view presenceStatus) noexcept
+    {
+        return presenceStatus == L"busy" || presenceStatus == L"shell";
     }
 
     // PURE: is Claude's presence heartbeat reporting this session AT REST — "idle" (no turn in
@@ -467,8 +499,15 @@ namespace Agentmaster
     //     (SubagentActivityUnixMs). Fires regardless of cursor priming — it is a CURRENT filesystem
     //     fact, not a transcript-replay artifact, so the primed-cursor gate the parent-append repairs
     //     need does not apply.
-    //   * presenceBusy — claude's heartbeat self-reports "busy" (it follows a live /fork to a new id).
-    // BOTH arms are gated on a NON-TERMINAL, NON-INTERRUPTED tail: a TERMINAL stop_reason (end_turn / stop_sequence /
+    //   * presenceWorking — claude's heartbeat self-reports "busy" (it follows a live /fork to a new
+    //     id) OR "shell" (a live shell job it owns — PresenceIsWorking).
+    //   * externalOutlivesTurn — the caller's kScanExternalWorkGraceMs proof that the external work
+    //     postdates the parent transcript's last write by more than the grace margin: an in-process
+    //     TEAMMATE or run_in_background Agent still writing subagents/*.jsonl minutes-hours after the
+    //     lead's end_turn, or a shell job still alive long after the turn settled. THIS arm alone may
+    //     promote past a terminal/interrupted tail (below) — "a shell or agent or teammate still
+    //     running means Running, not idle/done/waiting-for-you".
+    // The first two arms are gated on a NON-TERMINAL, NON-INTERRUPTED tail: a TERMINAL stop_reason (end_turn / stop_sequence /
     // max_tokens / refusal) means the turn is OVER, and recent side-file activity / a lingering "busy"
     // is then the TAIL END of the turn that just finished — the subagent's last write lands µs BEFORE
     // the parent's end_turn (so it is always "fresh" at turn-end), and "busy" lingers a tick after a
@@ -489,7 +528,7 @@ namespace Agentmaster
     // "needs you / ended" a mere activity signal must not clear. The caller synthesizes it as tool
     // ACTIVITY (PostToolUse -> Running), NOT a UserPromptSubmit (which would inflate the type-ahead
     // queue accounting, ++queuedPrompts).
-    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceBusy, std::wstring_view lastStopReason, bool interrupted) noexcept
+    inline bool ShouldSynthesizeRunningFromExternalWork(SessionState state, bool subagentActive, bool presenceWorking, std::wstring_view lastStopReason, bool interrupted, bool externalOutlivesTurn = false) noexcept
     {
         if (state != SessionState::Idle && state != SessionState::WaitingForInput)
         {
@@ -497,9 +536,20 @@ namespace Agentmaster
         }
         if (interrupted || IsTerminalStopReason(lastStopReason))
         {
-            return false; // a COMPLETED or INTERRUPTED turn — recent subagent activity / lingering "busy" is its tail end, not new work (an interrupt is recon-stop's job -> Waiting; promoting here would oscillate against it)
+            // A COMPLETED or INTERRUPTED turn: recent side-file activity / a lingering "busy" is
+            // normally its TAIL END, not new work (an interrupt is recon-stop's job -> Waiting;
+            // promoting on residue would oscillate against it) — EXCEPT work that provably OUTLIVED
+            // the turn's end by the kScanExternalWorkGraceMs proof: a teammate / background agent
+            // still writing side files, or a live shell job, long AFTER the end_turn / interrupt
+            // marker is BY DESIGN still running, so the session reads Running. Sub-margin residue
+            // (a final flush landing us before end_turn, post-Esc dying flushes <=
+            // kScanSubagentFreshMs, a one-tick "busy" linger) never qualifies — the classic settled /
+            // interrupt behavior is byte-identical — and recon-stop is HELD on the SAME expression
+            // (ShouldSynthesizeStop's externalWorkOngoing), so promotion and demotion stay mutually
+            // exclusive.
+            return externalOutlivesTurn;
         }
-        return subagentActive || presenceBusy;
+        return subagentActive || presenceWorking;
     }
 
     // PURE + total: should the reconciler demote a WaitingForInput session to Idle now? (Agentmaster
@@ -508,18 +558,19 @@ namespace Agentmaster
     //   * decay is enabled (minutes != 0; 0 == the cog's "Never"),
     //   * it is actually WaitingForInput,
     //   * it is NOT manually "Mark Unread"-ed (a manual mark is sticky — only a visit/archive clears it),
-    //   * claude is NOT self-reporting "busy" (a long Task/Agent subagent keeps the heartbeat busy while
-    //     the parent transcript is quiescent — the recon-subagent promotion's target; don't race it to Idle),
+    //   * claude is NOT self-reporting work — "busy" (a long Task/Agent subagent keeps the heartbeat busy
+    //     while the parent transcript is quiescent — the recon-subagent promotion's target; don't race it
+    //     to Idle) or "shell" (a live shell job — PresenceIsWorking),
     //   * there IS an activity anchor (lastActivityMs > 0),
     //   * the timeout has elapsed (now - lastActivityMs >= minutes), AND
     //   * the session has been READ since that activity (readUnixMs >= lastActivityMs) — an unread,
     //     past-timeout session keeps waiting-for-you until the user reads (visits) it.
     // So Waiting-for-you persists for the FULL timeout regardless of reading, and past the timeout it
-    // persists further while still unread; the demote happens at max(timeout, read-time). presenceBusy
-    // is passed in (the caller computes PresenceIsBusy) so this stays a pure, testable predicate.
-    inline bool ShouldDecayWaitingToIdle(SessionState state, int64_t lastActivityMs, int64_t readUnixMs, bool manualUnread, bool presenceBusy, uint32_t minutes, int64_t nowMs) noexcept
+    // persists further while still unread; the demote happens at max(timeout, read-time). presenceWorking
+    // is passed in (the caller computes PresenceIsWorking) so this stays a pure, testable predicate.
+    inline bool ShouldDecayWaitingToIdle(SessionState state, int64_t lastActivityMs, int64_t readUnixMs, bool manualUnread, bool presenceWorking, uint32_t minutes, int64_t nowMs) noexcept
     {
-        if (minutes == 0 || state != SessionState::WaitingForInput || manualUnread || presenceBusy || lastActivityMs <= 0)
+        if (minutes == 0 || state != SessionState::WaitingForInput || manualUnread || presenceWorking || lastActivityMs <= 0)
         {
             return false;
         }

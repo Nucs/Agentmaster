@@ -500,6 +500,34 @@ void TestBlockedAndInterruptedStates()
     // neither signal -> unchanged (a genuinely idle session):
     CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, false, L"tool_use", false), "ext-work: no subagent + not busy -> no synthesis (parent-only path owns it)");
 
+    // --- work that OUTLIVES the turn (teammates / background agents / live shells): "a shell or agent
+    //     or teammate still running means Running, not idle/done/waiting-for-you". The 6th arg is the
+    //     caller's kScanExternalWorkGraceMs proof that the external activity postdates the parent's
+    //     last write by more than the grace margin — ONLY that proof may promote past a terminal /
+    //     interrupted tail; margin-less residue (the cases above) keeps the classic settled behavior.
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"end_turn", false, true), "outlive: teammate/agent side-files written LONG after end_turn promote Waiting -> Running");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::Idle, false, true, L"end_turn", false, true), "outlive: presence 'shell'/'busy' persisting long past turn-end promotes Idle -> Running (a live shell job)");
+    CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, false, L"", true, true), "outlive: an INTERRUPTED lead whose background team kept working past the abort still promotes (Esc kills the turn, not the teammates)");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, true, true, L"end_turn", false, false), "outlive: terminal tail WITHOUT the outlive proof is turn-tail residue -> stay settled (byte-identical classic behavior)");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::NeedsApproval, true, true, L"end_turn", false, true), "outlive: NeedsApproval ('needs you') is never cleared, even by outliving work");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Running, true, true, L"end_turn", false, true), "outlive: already Running -> no-op");
+    CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::Done, true, true, L"end_turn", false, true), "outlive: Done (claude exited) never revived — in-process teammates die with the process");
+    // ... and the recon-stop HOLD mirror (ShouldSynthesizeStop's 5th arg): while the SAME expression is
+    // true, a Running session is NOT demoted to WaitingForInput on its terminal tail — mutual exclusion
+    // by construction, so promotion/demotion can never oscillate. Scoped to Running: the NeedsApproval
+    // release (answered -> Waiting) still fires, and the promotion re-lights Running from Waiting.
+    CHECK(!ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, 5000, true), "outlive-hold: Running + terminal tail + quiet BUT external work outlives the turn -> HOLD Running (teammates/agent/shell)");
+    CHECK(!ShouldSynthesizeStop(SessionState::Running, L"", true, 5000, true), "outlive-hold: interrupted tail also held while background work outlives the abort");
+    CHECK(ShouldSynthesizeStop(SessionState::NeedsApproval, L"end_turn", false, 5000, true), "outlive-hold: NeedsApproval release is NOT held (answered -> Waiting; the promotion re-lights Running next pass)");
+    CHECK(ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, 5000, false), "outlive-hold: no external work -> the classic missed-Stop fires unchanged");
+    // PresenceIsWorking — the scanner's activity signal: a turn in flight OR a live shell job.
+    CHECK(PresenceIsWorking(L"busy"), "presence-working: 'busy' (a turn in flight)");
+    CHECK(PresenceIsWorking(L"shell"), "presence-working: 'shell' (a live shell job claude owns) counts as working");
+    CHECK(!PresenceIsWorking(L"idle"), "presence-working: 'idle' is at rest");
+    CHECK(!PresenceIsWorking(L"waiting"), "presence-working: 'waiting' (needs-you) is not working");
+    CHECK(!PresenceIsWorking(L""), "presence-working: no heartbeat is not working");
+    static_assert(kScanExternalWorkGraceMs > kScanSubagentFreshMs, "outlive margin must exceed the dying-subagent flush window");
+
     // --- presence-IDLE release: claude's OWN heartbeat says "idle" while we are stuck Running on a
     //     NON-terminal tail (a trailing user prompt that produced no assistant output + a dropped/absent
     //     Stop). The IDLE mirror of PresenceIsBusy; it covers the exact gap ShouldSynthesizeStop cannot

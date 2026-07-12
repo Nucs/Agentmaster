@@ -817,11 +817,31 @@ What works, by area:
   the Waiting→Idle decay (`_maybeDecayWaiting`). `ShouldSynthesizeRunningFromExternalWork` then promotes
   an Idle/`WaitingForInput` session → **`Running`** (synthesized as `PostToolUse`, so no
   `++queuedPrompts`; logged `[recon-subagent]`) — the `recon-run` mirror for work OUTSIDE the parent
-  transcript. BOTH arms are gated on a **non-terminal** tail; the **subagent** arm additionally requires a side-file
+  transcript. BOTH plain arms are gated on a **non-terminal** tail; the **subagent** arm additionally requires a side-file
   write within `kScanSubagentFreshMs` (15s), while the `busy` arm is an instantaneous heartbeat read (no
   freshness window): a subagent's final write lands µs BEFORE the parent's `end_turn` and
   `busy` lingers a tick after a real `Stop`, so a TERMINAL tail (the turn truly ended) must never bounce
-  a settled session back to Running. `TranscriptTimesIn` also folds the newest subagent mtime into
+  a settled session back to Running on that residue. **Work that OUTLIVES the turn — a TEAMMATE /
+  background agent / live shell — is the deliberate exception (`externalOutlivesTurn`,
+  `kScanExternalWorkGraceMs` 20s): "a shell or agent or teammate still running means Running, not
+  idle/done/waiting-for-you".** Claude Code teams run teammates IN-PROCESS writing the lead's
+  `subagents/agent-a<name>-*.jsonl` for minutes–hours AFTER the lead's `end_turn` (empirically: a lead
+  settles "All three teammates are running" while the side files grow another 30 min), a
+  `run_in_background` Agent likewise outlives its spawning turn, and a live shell job keeps claude's own
+  heartbeat on the (new-in-2.1.x) **`shell`** status (measured: sessions carrying hours-old cmd/bash
+  children report `shell` on a quiet transcript — `PresenceIsWorking` = `busy`∪`shell`, now the scanner's
+  activity signal for the quiet-fold + promotion + decay-block, while `PresenceIsBusy`/`PresenceIsAtRest`
+  stay the narrow turn predicates). External activity that postdates the parent transcript's last write
+  by MORE than the 20s grace (> the 15s post-Esc dying-subagent flush window — `static_assert`ed — and ≫
+  the ~2s busy-linger tick) is PROOF of ongoing work, not residue: the promotion fires even on a
+  terminal/interrupted tail, and `ShouldSynthesizeStop` is **HELD** (Running-scoped `externalWorkOngoing`
+  param) on the SAME expression so promotion/demotion stay mutually exclusive (never oscillate; the
+  NeedsApproval release still fires — answered → Waiting → re-promoted next pass). A real hook `Stop`
+  (teammates end the lead's turn normally) still lands Waiting for ≤1 scanner tick before the promotion
+  re-lights Running — the flash ring self-clears on the move back to Running (`_EvaluateAgentFlash`), so
+  no stuck flash. When the background work finally quiets (15s side-file staleness + heartbeat off
+  `busy`/`shell`), the hold drops and the normal recon-stop settles the session → Waiting.
+  `TranscriptTimesIn` also folds the newest subagent mtime into
   `convLastActivityUnixMs`, so the per-tab overlay's `-lastActivityAgo` reflects subagent writes instead
   of reading stale. The pure gates (`PresenceIsBusy` / `ShouldSynthesizeRunningFromExternalWork`) are
   unit-tested (m5_tests). No UI code changed — this feeds the existing state→overlay→tab-dot pipe a

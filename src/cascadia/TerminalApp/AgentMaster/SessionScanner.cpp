@@ -664,10 +664,24 @@ namespace Agentmaster
         // and a "busy" heartbeat forces quietForMs to 0 (claude says it is working — never synthesize
         // a turn-end). With neither signal present this is exactly the prior parent-only value, so a
         // genuinely idle session reconciles unchanged.
-        const int64_t parentQuietMs = NowMs() - FiletimeToUnixMs(fad.ftLastWriteTime);
+        const int64_t parentWriteMs = FiletimeToUnixMs(fad.ftLastWriteTime);
+        const int64_t parentQuietMs = NowMs() - parentWriteMs;
         const int64_t subagentActivityMs = SubagentActivityUnixMs(st.path);
-        const bool presenceBusy = PresenceIsBusy(s.presenceStatus);
+        const bool presenceWorking = PresenceIsWorking(s.presenceStatus); // "busy" OR a live "shell" job (claude's own heartbeat)
         const bool subagentActive = subagentActivityMs > 0 && (NowMs() - subagentActivityMs) <= kScanSubagentFreshMs;
+        // Agentmaster (work that OUTLIVES the turn — teammates / background agents / shells): external
+        // work postdating the parent transcript's last write by MORE than kScanExternalWorkGraceMs has
+        // provably outlived the turn's end — an in-process TEAMMATE or run_in_background Agent keeps
+        // writing subagents/*.jsonl minutes-hours after the lead's end_turn, and a live shell job keeps
+        // claude's heartbeat on "shell"/"busy" — as opposed to turn-tail RESIDUE (a final side-file
+        // flush lands us before end_turn; "busy" lingers a ~2s tick; post-Esc dying subagents flush up
+        // to kScanSubagentFreshMs — all under the margin). ONE expression, computed ONCE, drives BOTH
+        // the terminal-tail promotion (ShouldSynthesizeRunningFromExternalWork) AND the recon-stop hold
+        // (ShouldSynthesizeStop's externalWorkOngoing) so the two gates can never disagree/oscillate:
+        // "a shell or agent or teammate still running means Running, not idle/done/waiting-for-you".
+        const bool externalOutlivesTurn =
+            (subagentActive && subagentActivityMs > parentWriteMs + kScanExternalWorkGraceMs) ||
+            (presenceWorking && parentQuietMs > kScanExternalWorkGraceMs);
         int64_t quietForMs = parentQuietMs;
         if (subagentActivityMs > 0)
         {
@@ -677,9 +691,9 @@ namespace Agentmaster
                 quietForMs = subQuietMs; // the conversation IS being written (just not the main file)
             }
         }
-        if (presenceBusy)
+        if (presenceWorking)
         {
-            quietForMs = 0; // claude self-reports working — the transcript may be momentarily quiet, the turn is not over
+            quietForMs = 0; // claude self-reports working (a turn OR a live shell job) — the transcript may be momentarily quiet, the work is not over
         }
 
         // Subagent/fork activity reconciliation — the EXTERNAL-WORK mirror of recon-run above.
@@ -694,7 +708,7 @@ namespace Agentmaster
         // end_turn) can bounce a just-Waiting session back to Running. The re-Get mirrors the other
         // synths' freshest-state re-check (a real hook landing mid-pass wins), and — gated to
         // Idle/Waiting — it self-limits: once it lands Running it stops re-firing.
-        if (ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceBusy, st.lastStopReason, st.interrupted))
+        if (ShouldSynthesizeRunningFromExternalWork(s.state, subagentActive, presenceWorking, st.lastStopReason, st.interrupted, externalOutlivesTurn))
         {
             const auto fresh = _registry->Get(s.id);
             if (fresh && (fresh->state == SessionState::Idle || fresh->state == SessionState::WaitingForInput))
@@ -706,7 +720,8 @@ namespace Agentmaster
                 act.ts = NowMs();
                 _registry->OnHookEvent(act);
                 AppendStateLog(L"scanner.log",
-                               L"[recon-subagent] " + s.id + L" (" + (presenceBusy ? L"presence=busy" : L"subagent active") +
+                               L"[recon-subagent] " + s.id + L" (" + (presenceWorking ? L"presence=" + s.presenceStatus : L"subagent side-files active") +
+                                   (externalOutlivesTurn ? L", outlived turn-end" : L"") +
                                    L", " + (fresh->state == SessionState::Idle ? L"Idle" : L"Waiting") + L" -> Running)\n");
             }
         }
@@ -795,7 +810,10 @@ namespace Agentmaster
         // one (-> WaitingForInput + the question-guard + the Autorunner advance). The state gate
         // (re-checked against the freshest state right before firing) makes a real Stop that
         // already landed win, so this never double-fires.
-        const bool stopFromTail = ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs);
+        // externalOutlivesTurn HOLDS the Running->Waiting demotion while a teammate / background agent /
+        // live shell provably outlives the finished turn — the exact expression the promotion above
+        // fires on, so the two stay mutually exclusive (never oscillate); see ShouldSynthesizeStop.
+        const bool stopFromTail = ShouldSynthesizeStop(s.state, st.lastStopReason, st.interrupted, quietForMs, externalOutlivesTurn);
         // Agentmaster (presence-idle release): the missing IDLE half of the presence signal. The
         // tail-based backstop above needs a TERMINAL stop_reason or an interrupt — but a turn can end
         // with NEITHER: its last transcript line is a bare user prompt that cleared the tracked
@@ -1096,8 +1114,9 @@ namespace Agentmaster
     // elapsed AND the user has READ it (visited its tab since the last turn) — so it persists for the
     // FULL timeout regardless of reading, and past the timeout it keeps waiting while still unread; a
     // manual "Mark Unread" never time-decays at all. The pure gate ShouldDecayWaitingToIdle decides;
-    // PresenceIsBusy is folded in so a long Task/Agent subagent (busy heartbeat, quiescent parent
-    // transcript — the recon-subagent promotion's target) is never raced to Idle. Like the synthesized
+    // PresenceIsWorking is folded in so a long Task/Agent subagent ("busy" heartbeat, quiescent parent
+    // transcript — the recon-subagent promotion's target) or a live shell job ("shell") is never raced
+    // to Idle. Like the synthesized
     // missed-Stop above, this is a deliberate TIME-derived transition layered on the hook-derived machine
     // (Rule #7-adjacent — never screen-scraped): the mutator RE-CHECKS the full gate UNDER the registry
     // lock, so a hook / a visit (read stamp) landing between our snapshot and the update wins. Autorunner
@@ -1105,8 +1124,8 @@ namespace Agentmaster
     void SessionScanner::_maybeDecayWaiting(const SessionInfo& s, int64_t nowMs)
     {
         const uint32_t minutes = _waitingDecayMinutes.load();
-        const bool busy = PresenceIsBusy(s.presenceStatus);
-        if (!ShouldDecayWaitingToIdle(s.state, s.lastActivityUnixMs, s.readUnixMs, s.manualUnread, busy, minutes, nowMs))
+        const bool working = PresenceIsWorking(s.presenceStatus);
+        if (!ShouldDecayWaitingToIdle(s.state, s.lastActivityUnixMs, s.readUnixMs, s.manualUnread, working, minutes, nowMs))
         {
             return;
         }
@@ -1114,7 +1133,7 @@ namespace Agentmaster
         _registry->Update(s.id, [&](SessionInfo& live) {
             // Re-check the full gate under the lock against the LIVE record (a visit may have just
             // stamped readUnixMs / cleared manualUnread, or a fresh turn may have moved the state).
-            if (ShouldDecayWaitingToIdle(live.state, live.lastActivityUnixMs, live.readUnixMs, live.manualUnread, PresenceIsBusy(live.presenceStatus), minutes, nowMs))
+            if (ShouldDecayWaitingToIdle(live.state, live.lastActivityUnixMs, live.readUnixMs, live.manualUnread, PresenceIsWorking(live.presenceStatus), minutes, nowMs))
             {
                 live.state = SessionState::Idle;
                 decayed = true;
