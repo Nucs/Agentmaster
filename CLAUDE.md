@@ -721,9 +721,13 @@ What works, by area:
   transient `QueuedPrompt::echoed` flag) and NOT double-recorded, and machine-injected
   protocol/control traffic is noise-gated OUT of the Typed record (`IsNoiseUserPrompt` at the
   registry seam, the SAME filter the scanner's back-fill applies — a TEAMMATE-message delivery
-  ("Another Claude session sent a message:\n<teammate-message …>") fires a REAL `UserPromptSubmit`
-  on the lead per report/idle notification, which used to fill the SENT list + sessions.json with
-  wrapper spam; the wake turn still drives state, only the record is filtered) — and a trailing 9th **`ts`**
+  fires a REAL `UserPromptSubmit` on the lead per report/idle notification, which used to fill the
+  SENT list + sessions.json with wrapper spam [8 wrapper rows found PERSISTED in the prod registry
+  — the bug's live fingerprint]; the wake turn still drives state, only the record is filtered.
+  Corpus-audited across BOTH delivery strata — the newer `"Another Claude session sent a
+  message:\n<teammate-message …>"` preamble shape AND the older bare `<teammate-message …>` block
+  (486 bare + 21 preambled real deliveries, 507/507 filtered, 0 leaks; a human prompt merely
+  MENTIONING the tag mid-text is kept — prefix-anchored, never substring)) — and a trailing 9th **`ts`**
   field (the hook's FIRE time, stamped by the forwarder before its slow Stop-path transcript
   work; old 8-field lines parse with ts=0 → arrival order). `ts` drives the **ordered state
   machine** (`NextSessionStateOrdered` + `SessionInfo.turns`, HOOKS.md *State machine*): a

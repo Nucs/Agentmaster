@@ -169,8 +169,9 @@ namespace Agentmaster
     //   • SubagentStop — a SUBAGENT'S/TEAMMATE'S turn just ended, but that turn ran in the
     //     subagent's OWN context: it never touches the LEAD conversation's prefix cache, so it is
     //     not evidence THIS session's cache is warm. In-process TEAMMATES (Claude Code teams) fire
-    //     SubagentStop for minutes–hours after the lead's last real turn (measured: 1000+ per day
-    //     in a teams-heavy log), which kept ⚡ lit on a long-cold lead; and during a classic
+    //     SubagentStop minutes–tens-of-minutes after the lead's last real turn (measured: firings
+    //     correlate to teammate deliveries to the second, 3–25 min post-turn; 1109 SubagentStops
+    //     over a 44-day teams-heavy log), which kept ⚡ lit on a long-cold lead; and during a classic
     //     >cacheMinutes Task wait the lead's cache GENUINELY expires — the old mid-turn stamp was
     //     masking a true expiry, not preventing a false one. (The lead's own next request — the
     //     tool_result turn / the wake turn's UserPromptSubmit — re-lights it honestly.)
