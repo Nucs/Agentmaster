@@ -260,7 +260,12 @@ void TestOrderedStateMachine()
       // traffic (the reported false positives).
         HookMessage probe;
         probe.event = HookEvent::SubagentStop;
-        CHECK(IsApiTurnEvidence(probe), "cache: SubagentStop is turn evidence");
+        CHECK(!IsApiTurnEvidence(probe), "cache: SubagentStop is NOT turn evidence — a subagent/teammate turn runs in its OWN context and never re-warms the LEAD's cache (in-process teammates fire it for hours post-turn)");
+        probe.event = HookEvent::PostToolUse;
+        CHECK(IsApiTurnEvidence(probe), "cache: a real PostToolUse (parent mid-turn) is turn evidence");
+        probe.externalWorkActivity = true;
+        CHECK(!IsApiTurnEvidence(probe), "cache: the scanner's recon-subagent external-work PostToolUse synth is NOT evidence (side-file/heartbeat work, not a lead API turn)");
+        probe.externalWorkActivity = false;
         probe.event = HookEvent::Notification;
         CHECK(IsApiTurnEvidence(probe), "cache: Notification (permission ask / recon-error carrier) is turn evidence");
         probe.event = HookEvent::Stop;
@@ -327,23 +332,34 @@ void TestOrderedStateMachine()
         SessionInfo pure;
         pure.live = true;
         pure.kind = AgentKind::Claude;
-        pure.convLastActivityUnixMs = 100000; // the observer's line-derived transcript activity
-        CHECK(ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: transcript-derived conv activity lights the hint (hook-less sessions)");
+        pure.convApiActivityUnixMs = 100000; // the observer's PARENT-line-derived API activity
+        CHECK(ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: transcript-derived API activity lights the hint (hook-less sessions)");
         pure.live = false;
         CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: an archived (!live) session never shows it");
         pure.live = true;
         pure.kind = AgentKind::Codex;
         CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 60000), "cache: a managed Codex never shows the Claude cache hint");
         pure.kind = AgentKind::Claude;
-        pure.convLastActivityUnixMs = 0;
+        pure.convApiActivityUnixMs = 0;
         pure.lastTurnUnixMs = 0;
         pure.lastActivityUnixMs = 100000; // decay-anchor-only (the SessionStart / triage-move shape)
         CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 1), "cache: the decay anchor alone never lights it (the old false positive)");
+        pure.convLastActivityUnixMs = 100000; // the FOLDED display activity (subagent/teammate side files ride it)
+        CHECK(!ServerCacheStillWarm(pure, 5, 100000 + 1), "cache: the folded display activity alone never lights it — a teammate/subagent side-file write is not a lead API turn");
+        pure.convLastActivityUnixMs = 0;
         pure.lastTurnUnixMs = 100000;
-        pure.convLastActivityUnixMs = 200000;
+        pure.convApiActivityUnixMs = 200000;
         CHECK(ServerCacheStillWarm(pure, 5, 200000 + 60000) && !ServerCacheStillWarm(pure, 5, 200000 + 5 * 60000),
               "cache: the freshest of the two turn signals wins");
         CHECK(!ServerCacheStillWarm(pure, 0, 200000 + 1), "cache: 0 minutes -> never (callers normalize, belt anyway)");
+        // The teammate shape end-to-end on the pure gate: folded display activity FRESH (a background
+        // team writing "just now") while the lead's own last API line is ~1 h old -> ⚡ stays COLD.
+        SessionInfo team;
+        team.live = true;
+        team.kind = AgentKind::Claude;
+        team.convApiActivityUnixMs = 100000; // the lead's own last API turn
+        team.convLastActivityUnixMs = 100000 + 55 * 60000; // teammates still writing side files an hour later
+        CHECK(!ServerCacheStillWarm(team, 5, 100000 + 55 * 60000 + 1000), "cache: teammate/subagent side-file activity alone never keeps ⚡ warm (their turns run in their own context)");
     }
 }
 
@@ -805,6 +821,35 @@ void TestTypedCapture()
     reg.OnHookEvent(UPS(L"s1", L""));
     s = reg.Get(L"s1");
     CHECK(s && s->queue.size() == 5, "empty prompt body records nothing");
+
+    // 6. Teammate/control PROTOCOL traffic is NOT recorded as Typed (the push-path noise gate —
+    //    IsNoiseUserPrompt, the SAME filter the scanner's back-fill applies, so the two paths
+    //    agree). A teammate-message delivery fires a REAL UserPromptSubmit on the lead (the exact
+    //    on-disk wrapper shape, session bd0d5b2f repro), so the STATE transition must still run —
+    //    only the Typed record is filtered.
+    const std::wstring kTeammateWake =
+        L"Another Claude session sent a message:\n"
+        L"<teammate-message teammate_id=\"P3-docs\" color=\"yellow\">\n"
+        L"{\"type\":\"idle_notification\",\"from\":\"P3-docs\",\"timestamp\":\"2026-07-07T05:11:33.000Z\"}\n"
+        L"</teammate-message>";
+    reg.Update(L"s1", [](SessionInfo& ss) { ss.state = SessionState::WaitingForInput; });
+    reg.OnHookEvent(UPS(L"s1", kTeammateWake));
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 5, "teammate-message delivery NOT recorded as a Typed prompt");
+    CHECK(s && s->state == SessionState::Running, "teammate-wake turn still drives state -> Running (a REAL turn; only the record is filtered)");
+
+    // 7. The rest of the shared noise set is filtered at this seam too (slash-command echoes were
+    //    the scanner-side motivation; the push path now matches).
+    reg.OnHookEvent(UPS(L"s1", L"<command-name>/model</command-name>"));
+    reg.OnHookEvent(UPS(L"s1", L"<task-notification>background task done</task-notification>"));
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 5, "slash-command echo + task-notification are filtered from the Typed record");
+
+    // 8. ...and a real human prompt right after the noise still records normally.
+    reg.OnHookEvent(UPS(L"s1", L"now fix the flaky test"));
+    s = reg.Get(L"s1");
+    CHECK(s && s->queue.size() == 6 && s->queue.back().origin == PromptOrigin::Typed && s->queue.back().text == L"now fix the flaky test",
+          "a real human prompt after teammate traffic is still recorded as Typed");
 }
 
 // Agentmaster (bounded queue history): TrimQueueHistory caps the RECORDED history without ever

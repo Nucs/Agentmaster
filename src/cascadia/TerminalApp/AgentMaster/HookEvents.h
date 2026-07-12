@@ -143,6 +143,13 @@ namespace Agentmaster
         // code (0 when none). Meaningful only when apiError is set.
         std::wstring errorMessage;
         int errorStatus{ 0 };
+        // Engine-internal (never on the wire): set ONLY by the SessionScanner's recon-subagent
+        // promotion (ShouldSynthesizeRunningFromExternalWork). The carrier PostToolUse reports
+        // EXTERNAL work — a subagent/teammate side-file write or the busy/shell heartbeat — not a
+        // turn of THIS conversation, so IsApiTurnEvidence must not let it stamp lastTurnUnixMs: a
+        // teammate's/subagent's API call runs in its OWN context and never re-warms the LEAD
+        // conversation's prefix cache (the ⚡ hint would otherwise light off every promotion).
+        bool externalWorkActivity{ false };
     };
 
     // Agentmaster (⚡ server-cache hint, SessionModels.h ServerCacheStillWarm) — PURE + unit-tested.
@@ -159,22 +166,35 @@ namespace Agentmaster
     //     after quiescence, the presence-idle release 5–30s late, and recon-error-release on a
     //     double-ESC rewind that involves NO API call at all. A REAL Stop (the turn's clean end,
     //     cache just re-written) counts.
-    // INCLUDED: UserPromptSubmit (the request fires on submit), Pre-/PostToolUse (mid-turn),
-    // SubagentStop (a subagent turn just completed inside the parent's), and Notification (a
-    // permission ask / idle nudge arrives mid- or moments-after-turn; the scanner's recon-error
-    // synth rides Notification too — the failed request WAS an API attempt moments ago).
+    //   • SubagentStop — a SUBAGENT'S/TEAMMATE'S turn just ended, but that turn ran in the
+    //     subagent's OWN context: it never touches the LEAD conversation's prefix cache, so it is
+    //     not evidence THIS session's cache is warm. In-process TEAMMATES (Claude Code teams) fire
+    //     SubagentStop for minutes–hours after the lead's last real turn (measured: 1000+ per day
+    //     in a teams-heavy log), which kept ⚡ lit on a long-cold lead; and during a classic
+    //     >cacheMinutes Task wait the lead's cache GENUINELY expires — the old mid-turn stamp was
+    //     masking a true expiry, not preventing a false one. (The lead's own next request — the
+    //     tool_result turn / the wake turn's UserPromptSubmit — re-lights it honestly.)
+    //   • A synthesized external-work PostToolUse (HookMessage::externalWorkActivity — the
+    //     scanner's recon-subagent promotion): the observed activity is a side-file write / the
+    //     busy-or-shell heartbeat — work OUTSIDE this conversation; same reasoning as SubagentStop.
+    // INCLUDED: UserPromptSubmit (the request fires on submit), Pre-/PostToolUse for REAL parent-turn
+    // activity (not registered as wire hooks today, but the scanner's recon-run/recon-resume synths
+    // ride UserPromptSubmit/PostToolUse for genuine parent-turn work and still count), and
+    // Notification (a permission ask / idle nudge arrives mid- or moments-after-turn; the scanner's
+    // recon-error synth rides Notification too — the failed request WAS an API attempt moments ago).
     inline bool IsApiTurnEvidence(const HookMessage& m) noexcept
     {
         switch (m.event)
         {
         case HookEvent::UserPromptSubmit:
         case HookEvent::PreToolUse:
-        case HookEvent::PostToolUse:
-        case HookEvent::SubagentStop:
         case HookEvent::Notification:
             return true;
+        case HookEvent::PostToolUse:
+            return !m.externalWorkActivity; // real parent-turn activity counts; the recon-subagent external-work synth does not
         case HookEvent::Stop:
             return !m.quiescentStop; // a real turn-end counts; a reconciliation-timed synth does not
+        case HookEvent::SubagentStop: // a subagent/teammate turn — its API call is in ITS OWN context, never the lead's cache
         case HookEvent::SessionStart:
         case HookEvent::SessionEnd:
         case HookEvent::Unknown:

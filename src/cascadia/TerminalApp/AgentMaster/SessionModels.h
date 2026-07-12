@@ -438,19 +438,22 @@ namespace Agentmaster
         // so it means "when did this card last demand attention", NOT "when did Claude last talk to
         // the API". Display surfaces fall back to it for the "-lastActivityAgo" adornment / MOST
         // ACTIVE sort when the transcript timing is unresolved. It must NEVER feed the ⚡
-        // server-cache hint (that is lastTurnUnixMs + convLastActivityUnixMs — ServerCacheStillWarm
+        // server-cache hint (that is lastTurnUnixMs + convApiActivityUnixMs — ServerCacheStillWarm
         // below): a launch/adopt/resume SessionStart or a triage move stamps this "now" with zero
         // API traffic, which was exactly the reported ⚡ false positive.
         int64_t lastActivityUnixMs{ 0 };
         // Agentmaster (⚡ server-cache hint): the last hook-time EVIDENCE OF A REAL API TURN —
         // stamped monotonically by SessionRegistry::OnHookEvent from the wire `ts`, but ONLY for
-        // events that mean Claude actually just made an API request (IsApiTurnEvidence, HookEvents.h:
-        // UserPromptSubmit / Pre-/PostToolUse / Notification / SubagentStop / a REAL Stop). NEVER
+        // events that mean THIS conversation actually just made an API request (IsApiTurnEvidence,
+        // HookEvents.h: UserPromptSubmit / Pre-/PostToolUse / Notification / a REAL Stop). NEVER
         // stamped by SessionStart (launch / --resume / adopt / /clear send no request), SessionEnd,
         // a synthesized quiescent Stop (reconciliation-timed — incl. the no-API double-ESC
-        // recon-error-release), or any UI mutation (the triage moves / Mark Unread). Feeds the
-        // Triage-Board ⚡ "still server-cached" hint together with the transcript-derived
-        // convLastActivityUnixMs (ServerCacheStillWarm takes the freshest of the two): the hook side
+        // recon-error-release), SubagentStop or the scanner's external-work PostToolUse synth (a
+        // subagent/teammate turn runs in its OWN context — in-process teammates fire SubagentStop
+        // for hours after the lead's last real turn, and it never touches the lead's cache), or any
+        // UI mutation (the triage moves / Mark Unread). Feeds the Triage-Board ⚡ "still
+        // server-cached" hint together with the transcript-derived, subagent-fold-free
+        // convApiActivityUnixMs (ServerCacheStillWarm takes the freshest of the two): the hook side
         // lights the ⚡ the instant a prompt is submitted (the observer's transcript enrichment is
         // silent + survey-lagged), the transcript side covers hook-less (observer-adopted) sessions.
         // Transient (NOT persisted; Persistence.cpp must not write it) — after a reopen there is
@@ -649,6 +652,16 @@ namespace Agentmaster
         // exists. Transient — re-derived each run (NOT persisted; Persistence.cpp must not write them).
         int64_t convCreatedUnixMs{}; // transcript ctime (≈ conversation start)
         int64_t convLastActivityUnixMs{}; // transcript mtime (≈ last activity)
+        // The API-TURN half of the transcript timing: the line-derived last activity WITHOUT the
+        // subagent side-file fold — the newest REAL user/assistant line of the PARENT conversation
+        // itself, i.e. (approximately) when THIS conversation last made an API request. Feeds ONLY
+        // the ⚡ ServerCacheStillWarm hint below: convLastActivityUnixMs above deliberately FOLDS
+        // subagent/teammate side-file activity for the display adornment ("the tab is active"), but
+        // a teammate's/subagent's API turn runs in its OWN context and never re-warms the LEAD
+        // conversation's prefix cache — folding it kept ⚡ lit for the whole (minutes–hours) life of
+        // a background team while the lead's cache was long cold. 0 until resolved (never the file
+        // mtime). Transient — re-derived each run (NOT persisted; Persistence.cpp must not write it).
+        int64_t convApiActivityUnixMs{};
         // Context-window occupancy: the NEWEST assistant message's usage tokens
         // (input + cache_creation + cache_read + output ≈ the size of the last request = current
         // context size). Filled QUIETLY by the SessionScanner as it tail-reads the transcript;
@@ -665,14 +678,18 @@ namespace Agentmaster
     // server-side prompt cache stays warm ~cacheMinutes after the last REAL API request, so a
     // follow-up inside the window reuses the cached prefix (cheaper & faster). "Real API request"
     // is the operative phrase — the hint reads ONLY the two API-turn signals:
-    //   • convLastActivityUnixMs — the transcript's LINE-DERIVED last activity (real user/assistant
-    //     line timestamps; a `--resume`'s untimestamped trailer appends never move it), fed by the
-    //     Fleet Observer. Note a fork/adopt of a recently-active conversation legitimately reads
-    //     warm: the cache is PREFIX-keyed, so the duplicated history IS still cached for the new
-    //     session — that ⚡ is a true positive.
-    //   • lastTurnUnixMs — the hook-time turn evidence (IsApiTurnEvidence, HookEvents.h), which
-    //     lights the hint the moment a prompt is submitted and covers a session whose transcript
-    //     the observer can't resolve.
+    //   • convApiActivityUnixMs — the transcript's PARENT-line-derived last activity (real
+    //     user/assistant line timestamps of THIS conversation; a `--resume`'s untimestamped trailer
+    //     appends never move it, and — unlike the folded display value convLastActivityUnixMs — a
+    //     subagent/teammate SIDE-FILE write never moves it either: those turns run in their OWN
+    //     context and never re-warm the LEAD's prefix cache, so a background team writing for an
+    //     hour must not keep ⚡ lit), fed by the Fleet Observer. Note a fork/adopt of a
+    //     recently-active conversation legitimately reads warm: the cache is PREFIX-keyed, so the
+    //     duplicated history IS still cached for the new session — that ⚡ is a true positive.
+    //   • lastTurnUnixMs — the hook-time turn evidence (IsApiTurnEvidence, HookEvents.h — which
+    //     likewise excludes SubagentStop + the scanner's external-work PostToolUse synth), lighting
+    //     the hint the moment a prompt is submitted and covering a session whose transcript the
+    //     observer can't resolve.
     // Deliberately NOT lastActivityUnixMs (the Waiting-for-you decay anchor): SessionStart at
     // launch / adopt / resume / /clear and the "Move to Waiting-for-you" triage promote stamp that
     // anchor "now" with zero API traffic — the reported ⚡ false positives ("shows right after
@@ -686,7 +703,7 @@ namespace Agentmaster
         {
             return false;
         }
-        const int64_t last = (s.convLastActivityUnixMs > s.lastTurnUnixMs) ? s.convLastActivityUnixMs : s.lastTurnUnixMs;
+        const int64_t last = (s.convApiActivityUnixMs > s.lastTurnUnixMs) ? s.convApiActivityUnixMs : s.lastTurnUnixMs;
         return last > 0 && (nowMs - last) < static_cast<int64_t>(cacheMinutes) * 60000;
     }
 

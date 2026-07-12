@@ -9,6 +9,7 @@
 #include <chrono>
 
 #include "ClaudeSpawn.h" // AppendStateLog (the --fork-session source-id-echo suppression trace)
+#include "TranscriptStore.h" // IsNoiseUserPrompt — keep teammate/control protocol out of the Typed record
 
 namespace
 {
@@ -398,7 +399,15 @@ namespace Agentmaster
             // The Auto Testing reflects EVERY message a session received. A UserPromptSubmit is
             // either the echo of a prompt WE just injected (suppress it — it is already in the
             // queue as Sent), or a prompt the human typed straight into the ConPTY (record it
-            // as a Sent/Typed entry so the Auto Testing's "sent" summary is complete).
+            // as a Sent/Typed entry so the Auto Testing's "sent" summary is complete) — UNLESS it
+            // is machine-injected protocol/control traffic (IsNoiseUserPrompt, the SAME filter the
+            // scanner's back-fill applies at SessionScanner.cpp): a TEAMMATE-message delivery fires
+            // a REAL UserPromptSubmit on the lead ("Another Claude session sent a message:\n
+            // <teammate-message …>" — measured live, one per teammate report/idle notification), and
+            // recording each as a "typed" prompt filled the SENT list (and sessions.json) with
+            // protocol spam nobody typed. The STATE transition above is untouched — the wake turn is
+            // real — only the Typed RECORD is filtered; the echo scan still runs first so an
+            // injected prompt's pickup bookkeeping can never be skipped.
             if (msg.event == HookEvent::UserPromptSubmit && !msg.promptText.empty())
             {
                 const int64_t now = NowMs();
@@ -414,7 +423,7 @@ namespace Agentmaster
                         break;
                     }
                 }
-                if (!isEcho)
+                if (!isEcho && !IsNoiseUserPrompt(msg.promptText))
                 {
                     QueuedPrompt typed;
                     typed.id = L"typed-" + std::to_wstring(now) + L"-" + std::to_wstring(_typedSeq++);
@@ -595,6 +604,12 @@ namespace Agentmaster
             if (o.lastActivityUnixMs != 0)
             {
                 s.convLastActivityUnixMs = o.lastActivityUnixMs;
+            }
+            if (o.apiActivityUnixMs != 0)
+            {
+                // The ⚡ half (ServerCacheStillWarm): the PARENT conversation's own last line — no
+                // subagent/teammate side-file fold, no mtime fallback (see convApiActivityUnixMs).
+                s.convApiActivityUnixMs = o.apiActivityUnixMs;
             }
 
             // One ConPTY = one live conversation (Rule #14 / session-id divergence): this observed claude

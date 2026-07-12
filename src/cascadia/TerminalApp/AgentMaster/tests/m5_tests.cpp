@@ -77,6 +77,7 @@ int wmain()
     TestAnalyzeFootprint();
     TestSessionSearch();
     TestProcessInspectLive();
+    TestTeammateLiveCorpus();
     TestBringToFrontHeuristics();
     TestBridgeRoundTrip();
 

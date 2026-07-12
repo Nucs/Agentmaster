@@ -192,6 +192,12 @@ namespace Agentmaster
         int64_t observedUnixMs{};
         int64_t createdUnixMs{}; // transcript ctime (≈ conversation start) — per-session timing
         int64_t lastActivityUnixMs{}; // transcript mtime (≈ last activity) — per-session timing
+        // The parent-line-derived last activity WITHOUT the subagent side-file fold — the newest
+        // REAL line of the PARENT conversation itself ≈ when this conversation last made an API
+        // request. Feeds SessionInfo.convApiActivityUnixMs, the ⚡ ServerCacheStillWarm input: a
+        // teammate's/subagent's own-context turn never re-warms the LEAD's prefix cache, so the
+        // folded display value above must not light the hint. 0 == unresolved (never the mtime).
+        int64_t apiActivityUnixMs{};
     };
 
     // An EXTERNAL agent — one we do NOT manage: a real Windows Terminal claude (has a WT_SESSION

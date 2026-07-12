@@ -310,9 +310,15 @@ namespace Agentmaster
     // TranscriptStore::QuickRowFacts (the Sessions browser's line-derived last-activity). The tail
     // reader grows its window past the (often untimestamped) tail block + a >1 MiB final line and
     // folds in SUBAGENT side-file activity. 0 == no timestamped conversation line (caller -> mtime).
+    // `apiLineMs` (optional out): the PRE-FOLD parent-line-derived value — the newest REAL line of
+    // the PARENT conversation itself, i.e. (approximately) when THIS conversation last made an API
+    // request; 0 when none found (deliberately NO mtime fallback — trailers/side files bump mtime
+    // with zero API traffic). Feeds SessionInfo.convApiActivityUnixMs, the ⚡ ServerCacheStillWarm
+    // input: a teammate's/subagent's own-context turn never re-warms the LEAD's prefix cache, so the
+    // folded display value must not light the hint (a background team kept ⚡ lit for hours).
     int64_t LastActivityMsFromTranscriptChunk(std::wstring_view chunk);
-    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId);
-    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId);
+    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs = nullptr);
+    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs = nullptr);
 
     // Agentmaster (TAB_OVERLAY.md row 3 "Transcript"): read a transcript into a plain-text
     // conversation — ONLY the human + assistant TEXT messages, in order. Tool calls, tool results,

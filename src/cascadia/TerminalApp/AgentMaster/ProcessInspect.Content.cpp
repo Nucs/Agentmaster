@@ -568,8 +568,12 @@ namespace Agentmaster
     // files (the same fold TranscriptTimesIn does), and those files are short-lived/never-resumed so
     // their mtime is honest. 0 when the file is absent / has no timestamped conversation line in the
     // window (the caller then falls back to the mtime). Filesystem only.
-    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId)
+    int64_t ReadTranscriptLastActivityTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs)
     {
+        if (apiLineMs)
+        {
+            *apiLineMs = 0;
+        }
         if (projectsDir.empty() || cwd.empty() || sessionId.empty())
         {
             return 0;
@@ -589,13 +593,17 @@ namespace Agentmaster
                 break; // found a conversation timestamp, or the whole file already fit this window
             }
         }
+        if (apiLineMs)
+        {
+            *apiLineMs = lineMs; // the PARENT conversation's own last line — the ⚡ API-activity half, deliberately WITHOUT the subagent fold below
+        }
         const int64_t subMs = SubagentActivityUnixMs(path); // running-subagent activity (parent quiescent)
         return (std::max<int64_t>)(lineMs, subMs); // explicit template arg + parens dodge the windows.h max() macro
     }
 
-    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId)
+    int64_t ReadTranscriptLastActivityTail(std::wstring_view cwd, std::wstring_view sessionId, int64_t* apiLineMs)
     {
-        return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId);
+        return ReadTranscriptLastActivityTailIn(ClaudeProjectsDir(), cwd, sessionId, apiLineMs);
     }
 
     // Agentmaster (conversation lineage): the real human-prompt TEXT from a user line, or "" when it is

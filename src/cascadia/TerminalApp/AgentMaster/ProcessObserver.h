@@ -198,12 +198,16 @@ namespace Agentmaster
         {
             int64_t mtime{ 0 }; // the transcript mtime the value was last derived at (the gate)
             int64_t lastActivityMs{ 0 }; // line-derived last-activity (0 == none found -> caller uses mtime)
+            int64_t apiActivityMs{ 0 }; // the PRE-FOLD parent-line value (the ⚡ API-activity half; 0 == none — never the mtime)
         };
         std::unordered_map<std::wstring, LineActivity> _lineActivityBySid;
         std::unordered_set<std::wstring> _lineActivitySeenThisSurvey; // the sids _LineDerivedLastActivity served THIS full survey — the prune's keep-set (worker-thread-only)
         // Worker-thread-only: the line-derived last-activity for `sid` (the value to publish as
         // convLastActivityUnixMs), gated by _lineActivityBySid against the transcript `mtimeMs` (from
         // TranscriptTimes) — which is also the fallback when no timestamped conversation line is found.
-        int64_t _LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs);
+        // `apiOut` (optional): the PRE-FOLD parent-line value for convApiActivityUnixMs — the newest
+        // real line of the PARENT conversation itself (never the subagent fold, never the mtime): a
+        // teammate's/subagent's own-context turn must not light the ⚡ cache hint.
+        int64_t _LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs, int64_t* apiOut = nullptr);
     };
 }

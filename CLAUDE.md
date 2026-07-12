@@ -718,7 +718,12 @@ What works, by area:
   `WireUnescape`: `\ \t \r \n`), so the registry records **every** message a session got — a
   prompt typed straight into the ConPTY becomes a `Sent`/`Typed` Auto-Testing entry, while the
   `UserPromptSubmit` echo of a prompt WE injected is recognized (text + a recency window + the
-  transient `QueuedPrompt::echoed` flag) and NOT double-recorded — and a trailing 9th **`ts`**
+  transient `QueuedPrompt::echoed` flag) and NOT double-recorded, and machine-injected
+  protocol/control traffic is noise-gated OUT of the Typed record (`IsNoiseUserPrompt` at the
+  registry seam, the SAME filter the scanner's back-fill applies — a TEAMMATE-message delivery
+  ("Another Claude session sent a message:\n<teammate-message …>") fires a REAL `UserPromptSubmit`
+  on the lead per report/idle notification, which used to fill the SENT list + sessions.json with
+  wrapper spam; the wake turn still drives state, only the record is filtered) — and a trailing 9th **`ts`**
   field (the hook's FIRE time, stamped by the forwarder before its slow Stop-path transcript
   work; old 8-field lines parse with ts=0 → arrival order). `ts` drives the **ordered state
   machine** (`NextSessionStateOrdered` + `SessionInfo.turns`, HOOKS.md *State machine*): a
@@ -1405,9 +1410,14 @@ What works, by area:
   value [tuned for the old 5-min cache window] is **invalidated** → existing installs fall back to the 1h
   default; the old key is ignored + dropped on next save), `serverCacheMinutes` (Claude's server-side
   prompt-cache lifetime, default **5**, drives ONLY the Triage-Board card's **⚡ "still cached"** hint shown to
-  the right of `⚙ sent/total` — keyed on **REAL API-turn evidence** via the pure `ServerCacheStillWarm`
-  (SessionModels.h): the transcript's line-derived conv activity + the hook-side `lastTurnUnixMs` stamp
-  (`IsApiTurnEvidence`, HookEvents.h — never `SessionStart`/`SessionEnd`/a synthesized quiescent Stop),
+  the right of `⚙ sent/total` — keyed on **REAL API-turn evidence of THIS conversation** via the pure
+  `ServerCacheStillWarm` (SessionModels.h): the transcript's PARENT-line-derived API activity
+  (`convApiActivityUnixMs` — the fold-free sibling of the display value `convLastActivityUnixMs`, which rides
+  subagent/TEAMMATE side-file writes and would keep ⚡ lit for a background team's whole minutes–hours run
+  while the lead's cache is long cold) + the hook-side `lastTurnUnixMs` stamp (`IsApiTurnEvidence`,
+  HookEvents.h — never `SessionStart`/`SessionEnd`/a synthesized quiescent Stop, and since the teammate pass
+  never `SubagentStop` nor the scanner's external-work `PostToolUse` synth: a subagent/teammate turn runs in
+  its OWN context and never re-warms the lead's prefix cache),
   deliberately NOT the `lastActivityUnixMs` decay anchor, which launch/adopt/resume `SessionStart`s and the
   "Move to Waiting-for-you" triage promote stamp "now" with ZERO API traffic — the old ⚡ false positives
   ("shows right after adopting / after Move to Waiting-for-you / on a never-prompted launch"); Claude-only —

@@ -718,6 +718,11 @@ namespace Agentmaster
                 act.sessionId = s.id;
                 act.cwd = s.workingDir;
                 act.ts = NowMs();
+                // EXTERNAL work (a subagent/teammate side file, the busy/shell heartbeat) — drives
+                // Running through the one state machine but must NOT stamp the ⚡ turn evidence: a
+                // teammate's/subagent's API call runs in its own context, never this conversation's
+                // prefix cache (IsApiTurnEvidence excludes the flagged PostToolUse).
+                act.externalWorkActivity = true;
                 _registry->OnHookEvent(act);
                 AppendStateLog(L"scanner.log",
                                L"[recon-subagent] " + s.id + L" (" + (presenceWorking ? L"presence=" + s.presenceStatus : L"subagent side-files active") +

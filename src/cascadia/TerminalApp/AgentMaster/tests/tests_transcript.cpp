@@ -3571,3 +3571,314 @@ void TestAnalyzeFootprint()
         CHECK(CollectConversationLineage(L"no-such-session-id", L"C:\\nowhere", 4).empty(), "contained: CollectConversationLineage(absent) -> empty");
     }
 }
+
+// Local fixtures for TestTeammateLiveCorpus: read up to the LAST `cap` bytes of a file (the
+// engine's own tail reader is TU-internal) and widen UTF-8 for the json parser.
+static std::string TeamReadTailBytes(const std::wstring& path, int64_t cap)
+{
+    std::string bytes;
+    const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return bytes;
+    }
+    LARGE_INTEGER sz{};
+    if (::GetFileSizeEx(h, &sz) && sz.QuadPart > 0)
+    {
+        const int64_t take = sz.QuadPart < cap ? sz.QuadPart : cap;
+        LARGE_INTEGER off{};
+        off.QuadPart = sz.QuadPart - take;
+        if (::SetFilePointerEx(h, off, nullptr, FILE_BEGIN))
+        {
+            bytes.resize(static_cast<size_t>(take));
+            DWORD rd = 0;
+            if (!::ReadFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &rd, nullptr))
+            {
+                rd = 0;
+            }
+            bytes.resize(rd);
+        }
+    }
+    ::CloseHandle(h);
+    return bytes;
+}
+
+static std::wstring TeamWidenUtf8(const std::string& s)
+{
+    if (s.empty())
+    {
+        return {};
+    }
+    const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+// Agentmaster (teammates / background work — LIVE-CORPUS validation): replay the outlived-turn
+// promotion + hold (the minimal mechanism), the "cache hint" API-activity split, and the
+// teammate-wrapper noise gate against REAL on-disk sessions in the live ~/.claude. The outlive
+// block SWEEPS the corpus for the at-rest teammate/background-agent signature (side files that
+// postdate their lead transcript's last write — a lead woken/resumed AFTER its team finished has
+// an mtime PAST its side files and honestly does not match; measured on this corpus: 7 such
+// sessions, deltas from minutes to DAYS). The noise block replays the 2026-07-07 fuzz-team repro:
+// lead bd0d5b2f received "Another Claude session sent a message:" <teammate-message> wrapper
+// deliveries, each firing a REAL UserPromptSubmit (the push-path noise-gate motivation). Every
+// block gates on its fixture existing in the expected shape on this machine and [info]-skips
+// otherwise (skip, never fail; the pure-fixture unit tests cover the logic machine-independently).
+void TestTeammateLiveCorpus()
+{
+    std::wprintf(L"Teammate/background-work live corpus (real ~/.claude sessions):\n");
+    const std::wstring proj = ClaudeProjectsDir();
+
+    // --- (1) the minimal mechanism against the REAL corpus: sweep every session directory for
+    //         subagent/tool-result side files that OUTLIVE their lead transcript's last write —
+    //         the at-rest teammate/background-agent signature — and replay the scanner's exact
+    //         expressions on the strongest find. (A lead woken/resumed AFTER its team finished has
+    //         an mtime PAST its side files and honestly does not match.) -------------------------
+    {
+        std::wstring bestParent;
+        int64_t bestDelta = 0, bestParentMs = 0, bestSubMs = 0;
+        std::error_code ec;
+        for (std::filesystem::directory_iterator projIt{ std::filesystem::path{ proj }, ec }, projEnd; !ec && projIt != projEnd; projIt.increment(ec))
+        {
+            std::error_code ed;
+            if (!projIt->is_directory(ed))
+            {
+                continue;
+            }
+            std::error_code es;
+            for (std::filesystem::directory_iterator sesIt{ projIt->path(), es }, sesEnd; !es && sesIt != sesEnd; sesIt.increment(es))
+            {
+                std::error_code ei;
+                if (!sesIt->is_directory(ei))
+                {
+                    continue;
+                }
+                const std::wstring parent = sesIt->path().wstring() + L".jsonl";
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (!::GetFileAttributesExW(parent.c_str(), GetFileExInfoStandard, &fad))
+                {
+                    continue; // a side dir without a matching transcript
+                }
+                ULARGE_INTEGER u{};
+                u.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+                u.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+                const int64_t parentWriteMs = static_cast<int64_t>((u.QuadPart - 116444736000000000ULL) / 10000ULL);
+                const int64_t subMs = SubagentActivityUnixMs(parent); // 0 == the session dir has no side files
+                if (subMs > 0 && subMs - parentWriteMs > bestDelta)
+                {
+                    bestDelta = subMs - parentWriteMs;
+                    bestParent = parent;
+                    bestParentMs = parentWriteMs;
+                    bestSubMs = subMs;
+                }
+            }
+        }
+        if (bestDelta > kScanExternalWorkGraceMs)
+        {
+            // Replay the scanner's exact expressions at a simulated instant DURING the run — one
+            // second after the last side-file write, when that external work was "fresh".
+            const int64_t simNow = bestSubMs + 1000;
+            const bool subagentActive = (simNow - bestSubMs) <= kScanSubagentFreshMs;
+            const bool outlived = subagentActive && bestSubMs > bestParentMs + kScanExternalWorkGraceMs;
+            CHECK(subagentActive && outlived, "live-team: REAL side files outlive their lead's last write by > grace");
+            CHECK(ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, subagentActive, false, L"end_turn", false, outlived),
+                  "live-team: the terminal-tail promotion fires on the real session's data (Waiting -> Running while the background work runs)");
+            CHECK(!ShouldSynthesizeStop(SessionState::Running, L"end_turn", false, 5000, outlived),
+                  "live-team: recon-stop HELD on the same expression (mutual exclusion — never oscillates)");
+            CHECK(!ShouldSynthesizeRunningFromExternalWork(SessionState::WaitingForInput, subagentActive, false, L"end_turn", false, false),
+                  "live-team: without the outlive proof the same freshness does NOT promote (turn-tail residue rule intact)");
+            std::wprintf(L"  [info] outlive sweep: %s outlives its lead by %lld s\n",
+                         std::filesystem::path{ bestParent }.filename().wstring().c_str(),
+                         static_cast<long long>(bestDelta / 1000));
+
+            // --- (2) the cache-hint split on the SAME found session: the folded display value
+            //         (which the side files ride) must NOT keep the hint warm past the lead's own
+            //         last conversation line — the exact measured teammate false positive --------
+            const int64_t apiMs = LastActivityMsFromTranscriptChunk(TeamWidenUtf8(TeamReadTailBytes(bestParent, 4ll << 20)));
+            const int64_t foldedMs = apiMs > bestSubMs ? apiMs : bestSubMs; // == ReadTranscriptLastActivityTailIn's fold
+            if (apiMs > 0 && foldedMs - apiMs > 5 * 60000)
+            {
+                SessionInfo si;
+                si.id = L"live-team-cache";
+                si.live = true;
+                si.kind = AgentKind::Claude;
+                si.convLastActivityUnixMs = foldedMs; // what the folded (display) value carried
+                si.convApiActivityUnixMs = apiMs; // the lead's own last conversation line
+                CHECK(!ServerCacheStillWarm(si, 5, foldedMs + 60000),
+                      "live-team: cache hint COLD while only the background work was writing — the folded value alone would have lit it (the lead's own cache had expired)");
+                std::wprintf(L"  [info] cache split: folded-vs-parent-line delta %lld s\n",
+                             static_cast<long long>((foldedMs - apiMs) / 1000));
+            }
+            else
+            {
+                std::wprintf(L"  [info] found session's folded/api gap under the cache window -> cache block skipped\n");
+            }
+        }
+        else
+        {
+            std::wprintf(L"  [info] no at-rest session with side files outliving its lead by > grace -> outlive block skipped\n");
+        }
+    }
+
+    // --- (3) the noise gate against the REAL wrapper deliveries (lead bd0d5b2f): every on-disk
+    //         "Another Claude session sent a message:" main-chain user line is filtered from the
+    //         Typed record, while the session's REAL human prompts are not ------------------------
+    {
+        const std::wstring lead = proj + L"\\K--source-NumSharp\\bd0d5b2f-1ff6-4a04-94c2-8eca1a7167e4.jsonl";
+        std::string bytes;
+        {
+            const HANDLE h = ::CreateFileW(lead.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                LARGE_INTEGER sz{};
+                if (::GetFileSizeEx(h, &sz) && sz.QuadPart > 0 && sz.QuadPart < (64ll << 20))
+                {
+                    bytes.resize(static_cast<size_t>(sz.QuadPart));
+                    DWORD rd = 0;
+                    if (!::ReadFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &rd, nullptr))
+                    {
+                        bytes.clear();
+                    }
+                    bytes.resize(rd);
+                }
+                ::CloseHandle(h);
+            }
+        }
+        if (!bytes.empty())
+        {
+            const auto widen = [](const std::string& s) -> std::wstring {
+                if (s.empty())
+                {
+                    return {};
+                }
+                const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+                std::wstring w(static_cast<size_t>(n), L'\0');
+                ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+                return w;
+            };
+            size_t wrappers = 0, realPrompts = 0;
+            bool allWrappersNoise = true;
+            std::wstring firstWrapper;
+            size_t start = 0;
+            while (start < bytes.size())
+            {
+                size_t end = bytes.find('\n', start);
+                if (end == std::string::npos)
+                {
+                    end = bytes.size();
+                }
+                const std::string line = bytes.substr(start, end - start);
+                start = end + 1;
+                // Cheap prefilter (the JSON parse below is authoritative): a main-chain user line
+                // whose content is a plain STRING (a typed prompt or an injected wrapper).
+                if (line.find("\"type\":\"user\"") == std::string::npos || line.find("tool_use_id") != std::string::npos)
+                {
+                    continue;
+                }
+                const auto parsed = json::Parse(widen(line));
+                if (!parsed || parsed->type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                if (parsed->StrAt(L"type") != L"user" || parsed->BoolAt(L"isSidechain") || parsed->BoolAt(L"isMeta"))
+                {
+                    continue;
+                }
+                const json::Value* msg = parsed->Find(L"message");
+                if (!msg || msg->type != json::Value::Type::Obj)
+                {
+                    continue;
+                }
+                const json::Value* content = msg->Find(L"content");
+                if (!content || content->type != json::Value::Type::Str)
+                {
+                    continue; // array-form content (tool results etc.) — not a typed/injected prompt
+                }
+                const std::wstring text = content->AsStr();
+                if (text.rfind(L"Another Claude session sent a message:", 0) == 0)
+                {
+                    ++wrappers;
+                    allWrappersNoise = allWrappersNoise && IsNoiseUserPrompt(text);
+                    if (firstWrapper.empty())
+                    {
+                        firstWrapper = text;
+                    }
+                }
+                else if (!text.empty() && !IsNoiseUserPrompt(text))
+                {
+                    ++realPrompts; // a genuine human prompt must never be classified noise
+                }
+            }
+            if (wrappers > 0)
+            {
+                CHECK(allWrappersNoise, "live-noise: EVERY real on-disk teammate wrapper is classified noise (IsNoiseUserPrompt)");
+                CHECK(realPrompts > 0, "live-noise: the session's REAL human prompts survive the filter (at least one non-noise prompt)");
+                // End-to-end through the push path: feed the ACTUAL on-disk wrapper into a live
+                // registry — state runs, the Typed record does not.
+                SessionRegistry reg;
+                reg.Upsert(MakeSession(L"live-noise-1"));
+                HookMessage wake;
+                wake.event = HookEvent::UserPromptSubmit;
+                wake.sessionId = L"live-noise-1";
+                wake.promptText = firstWrapper;
+                wake.ts = NowMsTest();
+                reg.OnHookEvent(wake);
+                const auto g = reg.Get(L"live-noise-1");
+                CHECK(g && g->queue.empty(), "live-noise: the ACTUAL wrapper text is filtered from the Typed record end-to-end");
+                CHECK(g && g->state == SessionState::Running, "live-noise: ...while the wake turn still drives state (a REAL turn)");
+                std::wprintf(L"  [info] bd0d5b2f: %zu teammate wrapper deliveries, %zu real prompts\n", wrappers, realPrompts);
+            }
+            else
+            {
+                std::wprintf(L"  [info] bd0d5b2f present but no wrapper lines found -> noise block skipped\n");
+            }
+        }
+        else
+        {
+            std::wprintf(L"  [info] teammate fixture bd0d5b2f not on this machine -> skipped\n");
+        }
+    }
+
+    // --- (4) the presence heartbeats LIVE: PresenceIsWorking classifies whatever statuses the real
+    //         ~/.claude/sessions currently holds ("shell" == a live shell job, measured on sessions
+    //         carrying hours-old cmd/bash children) --------------------------------------------
+    {
+        const auto rows = ReadSessionPresence();
+        if (!rows.empty())
+        {
+            size_t busyN = 0, shellN = 0, restN = 0, otherN = 0;
+            bool allClassified = true;
+            for (const auto& r : rows)
+            {
+                if (r.status == L"busy")
+                {
+                    ++busyN;
+                }
+                else if (r.status == L"shell")
+                {
+                    ++shellN;
+                }
+                else if (r.status == L"idle" || r.status == L"waiting")
+                {
+                    ++restN;
+                }
+                else
+                {
+                    ++otherN;
+                }
+                allClassified = allClassified &&
+                                (PresenceIsWorking(r.status) == (r.status == L"busy" || r.status == L"shell")) &&
+                                (PresenceIsAtRest(r.status) == (r.status == L"idle"));
+            }
+            CHECK(allClassified, "live-presence: PresenceIsWorking/PresenceIsAtRest classify every REAL heartbeat status (busy/shell work; idle rests; waiting neither)");
+            std::wprintf(L"  [info] live presence: %zu heartbeats (busy=%zu shell=%zu idle/waiting=%zu other=%zu)\n",
+                         rows.size(), busyN, shellN, restN, otherN);
+        }
+        else
+        {
+            std::wprintf(L"  [info] no live presence heartbeats -> skipped\n");
+        }
+    }
+}

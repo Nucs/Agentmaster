@@ -296,14 +296,20 @@ namespace Agentmaster
         }
     }
 
-    int64_t ProcessObserver::_LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs)
+    int64_t ProcessObserver::_LineDerivedLastActivity(std::wstring_view cwd, const std::wstring& sid, int64_t mtimeMs, int64_t* apiOut)
     {
         _lineActivitySeenThisSurvey.insert(sid); // the survey-tail prune keeps exactly what this pass consulted
         auto& c = _lineActivityBySid[sid];
         if (c.mtime != mtimeMs) // transcript grew (or first sight) -> re-derive from the tail; else reuse
         {
             c.mtime = mtimeMs;
-            c.lastActivityMs = ReadTranscriptLastActivityTail(cwd, sid);
+            c.lastActivityMs = ReadTranscriptLastActivityTail(cwd, sid, &c.apiActivityMs);
+        }
+        if (apiOut)
+        {
+            // The parent-line-derived API-activity half (⚡): NO mtime fallback — the mtime is bumped
+            // by trailers + subagent/teammate side files, exactly the non-API noise this value excludes.
+            *apiOut = c.apiActivityMs;
         }
         // 0 == no timestamped conversation line in the window (a never-prompted / unreadable transcript)
         // -> fall back to the mtime, preserving the old behavior for that degenerate case.
@@ -637,11 +643,11 @@ namespace Agentmaster
                 // untimestamped state lines that bump mtime without being activity, so a restored tab
                 // focused after a restart would read "active just now" (it only resumed). The tail read
                 // is mtime-gated (a quiet/just-resumed session costs only this stat after it settles).
-                int64_t convCreated = 0, convMtime = 0, convLast = 0;
+                int64_t convCreated = 0, convMtime = 0, convLast = 0, convApi = 0;
                 if (!sid.empty())
                 {
                     TranscriptTimes(f.cwd, sid, convCreated, convMtime); // ctime=created, mtime=the gate
-                    convLast = _LineDerivedLastActivity(f.cwd, sid, convMtime);
+                    convLast = _LineDerivedLastActivity(f.cwd, sid, convMtime, &convApi);
                 }
 
                 CorrelationRow cr;
@@ -698,6 +704,7 @@ namespace Agentmaster
                     o.observedUnixMs = now;
                     o.createdUnixMs = convCreated;
                     o.lastActivityUnixMs = convLast;
+                    o.apiActivityUnixMs = convApi; // the ⚡ half: the parent conversation's OWN last line (no subagent fold)
                     _registry->ObserveClaude(o);
                 }
                 continue;

@@ -159,6 +159,7 @@ void TestConversationLineage();
 void TestAnalyzeFootprint(); // analyze footprint: ScrubLargeBase64Payloads (pure) + the AnalyzeSessionTranscript (size,mtime) cache hit/invalidation/copy semantics
 void TestSessionSearch();
 void TestProcessInspectLive();
+void TestTeammateLiveCorpus(); // teammates/background work: the outlived-turn promotion + hold, the cache-hint split, and the wrapper noise gate replayed against REAL ~/.claude sessions (guarded, [info]-skips)
 void TestBringToFrontHeuristics();
 // tests_summary_anchor.cpp
 void TestSummaryTableTrim();
