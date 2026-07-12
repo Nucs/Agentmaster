@@ -469,19 +469,24 @@ namespace Agentmaster
             // inject the <teammate-message …> block with NO preamble line (corpus-audited: 486 such
             // deliveries across the March-2026 teams), so this prefix IS load-bearing, not just a belt.
             L"Another Claude session sent a message:", // ...and the NEWER strata's shape: Claude Code
-            // (~2.1.x teams) prefixes the <teammate-message> block with this preamble line (21 such
-            // deliveries in the same audit; 0 leaks across both strata, and a human prompt that merely
-            // MENTIONS <teammate-message> mid-text is kept — prefix-anchored, never substring). A title /
-            // prompt-list is the USER's framing, so NO teammate message belongs there (idle_notification
-            // protocol AND a delivered report alike) — none is a human prompt. (The SUMMARY filter
-            // SeIsCommandNoise is narrower: it keeps a real teammate report and drops only the JSON
-            // protocol envelope.)
-            L"<agent-message", // an AGENT'S message wrapper — the subagent analog of <teammate-message>:
-            // a background Agent-tool run reporting back to its lead is delivered as a bare
-            // `<agent-message from="<name>">` block (no preamble) and fires a REAL UserPromptSubmit,
-            // exactly like the teammate wrappers (fingerprinted: 2 such rows were PERSISTED as Typed
-            // prompts in the dev registry by the pre-gate code — the /code-review finder agents).
-            // (Plain background-task completions arrive as <task-notification>, above — 79 fingerprints.)
+            // (~2.1.x) prefixes the wrapper block with this preamble line — BOTH wrapper kinds ride it:
+            // <teammate-message> (21 such deliveries in the teams audit) AND <agent-message> (2/2 of the
+            // corpus's agent-report TRANSCRIPT rows are preambled — the bare entry below carries their
+            // WIRE shape). 0 leaks across all strata, and a human prompt that merely MENTIONS a wrapper
+            // tag mid-text is kept — prefix-anchored, never substring. A title / prompt-list is the
+            // USER's framing, so NO teammate/agent message belongs there (idle_notification protocol AND
+            // a delivered report alike) — none is a human prompt. (The SUMMARY filter SeIsCommandNoise
+            // is narrower: it keeps a real teammate report and drops only the JSON protocol envelope.)
+            L"<agent-message", // an AGENT'S message wrapper — the subagent analog of <teammate-message>.
+            // The two SEAMS see two shapes of the SAME delivery: the UserPromptSubmit HOOK PAYLOAD is
+            // the bare `<agent-message from="<name>">` block — this prefix guards the wire/Typed seam
+            // (2 such rows were PERSISTED as Typed prompts in the dev registry by the pre-gate code —
+            // the /code-review finder agents) — while the TRANSCRIPT user row of those same deliveries
+            // carries the "Another Claude session sent a message:" preamble (corpus scan: 2/2 preambled,
+            // 0 bare transcript rows), caught by the preamble entry above for the transcript readers
+            // (titles / prompt lists / the scanner back-fill). (Plain background-task completions arrive
+            // as <task-notification>, above — 79 persisted in the prod registry, 1188 transcript rows
+            // corpus-wide.)
             L"Caveat:", // the injected caveat preamble
             L"[Request interrupted", // Esc-interrupt control markers (both variants)
         };

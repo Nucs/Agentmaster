@@ -1940,6 +1940,7 @@ void TestTranscriptStore()
     // <task-notification> both fingerprinted as UserPromptSubmit texts in the live registries):
     CHECK(IsNoiseUserPrompt(L"<teammate-message teammate_id=\"ingestion\" color=\"green\">\n{\"type\":\"idle_notification\"}"), "BARE teammate-message delivery (older strata, no preamble) is noise");
     CHECK(IsNoiseUserPrompt(L"<agent-message from=\"finder-reuse\">\n[{\"file\": \"x.h\"}]"), "agent-message wrapper (a background Agent reporting back) is noise");
+    CHECK(IsNoiseUserPrompt(L"Another Claude session sent a message:\n<agent-message from=\"finder-conventions\">\n[{\"file\": \"y.cpp\"}]"), "PREAMBLED agent-message delivery (the TRANSCRIPT-row shape of the same wire delivery; corpus 2/2 preambled) is noise");
     CHECK(!IsNoiseUserPrompt(L"the <agent-message from=...> wrapper should be filtered"), "agent-message mentioned mid-text is a real prompt");
 
     // --- Teammate (multi-agent) protocol vs real teammate content (session b2da261d repro) ---
