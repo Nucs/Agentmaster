@@ -476,6 +476,12 @@ namespace Agentmaster
             // protocol AND a delivered report alike) — none is a human prompt. (The SUMMARY filter
             // SeIsCommandNoise is narrower: it keeps a real teammate report and drops only the JSON
             // protocol envelope.)
+            L"<agent-message", // an AGENT'S message wrapper — the subagent analog of <teammate-message>:
+            // a background Agent-tool run reporting back to its lead is delivered as a bare
+            // `<agent-message from="<name>">` block (no preamble) and fires a REAL UserPromptSubmit,
+            // exactly like the teammate wrappers (fingerprinted: 2 such rows were PERSISTED as Typed
+            // prompts in the dev registry by the pre-gate code — the /code-review finder agents).
+            // (Plain background-task completions arrive as <task-notification>, above — 79 fingerprints.)
             L"Caveat:", // the injected caveat preamble
             L"[Request interrupted", // Esc-interrupt control markers (both variants)
         };

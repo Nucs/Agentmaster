@@ -1935,14 +1935,20 @@ void TestTranscriptStore()
     CHECK(IsNoiseUserPrompt(L"[Request interrupted by user for tool use]"), "tool interrupt marker is noise");
     CHECK(!IsNoiseUserPrompt(L"fix the build please"), "a real prompt is NOT noise");
     CHECK(!IsNoiseUserPrompt(L"explain <command-name> semantics"), "marker NOT at start is not noise");
+    // Agent/teammate wrappers across ALL delivery strata (corpus-audited: 486 bare <teammate-message>
+    // deliveries in the older strata + 21 preambled in the newer; <agent-message from=...> and
+    // <task-notification> both fingerprinted as UserPromptSubmit texts in the live registries):
+    CHECK(IsNoiseUserPrompt(L"<teammate-message teammate_id=\"ingestion\" color=\"green\">\n{\"type\":\"idle_notification\"}"), "BARE teammate-message delivery (older strata, no preamble) is noise");
+    CHECK(IsNoiseUserPrompt(L"<agent-message from=\"finder-reuse\">\n[{\"file\": \"x.h\"}]"), "agent-message wrapper (a background Agent reporting back) is noise");
+    CHECK(!IsNoiseUserPrompt(L"the <agent-message from=...> wrapper should be filtered"), "agent-message mentioned mid-text is a real prompt");
 
     // --- Teammate (multi-agent) protocol vs real teammate content (session b2da261d repro) ---
     // Claude Code wraps a peer session's message as "Another Claude session sent a message:" + a
     // <teammate-message> block. A PROTOCOL envelope ({"type":"idle_notification",...}) is machine
     // signaling; a real REPORT (prose payload) is content. The two filters treat them differently:
     //   - IsNoiseUserPrompt (titles / prompt-lists): NEITHER is a user prompt => BOTH are noise (the
-    //     preamble prefix makes this fire — the bare "<teammate-message" prefix never did, since the
-    //     content starts with the preamble).
+    //     preamble prefix fires on the newer strata; the bare "<teammate-message" prefix carries the
+    //     OLDER strata, whose deliveries have no preamble — 486 such in the corpus audit).
     //   - SeIsCommandNoise (summary digest): drops ONLY the protocol envelope, KEEPS the real report.
     const std::wstring kTeammateIdle =
         L"Another Claude session sent a message:\n"

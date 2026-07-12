@@ -838,12 +838,17 @@ void TestTypedCapture()
     CHECK(s && s->queue.size() == 5, "teammate-message delivery NOT recorded as a Typed prompt");
     CHECK(s && s->state == SessionState::Running, "teammate-wake turn still drives state -> Running (a REAL turn; only the record is filtered)");
 
-    // 7. The rest of the shared noise set is filtered at this seam too (slash-command echoes were
-    //    the scanner-side motivation; the push path now matches).
+    // 7. The rest of the shared noise set is filtered at this seam too — the AGENT wake shapes
+    //    included (<task-notification> = a background task/agent completing, 79 rows fingerprinted
+    //    in the prod registry pre-gate; <agent-message from=...> = a background Agent reporting
+    //    back, 2 rows fingerprinted in the dev registry; bare <teammate-message> = the older
+    //    delivery strata, 486 corpus-wide).
     reg.OnHookEvent(UPS(L"s1", L"<command-name>/model</command-name>"));
     reg.OnHookEvent(UPS(L"s1", L"<task-notification>background task done</task-notification>"));
+    reg.OnHookEvent(UPS(L"s1", L"<agent-message from=\"finder-reuse\">\n[{\"file\": \"a.h\", \"summary\": \"x\"}]"));
+    reg.OnHookEvent(UPS(L"s1", L"<teammate-message teammate_id=\"system\">\n{\"type\":\"teammate_terminated\"}"));
     s = reg.Get(L"s1");
-    CHECK(s && s->queue.size() == 5, "slash-command echo + task-notification are filtered from the Typed record");
+    CHECK(s && s->queue.size() == 5, "slash-command echo + task-notification + agent-message + bare teammate-message are all filtered from the Typed record");
 
     // 8. ...and a real human prompt right after the noise still records normally.
     reg.OnHookEvent(UPS(L"s1", L"now fix the flaky test"));
