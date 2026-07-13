@@ -377,6 +377,55 @@ void TestSpawnBuilders()
         CHECK(ign.ok == 0 && ign.warn == 0 && ign.error == 0, "lex: blanks + comment => nothing");
     }
 
+    // LexLaunchModelsText (launch-model picker): per-entry verdicts + worst level + first-issue,
+    // driving the "Launch models" editor's live border + status line — the LexEnvText twin. `ok`
+    // is the OFFERED model count (Ok + listed Warns), i.e. exactly the pickers' submenu size.
+    {
+        // The shipped defaults lex clean: 3 offered, all-Ok, green.
+        const auto d = LexLaunchModelsText(kDefaultLaunchModels);
+        CHECK(d.ok == 3 && d.warn == 0 && d.error == 0, "models lex: shipped defaults => 3 offered, clean");
+        CHECK(d.worst == EnvLineKind::Ok, "models lex: defaults worst == Ok");
+
+        // Errors — an empty side is SKIPPED by the parser: missing name / missing id / bare '|'.
+        const auto err = LexLaunchModelsText(L"Good | good-id\n | no-name\nno-id | \n|");
+        CHECK(err.error == 3, "models lex: missing-name + missing-id + bare '|' => 3 errors");
+        CHECK(err.ok == 1, "models lex: only the good entry is offered");
+        CHECK(err.worst == EnvLineKind::Error, "models lex: worst == Error");
+        CHECK(err.firstIssueLine == 2, "models lex: first issue on line 2 (missing name)");
+        CHECK(ParseLaunchModels(L"Good | good-id\n | no-name\nno-id | \n|").size() == 1, "models lex: parser agrees — 1 accepted");
+
+        // Warns are LISTED (they count into ok): a duplicate display name (ASCII-case-insensitive)
+        // and a whitespace-carrying model id; a bare token is plain Ok (its own label).
+        const auto warn = LexLaunchModelsText(L"Opus | claude-opus-4-8\nopus | claude-opus-4-6\nX | my model\nclaude-sonnet-5");
+        CHECK(warn.error == 0 && warn.warn == 2, "models lex: duplicate name + spaced id => 2 warns");
+        CHECK(warn.ok == 4, "models lex: all four entries are still OFFERED (ok counts listed warns)");
+        CHECK(warn.worst == EnvLineKind::Warn, "models lex: worst == Warn (no errors)");
+        CHECK(warn.firstIssueLine == 2, "models lex: first issue on line 2 (duplicate name)");
+        CHECK(ParseLaunchModels(L"Opus | claude-opus-4-8\nopus | claude-opus-4-6\nX | my model\nclaude-sonnet-5").size() == 4, "models lex: parser agrees — 4 accepted");
+
+        // ';' splits entries WITHIN a line like the parser; both carry that line's number.
+        const auto semi = LexLaunchModelsText(L"A | a-1; B | b-1");
+        CHECK(semi.ok == 2 && semi.error == 0 && semi.warn == 0, "models lex: ';' splits two entries on one line");
+        CHECK(semi.lines.size() == 2 && semi.lines[0].line == 1 && semi.lines[1].line == 1, "models lex: both ';' entries report line 1");
+
+        // The kMaxLaunchModels cap: entry #33+ is Warn "not offered"; ok stays exactly the cap —
+        // and the parser drops the same tail, so status count == submenu size.
+        std::wstring big;
+        for (int i = 0; i < 40; ++i)
+        {
+            big += L"M" + std::to_wstring(i) + L" | id-" + std::to_wstring(i) + L"\n";
+        }
+        const auto capped = LexLaunchModelsText(big);
+        CHECK(capped.ok == kMaxLaunchModels, "models lex: ok capped at kMaxLaunchModels (the true offered count)");
+        CHECK(capped.warn == 40 - kMaxLaunchModels, "models lex: every past-cap entry warns (dropped)");
+        CHECK(capped.firstIssueLine == static_cast<uint32_t>(kMaxLaunchModels + 1), "models lex: first issue on the first past-cap line");
+        CHECK(ParseLaunchModels(big).size() == capped.ok, "models lex: parser agrees — offered == ok");
+
+        // Blanks + comments are Ignored (no counts, neutral).
+        const auto ign = LexLaunchModelsText(L"\n# Fable 5 | claude-fable-5\n   ");
+        CHECK(ign.ok == 0 && ign.warn == 0 && ign.error == 0, "models lex: blanks + comment => nothing");
+    }
+
     // dir-env.json round-trip (Serialize/Deserialize; pure — no disk).
     {
         std::vector<std::pair<std::wstring, std::wstring>> entries{

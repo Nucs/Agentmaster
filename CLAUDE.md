@@ -1412,8 +1412,14 @@ What works, by area:
   (neither a codex spawn nor `codex fork` takes `--model`), a shell tab keeps the plain "Fork
   session" (for it that's WT's duplicate-tab), and the launch bar's Launch/Fork + the double-click
   Resume/Fork dialog stay Default]; every tooltip points here, an ABSENT key seeds the
-  defaults while a cleared box stays empty ["just Default"], and the tab menu repopulates at
-  flyout-open so a cog edit applies live), `includeCoAuthoredBy`, and a
+  defaults while a cleared box stays empty ["just Default"], the tab menu repopulates at
+  flyout-open so a cog edit applies live, and the cog editor is **LIVE-LEXED like the env
+  editors** — `LexLaunchModelsText` (the `LexEnvText` twin, reusing `EnvLexResult`) recolors the
+  wrapping border green/amber/red + a counts/first-issue status line beneath
+  (`_RefreshLaunchModelsLex`, per keystroke + on open): Error = a skipped entry (empty name/id
+  side), Warn = listed-but-noteworthy (duplicate display name / a spaced model id) or dropped
+  past the 32-model cap, and `ok` counts what is actually OFFERED so "N models" == the submenu
+  size), `includeCoAuthoredBy`, and a
   global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via
   `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus a **CLAUDE BINARY** row (the
   native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**

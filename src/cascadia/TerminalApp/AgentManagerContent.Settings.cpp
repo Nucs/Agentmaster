@@ -742,22 +742,35 @@ namespace winrt::TerminalApp::implementation
         _setModel.PlaceholderText(L"As Is \x2014 blank keeps Claude's default (e.g. opus / sonnet)");
         AgentSetTip(_setModel, L"Model new sessions launch with (like /model) \x2014 e.g. opus or sonnet. Blank keeps Claude's own default.");
         panel.Children().Append(_setModel);
-        // Launch-model picker: the models every "Open New Session Here" submenu offers (the Manager
-        // board/tree + External row menus, the Sessions page, the WT tab menu). Multi-line like the
-        // env editor — one "Display name | model-id" per line; ParseLaunchModels is lenient (';'
-        // separates too, '#' comments, a bare model id is its own label).
+        // Launch-model picker: the models every "Open New Session Here" / "Fork session" submenu
+        // offers (the Manager board/tree + External row menus, the Sessions page, the WT tab menu).
+        // Multi-line like the env editor — one "Display name | model-id" per line; ParseLaunchModels
+        // is lenient (';' separates too, '#' comments, a bare model id is its own label) — and LIVE-
+        // LEXED exactly like the env editors: the box's own border is suppressed so the wrapping
+        // Border (recolored green/amber/red by LexLaunchModelsText) is the status indicator, with a
+        // counts + first-issue status line beneath (_RefreshLaunchModelsLex).
         _setLaunchModels = TextBox{};
-        _setLaunchModels.Header(winrt::box_value(L"Launch models (the \x201COpen New Session Here\x201D picker)"));
+        _setLaunchModels.Header(winrt::box_value(L"Launch models (the \x201COpen New Session Here\x201D / \x201C" L"Fork session\x201D picker)"));
         _setLaunchModels.AcceptsReturn(true);
         _setLaunchModels.TextWrapping(TextWrapping::NoWrap);
         _setLaunchModels.FontFamily(FontFamily{ L"Consolas" });
         _setLaunchModels.FontSize(12);
         _setLaunchModels.MinHeight(64);
         _setLaunchModels.MaxHeight(140);
+        _setLaunchModels.BorderThickness(Thickness{ 0, 0, 0, 0 });
         ScrollViewer::SetVerticalScrollBarVisibility(_setLaunchModels, ScrollBarVisibility::Auto);
         _setLaunchModels.PlaceholderText(L"Display name | model-id \x2014 one per line (e.g. Opus 4.8 | claude-opus-4-8)");
-        AgentSetTip(_setLaunchModels, L"The models every \x201COpen New Session Here\x201D submenu offers \x2014 on the Manager's board/tree and External menus, the Sessions page, and a tab's right-click menu. One \x201C" L"Display name | model-id\x201D per line: the left side is the menu label, the right is launched as --model <id> (that session only \x2014 \x201C" L"Default\x201D keeps the Model box above). '#' comments a line; clear the box to offer just Default.");
-        panel.Children().Append(_setLaunchModels);
+        AgentSetTip(_setLaunchModels, L"The models every \x201COpen New Session Here\x201D and \x201C" L"Fork session\x201D submenu offers \x2014 on the Manager's board/tree and External menus, the Sessions page, and a tab's right-click menu. One \x201C" L"Display name | model-id\x201D per line: the left side is the menu label, the right is launched as --model <id> (that session only \x2014 \x201C" L"Default\x201D keeps the Model box above). '#' comments a line; clear the box to offer just Default.");
+        _setLaunchModels.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshLaunchModelsLex(); });
+        _setLaunchModelsBorder = Border{};
+        _setLaunchModelsBorder.BorderThickness(Thickness{ 1, 1, 1, 1 });
+        _setLaunchModelsBorder.CornerRadius(CornerRadius{ 2, 2, 2, 2 });
+        _setLaunchModelsBorder.BorderBrush(Fill(0x60, 0x80, 0x80, 0x80)); // subtle neutral until the lexer paints it
+        _setLaunchModelsBorder.Child(_setLaunchModels);
+        panel.Children().Append(_setLaunchModelsBorder);
+        _setLaunchModelsStatus = Text(L"", 11, false, 0.7);
+        _setLaunchModelsStatus.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setLaunchModelsStatus);
         _setIncludeCoAuthored = ToggleSwitch{};
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
         AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
@@ -1580,6 +1593,7 @@ namespace winrt::TerminalApp::implementation
         if (_setLaunchModels)
         {
             _setLaunchModels.Text(winrt::hstring{ _appSettings.launchModels });
+            _RefreshLaunchModelsLex(); // explicit: a re-seed of IDENTICAL text fires no TextChanged, and the border/status must reflect THIS open's value
         }
         if (_setIncludeCoAuthored)
         {
@@ -2469,6 +2483,65 @@ namespace winrt::TerminalApp::implementation
             }
             status.Text(winrt::hstring{ msg });
             status.Foreground(fg);
+        }
+    }
+
+    // Agentmaster (launch-model picker): the "Launch models" editor's live validation — the
+    // _RefreshEnvLex twin over LexLaunchModelsText. Runs on every keystroke (TextChanged) + once on
+    // _ShowSettings (a programmatic re-seed of IDENTICAL text fires no TextChanged, so the explicit
+    // call keeps the border/status from going stale). Same palette + status shape as the env
+    // editors: green = every entry lists, amber = lists with warnings (duplicate name / spaced id /
+    // past the cap), red = a skipped entry (missing name or id side), neutral+hint when empty —
+    // `ok` is the true offered-model count, so "N models" is exactly every picker submenu's size.
+    void AgentManagerContent::_RefreshLaunchModelsLex()
+    {
+        if (!_setLaunchModels)
+        {
+            return;
+        }
+        const auto res = ::Agentmaster::LexLaunchModelsText(std::wstring{ _setLaunchModels.Text() });
+
+        // Same palette as _RefreshEnvLex / _ValidateLaunchBox: green ok / amber warn / red error.
+        const SolidColorBrush green = Fill(0xFF, 0x4C, 0xAF, 0x50);
+        const SolidColorBrush red = Fill(0xFF, 0xE5, 0x39, 0x35);
+        const SolidColorBrush amber = Fill(0xFF, 0xDA, 0xA5, 0x20);
+        const SolidColorBrush neutral = Fill(0x60, 0x80, 0x80, 0x80);
+        const SolidColorBrush dim = Fill(0xFF, 0x99, 0x99, 0x99);
+
+        const bool empty = (res.ok == 0 && res.warn == 0 && res.error == 0);
+        if (_setLaunchModelsBorder)
+        {
+            const SolidColorBrush bc = empty ? neutral :
+                                       res.worst == ::Agentmaster::EnvLineKind::Error ? red :
+                                       res.worst == ::Agentmaster::EnvLineKind::Warn  ? amber :
+                                                                                        green;
+            _setLaunchModelsBorder.BorderBrush(bc);
+        }
+        if (_setLaunchModelsStatus)
+        {
+            std::wstring msg;
+            SolidColorBrush fg = dim;
+            if (empty)
+            {
+                msg = L"No models \x2014 the pickers offer just Default.";
+            }
+            else if (res.error > 0)
+            {
+                msg = L"\x2715 " + res.firstIssue + L" (line " + std::to_wstring(res.firstIssueLine) + L")";
+                fg = red;
+            }
+            else if (res.warn > 0)
+            {
+                msg = L"\x26A0 " + std::to_wstring(res.ok) + (res.ok == 1 ? L" model \x00B7 " : L" models \x00B7 ") + res.firstIssue + L" (line " + std::to_wstring(res.firstIssueLine) + L")";
+                fg = amber;
+            }
+            else
+            {
+                msg = L"\x2713 " + std::to_wstring(res.ok) + (res.ok == 1 ? L" model in the pickers" : L" models in the pickers");
+                fg = green;
+            }
+            _setLaunchModelsStatus.Text(winrt::hstring{ msg });
+            _setLaunchModelsStatus.Foreground(fg);
         }
     }
 

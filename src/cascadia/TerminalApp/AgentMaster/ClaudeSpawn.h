@@ -204,6 +204,24 @@ namespace Agentmaster
     // calls Ok/Warn is exactly one the spawn applies (Warn => applied-but-noteworthy / dropped-if-reserved).
     EnvLexResult LexEnvText(std::wstring_view text);
 
+    // Agentmaster (launch-model picker): the launch-models twin of LexEnvText — a per-entry verdict
+    // over the Settings cog's "Launch models" editor, driving the SAME live border color + bottom
+    // status line the env editors have. REUSES the EnvLex* result shapes (they are shape-generic:
+    // line/kind/name/message + counts/worst/firstIssue); `EnvLineDiag::name` carries the entry's
+    // DISPLAY NAME. Verdicts mirror ParseLaunchModels EXACTLY:
+    //   Ignored — blank / '#' comment;
+    //   Ok      — a listed "Display name | model-id" (a bare token — its own label — is Ok too);
+    //   Warn    — LISTED but noteworthy: a duplicate display name (both DO list — a confusing menu;
+    //             ASCII-case-insensitive like the fold users perceive), or a model id carrying
+    //             whitespace (it launches quoted as --model "…" — almost certainly a typo) — plus
+    //             the NOT-listed case: any entry past the kMaxLaunchModels cap (parsed but DROPPED);
+    //   Error   — a '|' entry whose display-name or model-id side trims to empty (SKIPPED).
+    // Unlike LexEnvText, `ok` counts every entry that WILL be offered (Ok + the listed Warns, NOT
+    // the past-cap drops), so the status line's "N models" is the true submenu size. Entries are
+    // split like the parser (';'/'\r' inside a '\n' line too — each lexes as its own entry carrying
+    // that line's number), so lexer and parser can never disagree on what applies. PURE + unit-tested.
+    EnvLexResult LexLaunchModelsText(std::wstring_view text);
+
     // --- shipped global env defaults (ENV_VARS.md §8) ----------------------------------------------
     // Agentmaster ships a tiny set of GLOBAL env defaults, seeded ONCE into AppSettings.env so a NEW
     // install AND an UPDATER both get them — and a user who then EDITS or DELETES one keeps it gone (the

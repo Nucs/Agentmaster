@@ -469,6 +469,7 @@ namespace winrt::TerminalApp::implementation
         // Lex an env editor's text -> recolor its wrapping border + write its status line (the SAME
         // green/amber/red palette _ValidateLaunchBox uses). `perDir` picks which editor/border/status.
         void _RefreshEnvLex(bool perDir);
+        void _RefreshLaunchModelsLex(); // launch-model picker: live-lex the "Launch models" editor (LexLaunchModelsText) — recolor its border + refresh the counts/first-issue status line (the _RefreshEnvLex twin)
 
         // Agentmaster (updater; Updater.h): the Settings cog's UPDATES section. Runs a GitHub
         // release check OFF the UI thread (WinHTTP), then marshals back. interactive==true (the
@@ -777,7 +778,9 @@ namespace winrt::TerminalApp::implementation
         int _settingsActiveTab{ 0 }; // index of the showing tab (reset to 0 on each _ShowSettings)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setModel{ nullptr };
-        winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchModels{ nullptr }; // launch-model picker: multi-line "Display name | model-id" list (one per line) feeding every "Open New Session Here" submenu
+        winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchModels{ nullptr }; // launch-model picker: multi-line "Display name | model-id" list (one per line) feeding every "Open New Session Here" / "Fork session" submenu
+        winrt::Windows::UI::Xaml::Controls::Border _setLaunchModelsBorder{ nullptr }; // wraps _setLaunchModels; recolored by the lexer (the _setEnvBorder idiom)
+        winrt::Windows::UI::Xaml::Controls::TextBlock _setLaunchModelsStatus{ nullptr }; // the counts + first-issue line under the editor (the _setEnvStatus idiom)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setIncludeCoAuthored{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setDefaultMode{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxAutoSends{ nullptr };

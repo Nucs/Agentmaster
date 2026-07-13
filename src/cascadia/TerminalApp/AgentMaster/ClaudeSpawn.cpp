@@ -1531,6 +1531,150 @@ try {
         return r;
     }
 
+    EnvLexResult LexLaunchModelsText(std::wstring_view text)
+    {
+        // The launch-models twin of LexEnvText (see the header). Verdicts MUST mirror
+        // ParseLaunchModels: what it accepts is Ok/Warn-listed here, what it skips is Error, what
+        // its kMaxLaunchModels cap drops is Warn-dropped — the border/status the UI paints from
+        // this must never disagree with what the submenus actually offer.
+        EnvLexResult r;
+        std::unordered_map<std::wstring, uint32_t> seenNames; // fold(display name) of prior listed entries -> line no
+        size_t listed = 0; // entries the parser ACCEPTS (Ok + listed Warns) — its cap counter
+        uint32_t lineNo = 0;
+        size_t i = 0;
+
+        const auto fold = [&](std::wstring_view v) {
+            const auto up = [](wchar_t c) { return (c >= L'a' && c <= L'z') ? static_cast<wchar_t>(c - L'a' + L'A') : c; };
+            std::wstring f{ v };
+            for (auto& c : f)
+            {
+                c = up(c);
+            }
+            return f;
+        };
+        const auto note = [&](EnvLineKind k, const std::wstring& msg, uint32_t at, bool offered) {
+            if ((k == EnvLineKind::Warn || k == EnvLineKind::Error) && r.firstIssueLine == 0)
+            {
+                r.firstIssueLine = at;
+                r.firstIssue = msg;
+            }
+            if (k == EnvLineKind::Error)
+            {
+                ++r.error;
+                if (r.worst != EnvLineKind::Error)
+                {
+                    r.worst = EnvLineKind::Error;
+                }
+            }
+            else if (k == EnvLineKind::Warn)
+            {
+                ++r.warn;
+                if (r.worst == EnvLineKind::Ok)
+                {
+                    r.worst = EnvLineKind::Warn;
+                }
+            }
+            // Unlike the env lexer, `ok` = the OFFERED model count (Ok + listed Warns), so the
+            // status line's "N models" is the true size of every picker submenu.
+            if (offered)
+            {
+                ++r.ok;
+            }
+        };
+
+        // Walk '\n' lines for the line NUMBERS, then split each line on the parser's remaining
+        // intra-line separators (';' / a stray '\r' from a paste) so every entry the parser sees
+        // is lexed as its own diagnostic — carrying its line's number.
+        while (i <= text.size())
+        {
+            const size_t nl = text.find(L'\n', i);
+            const size_t end = (nl == std::wstring_view::npos) ? text.size() : nl;
+            ++lineNo;
+            const std::wstring_view line = text.substr(i, end - i);
+
+            size_t j = 0;
+            while (j <= line.size())
+            {
+                size_t sep = j;
+                while (sep < line.size() && line[sep] != L';' && line[sep] != L'\r')
+                {
+                    ++sep;
+                }
+                const std::wstring_view entry = EnvTrim(line.substr(j, sep - j));
+                EnvLineDiag d;
+                d.line = lineNo;
+                bool offered = false;
+                if (entry.empty() || entry.front() == L'#')
+                {
+                    d.kind = EnvLineKind::Ignored;
+                }
+                else
+                {
+                    const size_t bar = entry.find(L'|');
+                    const std::wstring name{ EnvTrim(bar == std::wstring_view::npos ? entry : entry.substr(0, bar)) };
+                    const std::wstring id{ EnvTrim(bar == std::wstring_view::npos ? entry : entry.substr(bar + 1)) };
+                    d.name = name;
+                    if (name.empty() && id.empty())
+                    {
+                        d.kind = EnvLineKind::Error;
+                        d.message = L"empty entry (expected Display name | model-id)";
+                    }
+                    else if (name.empty())
+                    {
+                        d.kind = EnvLineKind::Error;
+                        d.message = L"missing display name (text before '|')";
+                    }
+                    else if (id.empty())
+                    {
+                        d.kind = EnvLineKind::Error;
+                        d.message = L"missing model id (text after '|')";
+                    }
+                    else if (listed >= kMaxLaunchModels)
+                    {
+                        // The parser's cap: entry #33+ is never consumed — valid or not, it is DROPPED.
+                        d.kind = EnvLineKind::Warn;
+                        d.message = L"past the " + std::to_wstring(kMaxLaunchModels) + L"-model cap (not offered)";
+                    }
+                    else
+                    {
+                        ++listed;
+                        offered = true;
+                        if (const auto it = seenNames.find(fold(name)); it != seenNames.end())
+                        {
+                            d.kind = EnvLineKind::Warn;
+                            d.message = L"duplicate name \"" + name + L"\" (also line " + std::to_wstring(it->second) + L" \x2014 both will be listed)";
+                        }
+                        else if (id.find_first_of(L" \t") != std::wstring::npos)
+                        {
+                            d.kind = EnvLineKind::Warn;
+                            d.message = L"model id \"" + id + L"\" contains spaces \x2014 check it (it launches quoted)";
+                            seenNames.emplace(fold(name), lineNo);
+                        }
+                        else
+                        {
+                            d.kind = EnvLineKind::Ok;
+                            seenNames.emplace(fold(name), lineNo);
+                        }
+                    }
+                }
+                note(d.kind, d.message, d.line, offered);
+                r.lines.push_back(std::move(d));
+                if (sep >= line.size())
+                {
+                    break;
+                }
+                j = sep + 1;
+            }
+
+            if (nl == std::wstring_view::npos)
+            {
+                break;
+            }
+            i = nl + 1;
+        }
+        return r;
+    }
+
     // The child-env block shared by every managed-Claude spawn — fresh launch, resume, fork, AND the
     // in-place RESTART rebuild (BuildClaudeRestartSpec). CCMGR_SESSION_ID + CCMGR_HOOK_PIPE drive hook
     // correlation; the cog's global env is layered on top but can NEVER clobber the CCMGR_* vars (a stray
