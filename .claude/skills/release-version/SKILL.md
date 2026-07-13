@@ -119,6 +119,38 @@ It's outward-facing — never decide the version yourself. Default scheme: a tag
 `ver3 = X.Y.Z`, `ver4 = X.Y.Z.0` (the manifest `Identity Version`). Decide whether to release
 HEAD as-is or commit pending WIP first.
 
+### B0.5. Map the topology — diverged tags & "reunification" releases
+A version's tag is a **snapshot**, not necessarily a point on mainline. Prereleases and hotfixes
+routinely **diverge**: a hotfix cut off an old stable base, or a rebased/force-pushed branch, leaves
+a tagged commit that is **NOT an ancestor of `agentmaster` HEAD**. Before cutting, map where the
+release sits so the notes baseline and the "what does this contain" story are correct:
+```bash
+git fetch --tags --force origin
+for t in $(git tag --list 'v*' | sort -V | tail -6); do
+  git merge-base --is-ancestor "$t" HEAD 2>/dev/null \
+    && echo "$t  ON-mainline (ancestor of HEAD)" \
+    || echo "$t  DIVERGED (its commit is not on HEAD)"
+done
+git rev-list --count "v<lastStable>"..HEAD     # how far mainline is past the last STABLE
+git rev-parse HEAD origin/agentmaster          # is local ahead of origin? (push mainline before tagging)
+```
+- **Diverged tags are history** — leave them on GitHub; don't assume their commit is reachable from
+  mainline, and don't try to reconcile them into the branch. Their WORK usually still lives on
+  mainline (re-integrated / continued under different hashes).
+- **"Reunification" release:** when several prereleases/hotfixes diverged off an old stable base and
+  mainline is now the **superset** of all of them, releasing mainline REUNIFIES the line. Its notes
+  are the **comprehensive changelog since the last STABLE** (not since the last *tag*): fold in every
+  intervening prerelease's New/Fixes (release-notes skill §2/§6). Today's case: 0.6.2 (abandoned
+  prerelease) + 0.6.3/0.6.4 (diverged hotfixes) all sat off the 0.6.1 stable base; mainline carried
+  the full superset, so v0.6.5 released mainline as one prerelease baselined on **0.6.1** (the last
+  stable / current Latest), 30 commits back — even though 0.6.2–0.6.4 are "newer" tags.
+- **The last-stable baseline can sit BEHIND newer prereleases.** `Latest` = the newest **non**-
+  prerelease; intervening prereleases do NOT advance it (release-notes §2). Baseline notes off that
+  stable, not off the highest version number.
+- **Push mainline before tagging** so `origin/agentmaster` reflects the released tree (the install
+  one-liner pulls `tools/*.ps1` from the branch). A clean fast-forward (`git merge-base --is-ancestor
+  origin/agentmaster HEAD`) is a plain `git push origin agentmaster`.
+
 ### B1. PRE-VALIDATE with a clean local Release build — REQUIRED
 This is the single most important step. **The CI/release runner does a from-scratch Release x64
 build; your incremental Debug builds MASK errors it will hit** (e.g. a dead `using namespace
@@ -141,8 +173,21 @@ Expect `Build OK`. The wrapper skips the ~156s `.appxsym` symbol-package zip by 
 appxsym is safe for pre-validation: it catches compile/link errors, and the symbol-zip itself never
 fails. NOTE the CI `release.yml` does NOT pass the flag, so it still spends ~156s/arch generating an
 `.appxsym` nobody consumes — a separate, untouched CI-speedup opportunity.) `cl /MP` here reveals
-errors roughly one file at a time — fix, rebuild, repeat until green. (Optional belt-and-suspenders: the engine harness — `tests/run-m5-tests.bat`, ~604
-checks.)
+errors roughly one file at a time — fix, rebuild, repeat until green. (Optional belt-and-suspenders:
+the engine harness — `tests/run-m5-tests.bat`, ~1700 checks, no lock needed — but it validates the
+pure-C++ ENGINE TUs only, NOT the WinRT/XAML app TUs where clean-build-only errors bite, so it is
+NOT a substitute for B1.)
+
+**Self-kill caveat — when the release HOST is itself a main-tree Release instance.** If your Claude
+session runs *inside* the production instance (`*\bin\x64\Release\WindowsTerminal.exe`), you CANNOT
+relink the main tree's Release layout — building Release there locks/kills your own host. The
+self-kill-safe local build is an **isolated git worktree** (its own `bin\`), but a fresh worktree is
+a COLD build (full restore + cppwinrt projection, ~15-25 min for Release) that won't beat CI. In that
+case **CI's from-scratch Release build IS the clean-build gate B1 seeks** — trigger it (B3), watch the
+**build** step (B4), and spin a worktree only if it fails (incremental fix-rebuilds in a warm worktree
+are then fast). Reserve the local pre-validate for when you can build Release without self-kill (a
+Debug-hosted dev session, or an already-warm worktree). This is why v0.6.5 leaned on CI, not a local
+Release build.
 
 ### B2. Commit anything needed for a clean build
 Extensive commit message (project convention). If local diverged from origin by a content-identical
@@ -198,11 +243,21 @@ gh release edit vX.Y.Z -R Nucs/Agentmaster --notes-file /tmp/am_release_notes.md
 (`softprops/action-gh-release` writes a terse default body; override it.)
 
 ### B7. Publish
+Pick the flags by framing (the `release-notes` skill §5 owns stable-vs-prerelease framing):
 ```bash
-gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --latest
-gh release list -R Nucs/Agentmaster --limit 3          # confirm "Latest" on vX.Y.Z
+# STABLE — becomes the new Latest:
+gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --latest --prerelease=false
+# PRE-RELEASE — the current stable stays Latest:
+gh release edit vX.Y.Z -R Nucs/Agentmaster --draft=false --prerelease --latest=false
 ```
-After publishing, refresh `README.md` (Download/capabilities) if the feature set moved.
+Confirm the state + badge:
+```bash
+gh release view vX.Y.Z -R Nucs/Agentmaster | grep -iE '^draft:|^prerelease:'
+gh release list -R Nucs/Agentmaster --limit 5 | grep -vE '^\*'   # right badge on the right release
+```
+**Badge gotcha (proven):** `--latest=false` alone does NOT move the Latest badge off a release — to
+relocate it you must explicitly `--latest` the release you want as Latest (release-notes §5). After
+publishing, refresh `README.md` (Download/capabilities) if the feature set moved.
 
 ---
 
