@@ -146,7 +146,7 @@ namespace winrt::TerminalApp::implementation
     // parent transcript untouched. Transcript-gated: a parent with no transcript (or one the
     // cleanup sweep deleted mid-view) degrades to a FRESH session in the same dir rather than
     // dying on "No conversation found". Safe on a LIVE parent — the fork writes its own file.
-    void TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title)
+    void TerminalPage::_ForkSessionFromDisk(const std::wstring& parentId, const std::wstring& dir, const std::wstring& title, const std::wstring& modelOverride)
     {
         if (!_sessionRegistry || parentId.empty() || dir.empty())
         {
@@ -156,7 +156,8 @@ namespace winrt::TerminalApp::implementation
         // continuation resolve below logs the actual fork SOURCE, and the downstream [fork] line
         // carries the NEW forked id ("[fork] <new> (forked from <source>)") — so grepping [nav]+[fork]
         // gives the full row-clicked -> source -> new-id chain the user asked to be able to follow.
-        ::Agentmaster::LogNav(L"sessions fork-click row=" + ::Agentmaster::ShortId(parentId) + L" \"" + title.substr(0, 80) + L"\" dir=" + dir + (_openClaudeTabInBackground ? L" [bg]" : L""));
+        // A launch-model pick rides the line (model=<id>).
+        ::Agentmaster::LogNav(L"sessions fork-click row=" + ::Agentmaster::ShortId(parentId) + L" \"" + title.substr(0, 80) + L"\" dir=" + dir + (modelOverride.empty() ? std::wstring{} : (L" model=" + modelOverride)) + (_openClaudeTabInBackground ? L" [bg]" : L""));
         // Native-exe-only policy gate (auto-recovering): a fork is a claude launch (--fork-session).
         // _LaunchClaudeSession's backstop is SILENT, so gate + prompt here to surface the install notice.
         if (!::Agentmaster::EnsureClaudeAvailable())
@@ -176,7 +177,7 @@ namespace winrt::TerminalApp::implementation
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(forkParentId) ? forkParentId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log",
                                       L"[sessions-page->fork] source=" + forkParentId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom);
+        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ forkDir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, static_cast<uint32_t>(-1), modelOverride);
         // Nav audit END (pairs with the fork-click BEGIN above): the NEW forked id — exactly "the id of the
         // new forked session" the user asked to be able to trace, alongside the source it forked from. A
         // fork-click with NO matching fork-done means the launch crashed/hung between the two (the

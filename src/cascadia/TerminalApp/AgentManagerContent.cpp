@@ -284,7 +284,7 @@ namespace winrt::TerminalApp::implementation
     {
         _restartSessionHandler = std::move(handler);
     }
-    void AgentManagerContent::SetForkManagedSessionHandler(std::function<void(winrt::hstring)> handler)
+    void AgentManagerContent::SetForkManagedSessionHandler(std::function<void(winrt::hstring, winrt::hstring)> handler)
     {
         _forkManagedSessionHandler = std::move(handler);
     }

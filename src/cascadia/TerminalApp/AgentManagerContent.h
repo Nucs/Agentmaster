@@ -78,7 +78,7 @@ namespace winrt::TerminalApp::implementation
         // kind-aware fork the WT tab menu uses (Claude --fork-session / Codex `codex fork`), opening the
         // fork tab in the acting window. Both are kind-agnostic at this seam — the page branches.
         void SetRestartSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> restart a managed session's connection in place
-        void SetForkManagedSessionHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> fork a managed session (kind-aware), like the WT tab's "Fork session"
+        void SetForkManagedSessionHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, model) -> fork a managed session (kind-aware), like the WT tab's "Fork session"; model = the launch-model picker's per-LAUNCH `--model <id>` pick ("" = Default; always "" for Codex — its item is plain)
         void SetRenameHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (sessionId, newTitle) -> rename in the registry + retitle the WT tab (the one title)
         void SetTagsHandler(std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> handler); // Agentmaster (bookmark tags): (sessionId, anchor) -> the page opens its tag editor panel under the clicked board card / tree row (the WT tab menu's "Tags" twin)
         // Agentmaster (bookmark tags): the pointer entered/left one of a board card's bookmark
@@ -568,7 +568,7 @@ namespace winrt::TerminalApp::implementation
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _resumeSessionHandler; // Agentmaster: launch box holds a FOUND session id -> resume it (id, dir, title)
         std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _forkSessionHandler; // Agentmaster: launch box Fork -> fork the session id (id, dir, title)
         std::function<void(winrt::hstring)> _restartSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Restart session" -> rebuild a managed session's connection in place (page does it cross-window)
-        std::function<void(winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window
+        std::function<void(winrt::hstring, winrt::hstring)> _forkManagedSessionHandler; // Agentmaster: Triage Board / Explorer-tree "Fork session" -> kind-aware fork of a managed session (the WT tab menu's fork), opening the fork in the acting window. (sessionId, model) — model "" = Default (the launch-model picker)
         std::function<void(winrt::hstring, winrt::hstring)> _renameHandler; // Agentmaster: Explorer-tree rename -> page (registry title + tab title in lockstep)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::FrameworkElement)> _tagsHandler; // Agentmaster (bookmark tags): board-card / tree-row "Tags" -> page opens the tag editor panel (sessionId, the clicked element as the anchor)
         std::function<void(winrt::hstring, winrt::Windows::UI::Xaml::UIElement)> _tagHoverBeginHandler; // Agentmaster (bookmark tags): a card ribbon's pointer-enter -> the page's rich tag hover panel (tag, the ribbon as the anchor)

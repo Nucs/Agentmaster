@@ -1400,12 +1400,18 @@ What works, by area:
   `--dangerously-skip-permissions`), `model` (== `/model <v>`), **`launchModels`** (the
   **launch-model picker**: a multi-line `Display name | model-id` list — default `Fable 5 |
   claude-fable-5` / `Opus 4.8 | claude-opus-4-8` / `Sonnet 5 | claude-sonnet-5` — that turns EVERY
-  **"Open New Session Here"** into a submenu [board/tree session menu + External menu + the Sessions
-  page's row menu + its detail-pane SplitButton + the WT tab menu's "New Session Here", the shared
-  `AgentModelMenu.h` recipe]: **Default** (the plain behavior — the settings `model`) + one item per
-  configured model, each launching that ONE session with `--model <id>` [`ParseLaunchModels` →
-  `BuildClaudeCommandline`; per-launch only, never persisted — resume follows the settings model
-  again; a Codex row keeps the plain item]; every tooltip points here, an ABSENT key seeds the
+  **"Open New Session Here"** AND **"Fork session"/"Fork here"** into a submenu [board/tree session
+  menu + External menu + the Sessions page's row menu + its detail-pane SplitButtons (Open-New AND
+  Fork) + the WT tab menu's "New Session Here" and "Fork session", the shared `AgentModelMenu.h`
+  recipe]: **Default** (the plain behavior — the settings `model`) + one item per
+  configured model, each starting that ONE session with `--model <id>` [`ParseLaunchModels` →
+  `BuildClaudeCommandline`; a fork IS a launch — the pick rides `_ForkManagedSessionById` /
+  `_ForkSessionFromDisk` onto the forked session's commandline (the WT tab's fork submenu raises
+  `Tab::ForkSessionRequested`; its plain twin stays the DuplicateTab action) — per-launch only,
+  never persisted — resume follows the settings model again; a Codex row keeps the plain items
+  (neither a codex spawn nor `codex fork` takes `--model`), a shell tab keeps the plain "Fork
+  session" (for it that's WT's duplicate-tab), and the launch bar's Launch/Fork + the double-click
+  Resume/Fork dialog stay Default]; every tooltip points here, an ABSENT key seeds the
   defaults while a cleared box stays empty ["just Default"], and the tab menu repopulates at
   flyout-open so a cog edit applies live), `includeCoAuthoredBy`, and a
   global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via

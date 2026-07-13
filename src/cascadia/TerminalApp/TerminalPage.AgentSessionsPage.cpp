@@ -1922,16 +1922,19 @@ namespace winrt::TerminalApp::implementation
                     rowMenu.Items().Append(resume);
                 }
 
-                MenuFlyoutItem forkBtn;
+                // Launch-model picker: a SUBMENU — Default (the plain behavior) + one item per
+                // configured model (the shared AgentModelMenu.h recipe), each forking into a NEW
+                // BACKGROUND tab whose forked session starts on `--model <id>`.
+                MenuFlyoutSubItem forkBtn;
                 forkBtn.Text(L"Fork here");
-                SessSetTip(forkBtn, L"Fork into a NEW BACKGROUND tab (claude --resume --fork-session) \x2014 the original is untouched; the list stays open");
-                forkBtn.Click([this, rid, rdir, forkTitle](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rdir, forkTitle]() {
+                SessSetTip(forkBtn, winrt::hstring{ L"Fork into a NEW BACKGROUND tab (claude --resume --fork-session) \x2014 the original is untouched; the list stays open. Pick the model the fork starts on, or Default. " } + AgentModelEditHint());
+                AgentFillModelPickItems(forkBtn.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [this, rid, rdir, forkTitle](winrt::hstring model) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid, rdir, forkTitle, model]() {
                         if (auto self = weak.get())
                         {
                             self->_openClaudeTabInBackground = true;
                             auto reset = wil::scope_exit([self]() { self->_openClaudeTabInBackground = false; });
-                            self->_ForkSessionFromDisk(rid, rdir, forkTitle);
+                            self->_ForkSessionFromDisk(rid, rdir, forkTitle, std::wstring{ model });
                         }
                     });
                 });
@@ -2245,21 +2248,32 @@ namespace winrt::TerminalApp::implementation
         }
         // Fork here — ALWAYS offered (unlike Resume it is safe on a LIVE session too: the fork
         // writes its OWN new transcript, the parent's is untouched — no two-writers hazard).
+        // A SPLIT button (launch-model picker): the primary face keeps the one-click default fork;
+        // the chevron opens the shared "Default + models" picker (AgentModelMenu.h), the fork
+        // starting on the picked `--model <id>` — same shape as the Open-New split button below.
         {
-            Button forkBtn;
+            winrt::Microsoft::UI::Xaml::Controls::SplitButton forkBtn;
             forkBtn.Content(winrt::box_value(winrt::hstring{ L"Fork here" }));
-            SessSetTip(forkBtn, L"Fork a NEW conversation from this one \x2014 a copy you can diverge freely; the original transcript is untouched (--fork-session).");
+            SessSetTip(forkBtn, winrt::hstring{ L"Fork a NEW conversation from this one \x2014 a copy you can diverge freely; the original transcript is untouched (--fork-session). The \x25BE picks the model the fork starts on. " } + AgentModelEditHint());
             // A never-prompted row's display title is the page's placeholder — pass empty so the
             // fork seam derives a smart name instead of "(no prompt yet) (fork)".
             const std::wstring forkTitle = row->msgs > 0 ? title : std::wstring{};
-            forkBtn.Click([this, id, dir, forkTitle](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, forkTitle]() {
+            const auto forkHere = [this, id, dir, forkTitle](winrt::hstring model) {
+                Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, forkTitle, model]() {
                     if (auto self = weak.get())
                     {
-                        self->_ForkSessionFromDisk(id, dir, forkTitle);
+                        self->_ForkSessionFromDisk(id, dir, forkTitle, std::wstring{ model });
                     }
                 });
+            };
+            forkBtn.Click([forkHere](const winrt::Microsoft::UI::Xaml::Controls::SplitButton&, const winrt::Microsoft::UI::Xaml::Controls::SplitButtonClickEventArgs&) {
+                forkHere(winrt::hstring{}); // the primary face = Default (exactly the old button)
             });
+            {
+                MenuFlyout modelMenu;
+                AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), forkHere);
+                forkBtn.Flyout(modelMenu);
+            }
             actions.Children().Append(forkBtn);
         }
         // Open New Session Here — a SPLIT button (launch-model picker): the primary face keeps the

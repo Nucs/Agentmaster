@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Eli Belash <elibelash@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Agentmaster — the ONE "Open New Session Here ▸ <model>" picker recipe (launch-model picker),
-// shared by every surface that offers the action: the Manager's session menu (board card + tree
-// row) and External row menu (AgentManagerContent.Tree.cpp), the Sessions page's row menu +
-// detail-pane split button (TerminalPage.AgentSessionsPage.cpp), and the WT tab context menu
-// (Tab.cpp) — the AgentCopyActions.h convergence pattern, so the five menus can never drift.
+// Agentmaster — the ONE "<launch a Claude session> ▸ <model>" picker recipe (launch-model
+// picker), shared by every surface that offers a session-CREATING action: "Open New Session
+// Here" AND "Fork session"/"Fork here" — the Manager's session menu (board card + tree row) and
+// External row menu (AgentManagerContent.Tree.cpp), the Sessions page's row menu + detail-pane
+// split buttons (TerminalPage.AgentSessionsPage.cpp), and the WT tab context menu (Tab.cpp) —
+// the AgentCopyActions.h convergence pattern, so the many menus can never drift. (A fork IS a
+// launch variant — `claude --resume <src> --fork-session …` — so `--model <id>` applies to it
+// exactly like to a fresh spawn: the forked session starts on the picked model.)
 //
-// The picker shape is: a "Default" item (launch EXACTLY as the plain item always did — the
+// The picker shape is: a "Default" item (act EXACTLY as the plain item always did — the
 // Settings model, or Claude's own default when that is blank) over one item per configured model
 // from AppSettings.launchModels ("Display name | model-id", parsed by ParseLaunchModels). Picking
-// a model launches that ONE session with `--model <id>` (a CLI flag outranks the shared settings
+// a model starts that ONE session with `--model <id>` (a CLI flag outranks the shared settings
 // file); nothing is persisted — a later resume/restart follows the settings model again.
 //
 // The models are USER-EDITABLE (the Settings cog → Sessions → "Launch models"), and the user
@@ -58,7 +61,7 @@ namespace winrt::TerminalApp::implementation
 
         WUXC::MenuFlyoutItem def;
         def.Text(L"Default");
-        AgentSetTip(def, winrt::hstring{ L"Launch with the Settings model (blank there = Claude's own default) \x2014 exactly what a plain \x201COpen New Session Here\x201D always did. " } + AgentModelEditHint());
+        AgentSetTip(def, winrt::hstring{ L"Use the Settings model (blank there = Claude's own default) \x2014 exactly what the plain action always did. " } + AgentModelEditHint());
         def.Click([pick](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
             pick(winrt::hstring{});
         });
@@ -73,7 +76,7 @@ namespace winrt::TerminalApp::implementation
         {
             WUXC::MenuFlyoutItem it;
             it.Text(winrt::hstring{ name });
-            AgentSetTip(it, winrt::hstring{ L"Launch this session with --model " + id + L" (this launch only \x2014 resume follows the Settings model again). " } + AgentModelEditHint());
+            AgentSetTip(it, winrt::hstring{ L"Start this session on --model " + id + L" (this launch only \x2014 a later resume follows the Settings model again). " } + AgentModelEditHint());
             it.Click([pick, mid = winrt::hstring{ id }](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::RoutedEventArgs&) {
                 pick(mid);
             });

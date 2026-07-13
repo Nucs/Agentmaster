@@ -2554,6 +2554,25 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
+        // Agentmaster (launch-model picker): context-menu "Fork session ▸ <model>" -> fork THIS tab's
+        // managed Claude session starting on that model ("" = Default). Raised ONLY by the submenu form,
+        // which the flyout-Opening handler shows solely for a managed CLAUDE tab — so the session lookup
+        // here always resolves; a stale menu race (the session archived between open and click) just
+        // no-ops. Mirrors the plain item's path (_duplicateTabClicked -> DuplicateTab action ->
+        // _DuplicateTab -> _ForkManagedSessionById) with the same clickedIndex+1 placement, plus the pick.
+        hostingTab.ForkSessionRequested([weakTab, weakThis](winrt::hstring model) {
+            auto page{ weakThis.get() };
+            auto tab{ weakTab.get() };
+            if (!page || !tab)
+            {
+                return;
+            }
+            if (const auto sid = page->_ClaudeSessionForTab(*tab); !sid.empty())
+            {
+                page->_ForkManagedSessionById(sid, tab->TabViewIndex() + 1, std::wstring{ model });
+            }
+        });
+
         // Agentmaster: context-menu "Mark Unread" -> flash THIS tab's red attention ring until the user
         // visits (switches to) it. Resolve the managed session and route to _MarkSessionUnread, which
         // forces the flash even when this IS the currently-focused tab (the automatic active-tab skip is
@@ -2739,12 +2758,17 @@ namespace winrt::TerminalApp::implementation
                         }
                     }
                     tab->SetAgentCopyMenuVisible(isSession, isCodex);
-                    // Agentmaster (launch-model picker): (re)populate the "New Session Here" model
-                    // submenu from the LIVE settings list each open — the cog edits it without a
-                    // restart, and the tab's agent kind picks the form (a Codex tab keeps the plain
-                    // item: the models are Claude models, a codex spawn takes no --model). The Tab
-                    // change-gates the rebuild, so an unchanged list costs only the parse.
-                    tab->SetNewSessionModels(::Agentmaster::ParseLaunchModels(page->_appSettings.launchModels), isCodex);
+                    // Agentmaster (launch-model picker): (re)populate the "New Session Here" AND
+                    // "Fork session" model submenus from the LIVE settings list each open — the cog
+                    // edits it without a restart, and the tab's agent kind picks each form (a Codex
+                    // tab keeps both plain items: the models are Claude models, and neither a codex
+                    // spawn nor `codex fork` takes --model; a shell tab gets the New-Session submenu
+                    // — spawning Claude in its cwd — but keeps the plain "Fork session", which for it
+                    // is really WT's duplicate-tab). The Tab change-gates the rebuilds, so an
+                    // unchanged list costs only the one parse.
+                    const auto launchModels = ::Agentmaster::ParseLaunchModels(page->_appSettings.launchModels);
+                    tab->SetNewSessionModels(launchModels, isCodex);
+                    tab->SetForkSessionModels(launchModels, isSession && !isCodex);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too

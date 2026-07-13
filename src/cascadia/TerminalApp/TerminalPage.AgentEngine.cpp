@@ -909,10 +909,11 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: the Triage Board / Explorer-tree session menu's "Fork session" — kind-aware fork
         // (Claude --fork-session / Codex `codex fork`), the same path the WT tab's "Fork session" uses,
         // opening the fork tab in THIS window (it reads the shared registry; no live tab needed).
-        content->SetForkManagedSessionHandler([weakThis](winrt::hstring id) {
+        // model rides the launch-model picker's "Fork session ▸ <model>" submenu ("" = Default).
+        content->SetForkManagedSessionHandler([weakThis](winrt::hstring id, winrt::hstring model) {
             if (auto self = weakThis.get())
             {
-                self->_ForkManagedSessionById(std::wstring{ id });
+                self->_ForkManagedSessionById(std::wstring{ id }, static_cast<uint32_t>(-1), std::wstring{ model });
             }
         });
         content->SetRenameHandler([weakThis](winrt::hstring id, winrt::hstring title) {

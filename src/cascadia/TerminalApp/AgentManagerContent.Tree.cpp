@@ -1711,24 +1711,50 @@ namespace winrt::TerminalApp::implementation
         // Fork session — branch this conversation into a NEW, independent one (Claude: `--resume <id>
         // --fork-session`; Codex: `codex fork <rolloutUuid>`) opened in this window, the source untouched.
         // The page's _ForkManagedSessionById is the kind-aware fork shared with the WT tab's "Fork session".
-        MenuFlyoutItem fork;
-        fork.Text(L"Fork session");
-        fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
-        AgentSetTip(fork, L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched.");
-        fork.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
-            if (disp)
-            {
-                disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { if (self->_forkManagedSessionHandler) { self->_forkManagedSessionHandler(winrt::hstring{ id }); } } });
-            }
-            else if (auto self = weak.get())
-            {
-                if (self->_forkManagedSessionHandler)
+        // Launch-model picker: the CLAUDE item is a SUBMENU — Default + one item per configured model
+        // (a fork is a launch, so the pick rides `--model <id>` onto the forked session); the CODEX
+        // item stays plain (`codex fork` takes no --model).
+        if (isCodex)
+        {
+            MenuFlyoutItem fork;
+            fork.Text(L"Fork session");
+            fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
+            AgentSetTip(fork, L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched.");
+            fork.Click([weak, disp, id](const IInspectable&, const RoutedEventArgs&) {
+                if (disp)
                 {
-                    self->_forkManagedSessionHandler(winrt::hstring{ id });
+                    disp.TryEnqueue([weak, id]() { if (auto self = weak.get()) { if (self->_forkManagedSessionHandler) { self->_forkManagedSessionHandler(winrt::hstring{ id }, winrt::hstring{}); } } });
                 }
-            }
-        });
-        menu.Items().Append(fork);
+                else if (auto self = weak.get())
+                {
+                    if (self->_forkManagedSessionHandler)
+                    {
+                        self->_forkManagedSessionHandler(winrt::hstring{ id }, winrt::hstring{});
+                    }
+                }
+            });
+            menu.Items().Append(fork);
+        }
+        else
+        {
+            MenuFlyoutSubItem fork;
+            fork.Text(L"Fork session");
+            fork.Icon(glyphIcon(L"\xF5ED")); // Duplicate (matches the WT tab menu's "Fork session")
+            AgentSetTip(fork, winrt::hstring{ L"Fork this session \x2014 branch its conversation into a new, independent session (named \x201C\x2026 (fork)\x201D); the original is untouched. Pick the model the fork starts on, or Default. " } + AgentModelEditHint());
+            AgentFillModelPickItems(fork.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [weak, disp, id](winrt::hstring model) {
+                auto act = [weak, id, model]() {
+                    if (auto self = weak.get())
+                    {
+                        if (self->_forkManagedSessionHandler)
+                        {
+                            self->_forkManagedSessionHandler(winrt::hstring{ id }, model);
+                        }
+                    }
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(fork);
+        }
 
         // Close — the LAST item, set apart by a separator and carrying the X glyph, exactly like the WT
         // tab's right-click menu (its terminal Close item, glyph \xE711). Close shuts the session down

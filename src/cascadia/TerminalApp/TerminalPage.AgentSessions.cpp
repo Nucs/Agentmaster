@@ -1614,7 +1614,7 @@ namespace winrt::TerminalApp::implementation
     // hosted in another window into here). A source never prompted has no transcript/rollout to fork ->
     // fresh in the same dir (Rule #6). insertPosition threads tab placement (-1 == end). Returns false
     // only when `sourceId` is not a known managed session.
-    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition)
+    bool TerminalPage::_ForkManagedSessionById(const std::wstring& sourceId, uint32_t insertPosition, const std::wstring& modelOverride)
     {
         if (!_sessionRegistry || sourceId.empty())
         {
@@ -1627,8 +1627,9 @@ namespace winrt::TerminalApp::implementation
         }
         // Nav audit BEGIN: the user forked a LIVE managed session (the WT tab "Fork session" / _DuplicateTab,
         // or the board/tree "Fork session" menu). Logs the SOURCE + kind before the launch; the matching
-        // fork-managed-done names the new id. A begin with no done = a crash between the two.
-        ::Agentmaster::LogNav(std::wstring{ L"fork-managed-begin source=" } + ::Agentmaster::ShortId(sourceId) + (src->kind == ::Agentmaster::AgentKind::Codex ? L" (codex)" : L" (claude)"));
+        // fork-managed-done names the new id. A begin with no done = a crash between the two. A launch-model
+        // pick rides the line (model=<id>) so "which model did that fork start on" reads off the journey.
+        ::Agentmaster::LogNav(std::wstring{ L"fork-managed-begin source=" } + ::Agentmaster::ShortId(sourceId) + (modelOverride.empty() ? std::wstring{} : (L" model=" + modelOverride)) + (src->kind == ::Agentmaster::AgentKind::Codex ? L" (codex)" : L" (claude)"));
         const std::wstring dir = src->workingDir;
         const std::wstring forkBase = !src->title.empty() ? src->title : ::Agentmaster::DeriveSessionTitle(dir);
         const std::wstring ttl = ::Agentmaster::DeriveForkTitle(forkBase); // bump " (fork N)" instead of stacking
@@ -1656,7 +1657,7 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring forkFrom = ::Agentmaster::ClaudeConversationExists(sourceId) ? sourceId : std::wstring{};
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[fork-managed->fork] source=" + sourceId + (forkFrom.empty() ? L" (no transcript -> fresh session)" : L"") + L"\n");
-        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition);
+        const auto forkedTab = _LaunchClaudeSession(winrt::hstring{ dir }, winrt::hstring{ ttl }, std::nullopt, forkFrom, insertPosition, modelOverride);
         const std::wstring forkedId = forkedTab ? _ClaudeSessionForTab(forkedTab) : std::wstring{};
         ::Agentmaster::LogNav(L"fork-managed-done " + (forkedId.empty() ? std::wstring{ L"(no tab \x2014 launch skipped/failed)" } : (L"new=" + ::Agentmaster::ShortId(forkedId))) + L" from=" + ::Agentmaster::ShortId(sourceId) + (forkFrom.empty() ? std::wstring{ L" (fresh \x2014 no transcript)" } : std::wstring{}));
         return true;

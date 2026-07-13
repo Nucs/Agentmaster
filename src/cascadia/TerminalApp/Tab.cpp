@@ -2205,6 +2205,25 @@ namespace winrt::TerminalApp::implementation
 
             WUX::Controls::ToolTipService::SetToolTip(_duplicateTabMenuItem, box_value(duplicateTabToolTip));
             Automation::AutomationProperties::SetHelpText(_duplicateTabMenuItem, duplicateTabToolTip);
+
+            // The SUBMENU twin (Agentmaster, launch-model picker): "Fork session" expanded into
+            // Default + one item per configured model — a fork is a launch (`--resume <src>
+            // --fork-session …`), so `--model <id>` picks what the FORKED session starts on. The
+            // page repopulates it at flyout-open (SetForkSessionModels) and shows it ONLY for a
+            // managed CLAUDE tab (a Codex fork takes no --model; a plain shell tab's "Fork
+            // session" is really WT's duplicate-tab); the plain item above shows otherwise.
+            // Starts collapsed — the first flyout-open decides which of the pair shows.
+            Controls::FontIcon forkSubSymbol;
+            forkSubSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            forkSubSymbol.Glyph(L"\xF5ED"); // Duplicate (same as the plain item)
+
+            _forkSessionSubMenu.Text(RS_(L"DuplicateTabText"));
+            _forkSessionSubMenu.Icon(forkSubSymbol);
+            _forkSessionSubMenu.Visibility(WUX::Visibility::Collapsed);
+
+            const auto forkSubToolTip = winrt::hstring{ L"Fork this session \x2014 branch its conversation into a new, independent session; the original is untouched. Pick the model the fork starts on, or Default. Edit the list in the Manager's Settings (\x2699) \x2192 Sessions \x2192 Launch models." };
+            WUX::Controls::ToolTipService::SetToolTip(_forkSessionSubMenu, box_value(forkSubToolTip));
+            Automation::AutomationProperties::SetHelpText(_forkSessionSubMenu, forkSubToolTip);
         }
 
         {
@@ -2353,6 +2372,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_restartConnectionMenuItem);
         // Agentmaster: place "Fork session" directly below "Restart session"
         contextMenuFlyout.Items().Append(_duplicateTabMenuItem);
+        contextMenuFlyout.Items().Append(_forkSessionSubMenu); // Agentmaster (launch-model picker): its submenu twin — SetForkSessionModels shows exactly one of the pair, so they occupy one visual slot
         contextMenuFlyout.Items().Append(menuSeparator);
 
         auto closeSubMenu = _AppendCloseMenuItems(contextMenuFlyout);
@@ -2609,6 +2629,49 @@ namespace winrt::TerminalApp::implementation
             if (auto tab{ weakThis.get() })
             {
                 tab->NewSessionHereRequested.raise(model);
+            }
+        });
+    }
+
+    // Agentmaster (launch-model picker): the "Fork session" twin of SetNewSessionModels — swap the
+    // plain item (WT's repurposed duplicate-tab, whose click dispatches the DuplicateTab action) for
+    // the submenu form and (re)populate it. Shown ONLY for a managed CLAUDE tab with a non-empty
+    // list: a fork is a launch, so the pick rides `--model <id>` onto the forked session's
+    // commandline; a Codex fork takes no --model, and a shell tab's "Fork session" is really a
+    // duplicate — both keep the plain item. Submenu picks raise ForkSessionRequested (the page
+    // routes to _ForkManagedSessionById with the clicked tab's placement); the plain item keeps its
+    // action dispatch, which reaches the same fork seam with model = Default. Change-gated like
+    // SetNewSessionModels so an unchanged settings list costs nothing at flyout-open.
+    void Tab::SetForkSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isManagedClaude)
+    {
+        ASSERT_UI_THREAD();
+
+        const bool plain = !isManagedClaude || models.empty();
+        _duplicateTabMenuItem.Visibility(plain ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        _forkSessionSubMenu.Visibility(plain ? WUX::Visibility::Collapsed : WUX::Visibility::Visible);
+        if (plain)
+        {
+            return; // keep the last-built submenu items around — the key gate makes a flip back free
+        }
+        std::wstring key;
+        for (const auto& [name, id] : models)
+        {
+            key += name;
+            key += L'\x1F'; // unit separator — can't appear in a settings-typed name/id line
+            key += id;
+            key += L'\x1E';
+        }
+        if (key == _forkModelsKey && _forkSessionSubMenu.Items().Size() > 0)
+        {
+            return; // unchanged list — skip the item churn
+        }
+        _forkModelsKey = key;
+        _forkSessionSubMenu.Items().Clear();
+        auto weakThis{ get_weak() };
+        AgentFillModelPickItems(_forkSessionSubMenu.Items(), models, [weakThis](winrt::hstring model) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->ForkSessionRequested.raise(model);
             }
         });
     }
