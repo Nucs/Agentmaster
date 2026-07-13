@@ -810,10 +810,11 @@ namespace winrt::TerminalApp::implementation
         _agentManagerContent = winrt::make_weak(content.as<winrt::TerminalApp::IPaneContent>());
 
         const auto weakThis = get_weak();
-        content->SetSpawnHandler([weakThis](winrt::hstring dir, winrt::hstring title) {
+        content->SetSpawnHandler([weakThis](winrt::hstring dir, winrt::hstring title, winrt::hstring model) {
             if (auto self = weakThis.get())
             {
-                self->_SpawnClaudeSession(dir, title);
+                // model rides the launch-model picker ("Open New Session Here ▸ <model>"); "" = Default.
+                self->_SpawnClaudeSession(dir, title, static_cast<uint32_t>(-1), model);
             }
         });
         content->SetActivateHandler([weakThis](winrt::hstring id) {

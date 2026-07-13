@@ -50,6 +50,7 @@
 #include "TerminalPage.h"
 
 #include "AgentTipHelpers.h" // AgentSetTip / AgentCloseTipsIn — the shared tooltip-dismissal recipe
+#include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
 #include "AgentStatusColors.h" // ResolveTagDisplayColor / TagColorFor — the Tags column's bookmark ribbons
 #include "AgentMaster/ClaudeSpawn.h" // ClaudeProjectsDir / AppendStateLog
 #include "AgentMaster/Engine.h" // EnsureClaudeAvailable (native-exe-only launch gate)
@@ -1936,16 +1937,19 @@ namespace winrt::TerminalApp::implementation
                 });
                 rowMenu.Items().Append(forkBtn);
 
-                MenuFlyoutItem fresh;
+                // Launch-model picker: a SUBMENU — "Default" (the plain behavior) + one item per
+                // configured model (the shared AgentModelMenu.h recipe), each spawning the fresh
+                // BACKGROUND session with `--model <id>`.
+                MenuFlyoutSubItem fresh;
                 fresh.Text(L"Open New Session Here");
-                SessSetTip(fresh, L"Start a FRESH BACKGROUND session in this directory \x2014 the list stays open");
-                fresh.Click([this, rdir](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rdir]() {
+                SessSetTip(fresh, winrt::hstring{ L"Start a FRESH BACKGROUND session in this directory \x2014 the list stays open. Pick the model it starts on, or Default. " } + AgentModelEditHint());
+                AgentFillModelPickItems(fresh.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [this, rdir](winrt::hstring model) {
+                    Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rdir, model]() {
                         if (auto self = weak.get())
                         {
                             self->_openClaudeTabInBackground = true;
                             auto reset = wil::scope_exit([self]() { self->_openClaudeTabInBackground = false; });
-                            self->_SpawnClaudeSession(winrt::hstring{ rdir }, winrt::hstring{ L"" });
+                            self->_SpawnClaudeSession(winrt::hstring{ rdir }, winrt::hstring{ L"" }, static_cast<uint32_t>(-1), model);
                         }
                     });
                 });
@@ -2258,17 +2262,29 @@ namespace winrt::TerminalApp::implementation
             });
             actions.Children().Append(forkBtn);
         }
-        Button fresh;
+        // Open New Session Here — a SPLIT button (launch-model picker): the primary face keeps the
+        // one-click default spawn this always was; the chevron opens the SAME "Default + models"
+        // picker every "Open New Session Here" menu grew (the shared AgentModelMenu.h recipe), so
+        // the detail pane and the row menu can never drift.
+        winrt::Microsoft::UI::Xaml::Controls::SplitButton fresh;
         fresh.Content(winrt::box_value(winrt::hstring{ L"Open New Session Here" }));
-        SessSetTip(fresh, L"Start a fresh Claude session in this session's working directory.");
-        fresh.Click([this, dir](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
-            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), dir]() {
+        SessSetTip(fresh, winrt::hstring{ L"Start a fresh Claude session in this session's working directory. The \x25BE picks the model it starts on. " } + AgentModelEditHint());
+        const auto spawnFreshHere = [this, dir](winrt::hstring model) {
+            Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), dir, model]() {
                 if (auto self = weak.get())
                 {
-                    self->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{ L"" });
+                    self->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{ L"" }, static_cast<uint32_t>(-1), model);
                 }
             });
+        };
+        fresh.Click([spawnFreshHere](const winrt::Microsoft::UI::Xaml::Controls::SplitButton&, const winrt::Microsoft::UI::Xaml::Controls::SplitButtonClickEventArgs&) {
+            spawnFreshHere(winrt::hstring{}); // the primary face = Default (exactly the old button)
         });
+        {
+            MenuFlyout modelMenu;
+            AgentFillModelPickItems(modelMenu.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), spawnFreshHere);
+            fresh.Flyout(modelMenu);
+        }
         actions.Children().Append(fresh);
         _sessionsDetailHost.Children().Append(actions);
 

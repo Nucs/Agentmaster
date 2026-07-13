@@ -1397,7 +1397,17 @@ What works, by area:
   global-settings surface — an **in-content modal overlay** (a dimmed `Grid` over `_root`),
   NOT a `ContentDialog` (a text box inside one gets no keypresses in XAML Islands — see
   Gotchas). Exposes **Claude-session** config — `skipPermissions` (the spawn's
-  `--dangerously-skip-permissions`), `model` (== `/model <v>`), `includeCoAuthoredBy`, and a
+  `--dangerously-skip-permissions`), `model` (== `/model <v>`), **`launchModels`** (the
+  **launch-model picker**: a multi-line `Display name | model-id` list — default `Fable 5 |
+  claude-fable-5` / `Opus 4.8 | claude-opus-4-8` / `Sonnet 5 | claude-sonnet-5` — that turns EVERY
+  **"Open New Session Here"** into a submenu [board/tree session menu + External menu + the Sessions
+  page's row menu + its detail-pane SplitButton + the WT tab menu's "New Session Here", the shared
+  `AgentModelMenu.h` recipe]: **Default** (the plain behavior — the settings `model`) + one item per
+  configured model, each launching that ONE session with `--model <id>` [`ParseLaunchModels` →
+  `BuildClaudeCommandline`; per-launch only, never persisted — resume follows the settings model
+  again; a Codex row keeps the plain item]; every tooltip points here, an ABSENT key seeds the
+  defaults while a cleared box stays empty ["just Default"], and the tab menu repopulates at
+  flyout-open so a cog edit applies live), `includeCoAuthoredBy`, and a
   global **`env`** (a `;`-delimited `NAME=VALUE` list applied to every session via
   `ParseEnvAssignments`→`spec.env`, `CCMGR_*` filtered) — plus a **CLAUDE BINARY** row (the
   native-exe-only policy): the auto-detected `claude.exe` (read-only) + an **`.exe`-only override**

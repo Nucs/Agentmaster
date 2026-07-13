@@ -342,6 +342,7 @@ void TestAppSettings()
         AppSettings in;
         in.skipPermissions = false;
         in.model = L"opus";
+        in.launchModels = L"Opus 4.6 | claude-opus-4-6\nMine | my-model"; // non-default (default = the shipped 3-model kDefaultLaunchModels list) — launch-model picker
         in.includeCoAuthoredBy = false;
         in.defaultAutorunnerMode = AutorunnerMode::Full;
         in.maxAutoSends = 7;
@@ -375,6 +376,7 @@ void TestAppSettings()
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
         CHECK(out.env == L"FOO=bar;BAZ=qux", "settings env round-trip");
         CHECK(out.model == L"opus", "settings model round-trip");
+        CHECK(out.launchModels == L"Opus 4.6 | claude-opus-4-6\nMine | my-model", "settings launchModels round-trip (verbatim)");
         CHECK(out.includeCoAuthoredBy == false, "settings includeCoAuthoredBy round-trip");
         CHECK(out.defaultAutorunnerMode == AutorunnerMode::Full, "settings defaultAutorunnerMode round-trip");
         CHECK(out.maxAutoSends == 7u, "settings maxAutoSends round-trip");
@@ -408,10 +410,22 @@ void TestAppSettings()
               "settings hiddenSessionIds round-trip (order preserved)");
     }
 
+    // Agentmaster (launch-model picker): launchModels gates its default on key PRESENCE — an
+    // ABSENT key (a pre-picker settings.json) seeds the shipped kDefaultLaunchModels, while a
+    // PRESENT empty string is a deliberate "no models" (the user cleared the cog box) and stays "".
+    // (The on-disk shape is the {"version":1,"settings":{…}} wrapper SerializeAppSettings writes.)
+    {
+        const auto absent = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"model\":\"opus\"}}");
+        CHECK(absent.model == L"opus" && absent.launchModels == std::wstring{ kDefaultLaunchModels }, "settings launchModels ABSENT key -> the shipped defaults");
+        const auto cleared = DeserializeAppSettings(L"{\"version\":1,\"settings\":{\"launchModels\":\"\"}}");
+        CHECK(cleared.launchModels.empty(), "settings launchModels PRESENT-but-empty stays empty (deliberate 'just Default')");
+    }
+
     // Empty / garbage -> all defaults (a missing settings.json must change nothing).
     {
         const auto out = DeserializeAppSettings(L"");
         CHECK(out.skipPermissions == true && out.includeCoAuthoredBy == true, "settings defaults on empty");
+        CHECK(out.launchModels == std::wstring{ kDefaultLaunchModels }, "settings launchModels defaults (Fable 5 / Opus 4.8 / Sonnet 5) on empty");
         CHECK(out.defaultAutorunnerMode == AutorunnerMode::Full && out.maxAutoSends == 100u, "settings autorunner default Full on empty");
         CHECK(out.archiveSplitFraction > 0.499 && out.archiveSplitFraction < 0.501, "settings archiveSplitFraction default 0.5 on empty");
         CHECK(out.summaryPanelWidthFraction == 0.0 && out.summaryPanelHeightFraction == 0.0, "settings summaryPanel size fractions default 0 (auto) on empty");

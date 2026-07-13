@@ -80,7 +80,13 @@ namespace Agentmaster
     //   Given a launcher we emit its full path: a .exe as the (quoted) leading token; a .cmd/.bat
     //   wrapped in `cmd /c` (CreateProcessW cannot execute a batch file directly). Empty => the bare
     //   `claude` token (back-compat, and the not-found path that surfaces the error to the user).
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {});
+    // modelOverride (Agentmaster, launch-model picker): non-empty => append ` --model <id>` — the
+    //   per-LAUNCH model picked from an "Open New Session Here" submenu. A CLI flag outranks the
+    //   shared settings file, so this overrides the cog's global `model` for THIS session only;
+    //   the Fleet Observer reads it back off the live commandline (ReadClaudeFacts), so the card /
+    //   overlay `model·effort` adornment shows the pick with no extra plumbing. Quoted iff it
+    //   contains whitespace. Empty => no flag (exactly the pre-picker commandline).
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view modelOverride = {});
 
     // Assemble the codex (OpenAI Codex CLI) command line (Agentmaster — Codex managed-session
     // support). Codex CANNOT pin a session id and takes NO --settings (unlike claude), so a FRESH
@@ -136,6 +142,19 @@ namespace Agentmaster
     // empty NAME / starting with '#' (a comment) are skipped; whitespace around an entry and around
     // NAME is trimmed; VALUE is taken verbatim (may itself contain '='). Pure + unit-tested.
     std::vector<std::pair<std::wstring, std::wstring>> ParseEnvAssignments(std::wstring_view spec);
+
+    // Agentmaster (launch-model picker): parse AppSettings.launchModels — the "Display name |
+    // model-id" list behind every "Open New Session Here" model submenu — into ordered
+    // {displayName, modelId} pairs. Entries are separated by newline OR ';' (the same lenient
+    // splitting as ParseEnvAssignments, so the multi-line cog editor and a hand-edited single
+    // line both parse); the FIRST '|' splits name from id, both sides trimmed. A bare entry with
+    // no '|' uses the token as BOTH name and id (a raw model id still lists); blank entries and
+    // '#' comments are skipped, as is an entry whose name or id trims to empty. Order is
+    // preserved (the submenu lists top-to-bottom as typed; duplicates are kept verbatim — the
+    // user's list, not ours to dedupe). Capped at kMaxLaunchModels so a runaway settings edit
+    // can't balloon every context menu. Pure + unit-tested.
+    inline constexpr size_t kMaxLaunchModels = 32;
+    std::vector<std::pair<std::wstring, std::wstring>> ParseLaunchModels(std::wstring_view spec);
 
     // Merge a GLOBAL env block (AppSettings.env) with a working-directory's PER-DIR overrides
     // (dir-env.json) into the final ordered NAME=VALUE pairs. Per-dir entries OVERRIDE global ones
@@ -336,7 +355,11 @@ namespace Agentmaster
     // the fork's EXISTING id here so it forks back into the same id, preserving its identity (and the
     // WindowRecord tab ref) across the restart rather than churning a new id every reopen. Collision-free
     // because a transcript-less fork's id is unused on disk. Ignored unless forkFromSessionId is set.
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {});
+    // `modelOverride` (Agentmaster, launch-model picker): non-empty => the commandline carries
+    // ` --model <id>` — the per-LAUNCH model picked from an "Open New Session Here" submenu (see
+    // BuildClaudeCommandline). Per-launch only, deliberately NOT persisted on the session: a later
+    // resume/restart follows the settings model again (the pick was for THAT launch).
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId = {}, std::wstring_view claudeLauncher = {}, std::wstring_view forkIntoSessionId = {}, std::wstring_view modelOverride = {});
 
     // Build a spec to RELAUNCH an existing managed conversation IN PLACE — the tab's connection died and
     // the user hit "Restart session" (WT's restartConnection). Unlike BuildClaudeSpawn it NEVER mints a

@@ -577,6 +577,7 @@ namespace Agentmaster
         auto o = json::Value::MkObj();
         o.Set(L"skipPermissions", json::Value::MkBool(s.skipPermissions));
         o.Set(L"model", json::Value::MkStr(s.model));
+        o.Set(L"launchModels", json::Value::MkStr(s.launchModels));
         o.Set(L"includeCoAuthoredBy", json::Value::MkBool(s.includeCoAuthoredBy));
         o.Set(L"env", json::Value::MkStr(s.env));
         o.Set(L"claudeExePath", json::Value::MkStr(s.claudeExePath));
@@ -634,6 +635,14 @@ namespace Agentmaster
         AppSettings s; // any missing field keeps the struct default (== prior hardcoded behavior)
         s.skipPermissions = v.BoolAt(L"skipPermissions", true);
         s.model = v.StrAt(L"model");
+        // Launch-model picker: gate the default on key PRESENCE, not emptiness — an ABSENT key
+        // (a pre-picker settings.json) seeds the shipped kDefaultLaunchModels (the struct default),
+        // while a PRESENT empty string is a deliberate "no models" (the user cleared the cog box;
+        // every "Open New Session Here" submenu then offers just "Default") and must stay empty.
+        if (v.Find(L"launchModels"))
+        {
+            s.launchModels = v.StrAt(L"launchModels");
+        }
         s.includeCoAuthoredBy = v.BoolAt(L"includeCoAuthoredBy", true);
         s.env = v.StrAt(L"env");
         s.claudeExePath = v.StrAt(L"claudeExePath");

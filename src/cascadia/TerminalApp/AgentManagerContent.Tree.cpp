@@ -23,6 +23,7 @@
 
 #include "AgentTipHelpers.h" // AgentSetTip — hover tooltips with working dismissal (XAML Islands)
 #include "AgentCopyActions.h" // CopySessionField — the shared copy-menu action (same path as the per-tab overlay's copy button)
+#include "AgentModelMenu.h" // AgentFillModelPickItems / AgentModelEditHint — the shared "Open New Session Here ▸ <model>" picker (launch-model picker)
 #include "AgentStatusColors.h" // ParseArgbHexColor / FormatArgbHexColor — the cog's "status flashing color" picker <-> AppSettings::flashRingColor
 #include "AgentMaster/ClaudeSpawn.h" // NewSessionId (prompt ids)
 #include "AgentMaster/Persistence.h" // templates: load/save/apply
@@ -1039,14 +1040,17 @@ namespace winrt::TerminalApp::implementation
             // Open New Session Here — offered in every scope (matches _MakeSessionMenu's LOCAL/GLOBAL
             // ordering): spawn a managed session in this external's cwd (a new, independent
             // conversation — distinct from Adopt, which resumes the external's existing conversation).
-            MenuFlyoutItem openHere;
+            // Launch-model picker: a SUBMENU — "Default" (the plain behavior) + one item per configured
+            // model (AppSettings.launchModels; the shared AgentModelMenu.h recipe), each launching
+            // this ONE session with `--model <id>`.
+            MenuFlyoutSubItem openHere;
             openHere.Text(L"Open New Session Here");
-            AgentSetTip(openHere, L"Launch a managed Claude session in this directory (a new, independent conversation)");
-            openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+            AgentSetTip(openHere, winrt::hstring{ L"Launch a managed Claude session in this directory (a new, independent conversation) \x2014 pick the model it starts on, or Default. " } + AgentModelEditHint());
+            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
                 // Spawning a managed Claude session needs a native claude.exe (native-exe-only policy) —
                 // gate with the same re-resolve-then-prompt the Adopt action above uses, so this never
                 // silently no-ops at the engine backstop when Claude isn't installed.
-                auto act = [weak, cwd]() {
+                auto act = [weak, cwd, model]() {
                     auto self = weak.get();
                     if (!self || !self->_spawnHandler)
                     {
@@ -1057,7 +1061,7 @@ namespace winrt::TerminalApp::implementation
                         self->_ShowClaudeMissing();
                         return;
                     }
-                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}, model);
                 };
                 if (disp) { disp.TryEnqueue(act); } else { act(); }
             });
@@ -1626,44 +1630,61 @@ namespace winrt::TerminalApp::implementation
         menu.Items().Append(MenuFlyoutSeparator{});
 
         // New Session Here — spawn a NEW, independent managed session in this row's working dir.
-        MenuFlyoutItem openHere;
-        openHere.Text(isCodex ? L"Open New Codex Session Here" : L"Open New Session Here");
-        openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
-        AgentSetTip(openHere, isCodex ? L"Launch a managed Codex session in this directory (a new, independent conversation)" : L"Launch a managed Claude session in this directory (a new, independent conversation)");
-        openHere.Click([weak, disp, cwd, isCodex](const IInspectable&, const RoutedEventArgs&) {
-            auto act = [weak, cwd, isCodex]() {
-                auto self = weak.get();
-                if (!self)
-                {
-                    return;
-                }
-                if (isCodex)
-                {
+        // Launch-model picker: the Claude item is a SUBMENU — "Default" (the plain behavior) + one
+        // item per configured model (AppSettings.launchModels; the shared AgentModelMenu.h recipe).
+        // A Codex row keeps the PLAIN item: the models are Claude models and a codex spawn takes no
+        // --model, so a one-entry submenu would only add a hover for nothing.
+        if (isCodex)
+        {
+            MenuFlyoutItem openHere;
+            openHere.Text(L"Open New Codex Session Here");
+            openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
+            AgentSetTip(openHere, L"Launch a managed Codex session in this directory (a new, independent conversation)");
+            openHere.Click([weak, disp, cwd](const IInspectable&, const RoutedEventArgs&) {
+                auto act = [weak, cwd]() {
+                    auto self = weak.get();
+                    if (!self)
+                    {
+                        return;
+                    }
                     // Codex spawn (adopt=false, fork ignored) — no native-exe gate (Codex isn't exe-only;
                     // the launcher falls back to a bare `codex` token + surfaces any error).
                     if (self->_codexLaunchHandler)
                     {
                         self->_codexLaunchHandler(0, winrt::hstring{ cwd }, false, false);
                     }
-                    return;
-                }
-                // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
-                // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
-                // no-op'ing at the engine backstop when Claude isn't installed.
-                if (!self->_spawnHandler)
-                {
-                    return;
-                }
-                if (!::Agentmaster::EnsureClaudeAvailable())
-                {
-                    self->_ShowClaudeMissing();
-                    return;
-                }
-                self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{});
-            };
-            if (disp) { disp.TryEnqueue(act); } else { act(); }
-        });
-        menu.Items().Append(openHere);
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(openHere);
+        }
+        else
+        {
+            MenuFlyoutSubItem openHere;
+            openHere.Text(L"Open New Session Here");
+            openHere.Icon(glyphIcon(L"\xE710")); // Add (matches the WT tab menu's "New Session Here")
+            AgentSetTip(openHere, winrt::hstring{ L"Launch a managed Claude session in this directory (a new, independent conversation) \x2014 pick the model it starts on, or Default. " } + AgentModelEditHint());
+            AgentFillModelPickItems(openHere.Items(), ::Agentmaster::ParseLaunchModels(_appSettings.launchModels), [weak, disp, cwd](winrt::hstring model) {
+                auto act = [weak, cwd, model]() {
+                    auto self = weak.get();
+                    if (!self || !self->_spawnHandler)
+                    {
+                        return;
+                    }
+                    // Native-exe-only policy: spawning a managed Claude session needs a native claude.exe —
+                    // gate (re-resolve-then-prompt) so it surfaces the install modal instead of silently
+                    // no-op'ing at the engine backstop when Claude isn't installed.
+                    if (!::Agentmaster::EnsureClaudeAvailable())
+                    {
+                        self->_ShowClaudeMissing();
+                        return;
+                    }
+                    self->_spawnHandler(winrt::hstring{ cwd }, winrt::hstring{}, model);
+                };
+                if (disp) { disp.TryEnqueue(act); } else { act(); }
+            });
+            menu.Items().Append(openHere);
+        }
 
         // Restart session — rebuild THIS session's live ConPTY connection in place (the page resumes the
         // current conversation; never replays the launch commandline). Kind-agnostic at this seam: the

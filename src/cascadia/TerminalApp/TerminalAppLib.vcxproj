@@ -171,6 +171,7 @@
     <ClInclude Include="AgentManagerContent.h" />
     <ClInclude Include="AgentClipboard.h" />
     <ClInclude Include="AgentCopyActions.h" />
+    <ClInclude Include="AgentModelMenu.h" />
     <ClInclude Include="AgentStatusColors.h" />
     <ClInclude Include="AgentTipHelpers.h" />
     <ClInclude Include="AgentTabOverlay.h" />

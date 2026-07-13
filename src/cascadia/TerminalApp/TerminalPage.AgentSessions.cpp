@@ -162,12 +162,13 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: launch a fresh Claude session (the Manager's "Launch Claude"). insertPosition
     // threads tab placement: -1 (the default) keeps the end/NewTabPosition behavior; a tab
     // context-menu "New Session Here" passes clickedIndex+1 so the new tab lands next to it.
-    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition)
+    void TerminalPage::_SpawnClaudeSession(winrt::hstring workingDir, winrt::hstring title, uint32_t insertPosition, winrt::hstring model)
     {
         // Nav audit: the user asked for a FRESH session here (Manager "Launch Claude", a tree/board/
         // Sessions-page "Open New Session Here", or a tab-menu spawn). The resulting minted id lands
-        // in the downstream [spawn] line.
-        ::Agentmaster::LogNav(L"open-new claude dir=" + std::wstring{ workingDir } + (_openClaudeTabInBackground ? L" [bg]" : L""));
+        // in the downstream [spawn] line. A launch-model pick rides the line (model=<id>) so "which
+        // model did that session start on" reads straight off the journey.
+        ::Agentmaster::LogNav(L"open-new claude dir=" + std::wstring{ workingDir } + (model.empty() ? std::wstring{} : (L" model=" + std::wstring{ model })) + (_openClaudeTabInBackground ? L" [bg]" : L""));
         // Native-exe-only policy gate (auto-recovering). A page / tab-menu spawn that reaches here did
         // NOT pass through the Manager's rich modal, so prompt with the page dialog instead of silently
         // no-op'ing at _LaunchClaudeSession's backstop. (A Manager-tab spawn already gated upstream and
@@ -178,7 +179,7 @@ namespace winrt::TerminalApp::implementation
             _PromptClaudeMissing();
             return;
         }
-        const auto spawnedTab = _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition);
+        const auto spawnedTab = _LaunchClaudeSession(workingDir, title, std::nullopt, {}, insertPosition, std::wstring{ model });
         // Nav audit END (pairs with the open-new BEGIN above): the minted id of the fresh session. An
         // open-new with no matching done = the launch crashed/no-op'd before the tab was created.
         const std::wstring spawnedId = spawnedTab ? _ClaudeSessionForTab(spawnedTab) : std::wstring{};
@@ -193,7 +194,7 @@ namespace winrt::TerminalApp::implementation
     // restores its Auto Testing + autorunner from persistence (DESIGN §13) — so closing and
     // reopening the app brings the session back exactly as it was. `Sent` prompts are kept
     // Sent (never replayed, Correctness Rule #4).
-    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition)
+    TerminalApp::Tab TerminalPage::_LaunchClaudeSession(winrt::hstring workingDir, winrt::hstring title, std::optional<::Agentmaster::SessionInfo> restored, const std::wstring& forkFromId, uint32_t insertPosition, const std::wstring& modelOverride)
     {
         if (!_sessionRegistry || !_hooksBridge)
         {
@@ -284,7 +285,7 @@ namespace winrt::TerminalApp::implementation
         // ignores PATHEXT, so the full path is mandatory. This is reached ONLY when ClaudeAvailable() (the
         // Manager gates launch/new/fork/resume otherwise), so claudeExePath is non-empty here; the empty
         // bare-token fallback never executes.
-        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId);
+        const auto spec = ::Agentmaster::BuildClaudeSpawn(dir, ttl, _hooksBridge->PipeName(), resumeId, ::Agentmaster::LoadAppSettings(), effectiveForkFrom, ::Agentmaster::SharedEngine().claudeExePath, forkIntoId, modelOverride);
 
         // Build the ConPTY connection (commandline = claude + our hooks settings; child env = spec.env
         // [CCMGR_SESSION_ID + CCMGR_HOOK_PIPE + the cog's global env] plus this window's AM_SESSION

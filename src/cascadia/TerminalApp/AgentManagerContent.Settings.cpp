@@ -742,6 +742,22 @@ namespace winrt::TerminalApp::implementation
         _setModel.PlaceholderText(L"As Is \x2014 blank keeps Claude's default (e.g. opus / sonnet)");
         AgentSetTip(_setModel, L"Model new sessions launch with (like /model) \x2014 e.g. opus or sonnet. Blank keeps Claude's own default.");
         panel.Children().Append(_setModel);
+        // Launch-model picker: the models every "Open New Session Here" submenu offers (the Manager
+        // board/tree + External row menus, the Sessions page, the WT tab menu). Multi-line like the
+        // env editor — one "Display name | model-id" per line; ParseLaunchModels is lenient (';'
+        // separates too, '#' comments, a bare model id is its own label).
+        _setLaunchModels = TextBox{};
+        _setLaunchModels.Header(winrt::box_value(L"Launch models (the \x201COpen New Session Here\x201D picker)"));
+        _setLaunchModels.AcceptsReturn(true);
+        _setLaunchModels.TextWrapping(TextWrapping::NoWrap);
+        _setLaunchModels.FontFamily(FontFamily{ L"Consolas" });
+        _setLaunchModels.FontSize(12);
+        _setLaunchModels.MinHeight(64);
+        _setLaunchModels.MaxHeight(140);
+        ScrollViewer::SetVerticalScrollBarVisibility(_setLaunchModels, ScrollBarVisibility::Auto);
+        _setLaunchModels.PlaceholderText(L"Display name | model-id \x2014 one per line (e.g. Opus 4.8 | claude-opus-4-8)");
+        AgentSetTip(_setLaunchModels, L"The models every \x201COpen New Session Here\x201D submenu offers \x2014 on the Manager's board/tree and External menus, the Sessions page, and a tab's right-click menu. One \x201C" L"Display name | model-id\x201D per line: the left side is the menu label, the right is launched as --model <id> (that session only \x2014 \x201C" L"Default\x201D keeps the Model box above). '#' comments a line; clear the box to offer just Default.");
+        panel.Children().Append(_setLaunchModels);
         _setIncludeCoAuthored = ToggleSwitch{};
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
         AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
@@ -1561,6 +1577,10 @@ namespace winrt::TerminalApp::implementation
         {
             _setModel.Text(winrt::hstring{ _appSettings.model });
         }
+        if (_setLaunchModels)
+        {
+            _setLaunchModels.Text(winrt::hstring{ _appSettings.launchModels });
+        }
         if (_setIncludeCoAuthored)
         {
             _setIncludeCoAuthored.IsOn(_appSettings.includeCoAuthoredBy);
@@ -1844,6 +1864,13 @@ namespace winrt::TerminalApp::implementation
             const auto a = m.find_first_not_of(L" \t");
             const auto b = m.find_last_not_of(L" \t");
             _appSettings.model = (a == std::wstring::npos) ? std::wstring{} : m.substr(a, b - a + 1);
+        }
+        if (_setLaunchModels)
+        {
+            // Stored verbatim (the env-editor idiom — ParseLaunchModels handles the TextBox's
+            // \r-normalized newlines). A cleared box deliberately stores "" — the submenus then
+            // offer just "Default" (Persistence keeps a present-but-empty key, never re-seeds).
+            _appSettings.launchModels = std::wstring{ _setLaunchModels.Text() };
         }
         if (_setIncludeCoAuthored)
         {

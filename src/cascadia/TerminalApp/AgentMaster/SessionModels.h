@@ -725,6 +725,15 @@ namespace Agentmaster
         double treeFraction{ 0.4 }; // Explorer Tree width / (Tree + Auto Testing)   [bottom cols]
     };
 
+    // Agentmaster (launch-model picker): the SHIPPED default launch-model list — what every
+    // "Open New Session Here" model submenu offers until the user edits the list in the Settings
+    // cog. One entry per line, "Display name | model-id": the left side is the submenu label, the
+    // right is what the spawn passes as `--model <id>` (see ParseLaunchModels in ClaudeSpawn.h).
+    inline constexpr std::wstring_view kDefaultLaunchModels =
+        L"Fable 5 | claude-fable-5\n"
+        L"Opus 4.8 | claude-opus-4-8\n"
+        L"Sonnet 5 | claude-sonnet-5";
+
     // Global app settings — the Manager toolbar's Settings cog (next to "Pause Autorunner").
     // Every default reproduces the prior hardcoded behavior EXCEPT defaultAutorunnerMode (now
     // Full, the product default — "all new or opened sessions run on Autorunner"), so a missing
@@ -743,6 +752,17 @@ namespace Agentmaster
         // "" (As Is) => don't override the model. Else == what you'd type after `/model `
         //  (e.g. "opus" / "sonnet" / a full id) -> emitted as the settings `model` key.
         std::wstring model{};
+        // Agentmaster (launch-model picker): the models every "Open New Session Here" submenu
+        // offers (the Manager board/tree + External row menus, the Sessions page row menu +
+        // detail button, and the WT tab context menu) — picking one launches that session with
+        // `--model <id>`, overriding the global `model` above for THAT session only ("Default"
+        // launches exactly as before). One "Display name | model-id" entry per line (';' also
+        // separates, '#' comments a line; a bare entry is both name and id — ParseLaunchModels,
+        // ClaudeSpawn.h). Editable in the Settings cog (Sessions tab; the submenu tooltips point
+        // there). An ABSENT settings.json key seeds these shipped defaults; a PRESENT value —
+        // even "" (the user cleared the box; submenus then offer just "Default") — is kept
+        // verbatim (Persistence gates the default on key presence, not emptiness).
+        std::wstring launchModels{ kDefaultLaunchModels };
         // false => emit includeCoAuthoredBy:false (drop Claude's commit/PR co-author byline).
         bool includeCoAuthoredBy{ true };
         // The GLOBAL extra environment injected into EVERY spawned session (Claude AND Codex), edited

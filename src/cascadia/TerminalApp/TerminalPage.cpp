@@ -2509,8 +2509,9 @@ namespace winrt::TerminalApp::implementation
         // the live OSC-reported cwd of the active control (a shell tab 'cd'd somewhere). Spawn the
         // SAME agent kind the tab hosts — Codex for a managed codex tab, else Claude (the default
         // for shells / unmanaged tabs). An empty dir falls back to %USERPROFILE% inside the launch
-        // seam.
-        hostingTab.NewSessionHereRequested([weakTab, weakThis]() {
+        // seam. `model` is the launch-model picker's per-LAUNCH `--model <id>` pick from the item's
+        // submenu ("" = Default; a Codex tab only ever shows the plain item, which sends "").
+        hostingTab.NewSessionHereRequested([weakTab, weakThis](winrt::hstring model) {
             auto page{ weakThis.get() };
             auto tab{ weakTab.get() };
             if (!page || !tab)
@@ -2543,11 +2544,13 @@ namespace winrt::TerminalApp::implementation
             const uint32_t insertPosition = tab->TabViewIndex() + 1;
             if (codex)
             {
+                // A codex spawn takes no --model (`model` is always "" here — the Codex form of the
+                // menu is the plain item, which sends empty).
                 page->_SpawnCodexSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition);
             }
             else
             {
-                page->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition);
+                page->_SpawnClaudeSession(winrt::hstring{ dir }, winrt::hstring{}, insertPosition, model);
             }
         });
 
@@ -2736,6 +2739,12 @@ namespace winrt::TerminalApp::implementation
                         }
                     }
                     tab->SetAgentCopyMenuVisible(isSession, isCodex);
+                    // Agentmaster (launch-model picker): (re)populate the "New Session Here" model
+                    // submenu from the LIVE settings list each open — the cog edits it without a
+                    // restart, and the tab's agent kind picks the form (a Codex tab keeps the plain
+                    // item: the models are Claude models, a codex spawn takes no --model). The Tab
+                    // change-gates the rebuild, so an unchanged list costs only the parse.
+                    tab->SetNewSessionModels(::Agentmaster::ParseLaunchModels(page->_appSettings.launchModels), isCodex);
                     tab->SetAgentMarkUnreadVisible(isSession); // Agentmaster: "Mark Unread" is session-only too
                     tab->SetAgentFavoriteState(isSession, isSession && ::Agentmaster::IsSessionFavorite(sid)); // Agentmaster (FAVORITES.md): session-only; label reflects the current star
                     tab->SetAgentTagVisible(isSession); // Agentmaster (bookmark tags): "Tag" is session-only too

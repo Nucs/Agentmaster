@@ -8,6 +8,7 @@
 #include "SettingsPaneContent.h"
 #include "Tab.g.cpp"
 #include "TabHeaderControl.h" // Agentmaster (bookmark tags): get_self — the badge-hover til::events aren't projected
+#include "AgentModelMenu.h" // Agentmaster (launch-model picker): AgentFillModelPickItems — the shared "New Session Here ▸ <model>" submenu recipe
 #include "Utils.h"
 #include "AppLogic.h"
 #include "../../types/inc/ColorFix.hpp"
@@ -2268,7 +2269,7 @@ namespace winrt::TerminalApp::implementation
         {
             // "New Session Here" (Agentmaster) — spawn a managed agent session in this tab's working
             // dir (a new, independent conversation). The page computes the dir + agent kind (Codex vs
-            // Claude) and does the spawn, so this only raises the request.
+            // Claude) and does the spawn, so this only raises the request (modelId "" = Default).
             Controls::FontIcon newSessionSymbol;
             newSessionSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
             newSessionSymbol.Glyph(L"\xE710"); // Add
@@ -2276,7 +2277,7 @@ namespace winrt::TerminalApp::implementation
             _newSessionHereMenuItem.Click([weakThis](auto&&, auto&&) {
                 if (auto tab{ weakThis.get() })
                 {
-                    tab->NewSessionHereRequested.raise();
+                    tab->NewSessionHereRequested.raise(winrt::hstring{});
                 }
             });
             _newSessionHereMenuItem.Text(RS_(L"NewSessionHereText"));
@@ -2286,6 +2287,26 @@ namespace winrt::TerminalApp::implementation
 
             WUX::Controls::ToolTipService::SetToolTip(_newSessionHereMenuItem, box_value(newSessionHereToolTip));
             Automation::AutomationProperties::SetHelpText(_newSessionHereMenuItem, newSessionHereToolTip);
+
+            // The SUBMENU twin (Agentmaster, launch-model picker): the same "New Session Here",
+            // expanded into Default + one item per configured model. The page repopulates it at
+            // flyout-open (SetNewSessionModels — the models live in AppSettings.launchModels and
+            // are editable without a restart) and shows exactly ONE of the pair: the submenu for
+            // a Claude/shell tab, the plain item above for a Codex tab (Claude models don't apply)
+            // or an empty list. Starts collapsed — the first flyout-open decides which shows.
+            Controls::FontIcon newSessionSubSymbol;
+            newSessionSubSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            newSessionSubSymbol.Glyph(L"\xE710"); // Add (matches the plain item)
+
+            _newSessionHereSubMenu.Text(RS_(L"NewSessionHereText"));
+            _newSessionHereSubMenu.Icon(newSessionSubSymbol);
+            _newSessionHereSubMenu.Visibility(WUX::Visibility::Collapsed);
+
+            // The tooltip carries the picker + where the model list is edited (the user asked the
+            // tooltip to say so); the base sentence is the plain item's resource.
+            const auto newSessionSubToolTip = newSessionHereToolTip + winrt::hstring{ L" \x2014 pick the model it starts on, or Default. Edit the list in the Manager's Settings (\x2699) \x2192 Sessions \x2192 Launch models." };
+            WUX::Controls::ToolTipService::SetToolTip(_newSessionHereSubMenu, box_value(newSessionSubToolTip));
+            Automation::AutomationProperties::SetHelpText(_newSessionHereSubMenu, newSessionSubToolTip);
         }
 
         {
@@ -2328,6 +2349,7 @@ namespace winrt::TerminalApp::implementation
         contextMenuFlyout.Items().Append(_findMenuItem);
         contextMenuFlyout.Items().Append(Controls::MenuFlyoutSeparator{}); // Agentmaster: separator above "New Session Here" — sets export/find apart from the session ops (new/restart/fork)
         contextMenuFlyout.Items().Append(_newSessionHereMenuItem); // Agentmaster: "New Session Here" directly above "Restart session"
+        contextMenuFlyout.Items().Append(_newSessionHereSubMenu); // Agentmaster (launch-model picker): its submenu twin — SetNewSessionModels shows exactly one of the pair, so they occupy one visual slot
         contextMenuFlyout.Items().Append(_restartConnectionMenuItem);
         // Agentmaster: place "Fork session" directly below "Restart session"
         contextMenuFlyout.Items().Append(_duplicateTabMenuItem);
@@ -2547,6 +2569,48 @@ namespace winrt::TerminalApp::implementation
         ASSERT_UI_THREAD();
 
         _activateSessionMenuItem.Visibility(visible ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+    }
+
+    // Agentmaster (launch-model picker): choose which "New Session Here" form this tab's context menu
+    // shows and (re)populate the submenu form. Page-driven at flyout-open — the page parses the LIVE
+    // AppSettings.launchModels (editable in the cog without a restart) and resolves the tab's agent
+    // kind. A Codex tab (the models are Claude models — a codex spawn takes no --model) or an EMPTY
+    // list keeps the PLAIN item; otherwise the submenu shows: Default + one item per model, every
+    // click raising NewSessionHereRequested with its model id ("" for Default) — the page spawns.
+    // The rebuild is change-gated on the joined list (_newSessionModelsKey) so the usual flyout-open
+    // with an unchanged settings list touches nothing.
+    void Tab::SetNewSessionModels(const std::vector<std::pair<std::wstring, std::wstring>>& models, bool isCodex)
+    {
+        ASSERT_UI_THREAD();
+
+        const bool plain = isCodex || models.empty();
+        _newSessionHereMenuItem.Visibility(plain ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
+        _newSessionHereSubMenu.Visibility(plain ? WUX::Visibility::Collapsed : WUX::Visibility::Visible);
+        if (plain)
+        {
+            return; // keep the last-built submenu items around — the key gate makes a flip back free
+        }
+        std::wstring key;
+        for (const auto& [name, id] : models)
+        {
+            key += name;
+            key += L'\x1F'; // unit separator — can't appear in a settings-typed name/id line
+            key += id;
+            key += L'\x1E';
+        }
+        if (key == _newSessionModelsKey && _newSessionHereSubMenu.Items().Size() > 0)
+        {
+            return; // unchanged list — skip the item churn
+        }
+        _newSessionModelsKey = key;
+        _newSessionHereSubMenu.Items().Clear();
+        auto weakThis{ get_weak() };
+        AgentFillModelPickItems(_newSessionHereSubMenu.Items(), models, [weakThis](winrt::hstring model) {
+            if (auto tab{ weakThis.get() })
+            {
+                tab->NewSessionHereRequested.raise(model);
+            }
+        });
     }
 
     // Agentmaster (FAVORITES.md): show/hide the "★ Favorite & close all tabs" close-submenu item. Unlike

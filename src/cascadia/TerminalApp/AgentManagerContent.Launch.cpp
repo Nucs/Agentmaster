@@ -163,7 +163,7 @@ namespace winrt::TerminalApp::implementation
             }
             _PushRecentDir(text); // remember it as "recently selected"
             _ClosePathPicker();
-            _spawnHandler(winrt::hstring{ text }, winrt::hstring{});
+            _spawnHandler(winrt::hstring{ text }, winrt::hstring{}, winrt::hstring{}); // model "" = Default (the launch bar has no model picker — the settings model applies)
         }
     }
 

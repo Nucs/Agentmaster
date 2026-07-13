@@ -44,7 +44,7 @@ namespace winrt::TerminalApp::implementation
 
         // Wiring from the page (called right after construction).
         void SetRegistry(std::shared_ptr<::Agentmaster::SessionRegistry> registry);
-        void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler); // (workingDir, title)
+        void SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler); // (workingDir, title, model) — model is the launch-model picker's per-LAUNCH `--model <id>` pick from an "Open New Session Here" submenu ("" = Default, the settings model)
         void SetActivateHandler(std::function<void(winrt::hstring)> handler); // (sessionId) -> jump to tab
         // Agentmaster (eager-init / "Activate Tab"): (sessionId) -> start a DORMANT session's claude IN
         // PLACE (no focus change) — distinct from SetActivateHandler ("Jump to Tab", which switches to it).
@@ -558,7 +558,7 @@ namespace winrt::TerminalApp::implementation
         std::vector<CardProgress> _cardProgress;
         winrt::Windows::UI::Xaml::DispatcherTimer _progressTimer{ nullptr };
 
-        std::function<void(winrt::hstring, winrt::hstring)> _spawnHandler;
+        std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> _spawnHandler; // (workingDir, title, model) — model "" = Default (the launch-model picker)
         std::function<void(winrt::hstring)> _activateHandler;
         std::function<void(winrt::hstring)> _activateDormantHandler; // Agentmaster (eager-init): "Activate Tab" -> start a dormant session's claude in place (no focus change)
         std::function<void(bool)> _activateAllHandler; // Agentmaster (eager-init): "Activate All Tabs" -> wake every dormant tab (allWindows=false this window only / true + fan out)
@@ -777,6 +777,7 @@ namespace winrt::TerminalApp::implementation
         int _settingsActiveTab{ 0 }; // index of the showing tab (reset to 0 on each _ShowSettings)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setSkipPermissions{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setModel{ nullptr };
+        winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchModels{ nullptr }; // launch-model picker: multi-line "Display name | model-id" list (one per line) feeding every "Open New Session Here" submenu
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setIncludeCoAuthored{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setDefaultMode{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxAutoSends{ nullptr };

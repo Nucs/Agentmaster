@@ -244,7 +244,7 @@ namespace winrt::TerminalApp::implementation
         _Refresh();
     }
 
-    void AgentManagerContent::SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring)> handler)
+    void AgentManagerContent::SetSpawnHandler(std::function<void(winrt::hstring, winrt::hstring, winrt::hstring)> handler)
     {
         _spawnHandler = std::move(handler);
     }

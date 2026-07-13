@@ -276,6 +276,54 @@ void TestSpawnBuilders()
         CHECK(comment.empty(), "env parse: a '#'-led line is a comment even with '='");
     }
 
+    // ParseLaunchModels (Agentmaster, launch-model picker): "Display name | model-id" lines ->
+    // ordered {name, id} pairs feeding every "Open New Session Here" submenu.
+    {
+        // The SHIPPED defaults (AppSettings.launchModels seed) parse to the three advertised models.
+        const auto d = ParseLaunchModels(kDefaultLaunchModels);
+        CHECK(d.size() == 3, "launch models: shipped defaults -> 3 entries");
+        CHECK(d[0].first == L"Fable 5" && d[0].second == L"claude-fable-5", "launch models: default #1 Fable 5 | claude-fable-5");
+        CHECK(d[1].first == L"Opus 4.8" && d[1].second == L"claude-opus-4-8", "launch models: default #2 Opus 4.8 | claude-opus-4-8");
+        CHECK(d[2].first == L"Sonnet 5" && d[2].second == L"claude-sonnet-5", "launch models: default #3 Sonnet 5 | claude-sonnet-5");
+        // '|' splits on the FIRST bar, both sides trimmed; entries split on newline OR ';'; a
+        // TextBox's \r-normalized text (the cog editor round-trip) parses identically.
+        const auto e = ParseLaunchModels(L"  Opus 4.6 | claude-opus-4-6  ;Custom|my|model\rHaiku 4.5 | claude-haiku-4-5-20251001");
+        CHECK(e.size() == 3, "launch models: ';' / '\\r' both separate");
+        CHECK(e[0].first == L"Opus 4.6" && e[0].second == L"claude-opus-4-6", "launch models: trims around name and id");
+        CHECK(e[1].first == L"Custom" && e[1].second == L"my|model", "launch models: FIRST '|' splits (id keeps later bars)");
+        CHECK(e[2].first == L"Haiku 4.5" && e[2].second == L"claude-haiku-4-5-20251001", "launch models: '\\r'-separated entry parses");
+        // A bare token (no '|') is BOTH name and id; blanks / '#' comments / empty-side entries skip.
+        const auto b = ParseLaunchModels(L"claude-sonnet-5\n# a comment\n\n | missing-name\nmissing-id | \nOK | ok-id");
+        CHECK(b.size() == 2, "launch models: bare token kept; comment/blank/empty-side skipped");
+        CHECK(b[0].first == L"claude-sonnet-5" && b[0].second == L"claude-sonnet-5", "launch models: bare token is its own label");
+        CHECK(b[1].first == L"OK" && b[1].second == L"ok-id", "launch models: entry after skips parses");
+        CHECK(ParseLaunchModels(L"").empty(), "launch models: empty spec -> none (submenus offer just Default)");
+        // The kMaxLaunchModels cap bounds a runaway settings edit.
+        std::wstring big;
+        for (int i = 0; i < 50; ++i)
+        {
+            big += L"M" + std::to_wstring(i) + L" | id-" + std::to_wstring(i) + L"\n";
+        }
+        CHECK(ParseLaunchModels(big).size() == kMaxLaunchModels, "launch models: capped at kMaxLaunchModels");
+    }
+
+    // BuildClaudeCommandline modelOverride (Agentmaster, launch-model picker): the per-LAUNCH
+    // `--model <id>` pick — appended LAST on every form, quoted only when it carries whitespace,
+    // absent when empty (the pre-picker commandline, byte-identical).
+    {
+        const auto m = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, true, L"", L"", L"claude-opus-4-8");
+        CHECK(m == L"claude --dangerously-skip-permissions --settings \"C:/x/s.json\" --session-id abc-123 --model claude-opus-4-8", "model override: fresh form appends --model last");
+        const auto mFork = BuildClaudeCommandline(L"C:/x/s.json", L"new-id", false, true, L"src-id", L"C:\\bin\\claude.exe", L"claude-fable-5");
+        CHECK(mFork == L"\"C:\\bin\\claude.exe\" --dangerously-skip-permissions --resume src-id --fork-session --session-id new-id --settings \"C:/x/s.json\" --model claude-fable-5", "model override: fork form appends --model last");
+        const auto mBatch = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", true, true, L"", L"C:\\npm\\claude.cmd", L"claude-sonnet-5");
+        CHECK(mBatch == L"cmd /c \"\"C:\\npm\\claude.cmd\" --dangerously-skip-permissions --resume abc-123 --settings \"C:/x/s.json\" --model claude-sonnet-5\"", "model override: rides INSIDE the cmd /c outer-quote wrap");
+        const auto mWs = BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, true, L"", L"", L"my model");
+        CHECK(mWs.find(L"--model \"my model\"") != std::wstring::npos, "model override: whitespace-carrying value is quoted");
+        CHECK(BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, true, L"", L"", L"") ==
+                  BuildClaudeCommandline(L"C:/x/s.json", L"abc-123", false, true),
+              "model override: empty == no flag (byte-identical to the pre-picker form)");
+    }
+
     // MergeSessionEnv: per-dir overrides global (case-insensitive name match), CCMGR_* dropped, last-wins.
     {
         const auto m = MergeSessionEnv(L"FOO=global\nBAR=keep\nCCMGR_X=nope", L"foo=perdir\nNEW=1");

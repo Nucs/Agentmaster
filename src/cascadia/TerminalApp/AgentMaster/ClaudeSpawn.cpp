@@ -386,7 +386,7 @@ try {
         return json;
     }
 
-    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher)
+    std::wstring BuildClaudeCommandline(std::wstring_view settingsPath, std::wstring_view sessionId, bool resume, bool skipPermissions, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view modelOverride)
     {
         // When skipPermissions is ON (the cog default), spawn with --dangerously-skip-permissions:
         // the app drives claude programmatically (Autorunner + injected prompts) and gates risky
@@ -447,6 +447,18 @@ try {
         else
         {
             cmd = exe + L" " + flag + L"--settings \"" + std::wstring{ settingsPath } + L"\" --session-id " + std::wstring{ sessionId };
+        }
+
+        // Launch-model picker (Agentmaster): the per-LAUNCH model from an "Open New Session Here"
+        // submenu. Appended LAST so every form (fresh / resume / fork) carries it uniformly; a CLI
+        // flag outranks the shared settings file's `model`, so only THIS session is affected.
+        // Model ids are plain tokens (claude-opus-4-8), but a user-typed value could carry spaces —
+        // quote only then (an always-quote would churn the cmd /c outer-quote wrap for nothing).
+        if (!modelOverride.empty())
+        {
+            const bool needsQuotes = modelOverride.find_first_of(L" \t") != std::wstring_view::npos;
+            cmd += needsQuotes ? (L" --model \"" + std::wstring{ modelOverride } + L"\"") :
+                                 (L" --model " + std::wstring{ modelOverride });
         }
 
         if (batch)
@@ -1290,6 +1302,43 @@ try {
         return out;
     }
 
+    std::vector<std::pair<std::wstring, std::wstring>> ParseLaunchModels(std::wstring_view spec)
+    {
+        // The same lenient splitting as ParseEnvAssignments (newline / ';' separated, '\r' a
+        // separator too so a TextBox's \r-normalized text parses, blanks + '#' comments skipped) —
+        // but the entry shape is "Display name | model-id" instead of NAME=VALUE, and a bare
+        // token with no '|' is BOTH (a raw model id still lists, labeled as itself).
+        const auto isSep = [](wchar_t c) { return c == L';' || c == L'\n' || c == L'\r'; };
+
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        size_t i = 0;
+        while (i <= spec.size() && out.size() < kMaxLaunchModels)
+        {
+            size_t sep = i;
+            while (sep < spec.size() && !isSep(spec[sep]))
+            {
+                ++sep;
+            }
+            const std::wstring_view entry = EnvTrim(spec.substr(i, sep - i));
+            if (!entry.empty() && entry.front() != L'#')
+            {
+                const size_t bar = entry.find(L'|');
+                const std::wstring_view name = EnvTrim(bar == std::wstring_view::npos ? entry : entry.substr(0, bar));
+                const std::wstring_view id = EnvTrim(bar == std::wstring_view::npos ? entry : entry.substr(bar + 1));
+                if (!name.empty() && !id.empty())
+                {
+                    out.emplace_back(std::wstring{ name }, std::wstring{ id });
+                }
+            }
+            if (sep >= spec.size())
+            {
+                break;
+            }
+            i = sep + 1;
+        }
+        return out;
+    }
+
     std::vector<std::pair<std::wstring, std::wstring>> MergeSessionEnv(std::wstring_view globalEnv, std::wstring_view perDirEnv)
     {
         std::vector<std::pair<std::wstring, std::wstring>> out;
@@ -1500,7 +1549,7 @@ try {
         }
     }
 
-    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId)
+    ClaudeSpawnSpec BuildClaudeSpawn(std::wstring_view workingDir, std::wstring_view title, std::wstring_view pipeName, std::wstring_view resumeSessionId, const AppSettings& settings, std::wstring_view forkFromSessionId, std::wstring_view claudeLauncher, std::wstring_view forkIntoSessionId, std::wstring_view modelOverride)
     {
         ClaudeSpawnSpec spec;
         spec.workingDir = std::wstring{ workingDir };
@@ -1526,7 +1575,7 @@ try {
         spec.forwarderPath = forwarderPath;
 
         const auto settingsFwd = ToForwardSlashes(settingsPath);
-        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher);
+        spec.commandline = BuildClaudeCommandline(settingsFwd, spec.sessionId, resume, settings.skipPermissions, forkFromSessionId, claudeLauncher, modelOverride);
 
         // The cog's global env + the hook-correlation vars, applied to every session (CCMGR_* always win).
         AppendManagedClaudeEnv(spec, settings);
