@@ -416,6 +416,115 @@ void TestTranscriptScan()
     }
 }
 
+// Agentmaster — the CURRENT-MODEL adornment (the board card / per-tab overlay / tab tooltip model):
+// ShortModelName + SessionDisplayModel (pure, SessionModels.h), the delta parser's assistant
+// message.model capture (the SessionScanner's managed-session source), and the one-pass tail-facts
+// extractor the Fleet Observer reads an EXTERNAL session's recap + current model from
+// (TailFactsFromTranscriptChunk — RecapFromTranscriptChunk is now a view over it).
+void TestCurrentModel()
+{
+    std::wprintf(L"Current-model adornment (ShortModelName / delta capture / tail facts):\n");
+
+    // --- ShortModelName: every Anthropic id shape in the wild shortens; anything else passes through ---
+    {
+        CHECK(ShortModelName(L"claude-fable-5") == L"fable-5", "short: claude-fable-5 -> fable-5 (new date-less id)");
+        CHECK(ShortModelName(L"claude-opus-4-8") == L"opus-4.8", "short: claude-opus-4-8 -> opus-4.8");
+        CHECK(ShortModelName(L"claude-sonnet-5") == L"sonnet-5", "short: claude-sonnet-5 -> sonnet-5");
+        CHECK(ShortModelName(L"claude-opus-4-6-20260105") == L"opus-4.6", "short: dated id -> opus-4.6 (the 8-digit date never counts as a version)");
+        CHECK(ShortModelName(L"claude-haiku-4-5-20251001") == L"haiku-4.5", "short: claude-haiku-4-5-20251001 -> haiku-4.5");
+        CHECK(ShortModelName(L"claude-opus-4-20250514") == L"opus-4", "short: a single version number keeps no dot");
+        CHECK(ShortModelName(L"claude-3-7-sonnet-20250219") == L"sonnet-3.7", "short: OLD family-last id -> sonnet-3.7");
+        CHECK(ShortModelName(L"claude-3-5-haiku-20241022") == L"haiku-3.5", "short: old id -> haiku-3.5");
+        CHECK(ShortModelName(L"claude-3-opus-20240229") == L"opus-3", "short: old id -> opus-3");
+        CHECK(ShortModelName(L"claude-instant-1.2") == L"instant-1.2", "short: a dotted version token is kept whole");
+        CHECK(ShortModelName(L"claude-3-5-sonnet-latest") == L"sonnet-3.5", "short: the -latest suffix is stripped");
+        CHECK(ShortModelName(L"us.anthropic.claude-sonnet-4-5-20250929-v1:0") == L"sonnet-4.5", "short: Bedrock prefix + -v1:0 suffix stripped");
+        CHECK(ShortModelName(L"claude-3-5-sonnet-v2@20241022") == L"sonnet-3.5", "short: Vertex @date suffix stripped (the v2 marker drops)");
+        // bare aliases users pass to --model (already short) come back unchanged
+        CHECK(ShortModelName(L"opus") == L"opus", "short: a bare alias passes through");
+        CHECK(ShortModelName(L"sonnet-5") == L"sonnet-5", "short: an alias with a version is already short");
+        CHECK(ShortModelName(L"fable") == L"fable", "short: the fable alias passes through");
+        CHECK(ShortModelName(L"sonnet-5[1m]") == L"sonnet-5[1m]", "short: a [1m] context marker is preserved");
+        CHECK(ShortModelName(L"claude-sonnet-4-5[1m]") == L"sonnet-4.5[1m]", "short: full id + [1m] -> short + [1m]");
+        // NON-Anthropic ids are NEVER mangled (a managed Codex's model rides the same display path)
+        CHECK(ShortModelName(L"gpt-5.1-codex") == L"gpt-5.1-codex", "short: a Codex model passes through verbatim");
+        CHECK(ShortModelName(L"o4-mini") == L"o4-mini", "short: an unknown family passes through verbatim");
+        CHECK(ShortModelName(L"<synthetic>") == L"<synthetic>", "short: the API-error pseudo-model passes through (producers skip it upstream)");
+        CHECK(ShortModelName(L"").empty(), "short: empty -> empty");
+        CHECK(ShortModelName(L"  claude-fable-5  ") == L"fable-5", "short: surrounding whitespace is trimmed");
+        CHECK(ShortModelName(L"claude") == L"claude", "short: a bare 'claude' has nothing to shorten");
+        CHECK(ShortModelName(L"claude-2") == L"claude-2", "short: a familyless claude-2 keeps its shape");
+    }
+
+    // --- SessionDisplayModel: the transcript truth wins; the launch request is the fallback ---
+    {
+        SessionInfo s = MakeSession(L"m1");
+        CHECK(SessionDisplayModel(s).empty(), "display: neither known -> empty (never-prompted bare launch)");
+        s.model = L"opus"; // the --model launch request (the observer's cmdline read)
+        CHECK(SessionDisplayModel(s) == L"opus", "display: the launch request alone -> shown");
+        s.currentModel = L"claude-fable-5"; // the transcript truth (e.g. after a /model switch)
+        CHECK(SessionDisplayModel(s) == L"claude-fable-5", "display: the CURRENT model wins over the launch request");
+    }
+
+    // --- ParseTranscriptDelta: the assistant line's message.model is captured onto the event ---
+    {
+        const std::wstring line = LR"j({"type":"assistant","message":{"model":"claude-fable-5","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].model == L"claude-fable-5", "delta: assistant message.model captured");
+    }
+    {
+        const std::wstring line = LR"j({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].model.empty(), "delta: a model-less assistant line -> empty (never invents one)");
+    }
+    {
+        // The synthetic API-error line carries "<synthetic>" — the parser extracts it as-is (a plain
+        // extractor); the scanner FOLD skips it (the apiError flag + the literal), so it can never
+        // become SessionInfo.currentModel.
+        const std::wstring line = LR"j({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Overloaded"}]}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].model == L"<synthetic>" && r.events[0].apiError, "delta: the error line's pseudo-model rides WITH the apiError flag (the fold's skip signal)");
+    }
+
+    // --- TailFactsFromTranscriptChunk: ONE pass -> recap + current model (the observer's external read) ---
+    {
+        const std::wstring chunk =
+            std::wstring{ LR"j({"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"a"}]}})j" } + L"\n" +
+            LR"j({"type":"system","subtype":"away_summary","content":"Shipped. (disable recaps in /config)"})j" + L"\n" +
+            LR"j({"type":"assistant","message":{"model":"claude-fable-5","content":[{"type":"text","text":"b"}]}})j" + L"\n";
+        const auto tf = TailFactsFromTranscriptChunk(chunk);
+        CHECK(tf.model == L"claude-fable-5", "tail: the LAST real assistant line's model wins (a /model switch supersedes)");
+        CHECK(tf.recap == L"Shipped.", "tail: the recap rides the same pass (normalized)");
+    }
+    {
+        const std::wstring chunk =
+            std::wstring{ LR"j({"type":"assistant","message":{"model":"claude-fable-5","content":[{"type":"text","text":"real"}]}})j" } + L"\n" +
+            LR"j({"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error"}]}})j" + L"\n";
+        CHECK(TailFactsFromTranscriptChunk(chunk).model == L"claude-fable-5", "tail: a trailing API-error line's <synthetic> never shadows the real model");
+    }
+    {
+        const std::wstring chunk =
+            std::wstring{ LR"j({"type":"assistant","message":{"model":"claude-fable-5","content":[{"type":"text","text":"parent"}]}})j" } + L"\n" +
+            LR"j({"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"subagent"}]}})j" + L"\n";
+        CHECK(TailFactsFromTranscriptChunk(chunk).model == L"claude-fable-5", "tail: an inlined subagent (isSidechain) line's model never shadows the session's");
+    }
+    {
+        const std::wstring chunk = LR"j({"type":"user","message":{"content":"just me"}})j" L"\n";
+        const auto tf = TailFactsFromTranscriptChunk(chunk);
+        CHECK(tf.model.empty() && tf.recap.empty(), "tail: an assistant-less chunk yields empty facts (so 'empty never clears' holds at the caller)");
+    }
+    {
+        // A partial LEADING line (a tail read starting mid-line) is skipped; the complete line after it lands.
+        const std::wstring chunk = LR"j(odel":"claude-x"}})j" L"\n" LR"j({"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"ok"}]}})j" L"\n";
+        CHECK(TailFactsFromTranscriptChunk(chunk).model == L"claude-sonnet-5", "tail: a partial leading line is skipped; the complete assistant line is read");
+    }
+    // RecapFromTranscriptChunk stays the recap-only VIEW over the same pass (one implementation).
+    {
+        const std::wstring chunk = LR"j({"type":"system","subtype":"away_summary","content":"r1"})j" L"\n";
+        CHECK(RecapFromTranscriptChunk(chunk) == TailFactsFromTranscriptChunk(chunk).recap, "tail: RecapFromTranscriptChunk == TailFacts.recap (delegation, no drift)");
+    }
+}
+
 // Agentmaster — the stuck-state reconcilers (proved against 4 live Desktop sessions):
 //   #1 an unanswered AskUserQuestion left the session BLOCKED on the user but showing Running
 //      forever (a "tool_use" tail is non-terminal, so the missed-Stop backstop never fired);

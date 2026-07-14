@@ -893,7 +893,7 @@ namespace Agentmaster
                     // is missed — best-effort; the Bring-Window-To-Front worker re-reads deeper for its
                     // tab match.)
                     const auto ti = ReadTranscriptInfo(f.cwd, sid, 131072, 1);
-                    cached = _extInfoCache.emplace(sid, ExtInfo{ TranscriptDisplayTitle(ti), ti.gitBranch, L"", 0 }).first;
+                    cached = _extInfoCache.emplace(sid, ExtInfo{ TranscriptDisplayTitle(ti), ti.gitBranch, L"", L"", 0 }).first;
                 }
                 ex.title = cached->second.title;
                 ex.gitBranch = cached->second.gitBranch;
@@ -921,12 +921,23 @@ namespace Agentmaster
                 {
                     const size_t window = (cached->second.recapMtime == 0) ? (4u << 20) : 131072;
                     cached->second.recapMtime = extMtime;
-                    if (std::wstring r = ReadTranscriptRecapTail(f.cwd, sid, window); !r.empty())
+                    // ONE tail read now yields TWO facts: the recap AND the CURRENT model (the newest
+                    // real assistant line's message.model — the external analog of the scanner
+                    // mirroring SessionInfo.currentModel for a managed session; the cmdline `--model`
+                    // in ex.model is usually empty on a bare external claude and goes stale across a
+                    // /model switch). Same "empty never clears" rule, per field.
+                    auto tf = ReadTranscriptTailFacts(f.cwd, sid, window);
+                    if (!tf.recap.empty())
                     {
-                        cached->second.recap = std::move(r);
+                        cached->second.recap = std::move(tf.recap);
+                    }
+                    if (!tf.model.empty())
+                    {
+                        cached->second.model = std::move(tf.model);
                     }
                 }
                 ex.recap = cached->second.recap;
+                ex.currentModel = cached->second.model;
 
                 // Line-derived last-activity (NOT the lying mtime). mtime-gated via _lineActivityBySid,
                 // so an idle external costs only the TranscriptTimes stat above after the one settling read.

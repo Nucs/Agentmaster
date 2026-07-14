@@ -146,6 +146,7 @@ void TestTabNamingAndColor();
 void TestTabColorModes(); // tab color modes: enum/JSON round-trips + ChooseSessionAutoColor + SessionColorKeyDir/ResolveSessionColorHex
 // tests_transcript.cpp
 void TestTranscriptScan();
+void TestCurrentModel(); // current-model adornment: ShortModelName / SessionDisplayModel (pure) + the delta's assistant message.model capture + TailFactsFromTranscriptChunk (recap+model, one pass)
 void TestBlockedAndInterruptedStates();
 void TestProcessInspectTree();
 void TestProcessInspectParse();

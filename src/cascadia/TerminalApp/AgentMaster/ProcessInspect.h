@@ -298,6 +298,25 @@ namespace Agentmaster
     std::wstring ReadTranscriptRecapTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
     std::wstring ReadTranscriptRecapTail(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
 
+    // Agentmaster (current-model adornment): the tail-region facts the Fleet Observer pulls for an
+    // EXTERNAL session in ONE bounded, mtime-gated read — the idle RECAP plus the CURRENT MODEL (the
+    // newest real assistant line's message.model; the "<synthetic>" API-error pseudo-model and
+    // isSidechain lines are skipped). Managed sessions get the same two facts from the
+    // SessionScanner's byte-cursor delta (SessionInfo.recap / .currentModel); externals have no
+    // cursor, so the observer reads this instead. Each field is "" when the window carried none —
+    // the caller applies the "empty never clears" rule per field, so a shallow steady-state tail
+    // that happens to miss an assistant line never clears a captured model.
+    // TailFactsFromTranscriptChunk is the PURE per-chunk extractor (unit-tested);
+    // RecapFromTranscriptChunk above stays as its recap-only view (the CLI + older callers).
+    struct TranscriptTailFacts
+    {
+        std::wstring recap; // last away_summary, normalized (NormalizeRecapText); "" == none in the window
+        std::wstring model; // last REAL assistant message.model; "" == none in the window
+    };
+    TranscriptTailFacts TailFactsFromTranscriptChunk(std::wstring_view chunk);
+    TranscriptTailFacts ReadTranscriptTailFactsIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
+    TranscriptTailFacts ReadTranscriptTailFacts(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes);
+
     // Agentmaster: the line-derived LAST-ACTIVITY readers — the cheap, mtime-gateable form of
     // TranscriptInfo.lastTs. The Fleet Observer feeds this into SessionInfo.convLastActivityUnixMs
     // INSTEAD of the file mtime (TranscriptTimes): `claude --resume`, a /model or permission-mode

@@ -2028,11 +2028,15 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Header line 3: agent kind, model, effort, and the permission mode (a bypass tab is unsupervised).
+        // The model is the CURRENT one — the transcript truth (SessionDisplayModel: what the last
+        // reply actually ran on, so a /model switch shows on its next reply; falls back to the launch
+        // `--model`, also where a managed Codex's rollout model lives) — shortened (ShortModelName:
+        // "fable-5", not "claude-fable-5"; a Codex id passes through verbatim).
         std::vector<std::wstring> metaParts;
         metaParts.push_back(s.kind == ::Agentmaster::AgentKind::Codex ? std::wstring{ L"codex" } : std::wstring{ L"claude" });
-        if (!s.model.empty())
+        if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s)); !shortModel.empty())
         {
-            metaParts.push_back(s.model);
+            metaParts.push_back(shortModel);
         }
         if (!s.effort.empty())
         {

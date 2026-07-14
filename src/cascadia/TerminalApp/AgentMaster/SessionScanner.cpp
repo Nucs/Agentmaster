@@ -226,6 +226,10 @@ namespace Agentmaster
                 ev.apiError = obj.BoolAt(L"isApiErrorMessage");
                 ev.apiErrorStatus = static_cast<int>(obj.I64At(L"apiErrorStatus")); // top-level HTTP code (429/529/…); 0 when none
                 ev.uuid = obj.StrAt(L"uuid"); // the error line's OWN uuid -> seeds the descendant frontier (errorBranchUuids)
+                // The model that produced this message — the CURRENT model of the conversation (the
+                // newest line wins downstream). The API-error line's "<synthetic>" is carried as-is
+                // here (the parser stays a plain extractor); the fold skips it.
+                ev.model = msg->StrAt(L"model");
                 const auto* content = msg->Find(L"content");
                 ev.text = CollectText(content);
                 ev.toolName = CollectInteractiveToolName(content); // "" unless an interactive tool_use is present
@@ -1040,6 +1044,19 @@ namespace Agentmaster
                     st.contextTokens = ev.tokens;
                     const int64_t tok = ev.tokens;
                     _registry->UpdateQuiet(s.id, [tok](SessionInfo& ss) { ss.contextTokens = tok; });
+                }
+                // CURRENT model: the newest REAL assistant line's message.model wins. The synthetic
+                // API-error line's "<synthetic>" pseudo-model is skipped (it is not a model the
+                // session runs on — and it must not shadow the real one across an error). Mirrored via
+                // the NOTIFYING Update, unlike the quiet per-line mirrors above: it changes at most a
+                // handful of times per session (first reply / a `/model` switch, which is otherwise
+                // invisible — no cmdline/env/trailer trace), and the board card / per-tab overlay /
+                // tab tooltip should repaint when it does. Change-gated so steady state stays silent.
+                if (!ev.apiError && !ev.model.empty() && ev.model != L"<synthetic>" && ev.model != st.currentModel)
+                {
+                    st.currentModel = ev.model;
+                    const std::wstring mdl = ev.model;
+                    _registry->Update(s.id, [&mdl](SessionInfo& ss) { ss.currentModel = mdl; });
                 }
             }
             else if (ev.kind == TranscriptEvent::Kind::ToolResult)

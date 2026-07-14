@@ -101,6 +101,12 @@ namespace Agentmaster
         // (≈ the size of the request that produced it). 0 when no usage block. The NEWEST assistant
         // line wins -> SessionInfo.contextTokens -> the board card's context-% adornment.
         int64_t tokens{};
+        // Assistant only: this message's `message.model` — the model that actually produced it (e.g.
+        // "claude-fable-5"). The NEWEST real assistant line wins -> SessionInfo.currentModel (the
+        // board card / per-tab overlay / tab tooltip model adornment). "" when absent; the synthetic
+        // API-error line carries the pseudo-model "<synthetic>", which the scanner fold skips (it is
+        // not a model the session runs on).
+        std::wstring model;
         // Assistant only: this message is the synthetic API-error turn-ender — Claude Code wrote it
         // with a top-level isApiErrorMessage:true ("API Error: …" / a rate or usage limit / "Prompt is
         // too long" / a 4xx-5xx / a dropped connection). The turn DIED here; the scanner synthesizes
@@ -689,6 +695,11 @@ namespace Agentmaster
             std::wstring errorUuid;
             std::unordered_set<std::wstring> errorBranchUuids;
             int64_t contextTokens{ 0 }; // newest assistant usage tokens (≈ context occupancy); mirrored QUIETLY to SessionInfo for the board card's context-% adornment
+            // The newest REAL assistant line's message.model ("<synthetic>" API-error lines skipped) —
+            // mirrored change-gated onto SessionInfo.currentModel via the NOTIFYING Update (a model
+            // change is rare — first reply / a `/model` switch — and the card/overlay/tooltip should
+            // repaint when it lands, unlike the per-line contextTokens churn above).
+            std::wstring currentModel;
         };
 
         void _worker() noexcept;

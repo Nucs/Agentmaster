@@ -71,9 +71,9 @@ namespace winrt::TerminalApp::implementation
     {
         _dispatcher = DispatcherQueue::GetForCurrentThread();
 
-        // Row 1: a horizontal strip of DISCRETE parts (status · model·effort · Autorunner[button] · queue
-        // · link) so every part can carry its OWN tooltip and the Autorunner part can be a clickable button.
-        // _Refresh / ShowActivity fill _row1.Children(); right-aligned so the badge hugs the right edge.
+        // Row 1: a horizontal strip of DISCRETE parts (model · status · actions · Autorunner[button] ·
+        // queue · link) so every part can carry its OWN tooltip and the Autorunner part can be a clickable
+        // button. _Refresh / ShowActivity fill _row1.Children(); right-aligned so the badge hugs the right edge.
         _row1 = StackPanel{};
         _row1.Orientation(Orientation::Horizontal);
         _row1.HorizontalAlignment(HorizontalAlignment::Right);
@@ -281,8 +281,8 @@ namespace winrt::TerminalApp::implementation
         // only the abnormal states are worth calling out.
         const std::wstring link = s.external ? std::wstring{ L"observe" } : std::wstring{ L"unlinked" };
 
-        // Row 1 is built as DISCRETE, individually-tooltipped parts: status · Autorunner[button] · queue
-        // · link. A small helper appends a text part (optional tooltip); separators reproduce the
+        // Row 1 is built as DISCRETE, individually-tooltipped parts: model · status · Autorunner[button]
+        // · queue · link. A small helper appends a text part (optional tooltip); separators reproduce the
         // one-line look ("  ·  ") as their own tooltip-less elements so the strip reads as one line.
         _row1.Children().Clear();
         const auto fg = Fill(0xFF, 0xEC, 0xEC, 0xEC);
@@ -302,6 +302,22 @@ namespace winrt::TerminalApp::implementation
         };
         const std::wstring sepText = std::wstring{ L"  " } + kDot + L"  ";
         const auto appendSep = [&]() { appendText(sepText, nullptr, fg); };
+
+        // Agentmaster (current-model adornment): the CURRENT model, LEFT of the status indicator —
+        // the transcript truth (SessionDisplayModel: what the session's last reply actually ran on,
+        // scanner-fed SessionInfo.currentModel, so a mid-session /model switch shows on its next
+        // reply; falls back to the launch-request `model`, also where a managed Codex's rollout model
+        // lives), shortened for the HUD (ShortModelName: "fable-5" / "opus-4.6"; a Codex id passes
+        // through verbatim). Dimmer than the status so it reads as metadata; hidden until known (a
+        // never-prompted bare launch has no model to tell).
+        if (const std::wstring shortModel = ShortModelName(SessionDisplayModel(s)); !shortModel.empty())
+        {
+            appendText(shortModel,
+                       L"Model \x2014 what this session's last reply actually ran on (read from the\n"
+                       L"transcript; a /model switch shows here on its next reply).",
+                       Fill(0xFF, 0xC8, 0xC8, 0xC8));
+            appendSep();
+        }
 
         // Status: the colored state glyph + its label, one tooltip for the pair.
         {

@@ -371,19 +371,47 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Agentmaster: context-window occupancy as a raw TOKEN COUNT (PR feedback, Eli). A % needs a
-        // context-window denominator, and the 200K-vs-1M window can't be reliably known from the model
-        // id (Opus 4.8 doesn't advertise its 1M variant), so a % gave misleading numbers — the raw
-        // token count is unambiguous and matches what Claude Code reports for the session. This is the
-        // newest assistant turn's usage (input + cache_creation + cache_read + output ≈ what's in the
-        // session's context right now), filled by the SessionScanner. Shown once usage exists.
-        if (s.contextTokens > 0)
+        // Agentmaster (current-model adornment) + context occupancy, on ONE dim row — both derive
+        // from the same newest assistant line the SessionScanner tails. The MODEL is the transcript
+        // truth (SessionDisplayModel: currentModel — what the last reply actually ran on, so a
+        // mid-session /model switch shows here on its next reply — falling back to the launch-request
+        // `model`, which is also where a managed Codex's rollout model lives), shortened for the card
+        // (ShortModelName: "fable-5" / "opus-4.6", never "claude-opus-4-6-20260105"; a Codex
+        // "gpt-5.1-codex" passes through verbatim). The ctx TOKEN COUNT keeps its raw form (PR
+        // feedback, Eli: a % needs a context-window denominator that can't be reliably known from the
+        // model id — Opus 4.8 doesn't advertise its 1M variant — so the raw count is unambiguous and
+        // matches what Claude Code reports). Row shown once either fact exists.
         {
-            auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 10, false, 0.45);
-            const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
-                             L" tokens in the session (newest turn: input + cache + output).";
-            AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
-            stack.Children().Append(ctxText);
+            auto modelCtxRow = StackPanel{};
+            modelCtxRow.Orientation(Orientation::Horizontal);
+            modelCtxRow.Spacing(8);
+            if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s)); !shortModel.empty())
+            {
+                auto modelText = Text(winrt::hstring{ shortModel }, 10, false, 0.45);
+                std::wstring mtip = L"Model \x2014 what this session's last reply actually ran on (read from the transcript; a /model switch shows here on the next reply).";
+                if (!s.currentModel.empty())
+                {
+                    mtip += L"\n\n" + s.currentModel; // the full id behind the short form
+                }
+                else if (!s.model.empty())
+                {
+                    mtip += L"\n\nRequested at launch: " + s.model; // no reply yet — the --model ask is all we know
+                }
+                AgentSetTip(modelText, winrt::hstring{ mtip }, kCardTipDelay);
+                modelCtxRow.Children().Append(modelText);
+            }
+            if (s.contextTokens > 0)
+            {
+                auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 10, false, 0.45);
+                const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
+                                 L" tokens in the session (newest turn: input + cache + output).";
+                AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
+                modelCtxRow.Children().Append(ctxText);
+            }
+            if (modelCtxRow.Children().Size() > 0)
+            {
+                stack.Children().Append(modelCtxRow);
+            }
         }
 
         // autorunner badge ⚙ sent/total + the "still server-cached" ⚡ indicator, on ONE row (⚡ to the
@@ -1365,7 +1393,10 @@ namespace winrt::TerminalApp::implementation
                 }
                 me += part;
             };
-            addPart(ex.model);
+            // The CURRENT model (transcript truth, tail-read by the observer) wins over the launch
+            // cmdline `--model` — usually empty on a bare external claude — shortened for the card
+            // (a Codex row's rollout model rides ex.model and passes through ShortModelName verbatim).
+            addPart(::Agentmaster::ShortModelName(ex.currentModel.empty() ? ex.model : ex.currentModel));
             addPart(ex.effort);
             addPart(ex.sandbox); // Codex only (empty for Claude) — model · effort · sandbox · approval
             addPart(ex.approvalMode); // Codex only
@@ -1497,7 +1528,7 @@ namespace winrt::TerminalApp::implementation
             // Include the enrichment fields (id/title/host/branch) so a row that gains its title or
             // host a tick after first sight triggers one refresh. Timestamps are deliberately NOT
             // compared — mtime ticks constantly; the "ago" is recomputed live on any rebuild.
-            if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.effort != b.effort || a.background != b.background ||
+            if (a.pid != b.pid || a.cwd != b.cwd || a.model != b.model || a.currentModel != b.currentModel || a.effort != b.effort || a.background != b.background ||
                 a.sessionId != b.sessionId || a.title != b.title || a.host != b.host || a.hostLabel != b.hostLabel || a.gitBranch != b.gitBranch || a.hostPid != b.hostPid ||
                 a.kind != b.kind || a.sandbox != b.sandbox || a.approvalMode != b.approvalMode || // Phase C1: a codex row gaining its model/sandbox a tick after first sight triggers one refresh
                 a.codexState != b.codexState || // Phase C2: a Codex turn flip (running<->waiting) repaints the row's state dot

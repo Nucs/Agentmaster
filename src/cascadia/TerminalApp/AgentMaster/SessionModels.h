@@ -669,6 +669,22 @@ namespace Agentmaster
         // window denominator that can't be reliably inferred from the model id, so the raw count is
         // shown instead). 0 until the first assistant turn. Transient — re-derived each run (NOT persisted).
         int64_t contextTokens{};
+        // The CURRENT model — the model the session's NEWEST real assistant reply was produced by
+        // (the transcript assistant line's `message.model`, e.g. "claude-fable-5"). This is the truth
+        // the `model` field above can't be: `model` is the LAUNCH REQUEST (the cmdline `--model` /
+        // CLAUDE_* env the observer reads from the PEB — usually EMPTY on a bare `claude`, and stale
+        // the moment the user runs `/model` mid-session: the switch touches neither cmdline nor env
+        // and writes NO transcript trailer, so the next assistant reply is the earliest it is
+        // observable on disk). Written ONLY by the SessionScanner as it tails the transcript (the
+        // contextTokens sibling — same assistant line, and the same first-sight full replay hands a
+        // resumed/dormant session its historical model immediately) — change-gated, via the NOTIFYING
+        // Update (unlike per-line-churning contextTokens: a model changes at most a handful of times
+        // per session, and the board card / per-tab overlay / tab tooltip should repaint when it
+        // does). The synthetic API-error line's pseudo-model "<synthetic>" is never recorded. Codex:
+        // stays empty (its rollout-derived model already lives in `model` — display surfaces fall
+        // back, see SessionDisplayModel). Transient — re-derived each run (NOT persisted;
+        // Persistence.cpp must not write it).
+        std::wstring currentModel;
 
         std::vector<QueuedPrompt> queue; // the Auto Testing
         AutorunnerState autorunner{};
@@ -705,6 +721,168 @@ namespace Agentmaster
         }
         const int64_t last = (s.convApiActivityUnixMs > s.lastTurnUnixMs) ? s.convApiActivityUnixMs : s.lastTurnUnixMs;
         return last > 0 && (nowMs - last) < static_cast<int64_t>(cacheMinutes) * 60000;
+    }
+
+    // Agentmaster (current-model adornment): the ONE display-model resolution every surface shares —
+    // the transcript-derived CURRENT model when known (what the last reply actually ran on), else the
+    // launch-request `model` (the cmdline/env read, also where a managed Codex's rollout model
+    // lives). Returns "" only when neither is known (a never-prompted bare launch). PURE.
+    inline const std::wstring& SessionDisplayModel(const SessionInfo& s) noexcept
+    {
+        return s.currentModel.empty() ? s.model : s.currentModel;
+    }
+
+    // Agentmaster (current-model adornment): shorten an Anthropic model id for display — the Triage-
+    // Board card / per-tab overlay / tab tooltip show "opus-4.6" instead of
+    // "claude-opus-4-6-20260105". Handles every id shape in the wild:
+    //   claude-fable-5                                -> fable-5     (new date-less ids)
+    //   claude-opus-4-8                               -> opus-4.8
+    //   claude-haiku-4-5-20251001                     -> haiku-4.5   (dated ids)
+    //   claude-3-7-sonnet-20250219                    -> sonnet-3.7  (old family-last ids)
+    //   us.anthropic.claude-sonnet-4-5-20250929-v1:0  -> sonnet-4.5  (Bedrock; Vertex "@date" too)
+    //   claude-instant-1.2                            -> instant-1.2
+    //   opus / sonnet-5 / fable                       -> unchanged   (bare aliases users pass --model)
+    // A NON-Anthropic id (a managed Codex's "gpt-5.1-codex") or anything unrecognized is returned
+    // VERBATIM — never mangled — so callers can apply it unconditionally; likewise the API-error
+    // pseudo-model "<synthetic>" (which producers already skip). Rules: the version is every short
+    // (≤3-digit) numeric token joined by '.' (they surround the family in both the old and new id
+    // orders), an 8-digit date / "-latest" / Bedrock "-v1:0" / a Vertex "@…" suffix never count, and
+    // a trailing "[…]" marker (the 1M-context "[1m]" alias form) is preserved verbatim. PURE + total.
+    inline std::wstring ShortModelName(std::wstring_view id)
+    {
+        // Trim surrounding whitespace.
+        size_t b = 0, e = id.size();
+        while (b < e && (id[b] == L' ' || id[b] == L'\t'))
+        {
+            ++b;
+        }
+        while (e > b && (id[e - 1] == L' ' || id[e - 1] == L'\t'))
+        {
+            --e;
+        }
+        const std::wstring original{ id.substr(b, e - b) };
+        if (original.empty())
+        {
+            return {};
+        }
+        // Split off a trailing "[...]" marker (e.g. "sonnet-5[1m]") — re-appended verbatim.
+        std::wstring bracket;
+        std::wstring core = original;
+        if (core.back() == L']')
+        {
+            if (const auto open = core.rfind(L'['); open != std::wstring::npos)
+            {
+                bracket = core.substr(open);
+                core.erase(open);
+            }
+        }
+        // Lowercase (ids are ASCII; aliases may be typed capitalized).
+        for (auto& c : core)
+        {
+            if (c >= L'A' && c <= L'Z')
+            {
+                c = static_cast<wchar_t>(c - L'A' + L'a');
+            }
+        }
+        // Anchor on the "claude" token when present (strips "us.anthropic." / "anthropic." prefixes).
+        bool hadClaude = false;
+        if (const auto p = core.find(L"claude"); p != std::wstring::npos &&
+                                                 (p == 0 || core[p - 1] == L'.' || core[p - 1] == L'/' || core[p - 1] == L'-' || core[p - 1] == L'_'))
+        {
+            core.erase(0, p);
+            hadClaude = true;
+        }
+        // Strip provider suffixes: Vertex "@20250929", Bedrock "-v1:0", "-latest".
+        if (const auto at = core.find(L'@'); at != std::wstring::npos)
+        {
+            core.erase(at);
+        }
+        if (const auto colon = core.rfind(L':'); colon != std::wstring::npos)
+        {
+            if (const auto v = core.rfind(L"-v", colon); v != std::wstring::npos && v < colon)
+            {
+                core.erase(v);
+            }
+        }
+        constexpr std::wstring_view latest = L"-latest";
+        if (core.size() > latest.size() && std::wstring_view{ core }.substr(core.size() - latest.size()) == latest)
+        {
+            core.erase(core.size() - latest.size());
+        }
+        // Tokenize on '-' into the family (first all-alpha token besides "claude") + the short
+        // numeric version tokens (digits, or digits with an embedded '.'; an 8-digit date is not one).
+        std::wstring family;
+        std::wstring version;
+        size_t start = 0;
+        for (size_t i = 0; i <= core.size(); ++i)
+        {
+            if (i < core.size() && core[i] != L'-')
+            {
+                continue;
+            }
+            const std::wstring_view tok = std::wstring_view{ core }.substr(start, i - start);
+            start = i + 1;
+            if (tok.empty() || tok == L"claude")
+            {
+                continue;
+            }
+            bool alpha = true, numeric = true;
+            size_t digits = 0;
+            for (const wchar_t c : tok)
+            {
+                if (c >= L'0' && c <= L'9')
+                {
+                    alpha = false;
+                    ++digits;
+                }
+                else if (c == L'.')
+                {
+                    alpha = false;
+                }
+                else
+                {
+                    numeric = false;
+                }
+            }
+            if (alpha && family.empty())
+            {
+                family = tok;
+            }
+            else if (numeric && digits > 0 && digits <= 3)
+            {
+                if (!version.empty())
+                {
+                    version += L'.';
+                }
+                version += tok;
+            }
+        }
+        // Without a "claude" anchor only a KNOWN Anthropic family may be shortened — anything else
+        // ("gpt-5.1-codex", "o4-mini", "<synthetic>") passes through verbatim.
+        if (!hadClaude)
+        {
+            if (family != L"opus" && family != L"sonnet" && family != L"haiku" &&
+                family != L"fable" && family != L"mythos" && family != L"instant")
+            {
+                return original;
+            }
+        }
+        if (family.empty())
+        {
+            if (!hadClaude || version.empty())
+            {
+                return original; // nothing recognizable — never mangle
+            }
+            family = L"claude"; // e.g. "claude-2" -> "claude-2"
+        }
+        std::wstring out = family;
+        if (!version.empty())
+        {
+            out += L'-';
+            out += version;
+        }
+        out += bracket;
+        return out;
     }
 
     // A reusable plan (DESIGN §10 "Plans across the fleet"): a named sequence of prompts

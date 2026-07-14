@@ -128,7 +128,13 @@ namespace Agentmaster
             std::wstring title;
             std::wstring gitBranch;
             std::wstring recap; // last away_summary seen in the tail ("empty never clears")
-            int64_t recapMtime{ 0 }; // transcript mtime the recap was last re-read at
+            // Agentmaster (current-model adornment): the CURRENT model — the tail's newest real
+            // assistant message.model, read from the SAME mtime-gated tail pull as the recap
+            // (ReadTranscriptTailFacts: one read, two facts). "empty never clears": a shallow
+            // steady-state tail that carries no assistant line (all tool_results / user lines)
+            // keeps the captured model. Feeds ExternalClaudeRow.currentModel.
+            std::wstring model;
+            int64_t recapMtime{ 0 }; // transcript mtime the recap+model tail was last re-read at
         };
         std::unordered_map<std::wstring, ExtInfo> _extInfoCache;
 

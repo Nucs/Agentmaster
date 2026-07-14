@@ -58,6 +58,7 @@ int wmain()
     TestBuildPromptSubmission();
     TestSchedulerIntegration();
     TestTranscriptScan();
+    TestCurrentModel();
     TestBlockedAndInterruptedStates();
     TestPersistence();
     TestManagerLayout();

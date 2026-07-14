@@ -387,7 +387,20 @@ namespace Agentmaster
     // stored recap (the "empty never clears" rule, identical to the other two readers).
     std::wstring RecapFromTranscriptChunk(std::wstring_view chunk)
     {
-        std::wstring recap;
+        return TailFactsFromTranscriptChunk(chunk).recap;
+    }
+
+    // Agentmaster (current-model adornment): the shared TAIL-FACTS extractor — one pass over the
+    // chunk collects BOTH the idle recap (as before, RecapFromTranscriptChunk above is now a thin
+    // view over this) and the CURRENT MODEL: the LAST real assistant line's message.model. "Real"
+    // excludes the synthetic API-error line (isApiErrorMessage:true, whose pseudo-model is
+    // "<synthetic>" — belt-and-braces: both signals are checked) and isSidechain lines (an inlined
+    // subagent's reply runs on ITS model, not the session's — the same defensiveness
+    // ParseTranscriptDelta applies). "Last wins" for both fields; "" == not present in the window,
+    // so the caller's "empty never clears" rule holds per field.
+    TranscriptTailFacts TailFactsFromTranscriptChunk(std::wstring_view chunk)
+    {
+        TranscriptTailFacts facts;
         size_t start = 0;
         for (size_t i = 0; i <= chunk.size(); ++i)
         {
@@ -411,15 +424,26 @@ namespace Agentmaster
                 continue; // garbage / a partial leading line — skip
             }
             const auto& obj = *parsed;
-            if (obj.StrAt(L"type") == L"system" && obj.StrAt(L"subtype") == L"away_summary")
+            const std::wstring type = obj.StrAt(L"type");
+            if (type == L"system" && obj.StrAt(L"subtype") == L"away_summary")
             {
                 if (std::wstring r = NormalizeRecapText(obj.StrAt(L"content")); !r.empty())
                 {
-                    recap = std::move(r); // LAST one in the chunk wins (newer recaps supersede)
+                    facts.recap = std::move(r); // LAST one in the chunk wins (newer recaps supersede)
+                }
+            }
+            else if (type == L"assistant" && !obj.BoolAt(L"isApiErrorMessage") && !obj.BoolAt(L"isSidechain"))
+            {
+                if (const auto* msg = obj.Find(L"message"); msg && msg->type == json::Value::Type::Obj)
+                {
+                    if (std::wstring m = msg->StrAt(L"model"); !m.empty() && m != L"<synthetic>")
+                    {
+                        facts.model = std::move(m); // LAST real assistant line wins (== the current model)
+                    }
                 }
             }
         }
-        return recap;
+        return facts;
     }
 
     // Agentmaster: read JUST the idle RECAP out-of-band, from the transcript TAIL. WHY the tail and
@@ -434,6 +458,16 @@ namespace Agentmaster
     // tail window / unreadable. Filesystem only.
     std::wstring ReadTranscriptRecapTailIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
     {
+        return ReadTranscriptTailFactsIn(projectsDir, cwd, sessionId, maxTailBytes).recap;
+    }
+
+    std::wstring ReadTranscriptRecapTail(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
+    {
+        return ReadTranscriptRecapTailIn(ClaudeProjectsDir(), cwd, sessionId, maxTailBytes);
+    }
+
+    TranscriptTailFacts ReadTranscriptTailFactsIn(std::wstring_view projectsDir, std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
+    {
         if (projectsDir.empty() || cwd.empty() || sessionId.empty())
         {
             return {};
@@ -444,12 +478,12 @@ namespace Agentmaster
         {
             return {};
         }
-        return RecapFromTranscriptChunk(Utf8ToWide(bytes));
+        return TailFactsFromTranscriptChunk(Utf8ToWide(bytes));
     }
 
-    std::wstring ReadTranscriptRecapTail(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
+    TranscriptTailFacts ReadTranscriptTailFacts(std::wstring_view cwd, std::wstring_view sessionId, size_t maxTailBytes)
     {
-        return ReadTranscriptRecapTailIn(ClaudeProjectsDir(), cwd, sessionId, maxTailBytes);
+        return ReadTranscriptTailFactsIn(ClaudeProjectsDir(), cwd, sessionId, maxTailBytes);
     }
 
     std::wstring TranscriptDisplayTitle(const TranscriptInfo& info)

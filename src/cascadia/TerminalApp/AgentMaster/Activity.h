@@ -215,6 +215,13 @@ namespace Agentmaster
         std::wstring wtSession; // its WT_SESSION (the foreign tab id; NOT in our roster); empty if cmd-hosted
         std::wstring cwd;
         std::wstring model;
+        // Agentmaster (current-model adornment): the CURRENT model — the transcript's newest real
+        // assistant message.model, read from the same mtime-gated tail pull as the recap
+        // (ReadTranscriptTailFacts). `model` above is the LAUNCH REQUEST (cmdline --model — usually
+        // empty on a bare external `claude`, and stale across a /model switch); this is what the
+        // session actually last replied with. Claude rows only ("empty never clears" in the
+        // observer's cache); a Codex row's rollout-derived model already lives in `model`.
+        std::wstring currentModel;
         std::wstring effort; // Claude effort, or Codex model_reasoning_effort (from the rollout turn_context)
         bool background{};
         int64_t startUnixMs{};
