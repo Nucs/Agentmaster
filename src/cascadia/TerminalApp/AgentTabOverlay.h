@@ -105,6 +105,14 @@ namespace winrt::TerminalApp::implementation
         // re-renders a linked badge. Call on the UI thread.
         void SetTabColorMode(int mode);
 
+        // Agentmaster (current-model adornment): the GLOBAL AppSettings::modelFamilies csv — the
+        // Anthropic family words row 1's model shortener (ShortModelName) recognizes when the model
+        // is a BARE --model alias (a full "claude-…" id shortens regardless). Mirrored in by the
+        // page — on attach (seed) and on cog Save / cross-window broadcast (the SetTabColorMode
+        // idiom); kept as the raw csv here (parsed per refresh — engine-include-free header). A
+        // change re-renders a linked badge. Call on the UI thread.
+        void SetModelFamilies(const std::wstring& familiesCsv);
+
         // Agentmaster (TAB_OVERLAY.md summary panel): whether the panel preserves a message's real
         // newlines (true) or collapses each message to one line with a literal "\n" (false, the default
         // session-end.js look). A GLOBAL setting (AppSettings::summaryPanelWrapNewlines), mirrored in here
@@ -229,6 +237,7 @@ namespace winrt::TerminalApp::implementation
         double _restOpacity{ 0.50 }; // GLOBAL AppSettings::tabOverlayRestOpacity mirror (dim, at rest) — page-driven (seed + Save/broadcast)
         double _hoverOpacity{ 1.0 }; // GLOBAL AppSettings::tabOverlayHoverOpacity mirror (bright, on hover / copy-menu-open) — page-driven
         int _tabColorMode{ 0 }; // GLOBAL AppSettings::tabColorMode mirror as int (0 == WorkingDirectory) — page-driven; keys the EFFECTIVE work dir the subline/Open Path/Copy Path show (SetTabColorMode)
+        std::wstring _modelFamiliesCsv; // GLOBAL AppSettings::modelFamilies mirror (raw csv; parsed per refresh) — page-driven; the family words row 1's model shortener recognizes for a bare --model alias (SetModelFamilies)
         std::wstring _lastActivitySig; // last kind rendered by ShowActivity (skip redundant re-renders)
         std::shared_ptr<::Agentmaster::SessionRegistry> _registry;
         uint64_t _observerToken{ 0 }; // ::Agentmaster::ObserverToken (uint64_t; avoid the header here)

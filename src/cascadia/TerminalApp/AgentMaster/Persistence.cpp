@@ -578,6 +578,7 @@ namespace Agentmaster
         o.Set(L"skipPermissions", json::Value::MkBool(s.skipPermissions));
         o.Set(L"model", json::Value::MkStr(s.model));
         o.Set(L"launchModels", json::Value::MkStr(s.launchModels));
+        o.Set(L"modelFamilies", json::Value::MkStr(s.modelFamilies));
         o.Set(L"includeCoAuthoredBy", json::Value::MkBool(s.includeCoAuthoredBy));
         o.Set(L"env", json::Value::MkStr(s.env));
         o.Set(L"claudeExePath", json::Value::MkStr(s.claudeExePath));
@@ -651,6 +652,14 @@ namespace Agentmaster
         if (v.Find(L"launchModels"))
         {
             s.launchModels = v.StrAt(L"launchModels");
+        }
+        // Current-model adornment: presence-gated like launchModels — an ABSENT key (an older
+        // settings.json) seeds the shipped kDefaultModelFamilies (the struct default) so the cog
+        // box shows the list ready to extend; a PRESENT value — even "" — is kept verbatim (the
+        // display sites fall back to the built-ins on an empty parse, so nothing breaks).
+        if (v.Find(L"modelFamilies"))
+        {
+            s.modelFamilies = v.StrAt(L"modelFamilies");
         }
         s.includeCoAuthoredBy = v.BoolAt(L"includeCoAuthoredBy", true);
         s.env = v.StrAt(L"env");

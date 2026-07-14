@@ -310,7 +310,7 @@ namespace winrt::TerminalApp::implementation
         // lives), shortened for the HUD (ShortModelName: "fable-5" / "opus-4.6"; a Codex id passes
         // through verbatim). Dimmer than the status so it reads as metadata; hidden until known (a
         // never-prompted bare launch has no model to tell).
-        if (const std::wstring shortModel = ShortModelName(SessionDisplayModel(s)); !shortModel.empty())
+        if (const std::wstring shortModel = ShortModelName(SessionDisplayModel(s), ParseModelFamilies(_modelFamiliesCsv)); !shortModel.empty())
         {
             appendText(shortModel,
                        L"Model \x2014 what this session's last reply actually ran on (read from the\n"
@@ -627,6 +627,24 @@ namespace winrt::TerminalApp::implementation
         if (!_pending && !_sessionId.empty() && _registry)
         {
             _Refresh(); // repaint row 2 under the new mode
+        }
+    }
+
+    // Agentmaster (current-model adornment): adopt the GLOBAL model-family list (seeded on attach,
+    // broadcast alongside SetTabColorMode on a cog Save) — the words row 1's model shortener
+    // recognizes when the model is a BARE --model alias. Kept as the raw csv (ShortModelName parses
+    // via ParseModelFamilies at each refresh — a refresh is notify-driven and the list is tiny);
+    // change-gated so the steady-state re-seed is a no-op.
+    void AgentTabOverlay::SetModelFamilies(const std::wstring& familiesCsv)
+    {
+        if (_modelFamiliesCsv == familiesCsv)
+        {
+            return;
+        }
+        _modelFamiliesCsv = familiesCsv;
+        if (!_pending && !_sessionId.empty() && _registry)
+        {
+            _Refresh(); // repaint row 1's model part under the new list
         }
     }
 

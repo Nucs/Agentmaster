@@ -732,6 +732,69 @@ namespace Agentmaster
         return s.currentModel.empty() ? s.model : s.currentModel;
     }
 
+    // Agentmaster (current-model adornment): the SHIPPED default Anthropic model-FAMILY words —
+    // what ShortModelName recognizes when shortening a BARE model alias (one without a "claude-"
+    // prefix, e.g. a cmdline `--model opus-4.6`; a full "claude-…" id never consults the list).
+    // The AppSettings::modelFamilies default, so the Settings cog box shows this list ready to
+    // EXTEND when Anthropic ships a new family — no code change needed (the way "mythos" would
+    // have required one).
+    inline constexpr std::wstring_view kDefaultModelFamilies = L"opus, sonnet, haiku, fable, mythos, instant";
+
+    // Agentmaster (current-model adornment): parse a user-configured model-family list (the cog's
+    // AppSettings::modelFamilies) — comma/semicolon/whitespace-separated words, lowercased,
+    // deduped, input order kept. Empty/blank csv -> an empty vector (the display sites then fall
+    // back to the built-ins via ShortModelName's empty-means-default rule, so a cleared/garbled
+    // box can never break the model adornment). PURE + total.
+    inline std::vector<std::wstring> ParseModelFamilies(std::wstring_view csv)
+    {
+        std::vector<std::wstring> out;
+        std::wstring cur;
+        const auto flush = [&out, &cur]() {
+            if (cur.empty())
+            {
+                return;
+            }
+            for (auto& c : cur)
+            {
+                if (c >= L'A' && c <= L'Z')
+                {
+                    c = static_cast<wchar_t>(c - L'A' + L'a');
+                }
+            }
+            for (const auto& existing : out)
+            {
+                if (existing == cur)
+                {
+                    cur.clear();
+                    return;
+                }
+            }
+            out.push_back(cur);
+            cur.clear();
+        };
+        for (const wchar_t c : csv)
+        {
+            if (c == L',' || c == L';' || c == L' ' || c == L'\t' || c == L'\r' || c == L'\n')
+            {
+                flush();
+            }
+            else
+            {
+                cur.push_back(c);
+            }
+        }
+        flush();
+        return out;
+    }
+
+    // The built-in family list, parsed once (kDefaultModelFamilies as a vector — the fallback for
+    // an empty/unset configured list).
+    inline const std::vector<std::wstring>& DefaultModelFamilies()
+    {
+        static const std::vector<std::wstring> kFamilies = ParseModelFamilies(kDefaultModelFamilies);
+        return kFamilies;
+    }
+
     // Agentmaster (current-model adornment): shorten an Anthropic model id for display — the Triage-
     // Board card / per-tab overlay / tab tooltip show "opus-4.6" instead of
     // "claude-opus-4-6-20260105". Handles every id shape in the wild:
@@ -747,8 +810,12 @@ namespace Agentmaster
     // pseudo-model "<synthetic>" (which producers already skip). Rules: the version is every short
     // (≤3-digit) numeric token joined by '.' (they surround the family in both the old and new id
     // orders), an 8-digit date / "-latest" / Bedrock "-v1:0" / a Vertex "@…" suffix never count, and
-    // a trailing "[…]" marker (the 1M-context "[1m]" alias form) is preserved verbatim. PURE + total.
-    inline std::wstring ShortModelName(std::wstring_view id)
+    // a trailing "[…]" marker (the 1M-context "[1m]" alias form) is preserved verbatim.
+    // `families` = the recognized family words for the BARE-alias path (no "claude-" prefix — a
+    // prefixed id shortens on ANY alpha family): the cog's AppSettings::modelFamilies via
+    // ParseModelFamilies, REPLACING the built-ins so the settings list is the whole truth; empty
+    // (default / a cleared box) falls back to DefaultModelFamilies(). PURE + total.
+    inline std::wstring ShortModelName(std::wstring_view id, const std::vector<std::wstring>& families = {})
     {
         // Trim surrounding whitespace.
         size_t b = 0, e = id.size();
@@ -858,11 +925,21 @@ namespace Agentmaster
             }
         }
         // Without a "claude" anchor only a KNOWN Anthropic family may be shortened — anything else
-        // ("gpt-5.1-codex", "o4-mini", "<synthetic>") passes through verbatim.
+        // ("gpt-5.1-codex", "o4-mini", "<synthetic>") passes through verbatim. "Known" is the
+        // CONFIGURED list (the cog's Model families box), the built-ins when none is set.
         if (!hadClaude)
         {
-            if (family != L"opus" && family != L"sonnet" && family != L"haiku" &&
-                family != L"fable" && family != L"mythos" && family != L"instant")
+            const std::vector<std::wstring>& known = families.empty() ? DefaultModelFamilies() : families;
+            bool recognized = false;
+            for (const auto& f : known)
+            {
+                if (family == f)
+                {
+                    recognized = true;
+                    break;
+                }
+            }
+            if (!recognized)
             {
                 return original;
             }
@@ -941,6 +1018,17 @@ namespace Agentmaster
         // even "" (the user cleared the box; submenus then offer just "Default") — is kept
         // verbatim (Persistence gates the default on key presence, not emptiness).
         std::wstring launchModels{ kDefaultLaunchModels };
+        // Agentmaster (current-model adornment): the Anthropic model-FAMILY words ShortModelName
+        // recognizes when shortening a BARE model alias for display — the board card / per-tab
+        // overlay / tab tooltip model text (a full "claude-…" id, the transcript's usual shape,
+        // never consults this list; only a prefix-less `--model opus-4.6`-style alias does).
+        // Comma/space-separated, case-insensitive; REPLACES the built-in list, so editing here is
+        // how a NEW family ships without a code change. Blank/garbage self-heals: the display
+        // sites fall back to the built-ins (ParseModelFamilies -> empty ->
+        // DefaultModelFamilies inside ShortModelName), so a cleared box can never break the
+        // adornment. An ABSENT settings.json key seeds this shipped default (presence-gated like
+        // launchModels) so the cog box always shows the current list, ready to extend.
+        std::wstring modelFamilies{ kDefaultModelFamilies };
         // false => emit includeCoAuthoredBy:false (drop Claude's commit/PR co-author byline).
         bool includeCoAuthoredBy{ true };
         // The GLOBAL extra environment injected into EVERY spawned session (Claude AND Codex), edited

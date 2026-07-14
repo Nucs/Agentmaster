@@ -781,6 +781,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBox _setLaunchModels{ nullptr }; // launch-model picker: multi-line "Display name | model-id" list (one per line) feeding every "Open New Session Here" / "Fork session" submenu
         winrt::Windows::UI::Xaml::Controls::Border _setLaunchModelsBorder{ nullptr }; // wraps _setLaunchModels; recolored by the lexer (the _setEnvBorder idiom)
         winrt::Windows::UI::Xaml::Controls::TextBlock _setLaunchModelsStatus{ nullptr }; // the counts + first-issue line under the editor (the _setEnvStatus idiom)
+        winrt::Windows::UI::Xaml::Controls::TextBox _setModelFamilies{ nullptr }; // current-model adornment: the comma-separated Anthropic FAMILY words ShortModelName recognizes for a bare --model alias (AppSettings::modelFamilies; blank => built-ins)
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setIncludeCoAuthored{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ComboBox _setDefaultMode{ nullptr };
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxAutoSends{ nullptr };

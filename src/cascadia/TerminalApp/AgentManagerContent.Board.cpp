@@ -385,7 +385,7 @@ namespace winrt::TerminalApp::implementation
             auto modelCtxRow = StackPanel{};
             modelCtxRow.Orientation(Orientation::Horizontal);
             modelCtxRow.Spacing(8);
-            if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s)); !shortModel.empty())
+            if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s), ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies)); !shortModel.empty())
             {
                 auto modelText = Text(winrt::hstring{ shortModel }, 10, false, 0.45);
                 std::wstring mtip = L"Model \x2014 what this session's last reply actually ran on (read from the transcript; a /model switch shows here on the next reply).";
@@ -1395,8 +1395,9 @@ namespace winrt::TerminalApp::implementation
             };
             // The CURRENT model (transcript truth, tail-read by the observer) wins over the launch
             // cmdline `--model` — usually empty on a bare external claude — shortened for the card
-            // (a Codex row's rollout model rides ex.model and passes through ShortModelName verbatim).
-            addPart(::Agentmaster::ShortModelName(ex.currentModel.empty() ? ex.model : ex.currentModel));
+            // (a Codex row's rollout model rides ex.model and passes through ShortModelName verbatim;
+            // the family words come from the cog's Model families box).
+            addPart(::Agentmaster::ShortModelName(ex.currentModel.empty() ? ex.model : ex.currentModel, ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies)));
             addPart(ex.effort);
             addPart(ex.sandbox); // Codex only (empty for Claude) — model · effort · sandbox · approval
             addPart(ex.approvalMode); // Codex only

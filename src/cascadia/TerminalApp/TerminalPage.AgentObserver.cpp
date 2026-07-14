@@ -2034,7 +2034,7 @@ namespace winrt::TerminalApp::implementation
         // "fable-5", not "claude-fable-5"; a Codex id passes through verbatim).
         std::vector<std::wstring> metaParts;
         metaParts.push_back(s.kind == ::Agentmaster::AgentKind::Codex ? std::wstring{ L"codex" } : std::wstring{ L"claude" });
-        if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s)); !shortModel.empty())
+        if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s), ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies)); !shortModel.empty())
         {
             metaParts.push_back(shortModel);
         }
@@ -3375,6 +3375,10 @@ namespace winrt::TerminalApp::implementation
         // (the inferred dir under the Inferred mode); a cog Save re-applies it live via
         // _ReapplyManagedTabColors (the same broadcast that repaints the tabs).
         overlay->SetTabColorMode(static_cast<int>(_appSettings.tabColorMode));
+        // Model families (current-model adornment): a GLOBAL setting (AppSettings::modelFamilies) —
+        // seed this overlay's row-1 model shortener; a cog Save re-applies it live via the same
+        // _ReapplyManagedTabColors broadcast that pushes the tab-color mode.
+        overlay->SetModelFamilies(_appSettings.modelFamilies);
         {
             auto weakThis = get_weak();
             overlay->SetSummaryToggleHandler([weakThis]() {

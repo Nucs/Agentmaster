@@ -2161,9 +2161,12 @@ namespace winrt::TerminalApp::implementation
             // Mirror the (possibly changed) mode into the session's linked overlay too — its subline /
             // Open Path / Copy Path resolve the EFFECTIVE work dir through it, so a mode flip re-renders
             // the badge onto the same dir story the tab color just repainted to (a no-op when unchanged).
+            // The model-family list rides the same broadcast (row 1's model shortener; a no-op when
+            // unchanged, like the mode).
             if (const auto ovIt = _claudeOverlays.find(id); ovIt != _claudeOverlays.end() && ovIt->second)
             {
                 ovIt->second->SetTabColorMode(static_cast<int>(_appSettings.tabColorMode));
+                ovIt->second->SetModelFamilies(_appSettings.modelFamilies);
             }
         }
     }

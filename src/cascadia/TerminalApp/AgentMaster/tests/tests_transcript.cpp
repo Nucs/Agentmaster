@@ -466,6 +466,40 @@ void TestCurrentModel()
         CHECK(SessionDisplayModel(s) == L"claude-fable-5", "display: the CURRENT model wins over the launch request");
     }
 
+    // --- The CONFIGURABLE family list (AppSettings::modelFamilies -> ParseModelFamilies ->
+    // ShortModelName's bare-alias gate; a full "claude-…" id never consults it) ---
+    {
+        const auto f = ParseModelFamilies(L"Opus, sonnet;  ZEPHYR\nfable\tfable");
+        CHECK(f.size() == 4 && f[0] == L"opus" && f[1] == L"sonnet" && f[2] == L"zephyr" && f[3] == L"fable",
+              "families: split on comma/semicolon/whitespace, lowercased, deduped, order kept");
+        CHECK(ParseModelFamilies(L"").empty(), "families: empty csv -> empty vector (display falls back to built-ins)");
+        CHECK(ParseModelFamilies(L" ,;  \n").empty(), "families: separator-only csv -> empty vector");
+        CHECK(DefaultModelFamilies().size() == 6 && DefaultModelFamilies()[0] == L"opus",
+              "families: the built-ins parse from kDefaultModelFamilies (opus/sonnet/haiku/fable/mythos/instant)");
+        // a custom list REPLACES the built-ins for BARE aliases — how a NEW family ships without code
+        const auto zeph = ParseModelFamilies(L"zephyr");
+        CHECK(ShortModelName(L"Zephyr-3-1", zeph) == L"zephyr-3.1", "families: a configured NEW family shortens a bare alias");
+        CHECK(ShortModelName(L"fable-5", zeph) == L"fable-5", "families: an unlisted bare alias passes through (identity here)");
+        CHECK(ShortModelName(L"FABLE-5-20260101", zeph) == L"FABLE-5-20260101", "families: an unlisted alias is never normalized (case/date kept verbatim)");
+        CHECK(ShortModelName(L"claude-zephyr-3-1") == L"zephyr-3.1", "families: a claude-prefixed id shortens on ANY family — the list is bare-alias-only");
+        CHECK(ShortModelName(L"claude-fable-5", zeph) == L"fable-5", "families: a claude-prefixed id ignores the custom list too");
+        CHECK(ShortModelName(L"fable-5", {}) == L"fable-5", "families: an empty list -> the built-ins govern (the cleared-box self-heal)");
+        // AppSettings persistence: the csv round-trips; an ABSENT key seeds the shipped default
+        // (presence-gated like launchModels); a PRESENT empty value is kept verbatim.
+        AppSettings as;
+        as.modelFamilies = L"opus, zephyr";
+        CHECK(AppSettingsFromJson(ToJson(as)).modelFamilies == L"opus, zephyr", "families: modelFamilies round-trips settings.json");
+        CHECK(AppSettingsFromJson(json::Value::MkObj()).modelFamilies == std::wstring{ kDefaultModelFamilies },
+              "families: an ABSENT key seeds the shipped default list (the cog box shows it, ready to extend)");
+        {
+            // A fresh object (json::Value::Set APPENDS — re-setting a key on ToJson's output would
+            // leave the original entry first, and Find/StrAt read the FIRST match).
+            auto j = json::Value::MkObj();
+            j.Set(L"modelFamilies", json::Value::MkStr(L""));
+            CHECK(AppSettingsFromJson(j).modelFamilies.empty(), "families: a PRESENT empty value is kept (display then uses the built-ins)");
+        }
+    }
+
     // --- ParseTranscriptDelta: the assistant line's message.model is captured onto the event ---
     {
         const std::wstring line = LR"j({"type":"assistant","message":{"model":"claude-fable-5","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}]}})j" L"\n";

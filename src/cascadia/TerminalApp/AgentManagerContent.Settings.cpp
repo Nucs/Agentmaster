@@ -773,6 +773,16 @@ namespace winrt::TerminalApp::implementation
         _setLaunchModelsStatus = Text(L"", 11, false, 0.7);
         _setLaunchModelsStatus.TextWrapping(TextWrapping::Wrap);
         panel.Children().Append(_setLaunchModelsStatus);
+        // Agentmaster (current-model adornment): the Anthropic model-FAMILY words the model shortener
+        // recognizes (ShortModelName — the "fable-5" / "opus-4.6" text on the board card, the per-tab
+        // overlay, and the tab tooltip). Only a BARE --model alias consults it (a full "claude-…" id —
+        // the transcript's usual shape — shortens regardless), so this needs editing exactly once per
+        // NEW family Anthropic ships. Plain comma-separated words; REPLACES the built-in list.
+        _setModelFamilies = TextBox{};
+        _setModelFamilies.Header(winrt::box_value(L"Model families (short model display)"));
+        _setModelFamilies.PlaceholderText(winrt::hstring{ std::wstring{ L"blank = built-ins: " } + std::wstring{ ::Agentmaster::kDefaultModelFamilies } });
+        AgentSetTip(_setModelFamilies, L"The Anthropic model-family words the short model display recognizes (comma-separated, case-insensitive) \x2014 shown as e.g. \x201C" L"fable-5\x201D on the board card, the tab tooltip, and the per-tab overlay. Add a word here when a new Claude family ships. Only a bare --model alias needs this; a full \x201C" L"claude-\x2026\x201D id always shortens. Blank falls back to the built-in list.");
+        panel.Children().Append(_setModelFamilies);
         _setIncludeCoAuthored = ToggleSwitch{};
         _setIncludeCoAuthored.Header(winrt::box_value(L"Include co-authored-by in commits"));
         AgentSetTip(_setIncludeCoAuthored, L"When off, commits Claude makes omit the \x201C" L"Co-authored-by\x201D trailer. Applies to new sessions.");
@@ -1667,6 +1677,10 @@ namespace winrt::TerminalApp::implementation
             _setLaunchModels.Text(winrt::hstring{ _appSettings.launchModels });
             _RefreshLaunchModelsLex(); // explicit: a re-seed of IDENTICAL text fires no TextChanged, and the border/status must reflect THIS open's value
         }
+        if (_setModelFamilies)
+        {
+            _setModelFamilies.Text(winrt::hstring{ _appSettings.modelFamilies });
+        }
         if (_setIncludeCoAuthored)
         {
             _setIncludeCoAuthored.IsOn(_appSettings.includeCoAuthoredBy);
@@ -2008,6 +2022,12 @@ namespace winrt::TerminalApp::implementation
             // \r-normalized newlines). A cleared box deliberately stores "" — the submenus then
             // offer just "Default" (Persistence keeps a present-but-empty key, never re-seeds).
             _appSettings.launchModels = std::wstring{ _setLaunchModels.Text() };
+        }
+        if (_setModelFamilies)
+        {
+            // Stored verbatim (ParseModelFamilies trims/lowercases at every consumer); a cleared
+            // box stores "" — the display sites then fall back to the built-in family list.
+            _appSettings.modelFamilies = std::wstring{ _setModelFamilies.Text() };
         }
         if (_setIncludeCoAuthored)
         {

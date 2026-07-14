@@ -833,8 +833,9 @@ namespace winrt::TerminalApp::implementation
                         me += part;
                     };
                     // CURRENT model (transcript truth) > launch cmdline `--model`; short form. A Codex
-                    // row's rollout model rides ex.model and passes through ShortModelName verbatim.
-                    addPart(::Agentmaster::ShortModelName(ex.currentModel.empty() ? ex.model : ex.currentModel));
+                    // row's rollout model rides ex.model and passes through ShortModelName verbatim;
+                    // the family words come from the cog's Model families box.
+                    addPart(::Agentmaster::ShortModelName(ex.currentModel.empty() ? ex.model : ex.currentModel, ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies)));
                     addPart(ex.effort);
                     addPart(ex.sandbox); // Codex only (empty for Claude)
                     addPart(ex.approvalMode); // Codex only
