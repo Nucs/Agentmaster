@@ -1016,6 +1016,34 @@ namespace Agentmaster
         // preference, never a lifecycle action (a hidden session is untouched on disk).
         std::vector<std::wstring> hiddenSessionIds{};
 
+        // --- System notifications (the Settings cog's "Notifications" tab) ---
+        // Agentmaster: raise a WINDOWS TOAST when a managed session's status leaves Running for
+        // another state (the "your agent finished / needs you" cue). The toast reads:
+        //     <session title>
+        //     Has completed after <2h30m> and is <status>
+        // ("after <duration>" is the Running span — how long the turn worked; omitted when the
+        // Running entry wasn't observed, e.g. a session adopted mid-turn). Fired by the ONE window
+        // hosting the session's tab (TerminalPage::_EvaluateAgentNotification, riding the same
+        // registry-observer push as the tab status dot), so exactly one toast per transition
+        // regardless of how many windows are open. Clicking the toast jumps to the session's tab
+        // (while the app is running). Master switch — default ON; a missing key => ON.
+        bool notificationsEnabled{ true };
+        // Which TARGET states notify (the transition is always FROM Running). All default ON ==
+        // the "Running to anything else" default rule; uncheck a state in the cog to mute that
+        // transition. A missing key => ON (the default rule).
+        bool notifyOnWaiting{ true }; // Running -> WaitingForInput ("waiting for you")
+        bool notifyOnNeedsApproval{ true }; // Running -> NeedsApproval ("needs approval")
+        bool notifyOnIdle{ true }; // Running -> Idle
+        bool notifyOnDone{ true }; // Running -> Done
+        bool notifyOnError{ true }; // Running -> Error
+        // Skip the toast when the session's tab is the FOCUSED tab of the ACTIVE window — you're
+        // already looking at it (the flash ring's "the current tab is always considered visited"
+        // rule, applied to toasts). Default ON; a missing key => ON.
+        bool notifySuppressFocused{ true };
+        // Play the Windows notification sound with the toast; OFF adds <audio silent="true"/> so
+        // the toast is visual-only. Default ON; a missing key => ON.
+        bool notifySound{ true };
+
         // --- shipped-default seeding markers (ENV_VARS.md §8; NOT shown in the cog) ---
         // Agentmaster ships a few defaults ONCE and then respects user edits/removals. These markers
         // record that the one-time seed ran, so a default a user deletes never returns:

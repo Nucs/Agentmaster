@@ -619,6 +619,15 @@ namespace Agentmaster
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
         o.Set(L"updateSkippedVersion", json::Value::MkStr(s.updateSkippedVersion));
         o.Set(L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(s.updatePostponedUntilUnixMs)));
+        // System notifications (the cog's "Notifications" tab): the Running -> X toast switches.
+        o.Set(L"notificationsEnabled", json::Value::MkBool(s.notificationsEnabled));
+        o.Set(L"notifyOnWaiting", json::Value::MkBool(s.notifyOnWaiting));
+        o.Set(L"notifyOnNeedsApproval", json::Value::MkBool(s.notifyOnNeedsApproval));
+        o.Set(L"notifyOnIdle", json::Value::MkBool(s.notifyOnIdle));
+        o.Set(L"notifyOnDone", json::Value::MkBool(s.notifyOnDone));
+        o.Set(L"notifyOnError", json::Value::MkBool(s.notifyOnError));
+        o.Set(L"notifySuppressFocused", json::Value::MkBool(s.notifySuppressFocused));
+        o.Set(L"notifySound", json::Value::MkBool(s.notifySound));
         auto hidden = json::Value::MkArr();
         for (const auto& id : s.hiddenSessionIds)
         {
@@ -746,6 +755,16 @@ namespace Agentmaster
         s.allowUpdatePrerelease = v.BoolAt(L"allowUpdatePrerelease", false);
         s.updateSkippedVersion = v.StrAt(L"updateSkippedVersion");
         s.updatePostponedUntilUnixMs = v.I64At(L"updatePostponedUntilUnixMs", 0);
+        // System notifications (the cog's "Notifications" tab). Every switch defaults ON so a
+        // pre-feature settings.json gets the default rule: a toast on Running -> anything else.
+        s.notificationsEnabled = v.BoolAt(L"notificationsEnabled", true);
+        s.notifyOnWaiting = v.BoolAt(L"notifyOnWaiting", true);
+        s.notifyOnNeedsApproval = v.BoolAt(L"notifyOnNeedsApproval", true);
+        s.notifyOnIdle = v.BoolAt(L"notifyOnIdle", true);
+        s.notifyOnDone = v.BoolAt(L"notifyOnDone", true);
+        s.notifyOnError = v.BoolAt(L"notifyOnError", true);
+        s.notifySuppressFocused = v.BoolAt(L"notifySuppressFocused", true);
+        s.notifySound = v.BoolAt(L"notifySound", true);
         if (const auto* h = v.Find(L"hiddenSessionIds"); h && h->type == json::Value::Type::Arr)
         {
             for (const auto& e : h->arr)

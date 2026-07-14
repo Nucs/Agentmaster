@@ -787,6 +787,17 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setStopOnError{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setPauseOnHuman{ nullptr };
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setConfirmKill{ nullptr };
+        // NOTIFICATIONS tab (System notifications): the Running -> X Windows-toast switches. The master
+        // toggle gates the rest (the dependents grey out while it's off); the five checkboxes pick WHICH
+        // target states notify (all checked == the "Running to anything else" default rule).
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifyEnabled{ nullptr }; // master: show Windows notifications (AppSettings::notificationsEnabled, default ON)
+        winrt::Windows::UI::Xaml::Controls::CheckBox _setNotifyWaiting{ nullptr }; // Running -> WaitingForInput ("waiting for you")
+        winrt::Windows::UI::Xaml::Controls::CheckBox _setNotifyNeedsApproval{ nullptr }; // Running -> NeedsApproval ("needs approval")
+        winrt::Windows::UI::Xaml::Controls::CheckBox _setNotifyIdle{ nullptr }; // Running -> Idle
+        winrt::Windows::UI::Xaml::Controls::CheckBox _setNotifyDone{ nullptr }; // Running -> Done
+        winrt::Windows::UI::Xaml::Controls::CheckBox _setNotifyError{ nullptr }; // Running -> Error
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySuppressFocused{ nullptr }; // skip the toast when the session's tab is focused in the active window (default ON)
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setNotifySound{ nullptr }; // play the Windows notification sound (OFF => <audio silent/>; default ON)
         winrt::Windows::UI::Xaml::Controls::ComboBox _setRenameCommit{ nullptr }; // how the tab rename box commits via the keyboard (None / +Shift+Enter / +Enter); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setWaitingNever{ nullptr }; // Waiting-for-you "unread" model: ON => never time-decay (stay Waiting until read); disables the slider
         winrt::Windows::UI::Xaml::Controls::Slider _setWaitingDecaySlider{ nullptr }; // Waiting-for-you -> Idle timeout, 1..10080 minutes (1m..7d); the "Never" toggle above owns 0, the textbox (left) is the source of truth and may exceed 7d (slider then sits maxed)

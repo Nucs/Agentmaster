@@ -427,6 +427,19 @@ namespace winrt::TerminalApp::implementation
         std::unordered_set<std::wstring> _manualUnreadSessions;
         winrt::Windows::UI::Xaml::DispatcherTimer _agentFlashTimer{ nullptr };
         bool _agentFlashPhase{ false };
+        // Agentmaster (System notifications): the toast tracker's per-session state — DELIBERATELY
+        // separate from _agentFlashLastState (the flash erases/holds its map on its own rules; coupling
+        // the two would let a flash change silently break the toast edge detection, and vice versa).
+        // _agentNotifyLastState remembers each hosted session's last seen state so the registry-observer
+        // reaction can detect the Running -> X edge; _agentNotifyRunningSinceMs stamps when a session
+        // ENTERED Running (only on a SEEN edge — a session first observed already-Running, e.g. adopted
+        // mid-turn, gets no stamp and its toast omits the "after <duration>" clause rather than
+        // under-reporting). Both erased on !live (incl. when the archive seams dropped _claudeTabs before
+        // the queued observer hop landed — the cleanup runs ahead of the host gate) and at the move-out
+        // seams, so a later restore starts a fresh track (no phantom Running -> X toast). UI thread only.
+        std::unordered_map<std::wstring, ::Agentmaster::SessionState> _agentNotifyLastState;
+        std::unordered_map<std::wstring, int64_t> _agentNotifyRunningSinceMs;
+        bool _agentToastFailLogged{ false }; // log the first toast failure only (an unpackaged build throws on every Show — once is signal, per-fire is noise)
         // Agentmaster (status-dot flash-ring COLOR): the ONE brush every flashing tab in THIS window
         // shares as its ring Fill — the user-configurable "status flashing color" (Settings cog ->
         // AppSettings::flashRingColor; its alpha channel = the ring opacity). Built lazily on the first
@@ -827,6 +840,8 @@ namespace winrt::TerminalApp::implementation
         void _ClearSessionUnread(const std::wstring& sessionId); // Agentmaster (Mark Unread): clear a manual unread mark + hide the ring if the automatic flash isn't also active (from _VisitTabClearFlash / archive); ALSO clears the engine manualUnread
         void _MarkSessionRead(const std::wstring& sessionId); // Agentmaster (Waiting-for-you "unread" model): stamp readUnixMs=now (quiet) so a past-timeout WaitingForInput card may decay to Idle; from _VisitTabClearFlash (a visit) + _EvaluateAgentFlash (the focused tab)
         void _MoveSessionTriageState(const std::wstring& sessionId); // Agentmaster (Waiting-for-you + Error triage): the tab context-menu's status-adaptive move — demote a WaitingForInput session to Idle ("Move to Idle/Done"), DISMISS an Error one the same way (records the errorDismissed ack so the scanner's level-derived Error can't bounce it back), or plainly promote an Idle/Done one to WaitingForInput ("Move to Waiting-for-you"); direction re-derived from the live registry state. EXPLICITLY separate from _MarkSessionUnread (no sticky manualUnread, no ring flash)
+        void _EvaluateAgentNotification(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live); // Agentmaster (System notifications): detect the Running -> X edge per registry update on a HOSTED tab and raise the Windows toast per the Notifications settings (per-state switches, focused-tab skip); tracks the Running-entry time for the "after <duration>" clause; forgets state on !live like _EvaluateAgentFlash; UI thread
+        void _ShowAgentSessionToast(const std::wstring& sessionId, const std::wstring& title, const std::wstring& body, bool silent); // Agentmaster (System notifications): raise one Windows toast — line 1 = the session title, line 2 = the completion body; tagged per session (a newer toast replaces the older); clicking it jumps to the session's tab while the app is alive. Best-effort: an unpackaged build (no AUMID) logs once and no-ops
         void _SetTabSelectionPill(const TerminalApp::Tab& tab, bool on); // Agentmaster (Linked Lenses): show/hide the "selected/active" accent pill behind a tab's header via Tab.TabStatus(); UI thread
         void _SetTabAgentFavorite(const TerminalApp::Tab& tab, bool on); // Agentmaster (FAVORITES.md §5a): show/hide the FAVORITE marker (CROWN or STAR per AppSettings::favoriteIcon) over a tab's status dot via Tab.TabStatus(); the two markers are mutually exclusive; UI thread, idempotent
         void _RefreshTabFavoriteCrown(const std::wstring& sessionId); // Agentmaster (FAVORITES.md): re-read IsSessionFavorite(sid) and (re)assert the marker on this window's hosting tab; no-op when this window doesn't host the session. Called at bind/launch + on toggle (same-window instant; cross-window catches up on next bind)

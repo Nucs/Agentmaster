@@ -552,7 +552,7 @@ namespace winrt::TerminalApp::implementation
         card.BorderThickness(Thickness{ 1, 1, 1, 1 });
         card.CornerRadius(CornerRadius{ 8, 8, 8, 8 });
         card.Padding(Thickness{ 20, 16, 20, 16 });
-        card.Width(560); // Agentmaster: wider so the six top-tab buttons fit on one row
+        card.Width(660); // Agentmaster: wider so the seven top-tab buttons (incl. Notifications) fit on one row
         card.HorizontalAlignment(HorizontalAlignment::Center);
         card.VerticalAlignment(VerticalAlignment::Center);
         card.RequestedTheme(ElementTheme::Dark);
@@ -563,20 +563,22 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: the cog is organized into TOP TABS — a horizontal button-tab strip swapping one
         // scrollable panel per settings group (the _SwitchEnvTab idiom; deliberately NOT a Pivot, which
         // themes unreliably under XAML Islands). Save/Cancel is a fixed footer OUTSIDE the tabs (always
-        // reachable). Each section below appends into one of the six group panels; the `panel` variable is
+        // reachable). Each section below appends into one of the seven group panels; the `panel` variable is
         // RESEATED at every group boundary (a StackPanel is a ref-counted handle, so `panel = claudePanel`
         // just re-points it) so the per-control creation code stays byte-for-byte identical to before.
         auto outer = StackPanel{};
         outer.Spacing(8);
         outer.Children().Append(Text(L"Agentmaster Settings", 18, true, 1.0));
 
-        // The six group panels (built empty; filled by the sections below, in this label order).
+        // The seven group panels (built empty; filled by the sections below, in this label order).
         auto sessionsPanel = StackPanel{};
         sessionsPanel.Spacing(10);
         auto autorunnerPanel = StackPanel{};
         autorunnerPanel.Spacing(10);
         auto behaviorPanel = StackPanel{};
         behaviorPanel.Spacing(10);
+        auto notificationsPanel = StackPanel{};
+        notificationsPanel.Spacing(10);
         auto tabsPanel = StackPanel{};
         tabsPanel.Spacing(10);
         auto claudePanel = StackPanel{};
@@ -1021,6 +1023,75 @@ namespace winrt::TerminalApp::implementation
             }
         });
         panel.Children().Append(_setResetHidden);
+
+        // === NOTIFICATIONS tab (System notifications) ===
+        // A Windows TOAST when a managed session's status leaves Running — the "your agent finished /
+        // needs you" cue for tabs (and windows) you're not looking at:
+        //     <session title>
+        //     Has completed after <2h30m> and is <status>
+        // The DEFAULT rule is "Running -> anything else" (master ON + every target state checked); the
+        // checkboxes mute individual target states. Fired by the window hosting the session's tab on the
+        // registry-observer push (TerminalPage::_EvaluateAgentNotification), so exactly one toast per
+        // transition; clicking the toast jumps to the session's tab while the app is running.
+        panel = notificationsPanel;
+        panel.Children().Append(Text(L"SYSTEM NOTIFICATIONS", 11, true, 0.6));
+        _setNotifyEnabled = ToggleSwitch{};
+        _setNotifyEnabled.Header(winrt::box_value(L"Show Windows notifications"));
+        AgentSetTip(_setNotifyEnabled, L"Raise a Windows notification when a session's status changes from Running to another state \x2014 \x201C<title>: Has completed after 2h30m and is waiting for you\x201D. The checkboxes below pick which states notify. Default on.");
+        // The master gates the rest: greying the dependents while OFF makes "nothing will fire" legible
+        // at a glance (the _setWaitingNever slider-enable idiom).
+        _setNotifyEnabled.Toggled([this](const IInspectable&, const RoutedEventArgs&) {
+            if (!_setNotifyEnabled)
+            {
+                return;
+            }
+            const bool on = _setNotifyEnabled.IsOn();
+            for (const auto& dep : { _setNotifyWaiting, _setNotifyNeedsApproval, _setNotifyIdle, _setNotifyDone, _setNotifyError })
+            {
+                if (dep)
+                {
+                    dep.IsEnabled(on);
+                }
+            }
+            if (_setNotifySuppressFocused)
+            {
+                _setNotifySuppressFocused.IsEnabled(on);
+            }
+            if (_setNotifySound)
+            {
+                _setNotifySound.IsEnabled(on);
+            }
+        });
+        panel.Children().Append(_setNotifyEnabled);
+        {
+            auto cap = Text(L"Notify when a running session becomes:", 13, false, 0.9);
+            cap.Margin(Thickness{ 0, 2, 0, 0 });
+            panel.Children().Append(cap);
+
+            // The five target-state checkboxes, in the Triage-Board column order. All checked == the
+            // default "Running to anything else" rule; unchecking one mutes just that transition.
+            const auto mkStateBox = [&](CheckBox& slot, const wchar_t* label, const wchar_t* tip) {
+                slot = CheckBox{};
+                slot.Content(winrt::box_value(winrt::hstring{ label }));
+                slot.MinWidth(0);
+                slot.Margin(Thickness{ 8, 0, 0, 0 }); // indented under the caption
+                AgentSetTip(slot, winrt::hstring{ tip });
+                panel.Children().Append(slot);
+            };
+            mkStateBox(_setNotifyWaiting, L"Waiting for you", L"Notify on Running \x2192 Waiting-for-you \x2014 the turn completed and the session waits for your next prompt (or asked a question).");
+            mkStateBox(_setNotifyNeedsApproval, L"Needs approval", L"Notify on Running \x2192 Needs-approval \x2014 the session is blocked on a permission prompt or a question you must answer.");
+            mkStateBox(_setNotifyIdle, L"Idle", L"Notify on Running \x2192 Idle \x2014 the session settled back to idle.");
+            mkStateBox(_setNotifyDone, L"Done", L"Notify on Running \x2192 Done \x2014 the session finished cleanly (claude exited).");
+            mkStateBox(_setNotifyError, L"Error", L"Notify on Running \x2192 Error \x2014 the turn died on an API failure (rate limit, overloaded, prompt too long, \x2026).");
+        }
+        _setNotifySuppressFocused = ToggleSwitch{};
+        _setNotifySuppressFocused.Header(winrt::box_value(L"Skip when the tab is focused"));
+        AgentSetTip(_setNotifySuppressFocused, L"Don't notify when the session's tab is the one you're looking at (the focused tab of the active window) \x2014 you already saw it finish. Off notifies regardless. Default on.");
+        panel.Children().Append(_setNotifySuppressFocused);
+        _setNotifySound = ToggleSwitch{};
+        _setNotifySound.Header(winrt::box_value(L"Play the notification sound"));
+        AgentSetTip(_setNotifySound, L"Play the Windows notification sound with the toast. Off shows the toast silently. Default on.");
+        panel.Children().Append(_setNotifySound);
 
         // === TABS & OVERLAY tab ===
         panel = tabsPanel;
@@ -1505,6 +1576,7 @@ namespace winrt::TerminalApp::implementation
             addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
         }
         addSettingsTab(L"Behavior", L"Interaction + session-state behavior \x2014 close confirms, the rename commit key, and the Waiting-for-you \x201Cunread\x201D timeout.", behaviorPanel);
+        addSettingsTab(L"Notifications", L"Windows notifications when a session's status changes from Running to another state \x2014 which states notify, the focused-tab skip, and the sound.", notificationsPanel);
         addSettingsTab(L"Tabs & Overlay", L"The terminal tab strip + the per-tab overlay badge \x2014 close affordances, the favorite marker, the status-flash color, and overlay opacity.", tabsPanel);
         addSettingsTab(L"Claude", L"The Claude install Agentmaster drives \x2014 which native claude.exe, and how long Claude keeps session history.", claudePanel);
         addSettingsTab(L"About", L"Version + build, updates, the active profile folder, and uninstall.", aboutPanel);
@@ -1637,6 +1709,57 @@ namespace winrt::TerminalApp::implementation
         if (_setConfirmKill)
         {
             _setConfirmKill.IsOn(_appSettings.confirmBeforeKill);
+        }
+        // NOTIFICATIONS tab: seed the master + the five target-state checkboxes + the two behavior
+        // toggles, then sync the dependents' enabled state explicitly (don't rely on the programmatic
+        // IsOn firing Toggled — the _setInferGitRoot seeding rule).
+        if (_setNotifyEnabled)
+        {
+            _setNotifyEnabled.IsOn(_appSettings.notificationsEnabled);
+            const bool on = _appSettings.notificationsEnabled;
+            for (const auto& dep : { _setNotifyWaiting, _setNotifyNeedsApproval, _setNotifyIdle, _setNotifyDone, _setNotifyError })
+            {
+                if (dep)
+                {
+                    dep.IsEnabled(on);
+                }
+            }
+            if (_setNotifySuppressFocused)
+            {
+                _setNotifySuppressFocused.IsEnabled(on);
+            }
+            if (_setNotifySound)
+            {
+                _setNotifySound.IsEnabled(on);
+            }
+        }
+        if (_setNotifyWaiting)
+        {
+            _setNotifyWaiting.IsChecked(_appSettings.notifyOnWaiting);
+        }
+        if (_setNotifyNeedsApproval)
+        {
+            _setNotifyNeedsApproval.IsChecked(_appSettings.notifyOnNeedsApproval);
+        }
+        if (_setNotifyIdle)
+        {
+            _setNotifyIdle.IsChecked(_appSettings.notifyOnIdle);
+        }
+        if (_setNotifyDone)
+        {
+            _setNotifyDone.IsChecked(_appSettings.notifyOnDone);
+        }
+        if (_setNotifyError)
+        {
+            _setNotifyError.IsChecked(_appSettings.notifyOnError);
+        }
+        if (_setNotifySuppressFocused)
+        {
+            _setNotifySuppressFocused.IsOn(_appSettings.notifySuppressFocused);
+        }
+        if (_setNotifySound)
+        {
+            _setNotifySound.IsOn(_appSettings.notifySound);
         }
         if (_setRenameCommit)
         {
@@ -1971,6 +2094,42 @@ namespace winrt::TerminalApp::implementation
         if (_setConfirmKill)
         {
             _appSettings.confirmBeforeKill = _setConfirmKill.IsOn();
+        }
+        // NOTIFICATIONS tab. The checkboxes are read even while disabled (master off) — like
+        // _setInferGitRoot, they still hold the user's stored preference, and dropping them here
+        // would silently reset a mute to the default. IsChecked is an IReference<bool>; a null
+        // (indeterminate — not reachable from the UI, two-state boxes) reads as unchecked.
+        if (_setNotifyEnabled)
+        {
+            _appSettings.notificationsEnabled = _setNotifyEnabled.IsOn();
+        }
+        if (_setNotifyWaiting)
+        {
+            _appSettings.notifyOnWaiting = _setNotifyWaiting.IsChecked() && _setNotifyWaiting.IsChecked().Value();
+        }
+        if (_setNotifyNeedsApproval)
+        {
+            _appSettings.notifyOnNeedsApproval = _setNotifyNeedsApproval.IsChecked() && _setNotifyNeedsApproval.IsChecked().Value();
+        }
+        if (_setNotifyIdle)
+        {
+            _appSettings.notifyOnIdle = _setNotifyIdle.IsChecked() && _setNotifyIdle.IsChecked().Value();
+        }
+        if (_setNotifyDone)
+        {
+            _appSettings.notifyOnDone = _setNotifyDone.IsChecked() && _setNotifyDone.IsChecked().Value();
+        }
+        if (_setNotifyError)
+        {
+            _appSettings.notifyOnError = _setNotifyError.IsChecked() && _setNotifyError.IsChecked().Value();
+        }
+        if (_setNotifySuppressFocused)
+        {
+            _appSettings.notifySuppressFocused = _setNotifySuppressFocused.IsOn();
+        }
+        if (_setNotifySound)
+        {
+            _appSettings.notifySound = _setNotifySound.IsOn();
         }
         if (_setRenameCommit)
         {

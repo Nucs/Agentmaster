@@ -1950,6 +1950,16 @@ namespace winrt::TerminalApp::implementation
     // doesn't host is a cheap map-miss no-op (every window's observer sees every fleet event).
     void TerminalPage::_UpdateTabAgentDot(const std::wstring& sessionId, ::Agentmaster::SessionState state, bool live, bool dormant)
     {
+        // Agentmaster (System notifications): drop the toast tracker's per-session state on a live=false
+        // update BEFORE the host gate below — the archive seams write live=false and then erase
+        // _claudeTabs synchronously, so by the time this queued observer hop lands the map lookup
+        // misses and the host-gated _EvaluateAgentNotification would never see the drop; a leaked
+        // prev==Running would then phantom-fire a "completed" toast on a later restore of the same id.
+        if (!live)
+        {
+            _agentNotifyLastState.erase(sessionId);
+            _agentNotifyRunningSinceMs.erase(sessionId);
+        }
         const auto it = _claudeTabs.find(sessionId);
         if (it == _claudeTabs.end())
         {
@@ -1959,6 +1969,7 @@ namespace winrt::TerminalApp::implementation
         {
             _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt, dormant);
             _EvaluateAgentFlash(sessionId, tab, state, live); // start/stop the unvisited "left Running" red flash
+            _EvaluateAgentNotification(sessionId, tab, state, live); // Windows toast on the Running -> X edge (the cog's Notifications tab)
             _UpdateTabAgentToolTip(tab, sessionId); // refresh the rich hover tooltip (reverts to default when !live)
         }
     }
@@ -2345,6 +2356,189 @@ namespace winrt::TerminalApp::implementation
             }
         }
         // else: target -> target (or first sight) — leave any existing flash as-is.
+    }
+
+    // Agentmaster (System notifications — the Settings cog's "Notifications" tab): the Windows-toast
+    // twin of _EvaluateAgentFlash, on the SAME registry-observer push but with its OWN edge tracker
+    // (deliberately not sharing _agentFlashLastState — the flash holds/erases its map on its own rules,
+    // and coupling them would let a change in one silently break the other). The rule: when a hosted
+    // session's state leaves RUNNING for anything else, raise a toast
+    //     <session title>
+    //     Has completed after <2h30m> and is <status>
+    // gated by the per-target-state switches (default all ON == "Running to anything else") and the
+    // "skip when focused" rule. Because _UpdateTabAgentDot only reaches this for a session hosted in
+    // THIS window's _claudeTabs, exactly one window fires per transition. UI thread (the observer hop).
+    void TerminalPage::_EvaluateAgentNotification(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live)
+    {
+        using ::Agentmaster::SessionState;
+        if (!live)
+        {
+            // Archived/closed: forget the track so a later restore starts fresh — no phantom
+            // Running -> X toast off a state recorded in a previous life (the _EvaluateAgentFlash
+            // !live rule; also run host-gate-free at the top of _UpdateTabAgentDot, since the archive
+            // seams drop _claudeTabs before this queued hop lands).
+            _agentNotifyLastState.erase(sessionId);
+            _agentNotifyRunningSinceMs.erase(sessionId);
+            return;
+        }
+
+        const auto prevIt = _agentNotifyLastState.find(sessionId);
+        const bool hadPrev = (prevIt != _agentNotifyLastState.end());
+        const auto prev = hadPrev ? prevIt->second : newState;
+        _agentNotifyLastState[sessionId] = newState;
+
+        if (newState == SessionState::Running)
+        {
+            // Entering Running: stamp the entry time — but only on a SEEN edge. A session first
+            // observed already-Running (adopted / moved in mid-turn) gets no stamp; its completion
+            // toast then omits the "after <duration>" clause instead of under-reporting a span
+            // measured from first sight.
+            if (hadPrev && prev != SessionState::Running)
+            {
+                _agentNotifyRunningSinceMs[sessionId] = TtNowMs();
+            }
+            return;
+        }
+
+        if (!hadPrev || prev != SessionState::Running)
+        {
+            return; // at-rest -> at-rest noise (e.g. the Waiting -> Idle decay), or first sight at rest — only the Running -> X edge notifies
+        }
+
+        // Left Running. Consume the entry stamp regardless of whether a toast ends up shown — the
+        // span belongs to the turn that just ended either way (a re-entry restamps).
+        int64_t runningSince = 0;
+        if (const auto sinceIt = _agentNotifyRunningSinceMs.find(sessionId); sinceIt != _agentNotifyRunningSinceMs.end())
+        {
+            runningSince = sinceIt->second;
+            _agentNotifyRunningSinceMs.erase(sinceIt);
+        }
+
+        if (!_appSettings.notificationsEnabled)
+        {
+            return;
+        }
+        bool wanted = false;
+        switch (newState)
+        {
+        case SessionState::WaitingForInput:
+            wanted = _appSettings.notifyOnWaiting;
+            break;
+        case SessionState::NeedsApproval:
+            wanted = _appSettings.notifyOnNeedsApproval;
+            break;
+        case SessionState::Idle:
+            wanted = _appSettings.notifyOnIdle;
+            break;
+        case SessionState::Done:
+            wanted = _appSettings.notifyOnDone;
+            break;
+        case SessionState::Error:
+            wanted = _appSettings.notifyOnError;
+            break;
+        default:
+            break; // Running returned above; nothing else exists
+        }
+        if (!wanted)
+        {
+            return; // this target state is muted in the cog
+        }
+        // "Skip when the tab is focused": this window is the ACTIVE one AND the session's tab is its
+        // focused tab — you watched it finish (the flash ring's "the current tab is always considered
+        // visited" rule, applied to toasts). A focused tab in a BACKGROUND window still notifies.
+        if (_appSettings.notifySuppressFocused && _activated && tab == _GetFocusedTab())
+        {
+            return;
+        }
+
+        // Line 1: the session title (ONE value, Rule #11) — read fresh from the registry, falling back
+        // to the tab's text (an unbound rename edge), then a generic label (a title is never empty in
+        // practice — DeriveSessionTitle).
+        std::wstring title;
+        if (_sessionRegistry)
+        {
+            if (const auto info = _sessionRegistry->Get(sessionId))
+            {
+                title = info->title;
+            }
+        }
+        if (title.empty() && tab)
+        {
+            title = std::wstring{ tab.Title() };
+        }
+        if (title.empty())
+        {
+            title = L"Agent session";
+        }
+
+        // Line 2: "Has completed after 2h30m and is waiting for you" — the Running span via TtSpan
+        // (the tooltip's compact form), omitted when the entry wasn't observed.
+        std::wstring body = L"Has completed";
+        std::wstring span;
+        if (runningSince > 0)
+        {
+            span = TtSpan(TtNowMs() - runningSince, true);
+            body += L" after " + span;
+        }
+        body += L" and is ";
+        body += TtStateLabel(newState);
+
+        ::Agentmaster::AppendStateLog(L"hooks.log",
+                                      L"[notify] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(newState) +
+                                          (span.empty() ? std::wstring{} : (L" (after " + span + L")")) + L"\n");
+        _ShowAgentSessionToast(sessionId, title, body, !_appSettings.notifySound);
+    }
+
+    // Agentmaster (System notifications): raise ONE Windows toast for a session — line 1 the title,
+    // line 2 the completion body. The strings go in as DOM TEXT NODES (CreateTextNode), so XML-special
+    // characters in a session title are escaped by the DOM, never hand-built markup. Tag+Group make a
+    // session's newer toast REPLACE its older one in the Action Center instead of piling up (ShortId
+    // fits the legacy 16-char Tag cap). Clicking the toast while the app is alive jumps to the
+    // session's tab via the Linked-Lenses Activate seam (local select or the cross-window fan-out +
+    // foreground); with the process gone the OS falls back to a plain app activation (no COM activator
+    // is registered — acceptable for a completion cue). Best-effort by design: CreateToastNotifier
+    // throws on a build with no package identity (no AUMID, e.g. unpackaged test hosts) and Show can
+    // fail when notifications are disabled system-wide — swallowed, logged once.
+    void TerminalPage::_ShowAgentSessionToast(const std::wstring& sessionId, const std::wstring& title, const std::wstring& body, bool silent)
+    {
+        try
+        {
+            winrt::Windows::Data::Xml::Dom::XmlDocument doc;
+            doc.LoadXml(silent ?
+                            LR"(<toast><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual><audio silent="true"/></toast>)" :
+                            LR"(<toast><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>)");
+            const auto texts = doc.GetElementsByTagName(L"text");
+            texts.Item(0).AppendChild(doc.CreateTextNode(winrt::hstring{ title }));
+            texts.Item(1).AppendChild(doc.CreateTextNode(winrt::hstring{ body }));
+
+            winrt::Windows::UI::Notifications::ToastNotification toast{ doc };
+            toast.Tag(winrt::hstring{ ::Agentmaster::ShortId(sessionId) });
+            toast.Group(L"agentmaster");
+            {
+                // The platform raises Activated on a non-UI thread -> marshal to this window's
+                // dispatcher, then ride the one Activate seam (it re-checks _claudeTabs and fans out
+                // to the hosting window if the tab moved since the toast was shown).
+                const auto dispatcher = Dispatcher(); // agile — safe to call into from the callback thread
+                const auto weakThis = get_weak();
+                toast.Activated([weakThis, dispatcher, sessionId](const winrt::Windows::UI::Notifications::ToastNotification&, const winrt::Windows::Foundation::IInspectable&) {
+                    dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weakThis, sessionId]() {
+                        if (auto self = weakThis.get())
+                        {
+                            self->_ActivateClaudeSession(winrt::hstring{ sessionId });
+                        }
+                    });
+                });
+            }
+            winrt::Windows::UI::Notifications::ToastNotificationManager::CreateToastNotifier().Show(toast);
+        }
+        catch (...)
+        {
+            if (!_agentToastFailLogged)
+            {
+                _agentToastFailLogged = true; // once is signal, per-fire is noise (an unpackaged build throws on every Show)
+                ::Agentmaster::AppendStateLog(L"hooks.log", L"[notify] toast failed (no package identity / notifications unavailable) - further failures muted\n");
+            }
+        }
     }
 
     // Agentmaster (tab status-dot red flash): add this session to the flashing set + ensure the shared

@@ -940,7 +940,7 @@ namespace winrt::TerminalApp::implementation
                 cog.FontSize(13);
                 _settingsBtn.Content(cog);
             }
-            AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Tests Autorunner defaults, the Claude binary, the active profile, and app behavior.");
+            AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Tests Autorunner defaults, notifications, the Claude binary, the active profile, and app behavior.");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             actionsRow.Children().Append(_settingsBtn);
 

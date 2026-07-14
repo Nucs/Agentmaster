@@ -1447,7 +1447,22 @@ What works, by area:
   deliberately NOT the `lastActivityUnixMs` decay anchor, which launch/adopt/resume `SessionStart`s and the
   "Move to Waiting-for-you" triage promote stamp "now" with ZERO API traffic — the old ⚡ false positives
   ("shows right after adopting / after Move to Waiting-for-you / on a never-prompted launch"); Claude-only —
-  a managed Codex never shows it), `recentDirsLimit` (the path-picker MRU size, default 10), and (TABS
+  a managed Codex never shows it), `recentDirsLimit` (the path-picker MRU size, default 10), and (the
+  **NOTIFICATIONS tab** — **System notifications**) **`notificationsEnabled`** + the five per-target-state
+  switches **`notifyOnWaiting`/`notifyOnNeedsApproval`/`notifyOnIdle`/`notifyOnDone`/`notifyOnError`** +
+  **`notifySuppressFocused`** + **`notifySound`** (ALL default ON — a **Windows toast** whenever a managed
+  session's status leaves **Running** for anything else: line 1 = the session title, line 2 = `Has completed
+  after <2h30m> and is <status>`, the duration being the observed Running span [omitted when the entry edge
+  wasn't seen, e.g. adopted mid-turn]. Fired by the ONE window hosting the session's tab on the SAME
+  registry-observer push as the tab status dot (`TerminalPage::_EvaluateAgentNotification`, its own edge
+  tracker beside `_agentFlashLastState` — deliberately NOT shared with the flash), so exactly one toast per
+  transition across N windows; per-session **Tag+Group** makes a newer toast REPLACE the older in Action
+  Center; **clicking the toast jumps to the session's tab** (the Linked-Lenses Activate seam) while the app
+  is alive; `notifySuppressFocused` skips a toast for the focused tab of the ACTIVE window [the flash ring's
+  "current tab is always visited" rule]; `notifySound` OFF adds `<audio silent>`; the checkboxes grey out
+  while the master is OFF but keep their stored values. Best-effort `ToastNotificationManager` — an
+  unpackaged build [no AUMID] logs `[notify] toast failed` ONCE and no-ops; fires log `[notify] <id>
+  running -> <state> (after <span>)` in hooks.log. Codex rides it too at its 3-state floor), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
   broadcast), and (TABS section) **`maxTags`** (the **Max bookmark tags (global)** box — the ceiling on how
@@ -1591,7 +1606,7 @@ What works, by area:
   (`ClaudeSpawn.cpp`, thread-safe + best-effort). Three layers: (1) the **hook event stream**
   (`[SessionStart]`/`[UserPromptSubmit]`/`[Stop]`/…) — the push state machine; (2) **engine-mechanism
   tags** — `[fork]`/`[resume]`/`[restore-fresh]`/`[rehome]`/`[spawn]`/`[launch-fail]`/`[archive]`/`[teardown-archive]`/
-  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
+  `[recon-*]`/`[send]`/`[hold]`/`[enter-retry]`/`[codex-*]`/`[adopt-*]`/`[pending]`/`[notify]`/`[persist-fail]`/`[observer]`/`[activity]`/… (each
   carries the resulting ids), plus the **window-restore story** — one coherent trace per `windowId`:
   `[window-claim]`/`[window-fresh]` (claim a saved record or start fresh, at engine init) → `[rehome-begin]`
   (every tab ref listed BY SESSION ID + the focus target) → per-tab `[rehome] window <id> resume|skip <sid>`

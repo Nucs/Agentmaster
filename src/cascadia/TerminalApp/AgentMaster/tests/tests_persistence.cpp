@@ -371,6 +371,15 @@ void TestAppSettings()
         in.treeSort = ExplorerSort::ByPid; // non-default (default Newest) — Explorer Tree sort
         in.boardSort = ExplorerSort::Newest; // non-default (default MostActive) — Triage Board sort
         in.autoTestingShowsSummary = false; // non-default (default true = Summary) — Manager Auto-Testing pane tab
+        // System notifications (the cog's "Notifications" tab): every switch defaults ON, so store OFF.
+        in.notificationsEnabled = false;
+        in.notifyOnWaiting = false;
+        in.notifyOnNeedsApproval = false;
+        in.notifyOnIdle = false;
+        in.notifyOnDone = false;
+        in.notifyOnError = false;
+        in.notifySuppressFocused = false;
+        in.notifySound = false;
         in.hiddenSessionIds = { L"11111111-1111-1111-1111-111111111111", L"22222222-2222-2222-2222-222222222222" };
         const auto out = DeserializeAppSettings(SerializeAppSettings(in));
         CHECK(out.skipPermissions == false, "settings skipPermissions round-trip");
@@ -404,6 +413,12 @@ void TestAppSettings()
         CHECK(out.treeSort == ExplorerSort::ByPid, "settings treeSort round-trip");
         CHECK(out.boardSort == ExplorerSort::Newest, "settings boardSort round-trip");
         CHECK(out.autoTestingShowsSummary == false, "settings autoTestingShowsSummary round-trip");
+        CHECK(out.notificationsEnabled == false, "settings notificationsEnabled round-trip (stored OFF)");
+        CHECK(out.notifyOnWaiting == false && out.notifyOnNeedsApproval == false && out.notifyOnIdle == false &&
+                  out.notifyOnDone == false && out.notifyOnError == false,
+              "settings notifyOn* target-state switches round-trip (all stored OFF)");
+        CHECK(out.notifySuppressFocused == false, "settings notifySuppressFocused round-trip (stored OFF)");
+        CHECK(out.notifySound == false, "settings notifySound round-trip (stored OFF)");
         CHECK(out.hiddenSessionIds.size() == 2 &&
                   out.hiddenSessionIds[0] == L"11111111-1111-1111-1111-111111111111" &&
                   out.hiddenSessionIds[1] == L"22222222-2222-2222-2222-222222222222",
@@ -446,6 +461,14 @@ void TestAppSettings()
         CHECK(out.treeSort == ExplorerSort::Newest, "settings treeSort default (Newest) on empty");
         CHECK(out.boardSort == ExplorerSort::MostActive, "settings boardSort default (MostActive) on empty");
         CHECK(out.autoTestingShowsSummary == true, "settings autoTestingShowsSummary default (Summary) on empty");
+        // System notifications: a pre-feature settings.json gets the default rule — a toast on
+        // Running -> ANYTHING else (master + every target state + skip-focused + sound all ON).
+        CHECK(out.notificationsEnabled == true, "settings notificationsEnabled default ON on empty");
+        CHECK(out.notifyOnWaiting == true && out.notifyOnNeedsApproval == true && out.notifyOnIdle == true &&
+                  out.notifyOnDone == true && out.notifyOnError == true,
+              "settings notifyOn* target-state switches default ON on empty (the 'Running to anything else' rule)");
+        CHECK(out.notifySuppressFocused == true, "settings notifySuppressFocused default ON on empty");
+        CHECK(out.notifySound == true, "settings notifySound default ON on empty");
         CHECK(out.hiddenSessionIds.empty(), "settings hiddenSessionIds empty on empty");
         const auto out2 = DeserializeAppSettings(L"not json");
         CHECK(out2.skipPermissions == true && out2.confirmBeforeKill == true, "settings defaults on garbage");
