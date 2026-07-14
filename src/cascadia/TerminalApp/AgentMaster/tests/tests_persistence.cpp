@@ -4,15 +4,15 @@
 // ======================================================================================
 // Agentmaster M5 engine test harness (7 partial files)
 // Standalone engine test harness (NOT in the msbuild) -- run-m5-tests.bat compiles every TU
-// unity-style without the WinRT PCH and links the engine .cpp. The 38 tests + 2 benches were
+// unity-style without the WinRT PCH and links the engine .cpp. The tests + benches were
 // split out of the former 6006-line m5_tests.cpp into themed TUs that share m5_tests.h.
 //
 // Partial files in this group (★ marks THIS file):
 //   m5_tests.cpp              - the RUNNER: wmain (calls every entry point, in order) + the g_checks/g_failures defs
-//   m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all 40 test entry-point declarations
+//   m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all test entry-point declarations
 //   tests_state.cpp           - state machine / ordered-state / wire / registry / fanout / fork-echo / typed-capture / ObserveClaude / supersede
-//   tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration
-// ★ tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color
+//   tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration / updater version+prefs
+// ★ tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color / engine window lifecycle
 //   tests_transcript.cpp      - transcript scan + reconcilers / ProcessInspect tree+parse / transcript resolve / Codex / store / lineage / search / live / bring-to-front
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
 // ======================================================================================
@@ -20,6 +20,8 @@
 // Agentmaster - M5 standalone test harness: persistence tests. Shared CHECK/fixtures/decls
 // live in m5_tests.h; the runner (m5_tests.cpp) calls each entry point. See run-m5-tests.bat.
 #include "m5_tests.h"
+
+#include "../Engine.h" // the window-lifecycle `...In` seams (TestEngineWindowLifecycle)
 
 void TestPersistence()
 {
@@ -838,4 +840,176 @@ void TestTabColorModes()
         const auto slack = ChooseSessionAutoColor(L"44444444-aaaa-bbbb-cccc-000000000001", live, nearlyAll);
         CHECK(slack == c1, "session deal exhausted-reset picks the one color no open tab is showing");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Engine window lifecycle (PERSISTENCE.md 13.5 / Correctness Rule #16): the open-at-exit
+// manifest's SKIP-EMPTY rule, claim-by-id vs the no-arg front-pop, the reclaimable pool, the
+// Manager-only record deletion, and the race-safe Manager-only close reservation. Runs on LOCAL
+// Engine instances through the `...In` seams (Engine.h) — NEVER SharedEngine(): its first access
+// wires + STARTS the bridge (which would collide with TestBridgeRoundTrip's pipe on the same
+// `agentmaster.<pid>` name), the observer, and the scheduler. All disk I/O (windows/<id>.json +
+// open-windows.json) lands in the harness's scratch profile (AGENTMASTER_PROFILE — exported by
+// run-m5-tests.bat; wmain self-defaults it for a direct exe run).
+// ---------------------------------------------------------------------------------------------
+void TestEngineWindowLifecycle()
+{
+    std::wprintf(L"Engine window lifecycle (claim / manifest skip-empty / reclaim / reserve):\n");
+
+    const std::wstring idA = L"__m5eng_a__";
+    const std::wstring idB = L"__m5eng_b__";
+    const std::wstring idC = L"__m5eng_c__";
+    auto wipe = [&] {
+        DeleteWindowRecord(idA);
+        DeleteWindowRecord(idB);
+        DeleteWindowRecord(idC);
+    };
+    wipe(); // stale residue from a crashed earlier run
+
+    auto mkRec = [](const std::wstring& id, bool withTab) {
+        WindowRecord r;
+        r.windowId = id;
+        r.geometry.hasSize = true;
+        r.geometry.width = 800;
+        r.geometry.height = 600;
+        if (withTab)
+        {
+            TabEntry t;
+            t.kind = TabKind::Claude;
+            t.sessionId = L"conv-" + id;
+            r.tabs.push_back(t);
+        }
+        return r;
+    };
+    auto has = [](const std::vector<std::wstring>& v, const std::wstring& id) {
+        for (const auto& x : v)
+        {
+            if (x == id)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // A + B carry a tab ref (content-full); C held only the pinned Manager tab (no tab refs).
+    SaveWindowRecord(mkRec(idA, true));
+    SaveWindowRecord(mkRec(idB, true));
+    SaveWindowRecord(mkRec(idC, false));
+
+    // --- claim-by-id draws from the startup pool exactly once; unknown/empty ids miss ---
+    {
+        Engine e;
+        auto a = ClaimWindowRecordIn(e, idA);
+        CHECK(a && a->windowId == idA && a->tabs.size() == 1, "claim by id returns the saved record");
+        CHECK(!ClaimWindowRecordIn(e, idA).has_value(), "second claim of the same id misses (single owner)");
+        CHECK(!ClaimWindowRecordIn(e, L"__m5eng_none__").has_value(), "unknown id misses (window mints fresh)");
+        CHECK(!ClaimWindowRecordIn(e, L"").has_value(), "empty id misses");
+    }
+
+    // --- the open-at-exit manifest: register writes the live set, unregister prunes a closed
+    //     window, and SKIP-EMPTY preserves the final snapshot (Rule #16's "closed slowly" rule) ---
+    {
+        Engine e;
+        RegisterLiveWindowIn(e, idA);
+        RegisterLiveWindowIn(e, idB);
+        auto m = LoadOpenWindows();
+        CHECK(has(m, idA) && has(m, idB), "manifest carries both live windows");
+        CHECK(LiveWindowIdsIn(e).size() == 2, "live-id snapshot has both");
+        UnregisterLiveWindowIn(e, idA);
+        m = LoadOpenWindows();
+        CHECK(!has(m, idA) && has(m, idB), "a closed window is pruned from the manifest (not re-offered)");
+        UnregisterLiveWindowIn(e, idB); // would EMPTY the manifest
+        m = LoadOpenWindows();
+        CHECK(has(m, idB), "skip-empty: the LAST unregister keeps the final open-at-exit snapshot");
+    }
+
+    // --- the reclaimable pool: a claimed-then-closed record re-claims BY ID (real id + lens);
+    //     the no-arg front-pop NEVER draws from it (a plain "+ new window" must not adopt a
+    //     closed window's layout); a double teardown pools exactly ONE copy ---
+    {
+        Engine e;
+        auto a = ClaimWindowRecordIn(e, idA); // startup-pool claim (loads windows/*.json once)
+        CHECK(a.has_value(), "reclaim scenario: startup claim");
+        RegisterLiveWindowIn(e, idA);
+        RegisterLiveWindowIn(e, idB);
+        UnregisterLiveWindowIn(e, idA); // A closes mid-session -> its record returns to the pool
+        auto a2 = ClaimWindowRecordIn(e, idA);
+        CHECK(a2 && a2->windowId == idA, "closed-this-session record re-claims by id (recover-button path)");
+        UnregisterLiveWindowIn(e, idA); // back to the pool...
+        UnregisterLiveWindowIn(e, idA); // ...and a double teardown must not stack a second copy
+        while (ClaimWindowRecordIn(e).has_value())
+        {
+            // drain the startup pool (front-pop) so only the reclaimable pool remains
+        }
+        CHECK(!ClaimWindowRecordIn(e).has_value(), "front-pop never draws from the reclaimable pool");
+        CHECK(ClaimWindowRecordIn(e, idA).has_value(), "...but the by-id claim finds the closed record");
+        CHECK(!ClaimWindowRecordIn(e, idA).has_value(), "dedup: the double teardown pooled exactly one copy");
+    }
+
+    // --- Manager-only record deletion: a MID-SESSION-closed window whose record has NO tab refs
+    //     is deleted from disk (reopening it reconstructs "+ new window" = noise); the LAST window
+    //     out KEEPS its record — the open-at-exit geometry snapshot the next launch claims ---
+    {
+        Engine e;
+        RegisterLiveWindowIn(e, idB);
+        RegisterLiveWindowIn(e, idC);
+        UnregisterLiveWindowIn(e, idC); // C: no tabs + another window remains -> record deleted
+        CHECK(!LoadWindowRecord(idC).has_value(), "mid-session-closed Manager-only record is deleted from disk");
+        UnregisterLiveWindowIn(e, idB); // B: last one out (live set empties) -> record kept
+        CHECK(LoadWindowRecord(idB).has_value(), "the LAST window out keeps its record (open-at-exit snapshot)");
+    }
+
+    // --- RecoverableWindows = on-disk records − live − content-less, each indexed by its
+    //     CANONICAL LoadWindowRecords position (the `-s <idx>` the reopen dispatch uses) ---
+    {
+        Engine e;
+        SaveWindowRecord(mkRec(idC, false)); // re-seed the Manager-only record
+        RegisterLiveWindowIn(e, idB); // B is open
+        const auto rec = RecoverableWindowsIn(e);
+        bool offersA = false, offersB = false, offersC = false;
+        int idxA = -1;
+        for (const auto& r : rec)
+        {
+            if (r.record.windowId == idA)
+            {
+                offersA = true;
+                idxA = r.index;
+            }
+            offersB = offersB || r.record.windowId == idB;
+            offersC = offersC || r.record.windowId == idC;
+        }
+        CHECK(offersA, "recoverable: a not-open, content-full record is offered");
+        CHECK(!offersB, "recoverable: a live window is never offered");
+        CHECK(!offersC, "recoverable: a Manager-only (no-tabs) record is never offered");
+        const auto all = LoadWindowRecords();
+        int want = -1;
+        for (int i = 0; i < static_cast<int>(all.size()); ++i)
+        {
+            if (all[i].windowId == idA)
+            {
+                want = i;
+            }
+        }
+        CHECK(want >= 0 && idxA == want, "recoverable index == canonical LoadWindowRecords position (-s <idx>)");
+    }
+
+    // --- ReserveManagerOnlyClose: N windows emptying at once can never ALL close — the last
+    //     effective window stays (remaining==1), and a completed close clears its reservation ---
+    {
+        Engine e;
+        RegisterLiveWindowIn(e, idA);
+        RegisterLiveWindowIn(e, idB);
+        RegisterLiveWindowIn(e, idC);
+        CHECK(ReserveManagerOnlyCloseIn(e, idA), "reserve: 1st of 3 may close");
+        CHECK(ReserveManagerOnlyCloseIn(e, idB), "reserve: 2nd of 3 may close (one would remain)");
+        CHECK(!ReserveManagerOnlyCloseIn(e, idC), "reserve: the last effective window must STAY");
+        UnregisterLiveWindowIn(e, idA); // the close completes -> its reservation clears with it
+        CHECK(!ReserveManagerOnlyCloseIn(e, idC), "reserve: still last-effective after A finished closing");
+        UnregisterLiveWindowIn(e, idB);
+        CHECK(!ReserveManagerOnlyCloseIn(e, idC), "reserve: a lone window can never reserve");
+        CHECK(!ReserveManagerOnlyCloseIn(e, L""), "reserve: empty id refused");
+    }
+
+    wipe(); // leave no records behind (the scratch profile is wiped per bat run anyway)
 }

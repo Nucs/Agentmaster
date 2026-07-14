@@ -4,15 +4,15 @@
 // ======================================================================================
 // Agentmaster M5 engine test harness (7 partial files)
 // Standalone engine test harness (NOT in the msbuild) -- run-m5-tests.bat compiles every TU
-// unity-style without the WinRT PCH and links the engine .cpp. The 38 tests + 2 benches were
+// unity-style without the WinRT PCH and links the engine .cpp. The tests + benches were
 // split out of the former 6006-line m5_tests.cpp into themed TUs that share m5_tests.h.
 //
 // Partial files in this group (★ marks THIS file):
 //   m5_tests.cpp              - the RUNNER: wmain (calls every entry point, in order) + the g_checks/g_failures defs
-// ★ m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all 40 test entry-point declarations
+// ★ m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all test entry-point declarations
 //   tests_state.cpp           - state machine / ordered-state / wire / registry / fanout / fork-echo / typed-capture / ObserveClaude / supersede
-//   tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration
-//   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color
+//   tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration / updater version+prefs
+//   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color / engine window lifecycle
 //   tests_transcript.cpp      - transcript scan + reconcilers / ProcessInspect tree+parse / transcript resolve / Codex / store / lineage / search / live / bring-to-front
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
 // ======================================================================================
@@ -137,6 +137,7 @@ void TestScheduler();
 void TestEnterRetry();
 void TestBuildPromptSubmission();
 void TestSchedulerIntegration();
+void TestUpdaterVersionLogic(); // Updater.h: ParseVersion/CompareVersion (4th part = build metadata, ignored) + unpackaged facts + the settings.json skip/postpone RMW (preserve-other-keys, replace-not-append)
 // tests_persistence.cpp
 void TestPersistence();
 void TestManagerLayout();
@@ -144,6 +145,7 @@ void TestWindowRecord();
 void TestAppSettings();
 void TestTabNamingAndColor();
 void TestTabColorModes(); // tab color modes: enum/JSON round-trips + ChooseSessionAutoColor + SessionColorKeyDir/ResolveSessionColorHex
+void TestEngineWindowLifecycle(); // Engine window lifecycle (local-Engine `...In` seams — NEVER SharedEngine() in tests): claim-by-id vs front-pop + the open-at-exit manifest's skip-empty rule + the reclaimable pool + Manager-only record deletion + ReserveManagerOnlyClose (PERSISTENCE.md 13.5 / Rule #16)
 // tests_transcript.cpp
 void TestTranscriptScan();
 void TestCurrentModel(); // current-model adornment: ShortModelName / SessionDisplayModel (pure) + the delta's assistant message.model capture + TailFactsFromTranscriptChunk (recap+model, one pass)

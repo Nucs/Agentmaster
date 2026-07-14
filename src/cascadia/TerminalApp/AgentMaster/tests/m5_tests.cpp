@@ -4,15 +4,15 @@
 // ======================================================================================
 // Agentmaster M5 engine test harness (7 partial files)
 // Standalone engine test harness (NOT in the msbuild) -- run-m5-tests.bat compiles every TU
-// unity-style without the WinRT PCH and links the engine .cpp. The 38 tests + 2 benches were
+// unity-style without the WinRT PCH and links the engine .cpp. The tests + benches were
 // split out of the former 6006-line m5_tests.cpp into themed TUs that share m5_tests.h.
 //
 // Partial files in this group (★ marks THIS file):
 // ★ m5_tests.cpp              - the RUNNER: wmain (calls every entry point, in order) + the g_checks/g_failures defs
-//   m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all 40 test entry-point declarations
+//   m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all test entry-point declarations
 //   tests_state.cpp           - state machine / ordered-state / wire / registry / fanout / fork-echo / typed-capture / ObserveClaude / supersede
-//   tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration
-//   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color
+//   tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration / updater version+prefs
+//   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color / engine window lifecycle
 //   tests_transcript.cpp      - transcript scan + reconcilers / ProcessInspect tree+parse / transcript resolve / Codex / store / lineage / search / live / bring-to-front
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
 // ======================================================================================
@@ -32,6 +32,24 @@ int g_checks = 0;
 
 int wmain()
 {
+    // Agentmaster (state isolation): unless the caller already pointed AGENTMASTER_PROFILE
+    // somewhere (run-m5-tests.bat exports a WIPED %TEMP% scratch profile), default to that same
+    // scratch dir — BEFORE the first AgentmasterStateDir() call anywhere, since the profile
+    // resolution caches process-wide. Without this a direct m5_tests.exe run would append its
+    // engine traces ([fork-echo]/[send]/[recon-*]) to the LIVE release install's ~/.agentmaster
+    // logs and park test window records beside real ones (a crash mid-test would then leave a
+    // phantom "Reopen Windows (N)" entry in the production app).
+    {
+        wchar_t cur[8];
+        if (::GetEnvironmentVariableW(L"AGENTMASTER_PROFILE", cur, 8) == 0)
+        {
+            wchar_t tmp[MAX_PATH]{};
+            ::GetTempPathW(MAX_PATH, tmp);
+            const std::wstring scratch = std::wstring{ tmp } + L"agentmaster-m5-tests";
+            ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", scratch.c_str());
+        }
+    }
+
     std::wprintf(L"=== Agentmaster engine tests ===\n");
     TestPendingInput();
     TestPromptAnchor();
@@ -57,6 +75,7 @@ int wmain()
     TestEnterRetry();
     TestBuildPromptSubmission();
     TestSchedulerIntegration();
+    TestUpdaterVersionLogic();
     TestTranscriptScan();
     TestCurrentModel();
     TestBlockedAndInterruptedStates();
@@ -66,6 +85,7 @@ int wmain()
     TestAppSettings();
     TestTabNamingAndColor();
     TestTabColorModes();
+    TestEngineWindowLifecycle();
     TestProcessInspectTree();
     TestProcessInspectParse();
     TestTranscriptResolve();

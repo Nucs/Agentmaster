@@ -339,4 +339,21 @@ namespace Agentmaster
         WindowRecord record;
     };
     std::vector<RecoverableWindow> RecoverableWindows();
+
+    // Agentmaster (test seam — the SessionStore `...In` idiom): the window-record / manifest /
+    // reserve primitives above, parameterized on the Engine INSTANCE. The public functions delegate
+    // here with SharedEngine(); the standalone harness (tests/run-m5-tests.bat links Engine.cpp)
+    // pins the PERSISTENCE.md §13.5 / Rule #16 invariants — claim-by-id vs front-pop, the
+    // open-at-exit manifest's skip-empty rule, the reclaimable pool, Manager-only record deletion,
+    // ReserveManagerOnlyClose's last-window count — on a LOCAL Engine value, because
+    // SharedEngine()'s first access wires + STARTS the bridge/observer/scheduler (in the test
+    // process the bridge would collide with the harness's own HooksBridge round-trip on the same
+    // `\\.\pipe\agentmaster.<pid>` name). Production code keeps calling the SharedEngine() forms.
+    std::optional<WindowRecord> ClaimWindowRecordIn(Engine& e);
+    std::optional<WindowRecord> ClaimWindowRecordIn(Engine& e, const std::wstring& windowId);
+    void RegisterLiveWindowIn(Engine& e, const std::wstring& windowId);
+    void UnregisterLiveWindowIn(Engine& e, const std::wstring& windowId);
+    std::vector<std::wstring> LiveWindowIdsIn(Engine& e);
+    bool ReserveManagerOnlyCloseIn(Engine& e, const std::wstring& windowId);
+    std::vector<RecoverableWindow> RecoverableWindowsIn(Engine& e);
 }

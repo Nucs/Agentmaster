@@ -9,7 +9,10 @@ if errorlevel 1 (
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\cli"
 REM /D AGENTMASTER_DEV: this standalone build represents the DEV CLI — when run UNPACKAGED and
 REM outside any app (no inherited AGENTMASTER_PROFILE), it defaults to ~/.agentmaster-dev.
-cl /std:c++20 /EHsc /nologo /W3 /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
+REM /utf-8: matches the msbuild build (common.build.pre.props; agentmaster-cli.vcxproj inherits it)
+REM — the engine sources are BOM-less UTF-8, so without it the SessionSearch snippet markers
+REM (the scope emoji + ellipsis wide literals) compile to ANSI-codepage mojibake in THIS exe only.
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /D AGENTMASTER_DEV /Fe:agentcli.exe agentcli.cpp ^
    ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ^
    ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ^
    ole32.lib user32.lib oleaut32.lib

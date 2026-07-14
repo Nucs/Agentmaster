@@ -7,9 +7,11 @@ if errorlevel 1 (
   exit /b 2
 )
 cd /d "K:\source\Agentmaster\src\cascadia\TerminalApp\AgentMaster\tests"
-REM TranscriptStore.cpp: IsNoiseUserPrompt + PickDisplayTitle moved there (the Sessions-browser
-REM split) — SessionScanner/ProcessInspect reference them (mirrors run-m5-tests.bat's TU list).
-cl /std:c++20 /EHsc /nologo /W3 /Fe:uia_probe.exe uia_probe.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\TranscriptStore.cpp ole32.lib user32.lib oleaut32.lib
+REM The engine TU list MUST mirror run-m5-tests.bat's, kept in lockstep — when the ProcessInspect
+REM 5-TU split landed this bat kept the pre-split list and every build died LNK2019 on
+REM PickClaudeTab/ScoreClaudeTabName/... (they moved to ProcessInspect.Window.cpp). /utf-8 matches
+REM the msbuild app build so wide literals compile to the same constants; /MP parallelizes.
+cl /std:c++20 /EHsc /nologo /W3 /utf-8 /MP /DUNICODE /D_UNICODE /Fe:uia_probe.exe uia_probe.cpp ..\SessionRegistry.cpp ..\HooksBridge.cpp ..\ClaudeSpawn.cpp ..\Persistence.cpp ..\SessionScanner.cpp ..\ProcessInspect.cpp ..\ProcessInspect.Transcript.cpp ..\ProcessInspect.Content.cpp ..\ProcessInspect.Window.cpp ..\ProcessInspect.Summary.cpp ..\TranscriptStore.cpp ..\SessionSearch.cpp ..\SessionStore.cpp ..\Scheduler.cpp ..\Engine.cpp ..\ProcessObserver.cpp ole32.lib user32.lib oleaut32.lib
 if errorlevel 1 (
   echo [error] compile failed
   exit /b 1

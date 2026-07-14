@@ -345,7 +345,18 @@ namespace Agentmaster
 
     std::optional<WindowRecord> ClaimWindowRecord()
     {
-        auto& e = SharedEngine();
+        return ClaimWindowRecordIn(SharedEngine());
+    }
+
+    // Agentmaster (test seam — the SessionStore `...In` idiom). The window-record / manifest /
+    // reserve primitives below are parameterized on the Engine INSTANCE; the public functions
+    // delegate with SharedEngine() and stay the one production entry. The standalone harness
+    // (tests/run-m5-tests.bat, which links this TU) pins the PERSISTENCE.md §13.5 invariants on a
+    // LOCAL Engine value instead — it must NEVER touch SharedEngine(): its first access wires and
+    // STARTS the bridge/observer/scheduler, and in the test process the bridge would collide with
+    // TestBridgeRoundTrip's own pipe on the same `\\.\pipe\agentmaster.<pid>` name.
+    std::optional<WindowRecord> ClaimWindowRecordIn(Engine& e)
+    {
         std::lock_guard<std::mutex> lk(e.windowMutex);
         if (!e.windowRecordsLoaded)
         {
@@ -366,11 +377,15 @@ namespace Agentmaster
 
     std::optional<WindowRecord> ClaimWindowRecord(const std::wstring& windowId)
     {
+        return ClaimWindowRecordIn(SharedEngine(), windowId);
+    }
+
+    std::optional<WindowRecord> ClaimWindowRecordIn(Engine& e, const std::wstring& windowId)
+    {
         if (windowId.empty())
         {
             return std::nullopt;
         }
-        auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.windowMutex);
         if (!e.windowRecordsLoaded)
         {
@@ -407,11 +422,15 @@ namespace Agentmaster
 
     void RegisterLiveWindow(const std::wstring& windowId)
     {
+        RegisterLiveWindowIn(SharedEngine(), windowId);
+    }
+
+    void RegisterLiveWindowIn(Engine& e, const std::wstring& windowId)
+    {
         if (windowId.empty())
         {
             return;
         }
-        auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.windowMutex);
         e.liveWindowIds.insert(windowId);
         // A live window always has a record on disk (the page's autosave), so writing the manifest now
@@ -422,11 +441,15 @@ namespace Agentmaster
 
     void UnregisterLiveWindow(const std::wstring& windowId)
     {
+        UnregisterLiveWindowIn(SharedEngine(), windowId);
+    }
+
+    void UnregisterLiveWindowIn(Engine& e, const std::wstring& windowId)
+    {
         if (windowId.empty())
         {
             return;
         }
-        auto& e = SharedEngine();
         // Re-read the closing window's record from disk BEFORE the lock (disk I/O off the mutex). It is
         // returned to the reclaimable pool below so the in-session recover button can re-claim it.
         // Absent on disk (a window closed before its first autosave) => nothing to re-claim, fine.
@@ -482,18 +505,26 @@ namespace Agentmaster
 
     std::vector<std::wstring> LiveWindowIds()
     {
-        auto& e = SharedEngine();
+        return LiveWindowIdsIn(SharedEngine());
+    }
+
+    std::vector<std::wstring> LiveWindowIdsIn(Engine& e)
+    {
         std::lock_guard<std::mutex> lk(e.windowMutex);
         return { e.liveWindowIds.begin(), e.liveWindowIds.end() };
     }
 
     bool ReserveManagerOnlyClose(const std::wstring& windowId)
     {
+        return ReserveManagerOnlyCloseIn(SharedEngine(), windowId);
+    }
+
+    bool ReserveManagerOnlyCloseIn(Engine& e, const std::wstring& windowId)
+    {
         if (windowId.empty())
         {
             return false;
         }
-        auto& e = SharedEngine();
         std::lock_guard<std::mutex> lk(e.windowMutex);
         // Effective remaining-live = live windows MINUS those already reserved to self-close this tick.
         // Reserve THIS window's close only while >1 would remain — so concurrent Manager-only windows on
@@ -745,7 +776,11 @@ namespace Agentmaster
 
     std::vector<RecoverableWindow> RecoverableWindows()
     {
-        auto& e = SharedEngine();
+        return RecoverableWindowsIn(SharedEngine());
+    }
+
+    std::vector<RecoverableWindow> RecoverableWindowsIn(Engine& e)
+    {
         // Snapshot the live set under the lock, then read records OUTSIDE the lock (disk IO).
         std::set<std::wstring> live;
         {

@@ -4,15 +4,15 @@
 // ======================================================================================
 // Agentmaster M5 engine test harness (7 partial files)
 // Standalone engine test harness (NOT in the msbuild) -- run-m5-tests.bat compiles every TU
-// unity-style without the WinRT PCH and links the engine .cpp. The 38 tests + 2 benches were
+// unity-style without the WinRT PCH and links the engine .cpp. The tests + benches were
 // split out of the former 6006-line m5_tests.cpp into themed TUs that share m5_tests.h.
 //
 // Partial files in this group (★ marks THIS file):
 //   m5_tests.cpp              - the RUNNER: wmain (calls every entry point, in order) + the g_checks/g_failures defs
-//   m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all 40 test entry-point declarations
+//   m5_tests.h                - shared header: the CHECK macro, the extern counters, the fixtures (MakeSession/Msg/UPS/NowMsTest), and all test entry-point declarations
 //   tests_state.cpp           - state machine / ordered-state / wire / registry / fanout / fork-echo / typed-capture / ObserveClaude / supersede
-// ★ tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration
-//   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color
+// ★ tests_spawn_sched.cpp     - spawn builders / profile bootstrap / bridge round-trip / scheduler / enter-retry / build-prompt / scheduler integration / updater version+prefs
+//   tests_persistence.cpp     - persistence / manager layout / window record / app settings / tab naming + color / engine window lifecycle
 //   tests_transcript.cpp      - transcript scan + reconcilers / ProcessInspect tree+parse / transcript resolve / Codex / store / lineage / search / live / bring-to-front
 //   tests_summary_anchor.cpp  - summary table-trim + user-msg noise / PromptAnchor (+ edge/corpus/benches) / pending-input
 // ======================================================================================
@@ -20,6 +20,8 @@
 // Agentmaster - M5 standalone test harness: spawn_sched tests. Shared CHECK/fixtures/decls
 // live in m5_tests.h; the runner (m5_tests.cpp) calls each entry point. See run-m5-tests.bat.
 #include "m5_tests.h"
+
+#include "../Updater.h" // version parse/compare + the settings.json skip/postpone RMW (TestUpdaterVersionLogic)
 
 void TestSpawnBuilders()
 {
@@ -596,9 +598,11 @@ void TestSpawnBuilders()
 // Agentmaster: the per-install state PROFILE (ProfileBootstrap.h) — the pure pieces: the choice
 // file round-trip, the resolution precedence's env override, and the per-identity defaults.
 // (The picker itself is UI; the packaged-PFN branches need a package context — both untestable
-// headless. Tests run unpackaged, so PackageKey() must be "Unpackaged" and the silent default
-// must be the HISTORICAL ~/.agentmaster — that invariant is what keeps this harness writing to
-// the same state dir it always did.)
+// headless. Tests run unpackaged, so PackageKey() must be "Unpackaged" and the silent DEFAULT
+// must be the HISTORICAL ~/.agentmaster — the invariant that keeps old tooling/headless hosts
+// stable. The harness itself no longer RUNS there: run-m5-tests.bat / wmain point
+// AGENTMASTER_PROFILE at a %TEMP% scratch profile so engine traces + test window records never
+// land in the LIVE release install's state dir.)
 void TestProfileBootstrap()
 {
     namespace P = ::Agentmaster::Profiles;
@@ -643,8 +647,15 @@ void TestProfileBootstrap()
     }
 
     // Resolution precedence: the env override beats everything (and is what the WindowEmperor
-    // bootstrap exports, so dll-side resolution always agrees with the exe).
+    // bootstrap exports, so dll-side resolution always agrees with the exe). Save + RESTORE the
+    // ambient override — run-m5-tests.bat / wmain point AGENTMASTER_PROFILE at the scratch
+    // profile, and the old clear-to-nullptr would re-route any later first-resolution (or
+    // Uncached path) back at the LIVE ~/.agentmaster.
     {
+        wchar_t prevBuf[1024];
+        const DWORD prevLen = ::GetEnvironmentVariableW(L"AGENTMASTER_PROFILE", prevBuf, 1024);
+        const bool hadPrev = prevLen > 0 && prevLen < 1024;
+        const std::wstring prev = hadPrev ? std::wstring{ prevBuf, prevLen } : std::wstring{};
         const std::wstring fake = std::wstring{ tmpDir } + L"am-profile-env-" + NewSessionId();
         ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", fake.c_str());
         CHECK(P::ResolveProfileDirUncached() == fake, "resolve: env override wins");
@@ -652,6 +663,7 @@ void TestProfileBootstrap()
         const auto silent = P::ResolveProfileDirUncached();
         CHECK(!silent.empty(), "resolve: silent resolution non-empty");
         ::RemoveDirectoryW(fake.c_str());
+        ::SetEnvironmentVariableW(L"AGENTMASTER_PROFILE", hadPrev ? prev.c_str() : nullptr);
     }
 
     // SamePath: the filesystem-aware-enough comparison the migrate guard uses.
@@ -1251,6 +1263,107 @@ void TestSchedulerIntegration()
         CHECK(sent && injected.load() > 0, "legacy Held prompt rehabilitated to Pending and sent (not stranded)");
         reg->RemoveObserver(obsTok);
         sched.Stop();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Updater version logic (Updater.h — header-only, pure Win32). ParseVersion's tolerances, the
+// CompareVersion contract (the 4th part is BUILD METADATA — it never participates in "is a newer
+// release available?"), the unpackaged process facts that gate the startup auto-check, and the
+// settings.json skip/postpone RMW the EXE performs WITHOUT linking the engine — including the
+// preserve-other-keys contract the cog's Save relies on (and the SetMember replace-not-append
+// rule, since Json.h's Value::Set always APPENDS).
+// ---------------------------------------------------------------------------------------------
+void TestUpdaterVersionLogic()
+{
+    namespace U = ::Agentmaster::Updater;
+    std::wprintf(L"Updater version logic (parse / compare / skip-postpone RMW):\n");
+
+    // ParseVersion: tags, 4-part manifest versions, prerelease suffixes, junk, gaps.
+    {
+        const auto v = U::ParseVersion(L"v0.6.6");
+        CHECK(v.major == 0 && v.minor == 6 && v.patch == 6 && v.build == 0, "parse: v-prefixed tag");
+        const auto w = U::ParseVersion(L"1.2.3.4");
+        CHECK(w.major == 1 && w.minor == 2 && w.patch == 3 && w.build == 4, "parse: 4-part manifest version");
+        const auto b = U::ParseVersion(L"0.7.0-beta.2");
+        CHECK(b.major == 0 && b.minor == 7 && b.patch == 0 && b.build == 0, "parse: prerelease suffix stops cleanly");
+        const auto cap = U::ParseVersion(L"V2.10.3");
+        CHECK(cap.major == 2 && cap.minor == 10 && cap.patch == 3, "parse: capital V + multi-digit minor");
+        const auto e = U::ParseVersion(L"");
+        CHECK(e.major == 0 && e.minor == 0 && e.patch == 0 && e.build == 0, "parse: empty -> zeros");
+        const auto g = U::ParseVersion(L"garbage");
+        CHECK(g.major == 0 && g.minor == 0 && g.patch == 0, "parse: no digits -> zeros");
+        const auto m = U::ParseVersion(L"1..2");
+        CHECK(m.major == 1 && m.minor == 0 && m.patch == 2, "parse: a missing middle part defaults to 0");
+    }
+
+    // CompareVersion: strict major.minor.patch ordering; the 4th part NEVER participates.
+    {
+        auto mk = [](int a, int b2, int c, int d = 0) {
+            U::Version ver;
+            ver.major = a;
+            ver.minor = b2;
+            ver.patch = c;
+            ver.build = d;
+            return ver;
+        };
+        CHECK(U::CompareVersion(mk(0, 6, 6), mk(0, 6, 7)) < 0, "compare: patch orders");
+        CHECK(U::CompareVersion(mk(0, 7, 0), mk(0, 6, 9)) > 0, "compare: minor beats patch");
+        CHECK(U::CompareVersion(mk(1, 0, 0), mk(0, 99, 99)) > 0, "compare: major beats all");
+        CHECK(U::CompareVersion(mk(1, 2, 3, 9), mk(1, 2, 3, 0)) == 0, "compare: the 4th part is build metadata (ignored)");
+        CHECK(U::VersionToString(mk(0, 6, 6, 4)) == L"0.6.6", "to-string: three parts only");
+    }
+
+    // Unpackaged process facts (the harness IS unpackaged): version zeros + not packaged — the
+    // pair that gates the startup auto-check off dev/unpackaged runs.
+    {
+        const auto cur = U::CurrentPackageVersion();
+        CHECK(cur.major == 0 && cur.minor == 0 && cur.patch == 0 && cur.build == 0, "unpackaged: package version is zeros");
+        CHECK(!U::IsPackaged(), "unpackaged: IsPackaged false");
+    }
+
+    // Skip/Postpone RMW on settings.json (explicit stateDir -> a temp profile): defaults on a
+    // missing file, write-then-read of both keys, preserve-foreign-keys, replace-not-append.
+    {
+        wchar_t tmp[MAX_PATH]{};
+        ::GetTempPathW(MAX_PATH, tmp);
+        const std::wstring dir = std::wstring{ tmp } + L"am-updater-test-" + NewSessionId();
+
+        const auto missing = U::ReadPrefs(dir);
+        CHECK(!missing.allowPrerelease && missing.skippedVersion.empty() && missing.postponedUntilUnixMs == 0,
+              "prefs: missing settings.json -> defaults");
+
+        // Seed a settings.json with FOREIGN keys (a cog-shaped doc), then RMW the update keys in.
+        std::filesystem::create_directories(std::filesystem::path{ dir });
+        {
+            std::ofstream f{ std::filesystem::path{ dir } / L"settings.json", std::ios::binary };
+            f << "{\"model\":\"opus\",\"allowUpdatePrerelease\":true}";
+        }
+        U::WriteSkip(dir, L"v0.9.9");
+        U::WritePostpone(dir, 1234567890123LL);
+        const auto p = U::ReadPrefs(dir);
+        CHECK(p.skippedVersion == L"v0.9.9", "prefs: WriteSkip round-trips");
+        CHECK(p.postponedUntilUnixMs == 1234567890123LL, "prefs: WritePostpone round-trips (int64 survives the double)");
+        CHECK(p.allowPrerelease, "prefs: foreign allowUpdatePrerelease preserved by the RMW");
+
+        // SetMember must REPLACE, not append: a second skip leaves exactly ONE key, latest value.
+        U::WriteSkip(dir, L"v1.0.0");
+        const auto p2 = U::ReadPrefs(dir);
+        CHECK(p2.skippedVersion == L"v1.0.0", "prefs: a second skip replaces the tag");
+        {
+            std::wifstream f{ std::filesystem::path{ dir } / L"settings.json" };
+            std::wstring text{ std::istreambuf_iterator<wchar_t>(f), std::istreambuf_iterator<wchar_t>() };
+            size_t n = 0;
+            for (size_t at = text.find(L"updateSkippedVersion"); at != std::wstring::npos; at = text.find(L"updateSkippedVersion", at + 1))
+            {
+                ++n;
+            }
+            CHECK(n == 1, "prefs: SetMember replaces in place (no duplicate key)");
+            CHECK(text.find(L"\"model\"") != std::wstring::npos, "prefs: the cog's model key survives our RMW");
+        }
+
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path{ dir }, ec);
     }
 }
 
