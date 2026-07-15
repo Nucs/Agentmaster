@@ -690,10 +690,17 @@ namespace winrt::TerminalApp::implementation
             actionsRow.HorizontalAlignment(HorizontalAlignment::Left);
             actionsRow.VerticalAlignment(VerticalAlignment::Center);
 
-            // Agentmaster (responsive launch bar): "Agentmaster" + "\x2014" stay; "launch a" / "session in"
-            // (below) collapse first when the pane narrows (_ReflowLaunchBar), leaving "Agentmaster \x2014
+            // Agentmaster (responsive launch bar): the brand + "\x2014" stay; "launch a" / "session in"
+            // (below) collapse first when the pane narrows (_ReflowLaunchBar), leaving "<brand> \x2014
             // [\x25CF Claude] [box]". Built as members so reflow can toggle their Visibility.
-            _agentmasterText = Text(L"Agentmaster", 18, true, 1.0);
+            // The brand doubles as the at-a-glance which-install-am-I marker (like Title()): the DEV
+            // package (AgentmasterDev — the loose-layout deploy) reads "Agentmaster Dev", the release
+            // install plain "Agentmaster". Runtime identity, not a build flag, so one binary serves both;
+            // cached — the package family never changes mid-run.
+            static const winrt::hstring brandName = ::Agentmaster::Profiles::IsDevPackage() ?
+                                                        winrt::hstring{ L"Agentmaster Dev" } :
+                                                        winrt::hstring{ L"Agentmaster" };
+            _agentmasterText = Text(brandName, 18, true, 1.0);
             bar.Children().Append(_agentmasterText);
             _dashText = Text(L"\x2014", 13, false, 0.6); // em-dash, always shown
             bar.Children().Append(_dashText);
