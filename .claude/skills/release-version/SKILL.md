@@ -138,15 +138,18 @@ git rev-parse HEAD origin/agentmaster          # is local ahead of origin? (push
   mainline, and don't try to reconcile them into the branch. Their WORK usually still lives on
   mainline (re-integrated / continued under different hashes).
 - **"Reunification" release:** when several prereleases/hotfixes diverged off an old stable base and
-  mainline is now the **superset** of all of them, releasing mainline REUNIFIES the line. Its notes
-  are the **comprehensive changelog since the last STABLE** (not since the last *tag*): fold in every
-  intervening prerelease's New/Fixes (release-notes skill §2/§6). Today's case: 0.6.2 (abandoned
-  prerelease) + 0.6.3/0.6.4 (diverged hotfixes) all sat off the 0.6.1 stable base; mainline carried
-  the full superset, so v0.6.5 released mainline as one prerelease baselined on **0.6.1** (the last
-  stable / current Latest), 30 commits back — even though 0.6.2–0.6.4 are "newer" tags.
-- **The last-stable baseline can sit BEHIND newer prereleases.** `Latest` = the newest **non**-
-  prerelease; intervening prereleases do NOT advance it (release-notes §2). Baseline notes off that
-  stable, not off the highest version number.
+  mainline is now the **superset** of all of them, releasing mainline REUNIFIES the line. But the
+  NOTES still follow the §2 rule by release TYPE: a reunification **prerelease** lists only ITS OWN
+  delta — the work it newly ships (e.g. a previously-abandoned batch), MINUS anything already shipped
+  in an intervening hotfix prerelease; the comprehensive fold waits for the eventual STABLE. Today's
+  case: 0.6.2 (abandoned prerelease) + 0.6.3/0.6.4 (diverged hotfixes) all sat off the 0.6.1 base;
+  mainline carried the full superset, so v0.6.5 released mainline as one **prerelease** whose notes are
+  just the 0.6.2 batch + newer state/triage commits (NOT the 23 GB leak / hourly-update / crash-loop
+  that already shipped in 0.6.3/0.6.4) — even though 0.6.2–0.6.4 are "newer" tags.
+- **A prerelease baselines off the PREVIOUS release; a STABLE baselines off the last stable.** `Latest`
+  = the newest **non**-prerelease; intervening prereleases do NOT advance it. That last-stable is the
+  baseline for the STABLE fold (§6) only — a prerelease's delta is measured against whatever release
+  came right before it, not off the last stable or the highest version number (release-notes §2).
 - **Push mainline before tagging** so `origin/agentmaster` reflects the released tree (the install
   one-liner pulls `tools/*.ps1` from the branch). A clean fast-forward (`git merge-base --is-ancestor
   origin/agentmaster HEAD`) is a plain `git push origin agentmaster`.

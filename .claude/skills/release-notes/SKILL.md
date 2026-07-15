@@ -42,17 +42,28 @@ The `<NNN>` file name and the committed archive are the convention — match it.
 
 ## 2. Pick the baseline (what the notes cover)
 
-**Rule: a release's notes contain the complete changelog since the last STABLE release.**
-- **Last stable** = the newest release in `gh release list -R Nucs/Agentmaster` that is **not**
-  marked `Pre-release` (it wears the `Latest` badge). Pre-releases in between do **not** reset it.
-- A **pre-release** vX.Y.Z → notes = the delta since the last stable (naturally just the new work).
-- A **stable** vX.Y.Z → notes = the delta since the last stable, which means you **fold in every
-  intervening pre-release's notes in full** (see §6 assembly). Example today: 0.6.0 stable folded
-  the entire 0.5.6→0.5.9 pre-release line (last stable was 0.5.5).
+**THE RULE — and it DIFFERS for pre-release vs stable (this is the whole point):**
+- A **PRE-RELEASE** vX.Y.Z → notes show **ONLY that prerelease's OWN explicit delta** — what changed
+  vs the **immediately-previous release** (the prior prerelease, or the stable it built on). Each
+  prerelease's notes stand alone as "what's new in THIS one." **Do NOT fold in earlier prereleases**,
+  and do NOT re-list changes that already shipped in an earlier prerelease. (User's rule, stated
+  2026-07: *"all the prereleases … are supposed to only show what has changed in that prerelease
+  explicitly."*)
+- A **STABLE** vX.Y.Z → notes = the **complete changelog since the last stable** — you **fold in every
+  intervening pre-release's notes in full** (§6 assembly). **The accumulation happens ONLY at the
+  prerelease→stable promotion** — that is *when we actually take care of accumulating all prerelease
+  notes into the same release.* Example: 0.6.0 stable folded the entire 0.5.6→0.5.9 prerelease line.
 
-Get the delta and omit-list:
+- **Last stable** = the newest release in `gh release list -R Nucs/Agentmaster` NOT marked
+  `Pre-release` (it wears `Latest`); intervening prereleases do not reset it. It is the baseline for
+  the STABLE fold — **NOT** for a prerelease. A **prerelease baselines off the PREVIOUS release**,
+  whatever version that was (e.g. a reunification prerelease that ships a previously-abandoned batch
+  lists only that batch as ITS delta, minus anything already shipped in an intervening hotfix).
+
+Get the delta and omit-list — `<prev>` is the release RIGHT BEFORE `<target>` (prerelease: the prior
+prerelease/stable; stable: the last stable, then fold each intervening prerelease's body per §6):
 ```bash
-git log --oneline 'v<prev>^{commit}'..<target> 2>/dev/null          # the changelog
+git log --oneline 'v<prev>^{commit}'..<target> 2>/dev/null          # the changelog for THIS release
 git log --oneline 'v<prev>^{commit}'..<target> | grep -icE ' (docs|refactor|chore|test)\(|Merge '  # omit these from user notes
 ```
 Read the FULL message of the big commits before writing (`git show -s --format='%s%n%b' <sha> | head -30`) —
@@ -142,10 +153,12 @@ from git (`git show <notes-commit>:<draft path>`), so revert-and-reapply rather 
 
 ## 6. Comprehensive assembly — a STABLE release's full changelog since last stable
 
-When a stable release supersedes a run of pre-releases, its body must include the **complete**
-changelog: the new stable work on top, then each intervening pre-release's **full** New/Fixes
-folded in. Pull the authoritative **published** bodies and transform them (strip each Install,
-demote `##`→`###`, wrap under a per-version banner, one Install at the end):
+**This section is STABLE-only — it is _the_ prerelease→stable accumulation step.** A prerelease never
+does this (it shows only its own delta, §2); accumulating all the prerelease notes into one body is
+exactly what you do WHEN you cut the stable release. Its body must include the **complete** changelog:
+the new stable work on top, then each intervening pre-release's **full** New/Fixes folded in. Pull the
+authoritative **published** bodies and transform them (strip each Install, demote `##`→`###`, wrap
+under a per-version banner, one Install at the end):
 
 ```bash
 SC=/tmp; for V in 0.5.9 0.5.8 0.5.7 0.5.6; do
@@ -194,8 +207,11 @@ Finally, commit the draft archive (single `git add` + `git commit`, extensive me
 
 ## Gotchas recap
 - `-R Nucs/Agentmaster` on **every** `gh` call; `--jq` exiting 1 empty ⇒ use the plain form.
-- A STABLE release's notes must carry the **whole** changelog since the last stable — fold in the
-  intervening pre-releases (§6), don't just condense them to a recap.
+- A **PRE-RELEASE**'s notes show ONLY its OWN delta (vs the immediately-previous release) — never fold
+  in earlier prereleases, never re-list an already-shipped change; each prerelease stands alone (§2).
+- A **STABLE** release's notes must carry the **whole** changelog since the last stable — fold in the
+  intervening pre-releases (§6), don't just condense them to a recap. This fold is the ONLY place
+  accumulation happens (the prerelease→stable moment).
 - Flip framing **and** flags together; `--latest=false` alone won't move the badge — `--latest` the
   release you want (§5).
 - Strip the `<!-- … -->` draft header before `--notes-file`.
