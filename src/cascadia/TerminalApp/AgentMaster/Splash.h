@@ -29,9 +29,13 @@
 // CLOSE buttons (WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX + WS_EX_APPWINDOW). It is NOT topmost: it is
 // shown ACTIVATED (SW_SHOWNORMAL) so Windows brings it to the foreground ONCE when it appears, but the
 // still-building main window can come forward and cover it as soon as it's ready (a topmost splash used
-// to sit stubbornly above every window, including ones the user switched to). The user can minimize or
-// close it early (close => DefWindowProc => WM_DESTROY => the thread exits), and the settle-watch
-// dismisses it automatically when the window is ready.
+// to sit stubbornly above every window, including ones the user switched to). The user can minimize it,
+// or CLOSE it early to ABORT the launch: closing the loading window (its X / Alt+F4 / the taskbar or
+// system-menu Close) shuts the whole starting-up instance DOWN instead of letting it keep initializing
+// invisibly in the background (WM_CLOSE => g_userClosed => TerminateProcess in ThreadMain; the main/UI
+// thread is blocked in the synchronous restore this splash covers, so a posted quit wouldn't be seen
+// until that finished — a decisive terminate is the only thing that actually stops the launch). The
+// settle-watch still dismisses it automatically (WITHOUT terminating) once the window is ready.
 
 #pragma once
 
@@ -69,6 +73,7 @@ namespace Agentmaster::Splash
         inline std::atomic<HWND> g_hwnd{ nullptr };
         inline std::atomic<int> g_anim{ 0 }; // progress-segment position counter
         inline std::atomic<bool> g_dismissing{ false };
+        inline std::atomic<bool> g_userClosed{ false }; // the user closed the splash early (X/Alt+F4) => abort the whole launch
         inline std::mutex g_statusMtx;
         inline std::wstring g_status{ L"Launching Agentmaster..." }; // ASCII dots — keep this header codepage-clean
         inline HFONT g_titleFont{ nullptr }; // splash-thread-only after Show()
@@ -175,6 +180,19 @@ namespace Agentmaster::Splash
                     g_anim.fetch_add(kAnimStepPx);
                     ::InvalidateRect(hwnd, nullptr, FALSE);
                 }
+                return 0;
+            case WM_CLOSE:
+                // The user dismissed the loading window early — the X button, Alt+F4, or the taskbar /
+                // system-menu Close — BEFORE launch finished. Treat that as "abort the launch": record
+                // the user-initiated close so ThreadMain shuts the whole instance down (below) instead of
+                // letting it keep starting up invisibly in the background. The automatic dismiss path
+                // (ready/expired) calls DestroyWindow DIRECTLY with g_dismissing set, so it never routes
+                // through WM_CLOSE — hence a WM_CLOSE outside an in-progress dismiss is always the user.
+                if (!g_dismissing.load())
+                {
+                    g_userClosed.store(true);
+                }
+                ::DestroyWindow(hwnd);
                 return 0;
             case WM_DESTROY:
                 ::PostQuitMessage(0);
@@ -339,6 +357,21 @@ namespace Agentmaster::Splash
             {
                 ::DeleteObject(g_bodyFont);
                 g_bodyFont = nullptr;
+            }
+
+            // Agentmaster: the user CLOSED the loading window before launch finished => abort. Shut the
+            // whole instance down rather than let it keep starting up invisibly in the background (the
+            // half-built main window would otherwise still appear seconds later). TerminateProcess — not
+            // a posted quit — because the main/UI thread is busy with the SYNCHRONOUS session/window
+            // restore this splash exists to cover, so a WM_QUIT posted to it wouldn't be processed until
+            // that ~7s of work drained, defeating the point. This mirrors the app's other decisive exits
+            // (the single-instance handoff + the updater relaunch both TerminateProcess from a background
+            // thread). Safe here: the splash only ever runs in the genuine emperor process (a handoff /
+            // update / profile-decline all exit long BEFORE Splash::Show()), and startup only READS
+            // persisted state, so there is nothing half-written to lose by terminating now.
+            if (g_userClosed.load())
+            {
+                ::TerminateProcess(::GetCurrentProcess(), 0);
             }
         }
     }
