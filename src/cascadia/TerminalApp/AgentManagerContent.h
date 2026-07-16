@@ -204,6 +204,7 @@ namespace winrt::TerminalApp::implementation
     private:
         void _BuildLayout();
         void _Refresh();
+        void _RefreshFromRegistryEvent(); // Agentmaster (perf): the registry-notify path into _Refresh — trailing-throttled (min gap between event-driven full rebuilds; the trailing edge always runs); UI thread
         void _RebuildBoard(const std::vector<::Agentmaster::SessionInfo>& sessions);
         void _RebuildTree(const std::vector<::Agentmaster::SessionInfo>& sessions);
         // Agentmaster: the Explorer Tree's EXTERNAL scope — render the Fleet Observer's observe-only
@@ -540,6 +541,18 @@ namespace winrt::TerminalApp::implementation
         // TIME-derived card adornments (the ⚡ "still cached" hint + the "ago" timing) stay current in
         // quiet periods with no registry events. Stopped in the destructor.
         winrt::Windows::UI::Xaml::DispatcherTimer _cardRefreshTimer{ nullptr };
+        // Agentmaster (perf — the CPU-hotspot fix): COALESCE + trailing-THROTTLE for the registry-notify
+        // refresh. The observer used to TryEnqueue one FULL _Refresh (deep registry Snapshot + board +
+        // tree + plan rebuild) PER notify — with 19 active sessions (presence flips, hook events, recon
+        // synths) that was a steady per-window rebuild storm on the UI thread. _refreshQueued keeps at
+        // most ONE dispatcher hop in flight (a notify burst folds into it; cleared BEFORE the refresh so
+        // a notify landing DURING a rebuild schedules the next one — no lost updates); the one-shot
+        // _refreshDelayTimer enforces a minimum gap between event-driven rebuilds, always running the
+        // TRAILING refresh so the final state is never dropped. User-action refreshes (RefreshNow, scope/
+        // sort toggles, the 30s idle timer) stay direct and immediate.
+        std::shared_ptr<std::atomic<bool>> _refreshQueued{ std::make_shared<std::atomic<bool>>(false) };
+        int64_t _lastRegistryRefreshMs{ 0 };
+        winrt::Windows::UI::Xaml::DispatcherTimer _refreshDelayTimer{ nullptr };
 
         // Agentmaster (Waiting-for-you countdown bar): the live 1px bottom bars to drain. Each holds the
         // bar's ScaleTransform (ScaleX = fraction of the waiting window still remaining, origin LEFT) +

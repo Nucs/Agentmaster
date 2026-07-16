@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <mutex>
 #include <string>
 
 namespace Agentmaster
@@ -147,12 +148,92 @@ namespace Agentmaster
             return rec;
         }
 
-        // Write a record (deleting the file when empty, so the store stays sparse).
+        // Agentmaster (perf — the CPU-hotspot fix): an in-process, (size,mtime)-VALIDATED record cache.
+        // The Manager board reads GetSessionTags PER CARD PER REBUILD (and titles/favorites read the same
+        // files elsewhere) — each a CreateFile+ReadFile+JSON-parse of <session-store>\<sid>.json, most of
+        // which don't even exist (the store is sparse by design). Dump-proven on the live 70-tab release
+        // instance: GetSessionTags -> LoadSessionStoreIn -> ReadWhole sat ON the hot UI-thread stack.
+        // The cache turns a steady-state read into ONE GetFileAttributesExW (fail-fast for the common
+        // absent-file case) + a map hit; the file is re-parsed only when its (size,mtime) actually moved.
+        // Cross-PROCESS edits (another instance / the CLI writing the store) are caught by the same stat
+        // validation — no staleness class the old direct read didn't already have between polls. Same-
+        // process writes are WRITE-THROUGH below (WriteRecord updates the entry from what it just wrote),
+        // so a rapid write→read never depends on mtime granularity. Guarded by its own mutex — the store
+        // is called from the UI lane, the engine observer, and tests concurrently.
+        struct RecCacheEntry
+        {
+            SessionStoreRecord rec;
+            uint64_t size = 0;
+            int64_t mtime = 0; // FILETIME ticks
+            bool present = false; // file existed at last look (an ABSENT file caches as an empty record)
+        };
+        std::mutex g_recCacheMtx;
+        std::unordered_map<std::wstring, RecCacheEntry> g_recCache; // key: case-folded full path
+
+        std::wstring RecCacheKey(const std::wstring& path)
+        {
+            std::wstring k = path;
+            for (auto& c : k)
+            {
+                c = static_cast<wchar_t>(::towlower(c));
+            }
+            return k;
+        }
+
+        bool StatFile(const std::wstring& path, uint64_t& size, int64_t& mtime)
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (!::GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            {
+                size = 0;
+                mtime = 0;
+                return false;
+            }
+            size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            ULARGE_INTEGER li{};
+            li.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+            li.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+            mtime = static_cast<int64_t>(li.QuadPart);
+            return true;
+        }
+
+        // The cached read behind LoadSessionStoreIn. A hit whose (present,size,mtime) still matches is a
+        // map copy; anything else re-parses and refreshes the entry (a transient stat miss mid-atomic-
+        // replace simply caches "absent" for one round and self-heals on the next stat).
+        SessionStoreRecord LoadRecordCached(const std::wstring& storeDir, const std::wstring& sid)
+        {
+            const std::wstring path = FilePath(storeDir, sid);
+            uint64_t size = 0;
+            int64_t mtime = 0;
+            const bool present = StatFile(path, size, mtime);
+            const std::wstring key = RecCacheKey(path);
+            {
+                std::lock_guard guard{ g_recCacheMtx };
+                const auto it = g_recCache.find(key);
+                if (it != g_recCache.end() && it->second.present == present && it->second.size == size && it->second.mtime == mtime)
+                {
+                    return it->second.rec;
+                }
+            }
+            SessionStoreRecord rec = present ? ParseRecord(storeDir, sid) : SessionStoreRecord{};
+            {
+                std::lock_guard guard{ g_recCacheMtx };
+                g_recCache[key] = RecCacheEntry{ rec, size, mtime, present };
+            }
+            return rec;
+        }
+
+        // Write a record (deleting the file when empty, so the store stays sparse). WRITE-THROUGH: the
+        // cache entry is refreshed from what was just written, so a same-process write→read is coherent
+        // even when two writes land inside one mtime tick (the stat-validation blind spot).
         bool WriteRecord(const std::wstring& storeDir, const std::wstring& sid, const SessionStoreRecord& rec)
         {
+            const std::wstring path = FilePath(storeDir, sid);
             if (rec.empty())
             {
-                ::DeleteFileW(FilePath(storeDir, sid).c_str());
+                ::DeleteFileW(path.c_str());
+                std::lock_guard guard{ g_recCacheMtx };
+                g_recCache[RecCacheKey(path)] = RecCacheEntry{}; // absent, empty record
                 return true;
             }
             json::Value o = json::Value::MkObj();
@@ -160,7 +241,16 @@ namespace Agentmaster
             {
                 o.Set(k, json::Value::MkStr(v));
             }
-            return AtomicWriteUtf8(FilePath(storeDir, sid), json::Dump(o));
+            if (!AtomicWriteUtf8(path, json::Dump(o)))
+            {
+                return false;
+            }
+            uint64_t size = 0;
+            int64_t mtime = 0;
+            StatFile(path, size, mtime); // best-effort; a failed stat just means the next read re-parses
+            std::lock_guard guard{ g_recCacheMtx };
+            g_recCache[RecCacheKey(path)] = RecCacheEntry{ rec, size, mtime, true };
+            return true;
         }
 
         std::wstring StoreDir()
@@ -177,7 +267,10 @@ namespace Agentmaster
         {
             return {};
         }
-        return ParseRecord(storeDir, sessionId);
+        // Cached ((size,mtime)-validated): the hot read behind GetSessionTags / titles / favorites —
+        // called per card per board rebuild. See LoadRecordCached. (SetSessionStoreFieldIn's own
+        // read-modify-write below deliberately stays on the direct ParseRecord — freshest-disk RMW.)
+        return LoadRecordCached(storeDir, sessionId);
     }
 
     std::wstring GetSessionStoreFieldIn(const std::wstring& storeDir, const std::wstring& sessionId, const std::wstring& key)

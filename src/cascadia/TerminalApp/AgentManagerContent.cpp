@@ -204,6 +204,10 @@ namespace winrt::TerminalApp::implementation
         {
             _progressTimer.Stop(); // UI thread; stop the Waiting-for-you countdown-bar drainer
         }
+        if (_refreshDelayTimer)
+        {
+            _refreshDelayTimer.Stop(); // UI thread; stop the trailing-throttle one-shot (perf coalescing)
+        }
     }
 
     std::wstring AgentManagerContent::_WorkDirOf(const ::Agentmaster::SessionInfo& s) const
@@ -229,16 +233,29 @@ namespace winrt::TerminalApp::implementation
         {
             auto weak = get_weak();
             auto disp = _dispatcher;
-            _observerToken = _registry->AddObserver([weak, disp](const SessionInfo&, HookEvent) {
-                if (disp)
+            // Agentmaster (perf — the CPU-hotspot fix): COALESCED. One dispatcher hop in flight at a
+            // time — a notify burst (19 active sessions × presence flips / hook events / recon synths,
+            // each an observer fan-out) folds into the single queued refresh instead of enqueuing one
+            // FULL board+tree+plan rebuild EACH. The flag clears BEFORE the refresh runs, so a notify
+            // that lands DURING a rebuild schedules the next one — the trailing state is never lost.
+            // The hop lands in _RefreshFromRegistryEvent (trailing-throttled), not _Refresh directly.
+            auto queued = _refreshQueued;
+            _observerToken = _registry->AddObserver([weak, disp, queued](const SessionInfo&, HookEvent) {
+                if (!disp)
                 {
-                    disp.TryEnqueue([weak]() {
-                        if (auto self = weak.get())
-                        {
-                            self->_Refresh();
-                        }
-                    });
+                    return;
                 }
+                if (queued->exchange(true))
+                {
+                    return; // a refresh hop is already queued — this notify folds into it
+                }
+                disp.TryEnqueue([weak, queued]() {
+                    queued->store(false); // clear FIRST: a notify during the rebuild below must re-queue
+                    if (auto self = weak.get())
+                    {
+                        self->_RefreshFromRegistryEvent();
+                    }
+                });
             });
         }
         _Refresh();
@@ -1631,6 +1648,48 @@ namespace winrt::TerminalApp::implementation
     }
 
     // ---- Refresh / rebuild --------------------------------------------------
+
+    // Agentmaster (perf — the CPU-hotspot fix): the registry-notify path into _Refresh. The coalesced
+    // observer hop (SetRegistry) lands here on the UI thread; this enforces a MINIMUM GAP between
+    // event-driven full rebuilds — a burst runs one rebuild now and ONE trailing rebuild at the gap
+    // boundary (the one-shot _refreshDelayTimer), so the final state always renders and the rebuild
+    // rate is bounded (~4/s) no matter how hot the notify stream gets. Every USER-action refresh
+    // (RefreshNow, scope/sort toggles, selection, the 30s idle timer) still calls _Refresh() directly —
+    // interactive latency is untouched.
+    void AgentManagerContent::_RefreshFromRegistryEvent()
+    {
+        constexpr int64_t kMinGapMs = 250;
+        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+        const int64_t since = now - _lastRegistryRefreshMs;
+        if (since >= kMinGapMs)
+        {
+            _lastRegistryRefreshMs = now;
+            _Refresh();
+            return;
+        }
+        if (_refreshDelayTimer && _refreshDelayTimer.IsEnabled())
+        {
+            return; // a trailing refresh is already scheduled — this event folds into it
+        }
+        if (!_refreshDelayTimer)
+        {
+            _refreshDelayTimer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+            _refreshDelayTimer.Tick([weak = get_weak()](const IInspectable& sender, const IInspectable&) {
+                if (auto self = weak.get())
+                {
+                    self->_refreshDelayTimer.Stop();
+                    self->_lastRegistryRefreshMs = static_cast<int64_t>(::GetTickCount64());
+                    self->_Refresh();
+                }
+                else if (const auto t = sender.try_as<winrt::Windows::UI::Xaml::DispatcherTimer>())
+                {
+                    t.Stop(); // dead lens — stop the orphaned timer (the _cardRefreshTimer idiom)
+                }
+            });
+        }
+        _refreshDelayTimer.Interval(std::chrono::milliseconds(kMinGapMs - since));
+        _refreshDelayTimer.Start();
+    }
 
     void AgentManagerContent::_Refresh()
     {
