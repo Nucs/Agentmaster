@@ -389,6 +389,9 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Nav audit: a plain shell-tab duplicate (a managed tab took the fork path above, which logs
+        // fork-managed-begin/done — this line covers the non-managed remainder).
+        ::Agentmaster::LogNav(L"duplicate-tab " + _DescribeTabForLog(tab));
         try
         {
             // TODO: GH#5047 - We're duplicating the whole profile, which might
@@ -1255,6 +1258,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (result == ContentDialogResult::None)
                 {
+                    ::Agentmaster::LogNav(L"close-all cancelled (tabs=" + std::to_wstring(closable.size()) + L" managed=" + std::to_wstring(managedCount) + L")");
                     co_return; // Cancel All / dismiss -> stop the close
                 }
                 if (!forceFavorite)
@@ -1276,11 +1280,18 @@ namespace winrt::TerminalApp::implementation
             auto strong = weak.get();
             if (!strong || warningResult != ContentDialogResult::Primary)
             {
+                if (strong && warningResult != ContentDialogResult::Primary)
+                {
+                    ::Agentmaster::LogNav(L"close-all cancelled (shell batch, tabs=" + std::to_wstring(closable.size()) + L")"); // only a genuine decline, never a teardown race
+                }
                 co_return;
             }
         }
 
         // Apply the resolved decision to each tab, without re-prompting.
+        // Nav audit BEGIN for the whole batch (pairs with `close-all done`; the managed tabs inside
+        // the loop additionally log their own close-begin/close-done).
+        ::Agentmaster::LogNav(L"close-all begin tabs=" + std::to_wstring(closable.size()) + L" managed=" + std::to_wstring(managedCount) + (favoriteAll ? L" favorite-all" : L""));
         for (auto& tab : closable)
         {
             const auto strong = weak.get();
@@ -1307,6 +1318,7 @@ namespace winrt::TerminalApp::implementation
                 co_await _HandleCloseTabRequested(tab, /*skipConfirmClose*/ true);
             }
         }
+        ::Agentmaster::LogNav(L"close-all done"); // END — an unpaired begin means the app died mid-batch
     }
     // Method Description:
     // - Responds to changes in the TabView's item list by changing the

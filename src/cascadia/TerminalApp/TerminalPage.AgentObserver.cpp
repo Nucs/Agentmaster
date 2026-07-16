@@ -1467,6 +1467,12 @@ namespace winrt::TerminalApp::implementation
             if (!_tagEditorPickedHex.empty() && (!exists || recolorExisting))
             {
                 ::Agentmaster::SetTagColor(canonical, _tagEditorPickedHex);
+                if (recolorExisting)
+                {
+                    // Nav audit: the deliberate recolor of an EXISTING tag (an explicit swatch pick;
+                    // a NEW tag's color is part of its `tag add` creation line).
+                    ::Agentmaster::LogNav(L"tag recolor \"" + canonical + L"\" " + _tagEditorPickedHex);
+                }
             }
             // Nav audit: the user tagged a session from the Tags panel ((new) == this name just
             // entered the global universe).

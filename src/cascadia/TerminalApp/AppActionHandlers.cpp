@@ -930,6 +930,8 @@ namespace winrt::TerminalApp::implementation
             co_return;
         }
 
+        ::Agentmaster::LogNav(L"new-window"); // Agentmaster: [nav] — the user opened a new Agentmaster window
+
         // ShellExecuteExW may block, so do it on a background thread.
         //
         // NOTE: All remaining code of this function doesn't touch `this`, so we don't need weak/strong_ref.

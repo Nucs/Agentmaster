@@ -1661,7 +1661,19 @@ What works, by area:
   already covered by `tab-focus`), `move-out` (a managed tab dragged to ANOTHER window — where the session
   went, beside `[move-out]`), `manager bring-to-front` (surface an external's hosting window),
   `sessions-page close (back)` (the explicit Back; the programmatic hide after a resume/fork rides THAT
-  action); **clipboard/shell** — `copy <field>` (the ONE `CopySessionField` chokepoint behind EVERY copy
+  action), the **close/quit DECISION layer** (every confirm dialog's outcome — an "asked, declined" is
+  otherwise invisible): `close-cancelled <sid8>` + `close-confirm <sid8> (favorite & close | unfavorite &
+  close)` (the single-tab 3-way's Cancel / star-flip; plain Close needs no line — `close-begin/done`
+  follows immediately), `close-all begin tabs=N managed=M [favorite-all]` ↔ `close-all done` (the batch —
+  an unpaired begin == died mid-batch; `close-all cancelled …` for either dialog's decline),
+  `window-close cancelled|confirmed|-> close ALL windows (quit requested)` (the window ✕ 3-way), `quit
+  cancelled|confirmed (closing all windows)` (RequestQuit's own confirm), and **workspace mutations**:
+  `new-window` (`_OpenNewWindow`), `pane-split <ident>` (Initialized-gated so a restore's replayed splits
+  can't spam it), `duplicate-tab <ident>` (a plain shell duplicate; a managed tab takes the fork path =
+  `fork-managed-*`), `tab-color <sid8> -> <#hex|reset> (individual)` / `tab-color dir=<dir> -> <#hex|reset>`
+  (a genuine user pick/reset — the equality guards filter our own paints), `tag recolor "<name>" <#hex>`
+  (the explicit swatch recolor of an existing tag, beside the existing `tag add`/`tag remove`/`tag delete`);
+  **clipboard/shell** — `copy <field>` (the ONE `CopySessionField` chokepoint behind EVERY copy
   menu — the per-tab overlay's AND the board/tree Copy submenu — `field` ∈
   session-id/path/branch/claude-cli/codex-cli/transcript/summary), `open-path` (the overlay folder button →
   explorer); **cog/settings** — `settings-save` (the cog Save — logs the behavior-impacting fields

@@ -862,6 +862,7 @@ namespace winrt::TerminalApp::implementation
                 }
                 if (result == ContentDialogResult::None)
                 {
+                    ::Agentmaster::LogNav(L"close-cancelled " + ::Agentmaster::ShortId(sessionId)); // asked, declined — the session stays Open
                     co_return; // Cancel / dismiss -> leave the session Open
                 }
                 if (result == ContentDialogResult::Secondary)
@@ -871,6 +872,9 @@ namespace winrt::TerminalApp::implementation
                     // Sessions page's ★ column / [ ] Favorite filter; an already-favorite one is UN-starred
                     // ("☆ Unfavorite & Close"). Either way we then fall through to the archive below.
                     ::Agentmaster::SetSessionFavorite(sessionId, !alreadyFavorite);
+                    // Nav audit: the dialog's star flip (otherwise invisible — the `favorite` LogNav lives
+                    // on the Sessions-page toggle seam, not this direct SetSessionFavorite).
+                    ::Agentmaster::LogNav(L"close-confirm " + ::Agentmaster::ShortId(sessionId) + (alreadyFavorite ? L" (unfavorite & close)" : L" (favorite & close)"));
                 }
                 // Primary (Close) or Secondary (Favorite/Unfavorite & Close) -> fall through to the
                 // archive (keep-the-record) bookkeeping below.
@@ -2293,6 +2297,8 @@ namespace winrt::TerminalApp::implementation
             {
                 return; // already this session's persisted color (our paint / a settled pick) -> no loop
             }
+            // Nav audit: a genuine user pick/reset (the equality guard above filtered our own paints).
+            ::Agentmaster::LogNav(L"tab-color " + ::Agentmaster::ShortId(id) + L" -> " + (picked.empty() ? std::wstring{ L"reset" } : picked) + L" (individual)");
             _sessionRegistry->Update(id, [&picked](::Agentmaster::SessionInfo& s) { s.tabColorHex = picked; });
             _ScheduleWindowRecordSave(); // M10: the per-tab color rides in the window record
             return;
@@ -2305,6 +2311,9 @@ namespace winrt::TerminalApp::implementation
         {
             return; // already the dir's persisted color (our auto paint / user-pick fan-out / reset) -> no loop
         }
+        // Nav audit: a genuine user pick/reset for this color-key dir (the equality guard above
+        // filtered our auto paints / fan-out echoes) — it persists + recolors every same-dir tab.
+        ::Agentmaster::LogNav(L"tab-color dir=" + dir + L" -> " + (newHex ? *newHex : std::wstring{ L"reset" }));
         ::Agentmaster::SetDirColor(dir, newHex); // upsert the color, or drop it on reset
         _ApplyDirColorToTabs(dir, newHex); // every live tab sharing this color key tracks the change
         _ScheduleWindowRecordSave(); // M10: the per-tab color rides in the window record

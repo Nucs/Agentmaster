@@ -3008,8 +3008,10 @@ namespace winrt::TerminalApp::implementation
 
             if (warningResult != ContentDialogResult::Primary)
             {
+                ::Agentmaster::LogNav(L"quit cancelled"); // asked, declined — every window stays open
                 co_return;
             }
+            ::Agentmaster::LogNav(L"quit confirmed (closing all windows)");
         }
 
         // Agentmaster (quit-all window-record loss): flush THIS window's record at the
@@ -3231,6 +3233,7 @@ namespace winrt::TerminalApp::implementation
 
                 if (warningResult == ContentDialogResult::None)
                 {
+                    ::Agentmaster::LogNav(L"window-close cancelled"); // asked, declined — the window stays open
                     co_return; // Cancel / dismiss -> keep this window open
                 }
                 if (warningResult == ContentDialogResult::Secondary)
@@ -3239,10 +3242,12 @@ namespace winrt::TerminalApp::implementation
                     // ("Do you want to close all windows?") and then tears down every window (each flushes
                     // its record + archives its sessions). Do NOT also run this window's close below — let
                     // RequestQuit drive the app-wide, equally non-destructive teardown.
+                    ::Agentmaster::LogNav(L"window-close -> close ALL windows (quit requested)");
                     RequestQuit();
                     co_return;
                 }
                 // Primary ("Close Window") -> fall through to the non-destructive close below.
+                ::Agentmaster::LogNav(L"window-close confirmed");
             }
         }
         else
@@ -3660,6 +3665,12 @@ namespace winrt::TerminalApp::implementation
                                   const float splitSize,
                                   std::shared_ptr<Pane> newPane)
     {
+        // Agentmaster: [nav] — a pane split is a real workspace mutation; gated on Initialized so a
+        // window-restore's replayed split actions can't spam it (the tab-focus gating idiom).
+        if (_startupState == StartupState::Initialized && tab)
+        {
+            ::Agentmaster::LogNav(L"pane-split " + _DescribeTabForLog(*tab));
+        }
         auto activeTab = tab;
         // Clever hack for a crash in startup, with multiple sub-commands. Say
         // you have the following commandline:
