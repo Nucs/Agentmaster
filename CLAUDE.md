@@ -2465,23 +2465,31 @@ build **binlog uploads as an artifact** to diagnose the first run.
   resolved to a WUX `DirectUI::Border` — so the original v0.6.7 "fork → immediately drag" crash was
   THIS all along (the fork appends+reveals the new tab far right, scrolling index 0 out), NOT an
   uncommitted item→container map, which is why the settle/CanDrag guards alone didn't stop the
-  recurrence (three more crashes 2026-07-16, same offset, 0.6.7.0 + 0.6.7.1). **The fix — layer 0,
-  `_NeutralizeTabStripVirtualization()`** (`TerminalPage.AgentEngine.cpp`, run from
-  `_EnsureTabStripScrollViewer` once the strip template realizes, latched
-  `_tabStripVirtualizationOff`): swap the inner `TabViewListView`'s `ItemsPanel` to a plain
-  non-virtualizing horizontal `StackPanel` (XamlReader-built) — `ContainerFromIndex(i)` then never
-  returns null, the loop is total AND correct (the unique Border finally does its job on every strip
-  state). Safe because MUX has ZERO code dependency on `ItemsStackPanel` (it comes only from a
-  TabViewListView STYLE Setter, and an instance property assignment beats a style Setter); cost is
-  headers staying realized (~ today's restore-time peak, which already realizes all of them). The
-  belts stay: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()` mutation
-  (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` / `_TabDragCompleted`) so
-  the pump never sees an unsettled strip (XAML dispatches queued input ahead of the pending layout
-  pass) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays `CanDrag(false)`
-  until `ContainerFromItem` resolves it, re-enabled inline or on its `Loaded`; the Manager tab never
-  re-enables (its non-movable contract, re-checked in the deferred path). **Don't add a `TabItems()`
-  mutation without routing through these**; logs `[tabdrag-guard]` when the deferred path arms and
-  when the layer-0 panel swap installs.
+  recurrence (three more crashes 2026-07-16, same offset, 0.6.7.0 + 0.6.7.1). **⚠ DEAD END (0.6.7.2,
+  REMOVED — `_NeutralizeTabStripVirtualization()`): "make the strip non-virtualizing by swapping its
+  `ItemsPanel` for a plain `StackPanel`" is NOT legal and made things far WORSE.** It fixed the drag AV
+  but replaced it with a **deterministic startup crash on EVERY launch** — `0xC0000005` read of a
+  `0xD0` field in `Windows.UI.Xaml.dll+0x591677`, a deferred **render** pass (0 of our frames on the
+  faulting thread), pinned by full-dump forensics + the WER before/after (the drag AV `+0xB605C`
+  vanished the instant the swap compiled into Release, replaced by `+0x591677` at startup). Root
+  reason: a **system-XAML `ListView` (ListViewBase) REQUIRES its `ItemsPanel` to be a
+  `ModernCollectionBasePanel`** — an `ItemsStackPanel` or `ItemsWrapGrid`. A plain `StackPanel` is a
+  legal host only for a bare `ItemsControl`; inside a `ListView` the framework's internal panel casts
+  return null and the render pass null-derefs. (The removed comment's claim "MUX has ZERO code
+  dependency on `ItemsStackPanel`" missed that the dependency is the *system* `ListViewBase`, not MUX.)
+  There is **NO legal non-virtualizing `ItemsPanel` for a `ListView`**, so de-virtualization is
+  unreachable at our layer — don't retry it. **Current state: the drag AV is UNFIXED**, mitigated only
+  by the belts below (which the root-cause analysis proves are *insufficient* — a by-CONTENT lookup no
+  settling can map); the remaining real options are all product decisions (disable MUX tab-drag
+  reorder/tear-out — `TabView.CanReorderTabs`/`CanDragTabs` — or replace the strip's reorder
+  mechanism). The belts: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()`
+  mutation (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` /
+  `_TabDragCompleted`) so the pump never sees an unsettled strip (XAML dispatches queued input ahead of
+  the pending layout pass) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays
+  `CanDrag(false)` until `ContainerFromItem` resolves it, re-enabled inline or on its `Loaded`; the
+  Manager tab never re-enables (its non-movable contract, re-checked in the deferred path). **Don't add
+  a `TabItems()` mutation without routing through these**; logs `[tabdrag-guard]` when the deferred path
+  arms.
 - **A per-element `ToolTip` on rebuilt elements is a process-killing LEAK under XAML Islands — never
   `ToolTipService.SetToolTip` at BUILD time on any Manager-rebuilt surface.** The framework-side
   registration `SetToolTip` creates is never torn down under islands (the same broken bookkeeping that

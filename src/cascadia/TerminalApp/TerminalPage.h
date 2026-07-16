@@ -280,7 +280,6 @@ namespace winrt::TerminalApp::implementation
         double _managerTabWidthCache{ 0.0 };
         Windows::UI::Xaml::Controls::ScrollViewer::ViewChanged_revoker _tabStripViewChangedRevoker;
         Windows::UI::Xaml::FrameworkElement::SizeChanged_revoker _tabStripSizeChangedRevoker;
-        bool _tabStripVirtualizationOff{ false }; // Agentmaster: latched once the strip's ItemsStackPanel is swapped for a non-virtualizing StackPanel (layer 0 of the MUX drag AV fix — _NeutralizeTabStripVirtualization)
 
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
 
@@ -990,7 +989,6 @@ namespace winrt::TerminalApp::implementation
         void _RemoveSessionRecord(const std::wstring& sessionId);
         void _StripSessionFromSavedWindows(const std::wstring& sessionId);
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
-        void _NeutralizeTabStripVirtualization(); // Agentmaster: MUX drag AV fix, layer 0 (ROOT CAUSE) — swap the strip's virtualizing ItemsStackPanel for a plain StackPanel so MUX's drag-start ContainerFromIndex(i).Content() loop can never meet a null (derealized) container; see TerminalPage.AgentEngine.cpp
         void _SettleTabStripLayout(); // Agentmaster: commit the strip's item->container mapping synchronously after a TabItems() mutation (MUX drag-start AV guard, layer 1 — a belt; see TerminalPage.AgentEngine.cpp)
         void _GuardTabDragUntilRegistered(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: a (re)inserted tab stays undraggable until ContainerFromItem resolves it (MUX drag AV guard, layer 2 — a belt: keeps a not-yet-mapped tab ungrabbable)
         std::wstring _DescribeTabForLog(const TerminalApp::Tab& tab); // Agentmaster: `<sid8> "<title>"` (title-only for a shell tab) — the tab-strip forensic log identity; never throws

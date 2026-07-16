@@ -320,7 +320,6 @@ namespace winrt::TerminalApp::implementation
     {
         if (_tabStripScrollViewer || !_tabView)
         {
-            _NeutralizeTabStripVirtualization(); // idempotent (latched) — retries a not-yet-resolvable swap on the next call
             return;
         }
 
@@ -331,7 +330,6 @@ namespace winrt::TerminalApp::implementation
         }
 
         _tabStripScrollViewer = sv;
-        _NeutralizeTabStripVirtualization(); // layer 0 of the MUX drag AV fix — the strip template is realized NOW
         _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (auto page = weakThis.get())
             {
@@ -1373,7 +1371,7 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: MUX TabView drag AV — layer 0, the ROOT-CAUSE fix (layers 1/2 below are belts).
+    // Agentmaster: MUX TabView drag AV — the root cause + a DEAD-END fix attempt (do NOT retry it).
     // Dragging ANY tab has WUX report the dragged ITEM as the pressed container's **Content**, not the
     // TabViewItem itself (ListViewBase::GetDraggedItems, ListViewBase_Partial_Reorder.cpp: for an
     // items-are-their-own-containers list — exactly WT's TabItems of TabViewItems — it appends
@@ -1393,50 +1391,22 @@ namespace winrt::TerminalApp::implementation
     // "fork then drag" crash was THIS all along, not an uncommitted item->container map: a fork
     // appends+reveals the new tab at the far right, scrolling index 0 out). The settle/CanDrag belts
     // below cannot prevent it — the lookup that fails is by CONTENT, which no amount of settling maps.
-    // The one total fix at our layer: make the tab strip NON-VIRTUALIZING, so ContainerFromIndex(i)
-    // never returns null — the loop becomes safe AND correct (the unique Border finally does the job
-    // upstream intended, on every strip state). The swap is safe: MUX has ZERO code dependency on
-    // ItemsStackPanel (the panel comes only from a TabViewListView STYLE Setter — MUX TabView.xaml),
-    // and an instance ItemsPanel assignment beats a style Setter. Cost: tab headers stay realized
-    // instead of being reclaimed when scrolled off — the restore path already realizes every header
-    // once regardless (the [tabdrag-guard] Loaded storm), so steady state ~equals today's peak.
-    void TerminalPage::_NeutralizeTabStripVirtualization()
-    {
-        if (_tabStripVirtualizationOff || !_tabStripScrollViewer)
-        {
-            return; // done, or the strip template isn't realized yet (callers retry)
-        }
-        try
-        {
-            // The TabViewListView is the strip ScrollViewer's nearest ListView ancestor (the
-            // _RevealTabInStrip recipe).
-            winrt::WUX::Controls::ListView tabListView{ nullptr };
-            auto node = winrt::WUX::Media::VisualTreeHelper::GetParent(_tabStripScrollViewer);
-            while (node && !tabListView)
-            {
-                tabListView = node.try_as<winrt::WUX::Controls::ListView>();
-                node = winrt::WUX::Media::VisualTreeHelper::GetParent(node);
-            }
-            if (!tabListView)
-            {
-                return; // not resolvable yet — retried from _EnsureTabStripScrollViewer's callers
-            }
-            const auto tmpl = winrt::WUX::Markup::XamlReader::Load(
-                                  LR"(<ItemsPanelTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>)")
-                                  .try_as<winrt::WUX::Controls::ItemsPanelTemplate>();
-            if (!tmpl)
-            {
-                return;
-            }
-            tabListView.ItemsPanel(tmpl);
-            _tabStripVirtualizationOff = true;
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] tab-strip virtualization OFF (non-virtualizing StackPanel installed)\n");
-        }
-        CATCH_LOG();
-    }
+    //
+    // ⚠ DEAD END (0.6.7.2, REMOVED): "make the tab strip non-virtualizing by swapping its ItemsPanel
+    // for a plain StackPanel" is NOT a legal move and made things far WORSE — a deterministic startup
+    // crash on EVERY launch (0xC0000005 read of a 0xD0 field in Windows.UI.Xaml.dll+0x591677, during a
+    // deferred render pass — 0 of our frames on the faulting thread). A system-XAML `ListView`
+    // (ListViewBase) REQUIRES its ItemsPanel to be a ModernCollectionBasePanel — an `ItemsStackPanel`
+    // or `ItemsWrapGrid`; a plain `StackPanel` is a legal host only for a bare ItemsControl, so the
+    // ListView's internal panel casts return null and the render pass null-derefs. (The claim "MUX has
+    // ZERO code dependency on ItemsStackPanel" ignored that the *system* ListViewBase — not MUX — owns
+    // that dependency.) There is NO legal non-virtualizing ItemsPanel for a ListView, so
+    // de-virtualization is unreachable at our layer; the drag AV's only real mitigations are the belts
+    // below plus (product decision) disabling MUX tab-drag reorder/tear-out. The swap fixed the drag
+    // AV but replaced a user-triggered crash with a 100%-unlaunchable app — hence removed.
 
-    // Agentmaster: MUX TabView drag-start AV guard, layer 1 (a BELT — the proven root cause is layer
-    // 0, _NeutralizeTabStripVirtualization above) — settle the strip's item->container mapping BEFORE
+    // Agentmaster: MUX TabView drag-start AV guard, layer 1 (a BELT — see the drag-AV note above) —
+    // settle the strip's item->container mapping BEFORE
     // returning to the message pump. XAML dispatches queued INPUT ahead of the pending LAYOUT pass, so
     // a press+move queued behind a TabItems() insert/remove/reinsert can cross the drag threshold
     // while the mapping is still uncommitted, and MUX's drag paths consult that mapping
