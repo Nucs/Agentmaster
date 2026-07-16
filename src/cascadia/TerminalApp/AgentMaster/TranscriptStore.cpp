@@ -464,6 +464,12 @@ namespace Agentmaster
             L"<bash-stdout>",
             L"<bash-stderr>",
             L"<task-notification>", // background-task completion notification (post-2.1 schema)
+            L"<bash-notification>", // background-BASH completion wake — the shell twin of
+            // <task-notification> (`<bash-notification> <shell-id>…</shell-id> <output-file>…`,
+            // 14 non-meta user rows corpus-wide, 2026-07-16 sweep). The SUMMARY filter
+            // (SeIsCommandNoise) always listed it; THIS list never did, so a background shell's
+            // completion echo could back-fill as a Typed row and — pre the parser's noise skip —
+            // read as a turn event. Its wake turn is real: state rides the hook / assistant lines.
             L"<system-reminder", // injected reminder context
             L"<teammate-message", // agent-team traffic — the BARE wrapper: the OLDER delivery strata
             // inject the <teammate-message …> block with NO preamble line (corpus-audited: 486 such

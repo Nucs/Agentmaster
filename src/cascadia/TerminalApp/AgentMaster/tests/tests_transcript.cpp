@@ -160,6 +160,23 @@ void TestTranscriptScan()
         CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::UserPrompt,
               "a real prompt mentioning a marker mid-text is still a UserPrompt");
     }
+    // The isCompactSummary bridge ("This session is being continued…" — a /compact's synthetic,
+    // NON-meta user line): skipped like isMeta, mirroring every other transcript reader. Emitting
+    // it read as a turn START and back-filled the WHOLE summary into the Typed record (91 rows ≈
+    // 1.36 MB of machine text found persisted in the prod registry, 2026-07-16 sweep).
+    {
+        const std::wstring line = LR"j({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation that ran out of context. The summary…"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "the isCompactSummary /compact bridge -> NO turn event (skipped like isMeta)");
+    }
+    // The background-BASH completion wake (<bash-notification> — the shell twin of
+    // <task-notification>; a NON-meta string user line, 14 corpus-wide): noise-listed now, so the
+    // parser drops it like the other wake wrappers (its real wake turn lights via hook/assistant).
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"content":"<bash-notification>\n<shell-id>b92b2f3</shell-id>\n<output-file>C:\\tmp\\out.txt</output-file>\n</bash-notification>"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "a <bash-notification> background-shell wake -> NO turn event");
+    }
     // partial trailing line: only the complete line is parsed; consumed stops at the last newline
     {
         const std::wstring chunk = LR"j({"type":"user","message":{"content":"first"}})j" L"\n" LR"j({"type":"user","message":{"content":"par)j";
@@ -2110,6 +2127,7 @@ void TestTranscriptStore()
     CHECK(IsNoiseUserPrompt(L"<local-command-stdout>x"), "local-command wrapper is noise");
     CHECK(IsNoiseUserPrompt(L"<bash-input>ls</bash-input>"), "bash-input echo is noise");
     CHECK(IsNoiseUserPrompt(L"<task-notification>done</task-notification>"), "task-notification is noise");
+    CHECK(IsNoiseUserPrompt(L"<bash-notification>\n<shell-id>b92b2f3</shell-id>"), "bash-notification (background-shell wake) is noise");
     CHECK(IsNoiseUserPrompt(L"<system-reminder>r</system-reminder>"), "system-reminder is noise");
     CHECK(IsNoiseUserPrompt(L"Caveat: the messages below were generated"), "Caveat preamble is noise");
     CHECK(IsNoiseUserPrompt(L"[Request interrupted by user]"), "interrupt marker is noise");

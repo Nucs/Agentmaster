@@ -135,7 +135,9 @@ namespace Agentmaster
     // transcript JSONL). A trailing line WITHOUT a newline is an append in flight — it is left
     // unconsumed (reflected in `consumed`) so the next read re-sees it whole. User-prompt
     // extraction is deliberately CONSERVATIVE (top-level string / pure-text content only,
-    // `isMeta` lines skipped, and machine-injected CONTROL MARKERS — a local slash command's
+    // `isMeta` + `isCompactSummary` lines skipped — the latter the synthetic "This session is
+    // being continued…" /compact bridge every other transcript reader already skips — and
+    // machine-injected CONTROL MARKERS — a local slash command's
     // NON-meta "<command-name>…"/"<local-command-stdout>…" echoes, `!` bash passthrough echoes,
     // injected reminders, teammate/agent wrappers; IsNoiseUserPrompt, exempting the interrupt
     // marker — skipped too) so a tool_result / meta / control line is never mistaken for a typed

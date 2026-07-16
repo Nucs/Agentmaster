@@ -248,7 +248,17 @@ namespace Agentmaster
             else if (type == L"user")
             {
                 // Skip meta / synthetic user lines (command echoes, injected reminders, etc.).
-                if (obj.BoolAt(L"isMeta"))
+                // isCompactSummary == the synthetic "This session is being continued…" bridge a
+                // /compact (or auto-compaction) injects — machine text, not a human turn, and it is
+                // HUGE (the whole summary): emitting it as a UserPrompt back-filled it into the
+                // Typed record (91 rows ≈ 1.36 MB of machine text found persisted in the prod
+                // registry, rewritten on every autosave) and read as a turn START. Every other
+                // transcript reader (ReadTranscriptInfo / AnalyzeSessionTranscript /
+                // ClassifyTranscriptLine) already skips the flag exactly like isMeta — this parser
+                // was the lone exception. The post-compact auto-continuation (which fires NO
+                // UserPromptSubmit hook) still lights recon-run off its ASSISTANT lines one pass
+                // later, the same pattern as the wake wrappers.
+                if (obj.BoolAt(L"isMeta") || obj.BoolAt(L"isCompactSummary"))
                 {
                     continue;
                 }
