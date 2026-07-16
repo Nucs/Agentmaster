@@ -190,6 +190,10 @@ namespace winrt::TerminalApp::implementation
         // Agentmaster: MUX TabView drag-start AV guard — settle the item->container mapping + hold
         // the new tab undraggable until the strip can resolve it (see TerminalPage.AgentEngine.cpp).
         _GuardTabDragUntilRegistered(tabViewItem);
+        // Agentmaster: [tab-new] timestamps the strip INSERTION exactly — the v0.6.7 MUX AV lived in
+        // the insert->drag window, so the gap between this line and a [nav] tab-drag-begin is the
+        // forensic measurement. Covers every tab kind (managed launches also log [spawn]/[rehome]).
+        ::Agentmaster::AppendStateLog(L"hooks.log", L"[tab-new] idx=" + std::to_wstring(insertPosition) + L" tabs=" + std::to_wstring(_tabs.Size()) + L" " + _DescribeTabForLog(*newTabImpl) + L"\n");
 
         // Set this tab's icon to the icon from the content
         _UpdateTabIcon(*newTabImpl);
@@ -1732,6 +1736,7 @@ namespace winrt::TerminalApp::implementation
         }
         if (_managerTab && currentTabIndex < _tabs.Size() && _tabs.GetAt(currentTabIndex) == _managerTab)
         {
+            ::Agentmaster::LogNav(L"tab-move refused (manager tab is pinned)"); // Agentmaster: a moveTab action aimed at the pinned tab
             return; // can't move the Manager tab itself
         }
         const int32_t lowerBound = _managerTab ? 1 : 0; // keep index 0 reserved for the Manager tab
@@ -1739,6 +1744,9 @@ namespace winrt::TerminalApp::implementation
         if (currentTabIndex != newTabIndex)
         {
             auto tab = _tabs.GetAt(currentTabIndex);
+            // Agentmaster: [nav] — a same-window tab move (moveTab action / drop routing), BEGIN-style
+            // (logged before the mutations so a crash mid-move still shows what was being moved).
+            ::Agentmaster::LogNav(L"tab-move " + _DescribeTabForLog(tab) + L" idx=" + std::to_wstring(currentTabIndex) + L" -> " + std::to_wstring(newTabIndex));
             auto tabViewItem = tab.TabViewItem();
             _tabs.RemoveAt(currentTabIndex);
             _tabs.InsertAt(newTabIndex, tab);
@@ -1773,6 +1781,22 @@ namespace winrt::TerminalApp::implementation
     {
         auto& from{ _rearrangeFrom };
         auto& to{ _rearrangeTo };
+
+        // Agentmaster: [nav] drag forensics — the gesture END (pairs with tab-drag-begin; a begin with
+        // no matching end == the app died mid-drag, the v0.6.7 MUX AV class). from/to carry the
+        // same-window reorder result; a tear-out / cross-window drop / aborted drag has neither.
+        {
+            std::wstring nav{ L"tab-drag-end" };
+            if (from.has_value() && to.has_value())
+            {
+                nav += L" from=" + std::to_wstring(*from) + L" to=" + std::to_wstring(*to);
+            }
+            else
+            {
+                nav += L" (no same-window reorder)";
+            }
+            ::Agentmaster::LogNav(nav);
+        }
 
         if (from.has_value() && to.has_value() && to != from)
         {

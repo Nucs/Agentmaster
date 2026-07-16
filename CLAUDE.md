@@ -76,6 +76,7 @@ Commandline introspection (the `agentmaster <verb>` CLI): [`doc/agentmaster/CLI.
 Summary-panel JUMP (transcript→buffer resolve + center the view on a prompt): [`doc/agentmaster/SUMMARY_JUMP.md`](doc/agentmaster/SUMMARY_JUMP.md).
 Favorite + Close refactor (Archive removed; Sessions is the sole history view): [`doc/agentmaster/FAVORITES.md`](doc/agentmaster/FAVORITES.md).
 Pending-input monitor (detect an UNSENT draft in a Claude tab's input box): [`doc/agentmaster/PENDING_INPUT.md`](doc/agentmaster/PENDING_INPUT.md).
+System notifications (Windows toasts when a session leaves Running; click = foreground + jump to tab): [`doc/agentmaster/NOTIFICATIONS.md`](doc/agentmaster/NOTIFICATIONS.md).
 
 ## Status
 
@@ -1457,8 +1458,11 @@ What works, by area:
   registry-observer push as the tab status dot (`TerminalPage::_EvaluateAgentNotification`, its own edge
   tracker beside `_agentFlashLastState` — deliberately NOT shared with the flash), so exactly one toast per
   transition across N windows; per-session **Tag+Group** makes a newer toast REPLACE the older in Action
-  Center; **clicking the toast jumps to the session's tab** (the Linked-Lenses Activate seam) while the app
-  is alive; `notifySuppressFocused` skips a toast for the focused tab of the ACTIVE window [the flash ring's
+  Center; **clicking the toast brings the hosting window to the FRONT and jumps to the session's tab** while
+  the app is alive (`_FocusClaudeSessionTab(id, bringWindowToFront=true)` — restore-if-minimized +
+  `SetForegroundWindow` + the `SwitchToThisWindow` fallback — locally, else the activate fan-out whose
+  receiving window runs the same recipe; logged `[nav] notify-click`; app gone ⇒ the OS falls back to a
+  plain launch, no COM activator); `notifySuppressFocused` skips a toast for the focused tab of the ACTIVE window [the flash ring's
   "current tab is always visited" rule]; `notifySound` OFF adds `<audio silent>`; the checkboxes grey out
   while the master is OFF but keep their stored values. Best-effort `ToastNotificationManager` — an
   unpackaged build [no AUMID] logs `[notify] toast failed` ONCE and no-ops; fires log `[notify] <id>
@@ -1640,7 +1644,19 @@ What works, by area:
   session in a dir — the broadcast carries the affected count); **navigation**
   — `tab-focus` (the core "where is the user now"; gated on `Initialized` so a restore's focus-restore can't
   spam it), `tab-swap` (a tab's bound conversation changed in place — `/clear`/`/resume`/`/compact`, beside
-  `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md);
+  `[rehome]`), `manager select-external`, `jump-to-prompt` (a summary-panel ▸, SUMMARY_JUMP.md),
+  `notify-click` (a session's Windows toast clicked → foreground its window + jump to its tab,
+  NOTIFICATIONS.md), and the **tab-strip drag pair** (the v0.6.7 MUX drag-start AV forensics — see the
+  Gotchas bullet): `tab-drag-begin <ident>` ↔ `tab-drag-end from=N to=M` (the gesture BEGIN/END — a begin
+  with no end == died mid-drag; end carries the same-window reorder result or `(no same-window reorder)`;
+  a Manager-tab attempt logs `tab-drag-begin refused`), `tab-move <ident> idx=N -> M` (moveTab action /
+  drop routing; `refused (manager tab is pinned)`), `tab-send-to-window <ident> win=<id|-1> idx=N` (the
+  tab left this window: `-1` = torn out into a NEW window, else a cross-window drop — beside the
+  managed-session `[move-out]`), with mechanism tags `[tab-new] idx=N tabs=M <ident>` (every strip
+  INSERTION timestamped — the insert→drag gap is the crash-window measurement), `[pin-manager]`
+  (a drop displaced the pinned tab; snapped back to 0), and `[tabdrag-guard]` (the AV guard's deferred
+  arm / re-enable / settle-threw; `<ident>` everywhere = `_DescribeTabForLog`: `<sid8> "<title>"`,
+  title-only for a shell tab);
   **lifecycle/window** — `mark-unread` (the tab "Mark Unread"; its clear twin is an automatic tab VISIT,
   already covered by `tab-focus`), `move-out` (a managed tab dragged to ANOTHER window — where the session
   went, beside `[move-out]`), `manager bring-to-front` (surface an external's hosting window),

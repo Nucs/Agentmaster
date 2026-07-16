@@ -6645,6 +6645,11 @@ namespace winrt::TerminalApp::implementation
         tabImpl.copy_from(winrt::get_self<Tab>(tabBase));
         if (tabImpl)
         {
+            // Agentmaster: [nav] drag forensics — the gesture BEGIN (pairs with tab-drag-end /
+            // tab-send-to-window; a begin with no matching end == the app died mid-drag, the
+            // v0.6.7 MUX AV class).
+            ::Agentmaster::LogNav(L"tab-drag-begin " + _DescribeTabForLog(tabBase));
+
             // Agentmaster: the pinned Manager tab (index 0) is non-movable — it must never be torn
             // out into a new window nor handed to another window by drag. Refuse to begin its drag:
             // NOT stashing it neutralizes both tear-out seams (_onTabDroppedOutside and
@@ -6655,6 +6660,7 @@ namespace winrt::TerminalApp::implementation
             // back by _PinManagerTabFirst() in _TabDragCompleted.
             if (_managerTab && tabBase == _managerTab)
             {
+                ::Agentmaster::LogNav(L"tab-drag-begin refused (manager tab is non-movable)");
                 return;
             }
 
@@ -6833,6 +6839,10 @@ namespace winrt::TerminalApp::implementation
                                                std::optional<winrt::Windows::Foundation::Point> dragPoint)
     {
         auto startupActions = _stashed.draggedTab->BuildStartupActions(BuildStartupKind::Content);
+        // Agentmaster: [nav] — the dragged tab is leaving this window: win=-1 => torn out into a NEW
+        // window (_onTabDroppedOutside), else dropped into that window's strip at idx. The managed-
+        // session side of the same event additionally logs [move-out] (_DetachClaudeTabForMove).
+        ::Agentmaster::LogNav(L"tab-send-to-window " + _DescribeTabForLog(*_stashed.draggedTab) + L" win=" + std::wstring{ windowId } + L" idx=" + std::to_wstring(tabIndex));
         _DetachClaudeTabForMove(_stashed.draggedTab); // Agentmaster: a Claude tab is being torn out / dragged to another window — evict our binding (keep the injector) so teardown can't archive it; the destination re-homes it
         _DetachTabFromWindow(_stashed.draggedTab);
 

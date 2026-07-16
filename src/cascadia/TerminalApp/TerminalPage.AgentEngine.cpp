@@ -1334,6 +1334,8 @@ namespace winrt::TerminalApp::implementation
                 uint32_t viewIdx{};
                 if (tvi && _tabView.TabItems().IndexOf(tvi, viewIdx))
                 {
+                    // A drop displaced the pinned Manager tab — record where it landed before snapping back.
+                    ::Agentmaster::AppendStateLog(L"hooks.log", L"[pin-manager] snap-back (manager was displaced to view idx=" + std::to_wstring(viewIdx) + L")\n");
                     _tabView.TabItems().RemoveAt(viewIdx);
                     _tabView.TabItems().InsertAt(0, tvi);
                     _GuardTabDragUntilRegistered(tvi); // settle the map after the reinsert; keeps the Manager CanDrag(false)
@@ -1341,6 +1343,30 @@ namespace winrt::TerminalApp::implementation
             }
             CATCH_LOG();
             _UpdateTabIndices();
+        }
+    }
+
+    // Agentmaster: one-line log identity for tab-strip forensics — `<sid8> "<title>"` for a managed
+    // tab, `"<title>"` for a shell tab. Log-path safe: never throws.
+    std::wstring TerminalPage::_DescribeTabForLog(const winrt::TerminalApp::Tab& tab)
+    {
+        try
+        {
+            if (!tab)
+            {
+                return L"?";
+            }
+            std::wstring ident;
+            if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())
+            {
+                ident = ::Agentmaster::ShortId(sid) + L" ";
+            }
+            ident += L"\"" + std::wstring{ tab.Title() } + L"\"";
+            return ident;
+        }
+        catch (...)
+        {
+            return L"?";
         }
     }
 
@@ -1366,7 +1392,12 @@ namespace winrt::TerminalApp::implementation
                 _tabView.UpdateLayout();
             }
         }
-        CATCH_LOG();
+        catch (...)
+        {
+            // Surface the failure in OUR log too (a swallowed settle re-opens the crash window).
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] settle UpdateLayout threw\n");
+            LOG_CAUGHT_EXCEPTION();
+        }
     }
 
     // Agentmaster: MUX TabView drag-start AV guard, layer 2 (see _SettleTabStripLayout). A freshly
@@ -1397,8 +1428,15 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             tabViewItem.CanDrag(false);
-            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] tab unmapped after settle; drag deferred to Loaded\n");
-            tabViewItem.Loaded([weakThis = get_weak()](const IInspectable& sender, const RoutedEventArgs&) {
+            std::wstring ident{ L"?" };
+            if (const auto tab = _GetTabByTabViewItem(tabViewItem))
+            {
+                ident = _DescribeTabForLog(tab);
+            }
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] " + ident + L" unmapped after settle; drag deferred to Loaded\n");
+            // The Loaded handler lives with the tvi and fires on every tree (re)enter (virtualization
+            // recycle) — the re-assert is harmless/idempotent, but log only the FIRST re-enable.
+            tabViewItem.Loaded([weakThis = get_weak(), ident, logged = std::make_shared<bool>(false)](const IInspectable& sender, const RoutedEventArgs&) {
                 try
                 {
                     const auto tvi{ sender.try_as<MUX::Controls::TabViewItem>() };
@@ -1410,9 +1448,19 @@ namespace winrt::TerminalApp::implementation
                     if (page && page->_managerTab && page->_managerTab.TabViewItem() == tvi)
                     {
                         tvi.CanDrag(false); // the Manager tab's non-movable contract survives realization
+                        if (!*logged)
+                        {
+                            *logged = true;
+                            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] manager tab kept undraggable (Loaded)\n");
+                        }
                         return;
                     }
                     tvi.CanDrag(true); // realized => prepared/mapped: stock draggability restored
+                    if (!*logged)
+                    {
+                        *logged = true;
+                        ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] " + ident + L" drag re-enabled on Loaded\n");
+                    }
                 }
                 CATCH_LOG();
             });
