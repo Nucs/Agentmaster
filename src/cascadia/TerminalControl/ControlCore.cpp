@@ -882,9 +882,20 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         }
         const auto lock = _terminal->LockForReading();
         const auto& tb = _terminal->GetTextBuffer();
+        // Agentmaster (perf): mutation-id gate — the buffer hasn't changed since the last poll, so the
+        // rows (and therefore the detector's answer) are byte-identical; skip the 120-row read + parse.
+        // A draft being typed IS buffer output (the TUI echoes it), so any draft change bumps the id.
+        const auto mutationId = tb.GetLastMutationId();
+        if (_pendingInputScanValid && mutationId == _pendingInputScanMutationId)
+        {
+            return _pendingInputScanResult;
+        }
         const auto lastRow = tb.GetLastNonSpaceCharacter().y;
         if (lastRow < 0)
         {
+            _pendingInputScanMutationId = mutationId;
+            _pendingInputScanValid = true;
+            _pendingInputScanResult = {};
             return {};
         }
         // The input box + a little context above it is at most a viewport tall; 120 rows is generous and
@@ -898,7 +909,10 @@ namespace winrt::Microsoft::Terminal::Control::implementation
             rows.emplace_back(tb.GetRowByOffset(y).GetText()); // GetText() => wstring_view; copied while the lock is held
         }
         const auto draft = ::Agentmaster::DetectPendingInput(rows);
-        return winrt::hstring{ draft.text };
+        _pendingInputScanMutationId = mutationId;
+        _pendingInputScanValid = true;
+        _pendingInputScanResult = winrt::hstring{ draft.text };
+        return _pendingInputScanResult;
     }
 
     void ControlCore::AdjustOpacity(const float adjustment)

@@ -436,6 +436,16 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         bool _isReadOnly{ false };
         bool _closing{ false };
 
+        // Agentmaster (PENDING_INPUT.md, perf): ReadPendingInputDraft's buffer-mutation gate. The UI
+        // lane polls every bound started Claude tab each ~2.5s liveness tick; when the TextBuffer's
+        // mutation id hasn't moved since the last poll the buffer bytes are identical, so the previous
+        // detector result is returned without re-reading the 120-row tail (a quiet tab's scan becomes a
+        // lock + one integer compare). Only ever touched from ReadPendingInputDraft (one caller, the
+        // window's UI thread), under the terminal read lock.
+        uint64_t _pendingInputScanMutationId{ 0 };
+        bool _pendingInputScanValid{ false };
+        winrt::hstring _pendingInputScanResult{};
+
         struct StashedColorScheme
         {
             std::array<COLORREF, TextColor::TABLE_SIZE> scheme;
