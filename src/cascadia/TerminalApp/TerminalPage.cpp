@@ -3214,8 +3214,8 @@ namespace winrt::TerminalApp::implementation
                 dialog.Tag(box_value(L"agentmaster-dark")); // force the Agent-Manager dark theme (TerminalWindow::ShowDialog)
                 dialog.Title(box_value(L"Close this window?"));
                 dialog.Content(msg);
-                dialog.PrimaryButtonText(L"Close Window");
-                dialog.SecondaryButtonText(L"Close All Windows");
+                dialog.PrimaryButtonText(L"Close All Windows");
+                dialog.SecondaryButtonText(L"Close Window");
                 dialog.CloseButtonText(L"Cancel");
                 dialog.DefaultButton(ContentDialogButton::Close); // safe default = Cancel
 
@@ -3236,7 +3236,7 @@ namespace winrt::TerminalApp::implementation
                     ::Agentmaster::LogNav(L"window-close cancelled"); // asked, declined — the window stays open
                     co_return; // Cancel / dismiss -> keep this window open
                 }
-                if (warningResult == ContentDialogResult::Secondary)
+                if (warningResult == ContentDialogResult::Primary)
                 {
                     // "Close All Windows" -> quit the whole app. RequestQuit raises its OWN confirm
                     // ("Do you want to close all windows?") and then tears down every window (each flushes
@@ -3246,7 +3246,7 @@ namespace winrt::TerminalApp::implementation
                     RequestQuit();
                     co_return;
                 }
-                // Primary ("Close Window") -> fall through to the non-destructive close below.
+                // Secondary ("Close Window") -> fall through to the non-destructive close below.
                 ::Agentmaster::LogNav(L"window-close confirmed");
             }
         }
