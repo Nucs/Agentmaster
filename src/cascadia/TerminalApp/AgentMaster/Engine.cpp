@@ -20,14 +20,134 @@
 
 #include <windows.h>
 
+#include <algorithm> // Agentmaster: std::min (the autosaver's debounce deadline)
+#include <atomic>
+#include <condition_variable> // Agentmaster: the debounced sessions.json autosaver worker
 #include <cstdio>
 #include <mutex> // Agentmaster: guards the log observer's per-id dedup map (notify fires from several threads)
 #include <random>
 #include <string>
+#include <thread> // Agentmaster: the debounced sessions.json autosaver worker
 #include <unordered_map> // Agentmaster: per-id last-logged [Unknown] line, to dedup the pull/transient notify flood
 
 namespace Agentmaster
 {
+    namespace
+    {
+        // Agentmaster (perf — the CPU-hotspot fix): the DEBOUNCED sessions.json autosaver. The M8
+        // autosave observer used to run SaveSessions(reg->Snapshot()) INLINE on EVERY registry notify —
+        // a deep copy of ALL records + a ~3 MB JSON serialize + an atomic file replace, on whichever
+        // engine thread notified (scanner / S-lane / bridge). With 19 active sessions the notify stream
+        // is continuous, so the fleet was being re-serialized to disk many times a second (measured:
+        // sessions.json = 3.0 MB, rewritten per notify on the live 70-tab release instance).
+        //
+        // This worker coalesces bursts: a Poke() marks dirty + wakes the thread; the write runs once
+        // the stream is QUIET for kQuietMs, or at the kMaxLatencyMs cap while it never goes quiet — so
+        // steady-state pressure costs ~1 write/second instead of one per notify, and the on-disk state
+        // is never more than ~1s behind. DURABILITY (Rule 16 / Rule 4): the loss window is bounded by
+        // the cap; lifecycle-critical transitions do NOT ride the debounce — the engine observer below
+        // write-through-saves synchronously for a !live notify (archive/close/teardown, the moments
+        // that precede an exit), and the teardown/bind seams keep their own direct SaveSessions calls.
+        // SaveSessions itself is thread-safe (per-thread temp + atomic replace, Persistence.cpp), so
+        // this worker racing a direct seam call is the same class of interleave the per-notify saves
+        // already had — just far rarer.
+        class SessionAutosaver
+        {
+        public:
+            explicit SessionAutosaver(std::shared_ptr<SessionRegistry> reg) :
+                _reg(std::move(reg)),
+                _thread([this] { _run(); })
+            {
+            }
+
+            // Never runs in practice (the Engine singleton is deliberately never deleted) — but keep
+            // teardown correct for any future owner: stop, join, final-flush.
+            ~SessionAutosaver()
+            {
+                {
+                    std::lock_guard lk{ _mtx };
+                    _stop = true;
+                }
+                _cv.notify_all();
+                if (_thread.joinable())
+                {
+                    _thread.join();
+                }
+                if (_dirty)
+                {
+                    SaveSessions(_reg->Snapshot());
+                }
+            }
+
+            SessionAutosaver(const SessionAutosaver&) = delete;
+            SessionAutosaver& operator=(const SessionAutosaver&) = delete;
+
+            void Poke()
+            {
+                const int64_t now = static_cast<int64_t>(::GetTickCount64());
+                {
+                    std::lock_guard lk{ _mtx };
+                    _lastPokeMs = now;
+                    if (_firstPokeMs == 0)
+                    {
+                        _firstPokeMs = now;
+                    }
+                    _dirty = true;
+                }
+                _cv.notify_all();
+            }
+
+        private:
+            static constexpr int64_t kQuietMs = 300; // write once the notify stream pauses this long
+            static constexpr int64_t kMaxLatencyMs = 1000; // ... but never lag the disk more than this
+
+            void _run()
+            {
+                std::unique_lock lk{ _mtx };
+                while (!_stop)
+                {
+                    _cv.wait(lk, [this] { return _stop || _dirty; });
+                    if (_stop)
+                    {
+                        break; // the dtor final-flushes after the join
+                    }
+                    for (;;)
+                    {
+                        const int64_t now = static_cast<int64_t>(::GetTickCount64());
+                        const int64_t deadline = (std::min)(_lastPokeMs + kQuietMs, _firstPokeMs + kMaxLatencyMs); // (std::min): dodge the windows.h min macro (no NOMINMAX in the pch-less engine TUs)
+                        if (now >= deadline)
+                        {
+                            break;
+                        }
+                        _cv.wait_for(lk, std::chrono::milliseconds(deadline - now));
+                        if (_stop)
+                        {
+                            break;
+                        }
+                    }
+                    if (_stop)
+                    {
+                        break;
+                    }
+                    _dirty = false;
+                    _firstPokeMs = 0;
+                    lk.unlock(); // the Snapshot+serialize+write runs OUTSIDE the lock — Poke() never blocks on disk
+                    SaveSessions(_reg->Snapshot());
+                    lk.lock();
+                }
+            }
+
+            std::shared_ptr<SessionRegistry> _reg;
+            std::mutex _mtx;
+            std::condition_variable _cv;
+            bool _stop = false;
+            bool _dirty = false;
+            int64_t _firstPokeMs = 0; // first un-flushed Poke (drives the max-latency cap)
+            int64_t _lastPokeMs = 0; // newest Poke (drives the quiet window)
+            std::thread _thread; // last member: starts after everything above is initialized
+        };
+    }
+
     Engine& SharedEngine()
     {
         // Function-local static: C++ guarantees this initializer runs exactly once even if two
@@ -144,12 +264,29 @@ namespace Agentmaster
             }
 
             // Persistence (M8): autosave the registry (queue + autorunner + metadata) to
-            // sessions.json on every change, so an in-progress plan survives a crash. Restore
-            // never replays Sent prompts (statuses are preserved).
+            // sessions.json on change, so an in-progress plan survives a crash. Restore never
+            // replays Sent prompts (statuses are preserved).
+            //
+            // Agentmaster (perf — the CPU-hotspot fix): DEBOUNCED, not per-notify. The old inline
+            // SaveSessions(reg->Snapshot()) re-serialized the whole ~3 MB fleet to disk on EVERY
+            // registry notify (presence flips, hook events, recon synths — continuous with an active
+            // fleet), on whichever engine thread happened to notify. High-frequency LIVE churn now
+            // folds into the SessionAutosaver (quiet 300ms / cap 1s — the disk is never more than ~1s
+            // behind); a !live transition (archive/close/teardown — the writes that precede an exit,
+            // Rule 16) still saves SYNCHRONOUSLY right here, exactly like before, and the teardown/
+            // bind seams keep their own direct SaveSessions calls.
             {
                 auto reg = e->registry;
-                e->registry->AddObserver([reg](const SessionInfo&, HookEvent) {
-                    SaveSessions(reg->Snapshot());
+                auto saver = std::make_shared<SessionAutosaver>(e->registry);
+                e->registry->AddObserver([reg, saver](const SessionInfo& s, HookEvent) {
+                    if (!s.live)
+                    {
+                        SaveSessions(reg->Snapshot()); // lifecycle write-through (durability unchanged)
+                    }
+                    else
+                    {
+                        saver->Poke();
+                    }
                 });
             }
 
