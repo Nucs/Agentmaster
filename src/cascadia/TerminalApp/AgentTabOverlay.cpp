@@ -316,7 +316,7 @@ namespace winrt::TerminalApp::implementation
                        L"Model \x2014 what this session's last reply actually ran on (read from the\n"
                        L"transcript; a /model switch shows here on its next reply).",
                        Fill(0xFF, 0xC8, 0xC8, 0xC8));
-            appendSep();
+            appendText(std::wstring{ L"  " }, nullptr, fg); // spacer (no · dot) between model and status
         }
 
         // Status: the colored state glyph + its label, one tooltip for the pair.
