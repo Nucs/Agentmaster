@@ -964,6 +964,8 @@ namespace winrt::TerminalApp::implementation
         void _RemoveSessionRecord(const std::wstring& sessionId);
         void _StripSessionFromSavedWindows(const std::wstring& sessionId);
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
+        void _SettleTabStripLayout(); // Agentmaster: commit the strip's item->container mapping synchronously after a TabItems() mutation (MUX drag-start AV guard — see TerminalPage.AgentEngine.cpp)
+        void _GuardTabDragUntilRegistered(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: a (re)inserted tab stays undraggable until ContainerFromItem resolves it — the exact lookup MUX's drag-start path null-derefs on
         winrt::fire_and_forget _AdoptExternalSession(winrt::hstring sessionId, winrt::hstring cwd, winrt::hstring tabToken); // Agentmaster: bind a hand-typed `claude` to its ConPTY
         winrt::Windows::Foundation::IAsyncAction _SweepClaudeLivenessImpl(); // Agentmaster (terminate-net): the body of _SweepClaudeLiveness, awaited inside its try/catch so a throw can't escape the fire_and_forget (std::terminate)
         winrt::fire_and_forget _SweepClaudeLiveness(); // Agentmaster: archive this window's claude tabs whose ConPTY has Closed (scanner-ticked)

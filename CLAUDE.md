@@ -2403,6 +2403,26 @@ build **binlog uploads as an artifact** to diagnose the first run.
   **coalescing scheduler** (a `bool` + one `Dispatcher().RunAsync`) and do the reads + gated mutations on
   the CLEAN tick after layout settles (the `_ApplyRenamerMaxWidth` cycle-safety lesson, again). Both
   guards + a `CATCH_LOG` on the whole popup tail now live in `TabHeaderControl::_PositionTagBadgesNow`.
+- **MUX TabView drag-start null-deref (WinUI 2.8) — dragging a tab while the strip's item→container
+  map is uncommitted crashes INSIDE Microsoft's DLL, before any event reaches us.**
+  `TabView::OnListViewDragItemsStarting → FindTabViewItemFromDragItem` (TabView.cpp:850) falls back to
+  a loop calling `ContainerFromIndex(i).Content()` with NO null check when `ContainerFromItem(dragged)`
+  misses; on an overflowed strip the virtualizing `ItemsStackPanel` guarantees unrealized (null)
+  containers, so entering the loop is an instant `0xC0000005` (crash-dump-proven on release v0.6.7:
+  fork a tab → immediately drag the new tab; registers `Rcx=0`, `Rsi=0x41` == the 65-item
+  `TabItems().Size()`; symbolized against Microsoft's own MUX PDB). XAML dispatches queued **input**
+  ahead of the pending **layout** pass, so a press+move queued behind a `TabItems()`
+  insert/remove/reinsert can cross the drag threshold while the map is stale — and the AV fires
+  BEFORE `TabDragStarting` reaches our handlers (unguardable at the event, uncatchable under /EHsc).
+  Guard (both in `TerminalPage.AgentEngine.cpp`): **`_SettleTabStripLayout()`** — `UpdateLayout()`
+  after EVERY `TabItems()` mutation (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` /
+  `_PinManagerTabFirst` / `_TabDragCompleted`) so the pump never sees an unsettled strip (re-ordered
+  work, not added work) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays
+  `CanDrag(false)` until `ContainerFromItem` resolves it (the exact lookup MUX null-derefs on),
+  re-enabled inline or on its `Loaded` (an unrealized tab has no pixels to grab, so deferred re-enable
+  is inert); the Manager tab never re-enables (its non-movable contract, re-checked in the deferred
+  path). **Don't add a `TabItems()` mutation without routing through these**; logs
+  `[tabdrag-guard]` when the deferred path arms.
 - **A per-element `ToolTip` on rebuilt elements is a process-killing LEAK under XAML Islands — never
   `ToolTipService.SetToolTip` at BUILD time on any Manager-rebuilt surface.** The framework-side
   registration `SetToolTip` creates is never torn down under islands (the same broken bookkeeping that

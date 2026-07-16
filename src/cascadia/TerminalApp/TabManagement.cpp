@@ -187,6 +187,9 @@ namespace winrt::TerminalApp::implementation
 
         auto tabViewItem = newTabImpl->TabViewItem();
         _tabView.TabItems().InsertAt(insertPosition, tabViewItem);
+        // Agentmaster: MUX TabView drag-start AV guard — settle the item->container mapping + hold
+        // the new tab undraggable until the strip can resolve it (see TerminalPage.AgentEngine.cpp).
+        _GuardTabDragUntilRegistered(tabViewItem);
 
         // Set this tab's icon to the icon from the content
         _UpdateTabIcon(*newTabImpl);
@@ -631,6 +634,7 @@ namespace winrt::TerminalApp::implementation
         _tabs.RemoveAt(tabIndex);
         _tabView.TabItems().RemoveAt(tabIndex);
         _UpdateTabIndices();
+        _SettleTabStripLayout(); // Agentmaster: a remove invalidates the item->container map too (MUX drag-start AV guard)
 
         // To close the window here, we need to close the hosting window.
         if (_tabs.Size() == 0)
@@ -1743,6 +1747,7 @@ namespace winrt::TerminalApp::implementation
             _tabView.TabItems().RemoveAt(currentTabIndex);
             _tabView.TabItems().InsertAt(newTabIndex, tabViewItem);
             _tabView.SelectedItem(tabViewItem);
+            _GuardTabDragUntilRegistered(tabViewItem); // Agentmaster: the reinsert breaks the item->container map (MUX drag-start AV guard)
 
             if (auto autoPeer = Automation::Peers::FrameworkElementAutomationPeer::FromElement(*this))
             {
@@ -1795,6 +1800,7 @@ namespace winrt::TerminalApp::implementation
         to = std::nullopt;
 
         _PinManagerTabFirst(); // Agentmaster: a tab dropped before the pinned Manager tab snaps it back to 0
+        _SettleTabStripLayout(); // Agentmaster: MUX's own drag-reorder mutated TabItems — settle before the user can re-grab (drag-start AV guard)
     }
 
     void TerminalPage::_DismissTabContextMenus()

@@ -1336,11 +1336,88 @@ namespace winrt::TerminalApp::implementation
                 {
                     _tabView.TabItems().RemoveAt(viewIdx);
                     _tabView.TabItems().InsertAt(0, tvi);
+                    _GuardTabDragUntilRegistered(tvi); // settle the map after the reinsert; keeps the Manager CanDrag(false)
                 }
             }
             CATCH_LOG();
             _UpdateTabIndices();
         }
+    }
+
+    // Agentmaster: MUX TabView drag-start AV guard, layer 1 — settle the strip's item->container
+    // mapping BEFORE returning to the message pump. WinUI 2.8's TabView::OnListViewDragItemsStarting
+    // -> FindTabViewItemFromDragItem (TabView.cpp:850) walks ContainerFromIndex(i).Content() with NO
+    // null check whenever ContainerFromItem(dragged item) misses — and on an overflowed strip the
+    // virtualizing ItemsStackPanel guarantees unrealized (null) containers, so entering that fallback
+    // loop is an instant 0xC0000005 inside MUX, raised BEFORE TabDragStarting reaches any handler of
+    // ours and uncatchable under /EHsc (crash-dump-proven on release v0.6.7: fork a tab -> immediately
+    // drag it; Rcx=0, Rsi=0x41 == TabItems().Size()). The window that lets a drag in: XAML dispatches
+    // queued INPUT ahead of the pending LAYOUT pass, so a press+move queued behind a TabItems()
+    // insert/remove/reinsert can cross the drag threshold while the mapping is still uncommitted.
+    // UpdateLayout() runs that pass NOW — the layout was going to run next frame anyway, so this is
+    // re-ordered work, not added work. Called after EVERY TabItems() mutation (_InitializeTab /
+    // _RemoveTab / _TryMoveTab / _PinManagerTabFirst / _TabDragCompleted).
+    void TerminalPage::_SettleTabStripLayout()
+    {
+        try
+        {
+            if (_tabView)
+            {
+                _tabView.UpdateLayout();
+            }
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster: MUX TabView drag-start AV guard, layer 2 (see _SettleTabStripLayout). A freshly
+    // (re)inserted TabViewItem stays CanDrag(false) until the TabView can actually resolve its
+    // container (ContainerFromItem != null — the exact lookup MUX's drag-start path null-derefs on),
+    // so a drag can never begin from a tab the strip can't yet map. Re-enabled inline when the settle
+    // committed the mapping (the common case), else on the item's Loaded (realization == container
+    // prepare == mapped; an unrealized tab has no pixels to grab, so drag staying off until then is
+    // inert). The pinned Manager tab NEVER re-enables — the deferred path re-checks it, so a late
+    // Loaded can't undo _OpenAgentManagerTab's CanDrag(false).
+    void TerminalPage::_GuardTabDragUntilRegistered(const MUX::Controls::TabViewItem& tabViewItem)
+    {
+        if (!_tabView || !tabViewItem)
+        {
+            return;
+        }
+        _SettleTabStripLayout();
+        try
+        {
+            if (_managerTab && _managerTab.TabViewItem() == tabViewItem)
+            {
+                tabViewItem.CanDrag(false); // stays pinned-undraggable
+                return;
+            }
+            if (_tabView.ContainerFromItem(tabViewItem))
+            {
+                tabViewItem.CanDrag(true); // mapped — the settled common case
+                return;
+            }
+            tabViewItem.CanDrag(false);
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] tab unmapped after settle; drag deferred to Loaded\n");
+            tabViewItem.Loaded([weakThis = get_weak()](const IInspectable& sender, const RoutedEventArgs&) {
+                try
+                {
+                    const auto tvi{ sender.try_as<MUX::Controls::TabViewItem>() };
+                    if (!tvi)
+                    {
+                        return;
+                    }
+                    const auto page{ weakThis.get() };
+                    if (page && page->_managerTab && page->_managerTab.TabViewItem() == tvi)
+                    {
+                        tvi.CanDrag(false); // the Manager tab's non-movable contract survives realization
+                        return;
+                    }
+                    tvi.CanDrag(true); // realized => prepared/mapped: stock draggability restored
+                }
+                CATCH_LOG();
+            });
+        }
+        CATCH_LOG();
     }
 
     // Agentmaster (M10 Increment 3): TerminalWindow hands us the record id it resolved from the
