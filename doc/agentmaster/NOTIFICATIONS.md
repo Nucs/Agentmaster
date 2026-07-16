@@ -159,13 +159,27 @@ the track leak-proof:
 
 ## 6. Known behaviors & limitations (v1)
 
-- **The teammate/background-work flap toasts twice.** A lead session running TEAMMATES ends its own
-  turn with a real `Stop` (→ Waiting) and is re-promoted to Running by `recon-subagent` ≤1 scanner tick
-  later (see the scanner docs in CLAUDE.md). That transient Waiting IS a Running → Waiting edge, so it
-  toasts; the later true settle toasts again. The Tag replacement keeps the **Action Center** at one
-  toast per session (the newer replaces), but two banner pops can occur across a long teammate run.
-  This is deliberate parity with the flash ring (which also fires on that edge); a debounce would delay
-  every legitimate toast to fix a niche double.
+- **The teammate/background-work flap is ABSORBED by a signal-gated HOLD (was: toasts twice).** A lead
+  session with a live shell / background agent / teammate ends its turn with a real `Stop` (→ Waiting)
+  and is re-promoted to Running by the outlived-turn `recon-subagent` — for a shell-only session up to
+  ~20–24 s later (the promotion's presence arm needs the transcript quiet past
+  `kScanExternalWorkGraceMs`; proven live on `513d1366`: "waiting for you" toasted at the Stop edge,
+  then presence=shell re-lit Running 20 s later). A shown toast can't be recalled, so the edge now
+  **HOLDS** a Running → **Idle/Waiting** toast while the session's external-work signal is live
+  (`PresenceIsWorking` on the registry's heartbeat copy, or side files fresh within
+  `kScanSubagentFreshMs` — the same two raw inputs the promotion reads, evaluated on demand by
+  `AgentExternalWorkSignal`): the liveness tick sweeps the hold (`_SweepAgentPendingToasts` → the pure
+  `DecideHeldToast`, SessionScanner.h) — **dropped** when the session re-lights Running
+  (`[notify-hold]` → `[notify-drop]`, no pop; the push edge's Running re-entry is the primary drop,
+  the sweep the belt), **fired with the CURRENT state** when the signal clears (a real completion's
+  post-Stop `busy` linger costs ~one 2.5 s sweep tick of toast latency), a hard needs-you state lands
+  mid-hold, or the `kNotifyExternalHoldCapMs` (30 s) backstop elapses — the cog switches +
+  focused-skip re-apply at fire time (a tab visited during the hold suppresses). **NeedsApproval /
+  Error / Done never hold** — external work can't answer a question, undo a failure, or revive an
+  exited claude. A **per-session double-toast guard** (`kNotifyDuplicateToastMs`, 20 s;
+  `[notify-dedupe]`) additionally caps a W→R→W flap at one SHOWN toast per window, immediate and
+  deferred paths alike. The flash ring still fires on the transient edge (deliberate — it self-clears
+  on the re-promotion; a toast doesn't).
 - **Click after the app exits = plain launch.** No toast **COM activator** (`ToastActivatorCLSID`) is
   registered in the manifests, so clicking a leftover toast once the app is gone just launches
   Agentmaster (the single-instance handoff opens its normal startup window) — it does not deep-link to
@@ -183,6 +197,11 @@ the track leak-proof:
 - ✅ **Settings round-trip** (engine harness `tests_persistence.cpp`): all 8 switches stored OFF
   round-trip; the empty/garbage defaults block asserts all 8 default **ON** (the "Running to anything
   else" rule). Harness green (1787 checks, 0 failures).
+- ✅ **Toast HOLD gates** (engine harness `tests_transcript.cpp`, beside the outlive checks):
+  `ShouldHoldCompletionToast` / `DecideHeldToast` / `ShouldSuppressDuplicateToast` matrices (15
+  checks — hold only Idle/Waiting; Drop on re-lit Running / archived; Fire on signal-clear / hard
+  needs-you / cap; the 20 s dedupe boundary) + the compile-time cap-vs-promotion-latency
+  `static_assert`. Harness green (1907 checks, 0 failures).
 - ✅ **Full chain compiles**: TerminalAppLib (the cog tab + the edge tracker + the toast + the click
   handler) builds green.
 - ⏳ **Runtime** (pends a deploy — build/deploy permission): start a turn, switch to another tab/app →
@@ -190,7 +209,11 @@ the track leak-proof:
   `[notify] <id8> running -> waiting for you (after <span>)` lands in hooks.log; **clicking it restores/
   foregrounds the window and selects the tab** (+ `[nav] notify-click …`); the cog's checkboxes mute per
   state; the master OFF silences everything; `notifySound` OFF shows a silent toast; a second completion
-  replaces the first in Action Center.
+  replaces the first in Action Center. **Hold path:** a completion that leaves a background shell/agent
+  running logs `[notify-hold]` → `[notify-drop]` with NO pop (the session re-lights Running ~20 s
+  later — the 513d1366 repro); when the background work finally quiets, the true settle fires ONE toast
+  (`[notify] … (held Ns)` when it rode a hold); a W→R→W flap inside 20 s logs `[notify-dedupe]` for the
+  second entry.
 
 ### Follow-ups (non-blocking)
 
@@ -198,5 +221,9 @@ the track leak-proof:
 - **Quiet hours / focus-assist awareness** — Windows Focus Assist already suppresses toasts
   system-wide; an in-app schedule could complement it.
 - **Per-state sound or priority** — e.g. Error as a high-priority toast.
-- **An unread-delay** — "notify only if still unread after N seconds" would absorb the teammate flap
-  (§6) at the cost of latency on every toast.
+- ~~An unread-delay~~ — **shipped better** as the signal-gated HOLD (§6): only sessions whose
+  external-work signal is live pay any latency; a plain completion still toasts immediately.
+- **Cross-install dedupe** — a second Agentmaster install tracking the SAME session (a migrated
+  profile's fleet copy) toasts independently (the 513d1366 double: prod + dev ~3 s apart). The
+  in-process guards can't see it; the fix class is presence-pid host classification (the CLI's
+  `agentmaster-self` / `agentmaster-other`) demoting an other-install session to observe-only.

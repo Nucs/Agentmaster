@@ -47,6 +47,7 @@
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
 #include "AgentMaster/ProfileBootstrap.h" // Profiles:: profile-aware state paths (engine)
 #include "AgentMaster/SessionRegistry.h"
+#include "AgentMaster/SessionScanner.h" // PresenceIsWorking + the toast HOLD gates (ShouldHoldCompletionToast / DecideHeldToast / ShouldSuppressDuplicateToast) — System notifications
 #include "AgentMaster/SessionStore.h" // IsSessionFavorite (the FAVORITE crown on a managed tab's status dot)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (tab color modes): LoadOrRefreshSessionIndex + InferWorkingDirectory (the inferred-workdir scan)
 #include <winrt/Windows.UI.Xaml.Shapes.h> // Agentmaster (tab tooltip): the header state-dot Ellipse in the summary card
@@ -1966,6 +1967,8 @@ namespace winrt::TerminalApp::implementation
         {
             _agentNotifyLastState.erase(sessionId);
             _agentNotifyRunningSinceMs.erase(sessionId);
+            _agentToastHeld.erase(sessionId); // an archived session's held toast dies with it (no deferred "completed" off a previous life)
+            _agentToastLastShownMs.erase(sessionId);
         }
         const auto it = _claudeTabs.find(sessionId);
         if (it == _claudeTabs.end())
@@ -2379,6 +2382,36 @@ namespace winrt::TerminalApp::implementation
     // gated by the per-target-state switches (default all ON == "Running to anything else") and the
     // "skip when focused" rule. Because _UpdateTabAgentDot only reaches this for a session hosted in
     // THIS window's _claudeTabs, exactly one window fires per transition. UI thread (the observer hop).
+    // Agentmaster (System notifications — spurious-completion hold): the external-work signal at
+    // TOAST time, for ONE session — the same two raw inputs the scanner's outlived-turn expression
+    // reads (claude's own busy/shell heartbeat; fresh subagent/tool-result side files), evaluated on
+    // demand. presenceStatus is the registry's S-lane copy (<= ~2s stale — a real Stop leaves "busy"
+    // lingering one survey tick, which is exactly why a held toast costs ~one sweep tick before it
+    // fires); the side-file probe (two FindFirstFile enumerations) is paid only when presence alone
+    // doesn't decide. `what` receives the human-readable reason for the [notify-hold] log.
+    static bool AgentExternalWorkSignal(const ::Agentmaster::SessionInfo& s, bool& presenceWorking, bool& subagentFresh, std::wstring& what)
+    {
+        presenceWorking = ::Agentmaster::PresenceIsWorking(s.presenceStatus);
+        subagentFresh = false;
+        if (presenceWorking)
+        {
+            what = L"presence=" + s.presenceStatus;
+            return true;
+        }
+        if (!s.workingDir.empty() && !s.id.empty())
+        {
+            const std::wstring path = ::Agentmaster::ClaudeProjectsDir() + L"\\" + ::Agentmaster::EncodeCwdToProjectDir(s.workingDir) + L"\\" + s.id + L".jsonl";
+            const int64_t subMs = ::Agentmaster::SubagentActivityUnixMs(path);
+            if (subMs > 0 && TtNowMs() - subMs <= ::Agentmaster::kScanSubagentFreshMs)
+            {
+                subagentFresh = true;
+                what = L"side-files";
+                return true;
+            }
+        }
+        return false;
+    }
+
     void TerminalPage::_EvaluateAgentNotification(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState newState, bool live)
     {
         using ::Agentmaster::SessionState;
@@ -2390,6 +2423,8 @@ namespace winrt::TerminalApp::implementation
             // seams drop _claudeTabs before this queued hop lands).
             _agentNotifyLastState.erase(sessionId);
             _agentNotifyRunningSinceMs.erase(sessionId);
+            _agentToastHeld.erase(sessionId);
+            _agentToastLastShownMs.erase(sessionId);
             return;
         }
 
@@ -2400,6 +2435,17 @@ namespace winrt::TerminalApp::implementation
 
         if (newState == SessionState::Running)
         {
+            // Re-entering Running CONFIRMS a held toast as spurious — the outlived-turn promotion
+            // (or a genuine new turn) re-lit the session while its completion toast was on hold.
+            // This push edge is the PRIMARY drop path (it lands ms after the promotion); the sweep's
+            // Drop verdict is the belt.
+            if (const auto heldIt = _agentToastHeld.find(sessionId); heldIt != _agentToastHeld.end())
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[notify-drop] " + ::Agentmaster::ShortId(sessionId) + L" re-lit running (held " +
+                                                  std::to_wstring((TtNowMs() - heldIt->second.heldAtMs) / 1000) + L"s), spurious completion suppressed\n");
+                _agentToastHeld.erase(heldIt);
+            }
             // Entering Running: stamp the entry time — but only on a SEEN edge. A session first
             // observed already-Running (adopted / moved in mid-turn) gets no stamp; its completion
             // toast then omits the "after <duration>" clause instead of under-reporting a span
@@ -2429,8 +2475,51 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+
+        // HOLD instead of fire while external work is live (SessionScanner's ShouldHoldCompletionToast):
+        // only Idle/WaitingForInput ever hold — exactly the two states the outlived-turn promotion can
+        // veto (a NeedsApproval question / an Error / an exit needs you regardless of background work).
+        // The liveness-ticked sweep (_SweepAgentPendingToasts) later DROPS the hold (session re-lit
+        // Running — the 513d1366 spurious "waiting for you" toast) or FIRES it with the CURRENT state
+        // (signal cleared / moved to a hard needs-you state / the kNotifyExternalHoldCapMs backstop).
+        if (_sessionRegistry)
+        {
+            if (const auto info = _sessionRegistry->Get(sessionId); info && info->live)
+            {
+                bool presenceWorking = false;
+                bool subagentFresh = false;
+                std::wstring what;
+                AgentExternalWorkSignal(*info, presenceWorking, subagentFresh, what);
+                if (::Agentmaster::ShouldHoldCompletionToast(newState, presenceWorking, subagentFresh))
+                {
+                    _agentToastHeld[sessionId] = AgentHeldToast{ newState, runningSince, TtNowMs() };
+                    ::Agentmaster::AppendStateLog(L"hooks.log",
+                                                  L"[notify-hold] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(newState) +
+                                                      L" (external work live: " + what + L")\n");
+                    return;
+                }
+            }
+        }
+
+        _FireAgentCompletionToast(sessionId, tab, newState, runningSince, 0);
+    }
+
+    // Agentmaster (System notifications): the FIRE half of _EvaluateAgentNotification — everything
+    // downstream of the edge/hold decision, shared by the immediate path and the sweep's deferred
+    // fire so the two can never drift: the per-state cog switch, the focused-tab skip, the
+    // per-session double-toast guard, title/body build, the [notify] log (+ "held Ns" when
+    // deferred), and the toast itself. `state` is the state at FIRE time (a held toast passes the
+    // re-read CURRENT state — the body says what the session is NOW); runningSinceMs is the
+    // Running-entry stamp consumed at the edge (0 == entry unseen -> no "after <span>" clause).
+    void TerminalPage::_FireAgentCompletionToast(const std::wstring& sessionId, const TerminalApp::Tab& tab, ::Agentmaster::SessionState state, int64_t runningSinceMs, int64_t heldForMs)
+    {
+        using ::Agentmaster::SessionState;
+        if (!_appSettings.notificationsEnabled)
+        {
+            return; // master toggled off (possibly mid-hold)
+        }
         bool wanted = false;
-        switch (newState)
+        switch (state)
         {
         case SessionState::WaitingForInput:
             wanted = _appSettings.notifyOnWaiting;
@@ -2448,17 +2537,30 @@ namespace winrt::TerminalApp::implementation
             wanted = _appSettings.notifyOnError;
             break;
         default:
-            break; // Running returned above; nothing else exists
+            break; // Running never fires (the edge returns on it; DecideHeldToast Drops on it)
         }
         if (!wanted)
         {
-            return; // this target state is muted in the cog
+            return; // this target state is muted in the cog (re-checked at fire time — a hold can outlive a cog Save)
         }
         // "Skip when the tab is focused": this window is the ACTIVE one AND the session's tab is its
         // focused tab — you watched it finish (the flash ring's "the current tab is always considered
         // visited" rule, applied to toasts). A focused tab in a BACKGROUND window still notifies.
+        // Re-checked at fire time for a held toast: the user may have visited the tab during the hold.
         if (_appSettings.notifySuppressFocused && _activated && tab == _GetFocusedTab())
         {
+            return;
+        }
+        // Double-toast guard: at most one SHOWN toast per session per kNotifyDuplicateToastMs window —
+        // a Waiting -> Running -> Waiting flap otherwise toasts on every Waiting entry (the Action
+        // Center's Tag+Group replace dedupes the pile, not the interruptions).
+        const int64_t now = TtNowMs();
+        if (const auto lastIt = _agentToastLastShownMs.find(sessionId);
+            lastIt != _agentToastLastShownMs.end() && ::Agentmaster::ShouldSuppressDuplicateToast(now, lastIt->second))
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log",
+                                          L"[notify-dedupe] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(state) +
+                                              L" suppressed (last toast " + std::to_wstring((now - lastIt->second) / 1000) + L"s ago)\n");
             return;
         }
 
@@ -2486,18 +2588,92 @@ namespace winrt::TerminalApp::implementation
         // (the tooltip's compact form), omitted when the entry wasn't observed.
         std::wstring body = L"Has completed";
         std::wstring span;
-        if (runningSince > 0)
+        if (runningSinceMs > 0)
         {
-            span = TtSpan(TtNowMs() - runningSince, true);
+            span = TtSpan(now - runningSinceMs, true);
             body += L" after " + span;
         }
         body += L" and is ";
-        body += TtStateLabel(newState);
+        body += TtStateLabel(state);
 
         ::Agentmaster::AppendStateLog(L"hooks.log",
-                                      L"[notify] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(newState) +
-                                          (span.empty() ? std::wstring{} : (L" (after " + span + L")")) + L"\n");
+                                      L"[notify] " + ::Agentmaster::ShortId(sessionId) + L" running -> " + TtStateLabel(state) +
+                                          (span.empty() ? std::wstring{} : (L" (after " + span + L")")) +
+                                          (heldForMs > 0 ? (L" (held " + std::to_wstring(heldForMs / 1000) + L"s)") : std::wstring{}) + L"\n");
+        _agentToastLastShownMs[sessionId] = now;
         _ShowAgentSessionToast(sessionId, title, body, !_appSettings.notifySound);
+    }
+
+    // Agentmaster (System notifications): sweep the HELD completion toasts on the liveness tick
+    // (~2.5s cadence). Per held session, re-read the registry + the external-work signal and let the
+    // pure DecideHeldToast rule: DROP when the session re-lit Running (the outlived-turn promotion
+    // confirmed the completion spurious — the belt behind the push edge's primary drop) or left the
+    // fleet; FIRE when the signal cleared (the common one-tick "busy" linger), the session moved to a
+    // hard needs-you state, or the kNotifyExternalHoldCapMs backstop elapsed; KEEP otherwise. A
+    // deferred fire passes the CURRENT state, and _FireAgentCompletionToast re-applies the cog
+    // switches / focused-skip / double-toast guard at fire time. Mirrors _ScanPendingInput's
+    // marshal + terminate-net shape (the probe ticks on the scanner thread; the Impl resumes onto
+    // the UI thread where the maps live).
+    winrt::fire_and_forget TerminalPage::_SweepAgentPendingToasts()
+    {
+        auto strongThis{ get_strong() };
+        try
+        {
+            co_await _SweepAgentPendingToastsImpl();
+        }
+        catch (...)
+        {
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[observer] _SweepAgentPendingToasts: swallowed exception (no crash)\n");
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction TerminalPage::_SweepAgentPendingToastsImpl()
+    {
+        auto strongThis{ get_strong() };
+        co_await wil::resume_foreground(Dispatcher());
+        if (_agentToastHeld.empty() || !_sessionRegistry)
+        {
+            co_return;
+        }
+        const int64_t now = TtNowMs();
+        for (auto it = _agentToastHeld.begin(); it != _agentToastHeld.end();)
+        {
+            const std::wstring sessionId = it->first; // copy BEFORE any erase (never use a key ref past its node — the re-home UAF lesson)
+            const auto info = _sessionRegistry->Get(sessionId);
+            TerminalApp::Tab tab{ nullptr };
+            if (const auto tabIt = _claudeTabs.find(sessionId); tabIt != _claudeTabs.end())
+            {
+                tab = tabIt->second.get();
+            }
+            if (!info || !tab)
+            {
+                it = _agentToastHeld.erase(it); // archived / moved out / tab torn down — the erase seams usually beat us here
+                continue;
+            }
+            bool presenceWorking = false;
+            bool subagentFresh = false;
+            std::wstring what;
+            AgentExternalWorkSignal(*info, presenceWorking, subagentFresh, what);
+            const auto verdict = ::Agentmaster::DecideHeldToast(info->state, info->live, presenceWorking || subagentFresh, now - it->second.heldAtMs);
+            if (verdict == ::Agentmaster::HeldToastVerdict::Keep)
+            {
+                ++it;
+                continue;
+            }
+            const auto held = it->second;
+            it = _agentToastHeld.erase(it);
+            if (verdict == ::Agentmaster::HeldToastVerdict::Fire)
+            {
+                _FireAgentCompletionToast(sessionId, tab, info->state, held.runningSinceMs, now - held.heldAtMs);
+            }
+            else if (info->state == ::Agentmaster::SessionState::Running)
+            {
+                ::Agentmaster::AppendStateLog(L"hooks.log",
+                                              L"[notify-drop] " + ::Agentmaster::ShortId(sessionId) + L" re-lit running (held " +
+                                                  std::to_wstring((now - held.heldAtMs) / 1000) + L"s), spurious completion suppressed\n");
+            }
+        }
+        co_return;
     }
 
     // Agentmaster (System notifications): raise ONE Windows toast for a session — line 1 the title,

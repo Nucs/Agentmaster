@@ -1457,7 +1457,19 @@ What works, by area:
   wasn't seen, e.g. adopted mid-turn]. Fired by the ONE window hosting the session's tab on the SAME
   registry-observer push as the tab status dot (`TerminalPage::_EvaluateAgentNotification`, its own edge
   tracker beside `_agentFlashLastState` — deliberately NOT shared with the flash), so exactly one toast per
-  transition across N windows; per-session **Tag+Group** makes a newer toast REPLACE the older in Action
+  transition across N windows; a **spurious-completion HOLD** keeps the toast honest against the
+  outlived-turn promotion (the SessionScanner toast gates; proven live on `513d1366` — "waiting for you"
+  toasted at the Stop edge, presence=shell re-lit Running 20s later, and a shown toast can't be recalled):
+  a Running→**Idle/Waiting** toast is **HELD** while the session's external-work signal is live
+  (`PresenceIsWorking` on the heartbeat copy OR side files fresh within `kScanSubagentFreshMs` —
+  `AgentExternalWorkSignal`), then **dropped** if the session re-lights Running (`[notify-hold]` →
+  `[notify-drop]`, no pop; the push edge's Running re-entry is the primary drop, the liveness-ticked
+  `_SweepAgentPendingToasts` → pure `DecideHeldToast` the belt) or **fired with the CURRENT state** when
+  the signal clears (a plain completion's post-Stop `busy` linger costs ~one 2.5s sweep tick) / a hard
+  needs-you state lands / the 30s `kNotifyExternalHoldCapMs` backstop elapses — cog switches +
+  focused-skip re-applied at fire time; **NeedsApproval/Error/Done never hold** (work can't answer a
+  question), and a **per-session double-toast guard** (`kNotifyDuplicateToastMs` 20s, `[notify-dedupe]`)
+  caps a W→R→W flap at one SHOWN toast per window on both the immediate and deferred paths; per-session **Tag+Group** makes a newer toast REPLACE the older in Action
   Center; **clicking the toast brings the hosting window to the FRONT and jumps to the session's tab** while
   the app is alive (`_FocusClaudeSessionTab(id, bringWindowToFront=true)` — restore-if-minimized +
   `SetForegroundWindow` + the `SwitchToThisWindow` fallback — locally, else the activate fan-out whose

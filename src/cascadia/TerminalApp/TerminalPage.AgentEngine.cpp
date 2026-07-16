@@ -740,6 +740,7 @@ namespace winrt::TerminalApp::implementation
                     self->_ObserverProbe(); // Fleet Observer: publish this window's roster + bind via the correlation table (PULL; no hooks needed)
                     self->_SweepClaudeLiveness(); // then archive dead tabs (all self-marshal to the UI thread)
                     self->_ScanPendingInput(); // PENDING_INPUT.md: record each live Claude tab's unsent input-box draft
+                    self->_SweepAgentPendingToasts(); // System notifications: fire/drop the HELD completion toasts (spurious-toast suppression — SessionScanner's DecideHeldToast)
                     self->_ScanInferredTabColors(); // tab color modes: re-infer each Claude tab's ACTUAL workdir + recolor (no-op unless the mode is InferredWorkingDirectory; throttled + mtime-gated inside)
                 }
             });

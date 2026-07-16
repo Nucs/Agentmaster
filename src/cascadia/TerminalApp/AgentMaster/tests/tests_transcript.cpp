@@ -726,6 +726,30 @@ void TestBlockedAndInterruptedStates()
     CHECK(!PresenceIsWorking(L""), "presence-working: no heartbeat is not working");
     static_assert(kScanExternalWorkGraceMs > kScanSubagentFreshMs, "outlive margin must exceed the dying-subagent flush window");
 
+    // Toast HOLD gates — the NOTIFICATION mirror of the outlive pair. A completion toast fires on
+    // the Running -> X push edge BEFORE the outlived-turn promotion can veto the transition (its
+    // presence arm needs the transcript quiet past kScanExternalWorkGraceMs), and a shown toast
+    // can't be recalled — proven live on 513d1366: "waiting for you" toasted at the Stop edge, the
+    // presence=shell promotion re-lit Running 20s later. So the hosting window HOLDS Idle/Waiting
+    // toasts while the external-work signal is live, DROPS them on a Running re-light, and FIRES
+    // when the signal clears / a hard needs-you state lands / the cap backstop elapses.
+    CHECK(ShouldHoldCompletionToast(SessionState::WaitingForInput, true, false), "toast-hold: Waiting + working presence (busy linger or a live shell job) holds");
+    CHECK(ShouldHoldCompletionToast(SessionState::Idle, false, true), "toast-hold: Idle + fresh side files (a background agent/teammate) holds");
+    CHECK(!ShouldHoldCompletionToast(SessionState::WaitingForInput, false, false), "toast-hold: no signal -> fire immediately (the classic path, unchanged)");
+    CHECK(!ShouldHoldCompletionToast(SessionState::NeedsApproval, true, true), "toast-hold: NeedsApproval never holds (external work can't answer a question)");
+    CHECK(!ShouldHoldCompletionToast(SessionState::Error, true, true), "toast-hold: Error never holds");
+    CHECK(!ShouldHoldCompletionToast(SessionState::Done, true, true), "toast-hold: Done (claude exited) never holds");
+    CHECK(DecideHeldToast(SessionState::Running, true, true, 5000) == HeldToastVerdict::Drop, "held-toast: re-lit Running -> DROP (the promotion confirmed the completion spurious)");
+    CHECK(DecideHeldToast(SessionState::WaitingForInput, false, true, 5000) == HeldToastVerdict::Drop, "held-toast: archived mid-hold -> DROP (no deferred toast off a previous life)");
+    CHECK(DecideHeldToast(SessionState::WaitingForInput, true, false, 5000) == HeldToastVerdict::Fire, "held-toast: signal cleared while still at rest -> FIRE (the busy-linger case, one sweep tick late)");
+    CHECK(DecideHeldToast(SessionState::NeedsApproval, true, true, 5000) == HeldToastVerdict::Fire, "held-toast: moved to NeedsApproval mid-hold -> FIRE now (genuinely needs you, work or not)");
+    CHECK(DecideHeldToast(SessionState::WaitingForInput, true, true, 5000) == HeldToastVerdict::Keep, "held-toast: signal still live inside the cap -> KEEP holding");
+    CHECK(DecideHeldToast(SessionState::WaitingForInput, true, true, kNotifyExternalHoldCapMs) == HeldToastVerdict::Fire, "held-toast: the cap backstop fires even with the signal still present");
+    CHECK(ShouldSuppressDuplicateToast(100000, 90000), "toast-dedupe: a second toast within the 20s window is suppressed (the W->R->W flap)");
+    CHECK(!ShouldSuppressDuplicateToast(100000, 100000 - kNotifyDuplicateToastMs), "toast-dedupe: exactly at the window boundary fires");
+    CHECK(!ShouldSuppressDuplicateToast(100000, 0), "toast-dedupe: never-shown fires");
+    static_assert(kNotifyExternalHoldCapMs > kScanExternalWorkGraceMs + 2 * kScanSweepMs, "the hold cap must outlast the outlived-turn promotion latency (grace + sweep ticks), else the backstop fires the spurious toast right before the promotion drops it");
+
     // --- presence-IDLE release: claude's OWN heartbeat says "idle" while we are stuck Running on a
     //     NON-terminal tail (a trailing user prompt that produced no assistant output + a dropped/absent
     //     Stop). The IDLE mirror of PresenceIsBusy; it covers the exact gap ShouldSynthesizeStop cannot

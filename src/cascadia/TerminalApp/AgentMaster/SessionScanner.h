@@ -565,6 +565,79 @@ namespace Agentmaster
         return subagentActive || presenceWorking;
     }
 
+    // --- System-notification (toast) gates — the NOTIFICATION mirror of the outlived-turn pair ---
+    // A completion toast fires on the Running -> X push edge, BEFORE the outlived-turn promotion
+    // above can veto the transition: the promotion's presence arm needs the parent transcript quiet
+    // PAST kScanExternalWorkGraceMs, so a session with a live background shell re-lights Running
+    // ~20-24s AFTER the real Stop — and a toast, unlike the flash ring, cannot be recalled (proven
+    // live on session 513d1366: "waiting for you" toasted at the Stop edge, recon-subagent promoted
+    // presence=shell back to Running 20s later). The hosting window therefore HOLDS an
+    // Idle/WaitingForInput toast while the external-work signal (PresenceIsWorking / fresh side
+    // files) is present, DROPS it when the session re-lights Running (spurious confirmed), and
+    // FIRES it when the signal clears with the session still at rest (the common one-survey-tick
+    // "busy" linger after a real Stop costs exactly one ~2.5s sweep of toast latency).
+    inline constexpr int64_t kNotifyExternalHoldCapMs = 30000; // fire a HELD toast at latest here — the backstop for a signal that never clears while the promotion never lands (a starved scanner / flapping heartbeat); must OUTLAST the promotion's worst-case latency (grace + scanner ticks), or the backstop fires the spurious toast right before the promotion would have dropped it
+    inline constexpr int64_t kNotifyDuplicateToastMs = 20000; // per-session double-toast guard: at most one shown toast per session per this window — a Waiting -> Running -> Waiting flap otherwise toasts on EVERY Waiting entry (the Action Center Tag+Group replace dedupes the pile, not the interruptions)
+    static_assert(kNotifyExternalHoldCapMs > kScanExternalWorkGraceMs + 2 * kScanSweepMs,
+                  "the hold cap must outlast the outlived-turn promotion latency (grace + sweep ticks), else the backstop fires the spurious toast right before the promotion re-lights Running");
+
+    // PURE: should a just-detected Running -> `target` completion toast be HELD instead of shown?
+    // Only the two states the outlived-turn promotion can veto (Idle / WaitingForInput) ever hold;
+    // NeedsApproval / Error / Done fire immediately — external work can't answer a question, undo a
+    // failure, or revive an exited claude, so those genuinely need the user NOW.
+    inline bool ShouldHoldCompletionToast(SessionState target, bool presenceWorking, bool subagentFresh) noexcept
+    {
+        if (target != SessionState::Idle && target != SessionState::WaitingForInput)
+        {
+            return false;
+        }
+        return presenceWorking || subagentFresh;
+    }
+
+    // PURE: the per-sweep ruling on one HELD toast. Drop == the completion proved spurious (the
+    // session re-lit Running — the outlived-turn promotion or a real new turn) or the session left
+    // the fleet (archived); Fire == the completion stands (signal cleared, or the session moved to a
+    // hard needs-you state mid-hold, or the cap backstop elapsed); Keep == still ambiguous, sweep
+    // again next tick. The caller fires with the CURRENT state (the body says what the session is
+    // NOW) and re-applies the cog switches / focused-skip / duplicate guard at fire time.
+    enum class HeldToastVerdict
+    {
+        Keep,
+        Fire,
+        Drop,
+    };
+    inline HeldToastVerdict DecideHeldToast(SessionState current, bool live, bool signalPresent, int64_t heldForMs) noexcept
+    {
+        if (!live)
+        {
+            return HeldToastVerdict::Drop;
+        }
+        if (current == SessionState::Running)
+        {
+            return HeldToastVerdict::Drop;
+        }
+        if (current != SessionState::Idle && current != SessionState::WaitingForInput)
+        {
+            return HeldToastVerdict::Fire; // moved to NeedsApproval / Error / Done mid-hold: needs you regardless of background work
+        }
+        if (!signalPresent)
+        {
+            return HeldToastVerdict::Fire;
+        }
+        if (heldForMs >= kNotifyExternalHoldCapMs)
+        {
+            return HeldToastVerdict::Fire;
+        }
+        return HeldToastVerdict::Keep;
+    }
+
+    // PURE: the per-session double-toast guard — suppress a toast shown within
+    // kNotifyDuplicateToastMs of the session's previous SHOWN toast (lastShownMs == 0 => never shown).
+    inline bool ShouldSuppressDuplicateToast(int64_t nowMs, int64_t lastShownMs) noexcept
+    {
+        return lastShownMs > 0 && (nowMs - lastShownMs) < kNotifyDuplicateToastMs;
+    }
+
     // PURE + total: should the reconciler demote a WaitingForInput session to Idle now? (Agentmaster
     // Waiting-for-you "unread" model — the replacement for the old "decay after the 5-minute cache
     // window" rule.) A session leaves Waiting-for-you for Idle only when ALL hold:

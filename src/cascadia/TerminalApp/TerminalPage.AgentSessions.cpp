@@ -1723,6 +1723,8 @@ namespace winrt::TerminalApp::implementation
         _claudeTabs.erase(id); // drop the per-window binding; the injector + live flag stay untouched
         _agentNotifyLastState.erase(id); // System notifications: drop the toast track with the binding (the destination window re-tracks; a stale prev==Running here could phantom-fire if the tab later moved back)
         _agentNotifyRunningSinceMs.erase(id);
+        _agentToastHeld.erase(id); // + the held/shown toast state (same rationale — the destination window owns the session's toasts now)
+        _agentToastLastShownMs.erase(id);
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out] " + id + L" (Claude tab leaving this window; binding kept alive for the destination)\n");
         // Nav audit (beside [move-out]): the user dragged/moved this managed tab to ANOTHER window — its
         // session changes host window, so the nav trail records that it LEFT here (the destination re-homes
@@ -1808,6 +1810,8 @@ namespace winrt::TerminalApp::implementation
         _claudeTabs.erase(id); // drop the per-window binding; the injector + live flag stay untouched
         _agentNotifyLastState.erase(id); // System notifications: drop the toast track with the binding (the move-out twin above)
         _agentNotifyRunningSinceMs.erase(id);
+        _agentToastHeld.erase(id); // + the held/shown toast state (the move-out twin above)
+        _agentToastLastShownMs.erase(id);
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[move-out-pane] " + id + L" (Claude pane leaving this window; binding kept alive for the destination)\n");
     }
 
