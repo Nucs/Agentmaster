@@ -301,7 +301,7 @@ namespace winrt::TerminalApp::implementation
     // no-op (so the per-change observer reaction, the bind tail, and the slow per-tick sweep can all
     // re-assert it without re-hosting XAML). Hosting the element is deferred to _UpdateToolTip (which also
     // owns the default-tooltip fallback path). UI thread only.
-    void Tab::SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature)
+    void Tab::SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature, bool swapWhileOpen)
     {
         ASSERT_UI_THREAD();
         if (!content)
@@ -316,6 +316,7 @@ namespace winrt::TerminalApp::implementation
         _agentToolTipActive = true;
         _agentToolTipContent = std::move(content);
         _agentToolTipSig = std::move(signature);
+        _agentToolTipSwapOpenOnce = swapWhileOpen; // one-shot, consumed (and always cleared) by _UpdateAgentToolTip
         _UpdateToolTip();
     }
 
@@ -360,6 +361,9 @@ namespace winrt::TerminalApp::implementation
         // strip) is always IsLoaded()+rooted, so steady-state is unaffected. Complements the Unloaded detach
         // (_WireAgentToolTipUnload -> _DetachAgentToolTip): a recycle drops the ref so a later RELOAD of the
         // same owner rebuilds a FRESH tooltip here instead of reusing a stale one (the crash #4 lesson).
+        // Consume the one-shot FIRST (even the early-outs below must clear it — a swap-while-open grant
+        // that survived a skipped refresh would leak onto a later, unrelated content push).
+        const bool swapOpenOnce = std::exchange(_agentToolTipSwapOpenOnce, false);
         const auto owner = TabViewItem();
         if (!owner || !owner.IsLoaded() || !owner.XamlRoot())
         {
@@ -378,25 +382,30 @@ namespace winrt::TerminalApp::implementation
             _WireAgentToolTipUnload(); // wire (once) the owner Unloaded -> detach, so a recycle can't strand a stale ref
         }
 
-        // Don't swap Content while the framework has the tip OPEN (you're reading it): the ~2s refresh
-        // churns the seconds in the 'ago' line, and swapping under the pointer flickers. Reading IsOpen is
-        // safe — only DRIVING it ever raced. The next closed refresh re-sets Content, so a hover always
-        // shows current data (≤ one refresh interval stale — negligible for a tooltip).
-        if (_agentToolTip.IsOpen())
+        // Don't swap Content while the framework has the tip OPEN (you're reading it): swapping under the
+        // pointer flickers. Reading IsOpen is safe — only DRIVING it ever raced. ONE exception, opt-in per
+        // push (_agentToolTipSwapOpenOnce, consumed at entry above): the async summary-body arrival — the
+        // hovering user is WAITING for that content, so a single in-place swap is the desired behavior.
+        // (The old per-tick ago-churn this rule was written against is gone — content is hover-built now.)
+        if (_agentToolTip.IsOpen() && !swapOpenOnce)
         {
             return;
         }
-        // Anchor the popup to the TAB, not the cursor (a closed-only mutation, like Content below): a
+        // Anchor the popup to the TAB, not the cursor (a CLOSED-only mutation, unlike Content below): a
         // hover-opened AUTOMATIC tooltip places itself relative to the POINTER — Placement(Bottom) alone
         // reads "below the cursor", so the card landed wherever inside the tab the mouse happened to sit
         // (the old manual path opened programmatically, which the framework places target-relative; going
         // framework-managed changed the anchor). An explicit PlacementRect (the tab's own bounds, in the
         // placement target's coordinate space) overrides pointer placement, so Placement(Bottom) centers
         // the card directly under the TAB. Re-asserted each closed refresh — tab widths drift with tab
-        // add/remove/rename and window resize.
-        if (const auto w = static_cast<float>(owner.ActualWidth()), h = static_cast<float>(owner.ActualHeight()); w > 0 && h > 0)
+        // add/remove/rename and window resize; while OPEN we leave placement alone (moving a popup the
+        // user is reading would make it jump).
+        if (!_agentToolTip.IsOpen())
         {
-            _agentToolTip.PlacementRect(winrt::Windows::Foundation::IReference<winrt::Windows::Foundation::Rect>{ winrt::Windows::Foundation::Rect{ 0, 0, w, h } });
+            if (const auto w = static_cast<float>(owner.ActualWidth()), h = static_cast<float>(owner.ActualHeight()); w > 0 && h > 0)
+            {
+                _agentToolTip.PlacementRect(winrt::Windows::Foundation::IReference<winrt::Windows::Foundation::Rect>{ winrt::Windows::Foundation::Rect{ 0, 0, w, h } });
+            }
         }
         _agentToolTip.Content(_agentToolTipContent); // host the page-built card on the reused object
     }
@@ -439,6 +448,54 @@ namespace winrt::TerminalApp::implementation
                 self->_DetachAgentToolTip();
             }
         });
+    }
+
+    // Agentmaster (LAZY tab tooltip — the CPU fix): wire (once per tab) the owner TabViewItem's
+    // PointerEntered to the page's build-now callback. PointerEntered fires the moment the pointer
+    // enters the tab header — well BEFORE ToolTipService's open delay — so the page's rebuild +
+    // Content swap still happen while the tip is CLOSED (the safe mutation window _UpdateAgentToolTip
+    // enforces). This replaces the old model where the page rebuilt EVERY managed tab's card on every
+    // ~2.5s sweep tick (70-tab strip: a constant stream of XAML card builds nobody ever saw — the
+    // measured UI-thread hotspot); now a card is built only when a human is actually about to see it.
+    // The handler drives NO IsOpen and hosts nothing itself — it only invokes the page callback, which
+    // funnels through the same SetAgentToolTip/_UpdateAgentToolTip path as before. Returns true only
+    // the ONE time the hook is wired, so the caller can arm-build once (the tooltip must be hosted
+    // BEFORE the first hover for ToolTipService to open it on that hover). Like _WireAgentToolTipUnload,
+    // the handler lives on the tab's own TabViewItem (stable across MUX recycles) and weak-captures the
+    // Tab, so teardown order is safe; the callback itself weak-captures the page (set once, cleared on
+    // Shutdown so a dead window's page is never invoked).
+    bool Tab::EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild)
+    {
+        ASSERT_UI_THREAD();
+        if (_agentToolTipHoverWired)
+        {
+            return false; // already armed — keep the existing (identical-shape) callback
+        }
+        const auto tvi = TabViewItem();
+        if (!tvi)
+        {
+            return false; // no owner yet — a later arm attempt (bind tail / liveness tick) wires it
+        }
+        _agentToolTipHoverCb = std::move(onHoverBuild);
+        _agentToolTipHoverWired = true;
+        const auto weakThis = get_weak();
+        tvi.PointerEntered([weakThis](auto&&, auto&&) {
+            if (const auto self = weakThis.get())
+            {
+                if (self->_agentToolTipHoverCb)
+                {
+                    try
+                    {
+                        self->_agentToolTipHoverCb();
+                    }
+                    catch (...)
+                    {
+                        // a tooltip must never take the tab down — swallow (the card simply stays stale)
+                    }
+                }
+            }
+        });
+        return true;
     }
 
     // Agentmaster (tab tooltip): detach the framework-managed tooltip from its owner and drop our strong
@@ -1193,8 +1250,11 @@ namespace winrt::TerminalApp::implementation
 
         // Agentmaster: detach + drop the agent tooltip BEFORE the tab's visuals go away, so no stale ref
         // survives the teardown. The framework owns open/close, so there is no manually-opened popup to
-        // force shut; detaching from the owner is enough. See _DetachAgentToolTip.
+        // force shut; detaching from the owner is enough. See _DetachAgentToolTip. Also drop the lazy
+        // hover-build callback — it weak-captures the page, but releasing it here keeps a closed tab from
+        // holding the last lambda (and a late PointerEntered on a dying strip invokes nothing).
         _DetachAgentToolTip();
+        _agentToolTipHoverCb = nullptr;
 
         // NOTE: `TerminalPage::_HandleCloseTabRequested` relies on the content being null after this call.
         Content(nullptr);

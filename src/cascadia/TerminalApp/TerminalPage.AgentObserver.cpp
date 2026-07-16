@@ -1980,11 +1980,19 @@ namespace winrt::TerminalApp::implementation
             _SetTabAgentDot(tab, live ? std::optional{ AgentStatusColorFor(state) } : std::nullopt, dormant);
             _EvaluateAgentFlash(sessionId, tab, state, live); // start/stop the unvisited "left Running" red flash
             _EvaluateAgentNotification(sessionId, tab, state, live); // Windows toast on the Running -> X edge (the cog's Notifications tab)
-            _UpdateTabAgentToolTip(tab, sessionId); // refresh the rich hover tooltip (reverts to default when !live)
+            // LAZY tab tooltip (the CPU fix): a LIVE session's card is built on hover, not per notify —
+            // with 19+ active sessions the per-notify rebuild here was a steady UI-thread burn (each one
+            // a registry deep-copy + string builds + a XAML card). Only the !live edge still routes
+            // through: _UpdateTabAgentToolTip's gone/archived branch CLEARS to the default tooltip +
+            // drops the summary cache (event-driven — exactly when it changes).
+            if (!live)
+            {
+                _UpdateTabAgentToolTip(tab, sessionId);
+            }
         }
     }
 
-    void TerminalPage::_UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId)
+    void TerminalPage::_UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId, bool swapWhileOpen)
     {
         if (!tab || !_sessionRegistry)
         {
@@ -2172,7 +2180,7 @@ namespace winrt::TerminalApp::implementation
         sig += std::to_wstring(bodyMtime);
         if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig });
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig }, swapWhileOpen);
             _tabTooltipSig[sessionId] = sig;
         }
 
@@ -2188,11 +2196,58 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Agentmaster (LAZY tab tooltip — the CPU fix): arm the EVENT-DRIVEN rebuild for a managed tab. The
+    // rich card used to be rebuilt for EVERY managed tab on EVERY ~2.5s liveness sweep AND on every
+    // registry notify — on a 70-tab strip with active sessions that was a constant stream of registry
+    // deep-copies + string builds + XAML card constructions on the UI thread for tooltips nobody was
+    // hovering (the measured 65%-of-a-core burn; the seconds-granularity "ago" line busted the content
+    // signature every sweep). Now the card is built ONLY when the pointer actually enters the tab:
+    // Tab::EnsureAgentToolTipHoverHook wires PointerEntered (fires well before ToolTipService's open
+    // delay, so the swap happens while the tip is closed — the safe window), and the callback resolves
+    // the tab's CURRENT session at hover time (_ClaudeSessionForTab), so a /resume re-home or fork
+    // re-bind never leaves it stale. Idempotent and CHEAP when already armed (one bool probe — safe to
+    // call per sweep tick as the self-healing arm for tabs that entered _claudeTabs by any path, incl.
+    // window-restored dormant tabs that never pass the bind funnel). The FIRST arm also builds once, so
+    // the tooltip is hosted with ToolTipService before the first hover (a tooltip set mid-dwell may not
+    // open until the next hover otherwise).
+    void TerminalPage::_ArmTabAgentToolTipHover(const TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        const auto impl = _GetTabImpl(tab);
+        if (!impl || impl->AgentToolTipHoverWired())
+        {
+            return; // steady-state per-tick cost: this bool probe, nothing else
+        }
+        const bool justWired = impl->EnsureAgentToolTipHoverHook([weakThis = get_weak(), weakTab = winrt::make_weak(tab)]() {
+            const auto self = weakThis.get();
+            const auto t = weakTab.get();
+            if (self && t)
+            {
+                if (const auto sid = self->_ClaudeSessionForTab(t); !sid.empty())
+                {
+                    self->_UpdateTabAgentToolTip(t, sid); // hover-time build: fresh state + fresh "ago", kicks the mtime-gated summary load
+                }
+            }
+        });
+        if (justWired)
+        {
+            if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())
+            {
+                _UpdateTabAgentToolTip(tab, sid); // arm-build once so the FIRST hover opens a hosted card
+            }
+        }
+    }
+
     // Agentmaster (tab tooltip): resolve + stat + analyze the session's transcript OFF the UI thread, and
     // on a transcript growth render the session-end.js Summary box (full=false: numbered messages + files,
     // NO header -- the card already shows state/title/dir) into the per-session cache, then re-host the
     // card. mtime-gated (a quiet tab is one stat) + in-flight-guarded (one load per session at a time);
     // mirrors the AgentTabOverlay summary panel's off-thread caching. Codex uses its rollout analog.
+    // LAZY: reached only from a hover/bind/tag-toggle build (_UpdateTabAgentToolTip), never per tick —
+    // so the whole-transcript re-analyze runs at human-hover cadence, not 4s x N tabs (the pool burn).
     winrt::fire_and_forget TerminalPage::_EnsureTabTooltipSummary(winrt::TerminalApp::Tab tab, winrt::hstring sessionId, bool codex, winrt::hstring codexId, winrt::hstring cwd)
     {
         const std::wstring id{ sessionId };
@@ -2288,8 +2343,10 @@ namespace winrt::TerminalApp::implementation
                 }
                 // Re-host the card with the now-loaded / refreshed body. _UpdateTabAgentToolTip recomputes the
                 // signature (new mtime) so it re-hosts; the throttle (lastCheckMs, bumped by the caller) keeps it
-                // from immediately re-kicking us.
-                _UpdateTabAgentToolTip(tab, id);
+                // from immediately re-kicking us. swapWhileOpen: the hover that kicked this load is likely still
+                // showing the header-only card — the one-shot open-swap grant lets the body land IN the open tip
+                // (the single moment the "no Content swap while open" rule is wrong — the user is waiting for it).
+                _UpdateTabAgentToolTip(tab, id, /* swapWhileOpen */ true);
             }
             // path empty => no transcript yet (never prompted): leave the header-only card. The in-flight
             // flag was already cleared above, so a later hover retries.
@@ -4417,7 +4474,13 @@ namespace winrt::TerminalApp::implementation
         if (const auto impl = _GetTabImpl(tab))
         {
             const std::wstring sig = std::wstring{ L"observe\x1f" } + kind + L"\x1f" + std::wstring{ impl->Title() };
-            impl->SetAgentToolTip(TtBuildObserveCard(kind, std::wstring{ impl->Title() }), winrt::hstring{ sig });
+            // Sig PRE-check (the CPU fix): SetAgentToolTip's own guard discards an identical push, but the
+            // card argument was still BUILT first — a per-probe-tick XAML construction per observed tab,
+            // thrown away every time. Compare the hosted fingerprint before building anything.
+            if (std::wstring_view{ impl->AgentToolTipSig() } != sig)
+            {
+                impl->SetAgentToolTip(TtBuildObserveCard(kind, std::wstring{ impl->Title() }), winrt::hstring{ sig });
+            }
         }
         if (!_appSettings.showTabOverlay)
         {
@@ -4717,6 +4780,7 @@ namespace winrt::TerminalApp::implementation
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
         _RefreshTabTags(id); // bookmark tags: show the session's bookmark badges on bind/adopt/re-home
         _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
+        _ArmTabAgentToolTipHover(hostTab); // LAZY tooltip: from here on the card rebuilds on hover, not per tick/notify
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");
     }
@@ -4773,10 +4837,12 @@ namespace winrt::TerminalApp::implementation
             {
                 continue;
             }
-            // Tab tooltip: refresh on the slow sweep cadence so the relative "ago"/timing stays honest
-            // for a quiet (Idle/Waiting) session that emits no registry change between turns. Cheap —
-            // the Tab signature-guards the rebuild, so the XAML changes only when a displayed value does.
-            _UpdateTabAgentToolTip(tab, id);
+            // LAZY tab tooltip (the CPU fix): the sweep no longer BUILDS anything — it only self-heals the
+            // hover ARM for any tab that entered _claudeTabs without passing the bind funnel (a
+            // window-restored dormant tab, a re-home). Already-armed = one bool probe per tab per tick.
+            // The card itself (and its "ago" line) is built fresh at hover time, which is strictly more
+            // current than the old per-sweep rebuild ever was — and costs zero while nobody hovers.
+            _ArmTabAgentToolTipHover(tab);
             // The session's OWN connection WT_SESSION (== its tabToken, kept current by hooks + the
             // observer). When known, judge liveness by THIS session's connection specifically — NOT "any
             // terminal in the tab" — so a Claude pane closed/dead beside a still-live shell sibling (a

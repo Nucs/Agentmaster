@@ -77,9 +77,15 @@ namespace winrt::TerminalApp::implementation
         // TerminalPage::_UpdateTabAgentToolTip) since it owns the SessionInfo + registry; the Tab just
         // HOSTS it. While set it REPLACES the default title+keychord tooltip. `signature` is a cheap
         // content fingerprint: an identical push is a no-op (no re-host), so the per-change + per-tick
-        // callers stay cheap. ClearAgentToolTip reverts to the default tooltip. UI thread only.
-        void SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature);
+        // callers stay cheap. `swapWhileOpen` is a ONE-SHOT escape from the "Content only while closed"
+        // rule for the async summary-body arrival — the one moment the hovering user WANTS the open card
+        // to update (a single swap; the flicker rule targeted the old per-tick ago-churn, not this).
+        // ClearAgentToolTip reverts to the default tooltip. UI thread only.
+        void SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature, bool swapWhileOpen = false);
         void ClearAgentToolTip();
+        winrt::hstring AgentToolTipSig() const noexcept { return _agentToolTipSig; } // Agentmaster (lazy tooltip): the hosted content's fingerprint — lets a per-tick producer SKIP building a card that would only be sig-discarded
+        bool AgentToolTipHoverWired() const noexcept { return _agentToolTipHoverWired; } // Agentmaster (lazy tooltip): cheap already-armed probe so per-tick callers skip even the callback construction
+        bool EnsureAgentToolTipHoverHook(std::function<void()> onHoverBuild); // Agentmaster (lazy tooltip): wire (once) the owner TabViewItem's PointerEntered -> the page's build-now callback; returns true only the ONE time it wires (the caller's arm-build cue)
 
         std::optional<winrt::Windows::UI::Color> GetTabColor();
         std::optional<winrt::Windows::UI::Color> GetRuntimeTabColor() const noexcept { return _runtimeTabColor; } // Agentmaster: the user-chosen override (drives per-dir color sync)
@@ -279,6 +285,14 @@ namespace winrt::TerminalApp::implementation
         // recycle/unload/shutdown.
         winrt::Windows::UI::Xaml::Controls::ToolTip _agentToolTip{ nullptr };
         bool _agentToolTipUnloadWired{ false }; // the owner Unloaded -> detach handler is wired once per tab
+        // Agentmaster (LAZY tab tooltip — the CPU fix): the tooltip card is built ON HOVER, not per tick.
+        // The page's build-now callback (weak-captured) runs on the owner TabViewItem's PointerEntered —
+        // which fires well BEFORE ToolTipService's open delay, so the Content swap still happens while the
+        // tip is closed (the safe path). One hook per tab, wired once; the callback resolves the tab's
+        // CURRENT session at hover time, so a /resume re-home never leaves it stale.
+        std::function<void()> _agentToolTipHoverCb{ nullptr };
+        bool _agentToolTipHoverWired{ false }; // the PointerEntered hook is wired once per tab
+        bool _agentToolTipSwapOpenOnce{ false }; // one-shot: let the NEXT _UpdateAgentToolTip swap Content while OPEN (the async summary-body arrival)
 
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _themeColor{ nullptr };
         winrt::Microsoft::Terminal::Settings::Model::ThemeColor _unfocusedThemeColor{ nullptr };
