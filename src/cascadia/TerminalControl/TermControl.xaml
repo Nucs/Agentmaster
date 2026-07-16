@@ -1259,6 +1259,8 @@
 
             <Grid Grid.Column="0"
                   Background="Transparent"
+                  PointerCanceled="_PointerCaptureLostHandler"
+                  PointerCaptureLost="_PointerCaptureLostHandler"
                   PointerExited="_PointerExitedHandler"
                   PointerMoved="_PointerMovedHandler"
                   PointerPressed="_PointerPressedHandler"

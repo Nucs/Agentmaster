@@ -2256,6 +2256,26 @@ namespace winrt::Microsoft::Terminal::Control::implementation
     }
 
     // Method Description:
+    // - Agentmaster: event handler for PointerCaptureLost AND PointerCanceled.
+    //   A pointer whose capture is stolen mid-drag (a drag&drop loop, the DWM
+    //   "ghost window" input redirection while the UI thread stalls, a secure
+    //   desktop switch, device removal) never delivers the PointerReleased
+    //   that is otherwise the only stop for the selection auto-scroll - so
+    //   _autoScrollTimer keeps scrolling at the last velocity forever (the
+    //   "scrolls as if the mouse is held above the terminal" runaway, which
+    //   Esc cannot cancel). Stopping here is always safe: a genuinely live
+    //   drag (button still held, events still flowing) re-enters
+    //   _TryStartAutoScroll on its very next PointerMoved.
+    // Arguments:
+    // - sender: the XAML element responding to the pointer input
+    // - args: event data
+    void TermControl::_PointerCaptureLostHandler(const Windows::Foundation::IInspectable& /*sender*/,
+                                                 const Input::PointerRoutedEventArgs& args)
+    {
+        _TryStopAutoScroll(args.Pointer().PointerId());
+    }
+
+    // Method Description:
     // - Event handler for the PointerWheelChanged event. This is raised in
     //   response to mouse wheel changes. Depending upon what modifier keys are
     //   pressed, different actions will take place.
@@ -2545,6 +2565,16 @@ namespace winrt::Microsoft::Terminal::Control::implementation
         RestorePointerCursor.raise(*this, nullptr);
 
         _focused = false;
+
+        // Agentmaster: stop any active selection auto-scroll. It only ever
+        // starts while _focused, and a focus loss mid-drag (Alt+Tab, a popup,
+        // Ctrl+Alt+Del) can eat the PointerReleased that would stop it,
+        // leaving _autoScrollTimer scrolling forever. A still-live drag
+        // restarts it on the next PointerMoved once focus returns.
+        if (_autoScrollingPointerPoint)
+        {
+            _TryStopAutoScroll(_autoScrollingPointerPoint->PointerId());
+        }
 
         // This will disable the accessibility notifications, because the
         // UiaEngine lives in ControlInteractivity
