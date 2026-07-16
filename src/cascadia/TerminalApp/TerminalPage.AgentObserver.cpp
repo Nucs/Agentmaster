@@ -41,6 +41,7 @@
 #include "Tab.h" // get_self<Tab> -> CurrentEffectiveTabBackground (pending-dots contrast)
 #include "TabHeaderControl.h" // get_self<TabHeaderControl> -> ReserveTitleLines (consistent multi-line tab-row height)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
+#include "AgentMaster/Engine.h" // ActivateSessionInOtherWindows — a toast click's cross-window jump (System notifications)
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
@@ -2497,12 +2498,14 @@ namespace winrt::TerminalApp::implementation
     // line 2 the completion body. The strings go in as DOM TEXT NODES (CreateTextNode), so XML-special
     // characters in a session title are escaped by the DOM, never hand-built markup. Tag+Group make a
     // session's newer toast REPLACE its older one in the Action Center instead of piling up (ShortId
-    // fits the legacy 16-char Tag cap). Clicking the toast while the app is alive jumps to the
-    // session's tab via the Linked-Lenses Activate seam (local select or the cross-window fan-out +
-    // foreground); with the process gone the OS falls back to a plain app activation (no COM activator
-    // is registered — acceptable for a completion cue). Best-effort by design: CreateToastNotifier
-    // throws on a build with no package identity (no AUMID, e.g. unpackaged test hosts) and Show can
-    // fail when notifications are disabled system-wide — swallowed, logged once.
+    // fits the legacy 16-char Tag cap). Clicking the toast while the app is alive BRINGS THE HOSTING
+    // WINDOW TO THE FRONT and jumps to the session's tab (_FocusClaudeSessionTab with
+    // bringWindowToFront on BOTH the local and the fan-out end — restore-if-minimized +
+    // SetForegroundWindow + the SwitchToThisWindow fallback); with the process gone the OS falls back
+    // to a plain app activation (no COM activator is registered — acceptable for a completion cue).
+    // Best-effort by design: CreateToastNotifier throws on a build with no package identity (no AUMID,
+    // e.g. unpackaged test hosts) and Show can fail when notifications are disabled system-wide —
+    // swallowed, logged once.
     void TerminalPage::_ShowAgentSessionToast(const std::wstring& sessionId, const std::wstring& title, const std::wstring& body, bool silent)
     {
         try
@@ -2520,15 +2523,28 @@ namespace winrt::TerminalApp::implementation
             toast.Group(L"agentmaster");
             {
                 // The platform raises Activated on a non-UI thread -> marshal to this window's
-                // dispatcher, then ride the one Activate seam (it re-checks _claudeTabs and fans out
-                // to the hosting window if the tab moved since the toast was shown).
+                // dispatcher, then SURFACE the session: select its tab AND bring its window to FRONT.
+                // Deliberately NOT _ActivateClaudeSession — its local path skips the foreground
+                // (bringWindowToFront=false is right for an in-window click, which is already
+                // foreground), but a toast click arrives from the SHELL with this window possibly
+                // minimized / behind other apps, so the local path must run the same
+                // restore-if-minimized + SetForegroundWindow + SwitchToThisWindow recipe the
+                // cross-window receiver uses. If the tab MOVED to another window since the toast was
+                // shown, the activate fan-out's receiving window foregrounds itself the same way
+                // (_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true) on both ends).
                 const auto dispatcher = Dispatcher(); // agile — safe to call into from the callback thread
                 const auto weakThis = get_weak();
                 toast.Activated([weakThis, dispatcher, sessionId](const winrt::Windows::UI::Notifications::ToastNotification&, const winrt::Windows::Foundation::IInspectable&) {
                     dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weakThis, sessionId]() {
                         if (auto self = weakThis.get())
                         {
-                            self->_ActivateClaudeSession(winrt::hstring{ sessionId });
+                            // Nav audit: the user clicked a session's completion toast — the shell-side
+                            // jump into the fleet (the toast twin of the board/tree "activate" lines).
+                            ::Agentmaster::LogNav(L"notify-click " + ::Agentmaster::ShortId(sessionId) + L" (toast -> foreground window + jump to tab)");
+                            if (!self->_FocusClaudeSessionTab(sessionId, /*bringWindowToFront*/ true))
+                            {
+                                ::Agentmaster::ActivateSessionInOtherWindows(sessionId, self->_windowId);
+                            }
                         }
                     });
                 });
