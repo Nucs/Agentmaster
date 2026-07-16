@@ -1992,7 +1992,7 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void TerminalPage::_UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId, bool swapWhileOpen)
+    void TerminalPage::_UpdateTabAgentToolTip(const TerminalApp::Tab& tab, const std::wstring& sessionId, bool swapWhileOpen, bool kickSummary)
     {
         if (!tab || !_sessionRegistry)
         {
@@ -2186,8 +2186,13 @@ namespace winrt::TerminalApp::implementation
 
         // Keep the Summary body fresh off-thread (throttled + mtime-gated). First sight has no body yet, so
         // this fills it in, then re-hosts the card (a recursive _UpdateTabAgentToolTip on completion).
+        // kickSummary=false (the arm/bind pre-host) skips the kick entirely: those builds exist only so
+        // ToolTipService has a hosted card before the first hover — the analyze belongs to a REAL hover
+        // (else the first sweep after a 60-tab window restore would burst 60 whole-transcript parses onto
+        // the pool at the most fragile startup moment). The first hover's build kicks it, and the body
+        // lands into the open tip via the completion's swapWhileOpen grant.
         auto& slot = _tabTooltipSummary[sessionId]; // default-creates an empty slot on first sight
-        const bool needCheck = slot.body.empty() || slot.mtime == 0 || (now - slot.lastCheckMs) > 4000;
+        const bool needCheck = kickSummary && (slot.body.empty() || slot.mtime == 0 || (now - slot.lastCheckMs) > 4000);
         if (needCheck && !_tabTooltipSummaryInFlight.count(sessionId))
         {
             slot.lastCheckMs = now;
@@ -2236,7 +2241,10 @@ namespace winrt::TerminalApp::implementation
         {
             if (const auto sid = _ClaudeSessionForTab(tab); !sid.empty())
             {
-                _UpdateTabAgentToolTip(tab, sid); // arm-build once so the FIRST hover opens a hosted card
+                // Arm-build once so the FIRST hover opens a hosted card — header only (kickSummary=false):
+                // the transcript analyze waits for a real hover, so arming a restored 60-tab strip costs
+                // 60 small card builds, not 60 whole-transcript parses.
+                _UpdateTabAgentToolTip(tab, sid, /* swapWhileOpen */ false, /* kickSummary */ false);
             }
         }
     }
@@ -4779,7 +4787,7 @@ namespace winrt::TerminalApp::implementation
         _TrackSessionStarted(id); // Agentmaster (eager-init): clear the dormant flag once this control's connection starts
         _RefreshTabFavoriteCrown(id); // FAVORITES.md: show the gold crown if this session is starred
         _RefreshTabTags(id); // bookmark tags: show the session's bookmark badges on bind/adopt/re-home
-        _UpdateTabAgentToolTip(hostTab, id); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed one
+        _UpdateTabAgentToolTip(hostTab, id, /* swapWhileOpen */ false, /* kickSummary */ false); // tab tooltip: replace any "○ … unlinked" observe tooltip with the rich managed HEADER card (the transcript analyze waits for a real hover — a restore binding many tabs must not burst parses)
         _ArmTabAgentToolTipHover(hostTab); // LAZY tooltip: from here on the card rebuilds on hover, not per tick/notify
         ::Agentmaster::SaveSessions(_sessionRegistry->Snapshot());
         ::Agentmaster::AppendStateLog(L"hooks.log", L"[adopt] " + id + L" bound via " + origin + L"\n");

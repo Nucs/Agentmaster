@@ -298,9 +298,10 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster (tab tooltip): accept a rich, session-aware tooltip ELEMENT from TerminalPage (the
     // page owns the SessionInfo + the registry, so it builds the whole summary-style card; the Tab only
     // hosts it). `signature` is a cheap content fingerprint the page computes — an identical push is a
-    // no-op (so the per-change observer reaction, the bind tail, and the slow per-tick sweep can all
-    // re-assert it without re-hosting XAML). Hosting the element is deferred to _UpdateToolTip (which also
-    // owns the default-tooltip fallback path). UI thread only.
+    // no-op (so the hover-time rebuild, the bind tail, and the observe-badge probe can all re-assert it
+    // without re-hosting XAML; content is LAZY/hover-built now — the old per-tick sweep re-assert is
+    // gone). Hosting the element is deferred to _UpdateToolTip (which also owns the default-tooltip
+    // fallback path). UI thread only.
     void Tab::SetAgentToolTip(winrt::Windows::UI::Xaml::UIElement content, winrt::hstring signature, bool swapWhileOpen)
     {
         ASSERT_UI_THREAD();

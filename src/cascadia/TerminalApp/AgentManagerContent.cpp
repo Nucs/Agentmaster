@@ -249,13 +249,17 @@ namespace winrt::TerminalApp::implementation
                 {
                     return; // a refresh hop is already queued — this notify folds into it
                 }
-                disp.TryEnqueue([weak, queued]() {
+                const bool enqueued = disp.TryEnqueue([weak, queued]() {
                     queued->store(false); // clear FIRST: a notify during the rebuild below must re-queue
                     if (auto self = weak.get())
                     {
                         self->_RefreshFromRegistryEvent();
                     }
                 });
+                if (!enqueued)
+                {
+                    queued->store(false); // dispatcher shutting down (window closing) — never latch refreshes off
+                }
             });
         }
         _Refresh();
