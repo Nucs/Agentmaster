@@ -134,9 +134,14 @@ namespace Agentmaster
     // reconciled events. Each complete (newline-terminated) line is one JSON object (Claude Code
     // transcript JSONL). A trailing line WITHOUT a newline is an append in flight — it is left
     // unconsumed (reflected in `consumed`) so the next read re-sees it whole. User-prompt
-    // extraction is deliberately CONSERVATIVE (top-level string / pure-text content only, and
-    // `isMeta` lines skipped) so a tool_result or meta line is never mistaken for a typed prompt;
-    // the UserPromptSubmit hook is the primary path and this only back-fills a dropped one.
+    // extraction is deliberately CONSERVATIVE (top-level string / pure-text content only,
+    // `isMeta` lines skipped, and machine-injected CONTROL MARKERS — a local slash command's
+    // NON-meta "<command-name>…"/"<local-command-stdout>…" echoes, `!` bash passthrough echoes,
+    // injected reminders, teammate/agent wrappers; IsNoiseUserPrompt, exempting the interrupt
+    // marker — skipped too) so a tool_result / meta / control line is never mistaken for a typed
+    // prompt: a mere `/model` in an idle session used to read as a turn START and recon-run lit
+    // it Running (the /model false-Running fix). The UserPromptSubmit hook is the primary path
+    // and this only back-fills a dropped one.
     TranscriptParse ParseTranscriptDelta(std::wstring_view chunk);
 
     // PURE: does this assistant stop_reason mark the TURN as complete? "end_turn" is the common

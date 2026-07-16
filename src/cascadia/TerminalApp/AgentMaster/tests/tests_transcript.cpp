@@ -122,6 +122,44 @@ void TestTranscriptScan()
         const auto r = ParseTranscriptDelta(line);
         CHECK(r.events.empty(), "meta user line -> skipped");
     }
+    // Agentmaster (the /model false-Running fix): a LOCAL slash command writes NON-meta user lines —
+    // the "<command-name>…" echo + its "<local-command-stdout>…" result (the exact live de4fcb12
+    // shape below) — and starts NO API turn. They must NOT come back as UserPrompt turn events:
+    // emitting them made recon-run light an Idle/Waiting session Running off a mere `/model`, and
+    // their tail-fact wipes also released NeedsApproval / Error. Skipped like isMeta lines.
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "a /model <command-name> echo (non-meta user line) -> NO turn event");
+    }
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 4.8 and saved as your default</local-command-stdout>"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "a /model <local-command-stdout> result line -> NO turn event");
+    }
+    // ...the whole IsNoiseUserPrompt set rides the same skip — a teammate WAKE wrapper included
+    // (its turn is REAL, but state rides the real UserPromptSubmit hook / the wake turn's own
+    // assistant lines, never the wrapper echo)...
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"P3-docs\">\n{\"type\":\"idle_notification\"}\n</teammate-message>"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.empty(), "a teammate-wake wrapper user line -> NO turn event (push owns the wake)");
+    }
+    // ...EXCEPT the interrupt marker: it is in the noise list too, but it is a real turn-ENDER the
+    // reconciler must keep seeing (recon-stop keys on it), so it still flows as a UserPrompt event.
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"content":"[Request interrupted by user]"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::UserPrompt && IsUserInterruptMarker(r.events[0].text),
+              "the interrupt marker is noise-listed but STILL emitted (a real turn-ender)");
+    }
+    // ...and a REAL prompt merely MENTIONING a marker mid-text is untouched (prefix-anchored filter).
+    {
+        const std::wstring line = LR"j({"type":"user","message":{"content":"explain <command-name> semantics to me"}})j" L"\n";
+        const auto r = ParseTranscriptDelta(line);
+        CHECK(r.events.size() == 1 && r.events[0].kind == TranscriptEvent::Kind::UserPrompt,
+              "a real prompt mentioning a marker mid-text is still a UserPrompt");
+    }
     // partial trailing line: only the complete line is parsed; consumed stops at the last newline
     {
         const std::wstring chunk = LR"j({"type":"user","message":{"content":"first"}})j" L"\n" LR"j({"type":"user","message":{"content":"par)j";

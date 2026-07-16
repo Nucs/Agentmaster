@@ -302,6 +302,31 @@ namespace Agentmaster
                 }
                 if (!prompt.empty())
                 {
+                    // Agentmaster (the /model false-Running fix): a machine-injected CONTROL MARKER
+                    // masquerading as a user line is NOT a human turn — skip it like an isMeta line.
+                    // A LOCAL slash command (`/model`, `/config`, …) writes a NON-meta
+                    // "<command-name>…" echo + a "<local-command-stdout>…" result and starts NO API
+                    // turn at all (and fires NO UserPromptSubmit hook — verified live), yet emitting
+                    // them as UserPrompt turn events made the reconciler treat a mere `/model` as a
+                    // turn START: recon-run lit an Idle/Waiting session Running within one tick
+                    // (proven live: session de4fcb12 — `/model` echo at 05:29:26.392Z, [recon-run]
+                    // at .952), the wiped tail facts (the prior turn's TERMINAL stop_reason, a
+                    // pending AskUserQuestion, an unrecovered API error) also released NeedsApproval
+                    // (ShouldSynthesizeResumed) and Error (recon-run's recovery edge), and the now-
+                    // cleared stop_reason left the phantom turn releasable only by the 30s
+                    // presence-idle floor — landing WaitingForInput, never the original state. The
+                    // shared prefix filter (IsNoiseUserPrompt, TranscriptStore) also covers the `!`
+                    // bash passthrough echoes, injected reminders/caveats, and the teammate/agent/
+                    // task-notification WAKE wrappers — the wakes lose nothing: their turn is REAL,
+                    // so a wired session's state rides the real UserPromptSubmit hook (push), and a
+                    // hookless one lights recon-run off the wake turn's ASSISTANT lines one pass
+                    // later. The interrupt marker is in the noise list too but is a real turn-ENDER
+                    // the reconciler must keep seeing (IsUserInterruptMarker → recon-stop), so it is
+                    // exempted and still flows through as a UserPrompt event.
+                    if (IsNoiseUserPrompt(prompt) && !IsUserInterruptMarker(prompt))
+                    {
+                        continue;
+                    }
                     TranscriptEvent ev;
                     ev.kind = TranscriptEvent::Kind::UserPrompt;
                     ev.text = std::move(prompt);
@@ -1118,7 +1143,10 @@ namespace Agentmaster
                     st.interrupted = false;
                     // Control markers that masquerade as user lines — command echoes, task
                     // notifications (STATE.md §8 bug-2) — must not be back-filled into the Flight
-                    // Plan as Typed prompts. They still clear the stop_reason above.
+                    // Plan as Typed prompts. The parser now drops them before they ever get here
+                    // (the /model false-Running fix: a noise line is NOT a turn event and must not
+                    // clear the tail facts above either), so this gate is belt+suspenders for the
+                    // back-fill seam should the parser's filter ever be relaxed.
                     if (!IsNoiseUserPrompt(ev.text))
                     {
                         _registry->NoteExternalPrompt(s.id, ev.text); // idempotent by text — back-fills a dropped hook
