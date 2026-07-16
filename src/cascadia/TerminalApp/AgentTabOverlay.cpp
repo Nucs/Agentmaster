@@ -286,7 +286,7 @@ namespace winrt::TerminalApp::implementation
         // one-line look ("  ·  ") as their own tooltip-less elements so the strip reads as one line.
         _row1.Children().Clear();
         const auto fg = Fill(0xFF, 0xEC, 0xEC, 0xEC);
-        const auto appendText = [&](const std::wstring& t, const wchar_t* tip, const SolidColorBrush& brush) {
+        const auto appendText = [&](const std::wstring& t, const wchar_t* tip, const SolidColorBrush& brush, double padRight = 0.0) {
             TextBlock tb{};
             tb.FontSize(12);
             tb.IsTextSelectionEnabled(false);
@@ -294,6 +294,10 @@ namespace winrt::TerminalApp::implementation
             tb.VerticalAlignment(VerticalAlignment::Center);
             tb.Foreground(brush);
             tb.Text(winrt::hstring{ t });
+            if (padRight > 0.0)
+            {
+                tb.Padding(ThicknessHelper::FromLengths(0, 0, padRight, 0));
+            }
             if (tip)
             {
                 AgentSetTip(tb, winrt::hstring{ tip });
@@ -315,8 +319,8 @@ namespace winrt::TerminalApp::implementation
             appendText(shortModel,
                        L"Model \x2014 what this session's last reply actually ran on (read from the\n"
                        L"transcript; a /model switch shows here on its next reply).",
-                       Fill(0xFF, 0xC8, 0xC8, 0xC8));
-            appendText(std::wstring{ L"  " }, nullptr, fg); // spacer (no · dot) between model and status
+                       Fill(0xFF, 0xC8, 0xC8, 0xC8),
+                       2.0); // 2px pad-right — the only separation from the status indicator (no · dot)
         }
 
         // Status: the colored state glyph + its label, one tooltip for the pair.
