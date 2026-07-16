@@ -320,6 +320,7 @@ namespace winrt::TerminalApp::implementation
     {
         if (_tabStripScrollViewer || !_tabView)
         {
+            _NeutralizeTabStripVirtualization(); // idempotent (latched) — retries a not-yet-resolvable swap on the next call
             return;
         }
 
@@ -330,6 +331,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         _tabStripScrollViewer = sv;
+        _NeutralizeTabStripVirtualization(); // layer 0 of the MUX drag AV fix — the strip template is realized NOW
         _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (auto page = weakThis.get())
             {
@@ -1371,19 +1373,77 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: MUX TabView drag-start AV guard, layer 1 — settle the strip's item->container
-    // mapping BEFORE returning to the message pump. WinUI 2.8's TabView::OnListViewDragItemsStarting
-    // -> FindTabViewItemFromDragItem (TabView.cpp:850) walks ContainerFromIndex(i).Content() with NO
-    // null check whenever ContainerFromItem(dragged item) misses — and on an overflowed strip the
-    // virtualizing ItemsStackPanel guarantees unrealized (null) containers, so entering that fallback
-    // loop is an instant 0xC0000005 inside MUX, raised BEFORE TabDragStarting reaches any handler of
-    // ours and uncatchable under /EHsc (crash-dump-proven on release v0.6.7: fork a tab -> immediately
-    // drag it; Rcx=0, Rsi=0x41 == TabItems().Size()). The window that lets a drag in: XAML dispatches
-    // queued INPUT ahead of the pending LAYOUT pass, so a press+move queued behind a TabItems()
-    // insert/remove/reinsert can cross the drag threshold while the mapping is still uncommitted.
-    // UpdateLayout() runs that pass NOW — the layout was going to run next frame anyway, so this is
-    // re-ordered work, not added work. Called after EVERY TabItems() mutation (_InitializeTab /
-    // _RemoveTab / _TryMoveTab / _PinManagerTabFirst / _TabDragCompleted).
+    // Agentmaster: MUX TabView drag AV — layer 0, the ROOT-CAUSE fix (layers 1/2 below are belts).
+    // Dragging ANY tab has WUX report the dragged ITEM as the pressed container's **Content**, not the
+    // TabViewItem itself (ListViewBase::GetDraggedItems, ListViewBase_Partial_Reorder.cpp: for an
+    // items-are-their-own-containers list — exactly WT's TabItems of TabViewItems — it appends
+    // get_Content() to DragItemsStarting.Items). For WT that Content is the BODGY unique empty Border
+    // every Tab plants at construction (Tab.cpp `TabViewItem().Content(Border{})` — upstream's
+    // disambiguator for EXACTLY this MUX lookup). So MUX's TabView::OnListViewDragItemsStarting ->
+    // FindTabViewItemFromDragItem can NEVER resolve the item up front: ContainerFromItem(border)
+    // misses (a Border is not an item of TabItems) and VisualTreeHelper::GetParent(border) is null
+    // (the Content is never rendered), which sends EVERY drag into the fallback loop
+    // `ContainerFromIndex(i).Content() == item` from index 0 — and that loop null-derefs on the FIRST
+    // virtualized-out container (0xC0000005 at Microsoft.UI.Xaml.dll+0xB605C, raised BEFORE
+    // TabDragStarting reaches any handler of ours, uncatchable under /EHsc). On an overflowed strip
+    // that is scrolled at all, the virtualizing ItemsStackPanel guarantees index 0 (the pinned
+    // Manager tab) is unrealized => dragging ANY tab is an instant crash. Dump-proven THREE times on
+    // release 0.6.7.x with full-dump forensics (Rsi=0x41/0x47 == TabItems().Size(), Rdi=0 == died at
+    // loop index 0, and the dragged-item memory walk resolving to a WUX Border — the original v0.6.7
+    // "fork then drag" crash was THIS all along, not an uncommitted item->container map: a fork
+    // appends+reveals the new tab at the far right, scrolling index 0 out). The settle/CanDrag belts
+    // below cannot prevent it — the lookup that fails is by CONTENT, which no amount of settling maps.
+    // The one total fix at our layer: make the tab strip NON-VIRTUALIZING, so ContainerFromIndex(i)
+    // never returns null — the loop becomes safe AND correct (the unique Border finally does the job
+    // upstream intended, on every strip state). The swap is safe: MUX has ZERO code dependency on
+    // ItemsStackPanel (the panel comes only from a TabViewListView STYLE Setter — MUX TabView.xaml),
+    // and an instance ItemsPanel assignment beats a style Setter. Cost: tab headers stay realized
+    // instead of being reclaimed when scrolled off — the restore path already realizes every header
+    // once regardless (the [tabdrag-guard] Loaded storm), so steady state ~equals today's peak.
+    void TerminalPage::_NeutralizeTabStripVirtualization()
+    {
+        if (_tabStripVirtualizationOff || !_tabStripScrollViewer)
+        {
+            return; // done, or the strip template isn't realized yet (callers retry)
+        }
+        try
+        {
+            // The TabViewListView is the strip ScrollViewer's nearest ListView ancestor (the
+            // _RevealTabInStrip recipe).
+            winrt::WUX::Controls::ListView tabListView{ nullptr };
+            auto node = winrt::WUX::Media::VisualTreeHelper::GetParent(_tabStripScrollViewer);
+            while (node && !tabListView)
+            {
+                tabListView = node.try_as<winrt::WUX::Controls::ListView>();
+                node = winrt::WUX::Media::VisualTreeHelper::GetParent(node);
+            }
+            if (!tabListView)
+            {
+                return; // not resolvable yet — retried from _EnsureTabStripScrollViewer's callers
+            }
+            const auto tmpl = winrt::WUX::Markup::XamlReader::Load(
+                                  LR"(<ItemsPanelTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>)")
+                                  .try_as<winrt::WUX::Controls::ItemsPanelTemplate>();
+            if (!tmpl)
+            {
+                return;
+            }
+            tabListView.ItemsPanel(tmpl);
+            _tabStripVirtualizationOff = true;
+            ::Agentmaster::AppendStateLog(L"hooks.log", L"[tabdrag-guard] tab-strip virtualization OFF (non-virtualizing StackPanel installed)\n");
+        }
+        CATCH_LOG();
+    }
+
+    // Agentmaster: MUX TabView drag-start AV guard, layer 1 (a BELT — the proven root cause is layer
+    // 0, _NeutralizeTabStripVirtualization above) — settle the strip's item->container mapping BEFORE
+    // returning to the message pump. XAML dispatches queued INPUT ahead of the pending LAYOUT pass, so
+    // a press+move queued behind a TabItems() insert/remove/reinsert can cross the drag threshold
+    // while the mapping is still uncommitted, and MUX's drag paths consult that mapping
+    // (ContainerFromItem/IndexFromContainer). UpdateLayout() runs the pass NOW — the layout was going
+    // to run next frame anyway, so this is re-ordered work, not added work. Called after EVERY
+    // TabItems() mutation (_InitializeTab / _RemoveTab / _TryMoveTab / _PinManagerTabFirst /
+    // _TabDragCompleted).
     void TerminalPage::_SettleTabStripLayout()
     {
         try
@@ -1401,10 +1461,11 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Agentmaster: MUX TabView drag-start AV guard, layer 2 (see _SettleTabStripLayout). A freshly
+    // Agentmaster: MUX TabView drag-start AV guard, layer 2 (a BELT — see layers 0/1 above). A freshly
     // (re)inserted TabViewItem stays CanDrag(false) until the TabView can actually resolve its
-    // container (ContainerFromItem != null — the exact lookup MUX's drag-start path null-derefs on),
-    // so a drag can never begin from a tab the strip can't yet map. Re-enabled inline when the settle
+    // container (ContainerFromItem != null — the strip's item->container registration, which MUX's
+    // drag machinery consults), so a drag can never begin from a tab the strip can't yet map.
+    // Re-enabled inline when the settle
     // committed the mapping (the common case), else on the item's Loaded (realization == container
     // prepare == mapped; an unrealized tab has no pixels to grab, so drag staying off until then is
     // inert). The pinned Manager tab NEVER re-enables — the deferred path re-checks it, so a late

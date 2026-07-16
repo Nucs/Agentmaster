@@ -2443,26 +2443,45 @@ build **binlog uploads as an artifact** to diagnose the first run.
   **coalescing scheduler** (a `bool` + one `Dispatcher().RunAsync`) and do the reads + gated mutations on
   the CLEAN tick after layout settles (the `_ApplyRenamerMaxWidth` cycle-safety lesson, again). Both
   guards + a `CATCH_LOG` on the whole popup tail now live in `TabHeaderControl::_PositionTagBadgesNow`.
-- **MUX TabView drag-start null-deref (WinUI 2.8) — dragging a tab while the strip's item→container
-  map is uncommitted crashes INSIDE Microsoft's DLL, before any event reaches us.**
-  `TabView::OnListViewDragItemsStarting → FindTabViewItemFromDragItem` (TabView.cpp:850) falls back to
-  a loop calling `ContainerFromIndex(i).Content()` with NO null check when `ContainerFromItem(dragged)`
-  misses; on an overflowed strip the virtualizing `ItemsStackPanel` guarantees unrealized (null)
-  containers, so entering the loop is an instant `0xC0000005` (crash-dump-proven on release v0.6.7:
-  fork a tab → immediately drag the new tab; registers `Rcx=0`, `Rsi=0x41` == the 65-item
-  `TabItems().Size()`; symbolized against Microsoft's own MUX PDB). XAML dispatches queued **input**
-  ahead of the pending **layout** pass, so a press+move queued behind a `TabItems()`
-  insert/remove/reinsert can cross the drag threshold while the map is stale — and the AV fires
-  BEFORE `TabDragStarting` reaches our handlers (unguardable at the event, uncatchable under /EHsc).
-  Guard (both in `TerminalPage.AgentEngine.cpp`): **`_SettleTabStripLayout()`** — `UpdateLayout()`
-  after EVERY `TabItems()` mutation (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` /
-  `_PinManagerTabFirst` / `_TabDragCompleted`) so the pump never sees an unsettled strip (re-ordered
-  work, not added work) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays
-  `CanDrag(false)` until `ContainerFromItem` resolves it (the exact lookup MUX null-derefs on),
-  re-enabled inline or on its `Loaded` (an unrealized tab has no pixels to grab, so deferred re-enable
-  is inert); the Manager tab never re-enables (its non-movable contract, re-checked in the deferred
-  path). **Don't add a `TabItems()` mutation without routing through these**; logs
-  `[tabdrag-guard]` when the deferred path arms.
+- **MUX TabView drag-start null-deref (WinUI 2.8) — dragging ANY tab on a scrolled, overflowed strip
+  crashes INSIDE Microsoft's DLL, before any event reaches us. ROOT CAUSE (dump-proven ×3 on release
+  0.6.7.x, full-dump memory forensics): the dragged "item" WUX reports is the tab's CONTENT — WT's
+  BODGY unique `Border` — which MUX can never resolve, so EVERY drag walks a null-unsafe fallback
+  loop over ALL containers; any virtualized-out container before the dragged tab is an instant AV.**
+  The chain: WUX `ListViewBase::GetDraggedItems` (ListViewBase_Partial_Reorder.cpp) puts
+  `container.Content()` — NOT the container — into `DragItemsStarting.Items` for an
+  items-are-their-own-containers list (WT's `TabItems` of `TabViewItem`s), and upstream WT plants a
+  unique empty `Border` as every tab's Content (Tab.cpp `TabViewItem().Content(Border{})`, its "BODGY"
+  disambiguator for exactly this MUX lookup). MUX's `TabView::OnListViewDragItemsStarting →
+  FindTabViewItemFromDragItem` (TabView.cpp:823) then misses both fast paths —
+  `ContainerFromItem(border)` (a Border is no item of TabItems) and
+  `VisualTreeHelper::GetParent(border)` (the Content is never rendered) — and falls into the loop
+  `ContainerFromIndex(i).Content() == item` from index 0 with NO null check: the first
+  virtualized-out container (index 0 = the pinned Manager tab, whenever the overflowed strip is
+  scrolled) is `null.Content()` → `0xC0000005` at `Microsoft.UI.Xaml.dll+0xB605C` (+ the `0xc000041d`
+  death-rattle at the same offset), raised BEFORE `TabDragStarting` reaches our handlers
+  (unguardable at the event, uncatchable under /EHsc). Dump registers: `Rcx=0`, `Rsi=0x41/0x47` ==
+  `TabItems().Size()` (65/71 tabs), `Rdi=0` == died at loop index 0; the dragged-item stack slot
+  resolved to a WUX `DirectUI::Border` — so the original v0.6.7 "fork → immediately drag" crash was
+  THIS all along (the fork appends+reveals the new tab far right, scrolling index 0 out), NOT an
+  uncommitted item→container map, which is why the settle/CanDrag guards alone didn't stop the
+  recurrence (three more crashes 2026-07-16, same offset, 0.6.7.0 + 0.6.7.1). **The fix — layer 0,
+  `_NeutralizeTabStripVirtualization()`** (`TerminalPage.AgentEngine.cpp`, run from
+  `_EnsureTabStripScrollViewer` once the strip template realizes, latched
+  `_tabStripVirtualizationOff`): swap the inner `TabViewListView`'s `ItemsPanel` to a plain
+  non-virtualizing horizontal `StackPanel` (XamlReader-built) — `ContainerFromIndex(i)` then never
+  returns null, the loop is total AND correct (the unique Border finally does its job on every strip
+  state). Safe because MUX has ZERO code dependency on `ItemsStackPanel` (it comes only from a
+  TabViewListView STYLE Setter, and an instance property assignment beats a style Setter); cost is
+  headers staying realized (~ today's restore-time peak, which already realizes all of them). The
+  belts stay: **`_SettleTabStripLayout()`** — `UpdateLayout()` after EVERY `TabItems()` mutation
+  (`_InitializeTab` / `_RemoveTab` / `_TryMoveTab` / `_PinManagerTabFirst` / `_TabDragCompleted`) so
+  the pump never sees an unsettled strip (XAML dispatches queued input ahead of the pending layout
+  pass) — plus **`_GuardTabDragUntilRegistered(tvi)`** — a (re)inserted tab stays `CanDrag(false)`
+  until `ContainerFromItem` resolves it, re-enabled inline or on its `Loaded`; the Manager tab never
+  re-enables (its non-movable contract, re-checked in the deferred path). **Don't add a `TabItems()`
+  mutation without routing through these**; logs `[tabdrag-guard]` when the deferred path arms and
+  when the layer-0 panel swap installs.
 - **A per-element `ToolTip` on rebuilt elements is a process-killing LEAK under XAML Islands — never
   `ToolTipService.SetToolTip` at BUILD time on any Manager-rebuilt surface.** The framework-side
   registration `SetToolTip` creates is never torn down under islands (the same broken bookkeeping that
