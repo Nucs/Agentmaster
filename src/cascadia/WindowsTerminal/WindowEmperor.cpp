@@ -1081,8 +1081,27 @@ void WindowEmperor::_dispatchCommandline(winrt::TerminalApp::CommandlineArgs arg
 
 void WindowEmperor::_dispatchCommandlineCommon(winrt::array_view<const winrt::hstring> args, wil::zwstring_view currentDirectory, wil::zwstring_view envString, uint32_t showWindowCommand)
 {
+    // Agentmaster (Auto Testing debug escape hatch; ProfileBootstrap.h IsDebugPackage): `--debug`
+    // (or `-debug`) unlocks the DEV-only Tests Autorunner surfaces in a RELEASE build. It is NOT a
+    // Windows Terminal commandline option, so strip it here — the ONE choke every dispatch path funnels
+    // through (fresh launch, the reopen loop, AND the single-instance WM_COPYDATA handoff) — before the
+    // args reach the WT parser, which would otherwise reject the unknown option. The enablement itself
+    // reads GetCommandLineW()/AGENTMASTER_DEBUG directly (this filter does not touch either), so the
+    // token still registers; the strip only keeps it from breaking window creation.
+    std::vector<winrt::hstring> filtered;
+    filtered.reserve(args.size());
+    for (const auto& a : args)
+    {
+        if (til::equals_insensitive_ascii(std::wstring_view{ a }, L"--debug") ||
+            til::equals_insensitive_ascii(std::wstring_view{ a }, L"-debug"))
+        {
+            continue;
+        }
+        filtered.push_back(a);
+    }
+
     winrt::TerminalApp::CommandlineArgs c;
-    c.Commandline(args);
+    c.Commandline(filtered);
     c.CurrentDirectory(currentDirectory);
     c.CurrentEnvironment(envString);
     c.ShowWindowCommand(showWindowCommand);

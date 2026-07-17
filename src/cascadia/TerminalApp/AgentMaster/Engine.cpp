@@ -11,7 +11,7 @@
 #include "HooksBridge.h"
 #include "Persistence.h"
 #include "ProcessObserver.h"
-#include "ProfileBootstrap.h" // Profiles::IsDevPackage — Auto Testing / Tests Autorunner is a DEV-ONLY feature
+#include "ProfileBootstrap.h" // Profiles::IsDevPackage — Auto Testing / Tests Autorunner is a DEV-OR-DEBUG feature (IsDevOrDebugPackage)
 #include "Scheduler.h"
 #include "SessionRegistry.h"
 #include "SessionScanner.h"
@@ -238,16 +238,17 @@ namespace Agentmaster
             // and is forwarded to the scheduler; a separate observer feeds the stopOnError
             // backstop.
             //
-            // Agentmaster (Auto Testing is a DEV-ONLY feature): the autorunner that auto-sends
-            // queued prompts runs ONLY under the AgentmasterDev package. In a RELEASE install we
-            // create the Scheduler object (so callers never null-deref) but DO NOT start its worker
-            // and DO NOT wire the advance seam — so no session ever auto-sends. The Auto Testing UI
-            // (the Manager pane tab, the autorunner toggles, the queue/compose, the board badge, the
-            // overlay queue rows, the cog tab, the Pause button) is hidden in release to match, so
-            // there is no way to queue a prompt either. Send-now is a direct registry->Inject (it
-            // does not go through the scheduler), and it too is gated to dev in the UI.
+            // Agentmaster (Auto Testing is a DEV-OR-DEBUG feature): the autorunner that auto-sends
+            // queued prompts runs under the AgentmasterDev package OR when a RELEASE build is launched
+            // with `--debug` / AGENTMASTER_DEBUG (IsDevOrDebugPackage — the QA escape hatch, see
+            // ProfileBootstrap.h). Otherwise we still create the Scheduler object (so callers never
+            // null-deref) but DO NOT start its worker and DO NOT wire the advance seam — so no session
+            // ever auto-sends. The Auto Testing UI (the Manager pane tab, the autorunner toggles, the
+            // queue/compose, the board badge, the overlay queue rows, the cog tab, the Pause button)
+            // is hidden to match, so there is no way to queue a prompt either. Send-now is a direct
+            // registry->Inject (it does not go through the scheduler), gated the same way in the UI.
             e->scheduler = std::make_shared<Scheduler>(e->registry);
-            if (::Agentmaster::Profiles::IsDevPackage())
+            if (::Agentmaster::Profiles::IsDevOrDebugPackage())
             {
                 e->scheduler->Start();
                 auto sched = e->scheduler;
@@ -260,7 +261,7 @@ namespace Agentmaster
             }
             else
             {
-                AppendStateLog(L"hooks.log", L"[engine] release build: Auto Testing autorunner disabled (scheduler not started)\n");
+                AppendStateLog(L"hooks.log", L"[engine] release build (no --debug): Auto Testing autorunner disabled (scheduler not started)\n");
             }
 
             // Persistence (M8): autosave the registry (queue + autorunner + metadata) to

@@ -1632,10 +1632,11 @@ namespace winrt::TerminalApp::implementation
         // (title -> tabs -> divider -> content -> Save/Cancel). _SwitchSettingsTab(0) below swaps the
         // Sessions panel into the scroller.
         addSettingsTab(L"Sessions", L"How new Claude sessions launch \x2014 permissions, model, environment variables, and the Launch box's directory history.", sessionsPanel);
-        // Auto Testing is a DEV-ONLY feature: the Tests Autorunner defaults tab is added only under the
-        // AgentmasterDev package (the autorunner never runs in a release build — see Engine.cpp). The
-        // panel is still built above so the cog's load/save code paths stay uniform; it's just not shown.
-        if (::Agentmaster::Profiles::IsDevPackage())
+        // Auto Testing is a DEV-OR-DEBUG feature: the Tests Autorunner defaults tab is added under the
+        // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage; the
+        // autorunner never runs otherwise — see Engine.cpp). The panel is still built above so the cog's
+        // load/save code paths stay uniform; it's just not shown.
+        if (::Agentmaster::Profiles::IsDevOrDebugPackage())
         {
             addSettingsTab(L"Tests Autorunner", L"Tests Autorunner defaults stamped onto every new session \x2014 the starting mode and its backstops.", autorunnerPanel);
         }

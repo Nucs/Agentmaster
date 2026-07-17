@@ -25,7 +25,7 @@
 #include "AgentMaster/ClaudeSpawn.h" // ResolveClaudeTranscriptPath / BuildClaude|CodexCommandline (row 3 CLI + transcript)
 #include "AgentMaster/ProcessInspect.h" // ReadProcessCommandLine / ReadConversationText / Codex rollout resolve (row 3)
 #include "AgentMaster/Persistence.h" // LoadAppSettings (skipPermissions, for the would-use CLI builder)
-#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the Tests Autorunner badge is dev-only
+#include "AgentMaster/ProfileBootstrap.h" // Profiles::IsDevPackage — the Tests Autorunner badge is dev-or-debug (IsDevOrDebugPackage)
 #include "AgentMaster/Engine.h" // SharedEngine (claudeExePath / codexExePath, for the real launch CLI)
 
 #include <winrt/Windows.UI.h> // Color / ColorHelper / Colors
@@ -353,11 +353,12 @@ namespace winrt::TerminalApp::implementation
             _row1.Children().Append(_actions);
         }
 
-        // Autorunner mode — DEV ONLY: Auto Testing / Tests Autorunner is gated to the AgentmasterDev
-        // package (the autorunner never runs in a release build — see Engine.cpp), so a release tab's
-        // badge carries no autorunner control. A CLICKABLE button that cycles Off -> Semi -> Full -> Off,
-        // colored by mode (gray Off / amber Semi / green Full) to match the Triage Board's language.
-        static const bool kDevAutoTesting = ::Agentmaster::Profiles::IsDevPackage();
+        // Autorunner mode — DEV OR --debug: Auto Testing / Tests Autorunner is gated to the AgentmasterDev
+        // package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage — the autorunner never runs
+        // otherwise, see Engine.cpp), so an ordinary release tab's badge carries no autorunner control. A
+        // CLICKABLE button that cycles Off -> Semi -> Full -> Off, colored by mode (gray Off / amber Semi /
+        // green Full) to match the Triage Board's language.
+        static const bool kDevAutoTesting = ::Agentmaster::Profiles::IsDevOrDebugPackage();
         if (kDevAutoTesting)
         {
         appendSep();
@@ -403,9 +404,9 @@ namespace winrt::TerminalApp::implementation
             b.PointerExited([](const IInspectable&, const PointerRoutedEventArgs&) { ApplyCursor(CoreCursorType::Arrow); });
             _row1.Children().Append(b);
         }
-        } // if (kDevAutoTesting) — the Tests Autorunner button is dev-only
+        } // if (kDevAutoTesting) — the Tests Autorunner button is dev-or-debug
 
-        // queued (Pending) count — ⏳N. Dev-only too (a release build never queues, so pending is always 0).
+        // queued (Pending) count — ⏳N. Dev-or-debug too (an ordinary release never queues, so pending is always 0).
         if (kDevAutoTesting && pending > 0)
         {
             appendSep();

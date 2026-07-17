@@ -83,6 +83,78 @@ namespace Agentmaster::Profiles
             return s.size() >= prefix.size() && ::wcsncmp(s.data(), prefix.data(), prefix.size()) == 0;
         }
 
+        // True when the process commandline carries `flag` as a WHOLE token in either the `--flag`
+        // or `-flag` spelling, case-insensitively (flag=L"debug" matches `--debug`, `-Debug`). A real
+        // token walk (whitespace-split, honoring "quoted" runs) so `flag` appearing INSIDE a path or
+        // another argument never false-matches. Pure Win32 — no shell32/CommandLineToArgvW dependency,
+        // keeping this header lean and linkable everywhere it is already included.
+        inline bool CommandLineHasFlag(std::wstring_view flag)
+        {
+            const std::wstring_view cmd{ ::GetCommandLineW() };
+            const size_t n = cmd.size();
+            size_t i = 0;
+            while (i < n)
+            {
+                while (i < n && (cmd[i] == L' ' || cmd[i] == L'\t'))
+                {
+                    ++i;
+                }
+                bool quoted = false;
+                std::wstring token;
+                while (i < n && (quoted || (cmd[i] != L' ' && cmd[i] != L'\t')))
+                {
+                    const wchar_t c = cmd[i++];
+                    if (c == L'"')
+                    {
+                        quoted = !quoted; // drop the quote character, keep the run together
+                        continue;
+                    }
+                    token.push_back(c);
+                }
+                std::wstring_view body{ token };
+                if (StartsWith(body, L"--"))
+                {
+                    body.remove_prefix(2);
+                }
+                else if (StartsWith(body, L"-"))
+                {
+                    body.remove_prefix(1);
+                }
+                else
+                {
+                    continue; // not a flag-shaped token
+                }
+                if (body.size() != flag.size())
+                {
+                    continue;
+                }
+                bool equal = true;
+                for (size_t k = 0; k < flag.size(); ++k)
+                {
+                    wchar_t a = body[k];
+                    wchar_t b = flag[k];
+                    if (a >= L'A' && a <= L'Z')
+                    {
+                        a = static_cast<wchar_t>(a - L'A' + L'a');
+                    }
+                    if (b >= L'A' && b <= L'Z')
+                    {
+                        b = static_cast<wchar_t>(b - L'A' + L'a');
+                    }
+                    if (a != b)
+                    {
+                        equal = false;
+                        break;
+                    }
+                }
+                if (equal)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         inline std::string WideToUtf8(std::wstring_view s)
         {
             if (s.empty())
@@ -193,6 +265,41 @@ namespace Agentmaster::Profiles
     inline bool IsDevPackage()
     {
         return detail::StartsWith(PackageFamilyName(), L"AgentmasterDev");
+    }
+
+    // True when the DEBUG escape hatch is active: the AGENTMASTER_DEBUG env var is set (any non-empty
+    // value) OR a `--debug` / `-debug` token is on the process commandline. This unlocks the DEV-only
+    // Auto Testing / Tests Autorunner surfaces in a RELEASE (or unpackaged) build — the same "force a
+    // package-gated feature on for QA" escape hatch Updater::IsUpdaterChannel exposes via
+    // AGENTMASTER_UPDATE_STARTUP. WindowEmperor::_dispatchCommandlineCommon strips the `--debug` token
+    // from the WT commandline (it is NOT a Windows Terminal option) BEFORE the args are parsed, but
+    // GetCommandLineW() still returns the original string, so this scan stays valid regardless.
+    //
+    // Effective for the FRESH launch whose OWN commandline/env carries it. A `--debug` handed off to an
+    // ALREADY-running instance does not retro-enable it there (that process predates the flag, and the
+    // UI gates cache their verdict) — relaunch, or set AGENTMASTER_DEBUG in the environment, to persist.
+    inline bool IsDebugPackage()
+    {
+        // Process-lifetime constant (env + commandline never change mid-run) — cache so the hot gate
+        // sites (per-card board rebuilds, per-settings-push) don't rescan the commandline every call.
+        static const bool debug = []() {
+            if (!detail::GetEnvVar(L"AGENTMASTER_DEBUG").empty())
+            {
+                return true;
+            }
+            return detail::CommandLineHasFlag(L"debug");
+        }();
+        return debug;
+    }
+
+    // Dev package OR the debug escape hatch — the predicate every Auto Testing / Tests Autorunner
+    // FEATURE gate uses, so those surfaces appear under the AgentmasterDev build AND a `--debug` /
+    // AGENTMASTER_DEBUG release. IDENTITY decisions (profile dir, toast CLSID, reopen alias, updater
+    // channel, the "Agent Manager Dev" title/branding) deliberately stay on IsDevPackage() — they are
+    // about WHICH install this is, not whether the dev feature set is unlocked.
+    inline bool IsDevOrDebugPackage()
+    {
+        return IsDevPackage() || IsDebugPackage();
     }
 
     // The key an install's profile choice is stored under: the PFN (per-package — release and

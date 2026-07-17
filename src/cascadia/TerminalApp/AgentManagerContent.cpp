@@ -448,11 +448,12 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::SetSettings(const ::Agentmaster::AppSettings& settings)
     {
         _appSettings = settings;
-        // Auto Testing is a DEV-ONLY feature: in a RELEASE install the bottom-right pane is the
-        // read-only Summary view only (no [Summary | Auto Testing] toggle). Force the Summary tab
-        // selected so every reader (the pane visibility, _RefreshSummaryTab, _LoadSummaryForSession)
-        // shows it regardless of what settings.json carries. In memory only — never re-persisted.
-        if (!::Agentmaster::Profiles::IsDevPackage())
+        // Auto Testing is a DEV-OR-DEBUG feature: in an ordinary RELEASE install (no --debug) the
+        // bottom-right pane is the read-only Summary view only (no [Summary | Auto Testing] toggle).
+        // Force the Summary tab selected so every reader (the pane visibility, _RefreshSummaryTab,
+        // _LoadSummaryForSession) shows it regardless of what settings.json carries. In memory only —
+        // never re-persisted.
+        if (!::Agentmaster::Profiles::IsDevOrDebugPackage())
         {
             _appSettings.autoTestingShowsSummary = true;
         }
@@ -489,9 +490,9 @@ namespace winrt::TerminalApp::implementation
     void AgentManagerContent::ApplyExternalSettings(const ::Agentmaster::AppSettings& settings)
     {
         _appSettings = settings;
-        if (!::Agentmaster::Profiles::IsDevPackage())
+        if (!::Agentmaster::Profiles::IsDevOrDebugPackage())
         {
-            _appSettings.autoTestingShowsSummary = true; // release: Summary-only pane (Auto Testing is dev-only)
+            _appSettings.autoTestingShowsSummary = true; // ordinary release (no --debug): Summary-only pane
         }
         _UpdateTreeSortButton();
         _UpdateBoardSortButton();
@@ -1025,11 +1026,12 @@ namespace winrt::TerminalApp::implementation
             _UpdateKeepAwakeButton();
 
             // Pause/Resume Tests Autorunning — the rightmost button in the actions row (built far
-            // above). Auto Testing / Tests Autorunner is a DEV-ONLY feature: in a RELEASE install the
+            // above). Auto Testing / Tests Autorunner is a DEV-OR-DEBUG feature: without --debug the
             // autorunner never runs (the scheduler isn't started — see Engine.cpp), so this global
             // pause/resume backstop is hidden. Built unconditionally above but only ATTACHED under the
-            // AgentmasterDev package, so the actions row never carries a no-op control in release.
-            if (::Agentmaster::Profiles::IsDevPackage())
+            // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release, so an ordinary release's
+            // actions row never carries a no-op control.
+            if (::Agentmaster::Profiles::IsDevOrDebugPackage())
             {
                 actionsRow.Children().Append(_pauseBtn);
             }
@@ -1588,12 +1590,13 @@ namespace winrt::TerminalApp::implementation
                 auto wrap = Grid{};
                 wrap.RowDefinitions().Append(autoRow()); // 0: the [Summary | Auto Testing] toggle (dev only)
                 wrap.RowDefinitions().Append(starRow(1)); // 1: the selected tab's body
-                // Auto Testing is a DEV-ONLY feature: the [Summary | Auto Testing] toggle is shown ONLY
-                // under the AgentmasterDev package. In a RELEASE install this pane is the read-only
-                // Summary view only — SetSettings/ApplyExternalSettings force autoTestingShowsSummary=true,
-                // so _UpdatePlanPaneTab keeps the Summary body visible and collapses _autoTestBody (which
+                // Auto Testing is a DEV-OR-DEBUG feature: the [Summary | Auto Testing] toggle is shown
+                // under the AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release. In an
+                // ordinary release this pane is the read-only Summary view only —
+                // SetSettings/ApplyExternalSettings force autoTestingShowsSummary=true, so
+                // _UpdatePlanPaneTab keeps the Summary body visible and collapses _autoTestBody (which
                 // is still built so all members stay non-null and the methods are no-ops).
-                if (::Agentmaster::Profiles::IsDevPackage())
+                if (::Agentmaster::Profiles::IsDevOrDebugPackage())
                 {
                     Grid::SetRow(tabBar, 0);
                     wrap.Children().Append(tabBar);

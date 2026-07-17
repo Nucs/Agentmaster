@@ -1162,10 +1162,11 @@ namespace winrt::TerminalApp::implementation
     // A no-op when unchanged, so re-clicking the active tab doesn't churn persistence/broadcast.
     void AgentManagerContent::_SelectPlanPaneTab(bool summary)
     {
-        // Auto Testing is a DEV-ONLY feature: in a release build the pane is Summary-only and the toggle
-        // is hidden, so this can only ever be invoked under the AgentmasterDev package. Defensive no-op
-        // otherwise (a future caller / keybinding can't switch the release pane off Summary).
-        if (!::Agentmaster::Profiles::IsDevPackage())
+        // Auto Testing is a DEV-OR-DEBUG feature: in an ordinary release the pane is Summary-only and the
+        // toggle is hidden, so this can only ever be invoked under the AgentmasterDev package OR a
+        // `--debug` / AGENTMASTER_DEBUG release. Defensive no-op otherwise (a future caller / keybinding
+        // can't switch the Summary-only pane off Summary).
+        if (!::Agentmaster::Profiles::IsDevOrDebugPackage())
         {
             return;
         }

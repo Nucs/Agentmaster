@@ -429,10 +429,11 @@ namespace winrt::TerminalApp::implementation
             metaRow.Orientation(Orientation::Horizontal);
             metaRow.Spacing(8);
 
-            // DEV ONLY: the ⚙ sent/total badge is the Auto Testing prompt queue, gated to the
-            // AgentmasterDev package (a release build never queues prompts — the autorunner is off).
-            // The ⚡ server-cache indicator below is unrelated and stays in every build.
-            if (::Agentmaster::Profiles::IsDevPackage() && !s.queue.empty())
+            // DEV OR --debug: the ⚙ sent/total badge is the Auto Testing prompt queue, gated to the
+            // AgentmasterDev package OR a `--debug` / AGENTMASTER_DEBUG release (IsDevOrDebugPackage; an
+            // ordinary release never queues prompts — the autorunner is off). The ⚡ server-cache
+            // indicator below is unrelated and stays in every build.
+            if (::Agentmaster::Profiles::IsDevOrDebugPackage() && !s.queue.empty())
             {
                 int sent = 0;
                 for (const auto& p : s.queue)
