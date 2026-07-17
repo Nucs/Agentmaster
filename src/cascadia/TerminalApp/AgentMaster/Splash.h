@@ -40,6 +40,7 @@
 #pragma once
 
 #include <windows.h>
+#include <appmodel.h> // GetCurrentPackageFamilyName — dev-vs-release card title (AgentmasterDev => "Agentmaster Dev")
 #include <dwmapi.h> // DwmSetWindowAttribute — dark title bar to match the dark card
 #include <shellapi.h> // ExtractIconExW — the app icon for the taskbar button + caption
 
@@ -93,6 +94,36 @@ namespace Agentmaster::Splash
             return g_status;
         }
 
+        // The identity name shown as the loading card's bold title: "Agentmaster Dev" for the DEV
+        // package (family AgentmasterDev_*, the local Debug loose layout), plain "Agentmaster" for the
+        // RELEASE package (Agentmaster_*) and for unpackaged/portable runs. This is the SAME
+        // dev-vs-release signal the rest of the app keys on (Profiles::IsDevPackage — the package family
+        // name prefix), re-derived LOCALLY here so this splash header stays self-contained (pure Win32,
+        // no engine deps) across the exe/dll split, exactly as it re-derives the ready-event name from
+        // the PID. Package identity is fixed for the process lifetime, so compute it ONCE in a magic
+        // static. NB "Agentmaster" is a PREFIX of "AgentmasterDev", so test Dev FIRST — the same ordering
+        // rule used everywhere this pair is compared (GetWtExePath, windowClassName, _AgentmasterReopenTarget).
+        inline const wchar_t* IdentityTitle()
+        {
+            static const wchar_t* const kTitle = []() -> const wchar_t* {
+                UINT32 len = 0;
+                if (::GetCurrentPackageFamilyName(&len, nullptr) == ERROR_INSUFFICIENT_BUFFER && len > 1)
+                {
+                    std::wstring pfn(len, L'\0');
+                    if (::GetCurrentPackageFamilyName(&len, pfn.data()) == ERROR_SUCCESS)
+                    {
+                        pfn.resize(len > 0 ? len - 1 : 0); // drop the trailing NUL
+                        if (pfn.rfind(L"AgentmasterDev", 0) == 0)
+                        {
+                            return L"Agentmaster Dev";
+                        }
+                    }
+                }
+                return L"Agentmaster";
+            }();
+            return kTitle;
+        }
+
         inline void PaintCard(HWND hwnd, HDC hdc)
         {
             RECT rc{};
@@ -120,11 +151,11 @@ namespace Agentmaster::Splash
             const int pad = Scaled(20);
             ::SetBkMode(mem, TRANSPARENT);
 
-            // Title.
+            // Title — "Agentmaster Dev" on the dev package, plain "Agentmaster" on release/unpackaged.
             HFONT oldFont = static_cast<HFONT>(::SelectObject(mem, g_titleFont));
             ::SetTextColor(mem, RGB(0xEC, 0xEC, 0xEC));
             RECT tr{ rc.left + pad, rc.top + pad, rc.right - pad, rc.top + pad + Scaled(30) };
-            ::DrawTextW(mem, L"Agentmaster", -1, &tr, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            ::DrawTextW(mem, IdentityTitle(), -1, &tr, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
             // Status sub-line (live).
             ::SelectObject(mem, g_bodyFont);
@@ -269,8 +300,9 @@ namespace Agentmaster::Splash
             HWND hwnd = ::CreateWindowExW(
                 exStyle,
                 EnsureClass(),
-                L"", // no caption title text — the card body already shows the bolded "Agentmaster"; the
-                     // title bar keeps just the app icon + the minimize/close buttons
+                L"", // no caption title text — the card body already shows the bolded app name
+                     // (IdentityTitle: "Agentmaster" / "Agentmaster Dev"); the title bar keeps just the
+                     // app icon + the minimize/close buttons
                 style,
                 x, y, W, H,
                 nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
