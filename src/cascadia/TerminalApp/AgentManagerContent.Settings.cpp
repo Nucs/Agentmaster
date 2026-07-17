@@ -1141,7 +1141,10 @@ namespace winrt::TerminalApp::implementation
         _setTitleNaming.Items().Append(winrt::box_value(L"Folder name as is")); // index 1 == TabTitleNaming::FolderName
         _setTitleNaming.Items().Append(winrt::box_value(L"Two folder names")); // index 2 == TabTitleNaming::TwoFolders
         _setTitleNaming.Items().Append(winrt::box_value(L"Folder name capital letters")); // index 3 == TabTitleNaming::Capitals
-        AgentSetTip(_setTitleNaming, L"How a new session's tab is named from its working directory (generic bin/obj/Debug/\x2026 segments are skipped first).\n\x2022 Last word in folder name (default): \x201CPotato.Tomato.SlangGang\x201D \x2192 \x201CSlangGang\x201D; a name without separators stays whole (\x201CPotatoTomato\x201D).\n\x2022 Folder name as is: the folder name unchanged.\n\x2022 Two folder names: parent/folder \x2014 \x201C" L"C:\\repos\\Potato.Tomato.SlangGang\x201D \x2192 \x201Crepos/Potato.Tomato.SlangGang\x201D.\n\x2022 Folder name capital letters: the capitals only \x2014 \x201CPotaTo.Tomato.Slang\x201D \x2192 \x201CPTTS\x201D (an all-lowercase name falls back to its word initials).\nApplies when a session is launched or adopted; existing and renamed titles are kept.");
+        _setTitleNaming.Items().Append(winrt::box_value(L"Branch name")); // index 4 == TabTitleNaming::Branch
+        _setTitleNaming.Items().Append(winrt::box_value(L"Branch name / folder name")); // index 5 == TabTitleNaming::BranchFolder
+        _setTitleNaming.Items().Append(winrt::box_value(L"Branch name / two folder names")); // index 6 == TabTitleNaming::BranchTwoFolders
+        AgentSetTip(_setTitleNaming, L"How a new session's tab is named from its working directory (generic bin/obj/Debug/\x2026 segments are skipped first).\n\x2022 Last word in folder name (default): \x201CPotato.Tomato.SlangGang\x201D \x2192 \x201CSlangGang\x201D; a name without separators stays whole (\x201CPotatoTomato\x201D).\n\x2022 Folder name as is: the folder name unchanged.\n\x2022 Two folder names: parent/folder \x2014 \x201C" L"C:\\repos\\Potato.Tomato.SlangGang\x201D \x2192 \x201Crepos/Potato.Tomato.SlangGang\x201D.\n\x2022 Folder name capital letters: the capitals only \x2014 \x201CPotaTo.Tomato.Slang\x201D \x2192 \x201CPTTS\x201D (an all-lowercase name falls back to its word initials).\n\x2022 Branch name: the working directory's current git branch (\x201C" L"feature/issue123\x201D; a detached HEAD reads as the short commit id) \x2014 a non-git folder falls back to the folder name.\n\x2022 Branch name / folder name: \x201C" L"feature/issue123/Agentmaster\x201D.\n\x2022 Branch name / two folder names: \x201C" L"feature/issue123/source/Agentmaster\x201D.\nAny '\\' in the title is normalized to '/'. Applies when a session is launched or adopted; existing and renamed titles are kept.");
         _setTitleNaming.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _UpdateTitleNamingPreview(); });
         panel.Children().Append(_setTitleNaming);
         _setTitleCase = ComboBox{};
@@ -1889,11 +1892,15 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setTitleNaming)
         {
-            // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals.
+            // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals,
+            // 4 == Branch, 5 == BranchFolder, 6 == BranchTwoFolders.
             _setTitleNaming.SelectedIndex(_appSettings.tabTitleNaming == TabTitleNaming::FolderName ? 1 :
-                                              _appSettings.tabTitleNaming == TabTitleNaming::TwoFolders ? 2 :
-                                              _appSettings.tabTitleNaming == TabTitleNaming::Capitals   ? 3 :
-                                                                                                          0);
+                                              _appSettings.tabTitleNaming == TabTitleNaming::TwoFolders       ? 2 :
+                                              _appSettings.tabTitleNaming == TabTitleNaming::Capitals         ? 3 :
+                                              _appSettings.tabTitleNaming == TabTitleNaming::Branch           ? 4 :
+                                              _appSettings.tabTitleNaming == TabTitleNaming::BranchFolder     ? 5 :
+                                              _appSettings.tabTitleNaming == TabTitleNaming::BranchTwoFolders ? 6 :
+                                                                                                                0);
         }
         if (_setTitleCase)
         {
@@ -2315,10 +2322,14 @@ namespace winrt::TerminalApp::implementation
         }
         if (_setTitleNaming)
         {
-            // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals.
+            // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals,
+            // 4 == Branch, 5 == BranchFolder, 6 == BranchTwoFolders.
             _appSettings.tabTitleNaming = _setTitleNaming.SelectedIndex() == 1 ? TabTitleNaming::FolderName :
                                           _setTitleNaming.SelectedIndex() == 2 ? TabTitleNaming::TwoFolders :
                                           _setTitleNaming.SelectedIndex() == 3 ? TabTitleNaming::Capitals :
+                                          _setTitleNaming.SelectedIndex() == 4 ? TabTitleNaming::Branch :
+                                          _setTitleNaming.SelectedIndex() == 5 ? TabTitleNaming::BranchFolder :
+                                          _setTitleNaming.SelectedIndex() == 6 ? TabTitleNaming::BranchTwoFolders :
                                                                                  TabTitleNaming::LastWord;
         }
         if (_setTitleCase)
@@ -2776,10 +2787,14 @@ namespace winrt::TerminalApp::implementation
         if (_setTitleNaming)
         {
             // Items: 0 == LastWord (default; also the -1 no-selection build-time state), 1 ==
-            // FolderName, 2 == TwoFolders, 3 == Capitals — the same map the seed + Save use.
+            // FolderName, 2 == TwoFolders, 3 == Capitals, 4 == Branch, 5 == BranchFolder,
+            // 6 == BranchTwoFolders — the same map the seed + Save use.
             opts.naming = _setTitleNaming.SelectedIndex() == 1 ? TabTitleNaming::FolderName :
                           _setTitleNaming.SelectedIndex() == 2 ? TabTitleNaming::TwoFolders :
                           _setTitleNaming.SelectedIndex() == 3 ? TabTitleNaming::Capitals :
+                          _setTitleNaming.SelectedIndex() == 4 ? TabTitleNaming::Branch :
+                          _setTitleNaming.SelectedIndex() == 5 ? TabTitleNaming::BranchFolder :
+                          _setTitleNaming.SelectedIndex() == 6 ? TabTitleNaming::BranchTwoFolders :
                                                                  TabTitleNaming::LastWord;
         }
         if (_setTitleCase)
@@ -2792,6 +2807,10 @@ namespace winrt::TerminalApp::implementation
         {
             opts.spacesToUnderscores = _setTitleUnderscores.IsOn();
         }
+        // The Branch* techniques consume a branch the CALLER resolves (a real launch reads the
+        // dir's .git); these example paths are made-up, so preview with a made-up branch and say
+        // so in the block's first line (only when the picked technique actually uses it).
+        opts.branch = L"feature/ui";
         static const wchar_t* kExamples[] = {
             L"C:\\repos\\Potato.Tomato.SlangGang",
             L"C:\\work\\PotatoTomato",
@@ -2804,6 +2823,10 @@ namespace winrt::TerminalApp::implementation
             widest = std::max(widest, std::wcslen(p));
         }
         std::wstring text;
+        if (::Agentmaster::TitleNamingUsesBranch(opts.naming))
+        {
+            text = L"(example git branch: feature/ui)";
+        }
         for (const auto* p : kExamples)
         {
             std::wstring line{ p };

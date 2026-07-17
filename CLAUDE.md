@@ -1158,7 +1158,10 @@ What works, by area:
   (`DeriveSessionTitle`: walk up past generic `bin/obj/Debug/...` segments to the first meaningful
   folder, then apply the cog's **Tab title naming** technique — **Last word in folder name** default
   (`Potato.Tomato.SlangGang` → `SlangGang`) · Folder name as is · Two folder names (`repos/Foo`) ·
-  Capital letters (`PotaTo.Tomato.Slang` → `PTTS`) — + the Title-case / spaces→`_` transforms
+  Capital letters (`PotaTo.Tomato.Slang` → `PTTS`) · the Branch trio (branch alone /
+  `branch/folder` / `branch/parent/folder` — `ReadGitBranchForDir`, resolved only for those modes;
+  no branch ⇒ component dropped) — + the Title-case / spaces→`_` transforms and an unconditional
+  `\`→`/` normalization
   (`TabTitleNaming`/`TitleNamingOptions`; capped at 30 chars + `...`, never empty), and each tab is
   **colored per working directory** — a
   **permanent** color a dir keeps across tabs/windows/restarts (persisted to `dir-colors.json`): the
@@ -1490,11 +1493,19 @@ What works, by area:
   name; separators = `.`/`-`/`_`/whitespace) · **Folder name as is** · **Two folder names**
   (`C:\repos\Potato.Tomato.SlangGang` → `repos/Potato.Tomato.SlangGang`; at a drive root just the
   folder) · **Folder name capital letters** (`PotaTo.Tomato.Slang` → `PTTS`; a no-capitals name falls
-  back to word initials, a single lowercase word as-is), plus a **Title case** dropdown
+  back to word initials, a single lowercase word as-is) · the **Branch trio** — **Branch name** ·
+  **Branch name / folder name** · **Branch name / two folder names** (`feature/ui` ·
+  `feature/ui/Agentmaster` · `feature/ui/source/Agentmaster` — the dir's LIVE git branch as an
+  `TitleNamingOptions::branch` INPUT so the 2-arg derive stays pure; the 1-arg configured form
+  resolves it via `ReadGitBranchForDir` ONLY for these modes (`TitleNamingUsesBranch`), detached HEAD
+  reads as the short SHA, and an empty branch (non-git dir) drops the component + its `/` — bare
+  Branch then falls back to the folder name), plus a **Title case** dropdown
   (Default/Lowercase/Uppercase) and a **Spaces to underscores** toggle — every mode still walks past
-  generic `bin/obj/Debug/…` segments first and caps the result at 30 chars + `...`; a **live example
+  generic `bin/obj/Debug/…` segments first, normalizes any `\` in the title to `/` (unconditional, no
+  setting), and caps the result at 30 chars + `...`; a **live example
   preview** under the controls re-derives four made-up paths through the real 2-arg derive on every
-  change (`_UpdateTitleNamingPreview`). Applies at the NEXT launch/adopt/fork-from-disk of an UNTITLED
+  change (`_UpdateTitleNamingPreview` — a Branch* pick previews with a made-up `feature/ui` branch,
+  noted in the block's first line). Applies at the NEXT launch/adopt/fork-from-disk of an UNTITLED
   session only — existing/renamed titles never re-derive, Rule #11), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window

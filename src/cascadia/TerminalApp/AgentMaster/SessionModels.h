@@ -232,15 +232,26 @@ namespace Agentmaster
     //   * Capitals — the capital letters only ("PotaTo.Tomato.Slang" -> "PTTS"); a name with NO
     //     capitals falls back to its word initials uppercased ("potato tomato" -> "PT"), and a
     //     single all-lowercase word stays as-is (a one-letter title helps nobody).
-    // Applied when an UNTITLED session is launched / adopted / forked-from-disk — an existing or
-    // renamed title never re-derives (Rule #11: the title is ONE value). Serialized as a string
-    // token (Persistence ToString / TabTitleNamingFromString); a missing key => LastWord.
+    //   * Branch / BranchFolder / BranchTwoFolders — the working dir's CURRENT git branch
+    //     (TitleNamingOptions::branch, an INPUT — the configured 1-arg DeriveSessionTitle resolves
+    //     it via ReadGitBranchForDir; detached HEAD reads as the short SHA), alone or prefixed onto
+    //     the folder ("feature/ui/Agentmaster") or onto "<parent>/<folder>"
+    //     ("feature/ui/source/Agentmaster"). A dir with NO branch (not a git repo) omits the branch
+    //     component + its separator — the bare Branch technique then falls back to the folder name
+    //     (a title is never empty).
+    // Every technique's output also normalizes '\' -> '/' (unconditional, no setting). Applied when
+    // an UNTITLED session is launched / adopted / forked-from-disk — an existing or renamed title
+    // never re-derives (Rule #11: the title is ONE value). Serialized as a string token
+    // (Persistence ToString / TabTitleNamingFromString); a missing key => LastWord.
     enum class TabTitleNaming
     {
         LastWord = 0, // default: the last word of the folder name (whole name when it has no separators)
         FolderName = 1, // the meaningful folder name as-is
         TwoFolders = 2, // "<parent>/<folder>"
-        Capitals = 3 // the folder name's capital letters only
+        Capitals = 3, // the folder name's capital letters only
+        Branch = 4, // the git branch name (falls back to the folder name off-git)
+        BranchFolder = 5, // "<branch>/<folder>"
+        BranchTwoFolders = 6 // "<branch>/<parent>/<folder>"
     };
 
     // Agentmaster (tab title naming): the CASE transform applied to the derived title — the cog's
@@ -254,13 +265,19 @@ namespace Agentmaster
     };
 
     // Agentmaster (tab title naming): the full recipe DeriveSessionTitle applies — the technique +
-    // the output transforms (case; whitespace -> '_'). Defaults mirror the AppSettings defaults,
-    // so TitleNamingOptions{} == the out-of-the-box naming (tests + the cog preview rely on that).
+    // the output transforms (case; whitespace -> '_'; the unconditional '\' -> '/'). Defaults
+    // mirror the AppSettings defaults, so TitleNamingOptions{} == the out-of-the-box naming (tests
+    // + the cog preview rely on that).
     struct TitleNamingOptions
     {
         TabTitleNaming naming{ TabTitleNaming::LastWord };
         TabTitleCase caseMode{ TabTitleCase::Default };
         bool spacesToUnderscores{ false }; // convert any whitespace in the title to '_'
+        // The working dir's git branch — an INPUT the caller resolves (keeps the 2-arg derive
+        // PURE): the configured 1-arg DeriveSessionTitle fills it via ReadGitBranchForDir only for
+        // the Branch* techniques; tests + the cog preview pass a made-up one. Empty => the branch
+        // component (and its '/') is omitted.
+        std::wstring branch{};
     };
 
     // When a queued prompt is allowed to fire.

@@ -5,6 +5,7 @@
 #include "Persistence.h"
 
 #include "ClaudeSpawn.h" // AgentmasterStateDir, NewSessionId
+#include "ProcessInspect.h" // ReadGitBranchForDir — the configured DeriveSessionTitle's Branch* techniques
 
 #include <windows.h>
 
@@ -304,6 +305,12 @@ namespace Agentmaster
             return L"twoFolders";
         case TabTitleNaming::Capitals:
             return L"capitals";
+        case TabTitleNaming::Branch:
+            return L"branch";
+        case TabTitleNaming::BranchFolder:
+            return L"branchFolder";
+        case TabTitleNaming::BranchTwoFolders:
+            return L"branchTwoFolders";
         case TabTitleNaming::LastWord:
         default:
             return L"lastWord";
@@ -317,7 +324,18 @@ namespace Agentmaster
             return TabTitleNaming::TwoFolders;
         if (s == L"capitals")
             return TabTitleNaming::Capitals;
+        if (s == L"branch")
+            return TabTitleNaming::Branch;
+        if (s == L"branchFolder")
+            return TabTitleNaming::BranchFolder;
+        if (s == L"branchTwoFolders")
+            return TabTitleNaming::BranchTwoFolders;
         return TabTitleNaming::LastWord; // default + unknown token -> the default technique
+    }
+
+    bool TitleNamingUsesBranch(TabTitleNaming n)
+    {
+        return n == TabTitleNaming::Branch || n == TabTitleNaming::BranchFolder || n == TabTitleNaming::BranchTwoFolders;
     }
 
     std::wstring ToString(TabTitleCase c)
@@ -1542,10 +1560,36 @@ namespace Agentmaster
         case TabTitleNaming::Capitals:
             title = TitleCapitals(base);
             break;
+        case TabTitleNaming::Branch:
+            // No branch (not a git repo / unreadable HEAD) -> the folder name; never empty.
+            title = !opts.branch.empty() ? opts.branch : base;
+            break;
+        case TabTitleNaming::BranchFolder:
+            title = opts.branch.empty() ? base : opts.branch + L"/" + base;
+            break;
+        case TabTitleNaming::BranchTwoFolders:
+        {
+            // The branch prefixed onto the TwoFolders output; each absent component (no parent
+            // folder below the drive root / no branch) simply drops with its separator.
+            const std::wstring two = parentLeaf.empty() ? base : parentLeaf + L"/" + base;
+            title = opts.branch.empty() ? two : opts.branch + L"/" + two;
+            break;
+        }
         case TabTitleNaming::LastWord:
         default:
             title = TitleLastWord(base);
             break;
+        }
+
+        // Path-separator normalization — UNCONDITIONAL, deliberately not a setting: any '\' in the
+        // derived title reads as '/' (titles show path-ish fragments — branch + folder components —
+        // and those always render forward-slashed).
+        for (auto& c : title)
+        {
+            if (c == L'\\')
+            {
+                c = L'/';
+            }
         }
 
         // Output transforms: the case pick, then any whitespace -> '_' (order irrelevant — neither
@@ -1583,8 +1627,15 @@ namespace Agentmaster
     {
         // The configured convenience every launch/adopt/fork seam calls: apply the cog's CURRENT
         // "Tab title naming" settings, read fresh from disk so a Save applies to the very next
-        // launch in every window. (Tests + the cog preview use the pure 2-arg form.)
-        return DeriveSessionTitle(workingDir, TitleNamingFromSettings(LoadAppSettings()));
+        // launch in every window. (Tests + the cog preview use the pure 2-arg form.) The branch is
+        // resolved only when the technique consumes it — the .git walk is cheap (a few small reads)
+        // but not free, and non-branch modes shouldn't pay it per launch.
+        auto opts = TitleNamingFromSettings(LoadAppSettings());
+        if (TitleNamingUsesBranch(opts.naming))
+        {
+            opts.branch = ReadGitBranchForDir(workingDir);
+        }
+        return DeriveSessionTitle(workingDir, opts);
     }
 
     TitleNamingOptions TitleNamingFromSettings(const AppSettings& s)

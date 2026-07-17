@@ -544,6 +544,21 @@ void TestAppSettings()
         CHECK(out.skipPermissions == true, "settings missing skipPermissions -> default");
     }
 
+    // Tab title naming trio: present values honored (incl. the branch tokens); absent keys land
+    // the defaults (LastWord / Default case / no underscores).
+    {
+        const auto out = DeserializeAppSettings(L"{\"settings\":{\"tabTitleNaming\":\"capitals\",\"tabTitleCase\":\"upper\",\"tabTitleSpacesToUnderscores\":true}}");
+        CHECK(out.tabTitleNaming == TabTitleNaming::Capitals, "settings tabTitleNaming honored");
+        CHECK(out.tabTitleCase == TabTitleCase::Upper, "settings tabTitleCase honored");
+        CHECK(out.tabTitleSpacesToUnderscores == true, "settings tabTitleSpacesToUnderscores honored");
+        const auto br = DeserializeAppSettings(L"{\"settings\":{\"tabTitleNaming\":\"branchTwoFolders\"}}");
+        CHECK(br.tabTitleNaming == TabTitleNaming::BranchTwoFolders, "settings tabTitleNaming branch token honored");
+        const auto def = DeserializeAppSettings(L"{\"settings\":{}}");
+        CHECK(def.tabTitleNaming == TabTitleNaming::LastWord, "settings tabTitleNaming absent -> LastWord");
+        CHECK(def.tabTitleCase == TabTitleCase::Default, "settings tabTitleCase absent -> Default");
+        CHECK(def.tabTitleSpacesToUnderscores == false, "settings tabTitleSpacesToUnderscores absent -> off");
+    }
+
     // archiveSplitFraction: a sane value is honored; an extreme/corrupt one falls back to 0.5
     // (the same sane-band rule as the Manager layout fractions — a pane must never collapse).
     {
@@ -625,6 +640,47 @@ void TestTabNamingAndColor()
     CHECK(DeriveSessionTitle(L"C:\\x\\MyVeryLongProjectName", optCaps) == L"MVLPN", "Capitals: the legacy capitals-only rule");
     CHECK(DeriveSessionTitle(L"C:\\x\\potato tomato", optCaps) == L"PT", "Capitals: no capitals -> word initials uppercased");
     CHECK(DeriveSessionTitle(L"C:\\x\\agentmaster", optCaps) == L"agentmaster", "Capitals: single lowercase word -> as-is");
+
+    // Branch / BranchFolder / BranchTwoFolders: the branch is an INPUT (opts.branch — the 2-arg
+    // form stays pure; the 1-arg configured form resolves it via ReadGitBranchForDir). An empty
+    // branch drops the component + its separator; the bare Branch technique then falls back to the
+    // folder name (never empty).
+    {
+        TitleNamingOptions o{};
+        o.naming = TabTitleNaming::Branch;
+        o.branch = L"feature/issue123";
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"feature/issue123", "Branch: the branch name alone");
+        o.branch.clear();
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"Agentmaster", "Branch: no branch -> the folder name");
+
+        o.naming = TabTitleNaming::BranchFolder;
+        o.branch = L"feature/ui";
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"feature/ui/Agentmaster", "BranchFolder: <branch>/<folder>");
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster\\bin\\Debug", o) == L"feature/ui/Agentmaster", "BranchFolder: generic walk still applies");
+        o.branch.clear();
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"Agentmaster", "BranchFolder: no branch -> folder alone (no dangling '/')");
+
+        o.naming = TabTitleNaming::BranchTwoFolders;
+        o.branch = L"main";
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"main/source/Agentmaster", "BranchTwoFolders: <branch>/<parent>/<folder>");
+        CHECK(DeriveSessionTitle(L"C:\\OnlyFolder", o) == L"main/OnlyFolder", "BranchTwoFolders: no parent below the drive root -> branch/folder");
+        o.branch.clear();
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"source/Agentmaster", "BranchTwoFolders: no branch -> the TwoFolders output");
+        o.branch = L"feature/a-very-long-branch-name";
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == std::wstring{ L"feature/a-very-long-branch-name/source/Agentmaster" }.substr(0, 30) + L"...", "BranchTwoFolders: long combo capped at 30 + ...");
+    }
+
+    // '\' -> '/' normalization is UNCONDITIONAL (no setting) and title-wide — a backslash in any
+    // component (only a caller-supplied branch can realistically carry one) reads as '/'.
+    {
+        TitleNamingOptions o{};
+        o.naming = TabTitleNaming::BranchFolder;
+        o.branch = L"feature\\ui";
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"feature/ui/Agentmaster", "normalization: '\\' in the branch reads as '/'");
+        o.naming = TabTitleNaming::Branch;
+        o.branch = L"a\\b\\c";
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"a/b/c", "normalization: every '\\' normalized");
+    }
 
     // Case + whitespace transforms compose over any technique.
     {
@@ -792,7 +848,12 @@ void TestTabColorModes()
     CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::FolderName)) == TabTitleNaming::FolderName, "tabTitleNaming folderName round-trip");
     CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::TwoFolders)) == TabTitleNaming::TwoFolders, "tabTitleNaming twoFolders round-trip");
     CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::Capitals)) == TabTitleNaming::Capitals, "tabTitleNaming capitals round-trip");
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::Branch)) == TabTitleNaming::Branch, "tabTitleNaming branch round-trip");
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::BranchFolder)) == TabTitleNaming::BranchFolder, "tabTitleNaming branchFolder round-trip");
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::BranchTwoFolders)) == TabTitleNaming::BranchTwoFolders, "tabTitleNaming branchTwoFolders round-trip");
     CHECK(TabTitleNamingFromString(L"nonsense") == TabTitleNaming::LastWord, "tabTitleNaming unknown token -> LastWord (the default technique)");
+    CHECK(TitleNamingUsesBranch(TabTitleNaming::Branch) && TitleNamingUsesBranch(TabTitleNaming::BranchFolder) && TitleNamingUsesBranch(TabTitleNaming::BranchTwoFolders), "TitleNamingUsesBranch: the Branch* trio");
+    CHECK(!TitleNamingUsesBranch(TabTitleNaming::LastWord) && !TitleNamingUsesBranch(TabTitleNaming::FolderName) && !TitleNamingUsesBranch(TabTitleNaming::TwoFolders) && !TitleNamingUsesBranch(TabTitleNaming::Capitals), "TitleNamingUsesBranch: folder-only techniques don't read the branch");
     CHECK(TabTitleCaseFromString(ToString(TabTitleCase::Default)) == TabTitleCase::Default, "tabTitleCase default round-trip");
     CHECK(TabTitleCaseFromString(ToString(TabTitleCase::Lower)) == TabTitleCase::Lower, "tabTitleCase lower round-trip");
     CHECK(TabTitleCaseFromString(ToString(TabTitleCase::Upper)) == TabTitleCase::Upper, "tabTitleCase upper round-trip");

@@ -175,15 +175,23 @@ namespace Agentmaster
     // Derive a tab/session display name from a working directory. First walk up past generic
     // build/output/structural segments (bin/obj/Debug/... the top 20) to the first meaningful
     // folder, then apply the configured NAMING TECHNIQUE (TabTitleNaming: last word (default) /
-    // folder name as-is / "<parent>/<folder>" / capitals only) + the output transforms
-    // (TabTitleCase; whitespace -> '_'). The result is capped at 30 chars ("..." appended past it)
-    // and never empty ("claude"). The 2-arg form is PURE (options passed in — tests + the cog's
-    // live example preview); the 1-arg form applies the cog's CURRENT tabTitle* settings
-    // (LoadAppSettings — read fresh from disk, so a Save affects the very next launch).
+    // folder name as-is / "<parent>/<folder>" / capitals only / the git branch alone or prefixed —
+    // "<branch>/<folder>", "<branch>/<parent>/<folder>"; the branch is opts.branch, an INPUT) +
+    // the output transforms (TabTitleCase; whitespace -> '_'; '\' -> '/' unconditionally). The
+    // result is capped at 30 chars ("..." appended past it) and never empty ("claude"). The 2-arg
+    // form is PURE (options passed in — tests + the cog's live example preview); the 1-arg form
+    // applies the cog's CURRENT tabTitle* settings (LoadAppSettings — read fresh from disk, so a
+    // Save affects the very next launch) and resolves the branch (ReadGitBranchForDir) only when
+    // the technique needs it.
     std::wstring DeriveSessionTitle(const std::wstring& workingDir, const TitleNamingOptions& opts);
     std::wstring DeriveSessionTitle(const std::wstring& workingDir);
-    // The AppSettings -> TitleNamingOptions bridge (the three tabTitle* fields).
+    // The AppSettings -> TitleNamingOptions bridge (the three tabTitle* fields; branch stays empty
+    // — it is per-dir, not a setting: callers needing it resolve ReadGitBranchForDir themselves).
     TitleNamingOptions TitleNamingFromSettings(const AppSettings& s);
+    // Whether a technique consumes TitleNamingOptions::branch (the Branch* trio) — the 1-arg
+    // derive gates its ReadGitBranchForDir on this, and the cog preview gates its example-branch
+    // note on the same predicate (single-source, so they can't drift).
+    bool TitleNamingUsesBranch(TabTitleNaming n);
     // Derive a fork's title from its source's: a first fork appends " (fork)"; forking a fork BUMPS a
     // counter (" (fork 2)", " (fork 3)", ...) instead of stacking suffixes ("X (fork) (fork)"). Only a
     // trailing " (fork)" / " (fork N)" group is recognized (nested/earlier parens are left intact).
