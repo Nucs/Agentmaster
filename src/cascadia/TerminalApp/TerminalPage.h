@@ -44,6 +44,7 @@ namespace winrt::Microsoft::Terminal::Settings
 #include "AgentMaster/SessionModels.h"
 #include "AgentMaster/SessionStore.h" // Agentmaster (bookmark tags): GlobalTagInfo (by-value member — the Tag panel's cached universe)
 #include "AgentMaster/TranscriptStore.h" // Agentmaster (Sessions page): SessionIndexEntry (by-value member)
+#include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the Sessions page's designated-area tooltip panel (by-value member)
 #include <optional>
 namespace Agentmaster
 {
@@ -563,6 +564,11 @@ namespace winrt::TerminalApp::implementation
             std::wstring forkedFromId;
         };
         winrt::Windows::UI::Xaml::Controls::Grid _sessionsPageHost{ nullptr }; // full-bleed page over Root rows 1-2
+        // Agentmaster (LocalTooltip, AgentLocalTooltip.h): the page's hover-description panel — every
+        // tip inside the page renders in a click-through panel at the page's TOP-RIGHT (the header's
+        // empty right column, above the detail pane) instead of as a floating ToolTip; hidden on the
+        // explicit open/close seams (a tab-switch away keeps it, like the saved scroll offset).
+        AgentLocalTooltip _sessionsLocalTip;
         winrt::Windows::UI::Xaml::Controls::Grid _sessionsHeaderRow{ nullptr }; // LEFT: sortable column header
         winrt::Windows::UI::Xaml::Controls::StackPanel _sessionsRowsHost{ nullptr }; // LEFT: table data rows
         winrt::Windows::UI::Xaml::Controls::ScrollViewer _sessionsRowsScroll{ nullptr }; // LEFT: the table's ScrollViewer — kept so a tab-switch away can snapshot/restore its scroll offset (keep the page "as I left it")

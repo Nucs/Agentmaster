@@ -1037,6 +1037,11 @@ namespace winrt::TerminalApp::implementation
             _ReflowLaunchBar(); // initial pass (no-op until laid out — SizeChanged drives the first real reflow)
         }
 
+        // Agentmaster (LocalTooltip): the board + bottom section handles, hoisted out of their
+        // build blocks — the LocalTooltip wiring at the end of this method scopes + anchors on them.
+        Border boardSection{ nullptr };
+        Grid bottomGrid{ nullptr };
+
         // ---- Triage Board (row 1) ----
         {
             auto outer = Grid{};
@@ -1139,6 +1144,7 @@ namespace winrt::TerminalApp::implementation
             auto b = section(outer);
             Grid::SetRow(b, 1);
             _root.Children().Append(b);
+            boardSection = b; // LocalTooltip: scope root + the panel's top-right anchor
         }
 
         // ---- Bottom: Explorer Tree | Auto Testing (row 3) ----
@@ -1601,6 +1607,7 @@ namespace winrt::TerminalApp::implementation
 
             Grid::SetRow(bottom, 3);
             _root.Children().Append(bottom);
+            bottomGrid = bottom; // LocalTooltip: the tree | auto-testing region's scope root
         }
 
         // ---- Horizontal splitter between Triage Board and the bottom (drag = resize ↕) ----
@@ -1609,6 +1616,25 @@ namespace winrt::TerminalApp::implementation
             Grid::SetRow(hbar, 2);
             _root.Children().Append(hbar);
         }
+
+        // ---- LocalTooltip (AgentLocalTooltip.h): the Manager tab's designated-area tooltips ----
+        // Hovering any tipped control in the toolbar / Triage Board / Explorer Tree / Auto Testing
+        // renders its description (title + text) in ONE fixed panel nested in the BOARD's top-right
+        // corner, instead of a floating ToolTip popping over the very card/row being aimed at (and
+        // instead of the board cards' 4s hold-back workaround for exactly that intrusiveness — a
+        // side panel can update immediately). Scoped to the three CONTENT regions — deliberately
+        // NOT _root: the settings / claude-missing overlay cards are _root children too, and
+        // scoping the regions keeps them outside (settings has its OWN panel; claude-missing keeps
+        // floating tips over its modal dim). Click-through: the panel floats over board cards, so
+        // it must never eat a click (the modal panels swallow instead — they sit over a dim whose
+        // tap means dismiss). Appended after the content children (floats above them) and before
+        // the overlay builders below (a modal's dim covers it).
+        _managerLocalTip.Initialize();
+        _managerLocalTip.SetClickThrough(true);
+        _managerLocalTip.AttachScope(_toolbarCol);
+        _managerLocalTip.AttachScope(boardSection);
+        _managerLocalTip.AttachScope(bottomGrid);
+        _managerLocalTip.AnchorTopRightInside(_root, boardSection, 8.0);
 
         // ---- Launch path-picker drop-down (a Popup anchored under the cwd box) ----
         // Parented into _root (top-left aligned) so its offset is _root-relative; it renders

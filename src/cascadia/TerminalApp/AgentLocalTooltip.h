@@ -26,13 +26,27 @@
 //     host's open tick yields inside a marked scope, so the two never double-show. The marker
 //     is a live switch: _Reposition flips it false while the window is too NARROW to host the
 //     panel (no room left of the anchor) — the classic floating tips take over — and back true
-//     when room returns. Graceful degradation, no re-wiring.
-//   * PLACEMENT — AnchorTopLeftOutside(host, anchor) pins the panel's right edge `gap` px left
-//     of the anchor's left edge and its top to the anchor's top, recomputed from the anchor's
-//     REAL position (TransformToVisual) on host/anchor SizeChanged. HorizontalAlignment::Right
-//     + a computed right margin is what makes it grow ONLY leftward. Layout-cycle-safe by
-//     construction: the panel is a sibling whose size affects neither host nor anchor, and
-//     every write is change-gated (the _ApplyRenamerMaxWidth lesson).
+//     when room returns. Graceful degradation, no re-wiring. AttachScope may be called for
+//     SEVERAL roots feeding ONE panel (the Manager tab scopes its toolbar/board/bottom regions
+//     separately, so the settings / claude-missing overlay cards — SIBLINGS in the same root
+//     Grid — stay outside the scope: no nested-scope resolution exists or is needed).
+//   * PLACEMENT — three anchors, all recomputed from the anchor's REAL position
+//     (TransformToVisual) on host/anchor SizeChanged, all growing ONLY leftward
+//     (HorizontalAlignment::Right + a computed right margin):
+//       - AnchorTopLeftOutside(host, anchor, gap): right edge `gap` px LEFT of the anchor, tops
+//         aligned — the settings card's "outside the dialog" placement;
+//       - AnchorTopRightAbove(host, anchor, topPad): right edges ALIGNED, top pinned at the
+//         HOST's top — the empty zone ABOVE the anchor (the Sessions page's header-right
+//         alignment space over its detail pane);
+//       - AnchorTopRightInside(host, anchor, pad): nested `pad` px inside the anchor's
+//         top-right corner (the Manager tab's board region).
+//     Layout-cycle-safe by construction: the panel is a floating sibling whose size affects
+//     neither host nor anchor (a Grid host gets Row/ColumnSpan 99 so no Auto row ever grows to
+//     fit it), and every write is change-gated (the _ApplyRenamerMaxWidth lesson).
+//   * INPUT — SetClickThrough(true) makes the panel ignore pointer input entirely (the floating
+//     ToolTip's own IsHitTestVisible(false) rationale) for placements that FLOAT OVER
+//     interactive content; the default swallows taps instead, for the settings placement over a
+//     modal dim whose Tapped means "dismiss".
 //
 // ⚠ LEAK DISCIPLINE (the 68 GB AgentTipHelpers lesson): everything here is per-SCOPE, never
 // per-element — one PointerMoved handler on the scope root, one panel, zero per-element
@@ -51,6 +65,7 @@
 
 #include <algorithm> // std::min/max — the anchor math
 #include <memory> // the shared State the scope/anchor handlers capture
+#include <vector> // the attached scope roots (a panel may serve several regions)
 
 #include "AgentTipHelpers.h" // TipTextOf/TipTitleProperty (the per-element tip store) + LocalTipScopeProperty (the floating-tip suppression seam)
 
@@ -124,13 +139,28 @@ namespace winrt::TerminalApp::implementation
         explicit operator bool() const noexcept { return static_cast<bool>(_s); }
 
         // The panel element, for a scope owner that places it MANUALLY (its own designated area /
-        // alignment) instead of via AnchorTopLeftOutside. Null before Initialize.
+        // alignment) instead of via the Anchor* methods. Null before Initialize.
         winrt::Windows::UI::Xaml::UIElement Visual() const { return _s ? _s->root : nullptr; }
+
+        // Informational-overlay mode: the panel ignores pointer input entirely, so a placement that
+        // FLOATS OVER interactive content (the sessions detail pane's top, the manager board) can
+        // never block a click — the floating ToolTip's own IsHitTestVisible(false) rationale. The
+        // default (off) keeps the Initialize tap-swallow instead: the settings panel sits over a
+        // modal DIM whose Tapped means "dismiss", where a click-through would close the dialog
+        // under the very click.
+        void SetClickThrough(bool clickThrough)
+        {
+            if (_s)
+            {
+                _s->root.IsHitTestVisible(!clickThrough);
+            }
+        }
 
         // Route every AgentSetTip text under `scopeRoot` into this panel: ONE bubbling PointerMoved
         // resolves the hovered tipped element (innermost wins) and renders title+body immediately;
-        // the scope marker makes the floating host yield inside (see the header block). One scope
-        // per instance (the marker the cramped fallback flips is the LAST attached root).
+        // the scope marker makes the floating host yield inside (see the header block). May be
+        // called for SEVERAL roots feeding one panel (the Manager tab's toolbar/board/bottom) — the
+        // cramped fallback flips every attached root's marker in lockstep.
         void AttachScope(const winrt::Windows::UI::Xaml::FrameworkElement& scopeRoot)
         {
             if (!_s || !scopeRoot)
@@ -138,8 +168,11 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             namespace atd = agent_tip_details;
-            _s->scopeRoot = winrt::make_weak(scopeRoot);
-            scopeRoot.SetValue(atd::LocalTipScopeProperty(), winrt::box_value(true));
+            _s->scopeRoots.push_back(winrt::make_weak(scopeRoot));
+            // Seed the live suppression marker: active, unless the anchor math has ALREADY proven
+            // the window too cramped to host the panel — a root attached mid-cramped must not
+            // suppress the floating tips that are currently serving.
+            scopeRoot.SetValue(atd::LocalTipScopeProperty(), winrt::box_value(!(_s->crampedSynced && _s->cramped)));
             ++atd::Host().localTipScopes; // arm the floating host's suppression fast-path (this UI thread)
             // The ONE scope-level handler (capture-safe: the shared State only — never `this`, never
             // the scope root, which its own handler would cycle-pin).
@@ -162,20 +195,42 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            _s->root.HorizontalAlignment(winrt::Windows::UI::Xaml::HorizontalAlignment::Right);
-            _s->root.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Top);
-            host.Children().Append(_s->root);
-            auto s = _s;
-            auto wHost = winrt::make_weak(host);
-            auto wAnchor = winrt::make_weak(anchor);
-            const auto repos = [s, wHost, wAnchor, gap](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::SizeChangedEventArgs&) {
-                _Reposition(s, wHost.get(), wAnchor.get(), gap);
-            };
-            // SizeChanged (not LayoutUpdated) on both: it fires on the first real arrange too, and
-            // the anchor only ever MOVES when one of the two resizes (the anchor is host-centered).
-            // Writes inside are to the sibling panel only + change-gated — no layout cycle.
-            host.SizeChanged(repos);
-            anchor.SizeChanged(repos);
+            _s->mode = AnchorMode::TopLeftOutside;
+            _s->pad = gap;
+            _WireAnchor(host, anchor);
+        }
+
+        // Place the panel in `host` ABOVE `anchor`'s top-right: right edges ALIGNED, top pinned at
+        // the HOST's top + topPad — the placement for an empty header zone that sits over a pane
+        // (the Sessions page's header-right alignment space above its detail pane). A long text may
+        // extend down OVER the anchor's top; pair with SetClickThrough(true) so it can never block.
+        void AnchorTopRightAbove(const winrt::Windows::UI::Xaml::Controls::Panel& host,
+                                 const winrt::Windows::UI::Xaml::FrameworkElement& anchor,
+                                 double topPad = 10.0)
+        {
+            if (!_s || !host || !anchor)
+            {
+                return;
+            }
+            _s->mode = AnchorMode::TopRightAbove;
+            _s->pad = topPad;
+            _WireAnchor(host, anchor);
+        }
+
+        // Place the panel in `host` NESTED `pad` px inside `anchor`'s top-right corner (the Manager
+        // tab's board region). Floats over the anchor's own content — pair with
+        // SetClickThrough(true).
+        void AnchorTopRightInside(const winrt::Windows::UI::Xaml::Controls::Panel& host,
+                                  const winrt::Windows::UI::Xaml::FrameworkElement& anchor,
+                                  double pad = 8.0)
+        {
+            if (!_s || !host || !anchor)
+            {
+                return;
+            }
+            _s->mode = AnchorMode::TopRightInside;
+            _s->pad = pad;
+            _WireAnchor(host, anchor);
         }
 
         // Manual show (the scope routing calls this too): title may be empty — the heading row +
@@ -204,8 +259,16 @@ namespace winrt::TerminalApp::implementation
 
     private:
         static constexpr double kMaxWidthPx = 340.0; // readability cap (the floating ToolTip's ~320 family)
-        static constexpr double kMinRoomPx = 140.0; // below this much room left of the anchor -> cramped fallback
+        static constexpr double kMinRoomPx = 140.0; // below this much room for the panel -> cramped fallback
         static constexpr double kEdgePadPx = 8.0; // breathing room at the host's left/bottom edges
+
+        // Which corner the panel is pinned to, relative to the anchor (see the Anchor* methods).
+        enum class AnchorMode
+        {
+            TopLeftOutside, // settings: left of the anchor, tops aligned
+            TopRightAbove, // sessions: right edges aligned, top at the HOST's top
+            TopRightInside, // manager: nested inside the anchor's top-right corner
+        };
 
         struct State
         {
@@ -216,10 +279,13 @@ namespace winrt::TerminalApp::implementation
             // Hover throttle: the last element rendered — WEAK, so a rebuilt-away element is never
             // pinned by the panel (the AgentTipHelpers leak discipline).
             winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> lastTarget{ nullptr };
-            // The scope root whose LocalTipScopeProperty the cramped fallback flips (weak: the
-            // root's own PointerMoved handler must not keep it alive).
-            winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement> scopeRoot{ nullptr };
+            // The scope roots whose LocalTipScopeProperty the cramped fallback flips in lockstep
+            // (weak: a root's own PointerMoved handler must not keep it alive).
+            std::vector<winrt::weak_ref<winrt::Windows::UI::Xaml::FrameworkElement>> scopeRoots;
+            AnchorMode mode{ AnchorMode::TopLeftOutside };
+            double pad{ 12.0 }; // the mode's gap/topPad/pad (see the Anchor* methods)
             bool cramped{ true }; // no room to host the panel — floating tips serve; true until the first _Reposition proves room
+            bool crampedSynced{ false }; // the first _Reposition must PUSH the computed state onto the scope markers even when it equals the seed (a genuinely-cramped first layout would otherwise leave the markers suppressing with the panel hidden — no tips at all)
             bool shown{ false }; // a Show happened since the last Hide (what a cramped->roomy flip restores)
             // Change gates for the anchor writes (never re-set an unchanged layout property).
             double lastTop{ -1.0 };
@@ -354,16 +420,48 @@ namespace winrt::TerminalApp::implementation
             return {};
         }
 
-        // Re-anchor: pin the panel's right edge `gap` px left of the anchor and its top to the
-        // anchor's top; refine MaxWidth to the room actually left of the anchor (readability-capped)
-        // and MaxHeight to the host's bottom. Too little room => the CRAMPED fallback: collapse the
-        // panel and lift the scope marker so the classic floating tips serve — flipped back the
-        // moment room returns. All writes change-gated; the panel is a sibling of the anchor, so
-        // none of them feed back into the SizeChanged that ran this (no layout cycle).
+        // The shared anchor plumbing behind the Anchor* methods: mount the panel into the host,
+        // widen its slot to the WHOLE grid, and wire the re-anchor triggers.
+        void _WireAnchor(const winrt::Windows::UI::Xaml::Controls::Panel& host,
+                         const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
+        {
+            _s->root.HorizontalAlignment(winrt::Windows::UI::Xaml::HorizontalAlignment::Right);
+            _s->root.VerticalAlignment(winrt::Windows::UI::Xaml::VerticalAlignment::Top);
+            host.Children().Append(_s->root);
+            // A Grid host: span every row/column (the settings-overlay idiom), so the floating
+            // panel's slot is the WHOLE grid. Without this the panel lands in cell (0,0) — and an
+            // Auto row (the sessions header, the manager toolbar) would GROW to fit it, shifting
+            // the real content on every hover.
+            if (host.try_as<winrt::Windows::UI::Xaml::Controls::Grid>())
+            {
+                winrt::Windows::UI::Xaml::Controls::Grid::SetRow(_s->root, 0);
+                winrt::Windows::UI::Xaml::Controls::Grid::SetColumn(_s->root, 0);
+                winrt::Windows::UI::Xaml::Controls::Grid::SetRowSpan(_s->root, 99);
+                winrt::Windows::UI::Xaml::Controls::Grid::SetColumnSpan(_s->root, 99);
+            }
+            auto s = _s;
+            auto wHost = winrt::make_weak(host);
+            auto wAnchor = winrt::make_weak(anchor);
+            const auto repos = [s, wHost, wAnchor](const winrt::Windows::Foundation::IInspectable&, const winrt::Windows::UI::Xaml::SizeChangedEventArgs&) {
+                _Reposition(s, wHost.get(), wAnchor.get());
+            };
+            // SizeChanged (not LayoutUpdated) on both: it fires on the first real arrange too, and
+            // the anchor only ever MOVES when one of the two resizes (the anchors here are
+            // host-centered / host-proportional). Writes inside are to the sibling panel only +
+            // change-gated — no layout cycle.
+            host.SizeChanged(repos);
+            anchor.SizeChanged(repos);
+        }
+
+        // Re-anchor: compute the mode's pin (top, right margin) and the ROOM the panel may grow
+        // into, refine MaxWidth (readability-capped) + MaxHeight (to the host's bottom). Too little
+        // room => the CRAMPED fallback: collapse the panel and lift every scope marker so the
+        // classic floating tips serve — flipped back the moment room returns. All writes are
+        // change-gated; the panel is a floating sibling, so none of them feed back into the
+        // SizeChanged that ran this (no layout cycle).
         static void _Reposition(const std::shared_ptr<State>& s,
                                 const winrt::Windows::UI::Xaml::Controls::Panel& host,
-                                const winrt::Windows::UI::Xaml::FrameworkElement& anchor,
-                                double gap)
+                                const winrt::Windows::UI::Xaml::FrameworkElement& anchor)
         {
             namespace WUX = winrt::Windows::UI::Xaml;
             namespace atd = agent_tip_details;
@@ -389,15 +487,51 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
 
-            const double room = x - gap - kEdgePadPx; // width available left of the anchor
-            const bool cramped = room < kMinRoomPx;
-            if (cramped != s->cramped)
+            const double anchorW = anchor.ActualWidth();
+            double top = 0.0; // margin.top — the panel's top edge
+            double right = 0.0; // margin.right — HorizontalAlignment::Right puts the panel's right edge at (hostW - right)
+            double room = 0.0; // how wide the panel may grow (leftward) at this placement
+            switch (s->mode)
             {
+            case AnchorMode::TopLeftOutside:
+                // Right edge `pad` (gap) px LEFT of the anchor; tops aligned; room = the space
+                // between the anchor and the host's left edge.
+                room = x - s->pad - kEdgePadPx;
+                top = std::max(0.0, y);
+                right = std::max(0.0, hostW - x + s->pad);
+                break;
+            case AnchorMode::TopRightAbove:
+                // Right edges ALIGNED; top pinned at the HOST's top — the empty zone ABOVE the
+                // anchor; room = the anchor's own width (the column it heads).
+                room = anchorW;
+                top = s->pad;
+                right = std::max(0.0, hostW - (x + anchorW));
+                break;
+            case AnchorMode::TopRightInside:
+                // Nested `pad` px inside the anchor's top-right corner; room = the anchor's width
+                // minus both pads.
+                room = anchorW - 2.0 * s->pad;
+                top = std::max(0.0, y + s->pad);
+                right = std::max(0.0, hostW - (x + anchorW) + s->pad);
+                break;
+            }
+
+            const bool cramped = room < kMinRoomPx;
+            // Sync on EVERY transition AND on the first computation (crampedSynced): the seed is
+            // cramped=true with the scope markers seeded ACTIVE, so a genuinely-cramped first
+            // layout takes this branch to push the markers OFF (floating serves) — without it the
+            // markers would keep suppressing while the panel stays hidden: no tips at all.
+            if (!s->crampedSynced || cramped != s->cramped)
+            {
+                s->crampedSynced = true;
                 s->cramped = cramped;
-                if (const auto scope = s->scopeRoot.get())
+                for (const auto& weakScope : s->scopeRoots)
                 {
-                    // The live suppression switch: floating tips take over while cramped.
-                    scope.SetValue(atd::LocalTipScopeProperty(), winrt::box_value(!cramped));
+                    if (const auto scope = weakScope.get())
+                    {
+                        // The live suppression switch: floating tips take over while cramped.
+                        scope.SetValue(atd::LocalTipScopeProperty(), winrt::box_value(!cramped));
+                    }
                 }
                 s->root.Visibility(!cramped && s->shown ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
             }
@@ -406,8 +540,6 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
 
-            const double top = std::max(0.0, y);
-            const double right = std::max(0.0, hostW - x + gap); // HorizontalAlignment::Right => right edge at (hostW - right) == anchor left - gap
             const double maxW = std::min(kMaxWidthPx, room);
             const double maxH = std::max(60.0, hostH - top - kEdgePadPx);
             if (std::abs(top - s->lastTop) > 0.5 || std::abs(right - s->lastRight) > 0.5)

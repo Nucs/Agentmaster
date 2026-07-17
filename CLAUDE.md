@@ -1963,14 +1963,22 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     surface — the hovered element's `AgentSetTip` text renders in ONE fixed panel (title auto-derived
     from the control's Header/Content, `AgentSetTipTitle` overrides) instead of a floating ToolTip
     chasing the pointer. `AttachScope(root)` = ONE bubbling PointerMoved per SCOPE (never per element
-    — the 68 GB lesson), immediate + STICKY (gaps between controls don't strobe it), and marks the
-    root so the floating host's open tick YIELDS inside (`LocalTipScopeProperty`, a live switch);
-    `AnchorTopLeftOutside(host, anchor)` pins the panel outside the anchor's top-LEFT (same top,
-    right edge glued to the anchor's left edge, growing only leftward), change-gated re-anchoring on
-    host/anchor SizeChanged. First consumer: the **Settings cog** (`_settingsLocalTip` — the 60+
-    per-control tips inside the card render left-outside it, untouched at their call sites); a window
-    too narrow to host the panel falls back to the classic floating tips automatically. Reusable by
-    any page/component at any designated area.
+    — the 68 GB lesson; multiple roots may feed one panel), immediate + STICKY (gaps between controls
+    don't strobe it), and marks the root so the floating host's open tick YIELDS inside
+    (`LocalTipScopeProperty`, a live switch); three change-gated anchors — `AnchorTopLeftOutside`
+    (left of the anchor, tops aligned) · `AnchorTopRightAbove` (right edges aligned, top at the
+    HOST's top) · `AnchorTopRightInside` (nested in the anchor's top-right corner) — all growing
+    only leftward; `SetClickThrough(true)` for placements floating OVER content (never eats a
+    click; the default swallows taps for over-a-modal-dim placements). THREE consumers: the
+    **Settings cog** (`_settingsLocalTip` — left-outside the card, tap-swallowing), the **Sessions
+    page** (`_sessionsLocalTip` — the header's empty right column above the detail pane,
+    click-through, kept across tab-switch restore like the scroll offset), and the **Manager tab**
+    (`_managerLocalTip` — nested in the Triage Board's top-right, click-through, scoped to the
+    toolbar/board/bottom regions — NOT `_root`, so the settings/claude-missing overlay cards stay
+    outside it; also retires the board cards' 4s tip hold-back *intrusiveness* rationale there —
+    the side panel updates immediately). All ~200 existing `AgentSetTip` call sites on these
+    surfaces feed the panels UNCHANGED; a window too narrow to host a panel falls back to the
+    classic floating tips automatically.
   - `src/cascadia/TerminalApp/AgentCopyActions.h` — the ONE shared `CopySessionField` action
     (Session Id · working-dir Path · Branch · Claude/Codex Launch CLI · Transcript · Summary) behind
     BOTH the per-tab overlay's copy menu (`AgentTabOverlay`) AND the Triage Board / Explorer-tree

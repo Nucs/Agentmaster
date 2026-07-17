@@ -787,6 +787,11 @@ namespace winrt::TerminalApp::implementation
         // right edge glued to the card's left edge, growing only leftward) instead of as a floating
         // ToolTip (suppressed inside the card's scope; a too-narrow window falls back to floating).
         AgentLocalTooltip _settingsLocalTip;
+        // Agentmaster (LocalTooltip): the Manager TAB's hover-description panel — the toolbar /
+        // Triage Board / Explorer Tree / Auto Testing regions' tips render in a click-through panel
+        // nested in the board's top-right corner (scoped per region, NOT on _root, so the settings /
+        // claude-missing overlay cards stay outside it — see _BuildLayout's wiring block).
+        AgentLocalTooltip _managerLocalTip;
         // Agentmaster: the cog's TOP TABS. The strip buttons + their content panels are parallel-indexed
         // (button i <-> panel i); _SwitchSettingsTab SWAPS panel i into the single _settingsScroll (the
         // ContentPresenter-swap idiom) and restyles the strip. Each section in _BuildSettingsOverlay fills

@@ -623,6 +623,19 @@ namespace winrt::TerminalApp::implementation
         Grid::SetRow(body, 1);
         host.Children().Append(body);
 
+        // ---- LocalTooltip (AgentLocalTooltip.h): the page's designated-area tooltips ----
+        // Hovering any tipped control (search box, scope toggles, rows, detail buttons, …) renders
+        // its description (title + text) in ONE fixed panel at the page's TOP-RIGHT — the header's
+        // right column is deliberately empty "alignment space" above the detail pane, so the panel
+        // lives exactly there (right edge aligned with the detail pane's, growing only leftward; a
+        // long text may extend down over the pane's top). Scoped to the whole page host; the
+        // floating tips inside are suppressed (a too-narrow window falls back to them).
+        // Click-through: it floats over content, so it must never eat a click.
+        _sessionsLocalTip.Initialize();
+        _sessionsLocalTip.SetClickThrough(true);
+        _sessionsLocalTip.AttachScope(host);
+        _sessionsLocalTip.AnchorTopRightAbove(host, rightScroll, 10.0);
+
         this->Root().Children().Append(host);
         Grid::SetRow(host, 1);
         Grid::SetRowSpan(host, 2);
@@ -770,6 +783,7 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             self->_sessionsPageHost.Visibility(Visibility::Visible);
+            self->_sessionsLocalTip.Hide(); // fresh open: the description panel stays hidden until the first hover
             self->_sessionsPageVisible.store(true, std::memory_order_relaxed);
             // Mark the page logically OPEN so leaving + returning to the Manager tab restores it as left
             // (the tab-switch seam only collapses; this intent is what tells it to re-open on return).
@@ -804,6 +818,11 @@ namespace winrt::TerminalApp::implementation
                 // Tooltips are popups too — collapsing the host does NOT hide an open one
                 // (the same popup-root reason the range popup is closed explicitly here).
                 SessCloseTipsIn(self->_sessionsPageHost);
+                // The LocalTooltip panel is in-tree (it collapses with the host), but an explicit
+                // close also drops its sticky content + hover throttle, so a RE-open starts
+                // hidden-until-hover. (A tab-switch away deliberately does NOT hide it — the page
+                // restores "as I left it", panel included, like the scroll offset.)
+                self->_sessionsLocalTip.Hide();
                 self->_sessionsPageHost.Visibility(Visibility::Collapsed);
                 self->_sessionsPageVisible.store(false, std::memory_order_relaxed);
                 if (self->_sessRangePopup)
