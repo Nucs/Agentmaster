@@ -660,7 +660,8 @@ namespace winrt::TerminalApp::implementation
                 tip += L" (" + pfn + L")";
             }
             tip += L"\nConfiguration " + config;
-            AgentSetTip(sub, winrt::hstring{ tip });
+            tip += L"\n\nExactly which build this is \x2014 quote it in a bug report. Release and Dev install side by side, so the channel says which of the two you are looking at.";
+            AgentSetTitledTip(sub, L"This build", winrt::hstring{ tip });
             panel.Children().Append(sub);
         }
 
@@ -814,7 +815,7 @@ namespace winrt::TerminalApp::implementation
         _setClaudeDetected.TextWrapping(TextWrapping::Wrap);
         _setClaudeDetected.Opacity(0.85);
         _setClaudeDetected.FontSize(12);
-        AgentSetTip(_setClaudeDetected, L"The native claude.exe Agentmaster resolved (PATH \xB7 %USERPROFILE%\\.local\\bin \xB7 behind an npm claude.cmd). The fleet view drives this binary, so a pure-Node Claude is unsupported \x2014 launch / resume / fork stay disabled until one is found.");
+        AgentSetTitledTip(_setClaudeDetected, L"Detected claude.exe", L"The native claude.exe Agentmaster found, looking on your PATH, then in %USERPROFILE%\\.local\\bin, then behind an npm claude.cmd. Everything here drives that binary directly \x2014 a Claude that is only the Node CLI can't be tracked, so launch / resume / fork stay disabled until a real .exe turns up. Set one explicitly below if the wrong one was picked.");
         panel.Children().Append(_setClaudeDetected);
         _setClaudeExePath = TextBox{};
         _setClaudeExePath.Header(winrt::box_value(L"Override claude.exe path"));
@@ -850,8 +851,14 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(_setStopOnError, L"When on, Tests Autorunner halts a session's queue as soon as it enters the Error state instead of sending the next prompt.");
         panel.Children().Append(_setStopOnError);
         _setPauseOnHuman = ToggleSwitch{};
-        _setPauseOnHuman.Header(winrt::box_value(L"Pause on human input"));
-        AgentSetTip(_setPauseOnHuman, L"When on, typing into a session's terminal yourself pauses its Tests Autorunner so a manual interruption isn't overwritten by the next queued send.");
+        _setPauseOnHuman.Header(winrt::box_value(L"Pause on human input (not wired up yet)"));
+        // HONESTY (reviewed 2026-07-17): this toggle currently does NOTHING. Scheduler.h's DecideAdvance
+        // gates on `lastHumanInputUnixMs != 0`, fed by SessionRegistry::NoteHumanInput — which has ZERO
+        // call sites in the tree, so LastHumanInputUnixMs is always 0 and the gate can never fire. It is
+        // the "feed pauseOnHumanInput from a TermControl input tap" follow-up (CLAUDE.md; PENDING_INPUT.md
+        // §4/§6) — the setting round-trips and the scheduler is ready, only the keystroke tap is missing.
+        // Say so rather than describe a behavior that doesn't happen; drop this caveat when it lands.
+        AgentSetTip(_setPauseOnHuman, L"Meant to hold a session's queue while you are typing into its terminal yourself, so an auto-send can't land mid-sentence.\n\nNot wired up yet: nothing reports your keystrokes to the Tests Autorunner, so this toggle has no effect today. Your choice is saved and takes effect once it is connected.\n\nA prompt you actually SEND does stop the queue \x2014 the session goes Running, and nothing is ever auto-sent mid-turn.");
         panel.Children().Append(_setPauseOnHuman);
 
         // === BEHAVIOR tab ===
@@ -928,7 +935,8 @@ namespace winrt::TerminalApp::implementation
 
             _setWaitingDecayText = TextBox{};
             _setWaitingDecayText.Width(96);
-            AgentSetTip(_setWaitingDecayText, L"How long a READ Waiting-for-you session waits before it may demote to Idle. Type a duration \x2014 combine days/hours/minutes:  d = days, h = hours, m = minutes  (a bare number = minutes).\n\nExamples:   3d   \x00B7   12h5m   \x00B7   2d4h30m   \x00B7   90m   \x00B7   45m   \x00B7   120 (= 2h)\n\nThe slider tops out at 7d, but you can type more here (it then sits maxed). The border turns red if the text can't be read. Use the \x201CNever\x201D toggle above to never decay.");
+            // No Header on the box/slider (the row shares one label above them), so both name themselves.
+            AgentSetTitledTip(_setWaitingDecayText, L"Waiting-for-you \x2192 Idle after", L"How long a session you have READ sits in Waiting-for-you before it may drop to Idle. Type a duration, combining days / hours / minutes:  d = days, h = hours, m = minutes  (a bare number means minutes).\n\nExamples:   3d   \x00B7   12h5m   \x00B7   2d4h30m   \x00B7   90m   \x00B7   45m   \x00B7   120 (= 2h)\n\nThis box is the real value \x2014 the slider beside it only reaches 7d, so anything longer typed here leaves it sitting at its maximum. The border turns red while the text can't be read. Nothing decays until you have actually visited the tab, and the \x201CNever\x201D toggle above stops it decaying at all.");
             _setWaitingDecayText.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) {
                 if (_waitingDecaySyncing || !_setWaitingDecayText)
                 {
@@ -969,7 +977,7 @@ namespace winrt::TerminalApp::implementation
             _setWaitingDecaySlider.Maximum(10080); // 7 days
             _setWaitingDecaySlider.StepFrequency(1);
             _setWaitingDecaySlider.VerticalAlignment(VerticalAlignment::Center);
-            AgentSetTip(_setWaitingDecaySlider, L"How long a Waiting-for-you session waits before it may demote to Idle \x2014 1 minute \x2026 7 days. It only demotes once you've READ it (an unread session keeps waiting past the timeout). The box on the left mirrors this and can go beyond 7 days. Use the toggle above for \x201Cnever\x201D.");
+            AgentSetTitledTip(_setWaitingDecaySlider, L"Waiting-for-you \x2192 Idle after", L"How long a session sits in Waiting-for-you before it may drop to Idle \x2014 1 minute to 7 days. It only ever drops once you have READ it: an unread session keeps waiting however long the timeout says. The box on the left mirrors this and accepts more than 7 days; the \x201CNever\x201D toggle above stops it decaying at all.");
             _setWaitingDecaySlider.ValueChanged([this](const IInspectable&, const Primitives::RangeBaseValueChangedEventArgs&) {
                 if (_waitingDecaySyncing || !_setWaitingDecaySlider || !_setWaitingDecayText)
                 {
@@ -1092,7 +1100,7 @@ namespace winrt::TerminalApp::implementation
             mkStateBox(_setNotifyWaiting, L"Waiting for you", L"Notify on Running \x2192 Waiting-for-you \x2014 the turn completed and the session waits for your next prompt (or asked a question).");
             mkStateBox(_setNotifyNeedsApproval, L"Needs approval", L"Notify on Running \x2192 Needs-approval \x2014 the session is blocked on a permission prompt or a question you must answer.");
             mkStateBox(_setNotifyIdle, L"Idle", L"Notify on Running \x2192 Idle \x2014 the session settled back to idle.");
-            mkStateBox(_setNotifyDone, L"Done", L"Notify on Running \x2192 Done \x2014 the session finished cleanly (claude exited).");
+            mkStateBox(_setNotifyDone, L"Done", L"Notify on Running \x2192 Done \x2014 the session ended and claude exited.");
             mkStateBox(_setNotifyError, L"Error", L"Notify on Running \x2192 Error \x2014 the turn died on an API failure (rate limit, overloaded, prompt too long, \x2026).");
         }
         _setNotifySuppressFocused = ToggleSwitch{};
@@ -1167,7 +1175,7 @@ namespace winrt::TerminalApp::implementation
         _titleNamingPreview.Opacity(0.65);
         _titleNamingPreview.TextWrapping(TextWrapping::NoWrap);
         _titleNamingPreview.Margin(Thickness{ 0, -2, 0, 4 });
-        AgentSetTip(_titleNamingPreview, L"A live preview: what these made-up working directories would name their tabs under the settings above.");
+        AgentSetTitledTip(_titleNamingPreview, L"Preview", L"What these made-up working directories would name their tabs under the settings above \x2014 re-derived through the real naming code as you change them, so what you see here is what a new session gets.");
         panel.Children().Append(_titleNamingPreview);
         _UpdateTitleNamingPreview(); // initial render (nothing selected yet -> the defaults)
         // FAVORITES.md §5a: which glyph marks a FAVORITE (starred) session on its live tab — Crown
@@ -1222,7 +1230,7 @@ namespace winrt::TerminalApp::implementation
         _setTabColorMode.Items().Append(winrt::box_value(L"Individual per tab")); // index 1 == TabColorMode::Individual
         _setTabColorMode.Items().Append(winrt::box_value(L"Inferred working directory")); // index 2 == TabColorMode::InferredWorkingDirectory
         _setTabColorMode.Items().Append(winrt::box_value(L"Remove colors")); // index 3 == TabColorMode::NoColor
-        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by the directory the session ACTUALLY works in \x2014 the deepest folder most of the files it reads/edits/creates share \x2014 re-detected as the session works, so a session that settles into one subtree takes that subtree's color.\n\x2022 Remove colors: NO tab is colored \x2014 session tabs, shell tabs (e.g. a PowerShell tab that kept a color), and the Manager tab alike \x2014 and \x201C" L"Change tab color\x201D is disabled on every tab. Nothing is deleted: folder/session colors and a shell tab's own color are kept (just not shown) \x2014 switch back to any other mode and they return exactly as they were.");
+        AgentSetTip(_setTabColorMode, L"How session tabs are colored.\n\x2022 Shared per working directory (default): every tab launched in a folder wears that folder's permanent color; picking a color recolors the whole folder.\n\x2022 Individual per tab: each session gets its own color (kept across close/reopen); picking a color changes only that tab.\n\x2022 Inferred working directory: like shared-per-directory, but keyed by where the session ACTUALLY works rather than where it was started. Every file it touches votes; the votes group into work areas \x2014 a git repository, or a top-level folder outside one \x2014 and the area with the most votes wins (a repo answers as the repo root, never deeper). Re-checked as the session works, so one that settles into another tree takes that tree's color. Scratch files under your temp folder never vote.\n\x2022 Remove colors: NO tab is colored \x2014 session tabs, shell tabs (e.g. a PowerShell tab that kept a color), and the Manager tab alike \x2014 and \x201C" L"Change tab color\x201D is disabled on every tab. Nothing is deleted: folder/session colors and a shell tab's own color are kept (just not shown) \x2014 switch back to any other mode and they return exactly as they were.\n\nOne exception, in every mode: a session launched straight in your home folder infers anyway \x2014 a bare \x201C" L"claude\x201D with no cd almost never works there, so its color follows the files it touches instead.");
         panel.Children().Append(_setTabColorMode);
         // Tab color modes — "Use .git folder to infer" (AppSettings::inferGitRoot, default ON): the
         // inferred working dir SNAPS to the enclosing git repository root (the folder holding .git —
@@ -1232,7 +1240,7 @@ namespace winrt::TerminalApp::implementation
         // meaningful in the Inferred mode, so it's enabled only while that mode is selected.
         _setInferGitRoot = ToggleSwitch{};
         _setInferGitRoot.Header(winrt::box_value(L"Use .git folder to infer"));
-        AgentSetTip(_setInferGitRoot, L"When inferring the working directory, treat the enclosing git repository as the answer: if most of the files a session touches live under one repo (the nearest folder holding .git \x2014 a worktree counts as its own repo), that repo root is the inferred directory \x2014 so an in-repo session keeps the same color as in \x201Cshared per working directory\x201D. When off, the deepest folder holding the majority of the touched files is used as-is. Default on; applies while \x201CTab coloring\x201D is \x201CInferred working directory\x201D.");
+        AgentSetTip(_setInferGitRoot, L"When inferring the working directory, let a git repository be the answer: files are grouped by the repo enclosing them (the nearest folder holding .git \x2014 a worktree counts as its own), and if that repo is where most of a session's work lands, its ROOT is the inferred directory \x2014 never a folder inside it, since the repo is one working area. That is what keeps an in-repo session the same color it has under \x201Cshared per working directory\x201D, so the two modes only ever disagree when a session genuinely works outside its own repo.\n\nWhen off, files group by their top-level folder instead, and the pick walks down only as long as one child holds more than half of its parent's files \x2014 so a 60/40 split between two subfolders stays on the folder above them.\n\nDefault on; only applies while \x201CTab coloring\x201D is \x201CInferred working directory\x201D.");
         _setInferGitRoot.IsEnabled(false); // enabled by the combo handler / the seed when Inferred is selected
         _setTabColorMode.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) {
             if (_setInferGitRoot && _setTabColorMode)
@@ -1314,7 +1322,8 @@ namespace winrt::TerminalApp::implementation
             swatchBtn.Padding(Thickness{ 4, 3, 4, 3 });
             swatchBtn.Content(_flashRingSwatch);
             swatchBtn.Flyout(flyout);
-            AgentSetTip(swatchBtn, L"Pick the tab status-dot \x201Cunread\x201D flash-ring color. The picker's alpha slider sets its opacity. Default: red at 80% opacity.");
+            // The swatch button's content is the color preview itself — nothing to derive a heading from.
+            AgentSetTitledTip(swatchBtn, L"Status flashing color", L"The color of the ring that pulses around a tab's status dot when a session you weren't looking at stops running and wants you \x2014 it clears the moment you visit the tab. The picker's alpha slider is its opacity, so one control sets both. Default: red at 80%.");
             row.Children().Append(swatchBtn);
 
             panel.Children().Append(row);
@@ -1329,6 +1338,7 @@ namespace winrt::TerminalApp::implementation
         // the next scan tick, board cards on the next rebuild). A local lambda builds both identical rows.
         {
             auto makeDotsColorRow = [&panel](const wchar_t* labelText,
+                                             const wchar_t* tipTitle,
                                              const wchar_t* tipText,
                                              const wchar_t* resetText,
                                              Color defColor,
@@ -1389,19 +1399,21 @@ namespace winrt::TerminalApp::implementation
                 swatchBtn.Padding(Thickness{ 4, 3, 4, 3 });
                 swatchBtn.Content(swatch);
                 swatchBtn.Flyout(flyout);
-                AgentSetTip(swatchBtn, tipText);
+                AgentSetTitledTip(swatchBtn, tipTitle, tipText); // the content is the color preview — nothing derives a heading
                 row.Children().Append(swatchBtn);
 
                 panel.Children().Append(row);
             };
 
             makeDotsColorRow(L"Pending dots (on dark tabs)",
-                             L"Pick the color of the unsent-draft \x201C" L"3 dots\x201D shown on a DARK tab / card background. The picker's alpha slider sets its opacity. Default: gold.",
+                             L"Pending dots (on dark tabs)",
+                             L"The three dots that pulse on a tab and its card when you have typed a message into a session but not sent it. This is the color used against a DARK tab background \x2014 the light half of the pair, picked automatically so the dots are never invisible. The picker's alpha slider is its opacity. Default: gold.",
                              L"Reset to default (gold)",
                              ColorHelper::FromArgb(0xFF, 0xE0, 0xA9, 0x2B),
                              _setPendingLightPicker, _pendingLightSwatch);
             makeDotsColorRow(L"Pending dots (on light tabs)",
-                             L"Pick the color of the unsent-draft \x201C" L"3 dots\x201D shown on a LIGHT tab / card background. The picker's alpha slider sets its opacity. Default: deep amber.",
+                             L"Pending dots (on light tabs)",
+                             L"The same unsent-draft dots, in the color used against a LIGHT tab background \x2014 the dark half of the pair. Which of the two a tab gets is decided by how light its own color is, so neither can vanish into it. The picker's alpha slider is its opacity. Default: deep amber.",
                              L"Reset to default (amber)",
                              ColorHelper::FromArgb(0xFF, 0x5A, 0x3E, 0x00),
                              _setPendingDarkPicker, _pendingDarkSwatch);
@@ -1430,7 +1442,7 @@ namespace winrt::TerminalApp::implementation
             _overlayOpacityTrack.Height(kOverlayTrackH);
             _overlayOpacityTrack.Margin(Thickness{ 0, 4, 0, 4 });
             _overlayOpacityTrack.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(_overlayOpacityTrack, L"Drag the two dots to set how visible the per-tab overlay badge is \x2014 the LEFT dot is its REST opacity (idle; the transparent end), the RIGHT dot its HOVER opacity (on pointer-over; the solid end). The dots can't cross.");
+            AgentSetTitledTip(_overlayOpacityTrack, L"Overlay opacity", L"How visible the badge in a terminal tab's top-right corner is. Drag the two dots: the LEFT one sets how it looks at rest (the transparent end of the rail), the RIGHT one how bright it gets when you point at it (the solid end). They can't cross, so hover is never dimmer than rest.");
 
             // The gradient rail (transparent left -> solid white right). Non-hit-test so only the dots
             // capture the pointer; a faint outline keeps the transparent end visible on the dark card.
@@ -1531,8 +1543,8 @@ namespace winrt::TerminalApp::implementation
             };
             _overlayRestThumb = makeDot(true);
             _overlayHoverThumb = makeDot(false);
-            AgentSetTip(_overlayRestThumb, L"REST opacity \x2014 how visible the overlay badge is when idle (drag left for more transparent). Can't go past the hover dot.");
-            AgentSetTip(_overlayHoverThumb, L"HOVER opacity \x2014 how visible the overlay becomes on pointer-over (drag right for more solid). Can't drop below the rest dot.");
+            AgentSetTitledTip(_overlayRestThumb, L"Rest opacity", L"How visible the overlay badge is while you are not pointing at it \x2014 drag left to fade it further into the terminal. It stops at the hover dot; it can never be brighter than hover.");
+            AgentSetTitledTip(_overlayHoverThumb, L"Hover opacity", L"How bright the overlay badge becomes when you point at it \x2014 drag right for more solid. It stops at the rest dot; it can never be dimmer than rest.");
             // Hover dot LAST so it sits on top + stays grabbable when the two dots coincide.
             _overlayOpacityTrack.Children().Append(_overlayRestThumb);
             _overlayOpacityTrack.Children().Append(_overlayHoverThumb);
@@ -1553,7 +1565,7 @@ namespace winrt::TerminalApp::implementation
         _setProfileDir.TextWrapping(TextWrapping::Wrap);
         _setProfileDir.Opacity(0.85);
         _setProfileDir.FontSize(12);
-        AgentSetTip(_setProfileDir, L"This install's active profile folder \x2014 where all sessions, settings, hooks, and window layouts are stored. A staged change shows as current \x2192 new (after restart).");
+        AgentSetTitledTip(_setProfileDir, L"Active profile folder", L"Where this install keeps everything it remembers \x2014 your sessions, these settings, the hooks, the window layouts, the logs. Release and Dev each get their own by default, which is how they coexist without touching each other's state. A change you have staged reads as current \x2192 new (after restart).");
         panel.Children().Append(_setProfileDir);
         auto changeProfile = Button{};
         changeProfile.Content(winrt::box_value(L"Change profile folder\x2026"));
@@ -2501,7 +2513,8 @@ namespace winrt::TerminalApp::implementation
         }
         makeEditor(_setEnv);
         _setEnv.PlaceholderText(L"NAME=VALUE\nNAME=VALUE");
-        AgentSetTip(_setEnv, L"Environment variables applied to every launched session (Claude and Codex). One NAME=VALUE per line; '#' starts a comment.");
+        // The editor has no Header (the tab strip above it is the label), so it names itself.
+        AgentSetTitledTip(_setEnv, L"Global environment variables", L"Variables handed to every session Agentmaster launches, Claude and Codex alike, whatever directory it starts in. One NAME=VALUE per line; '#' starts a comment. The border turns green / amber / red as you type, and the line beneath it says what it made of the text.");
         _setEnv.TextChanged([this](const IInspectable&, const TextChangedEventArgs&) { _RefreshEnvLex(false); });
         wrapInBorder(_setEnv, _setEnvBorder);
         _envGlobalPanel.Children().Append(_setEnvBorder);
