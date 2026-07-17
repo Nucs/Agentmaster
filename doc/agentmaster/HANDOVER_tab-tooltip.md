@@ -217,19 +217,43 @@ tooltip code off the UI thread.
 
 ## 6. The content builders (`Tt*`)
 
-- `TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText)` → a dark `Border`
-  (bg `#FF202020`, 1px `#40FFFFFF` border, corner radius 4, padding 10/8, **MaxWidth 460**) wrapping a
-  vertical `StackPanel`:
+- `TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, bodyText, …, maxCardHeight)` → a
+  dark `Border` (bg `#FF202020`, 1px `#40FFFFFF` border, corner radius 4, padding 10/8,
+  **MaxWidth `kTtCardMaxWidth` = 660**) wrapping a vertical `StackPanel`:
   - **Header** (a 2-col `Grid`): left = a 9px state-colored `Ellipse` (`accent`, 1px black stroke) +
     the title (Cascadia Mono 13, semibold, ellipsized, NoWrap); right = `folderBranch` (Cascadia Mono
     11, dim `#B0B0B0`, ellipsized).
   - **State line** (Cascadia Mono 11, colored `accent`): `<state> · <ago> · <why> · ⚠ unread`.
   - **Meta line** (Cascadia Mono 11, dim): `claude|codex · model · effort · <mode/⚡ bypass>`.
-  - **Divider** (full-width 1px `Border`) + the Summary body, **line-truncated** (`kTtBodyMaxLines` 32 +
-    a dim `"… +K more (see the summary panel)"` marker) inside a plain **`Grid` with MaxHeight 360**
+  - **Divider** (full-width 1px `Border`) + the Summary body, **line-truncated** (`kTtBodyMaxLines` +
+    a dim `"… +K more (see the summary panel)"` marker) inside a plain **clipping `Grid`**
     (UWP layout-clips overflow). **Deliberately NOT a ScrollViewer** — a ScrollViewer entering the ToolTip
     popup activates DirectManipulation, which fail-fasted the app (crash #7, §9); and the tooltip is
     hit-test-invisible, so it could never scroll anyway.
+
+### Sizing — width is flat, height is a WINDOW FRACTION
+
+Height is the dimension that stretches (the card grows downward with the Summary body), so it is the one
+budgeted against the window rather than hardcoded — the old flat `MaxHeight(360)` body clip topped the
+whole card out near half the screen:
+
+- **Width** — `kTtCardMaxWidth` **660** (was 460; +200, and since the card is centered under its tab that
+  spends 100 per side). `kTagLineBudget` (the tag-row greedy packer) is derived from it, so it can't drift.
+- **Height** — `_UpdateTabAgentToolTip` measures `Root().ActualHeight()` (the XAML island root == the window
+  client area; the tooltip renders in the island's popup root, so the window bounds it regardless — and it
+  IS the screen when maximized, the normal case) and passes `kTtCardHeightFraction` (**0.80**) of it as
+  `maxCardHeight`. The builder hands the body `maxCardHeight − kTtChromeReserve` (170 — an estimate of the
+  header/state/meta/tags/divider/padding rows, since nothing is laid out at build time), floored at
+  `kTtMinBodyHeight` (120). An unmeasured root (0) falls back to `kTtCardFallbackHeight` (460 ≈ the old
+  fixed card), so a pre-layout build is never worse than before.
+- **`kTtBodyMaxLines`** is no longer a constant: it is derived from the body budget with a deliberately
+  UNDER-estimated per-line height (`/ 11.0`, clamped 24–160) so it stays a pure **element-count backstop**
+  sitting ABOVE what the clip can show — the clip, not the truncation, is the visual cut. That reproduces
+  the old hardcoded pair exactly at the old budget (360 / 11 = 32).
+- The budget rides the **re-host signature** (coarsened to a 50px grain, the `tagsOpacity` precedent) so a
+  window resize re-hosts an already-built card without a drag re-hosting on every pixel.
+- `TtBuildObserveCard` (the `○ <kind> · unlinked` twin) keeps its flat **MaxWidth 420** — it is two lines
+  and never stretches.
 - `TtBuildSummaryBody(text)` → a `StackPanel` of Cascadia Mono `TextBlock`s; the sentinel line
   `\x1F` becomes a full-width `Border` rule (the same convention the overlay's summary panel uses).
   The text is the `RenderSessionSummaryBox(..., full=false)` output (numbered messages + files; no

@@ -265,11 +265,37 @@ namespace
         return stack;
     }
 
+    // The tab-tooltip card's SIZE budget.
+    //
+    // Width is a flat cap: the card is anchored under a tab and centered on it, so every extra pixel of
+    // width spends half to each side. 660 = the historical 460 + 200 (100 per side) -- enough that a
+    // real session title and a numbered prompt line stop wrapping so hard, without the card sprawling
+    // across the strip.
+    //
+    // Height is a WINDOW FRACTION, because height is the dimension that actually stretches: the card
+    // grows downward with the Summary body (a chatty session has dozens of numbered prompts + files),
+    // and the old flat 360px body clip topped the whole card out near half the screen. The caller
+    // measures the XAML island root -- the window client area, which IS the screen when maximized, the
+    // normal case -- and passes kTtCardHeightFraction of it; the tooltip renders in the island's popup
+    // root, so the window is the true bound regardless. A non-positive budget (root not laid out yet)
+    // falls back to the historical fixed size, so an unmeasured build is never worse than before.
+    constexpr double kTtCardMaxWidth = 660.0; // 460 + 200 (100 per side)
+    constexpr double kTtCardHeightFraction = 0.80; // "up to 80% of the screen"
+    constexpr double kTtCardFallbackHeight = 460.0; // ~= the pre-budget card: the 360px body clip + its chrome
+    // Chrome the body does NOT get: header (a title wraps to <=3 lines) + folder/branch + state + meta +
+    // dir-detail + up to a couple of tag rows + the divider + the card padding + the "+N more" line.
+    // An estimate -- nothing is laid out at build time -- so it is deliberately generous; overshooting
+    // only costs the body a line or two, undershooting would let the card exceed the fraction.
+    constexpr double kTtChromeReserve = 170.0;
+    constexpr double kTtMinBodyHeight = 120.0; // a tiny window still shows a few body lines
+
     // Build the whole tab-tooltip card: a dark, rounded Border (summary-panel chrome) holding the header
     // (state dot + a wrapping title, which owns the full card width), then one dim line each for the
     // folder/branch and the state (colored to match the tab dot) and the kind/model/effort/perm, and --
     // once the Summary body has loaded -- a divider + the numbered Summary box, height-capped by LINE
     // TRUNCATION + a plain clipping Grid (the full, scrollable view is the pencil-toggled summary panel).
+    // maxCardHeight is the caller's window-derived budget for the WHOLE card (see the constants above);
+    // <= 0 means "not measured" -> the historical fixed size.
     //
     // NO ScrollViewer -- this is a hard rule, learned from a proven fail-fast (2026-07-02, full-dump stowed
     // backtrace): when the ToolTip popup opens, its content tree ENTERs the live tree, and a ScrollViewer's
@@ -288,10 +314,14 @@ namespace
                                                                   const std::wstring& dirDetailLine,
                                                                   const std::vector<std::pair<std::wstring, winrt::Windows::UI::Color>>& tagChips,
                                                                   double tagsOpacity,
-                                                                  const winrt::hstring& bodyText)
+                                                                  const winrt::hstring& bodyText,
+                                                                  double maxCardHeight)
     {
         using namespace winrt::Windows::UI::Xaml;
         using namespace winrt::Windows::UI::Xaml::Controls;
+
+        const double cardHeight = maxCardHeight > 0.0 ? maxCardHeight : kTtCardFallbackHeight;
+        const double bodyMaxHeight = std::max(kTtMinBodyHeight, cardHeight - kTtChromeReserve);
 
         StackPanel col;
         col.Orientation(Orientation::Vertical);
@@ -411,7 +441,10 @@ namespace
             tagRows.Opacity(tagsOpacity);
             StackPanel line{ nullptr };
             size_t lineChars = 0;
-            constexpr size_t kTagLineBudget = 52; // ~mono-11 chars that fit the 460px card minus padding
+            // ~mono-11 chars that fit the card minus its padding. Derived from kTtCardMaxWidth so it can't
+            // drift stale beside it (it was a hand-tuned 52 back when the card was a hardcoded 460 wide --
+            // the ratio, kept here, already allows for the 10px inter-chip gaps).
+            const size_t kTagLineBudget = static_cast<size_t>(52.0 * kTtCardMaxWidth / 460.0);
             for (const auto& [tagName, tagColor] : tagChips)
             {
                 if (!line || (lineChars > 0 && lineChars + tagName.size() > kTagLineBudget))
@@ -458,9 +491,12 @@ namespace
             rule.Margin(ThicknessHelper::FromLengths(0, 4, 0, 4));
             col.Children().Append(rule);
 
-            // Truncate the body to a sane line count (bounds the XAML element count AND the typical
-            // height; the old ScrollViewer's 360px cap made anything past ~24 rows invisible anyway).
-            constexpr size_t kTtBodyMaxLines = 32;
+            // Truncate the body to a sane line count: a BACKSTOP that bounds the XAML element count, not
+            // the visual cut (the clipping Grid below is that). Derived from the height budget with a
+            // deliberately UNDER-estimated per-line height, so it always sits above what the clip can
+            // actually show -- the same relationship the old hardcoded pair had, which this reproduces
+            // exactly at the old budget (360px body / 11 = 32 lines).
+            const size_t kTtBodyMaxLines = std::clamp<size_t>(static_cast<size_t>(bodyMaxHeight / 11.0), 24, 160);
             std::wstring bodyStr{ bodyText };
             size_t hiddenLines = 0;
             {
@@ -489,7 +525,7 @@ namespace
             // DirectManipulation activation on popup-enter is the proven 0xC000027B fail-fast; see the
             // function comment). A Grid carries no manipulation machinery.
             Grid bodyClip;
-            bodyClip.MaxHeight(360);
+            bodyClip.MaxHeight(bodyMaxHeight);
             bodyClip.Children().Append(TtBuildSummaryBody(bodyStr));
             col.Children().Append(bodyClip);
 
@@ -511,7 +547,7 @@ namespace
         root.BorderThickness(ThicknessHelper::FromUniformLength(1));
         root.CornerRadius(CornerRadiusHelper::FromUniformRadius(4));
         root.Padding(ThicknessHelper::FromLengths(10, 8, 10, 8));
-        root.MaxWidth(460);
+        root.MaxWidth(kTtCardMaxWidth);
         root.Child(col);
         return root;
     }
@@ -2190,9 +2226,25 @@ namespace winrt::TerminalApp::implementation
             sig += L'\x1f';
         }
         sig += std::to_wstring(bodyMtime);
+        // The card's height budget: 80% of the window (== the screen when maximized, the normal case;
+        // the tooltip renders in the island's popup root, so the window bounds it regardless). Measured
+        // here because the builder is a free helper with no page. An unmeasured root (0) tells it to use
+        // its fixed fallback. Like tagsOpacity above it rides the sig -- coarsened to a 50px grain so a
+        // resize re-hosts an already-built card, without a drag re-hosting on every pixel.
+        double cardMaxHeight = 0.0;
+        try
+        {
+            if (const auto root = Root())
+            {
+                cardMaxHeight = root.ActualHeight() * ::kTtCardHeightFraction;
+            }
+        }
+        CATCH_LOG();
+        sig += L'\x1f';
+        sig += std::to_wstring(static_cast<int>(cardMaxHeight / 50.0));
         if (const auto sit = _tabTooltipSig.find(sessionId); sit == _tabTooltipSig.end() || sit->second != sig)
         {
-            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText), winrt::hstring{ sig }, swapWhileOpen);
+            impl->SetAgentToolTip(TtBuildTooltipCard(accent, title, folderBranch, stateText, metaText, dirDetailLine, tagChips, tagsOpacity, bodyText, cardMaxHeight), winrt::hstring{ sig }, swapWhileOpen);
             _tabTooltipSig[sessionId] = sig;
         }
 
