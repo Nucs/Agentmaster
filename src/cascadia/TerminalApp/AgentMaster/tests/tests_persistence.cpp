@@ -620,8 +620,14 @@ void TestTabNamingAndColor()
     CHECK(DeriveSessionTitle(L"C:\\repos\\Potato.Tomato.SlangGang", optAsIs) == L"Potato.Tomato.SlangGang", "FolderName: name kept verbatim");
     CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\bin\\Debug", optAsIs) == L"NumSharp", "FolderName: generic walk still applies");
     {
-        const std::wstring leaf(35, L'a');
-        CHECK(DeriveSessionTitle(L"C:\\x\\" + leaf, optAsIs) == std::wstring(30, L'a') + L"...", "FolderName: >30 chars truncated with ...");
+        // The trim is a 255-char SAFETY NET only — real (even long) names stay whole; past 255 the
+        // title becomes its first 252 chars + "..." (== 255 total).
+        const std::wstring leaf(100, L'a');
+        CHECK(DeriveSessionTitle(L"C:\\x\\" + leaf, optAsIs) == leaf, "FolderName: a 100-char name is NOT trimmed (the cap is 255)");
+        const std::wstring exact(255, L'a');
+        CHECK(DeriveSessionTitle(L"C:\\x\\" + exact, optAsIs) == exact, "FolderName: exactly 255 chars stays whole");
+        const std::wstring huge(300, L'a');
+        CHECK(DeriveSessionTitle(L"C:\\x\\" + huge, optAsIs) == std::wstring(252, L'a') + L"...", "FolderName: >255 chars trims to 252 + ... (255 total)");
     }
 
     // TwoFolders: "<parent>/<folder>"; a folder directly under the drive root has no parent folder.
@@ -667,7 +673,9 @@ void TestTabNamingAndColor()
         o.branch.clear();
         CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"source/Agentmaster", "BranchTwoFolders: no branch -> the TwoFolders output");
         o.branch = L"feature/a-very-long-branch-name";
-        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == std::wstring{ L"feature/a-very-long-branch-name/source/Agentmaster" }.substr(0, 30) + L"...", "BranchTwoFolders: long combo capped at 30 + ...");
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == L"feature/a-very-long-branch-name/source/Agentmaster", "BranchTwoFolders: a long (but <255) combo stays whole");
+        o.branch = std::wstring(300, L'b');
+        CHECK(DeriveSessionTitle(L"K:\\source\\Agentmaster", o) == std::wstring(252, L'b') + L"...", "BranchTwoFolders: past 255 trims to 252 + ... (255 total)");
     }
 
     // '\' -> '/' normalization is UNCONDITIONAL (no setting) and title-wide — a backslash in any

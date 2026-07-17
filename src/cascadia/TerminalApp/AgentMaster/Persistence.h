@@ -178,7 +178,8 @@ namespace Agentmaster
     // folder name as-is / "<parent>/<folder>" / capitals only / the git branch alone or prefixed —
     // "<branch>/<folder>", "<branch>/<parent>/<folder>"; the branch is opts.branch, an INPUT) +
     // the output transforms (TabTitleCase; whitespace -> '_'; '\' -> '/' unconditionally). The
-    // result is capped at 30 chars ("..." appended past it) and never empty ("claude"). The 2-arg
+    // result is never empty ("claude"); as a safety net only, a title past 255 chars trims to
+    // 252 + "..." (== 255 total — real names stay whole, the strip visually trims). The 2-arg
     // form is PURE (options passed in — tests + the cog's live example preview); the 1-arg form
     // applies the cog's CURRENT tabTitle* settings (LoadAppSettings — read fresh from disk, so a
     // Save affects the very next launch) and resolves the branch (ReadGitBranchForDir) only when

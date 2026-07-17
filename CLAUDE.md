@@ -1162,7 +1162,8 @@ What works, by area:
   `branch/folder` / `branch/parent/folder` — `ReadGitBranchForDir`, resolved only for those modes;
   no branch ⇒ component dropped) — + the Title-case / spaces→`_` transforms and an unconditional
   `\`→`/` normalization
-  (`TabTitleNaming`/`TitleNamingOptions`; capped at 30 chars + `...`, never empty), and each tab is
+  (`TabTitleNaming`/`TitleNamingOptions`; never empty, trimmed only past 255 chars to 252 + `...`),
+  and each tab is
   **colored per working directory** — a
   **permanent** color a dir keeps across tabs/windows/restarts (persisted to `dir-colors.json`): the
   dir's persisted color, or a fresh **collision-free auto color** (first in the dir's seeded probe
@@ -1502,7 +1503,8 @@ What works, by area:
   Branch then falls back to the folder name), plus a **Title case** dropdown
   (Default/Lowercase/Uppercase) and a **Spaces to underscores** toggle — every mode still walks past
   generic `bin/obj/Debug/…` segments first, normalizes any `\` in the title to `/` (unconditional, no
-  setting), and caps the result at 30 chars + `...`; a **live example
+  setting), and trims only a degenerate >255-char title to 252 + `...` (a safety net — real names
+  stay whole, the strip trims visually); a **live example
   preview** under the controls re-derives four made-up paths through the real 2-arg derive on every
   change (`_UpdateTitleNamingPreview` — a Branch* pick previews with a made-up `feature/ui` branch,
   noted in the block's first line). Applies at the NEXT launch/adopt/fork-from-disk of an UNTITLED

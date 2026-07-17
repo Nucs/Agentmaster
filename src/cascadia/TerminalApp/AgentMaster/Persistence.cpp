@@ -1614,11 +1614,12 @@ namespace Agentmaster
             }
         }
 
-        // Keep the tab strip sane in every mode: a runaway name truncates past 30 chars (the
-        // historical cap).
-        if (title.size() > 30)
+        // A SAFETY NET only, in every mode: a runaway title trims past 255 chars to 252 + "..."
+        // (== 255 total). Deliberately generous — real folder/branch combos stay whole and the tab
+        // strip's own visual trimming handles display width; this only bounds a degenerate input.
+        if (title.size() > 255)
         {
-            return title.substr(0, 30) + L"...";
+            return title.substr(0, 252) + L"...";
         }
         return title;
     }
