@@ -146,17 +146,35 @@ namespace winrt::TerminalApp::implementation
         // Gated on the latch so it does NOT re-capture (and clobber) a good close/quit-seam flush after
         // _claudeTabs was already cleared; the geometry fallback in _CaptureWindowRecord keeps the
         // last-known position/size if the window is already too far torn down to read it live.
+        // Agentmaster (terminate-net — teardown can run on a BACKGROUND thread): ~TerminalPage assumes
+        // UI-thread execution (it stops DispatcherTimers + reads XAML in the flush/archive here — all
+        // UI-affine), but a fire_and_forget observer/sweep coroutine can hold the last get_strong() ref
+        // and, when the window closes mid-tick, its resume_foreground() can't reach the dying dispatcher
+        // and completes INLINE on the thread-pool thread — so releasing that last ref runs THIS
+        // destructor THERE. A UI-affine call then throws RPC_E_WRONG_THREAD, and a throw escaping a
+        // destructor => std::terminate (0xC0000409 FATAL_APP_EXIT — hit live after a tab drag-drop tore a
+        // window down while _ObserverProbe was mid-tick). So EVERY UI-affine step below is individually
+        // guarded (CATCH_LOG), while the thread-safe engine detaches (Rule #10) stay bare so a guarded
+        // throw can never skip them. On the normal UI-thread teardown nothing throws, so this is inert.
         if (!_windowRecordTeardownFlushed)
         {
-            _FlushWindowRecord();
+            try
+            {
+                _FlushWindowRecord();
+            }
+            CATCH_LOG();
             _windowRecordTeardownFlushed = true;
         }
 
         // Agentmaster (lifecycle gap #1): archive any of this window's still-live sessions before we
         // detach. Normally CloseWindow already did this (deterministically, before raising
         // CloseWindowRequested); this is the catch-all for quit-all / any teardown path that bypassed
-        // it. Idempotent — a no-op if CloseWindow already cleared _claudeTabs.
-        _ArchiveWindowSessionsOnTeardown();
+        // it. Idempotent — a no-op if CloseWindow already cleared _claudeTabs. Guarded (bg-thread net).
+        try
+        {
+            _ArchiveWindowSessionsOnTeardown();
+        }
+        CATCH_LOG();
 
         if (_sessionRegistry && _adoptionToken)
         {
@@ -174,16 +192,27 @@ namespace winrt::TerminalApp::implementation
         {
             _scanner->RemoveLivenessProbe(_livenessToken);
         }
-        // Agentmaster (alt+up/down prompt nav): stop the 30 s focused-refresh timer (UI thread, safe).
+        // Agentmaster (alt+up/down prompt nav): stop the 30 s focused-refresh timer. DispatcherTimer is
+        // UI-thread-affine, so Stop() throws RPC_E_WRONG_THREAD on a background-thread teardown (see the
+        // terminate-net note above) — guard it. Unstopped is harmless: the timer dies with the page and
+        // its Tick captures get_weak().
         if (_promptNavRefreshTimer)
         {
-            _promptNavRefreshTimer.Stop();
+            try
+            {
+                _promptNavRefreshTimer.Stop();
+            }
+            CATCH_LOG();
         }
-        // Agentmaster (eager-init "Activate All Tabs" pacing): stop a mid-flight activate-all drip —
-        // its queue dies with the page; the weak Tick would no-op anyway (UI thread, safe).
+        // Agentmaster (eager-init "Activate All Tabs" pacing): stop a mid-flight activate-all drip — its
+        // queue dies with the page; the weak Tick would no-op anyway. Same UI-affine guard as above.
         if (_activateAllTimer)
         {
-            _activateAllTimer.Stop();
+            try
+            {
+                _activateAllTimer.Stop();
+            }
+            CATCH_LOG();
         }
         // Agentmaster (cross-window activate): drop this window's activate sink from the shared
         // engine — a stray fan-out after teardown is already a safe no-op (the sink captures
@@ -321,6 +350,7 @@ namespace winrt::TerminalApp::implementation
     {
         if (_tabStripScrollViewer || !_tabView)
         {
+            _BoostTabStripCacheForDrag(); // idempotent (latched) — retries until the ItemsStackPanel realizes
             return;
         }
 
@@ -331,6 +361,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         _tabStripScrollViewer = sv;
+        _BoostTabStripCacheForDrag(); // MUX drag-AV candidate — keep every tab header realized (strip is realized NOW)
         _tabStripViewChangedRevoker = sv.ViewChanged(winrt::auto_revoke, [weakThis = get_weak()](auto&&, auto&&) {
             if (auto page = weakThis.get())
             {
@@ -1416,10 +1447,76 @@ namespace winrt::TerminalApp::implementation
     // or `ItemsWrapGrid`; a plain `StackPanel` is a legal host only for a bare ItemsControl, so the
     // ListView's internal panel casts return null and the render pass null-derefs. (The claim "MUX has
     // ZERO code dependency on ItemsStackPanel" ignored that the *system* ListViewBase — not MUX — owns
-    // that dependency.) There is NO legal non-virtualizing ItemsPanel for a ListView, so
-    // de-virtualization is unreachable at our layer; the drag AV's only real mitigations are the belts
-    // below plus (product decision) disabling MUX tab-drag reorder/tear-out. The swap fixed the drag
-    // AV but replaced a user-triggered crash with a 100%-unlaunchable app — hence removed.
+    // that dependency.) SWAPPING the panel is therefore unreachable at our layer, and the swap fixed
+    // the drag AV only by replacing a user-triggered crash with a 100%-unlaunchable app (hence removed).
+    // The CANDIDATE that keeps BOTH drag AND a legal panel is _BoostTabStripCacheForDrag() below: leave
+    // the ItemsStackPanel in place (a legal ModernCollectionBasePanel — no render corruption) and only
+    // crank its CacheLength so every tab header stays realized, which makes ContainerFromIndex(i)
+    // non-null for all i and the MUX loop safe. It needs runtime drag-verification (a large cache is a
+    // realization HINT, not a hard guarantee); the belts below stay as the backstop.
+
+    // Agentmaster: MUX TabView drag-start AV mitigation (CANDIDATE, pending drag-verification) — keep
+    // every tab header REALIZED so MUX's FindTabViewItemFromDragItem fallback loop
+    // (`ContainerFromIndex(i).Content()`) never meets a null (derealized) container. Unlike the removed
+    // 0.6.7.2 swap, we do NOT replace the panel (a plain StackPanel is illegal for a ListView and
+    // crashed the render pass): we keep the ListView's OWN virtualizing ItemsStackPanel — a legal
+    // ModernCollectionBasePanel — and only raise its CacheLength (the count of viewports-worth of items
+    // kept realized on each side of the viewport). A cache large enough to span the whole strip means
+    // nothing recycles, so ContainerFromIndex(i) is non-null for every i. No panel swap => no
+    // re-parenting, no render-tree corruption; it's a pure property write on the EXISTING, live
+    // ItemsPanelRoot. Idempotent + latched once applied; retried by _EnsureTabStripScrollViewer's
+    // callers until the panel is realized (ItemsPanelRoot is null until the ListView first measures with
+    // items). If drag-testing shows the cache doesn't HARD-prevent the null (a recycle under a fast
+    // scroll, or ItemsPanelRoot not resolvable as an ItemsStackPanel), fall back to disabling MUX
+    // tab-drag reorder/tear-out.
+    void TerminalPage::_BoostTabStripCacheForDrag()
+    {
+        if (_tabStripCacheBoosted || !_tabStripScrollViewer)
+        {
+            return; // done, or the strip template isn't realized yet (callers retry)
+        }
+        try
+        {
+            // The TabViewListView is the strip ScrollViewer's nearest ListView ancestor (the
+            // _RevealTabInStrip recipe).
+            winrt::WUX::Controls::ListView tabListView{ nullptr };
+            auto node = winrt::WUX::Media::VisualTreeHelper::GetParent(_tabStripScrollViewer);
+            while (node && !tabListView)
+            {
+                tabListView = node.try_as<winrt::WUX::Controls::ListView>();
+                node = winrt::WUX::Media::VisualTreeHelper::GetParent(node);
+            }
+            if (!tabListView)
+            {
+                return; // not resolvable yet — retried from _EnsureTabStripScrollViewer's callers
+            }
+            const auto panel = tabListView.ItemsPanelRoot();
+            if (!panel)
+            {
+                return; // the ItemsStackPanel isn't realized yet — retry on a later call (tab add / scroll)
+            }
+            const auto isp = panel.try_as<winrt::WUX::Controls::ItemsStackPanel>();
+            if (!isp)
+            {
+                // Realized, but NOT an ItemsStackPanel — CacheLength can't apply. Log ONCE (with the
+                // actual type) so a failed drag-test is diagnosable rather than a silent no-op.
+                if (!_tabStripCacheDiagged)
+                {
+                    _tabStripCacheDiagged = true;
+                    ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[tabdrag-guard] cache-boost: strip ItemsPanelRoot is '" } + winrt::get_class_name(panel).c_str() + L"', not ItemsStackPanel — cannot boost CacheLength\n");
+                }
+                return;
+            }
+            // 60 viewports each side realizes the whole strip for any realistic tab count (a ~70-tab
+            // strip spans well under 10 viewports); capped at the actual item count, so it can't
+            // over-realize empty space.
+            const auto before = isp.CacheLength();
+            isp.CacheLength(60.0);
+            _tabStripCacheBoosted = true;
+            ::Agentmaster::AppendStateLog(L"hooks.log", std::wstring{ L"[tabdrag-guard] ItemsStackPanel.CacheLength " } + std::to_wstring(before) + L" -> 60 (keep tab headers realized for safe MUX drag)\n");
+        }
+        CATCH_LOG();
+    }
 
     // Agentmaster: MUX TabView drag-start AV guard, layer 1 (a BELT — see the drag-AV note above) —
     // settle the strip's item->container mapping BEFORE

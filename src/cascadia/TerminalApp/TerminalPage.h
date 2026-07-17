@@ -281,6 +281,8 @@ namespace winrt::TerminalApp::implementation
         double _managerTabWidthCache{ 0.0 };
         Windows::UI::Xaml::Controls::ScrollViewer::ViewChanged_revoker _tabStripViewChangedRevoker;
         Windows::UI::Xaml::FrameworkElement::SizeChanged_revoker _tabStripSizeChangedRevoker;
+        bool _tabStripCacheBoosted{ false }; // Agentmaster: latched once the strip's ItemsStackPanel.CacheLength is cranked to keep all tab headers realized (MUX drag-AV candidate — _BoostTabStripCacheForDrag; keeps a LEGAL virtualizing panel, no swap)
+        bool _tabStripCacheDiagged{ false }; // Agentmaster: one-shot guard so _BoostTabStripCacheForDrag logs a not-an-ItemsStackPanel diagnosis at most once (keeps a failed drag-test diagnosable)
 
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
 
@@ -998,6 +1000,7 @@ namespace winrt::TerminalApp::implementation
         void _RemoveSessionRecord(const std::wstring& sessionId);
         void _StripSessionFromSavedWindows(const std::wstring& sessionId);
         void _PinManagerTabFirst(); // Agentmaster: keep the non-closable Manager tab pinned at index 0 after any reorder
+        void _BoostTabStripCacheForDrag(); // Agentmaster: MUX drag-AV candidate — raise the strip ItemsStackPanel's CacheLength so every tab header stays realized (ContainerFromIndex(i) never null in MUX's drag-start loop); a LEGAL panel, no swap. See TerminalPage.AgentEngine.cpp
         void _SettleTabStripLayout(); // Agentmaster: commit the strip's item->container mapping synchronously after a TabItems() mutation (MUX drag-start AV guard, layer 1 — a belt; see TerminalPage.AgentEngine.cpp)
         void _GuardTabDragUntilRegistered(const Microsoft::UI::Xaml::Controls::TabViewItem& tabViewItem); // Agentmaster: a (re)inserted tab stays undraggable until ContainerFromItem resolves it (MUX drag AV guard, layer 2 — a belt: keeps a not-yet-mapped tab ungrabbable)
         std::wstring _DescribeTabForLog(const TerminalApp::Tab& tab); // Agentmaster: `<sid8> "<title>"` (title-only for a shell tab) — the tab-strip forensic log identity; never throws
