@@ -42,6 +42,7 @@
 #include "TabHeaderControl.h" // get_self<TabHeaderControl> -> ReserveTitleLines (consistent multi-line tab-row height)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog
 #include "AgentMaster/Engine.h" // ActivateSessionInOtherWindows — a toast click's cross-window jump (System notifications)
+#include "AgentToastActivator.h" // ToastActivator::IsRegistered — is the COM activator live (wire the in-process click fallback only if not)?
 #include "AgentMaster/Persistence.h" // DeriveSessionTitle / SaveSessions (bind tail)
 #include "AgentMaster/ProcessInspect.h" // ResolveClaudeTranscriptPath + AnalyzeSessionTranscript (prompt-nav)
 #include "AgentMaster/ProcessObserver.h" // roster publish + Correlation/Activity/External tables
@@ -2756,11 +2757,25 @@ namespace winrt::TerminalApp::implementation
     // line 2 the completion body. The strings go in as DOM TEXT NODES (CreateTextNode), so XML-special
     // characters in a session title are escaped by the DOM, never hand-built markup. Tag+Group make a
     // session's newer toast REPLACE its older one in the Action Center instead of piling up (ShortId
-    // fits the legacy 16-char Tag cap). Clicking the toast while the app is alive BRINGS THE HOSTING
-    // WINDOW TO THE FRONT and jumps to the session's tab (_FocusClaudeSessionTab with
-    // bringWindowToFront on BOTH the local and the fan-out end — restore-if-minimized +
-    // SetForegroundWindow + the SwitchToThisWindow fallback); with the process gone the OS falls back
-    // to a plain app activation (no COM activator is registered — acceptable for a completion cue).
+    // fits the legacy 16-char Tag cap).
+    //
+    // CLICKING IT (NOTIFICATIONS.md §4a) surfaces the session — foreground the hosting window + select
+    // its tab — over ONE of two mutually exclusive paths:
+    //   * the TOAST COM ACTIVATOR (AgentToastActivator.h), when its class object registered at engine
+    //     init. The `launch` attribute below carries the session id, which the shell hands back as
+    //     INotificationActivationCallback::Activate's invokedArgs. This is the path that FIXES the
+    //     stray window: the shell CoCreateInstances our CLSID and reaches THIS process, instead of
+    //     falling back to an AUMID activation that launches a second process (which the running
+    //     Emperor turns into a brand-new window with a default tab).
+    //   * the legacy in-process ToastNotification.Activated handler, ONLY when the activator did NOT
+    //     register (unpackaged, or a package registered before the manifests carried the CLSID — i.e.
+    //     the loose layout hasn't been re-registered since). The jump then works exactly as it did —
+    //     stray window and all — so a stale registration is never a regression, just un-fixed.
+    // Wiring BOTH would double-jump (harmless — same tab, idempotent) and log two [nav] lines, so the
+    // handler is wired only as the fallback. With the process gone the OS launches the ExeServer the
+    // manifest names (`-ToastActivated`), which starts Agentmaster normally — a fresh window IS right
+    // when nothing was open — and the pending activation then jumps if it beats the SCM's timeout.
+    //
     // Best-effort by design: CreateToastNotifier throws on a build with no package identity (no AUMID,
     // e.g. unpackaged test hosts) and Show can fail when notifications are disabled system-wide —
     // swallowed, logged once.
@@ -2775,21 +2790,27 @@ namespace winrt::TerminalApp::implementation
             const auto texts = doc.GetElementsByTagName(L"text");
             texts.Item(0).AppendChild(doc.CreateTextNode(winrt::hstring{ title }));
             texts.Item(1).AppendChild(doc.CreateTextNode(winrt::hstring{ body }));
+            // The activation payload: which session to surface. Set as an ATTRIBUTE VALUE via the DOM
+            // (like the text nodes) so a session id can never break the markup. It comes back verbatim
+            // as Activate()'s invokedArgs — a session id is a plain GUID, so no encoding is needed.
+            doc.DocumentElement().SetAttribute(L"launch", winrt::hstring{ sessionId });
 
             winrt::Windows::UI::Notifications::ToastNotification toast{ doc };
             toast.Tag(winrt::hstring{ ::Agentmaster::ShortId(sessionId) });
             toast.Group(L"agentmaster");
+            if (!::Agentmaster::ToastActivator::IsRegistered())
             {
-                // The platform raises Activated on a non-UI thread -> marshal to this window's
-                // dispatcher, then SURFACE the session: select its tab AND bring its window to FRONT.
-                // Deliberately NOT _ActivateClaudeSession — its local path skips the foreground
-                // (bringWindowToFront=false is right for an in-window click, which is already
-                // foreground), but a toast click arrives from the SHELL with this window possibly
-                // minimized / behind other apps, so the local path must run the same
-                // restore-if-minimized + SetForegroundWindow + SwitchToThisWindow recipe the
-                // cross-window receiver uses. If the tab MOVED to another window since the toast was
-                // shown, the activate fan-out's receiving window foregrounds itself the same way
-                // (_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true) on both ends).
+                // FALLBACK ONLY (see above): no COM activator, so the shell will activate the AUMID
+                // (launching a second process -> the stray window we can't stop from here). At least
+                // make the click do its job: the platform raises Activated on a non-UI thread ->
+                // marshal to this window's dispatcher, then surface the session. Deliberately NOT
+                // _ActivateClaudeSession — its local path skips the foreground (bringWindowToFront=false
+                // is right for an in-window click, which is already foreground), but a toast click
+                // arrives from the SHELL with this window possibly minimized / behind other apps, so the
+                // local path must run the same restore-if-minimized + SetForegroundWindow +
+                // SwitchToThisWindow recipe the cross-window receiver uses. If the tab MOVED to another
+                // window since the toast was shown, the fan-out's receiving window foregrounds itself
+                // the same way (_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true) on both ends).
                 const auto dispatcher = Dispatcher(); // agile — safe to call into from the callback thread
                 const auto weakThis = get_weak();
                 toast.Activated([weakThis, dispatcher, sessionId](const winrt::Windows::UI::Notifications::ToastNotification&, const winrt::Windows::Foundation::IInspectable&) {

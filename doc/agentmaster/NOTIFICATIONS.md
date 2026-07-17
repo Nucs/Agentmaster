@@ -1,10 +1,12 @@
 # System notifications — Windows toasts when a session leaves Running
 
 > Status: **complete — the Settings cog "Notifications" tab + the Running → X toast pipe + click-to-surface
-> (bring the hosting window to the FRONT and jump to the session's tab).** Settings round-trip unit-tested
-> (engine harness green); the full chain lib-compiles green (TerminalAppLib). Runtime verification (a live
-> toast + the `[notify]` trace + the click-to-surface) pends a deploy — gated on the user's build/deploy
-> permission.
+> (bring the hosting window to the FRONT and jump to the session's tab), via a per-identity TOAST COM
+> ACTIVATOR (§4a) that also kills the shell's stray-window fallback.** Settings round-trip + the toast HOLD
+> gates are unit-tested (engine harness green); the full chain lib-compiles green (TerminalAppLib +
+> WindowEmperor). Runtime verification (a live toast + the `[notify]` trace + a click that opens NO stray
+> window) pends a deploy — gated on the user's build/deploy permission, and the manifest change means this
+> deploy needs a **re-register** of the loose layout.
 
 ## 1. What this is & why
 
@@ -115,26 +117,58 @@ SessionRegistry::_notify (any session change; bridge/scanner/UI thread)
   Center instead of piling up. Distinct sessions keep distinct toasts.
 - **Sound** — the default system notification sound; `notifySound` OFF swaps the template for one with
   `<audio silent="true"/>`.
-- **Click → surface the session.** The in-process `ToastNotification.Activated` event (the platform
-  raises it on a non-UI thread → marshaled to the window's dispatcher) runs the **foregrounding**
-  jump — deliberately NOT `_ActivateClaudeSession`, whose local path skips the foreground
-  (`bringWindowToFront=false` is right for an in-window click, which is already foreground). A toast
-  click arrives from the **shell** with the app possibly minimized or behind other apps, so:
-  - **local** (this window still hosts the tab): `_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true)`
-    — select the tab + **restore-if-minimized + `SetForegroundWindow` + the `SwitchToThisWindow`
-    fallback** (the shell may deny a foreground hand-off to a background process; the fallback performs
-    the Alt+Tab-style switch).
-  - **moved** (the tab migrated to another window since the toast was shown):
-    `ActivateSessionInOtherWindows(id, _windowId)` — the engine's activate fan-out; the receiving
-    window's sink runs the SAME `_FocusClaudeSessionTab(id, true)` recipe, so both ends foreground.
-  - The jump is logged as `[nav] notify-click <id8> (toast -> foreground window + jump to tab)` — the
-    shell-side entry in the user-navigation audit trail.
-  - Selecting the tab rides the normal tab-switch funnel, so the flash ring / unread mark / Manager
-    lens selection all clear/sync exactly as if the user clicked the tab.
+- **`launch` = the session id.** Set as a DOM attribute on `<toast>` (same escaping rationale as the
+  text nodes). It is the activation payload — the shell hands it back verbatim as the activator's
+  `invokedArgs`, so a click knows exactly which session to surface.
 - **Best-effort by design.** `ToastNotificationManager::CreateToastNotifier()` (no-arg — the packaged
   app's AUMID) **throws on a build with no package identity** (unpackaged test hosts), and `Show` can
   fail when notifications are disabled system-wide. Both are swallowed; the FIRST failure logs
   `[notify] toast failed …` (`_agentToastFailLogged` — once is signal, per-fire is noise).
+
+## 4a. Click → surface the session (and why it needed a COM activator)
+
+**The bug this section exists for:** the first cut had no `ToastActivatorCLSID`, so the shell fell back
+to a plain **AUMID activation** of the package. For a `FullTrustApplication` that means *launching
+`WindowsTerminal.exe` with no arguments* — which hits the single-instance handoff, and the running
+Emperor obligingly opens **a brand-new window with a default tab**. So a click produced BOTH the
+in-process jump *and* a stray window ("opens both the desired tab but also a new window with new tab").
+There is no way to tell that launch apart from a user typing `agentmasterdev`: the activation reason
+simply isn't carried on the commandline, which is precisely the gap the CLSID fills.
+
+**The fix — `AgentToastActivator.h` (header-only; the `PromptAnchor.h` idiom, included by exactly one
+TU so it needs no `.vcxproj` entry).** Both manifests declare a **per-identity** ToastActivatorCLSID,
+and the running instance registers a class object for it at engine init. The shell then
+**CoCreateInstances that CLSID instead of activating the AUMID**; COM's SCM finds the already-registered
+class object and calls `INotificationActivationCallback::Activate` **in the running process** — so **no
+second process is ever launched and the stray window cannot exist by construction** (not "is suppressed
+after the fact" — the launch never happens).
+
+| | |
+|---|---|
+| **Manifest** | `<desktop:Extension Category="windows.toastNotificationActivation">` + a `<com:Class>` under a `<com:ExeServer Executable="WindowsTerminal.exe" Arguments="-ToastActivated">`. **A manifest change ⇒ the loose layout must be re-registered** (`Add-AppxPackage -Register … -ForceUpdateFromAnyVersion`). |
+| **CLSIDs** | **Per identity** — release `{7608CBBC-…}`, dev `{6CB0FAE1-…}` — because a CLSID is machine-global COM state and the two installs live side by side (sharing one would let whichever registered last steal the other's clicks). Picked at runtime by `Profiles::IsDevPackage()`. Deliberately **not** more of the shared-CLSID debt PROFILES.md §5 tracks for the defterm/shellext GUIDs. Keep the header constants and the manifests in lockstep — a mismatch silently reverts to the stray-window fallback. |
+| **Where it lives** | `TerminalApp.dll`, registered once (`std::once_flag`) from `_InitAgentmasterEngine`. Not `Engine.cpp` (plain C++/no-WinRT by contract) and not the EXE (which deliberately doesn't link the engine — only its header-only bits — while the jump routes through the engine's fan-out). |
+| **The jump** | `Activate()` runs on an RPC/COM thread, so it hands off to `ActivateSessionInOtherWindows(id, /*source*/ L"")` — an **empty** source window id, so no window is excluded: we're not "a window asking the others", we're the shell asking the fleet. Whichever window hosts the tab selects it and foregrounds itself via `_FocusClaudeSessionTab(id, /*bringWindowToFront*/ true)` = **restore-if-minimized + `SetForegroundWindow` + the `SwitchToThisWindow` fallback** (the shell may deny a foreground hand-off; the fallback does the Alt+Tab-style switch). A session whose tab closed since the toast was shown simply finds no host — nothing happens, still no stray window. |
+| **Logged** | `[nav] notify-click <id8> (toast -> foreground window + jump to tab)` at the callback (so the trail records the click even when no window hosts the session), plus `[notify] toast activator registered …` once at startup. |
+
+Selecting the tab rides the normal tab-switch funnel, so the flash ring / unread mark / Manager lens
+selection all clear and sync exactly as if the user had clicked the tab.
+
+**The two click paths are mutually exclusive** (`ToastActivator::IsRegistered()`): with the activator
+live, the toast wires **no** in-process handler — both firing would double-jump (harmless, but two
+`[nav]` lines). When the activator did **not** register — unpackaged, or **a package registered before
+the manifests carried the CLSID (i.e. not re-registered since this change)** — the toast keeps its
+legacy in-process `ToastNotification.Activated` handler, so the jump still works exactly as it did,
+stray window and all. **A stale registration is never a regression, just un-fixed.**
+
+**Cold start** (no instance running): the SCM launches the ExeServer —
+`WindowsTerminal.exe -ToastActivated -Embedding` (our `Arguments` + the `-Embedding` COM appends).
+Neither token is a WT commandline, and the `-Embedding` (defterm) branch would leave the click with no
+window at all, so `WindowEmperor::HandleCommandlineArgs` **strips the pair and continues as a plain
+no-arg launch**: the workspace restores exactly as from the Start menu (a fresh window IS the right
+answer when nothing was open), and the activation still pending in the SCM completes into the class
+object the engine registers at init — jumping to the clicked session on top of the restored workspace,
+if it beats the SCM's activation timeout. Either way the user gets their app back.
 
 ## 5. Stale-track hardening (where the cleanup runs, and why)
 
@@ -180,11 +214,14 @@ the track leak-proof:
   `[notify-dedupe]`) additionally caps a W→R→W flap at one SHOWN toast per window, immediate and
   deferred paths alike. The flash ring still fires on the transient edge (deliberate — it self-clears
   on the re-promotion; a toast doesn't).
-- **Click after the app exits = plain launch.** No toast **COM activator** (`ToastActivatorCLSID`) is
-  registered in the manifests, so clicking a leftover toast once the app is gone just launches
-  Agentmaster (the single-instance handoff opens its normal startup window) — it does not deep-link to
-  the session. Registering an activator (+ launch args carrying the session id → a startup jump) is the
-  documented follow-up if click-after-exit matters.
+- **Click after the app exits = a normal start, then a best-effort jump.** The manifests' ExeServer
+  brings Agentmaster back (workspace restore and all) and the SCM's pending activation jumps to the
+  session once the engine registers the class object — *if* it beats the SCM's activation timeout on a
+  slow restore. It is not a guaranteed deep-link; the user always at least gets their app back. (§4a.)
+- **A manifest change ⇒ re-register.** The activator only takes effect once the package is registered
+  with the CLSID-carrying manifest. Until then `ToastActivator::IsRegistered()` is false, the toast
+  falls back to its in-process click handler, and the stray-window behavior persists — un-fixed, but
+  never worse (§4a).
 - **Suppress-focused is (active window && focused tab).** A focused tab in a background window still
   notifies — deliberate: you are not looking at it.
 - **Uniform wording.** `Has completed … and is error` reads slightly off for Error — the template is
@@ -202,22 +239,28 @@ the track leak-proof:
   checks — hold only Idle/Waiting; Drop on re-lit Running / archived; Fire on signal-clear / hard
   needs-you / cap; the 20 s dedupe boundary) + the compile-time cap-vs-promotion-latency
   `static_assert`. Harness green (1907 checks, 0 failures).
-- ✅ **Full chain compiles**: TerminalAppLib (the cog tab + the edge tracker + the toast + the click
-  handler) builds green.
-- ⏳ **Runtime** (pends a deploy — build/deploy permission): start a turn, switch to another tab/app →
-  on turn-complete a toast shows the title + `Has completed after <span> and is waiting for you`, and
-  `[notify] <id8> running -> waiting for you (after <span>)` lands in hooks.log; **clicking it restores/
-  foregrounds the window and selects the tab** (+ `[nav] notify-click …`); the cog's checkboxes mute per
-  state; the master OFF silences everything; `notifySound` OFF shows a silent toast; a second completion
-  replaces the first in Action Center. **Hold path:** a completion that leaves a background shell/agent
-  running logs `[notify-hold]` → `[notify-drop]` with NO pop (the session re-lights Running ~20 s
-  later — the 513d1366 repro); when the background work finally quiets, the true settle fires ONE toast
-  (`[notify] … (held Ns)` when it rode a hold); a W→R→W flap inside 20 s logs `[notify-dedupe]` for the
-  second entry.
+- ✅ **Full chain compiles**: TerminalAppLib (the cog tab + the edge tracker + the toast + the
+  activator) builds green; `WindowEmperor.cpp` (the `-ToastActivated` cold start) ClCompiles green.
+- ✅ **Manifests**: both well-formed; each identity's ToastActivatorCLSID round-trips to its own
+  `<com:Class>` and matches the `AgentToastActivator.h` constant (release `{7608CBBC-…}` / dev
+  `{6CB0FAE1-…}`).
+- ⏳ **Runtime** (pends a deploy — build/deploy permission; the manifest change needs a **re-register**,
+  §4a): start a turn, switch to another tab/app → on turn-complete a toast shows the title +
+  `Has completed after <span> and is waiting for you`, and `[notify] <id8> running -> waiting for you
+  (after <span>)` lands in hooks.log; the cog's checkboxes mute per state; the master OFF silences
+  everything; `notifySound` OFF shows a silent toast; a second completion replaces the first in Action
+  Center. **Click path (the fix):** startup logs `[notify] toast activator registered …`, and clicking a
+  toast restores/foregrounds the hosting window + selects the tab (+ `[nav] notify-click …`) **with NO
+  stray window** — the regression this section exists for. **Hold path:** a completion that leaves a
+  background shell/agent running logs `[notify-hold]` → `[notify-drop]` with NO pop (the session
+  re-lights Running ~20 s later — the 513d1366 repro); when the background work finally quiets, the true
+  settle fires ONE toast (`[notify] … (held Ns)` when it rode a hold); a W→R→W flap inside 20 s logs
+  `[notify-dedupe]` for the second entry.
 
 ### Follow-ups (non-blocking)
 
-- **Toast COM activator** — deep-link a click into a fresh app launch (click-after-exit, §6).
+- ~~Toast COM activator~~ — **shipped** (§4a): it was the fix for the stray-window-on-click bug, and it
+  carries the click-after-exit deep-link as far as the SCM's activation timeout allows (§6).
 - **Quiet hours / focus-assist awareness** — Windows Focus Assist already suppresses toasts
   system-wide; an in-app schedule could complement it.
 - **Per-state sound or priority** — e.g. Error as a high-priority toast.

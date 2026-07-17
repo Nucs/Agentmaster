@@ -1477,11 +1477,25 @@ What works, by area:
   focused-skip re-applied at fire time; **NeedsApproval/Error/Done never hold** (work can't answer a
   question), and a **per-session double-toast guard** (`kNotifyDuplicateToastMs` 20s, `[notify-dedupe]`)
   caps a W→R→W flap at one SHOWN toast per window on both the immediate and deferred paths; per-session **Tag+Group** makes a newer toast REPLACE the older in Action
-  Center; **clicking the toast brings the hosting window to the FRONT and jumps to the session's tab** while
-  the app is alive (`_FocusClaudeSessionTab(id, bringWindowToFront=true)` — restore-if-minimized +
-  `SetForegroundWindow` + the `SwitchToThisWindow` fallback — locally, else the activate fan-out whose
-  receiving window runs the same recipe; logged `[nav] notify-click`; app gone ⇒ the OS falls back to a
-  plain launch, no COM activator); `notifySuppressFocused` skips a toast for the focused tab of the ACTIVE window [the flash ring's
+  Center; **clicking the toast brings the hosting window to the FRONT and jumps to the session's tab**
+  (NOTIFICATIONS.md §4a) — via a **per-identity TOAST COM ACTIVATOR** (`AgentToastActivator.h`, header-only,
+  registered process-once at engine init; CLSIDs declared in BOTH manifests — release `{7608CBBC-…}` / dev
+  `{6CB0FAE1-…}`, distinct because a CLSID is machine-global and the two installs coexist): the shell
+  CoCreateInstances our CLSID and reaches the RUNNING process (`INotificationActivationCallback::Activate`
+  → `ActivateSessionInOtherWindows(id, "")` → the hosting window's
+  `_FocusClaudeSessionTab(id, bringWindowToFront=true)` = restore-if-minimized + `SetForegroundWindow` +
+  the `SwitchToThisWindow` fallback), so **no second process launches and the click can't open a stray
+  window** — the bug the first cut had, where the shell's fallback AUMID activation launched
+  `WindowsTerminal.exe` with no args and the Emperor turned it into a new window with a default tab. The
+  toast's `launch` attr carries the session id (== `invokedArgs`); the legacy in-process
+  `ToastNotification.Activated` handler is wired ONLY when the activator didn't register
+  (`ToastActivator::IsRegistered()` — unpackaged, or a package not re-registered since the manifest gained
+  the CLSID), so a stale registration is un-fixed but never regressed. **A manifest change ⇒ the loose
+  layout must be re-registered.** Cold start (app gone): the manifests' ExeServer relaunches us
+  `-ToastActivated -Embedding`, which `WindowEmperor` strips to a plain no-arg launch (normal workspace
+  restore, never the defterm path) and the pending activation then jumps if it beats the SCM timeout.
+  Logged `[nav] notify-click` + `[notify] toast activator registered`;
+  `notifySuppressFocused` skips a toast for the focused tab of the ACTIVE window [the flash ring's
   "current tab is always visited" rule]; `notifySound` OFF adds `<audio silent>`; the checkboxes grey out
   while the master is OFF but keep their stored values. Best-effort `ToastNotificationManager` — an
   unpackaged build [no AUMID] logs `[notify] toast failed` ONCE and no-ops; fires log `[notify] <id>
@@ -1940,6 +1954,15 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     + full-width `Border` rules, `_LoadSummaryAsync` off-thread, `CopySummaryAsync` for the full box) —
     whose times bar carries a **wrap-line toggle** (`_ToggleSummaryWrap`/`SetSummaryWrapNewlines`, the
     GLOBAL `AppSettings.summaryPanelWrapNewlines`: preserve message newlines vs literal `\n`).
+  - `src/cascadia/TerminalApp/AgentToastActivator.h` — **System notifications' TOAST COM ACTIVATOR**
+    (NOTIFICATIONS.md §4a): the per-identity ToastActivatorCLSID pair (release/dev, matching the two
+    manifests' `<desktop:ToastNotificationActivation>` + `<com:Class>`), an
+    `INotificationActivationCallback` whose `Activate` routes the toast's `launch` payload (the session
+    id) through `ActivateSessionInOtherWindows` → foreground + jump, its `IClassFactory`, and
+    `Register()`/`IsRegistered()`. Header-only + included by exactly ONE TU (`TerminalPage.AgentEngine.cpp`,
+    which `std::call_once`s `Register()` at engine init) — the `PromptAnchor.h` idiom, so no vcxproj entry.
+    It is what makes the shell activate the RUNNING instance in-process instead of launching a second
+    process (whose no-arg startup the Emperor turned into a stray window).
   - `src/cascadia/TerminalApp/AgentStatusColors.h` — the ONE shared `SessionState` → color table
     (Triage-Board dot, per-tab overlay, and the tab-strip status dot all read it; replaced the
     overlay's hand-synced palette copy). Also the shared `#AARRGGBB` color parse/format
@@ -2018,7 +2041,10 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     `WindowsTerminal.exe` byte-for-byte; the `agentmaster-cli.vcxproj` reference + the `wt`-mirrored
     entry in `OpenConsole.slnx` + `CascadiaPackage.wapproj` ship the CLI in the package.
   - `Package-Rel.appxmanifest` + `Package-Dev.appxmanifest` (the two identities; selection in
-    `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`), a comctl32-v6 dependency in
+    `CascadiaPackage.wapproj` via `AgentmasterPackageIdentity`; each also declares its OWN
+    **toast-activator CLSID** — `<desktop:ToastNotificationActivation>` + a `<com:Class>` under a
+    `WindowsTerminal.exe` ExeServer with `Arguments="-ToastActivated"` — see `AgentToastActivator.h` /
+    NOTIFICATIONS.md §4a; a change here needs a **re-register**), a comctl32-v6 dependency in
     `WindowsTerminal.manifest` (the profile picker's TaskDialog), the `AGENTMASTER_PROFILE`
     redirect in `TerminalSettingsModel/FileUtils.cpp` (Terminal's own settings →
     `<profile>\terminal\`), the profile bootstrap call in `WindowEmperor.cpp`,

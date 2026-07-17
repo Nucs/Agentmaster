@@ -768,7 +768,24 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
             }
         }
 
-        const auto args = commandlineToArgArray(GetCommandLineW());
+        auto args = commandlineToArgArray(GetCommandLineW());
+
+        // Agentmaster (System notifications; NOTIFICATIONS.md §4a): a COLD-START toast activation.
+        // When NO instance is running, a toast click makes the SCM launch the ExeServer our manifests
+        // register for the toast-activator CLSID: `WindowsTerminal.exe -ToastActivated -Embedding`
+        // (our chosen Arguments + the -Embedding COM appends). Neither token is a WT commandline —
+        // parsing them would fail, and falling into the -Embedding (defterm) branch below would leave
+        // the click with NO window at all. So strip the pair and continue as a PLAIN NO-ARG LAUNCH:
+        // the workspace restores exactly as it would from the Start menu (the reopen dispatch above
+        // has already run, so `_windows` may be populated and no extra window is created), and the
+        // activation still pending in the SCM completes into the class object the engine registers at
+        // init — jumping to the clicked session on top of the restored workspace. A RUNNING instance
+        // never gets here: its class object is already registered, so the shell hands the click
+        // straight to it in-process (that is what keeps a click from ever opening a stray window).
+        if (std::find(args.begin(), args.end(), winrt::hstring{ L"-ToastActivated" }) != args.end())
+        {
+            std::erase_if(args, [](const winrt::hstring& a) { return a == L"-ToastActivated" || a == L"-Embedding"; });
+        }
 
         if (args.size() == 2 && args[1] == L"-Embedding")
         {

@@ -134,6 +134,20 @@
                 <com:Interface Id="746E6BC0-AB05-4E38-AB14-71E86763141F" ProxyStubClsid="DEC4804D-56D1-4F73-9FBE-6828E7C85C56"/>
             </com:ComInterface>
         </com:Extension>
+        <!-- Agentmaster (System notifications; NOTIFICATIONS.md §4a): the TOAST COM ACTIVATOR.
+             Without this, clicking one of our toasts makes the shell fall back to a plain AUMID
+             activation — which for a FullTrustApplication LAUNCHES WindowsTerminal.exe with no args,
+             and the running Emperor turns that into a stray new window with a default tab (on top of
+             the in-process jump). With the CLSID declared, the shell CoCreateInstances it instead and
+             reaches the class object the running instance registered at engine init
+             (AgentToastActivator.h) — no second process, so no stray window.
+             The GUID is per-IDENTITY (this is the RELEASE one; Package-Dev.appxmanifest carries its
+             own): a CLSID is machine-global COM state, and release+dev install side by side, so sharing
+             one would let whichever registered last steal the other's clicks. Keep it in lockstep with
+             AgentToastActivator.h's kReleaseClsid. -->
+        <desktop:Extension Category="windows.toastNotificationActivation">
+            <desktop:ToastNotificationActivation ToastActivatorCLSID="7608CBBC-E01D-4807-852F-0B630A1DDC51"/>
+        </desktop:Extension>
         <com:Extension Category="windows.comServer">
             <com:ComServer>
                 <com:ExeServer DisplayName="OpenConsole" Executable="OpenConsole.exe">
@@ -141,6 +155,15 @@
                 </com:ExeServer>
                 <com:ExeServer DisplayName="WindowsTerminal" Executable="WindowsTerminal.exe">
                     <com:Class Id="051F34EE-C1FD-4B19-AF75-9BA54648434C"/>
+                </com:ExeServer>
+                <!-- Agentmaster: the COLD-START half of the toast activator above (the CLSID must
+                     resolve to a server, or the shell can't route the click at all). Only reached when
+                     NO instance is running — a live one already registered the class object, so the SCM
+                     hands the click straight to it and never launches this. `Arguments` is ours to
+                     choose: WindowEmperor treats -ToastActivated as a NORMAL startup (restore the
+                     workspace) rather than the defterm -Embedding path COM appends after it. -->
+                <com:ExeServer DisplayName="Agentmaster Notifications" Executable="WindowsTerminal.exe" Arguments="-ToastActivated">
+                    <com:Class Id="7608CBBC-E01D-4807-852F-0B630A1DDC51"/>
                 </com:ExeServer>
                 <com:SurrogateServer DisplayName="WindowsTerminalShellExt">
                     <com:Class Id="52065414-e077-47ec-a3ac-1cc5455e1b54" Path="WindowsTerminalShellExt.dll" ThreadingModel="STA"/>

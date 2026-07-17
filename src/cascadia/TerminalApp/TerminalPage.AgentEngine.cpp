@@ -35,6 +35,7 @@
 
 #include "AgentManagerContent.h" // the Manager tab's content (C1 UI) — created + wired here
 #include "AgentTabOverlay.h" // ~TerminalPage destroys the com_ptr<AgentTabOverlay> maps — needs the complete type
+#include "AgentToastActivator.h" // System notifications: the toast COM activator (registered once, process-wide, from the engine init below)
 #include "TabHeaderControl.h" // Agentmaster: SetTabRenameCommitMode (push the GLOBAL rename-commit mode to tab headers)
 #include "AgentMaster/ClaudeSpawn.h" // AppendStateLog / AgentmasterStateDir / MaterializeSharedHookFiles
 #include "AgentMaster/Engine.h" // SharedEngine / ClaimWindowRecord / Register-UnregisterLiveWindow
@@ -491,6 +492,19 @@ namespace winrt::TerminalApp::implementation
         _scheduler = engine.scheduler;
         _scanner = engine.scanner;
         _observer = engine.observer; // Fleet Observer S-lane (PULL census/correlation; OBSERVER.md §10)
+
+        // Agentmaster (System notifications; NOTIFICATIONS.md §4a): register the TOAST COM ACTIVATOR
+        // process-wide, so the shell delivers a toast click to THIS running instance
+        // (INotificationActivationCallback::Activate -> the activate fan-out -> foreground + jump)
+        // instead of falling back to an AUMID activation, which launches a second process and opens a
+        // stray new window. Once per process (std::once_flag) — it registers a machine-global COM class
+        // object, not per-window state. It lives here rather than in Engine.cpp because that TU is plain
+        // C++/no-WinRT by contract, and this needs COM/WinRT; and it must be in TerminalApp.dll rather
+        // than the EXE because the jump routes through the engine's fan-out, which the EXE doesn't link.
+        {
+            static std::once_flag toastActivatorOnce;
+            std::call_once(toastActivatorOnce, [] { ::Agentmaster::ToastActivator::Register(); });
+        }
 
         // M10 (PERSISTENCE.md §13): claim this window's persisted record — an existing
         // windows/<id>.json (geometry + Manager lens + ordered tab refs), or a fresh GUID if none
