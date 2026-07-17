@@ -1156,8 +1156,11 @@ What works, by area:
   right-click **Rename…** → `_RenameClaudeSession`; a WT tab rename → `_SyncClaudeTitleFromTab`;
   Rule #11). A launched session's default name is **smart-derived from its cwd**
   (`DeriveSessionTitle`: walk up past generic `bin/obj/Debug/...` segments to the first meaningful
-  folder, then **≤16 chars** as-is / **>16 mixed-case** → its capitals only / **>16 all-lower** →
-  as-is truncated past 30 with `...`), and each tab is **colored per working directory** — a
+  folder, then apply the cog's **Tab title naming** technique — **Last word in folder name** default
+  (`Potato.Tomato.SlangGang` → `SlangGang`) · Folder name as is · Two folder names (`repos/Foo`) ·
+  Capital letters (`PotaTo.Tomato.Slang` → `PTTS`) — + the Title-case / spaces→`_` transforms
+  (`TabTitleNaming`/`TitleNamingOptions`; capped at 30 chars + `...`, never empty), and each tab is
+  **colored per working directory** — a
   **permanent** color a dir keeps across tabs/windows/restarts (persisted to `dir-colors.json`): the
   dir's persisted color, or a fresh **collision-free auto color** (first in the dir's seeded probe
   order that no other folder holds; on a full palette it resets + reuses, avoiding colors open tabs
@@ -1479,6 +1482,20 @@ What works, by area:
   while the master is OFF but keep their stored values. Best-effort `ToastNotificationManager` — an
   unpackaged build [no AUMID] logs `[notify] toast failed` ONCE and no-ops; fires log `[notify] <id>
   running -> <state> (after <span>)` in hooks.log. Codex rides it too at its 3-state floor), and (TABS
+  section) **`tabTitleNaming`/`tabTitleCase`/`tabTitleSpacesToUnderscores`** (the **Tab title naming**
+  trio — HOW an untitled session's default tab title derives from its working dir, all applied by the
+  ONE `DeriveSessionTitle` (its 2-arg form is pure — options in; the 1-arg form reads these fresh from
+  disk at each derive, so a Save hits the very next launch in every window): the technique dropdown
+  **Last word in folder name** default (`Potato.Tomato.SlangGang` → `SlangGang`; no separators ⇒ whole
+  name; separators = `.`/`-`/`_`/whitespace) · **Folder name as is** · **Two folder names**
+  (`C:\repos\Potato.Tomato.SlangGang` → `repos/Potato.Tomato.SlangGang`; at a drive root just the
+  folder) · **Folder name capital letters** (`PotaTo.Tomato.Slang` → `PTTS`; a no-capitals name falls
+  back to word initials, a single lowercase word as-is), plus a **Title case** dropdown
+  (Default/Lowercase/Uppercase) and a **Spaces to underscores** toggle — every mode still walks past
+  generic `bin/obj/Debug/…` segments first and caps the result at 30 chars + `...`; a **live example
+  preview** under the controls re-derives four made-up paths through the real 2-arg derive on every
+  change (`_UpdateTitleNamingPreview`). Applies at the NEXT launch/adopt/fork-from-disk of an UNTITLED
+  session only — existing/renamed titles never re-derive, Rule #11), and (TABS
   section) `favoriteIcon` (the **Favorite marker** dropdown — **Crown** default / **Star** — the glyph a
   favorited session wears on its live tab strip; FAVORITES.md §5a, applied live on Save + cross-window
   broadcast), and (TABS section) **`maxTags`** (the **Max bookmark tags (global)** box — the ceiling on how

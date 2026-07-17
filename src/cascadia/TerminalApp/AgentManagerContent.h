@@ -825,6 +825,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setCloseTabOnMiddleClick{ nullptr }; // TABS: close a tab on middle-mouse click (OFF => disable both the manual hook + WinUI's native middle-close); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setAlwaysShowHomeButton{ nullptr }; // TABS: always show the strip "Home" button (OFF => only when the Manager tab is scrolled off); GLOBAL
         winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setShowTabIcon{ nullptr }; // TABS: show the profile icon on tabs (OFF, the default => IconStyle::Hidden, takes no strip space); GLOBAL
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleNaming{ nullptr }; // TABS: HOW an untitled session's tab title derives from its working dir — last word (default) / folder as-is / two folders / capitals (TabTitleNaming); GLOBAL, applies at the next launch/adopt
+        winrt::Windows::UI::Xaml::Controls::ComboBox _setTitleCase{ nullptr }; // TABS: the case transform on the derived title — Default / Lowercase / Uppercase (TabTitleCase); GLOBAL
+        winrt::Windows::UI::Xaml::Controls::ToggleSwitch _setTitleUnderscores{ nullptr }; // TABS: convert any whitespace in the derived title to '_' (AppSettings::tabTitleSpacesToUnderscores); GLOBAL
+        winrt::Windows::UI::Xaml::Controls::TextBlock _titleNamingPreview{ nullptr }; // TABS: the live example preview under the naming controls — made-up paths re-derived through the REAL DeriveSessionTitle from the CURRENT (unsaved) control state on every change
+        void _UpdateTitleNamingPreview(); // re-render _titleNamingPreview from the current naming controls
         winrt::Windows::UI::Xaml::Controls::ComboBox _setFavoriteIcon{ nullptr }; // TABS: the FAVORITE marker glyph on a live session's tab — Crown (default) / Star (FAVORITES.md §5a); GLOBAL
         winrt::Windows::UI::Xaml::Controls::TextBox _setMaxTags{ nullptr }; // TABS: the GLOBAL cap on distinct bookmark tags (default 20, hard ceiling 40 — ClampMaxTags); GLOBAL
         winrt::Windows::UI::Xaml::Controls::Slider _setTooltipTagsOpacity{ nullptr }; // TABS: the OPACITY (10..100%) of the bookmark-tag chips in the rich tab TOOLTIP (AppSettings::tooltipTagsOpacity, default 0.9); GLOBAL. Header shows the live percent.

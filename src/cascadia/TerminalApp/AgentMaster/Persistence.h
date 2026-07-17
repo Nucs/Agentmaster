@@ -41,6 +41,10 @@ namespace Agentmaster
     FavoriteIcon FavoriteIconFromString(std::wstring_view s);
     std::wstring ToString(TabColorMode m);
     TabColorMode TabColorModeFromString(std::wstring_view s);
+    std::wstring ToString(TabTitleNaming n);
+    TabTitleNaming TabTitleNamingFromString(std::wstring_view s);
+    std::wstring ToString(TabTitleCase c);
+    TabTitleCase TabTitleCaseFromString(std::wstring_view s);
 
     // ---- struct <-> json::Value ----
     json::Value ToJson(const QueuedPrompt& p);
@@ -168,11 +172,18 @@ namespace Agentmaster
     void SeedClaudeCleanupPeriodDaysIfNeeded();
 
     // ---- tab naming + per-directory color (pure; testable) ----
-    // Derive a tab/session display name from a working directory: walk up past generic build/
-    // output/structural segments (bin/obj/Debug/... the top 20) to the first meaningful folder,
-    // then apply the length rules — <=16 chars used as-is; >16 mixed-case -> its capital letters
-    // only; >16 all-lowercase -> as-is, truncated past 30 chars with "...". Never empty ("claude").
+    // Derive a tab/session display name from a working directory. First walk up past generic
+    // build/output/structural segments (bin/obj/Debug/... the top 20) to the first meaningful
+    // folder, then apply the configured NAMING TECHNIQUE (TabTitleNaming: last word (default) /
+    // folder name as-is / "<parent>/<folder>" / capitals only) + the output transforms
+    // (TabTitleCase; whitespace -> '_'). The result is capped at 30 chars ("..." appended past it)
+    // and never empty ("claude"). The 2-arg form is PURE (options passed in — tests + the cog's
+    // live example preview); the 1-arg form applies the cog's CURRENT tabTitle* settings
+    // (LoadAppSettings — read fresh from disk, so a Save affects the very next launch).
+    std::wstring DeriveSessionTitle(const std::wstring& workingDir, const TitleNamingOptions& opts);
     std::wstring DeriveSessionTitle(const std::wstring& workingDir);
+    // The AppSettings -> TitleNamingOptions bridge (the three tabTitle* fields).
+    TitleNamingOptions TitleNamingFromSettings(const AppSettings& s);
     // Derive a fork's title from its source's: a first fork appends " (fork)"; forking a fork BUMPS a
     // counter (" (fork 2)", " (fork 3)", ...) instead of stacking suffixes ("X (fork) (fork)"). Only a
     // trailing " (fork)" / " (fork N)" group is recognized (nested/earlier parens are left intact).

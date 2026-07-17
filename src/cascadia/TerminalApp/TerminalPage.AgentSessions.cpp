@@ -225,7 +225,8 @@ namespace winrt::TerminalApp::implementation
         if (ttl.empty())
         {
             // Smart tab/session name: walk past generic bin/obj/Debug/... segments to the first
-            // meaningful folder, then apply the length/case rules (see DeriveSessionTitle).
+            // meaningful folder, then apply the cog's configured naming technique + case/underscore
+            // transforms (DeriveSessionTitle / TabTitleNaming — read fresh from settings.json).
             ttl = ::Agentmaster::DeriveSessionTitle(dir);
         }
 

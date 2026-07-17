@@ -1128,6 +1128,44 @@ namespace winrt::TerminalApp::implementation
         _setShowTabIcon.Header(winrt::box_value(L"Show icons on tabs"));
         AgentSetTip(_setShowTabIcon, L"Show the profile icon at the left of each tab (before the status dot and title). When off (the default), the icon is hidden entirely and takes no space \x2014 the tab reads on its status dot + title. Default off.");
         panel.Children().Append(_setShowTabIcon);
+        // Tab title naming (Agentmaster): HOW an untitled session's default tab title derives from
+        // its working directory — the technique dropdown + a case dropdown + a whitespace->'_'
+        // toggle, with a LIVE example preview beneath (made-up paths run through the REAL
+        // DeriveSessionTitle with the CURRENT control state, re-rendered on every change). GLOBAL
+        // (AppSettings::tabTitleNaming / tabTitleCase / tabTitleSpacesToUnderscores); applied at the
+        // NEXT launch/adopt of an untitled session — existing and renamed titles never re-derive
+        // (Rule #11).
+        _setTitleNaming = ComboBox{};
+        _setTitleNaming.Header(winrt::box_value(L"Tab title naming"));
+        _setTitleNaming.Items().Append(winrt::box_value(L"Last word in folder name")); // index 0 == TabTitleNaming::LastWord (default)
+        _setTitleNaming.Items().Append(winrt::box_value(L"Folder name as is")); // index 1 == TabTitleNaming::FolderName
+        _setTitleNaming.Items().Append(winrt::box_value(L"Two folder names")); // index 2 == TabTitleNaming::TwoFolders
+        _setTitleNaming.Items().Append(winrt::box_value(L"Folder name capital letters")); // index 3 == TabTitleNaming::Capitals
+        AgentSetTip(_setTitleNaming, L"How a new session's tab is named from its working directory (generic bin/obj/Debug/\x2026 segments are skipped first).\n\x2022 Last word in folder name (default): \x201CPotato.Tomato.SlangGang\x201D \x2192 \x201CSlangGang\x201D; a name without separators stays whole (\x201CPotatoTomato\x201D).\n\x2022 Folder name as is: the folder name unchanged.\n\x2022 Two folder names: parent/folder \x2014 \x201C" L"C:\\repos\\Potato.Tomato.SlangGang\x201D \x2192 \x201Crepos/Potato.Tomato.SlangGang\x201D.\n\x2022 Folder name capital letters: the capitals only \x2014 \x201CPotaTo.Tomato.Slang\x201D \x2192 \x201CPTTS\x201D (an all-lowercase name falls back to its word initials).\nApplies when a session is launched or adopted; existing and renamed titles are kept.");
+        _setTitleNaming.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _UpdateTitleNamingPreview(); });
+        panel.Children().Append(_setTitleNaming);
+        _setTitleCase = ComboBox{};
+        _setTitleCase.Header(winrt::box_value(L"Title case"));
+        _setTitleCase.Items().Append(winrt::box_value(L"Default")); // index 0 == TabTitleCase::Default
+        _setTitleCase.Items().Append(winrt::box_value(L"Lowercase")); // index 1 == TabTitleCase::Lower
+        _setTitleCase.Items().Append(winrt::box_value(L"Uppercase")); // index 2 == TabTitleCase::Upper
+        AgentSetTip(_setTitleCase, L"The case applied to the derived tab title \x2014 Default keeps it as derived; Lowercase / Uppercase transform the whole title.");
+        _setTitleCase.SelectionChanged([this](const IInspectable&, const SelectionChangedEventArgs&) { _UpdateTitleNamingPreview(); });
+        panel.Children().Append(_setTitleCase);
+        _setTitleUnderscores = ToggleSwitch{};
+        _setTitleUnderscores.Header(winrt::box_value(L"Spaces to underscores"));
+        AgentSetTip(_setTitleUnderscores, L"Convert any whitespace in the derived tab title to '_' (\x201CPotato Tomato Slang\x201D \x2192 \x201CPotato_Tomato_Slang\x201D). Default off.");
+        _setTitleUnderscores.Toggled([this](const IInspectable&, const RoutedEventArgs&) { _UpdateTitleNamingPreview(); });
+        panel.Children().Append(_setTitleUnderscores);
+        _titleNamingPreview = TextBlock{};
+        _titleNamingPreview.FontFamily(FontFamily{ L"Consolas" });
+        _titleNamingPreview.FontSize(11);
+        _titleNamingPreview.Opacity(0.65);
+        _titleNamingPreview.TextWrapping(TextWrapping::NoWrap);
+        _titleNamingPreview.Margin(Thickness{ 0, -2, 0, 4 });
+        AgentSetTip(_titleNamingPreview, L"A live preview: what these made-up working directories would name their tabs under the settings above.");
+        panel.Children().Append(_titleNamingPreview);
+        _UpdateTitleNamingPreview(); // initial render (nothing selected yet -> the defaults)
         // FAVORITES.md §5a: which glyph marks a FAVORITE (starred) session on its live tab — Crown
         // (default, a gold crown at the status dot's NW) or Star (the status dot foregrounded on a white,
         // golden-tipped star). GLOBAL across windows; applied live on Save + cross-window broadcast.
@@ -1836,6 +1874,28 @@ namespace winrt::TerminalApp::implementation
         {
             _setShowTabIcon.IsOn(_appSettings.showTabIcon);
         }
+        if (_setTitleNaming)
+        {
+            // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals.
+            _setTitleNaming.SelectedIndex(_appSettings.tabTitleNaming == TabTitleNaming::FolderName ? 1 :
+                                              _appSettings.tabTitleNaming == TabTitleNaming::TwoFolders ? 2 :
+                                              _appSettings.tabTitleNaming == TabTitleNaming::Capitals   ? 3 :
+                                                                                                          0);
+        }
+        if (_setTitleCase)
+        {
+            // Items: 0 == Default, 1 == Lowercase, 2 == Uppercase.
+            _setTitleCase.SelectedIndex(_appSettings.tabTitleCase == TabTitleCase::Lower ? 1 :
+                                            _appSettings.tabTitleCase == TabTitleCase::Upper ? 2 :
+                                                                                               0);
+        }
+        if (_setTitleUnderscores)
+        {
+            _setTitleUnderscores.IsOn(_appSettings.tabTitleSpacesToUnderscores);
+        }
+        // The seeded values above re-fire the controls' change handlers, but be explicit so the
+        // preview never depends on a programmatic set actually raising them.
+        _UpdateTitleNamingPreview();
         if (_setFavoriteIcon)
         {
             // Items: 0 == Crown (default), 1 == Star.
@@ -2235,6 +2295,25 @@ namespace winrt::TerminalApp::implementation
         if (_setShowTabIcon)
         {
             _appSettings.showTabIcon = _setShowTabIcon.IsOn();
+        }
+        if (_setTitleNaming)
+        {
+            // Items: 0 == LastWord (default), 1 == FolderName, 2 == TwoFolders, 3 == Capitals.
+            _appSettings.tabTitleNaming = _setTitleNaming.SelectedIndex() == 1 ? TabTitleNaming::FolderName :
+                                          _setTitleNaming.SelectedIndex() == 2 ? TabTitleNaming::TwoFolders :
+                                          _setTitleNaming.SelectedIndex() == 3 ? TabTitleNaming::Capitals :
+                                                                                 TabTitleNaming::LastWord;
+        }
+        if (_setTitleCase)
+        {
+            // Items: 0 == Default, 1 == Lowercase, 2 == Uppercase.
+            _appSettings.tabTitleCase = _setTitleCase.SelectedIndex() == 1 ? TabTitleCase::Lower :
+                                        _setTitleCase.SelectedIndex() == 2 ? TabTitleCase::Upper :
+                                                                             TabTitleCase::Default;
+        }
+        if (_setTitleUnderscores)
+        {
+            _appSettings.tabTitleSpacesToUnderscores = _setTitleUnderscores.IsOn();
         }
         if (_setFavoriteIcon)
         {
@@ -2663,6 +2742,64 @@ namespace winrt::TerminalApp::implementation
             status.Text(winrt::hstring{ msg });
             status.Foreground(fg);
         }
+    }
+
+    // Agentmaster (tab title naming): re-render the cog's example preview from the CURRENT
+    // (unsaved) naming controls — every change of technique / case / underscores re-derives a set
+    // of made-up example paths through the REAL 2-arg DeriveSessionTitle, so the preview is exactly
+    // what a launch under these picks would name. The examples are chosen so every technique reads
+    // visibly different (dotted, one-word camel, spaced, mixed-caps).
+    void AgentManagerContent::_UpdateTitleNamingPreview()
+    {
+        if (!_titleNamingPreview)
+        {
+            return;
+        }
+        ::Agentmaster::TitleNamingOptions opts;
+        if (_setTitleNaming)
+        {
+            // Items: 0 == LastWord (default; also the -1 no-selection build-time state), 1 ==
+            // FolderName, 2 == TwoFolders, 3 == Capitals — the same map the seed + Save use.
+            opts.naming = _setTitleNaming.SelectedIndex() == 1 ? TabTitleNaming::FolderName :
+                          _setTitleNaming.SelectedIndex() == 2 ? TabTitleNaming::TwoFolders :
+                          _setTitleNaming.SelectedIndex() == 3 ? TabTitleNaming::Capitals :
+                                                                 TabTitleNaming::LastWord;
+        }
+        if (_setTitleCase)
+        {
+            opts.caseMode = _setTitleCase.SelectedIndex() == 1 ? TabTitleCase::Lower :
+                            _setTitleCase.SelectedIndex() == 2 ? TabTitleCase::Upper :
+                                                                 TabTitleCase::Default;
+        }
+        if (_setTitleUnderscores)
+        {
+            opts.spacesToUnderscores = _setTitleUnderscores.IsOn();
+        }
+        static const wchar_t* kExamples[] = {
+            L"C:\\repos\\Potato.Tomato.SlangGang",
+            L"C:\\work\\PotatoTomato",
+            L"D:\\projects\\Potato Tomato Slang",
+            L"K:\\source\\PotaTo.Tomato.Slang",
+        };
+        size_t widest = 0;
+        for (const auto* p : kExamples)
+        {
+            widest = std::max(widest, std::wcslen(p));
+        }
+        std::wstring text;
+        for (const auto* p : kExamples)
+        {
+            std::wstring line{ p };
+            line.append(widest - line.size(), L' '); // monospace column so the arrows align
+            line += L"  \x2192  ";
+            line += ::Agentmaster::DeriveSessionTitle(p, opts);
+            if (!text.empty())
+            {
+                text += L'\n';
+            }
+            text += line;
+        }
+        _titleNamingPreview.Text(winrt::hstring{ text });
     }
 
     // Agentmaster (launch-model picker): the "Launch models" editor's live validation — the

@@ -577,23 +577,72 @@ void TestTabNamingAndColor()
 {
     std::wprintf(L"[tab naming + per-dir color]\n");
 
-    // --- DeriveSessionTitle: walk up past generic segments, then length/case rules ---
-    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp") == L"NumSharp", "short non-generic leaf as-is");
-    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\bin\\Debug") == L"NumSharp", "walk up past bin/Debug");
-    CHECK(DeriveSessionTitle(L"K:\\proj\\obj\\x64\\Release") == L"proj", "walk up past obj/x64/Release");
-    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\") == L"NumSharp", "trailing slash tolerated");
-    CHECK(DeriveSessionTitle(L"K:/source/NumSharp") == L"NumSharp", "forward slashes tolerated");
-    CHECK(DeriveSessionTitle(L"C:\\bin") == L"bin", "all-generic falls back to the leaf");
-    CHECK(DeriveSessionTitle(L"") == L"claude", "empty dir -> claude");
+    // --- DeriveSessionTitle: walk up past generic segments, then the configured naming technique
+    // + output transforms. The 2-arg form is PURE (options passed in); TitleNamingOptions{} == the
+    // defaults (LastWord / Default case / no underscores) — the 1-arg form reads the cog settings
+    // from disk, so tests always pass options explicitly. ---
+    const TitleNamingOptions optDefault{};
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp", optDefault) == L"NumSharp", "one-word leaf stays whole (LastWord default)");
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\bin\\Debug", optDefault) == L"NumSharp", "walk up past bin/Debug");
+    CHECK(DeriveSessionTitle(L"K:\\proj\\obj\\x64\\Release", optDefault) == L"proj", "walk up past obj/x64/Release");
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\", optDefault) == L"NumSharp", "trailing slash tolerated");
+    CHECK(DeriveSessionTitle(L"K:/source/NumSharp", optDefault) == L"NumSharp", "forward slashes tolerated");
+    CHECK(DeriveSessionTitle(L"C:\\bin", optDefault) == L"bin", "all-generic falls back to the leaf");
+    CHECK(DeriveSessionTitle(L"", optDefault) == L"claude", "empty dir -> claude");
 
-    // length rules
-    CHECK(DeriveSessionTitle(L"C:\\x\\MyProject") == L"MyProject", "<=16 used as-is (mixed case)");
-    CHECK(DeriveSessionTitle(L"C:\\x\\abcdefghijklmnop") == L"abcdefghijklmnop", "16 chars used as-is");
-    CHECK(DeriveSessionTitle(L"C:\\x\\MyVeryLongProjectName") == L"MVLPN", ">16 mixed-case -> capitals only");
-    CHECK(DeriveSessionTitle(L"C:\\x\\myreasonablylongname") == L"myreasonablylongname", ">16 all-lower <=30 as-is");
+    // LastWord (the default technique): the last '.'/' '/'-'/'_'-separated word; whole when no separator.
+    CHECK(DeriveSessionTitle(L"C:\\repos\\Potato.Tomato.SlangGang", optDefault) == L"SlangGang", "LastWord: dotted name -> last segment");
+    CHECK(DeriveSessionTitle(L"C:\\x\\PotatoTomato", optDefault) == L"PotatoTomato", "LastWord: no separators -> whole name");
+    CHECK(DeriveSessionTitle(L"C:\\x\\Potato Tomato Slang", optDefault) == L"Slang", "LastWord: spaces separate words");
+    CHECK(DeriveSessionTitle(L"C:\\x\\Potato.Tomato", optDefault) == L"Tomato", "LastWord: two segments -> the last");
+    CHECK(DeriveSessionTitle(L"C:\\x\\potato-tomato_gang", optDefault) == L"gang", "LastWord: '-' and '_' separate too");
+    CHECK(DeriveSessionTitle(L"C:\\x\\Potato.Tomato.", optDefault) == L"Tomato", "LastWord: trailing separator ignored");
+    CHECK(DeriveSessionTitle(L"C:\\x\\...", optDefault) == L"...", "LastWord: nothing but separators -> whole (never empty)");
+
+    // FolderName: the meaningful folder name as-is (the generic walk still applies).
+    TitleNamingOptions optAsIs{};
+    optAsIs.naming = TabTitleNaming::FolderName;
+    CHECK(DeriveSessionTitle(L"C:\\repos\\Potato.Tomato.SlangGang", optAsIs) == L"Potato.Tomato.SlangGang", "FolderName: name kept verbatim");
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\bin\\Debug", optAsIs) == L"NumSharp", "FolderName: generic walk still applies");
     {
         const std::wstring leaf(35, L'a');
-        CHECK(DeriveSessionTitle(L"C:\\x\\" + leaf) == std::wstring(30, L'a') + L"...", ">30 all-lower truncated with ...");
+        CHECK(DeriveSessionTitle(L"C:\\x\\" + leaf, optAsIs) == std::wstring(30, L'a') + L"...", "FolderName: >30 chars truncated with ...");
+    }
+
+    // TwoFolders: "<parent>/<folder>"; a folder directly under the drive root has no parent folder.
+    TitleNamingOptions optTwo{};
+    optTwo.naming = TabTitleNaming::TwoFolders;
+    CHECK(DeriveSessionTitle(L"C:\\repos\\Potato.Tomato.SlangGang", optTwo) == L"repos/Potato.Tomato.SlangGang", "TwoFolders: parent/folder");
+    CHECK(DeriveSessionTitle(L"C:\\OnlyFolder", optTwo) == L"OnlyFolder", "TwoFolders: no parent below the drive root -> folder alone");
+    CHECK(DeriveSessionTitle(L"K:\\source\\NumSharp\\bin\\Debug", optTwo) == L"source/NumSharp", "TwoFolders: parent of the MEANINGFUL folder (generic walk first)");
+
+    // Capitals: the capitals only; a no-capitals name falls back to word initials (>=2 words) else as-is.
+    TitleNamingOptions optCaps{};
+    optCaps.naming = TabTitleNaming::Capitals;
+    CHECK(DeriveSessionTitle(L"C:\\x\\PotaTo.Tomato.Slang", optCaps) == L"PTTS", "Capitals: every capital collected");
+    CHECK(DeriveSessionTitle(L"C:\\x\\PotatoTomato", optCaps) == L"PT", "Capitals: camel-case capitals");
+    CHECK(DeriveSessionTitle(L"C:\\x\\Potato Tomato Slang", optCaps) == L"PTS", "Capitals: spaced words");
+    CHECK(DeriveSessionTitle(L"C:\\x\\MyVeryLongProjectName", optCaps) == L"MVLPN", "Capitals: the legacy capitals-only rule");
+    CHECK(DeriveSessionTitle(L"C:\\x\\potato tomato", optCaps) == L"PT", "Capitals: no capitals -> word initials uppercased");
+    CHECK(DeriveSessionTitle(L"C:\\x\\agentmaster", optCaps) == L"agentmaster", "Capitals: single lowercase word -> as-is");
+
+    // Case + whitespace transforms compose over any technique.
+    {
+        TitleNamingOptions o{};
+        o.naming = TabTitleNaming::FolderName;
+        o.caseMode = TabTitleCase::Upper;
+        CHECK(DeriveSessionTitle(L"C:\\x\\Potato Tomato", o) == L"POTATO TOMATO", "case: Uppercase");
+        o.caseMode = TabTitleCase::Lower;
+        CHECK(DeriveSessionTitle(L"C:\\x\\Potato Tomato", o) == L"potato tomato", "case: Lowercase");
+        o.caseMode = TabTitleCase::Default;
+        o.spacesToUnderscores = true;
+        CHECK(DeriveSessionTitle(L"C:\\x\\Potato Tomato Slang", o) == L"Potato_Tomato_Slang", "whitespace -> underscores");
+        o.caseMode = TabTitleCase::Upper;
+        CHECK(DeriveSessionTitle(L"C:\\x\\Potato Tomato", o) == L"POTATO_TOMATO", "case + underscores compose");
+        o = TitleNamingOptions{};
+        o.naming = TabTitleNaming::TwoFolders;
+        o.caseMode = TabTitleCase::Lower;
+        CHECK(DeriveSessionTitle(L"C:\\Repos\\NumSharp", o) == L"repos/numsharp", "TwoFolders lowercased");
     }
 
     // --- DeriveForkTitle: first fork appends " (fork)", forking a fork BUMPS the counter ---
@@ -737,6 +786,17 @@ void TestTabColorModes()
     CHECK(TabColorModeFromString(ToString(TabColorMode::NoColor)) == TabColorMode::NoColor, "tabColorMode noColor round-trip");
     CHECK(ToString(TabColorMode::NoColor) == L"noColor", "tabColorMode NoColor serializes as the 'noColor' token");
     CHECK(TabColorModeFromString(L"nonsense") == TabColorMode::WorkingDirectory, "tabColorMode unknown token -> WorkingDirectory (the prior behavior)");
+
+    // --- tab title naming enums: <-> string round-trip + unknown-token fallback ---
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::LastWord)) == TabTitleNaming::LastWord, "tabTitleNaming lastWord round-trip");
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::FolderName)) == TabTitleNaming::FolderName, "tabTitleNaming folderName round-trip");
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::TwoFolders)) == TabTitleNaming::TwoFolders, "tabTitleNaming twoFolders round-trip");
+    CHECK(TabTitleNamingFromString(ToString(TabTitleNaming::Capitals)) == TabTitleNaming::Capitals, "tabTitleNaming capitals round-trip");
+    CHECK(TabTitleNamingFromString(L"nonsense") == TabTitleNaming::LastWord, "tabTitleNaming unknown token -> LastWord (the default technique)");
+    CHECK(TabTitleCaseFromString(ToString(TabTitleCase::Default)) == TabTitleCase::Default, "tabTitleCase default round-trip");
+    CHECK(TabTitleCaseFromString(ToString(TabTitleCase::Lower)) == TabTitleCase::Lower, "tabTitleCase lower round-trip");
+    CHECK(TabTitleCaseFromString(ToString(TabTitleCase::Upper)) == TabTitleCase::Upper, "tabTitleCase upper round-trip");
+    CHECK(TabTitleCaseFromString(L"nonsense") == TabTitleCase::Default, "tabTitleCase unknown token -> Default");
 
     // --- SessionColorKeyDir: which dir KEYS a session's color under each mode ---
     {

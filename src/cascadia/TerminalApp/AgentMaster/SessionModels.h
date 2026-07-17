@@ -218,6 +218,51 @@ namespace Agentmaster
         NoColor = 3 // "Remove colors": no tab is colored; persisted colors kept but not loaded
     };
 
+    // Agentmaster (tab title naming): HOW an untitled session's default tab title is derived from
+    // its working directory — the cog's TABS "Tab title naming" dropdown. Every technique starts
+    // from the MEANINGFUL folder (the walk past generic bin/obj/Debug/... segments
+    // DeriveSessionTitle always did), then:
+    //   * LastWord (default) — the last '.'/' '/'-'/'_'-separated word of the folder name
+    //     ("Potato.Tomato.SlangGang" -> "SlangGang"); a name with no separators stays whole
+    //     ("PotatoTomato").
+    //   * FolderName — the folder name as-is.
+    //   * TwoFolders — "<parent>/<folder>" ("C:\repos\Potato.Tomato.SlangGang" ->
+    //     "repos/Potato.Tomato.SlangGang"); a folder directly under a drive/share root (no parent
+    //     folder) is just the folder name.
+    //   * Capitals — the capital letters only ("PotaTo.Tomato.Slang" -> "PTTS"); a name with NO
+    //     capitals falls back to its word initials uppercased ("potato tomato" -> "PT"), and a
+    //     single all-lowercase word stays as-is (a one-letter title helps nobody).
+    // Applied when an UNTITLED session is launched / adopted / forked-from-disk — an existing or
+    // renamed title never re-derives (Rule #11: the title is ONE value). Serialized as a string
+    // token (Persistence ToString / TabTitleNamingFromString); a missing key => LastWord.
+    enum class TabTitleNaming
+    {
+        LastWord = 0, // default: the last word of the folder name (whole name when it has no separators)
+        FolderName = 1, // the meaningful folder name as-is
+        TwoFolders = 2, // "<parent>/<folder>"
+        Capitals = 3 // the folder name's capital letters only
+    };
+
+    // Agentmaster (tab title naming): the CASE transform applied to the derived title — the cog's
+    // "Title case" dropdown beside the technique. Serialized as a string token (Persistence
+    // ToString / TabTitleCaseFromString); a missing key => Default (keep the derived casing).
+    enum class TabTitleCase
+    {
+        Default = 0, // as derived
+        Lower = 1, // lowercase the whole title
+        Upper = 2 // uppercase the whole title
+    };
+
+    // Agentmaster (tab title naming): the full recipe DeriveSessionTitle applies — the technique +
+    // the output transforms (case; whitespace -> '_'). Defaults mirror the AppSettings defaults,
+    // so TitleNamingOptions{} == the out-of-the-box naming (tests + the cog preview rely on that).
+    struct TitleNamingOptions
+    {
+        TabTitleNaming naming{ TabTitleNaming::LastWord };
+        TabTitleCase caseMode{ TabTitleCase::Default };
+        bool spacesToUnderscores{ false }; // convert any whitespace in the title to '_'
+    };
+
     // When a queued prompt is allowed to fire.
     enum class PromptGate
     {
@@ -1139,6 +1184,17 @@ namespace Agentmaster
         // hides tab icons by default so the strip reads on the status dot + title. Flip it on to restore
         // the profile icons. The pinned Manager tab follows this like any other tab.
         bool showTabIcon{ false };
+        // Agentmaster (tab title naming): HOW an untitled session's default tab title derives from
+        // its working directory (TabTitleNaming — LastWord default / FolderName / TwoFolders /
+        // Capitals), plus the output transforms: the case applied to the result (TabTitleCase) and
+        // whether any whitespace becomes '_'. Consumed by DeriveSessionTitle whenever an UNTITLED
+        // session is launched / adopted / forked-from-disk — an existing (or renamed) title never
+        // re-derives (Rule #11). GLOBAL; the 1-arg DeriveSessionTitle reads these fresh from disk at
+        // each derive, so a cog Save applies to the very next launch in every window. Missing keys
+        // => LastWord / Default / false.
+        TabTitleNaming tabTitleNaming{ TabTitleNaming::LastWord };
+        TabTitleCase tabTitleCase{ TabTitleCase::Default };
+        bool tabTitleSpacesToUnderscores{ false };
         // Agentmaster (FAVORITES.md §5a): the FAVORITE marker glyph on a live session's tab — Crown
         // (default, a gold crown at the status dot's north-west) or Star (the status dot foregrounded
         // on a white, golden-tipped star drawn behind it). GLOBAL across windows; applied live on Save

@@ -294,6 +294,54 @@ namespace Agentmaster
         return TabColorMode::WorkingDirectory; // default + unknown token -> the prior (per-dir) behavior
     }
 
+    std::wstring ToString(TabTitleNaming n)
+    {
+        switch (n)
+        {
+        case TabTitleNaming::FolderName:
+            return L"folderName";
+        case TabTitleNaming::TwoFolders:
+            return L"twoFolders";
+        case TabTitleNaming::Capitals:
+            return L"capitals";
+        case TabTitleNaming::LastWord:
+        default:
+            return L"lastWord";
+        }
+    }
+    TabTitleNaming TabTitleNamingFromString(std::wstring_view s)
+    {
+        if (s == L"folderName")
+            return TabTitleNaming::FolderName;
+        if (s == L"twoFolders")
+            return TabTitleNaming::TwoFolders;
+        if (s == L"capitals")
+            return TabTitleNaming::Capitals;
+        return TabTitleNaming::LastWord; // default + unknown token -> the default technique
+    }
+
+    std::wstring ToString(TabTitleCase c)
+    {
+        switch (c)
+        {
+        case TabTitleCase::Lower:
+            return L"lower";
+        case TabTitleCase::Upper:
+            return L"upper";
+        case TabTitleCase::Default:
+        default:
+            return L"default";
+        }
+    }
+    TabTitleCase TabTitleCaseFromString(std::wstring_view s)
+    {
+        if (s == L"lower")
+            return TabTitleCase::Lower;
+        if (s == L"upper")
+            return TabTitleCase::Upper;
+        return TabTitleCase::Default; // default + unknown token -> keep the derived casing
+    }
+
     std::wstring ToString(PromptStatus s)
     {
         switch (s)
@@ -598,6 +646,9 @@ namespace Agentmaster
         o.Set(L"closeTabOnMiddleClick", json::Value::MkBool(s.closeTabOnMiddleClick));
         o.Set(L"alwaysShowHomeButton", json::Value::MkBool(s.alwaysShowHomeButton));
         o.Set(L"showTabIcon", json::Value::MkBool(s.showTabIcon));
+        o.Set(L"tabTitleNaming", json::Value::MkStr(ToString(s.tabTitleNaming)));
+        o.Set(L"tabTitleCase", json::Value::MkStr(ToString(s.tabTitleCase)));
+        o.Set(L"tabTitleSpacesToUnderscores", json::Value::MkBool(s.tabTitleSpacesToUnderscores));
         o.Set(L"favoriteIcon", json::Value::MkStr(ToString(s.favoriteIcon)));
         o.Set(L"tabColorMode", json::Value::MkStr(ToString(s.tabColorMode)));
         o.Set(L"inferGitRoot", json::Value::MkBool(s.inferGitRoot));
@@ -693,6 +744,9 @@ namespace Agentmaster
         s.closeTabOnMiddleClick = v.BoolAt(L"closeTabOnMiddleClick", true); // absent => ON (close on middle click, the prior behavior)
         s.alwaysShowHomeButton = v.BoolAt(L"alwaysShowHomeButton", true); // absent => ON (the Home button is always shown by default)
         s.showTabIcon = v.BoolAt(L"showTabIcon", false); // absent => OFF (tab icons HIDDEN by default — an Agentmaster override of stock WT, which shows them)
+        s.tabTitleNaming = TabTitleNamingFromString(v.StrAt(L"tabTitleNaming", L"lastWord")); // tab title naming: absent/unknown => LastWord (the default technique)
+        s.tabTitleCase = TabTitleCaseFromString(v.StrAt(L"tabTitleCase", L"default")); // absent/unknown => keep the derived casing
+        s.tabTitleSpacesToUnderscores = v.BoolAt(L"tabTitleSpacesToUnderscores", false); // absent => OFF (titles keep their spaces)
         s.favoriteIcon = FavoriteIconFromString(v.StrAt(L"favoriteIcon", L"crown")); // FAVORITES.md §5a: absent/unknown => Crown (the prior behavior)
         s.tabColorMode = TabColorModeFromString(v.StrAt(L"tabColorMode", L"workingDirectory")); // tab color modes: absent/unknown => shared-per-working-dir (the prior behavior)
         s.inferGitRoot = v.BoolAt(L"inferGitRoot", true); // "Use .git folder to infer": absent => ON (the inferred dir snaps to the enclosing git root)
@@ -1361,9 +1415,79 @@ namespace Agentmaster
         return kGeneric.find(LowerCopy(segment)) != kGeneric.end();
     }
 
-    std::wstring DeriveSessionTitle(const std::wstring& workingDir)
+    namespace
+    {
+        // Title-word separators for the naming techniques: the characters users separate folder-name
+        // "words" with ('.', '-', '_', whitespace). Deliberately a fixed set — NOT iswalnum's
+        // complement — so decorated names like "C++Project" or "App (copy)" don't shatter into
+        // surprising fragments.
+        bool IsTitleWordSep(wchar_t c)
+        {
+            return c == L'.' || c == L'-' || c == L'_' || std::iswspace(static_cast<wint_t>(c)) != 0;
+        }
+
+        // TabTitleNaming::LastWord — the last separator-delimited word of the folder name
+        // ("Potato.Tomato.SlangGang" -> "SlangGang"); a name with no separators (or nothing but
+        // separators) stays whole ("PotatoTomato").
+        std::wstring TitleLastWord(const std::wstring& name)
+        {
+            size_t end = name.size();
+            while (end > 0 && IsTitleWordSep(name[end - 1]))
+            {
+                --end; // trailing separators never make an empty last word ("Potato.Tomato." -> "Tomato")
+            }
+            if (end == 0)
+            {
+                return name; // nothing but separators -> whole (never empty)
+            }
+            size_t begin = end;
+            while (begin > 0 && !IsTitleWordSep(name[begin - 1]))
+            {
+                --begin;
+            }
+            return name.substr(begin, end - begin);
+        }
+
+        // TabTitleNaming::Capitals — the capital letters only ("PotaTo.Tomato.Slang" -> "PTTS").
+        // A name with NO capitals falls back to its word initials uppercased ("potato tomato" ->
+        // "PT"); a single all-lowercase word stays as-is (a one-letter title helps nobody).
+        std::wstring TitleCapitals(const std::wstring& name)
+        {
+            std::wstring caps;
+            for (const wchar_t c : name)
+            {
+                if (std::iswupper(static_cast<wint_t>(c)))
+                {
+                    caps.push_back(c);
+                }
+            }
+            if (!caps.empty())
+            {
+                return caps;
+            }
+            std::wstring initials;
+            bool atWordStart = true;
+            for (const wchar_t c : name)
+            {
+                if (IsTitleWordSep(c))
+                {
+                    atWordStart = true;
+                    continue;
+                }
+                if (atWordStart)
+                {
+                    initials.push_back(static_cast<wchar_t>(std::towupper(static_cast<wint_t>(c))));
+                    atWordStart = false;
+                }
+            }
+            return initials.size() >= 2 ? initials : name;
+        }
+    }
+
+    std::wstring DeriveSessionTitle(const std::wstring& workingDir, const TitleNamingOptions& opts)
     {
         std::wstring base;
+        std::wstring parentLeaf; // the meaningful folder's own parent name ("" at/above a drive/share root)
         try
         {
             // Walk up from the leaf to the first non-generic segment (K:\proj\bin\Debug -> "proj").
@@ -1386,7 +1510,15 @@ namespace Agentmaster
             if (base.empty())
             {
                 // All-generic (or rootless) -> fall back to the actual leaf.
-                base = std::filesystem::path{ StripTrailingSep(workingDir) }.filename().wstring();
+                cur = std::filesystem::path{ StripTrailingSep(workingDir) };
+                base = cur.filename().wstring();
+            }
+            // The segment ABOVE the meaningful folder — the TwoFolders prefix. A drive/share root
+            // decomposes to an empty filename ("C:\" -> ""), and "."/".." add nothing.
+            const std::wstring up = cur.parent_path().filename().wstring();
+            if (up != L"." && up != L"..")
+            {
+                parentLeaf = up;
             }
         }
         catch (...)
@@ -1394,45 +1526,74 @@ namespace Agentmaster
         }
         if (base.empty())
         {
-            base = L"claude";
+            base = L"claude"; // never empty
         }
 
-        // Display rules by length/case.
-        if (base.size() <= 16)
+        // The naming technique (the cog's "Tab title naming" dropdown).
+        std::wstring title;
+        switch (opts.naming)
         {
-            return base; // short -> as-is
+        case TabTitleNaming::FolderName:
+            title = base;
+            break;
+        case TabTitleNaming::TwoFolders:
+            title = parentLeaf.empty() ? base : parentLeaf + L"/" + base;
+            break;
+        case TabTitleNaming::Capitals:
+            title = TitleCapitals(base);
+            break;
+        case TabTitleNaming::LastWord:
+        default:
+            title = TitleLastWord(base);
+            break;
         }
-        bool allLower = true;
-        for (const wchar_t c : base)
+
+        // Output transforms: the case pick, then any whitespace -> '_' (order irrelevant — neither
+        // changes the other's input class).
+        if (opts.caseMode == TabTitleCase::Lower || opts.caseMode == TabTitleCase::Upper)
         {
-            if (std::iswupper(static_cast<wint_t>(c)))
+            for (auto& c : title)
             {
-                allLower = false;
-                break;
+                c = (opts.caseMode == TabTitleCase::Lower) ?
+                        static_cast<wchar_t>(std::towlower(static_cast<wint_t>(c))) :
+                        static_cast<wchar_t>(std::towupper(static_cast<wint_t>(c)));
             }
         }
-        if (!allLower)
+        if (opts.spacesToUnderscores)
         {
-            // >16 and has capitals -> the capital letters only ("MyLongProjectName" -> "MLPN").
-            std::wstring caps;
-            for (const wchar_t c : base)
+            for (auto& c : title)
             {
-                if (std::iswupper(static_cast<wint_t>(c)))
+                if (std::iswspace(static_cast<wint_t>(c)))
                 {
-                    caps.push_back(c);
+                    c = L'_';
                 }
             }
-            if (!caps.empty())
-            {
-                return caps;
-            }
         }
-        // >16 all-lowercase -> as-is, truncated past 30 chars with an ellipsis.
-        if (base.size() > 30)
+
+        // Keep the tab strip sane in every mode: a runaway name truncates past 30 chars (the
+        // historical cap).
+        if (title.size() > 30)
         {
-            return base.substr(0, 30) + L"...";
+            return title.substr(0, 30) + L"...";
         }
-        return base;
+        return title;
+    }
+
+    std::wstring DeriveSessionTitle(const std::wstring& workingDir)
+    {
+        // The configured convenience every launch/adopt/fork seam calls: apply the cog's CURRENT
+        // "Tab title naming" settings, read fresh from disk so a Save applies to the very next
+        // launch in every window. (Tests + the cog preview use the pure 2-arg form.)
+        return DeriveSessionTitle(workingDir, TitleNamingFromSettings(LoadAppSettings()));
+    }
+
+    TitleNamingOptions TitleNamingFromSettings(const AppSettings& s)
+    {
+        TitleNamingOptions o;
+        o.naming = s.tabTitleNaming;
+        o.caseMode = s.tabTitleCase;
+        o.spacesToUnderscores = s.tabTitleSpacesToUnderscores;
+        return o;
     }
 
     std::wstring DeriveForkTitle(const std::wstring& sourceTitle)
