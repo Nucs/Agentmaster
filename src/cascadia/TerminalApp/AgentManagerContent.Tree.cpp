@@ -78,6 +78,7 @@ using namespace Agentmaster;
 // The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
 // helpers below (e.g. TimingText) can call it unqualified too.
 using winrt::TerminalApp::implementation::AgentSetTip;
+using winrt::TerminalApp::implementation::AgentSetTitledTip;
 #include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
 
 namespace winrt::TerminalApp::implementation
@@ -282,7 +283,7 @@ namespace winrt::TerminalApp::implementation
             dirBtn.Background(Fill(PathEq(dir, _scopeDir) ? 0x30 : 0x00, 0x80, 0x80, 0x80));
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
-            AgentSetTip(dirBtn, L"Working directory \x2014 click to scope the board to its sessions; click the scoped one again to collapse it.");
+            AgentSetTitledTip(dirBtn, L"Working directory", L"A folder your sessions run in, and how many are open in it. Click to narrow the board and this tree to just its sessions; click the folder that is already scoped to collapse it and fall back to the one above it (the topmost falls back to all directories).");
             const auto capturedDir = dir;
             const auto capturedPrevDir = prevDir; // predecessor at build time, for "collapse + select previous"
             dirBtn.Click([this, capturedDir, capturedPrevDir](const IInspectable&, const RoutedEventArgs&) {
@@ -435,13 +436,13 @@ namespace winrt::TerminalApp::implementation
                 if (IsSessionDormant(s))
                 {
                     auto dot = StateDotDormant(StateColor(s.state));
-                    AgentSetTip(dot, L"Not started yet \x2014 the half-hollow dot means this session's claude hasn't initialized (a restored tab you haven't opened). Shift+Click the row (or right-click \x2192 Activate Tab, or open the tab) to start it.");
+                    AgentSetTitledTip(dot, L"Not started yet", L"A half-hollow dot means this session's claude hasn't started \x2014 a restored tab you haven't opened yet. It only starts when the tab is first shown, so it costs nothing until you want it. Shift+Click the row, right-click \x2192 Activate Tab, or just open the tab to start it now; the dot fills once it is running.");
                     row.Children().Append(dot);
                 }
                 else
                 {
                     auto dot = StateDot(StateColor(s.state));
-                    AgentSetTip(dot, L"Session state \x2014 the dot color matches the Triage Board column; the label to the right names it.");
+                    AgentSetTitledTip(dot, L"Session state", L"The same color this session's card wears on the Triage Board, and the same dot its terminal tab carries \x2014 blue Running \xB7 gold Waiting-for-you \xB7 orange-red Needs-approval \xB7 crimson Error \xB7 green Done \xB7 gray Idle. The label beside it names the state; hover a board column header for what each one means.");
                     row.Children().Append(dot);
                 }
                 row.Children().Append(Text(OneLine(s.title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ s.title }), 13, false, 1.0));
@@ -451,7 +452,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
                     cp.Opacity(0.9);
-                    AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.");
+                    AgentSetTitledTip(cp, L"Codex agent", L"This managed session runs the OpenAI Codex CLI instead of Claude. Agentmaster launches, resumes and tracks it like any session, but cannot drive its prompts \x2014 there is no queue or Tests Autorunner for Codex, and it reports only Running / Waiting / Idle.");
                     row.Children().Append(cp);
                 }
                 row.Children().Append(Text(StateLabel(s.state), 11, false, 0.5));
@@ -462,7 +463,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto outside = Pill(L"outside", Color{ 0xFF, 0x8A, 0x8A, 0x8A });
                     outside.Opacity(0.85);
-                    AgentSetTip(outside, L"This session's tab lives in another window (shown only in GLOBAL scope). Double-click to jump to it.");
+                    AgentSetTitledTip(outside, L"Another window", L"This session's tab lives in a different Agentmaster window \x2014 which is why it only appears here in GLOBAL scope. Double-click the row to bring that window forward and land on the tab.");
                     row.Children().Append(outside);
                 }
                 // Per-session timing (created-ago / active-for / last-activity-ago) from the transcript.
@@ -558,7 +559,7 @@ namespace winrt::TerminalApp::implementation
                 });
                 // Right-click (or context key / long-press) menu: Rename / Archive / Open New Session Here.
                 rowBtn.ContextFlyout(_MakeSessionMenu(id, _WorkDirOf(s), rowBtn)); // the row anchors its Tags panel; Open-New-Here targets the EFFECTIVE work dir (the group this row sits under)
-                AgentSetTip(rowBtn, L"Click to select this session \x2014 double-click or Enter jumps to its live tab; F2 renames, Del archives, right-click for more.");
+                AgentSetTitledTip(rowBtn, winrt::hstring{ s.title.empty() ? std::wstring{ L"(untitled)" } : s.title }, L"Click selects this session (the pane on the right follows it), double-click or Enter jumps to its live tab. F2 renames it, Del closes it, Shift+Click starts it if it hasn't started yet, and right-click has the rest.");
                 // Agentmaster: tag + register the row so _Refresh can RESTORE keyboard focus onto it
                 // after a rebuild (see _MakeCard for the board-lens twin). "t:" marks the tree lens.
                 rowBtn.Tag(winrt::box_value(winrt::hstring{ L"t:" + id }));
@@ -691,7 +692,7 @@ namespace winrt::TerminalApp::implementation
             dirBtn.Background(Fill(0x00, 0x80, 0x80, 0x80));
             dirBtn.BorderThickness(Thickness{ 0, 0, 0, 0 });
             dirBtn.Padding(Thickness{ 4, 2, 4, 2 });
-            AgentSetTip(dirBtn, L"Working directory of these external sessions \x2014 click to collapse or expand the group.");
+            AgentSetTitledTip(dirBtn, L"Working directory", L"A folder agents outside Agentmaster are running in, and how many. Click to collapse or expand the group \x2014 unlike your own directories, an external folder doesn't scope the board (these sessions belong to no window).");
             const auto capturedDir = dir;
             dirBtn.Click([this, capturedDir](const IInspectable&, const RoutedEventArgs&) {
                 if (_collapsedDirs.find(capturedDir) != _collapsedDirs.end())
@@ -758,11 +759,11 @@ namespace winrt::TerminalApp::implementation
                 auto g = StateDot(ex.kind == AgentKind::Codex ? CodexStateColor(ex.codexState) : Color{ 0xFF, 0x9E, 0x9E, 0x9E });
                 if (ex.kind == AgentKind::Codex)
                 {
-                    AgentSetTip(g, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" });
+                    AgentSetTitledTip(g, L"Codex turn state", winrt::hstring{ L"Currently " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", read from this session's rollout transcript. Codex reports only Running, Waiting and Idle \x2014 its rollout records no approval or error event, so it has no needs-you or error state to show." });
                 }
                 else
                 {
-                    AgentSetTip(g, L"Observed only \x2014 Agentmaster doesn't track an external Claude session's turn state.");
+                    AgentSetTitledTip(g, L"Observed only", L"Agentmaster reads this external Claude session but doesn't follow its turns, so it has no state to show here. Adopt it (right-click) to bring its conversation into a tab that is tracked in full.");
                 }
                 row.Children().Append(g);
                 // Agentmaster (Phase C1): a teal "codex" agent pill on Codex rows (Claude = default, no pill).
@@ -770,7 +771,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
                     cp.Opacity(0.9);
-                    AgentSetTip(cp, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed).");
+                    AgentSetTitledTip(cp, L"Codex agent", L"This external session runs the OpenAI Codex CLI. It is observed, not managed \x2014 right-click to fork a copy of its rollout, or resume it, into a tab here.");
                     row.Children().Append(cp);
                 }
                 {
@@ -780,7 +781,9 @@ namespace winrt::TerminalApp::implementation
                     // region (ExternalClaudeRow.recap; see ProcessObserver). Full text (the tooltip wraps).
                     if (!ex.recap.empty())
                     {
-                        AgentSetTip(titleText, winrt::hstring{ title } + winrt::hstring{ L"\n\nRecap: " } + winrt::hstring{ ex.recap });
+                        AgentSetTitledTip(titleText,
+                                          winrt::hstring{ title },
+                                          winrt::hstring{ L"Recap \x2014 its own \x201C" L"what we did / what's next\x201D note, written after this session sat idle:\n" } + winrt::hstring{ ex.recap });
                     }
                     row.Children().Append(titleText);
                 }
@@ -809,7 +812,7 @@ namespace winrt::TerminalApp::implementation
                     }
                     auto hp = Pill(winrt::hstring{ hostLabel }, Color{ 0xFF, 0x6E, 0x7B, 0x8A });
                     hp.Opacity(0.85);
-                    AgentSetTip(hp, L"Host \x2014 the terminal application this external session runs in (e.g. Windows Terminal, a sibling Agentmaster, cmd, or pwsh).");
+                    AgentSetTitledTip(hp, L"Host", L"The terminal application this external session runs in \x2014 Windows Terminal, another Agentmaster install, or a plain cmd / pwsh console. Right-click the row to bring that window to the front.");
                     row.Children().Append(hp);
                 }
 
@@ -846,7 +849,7 @@ namespace winrt::TerminalApp::implementation
                     if (!me.empty())
                     {
                         auto meText = Text(winrt::hstring{ me }, 11, false, 0.5);
-                        AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex adds sandbox \xB7 approval policy) \xB7 bg = running in the background.");
+                        AgentSetTitledTip(meText, L"How this session was started", L"Its model \xB7 reasoning effort \xB7 (for Codex, its sandbox and approval policy) \xB7 bg if it runs in the background. Read from the running process, not from a config file.");
                         row.Children().Append(meText);
                     }
                 }
@@ -863,7 +866,7 @@ namespace winrt::TerminalApp::implementation
                     underline.CornerRadius(CornerRadius{ 1, 1, 1, 1 });
                     underline.HorizontalAlignment(HorizontalAlignment::Stretch); // span the "pid N" width
                     underline.Background(SolidColorBrush{ WindowKeyColor(key) });
-                    AgentSetTip(underline, winrt::hstring{ L"Host window / shell PID " } + winrt::to_hstring(key) + L" \x2014 rows sharing this underline color run in the same terminal window / tab");
+                    AgentSetTitledTip(underline, L"Host window", winrt::hstring{ L"Every row with this underline color runs in the same terminal window or tab \x2014 shell process " } + winrt::to_hstring(key) + L" \x2014 so you can tell at a glance which external sessions share a window, even across different folders.");
                     pidCol.Children().Append(underline);
                     row.Children().Append(pidCol);
                 }
@@ -899,7 +902,7 @@ namespace winrt::TerminalApp::implementation
                 rowBtn.Click([this, exId, exCwd, exTitle, exKind, exRollout](const IInspectable&, const RoutedEventArgs&) {
                     _SelectExternal(exId, exCwd, exTitle, exKind, exRollout);
                 });
-                AgentSetTip(rowBtn, L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward.");
+                AgentSetTitledTip(rowBtn, winrt::hstring{ title }, L"An agent running outside Agentmaster \x2014 found and read, never driven. Click to read its conversation in the pane on the right; right-click to adopt it into a tab here, start a session in its folder, or bring its window forward.");
                 _treeHost.Children().Append(rowBtn);
             }
         }

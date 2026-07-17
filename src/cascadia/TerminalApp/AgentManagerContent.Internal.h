@@ -569,9 +569,13 @@ namespace
         return L"-" + createdAgo + L"/" + activeFor + L"/-" + lastAgo;
     }
 
-    // The human-readable tooltip explaining the cryptic timing string.
+    // The human-readable tooltip explaining the cryptic timing string, and its heading for the tip
+    // panel (the timing is a bare TextBlock — there is no label to derive one from).
+    constexpr const wchar_t* kTimingTooltipTitle = L"Age and activity";
     constexpr const wchar_t* kTimingTooltip =
-        L"created ago  /  active for  /  last activity ago\n(e.g. -2m7d/12h/-2h30m — m=month or minute by position, d=day, h=hour, s=second)";
+        L"Three spans, in order: how long ago the session was created  /  how long it spanned, from creation to its last activity  /  how long ago it was last active.\n\n"
+        L"So -2m7d/12h/-2h30m reads: started 2 months 7 days ago, spanned 12 hours of work, last did something 2\xBD hours ago.\n\n"
+        L"d=day, h=hour, s=second; m is months before a d/h and minutes after one.";
 
     // Set the window pointer cursor (used by the resize splitters: a ↔/↕ on hover, Arrow on
     // exit). There is no per-element cursor in this XAML projection (ProtectedCursor is only
@@ -924,7 +928,7 @@ namespace
             return nullptr;
         }
         auto t = Text(winrt::hstring{ s }, 10, false, 0.45);
-        AgentSetTip(t, winrt::hstring{ kTimingTooltip });
+        AgentSetTitledTip(t, winrt::hstring{ kTimingTooltipTitle }, winrt::hstring{ kTimingTooltip });
         return t;
     }
 

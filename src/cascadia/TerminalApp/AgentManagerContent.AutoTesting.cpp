@@ -77,6 +77,7 @@ using namespace Agentmaster;
 // The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
 // helpers below (e.g. TimingText) can call it unqualified too.
 using winrt::TerminalApp::implementation::AgentSetTip;
+using winrt::TerminalApp::implementation::AgentSetTitledTip;
 #include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
 
 namespace winrt::TerminalApp::implementation
@@ -120,7 +121,7 @@ namespace winrt::TerminalApp::implementation
         titleRow.Children().Append(Text(OneLine(sel->title.empty() ? std::wstring_view{ L"(untitled)" } : std::wstring_view{ sel->title }), 16, true, 1.0));
         {
             auto statePill = Pill(StateLabel(sel->state), StateColor(sel->state));
-            AgentSetTip(statePill, L"Current state \x2014 this session's Triage state (hover a Triage Board column header for what each state means).");
+            AgentSetTitledTip(statePill, L"Current state", L"Which Triage Board column this session is sitting in right now. Hover that column's header for what the state means and what moves it out of there.");
             titleRow.Children().Append(statePill);
         }
         _planHeaderHost.Children().Append(titleRow);
@@ -151,7 +152,8 @@ namespace winrt::TerminalApp::implementation
             banner.Children().Append(lbl);
             auto sendBtn = Button{};
             sendBtn.Content(winrt::box_value(L"Send"));
-            AgentSetTip(sendBtn, L"Semi-auto: send the next queued prompt that Tests Autorunner armed.");
+            // (Both buttons' content IS their label, so the tip panel derives these headings from them.)
+            AgentSetTip(sendBtn, L"Send the prompt the Tests Autorunner has armed. It asks because this session is on Semi-auto \x2014 switch it to Full and prompts go out without this step.");
             sendBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 if (_confirmHandler && !_selectedId.empty())
                 {
@@ -160,7 +162,7 @@ namespace winrt::TerminalApp::implementation
             });
             auto skipBtn = Button{};
             skipBtn.Content(winrt::box_value(L"Skip"));
-            AgentSetTip(skipBtn, L"Semi-auto: skip this armed prompt without sending it.");
+            AgentSetTip(skipBtn, L"Pass on the armed prompt: it is marked Skipped \x2014 kept in the list but never sent \x2014 and the queue moves on to the next one.");
             skipBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 if (_confirmHandler && !_selectedId.empty())
                 {
@@ -228,9 +230,11 @@ namespace winrt::TerminalApp::implementation
                 // Amber "typed" (a human keystroke) vs. blue "flight" (queued + injected by us).
                 auto originPill = Pill(typed ? winrt::hstring{ L"typed" } : winrt::hstring{ L"auto" },
                                        typed ? ColorHelper::FromArgb(0xFF, 0xD9, 0xA6, 0x2E) : ColorHelper::FromArgb(0xFF, 0x4F, 0x8B, 0xD0));
-                AgentSetTip(originPill, typed ?
-                                            winrt::hstring{ L"Typed \x2014 you typed this prompt straight into the terminal." } :
-                                            winrt::hstring{ L"Auto \x2014 Agentmaster queued this prompt and sent it for you (Tests Autorunner or Send now)." });
+                AgentSetTitledTip(originPill,
+                                  typed ? L"Typed" : L"Auto",
+                                  typed ?
+                                      winrt::hstring{ L"You typed this prompt straight into the terminal. It is listed because Agentmaster records every message a session gets, not only the ones it sent itself." } :
+                                      winrt::hstring{ L"Agentmaster queued this prompt and sent it for you \x2014 either the Tests Autorunner reached it, or you used Send now." });
                 row.Children().Append(originPill);
             }
             else
@@ -260,9 +264,11 @@ namespace winrt::TerminalApp::implementation
             // Move down / Delete) on UPCOMING rows only (a sent/historical row can't be reordered).
             // showOrigin is true for the SENT summary, false for the UPCOMING queue.
             rowBtn.ContextFlyout(_MakePromptMenu(pid, !showOrigin));
-            AgentSetTip(rowBtn, showOrigin ?
-                                    winrt::hstring{ L"A message this session already received \x2014 right-click to copy it." } :
-                                    winrt::hstring{ L"A queued prompt \x2014 click to select it; right-click to copy, move or delete it." });
+            AgentSetTitledTip(rowBtn,
+                              showOrigin ? L"Sent message" : L"Queued prompt",
+                              showOrigin ?
+                                  winrt::hstring{ L"A message this session has already received, oldest first \x2014 whether Agentmaster sent it or you typed it. The row trims long text; right-click to copy the whole prompt." } :
+                                  winrt::hstring{ L"A prompt waiting its turn. Click to select it; right-click to copy it, move it up or down the order, or drop it from the queue. The next one still pending is what the Tests Autorunner sends." });
             _planListHost.Children().Append(rowBtn);
         };
 
@@ -316,13 +322,13 @@ namespace winrt::TerminalApp::implementation
         if (isCodex)
         {
             auto op = Pill(L"codex \x00B7 observe-only", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
-            AgentSetTip(op, L"Observe-only \x2014 a Codex session running outside Agentmaster: you can read its conversation but not drive it. Adopt it to take control.");
+            AgentSetTitledTip(op, L"Observe-only", L"A Codex session running outside Agentmaster. Its conversation is readable here, but it can't be driven \x2014 there is no queue or Send now for a session we don't host. Right-click it in the tree or on the board to adopt it.");
             titleRow.Children().Append(op);
         }
         else
         {
             auto op = Pill(L"external \x00B7 observe-only", Colors::Gray());
-            AgentSetTip(op, L"Observe-only \x2014 a Claude session running outside Agentmaster: you can read its conversation but not drive it. Adopt it to take control.");
+            AgentSetTitledTip(op, L"Observe-only", L"A Claude session running outside Agentmaster. Its conversation is readable here, but it can't be driven \x2014 there is no queue or Send now for a session we don't host. Right-click it in the tree or on the board to adopt it.");
             titleRow.Children().Append(op);
         }
         _planHeaderHost.Children().Append(titleRow);
@@ -349,7 +355,7 @@ namespace winrt::TerminalApp::implementation
                 recapText.TextWrapping(TextWrapping::Wrap);
                 recapText.TextTrimming(TextTrimming::None);
                 recapText.Margin(Thickness{ 0, 6, 0, 0 });
-                AgentSetTip(recapText, L"Claude Code's idle recap (away_summary) \x2014 a >5-min \x201C" L"what we did / what's next\x201D synthesis, read from this session's transcript tail.");
+                AgentSetTitledTip(recapText, L"Idle recap", L"Claude Code's own \x201C" L"what we did / what's next\x201D note. It writes one after a session has sat idle for more than about five minutes; this is read straight from the tail of its transcript, so it says where the session actually got to.");
                 _planHeaderHost.Children().Append(recapText);
                 break;
             }

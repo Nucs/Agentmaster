@@ -316,6 +316,16 @@ namespace winrt::TerminalApp::implementation
             AgentSetTip(el, tip);
         }
 
+        // The titled form (AgentLocalTooltip.h): the page renders its tips in the LocalTooltip panel
+        // at the top-right, which leads with a TITLE. Almost nothing here can derive one — the search
+        // box has no Header, the scope toggles' content is a bare glyph, "1 month" / "\x21BB" are the
+        // control's VALUE rather than its name, and a table row is a plain Border — so a page tip
+        // names itself. Empty tip == no-op (the headerless table columns pass one).
+        void SessSetTip(const UIElement& el, const winrt::hstring& title, const winrt::hstring& tip)
+        {
+            AgentSetTitledTip(el, title, tip);
+        }
+
         // Force-close every tooltip under root — for hosts about to Clear() or be HIDDEN
         // (a Visibility toggle doesn't unload; a collapsed host does not hide a popup).
         void SessCloseTipsIn(const UIElement& root)
@@ -324,14 +334,16 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Build the toggle buttons of the search bar: a compact glyph ToggleButton with a tooltip.
-        Primitives::ToggleButton SessToggle(const winrt::hstring& glyph, const winrt::hstring& tip)
+        // The title is explicit — the button's content is the bare glyph, which would derive a "👤"
+        // heading for the tip panel.
+        Primitives::ToggleButton SessToggle(const winrt::hstring& glyph, const winrt::hstring& title, const winrt::hstring& tip)
         {
             Primitives::ToggleButton b;
             b.Content(winrt::box_value(glyph));
             b.Padding(Thickness{ 6, 2, 6, 2 });
             b.MinWidth(0);
             b.MinHeight(0);
-            SessSetTip(b, tip);
+            SessSetTip(b, title, tip);
             return b;
         }
 

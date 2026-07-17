@@ -148,7 +148,7 @@ namespace winrt::TerminalApp::implementation
         Button back;
         back.Content(winrt::box_value(winrt::hstring{ L"\x2190  Back" }));
         back.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(back, L"Back \x2014 close the Sessions browser and return to your tabs.");
+        SessSetTip(back, L"Back", L"Close the Sessions browser and return to the tab you came from. Nothing here is changed by browsing \x2014 sessions are only ever read from disk.");
         back.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) { ::Agentmaster::LogNav(L"sessions-page close (back)"); _HideSessionsPage(); }); // Nav audit: the EXPLICIT close (the programmatic _HideSessionsPage after a resume/fork is part of THAT action, so it isn't logged here)
         Grid::SetColumn(back, 0);
         topLeft.Children().Append(back);
@@ -158,6 +158,9 @@ namespace winrt::TerminalApp::implementation
         titleStack.VerticalAlignment(VerticalAlignment::Center);
         titleStack.Children().Append(SessText(L"Claude Code Sessions", 18, true, 1.0));
         _sessionsCountText = SessText(L"", 12, false, 0.6);
+        // The count line is the page's only running commentary on WHY you are seeing this set, but it
+        // says it in shorthand ("12 of 340 sessions \xB7 1 month \xB7 filtered \xB7 3 hidden") — so spell it out.
+        SessSetTip(_sessionsCountText, L"Sessions listed", L"How many sessions are showing and, when something is narrowing them, how many were found in the time window before the filters ran. The notes after it name what is narrowing: the window itself, the Open / Favorite / tag / row filters, and how many you have hidden. \x201Cindexing\x201D means new content is still being folded into the search \x2014 results keep arriving while it does.");
         titleStack.Children().Append(_sessionsCountText);
         Grid::SetColumn(titleStack, 1);
         topLeft.Children().Append(titleStack);
@@ -166,7 +169,7 @@ namespace winrt::TerminalApp::implementation
         search.PlaceholderText(L"search for sessions");
         search.HorizontalAlignment(HorizontalAlignment::Stretch); // stretch to the table's right edge
         search.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(search, L"Filter the list \x2014 every word must match (each may match a different field) \x00B7 \"quoted phrase\" = exact match \x00B7 paste a session-id GUID to find that session and its forks");
+        SessSetTip(search, L"Search", L"Narrow the list. Every word has to match, though each may match a different field \x2014 a title, a folder, a branch, a file the session touched. Put \"quotes\" around words to match that exact phrase, and paste a session id to find that session and everything forked from it.\n\nWhat gets searched is up to the toggles below; a name match always ranks above an incidental mention deeper in a conversation.");
         _sessionsSearchBox = search;
         search.TextChanged([this](const winrt::Windows::Foundation::IInspectable& s, const TextChangedEventArgs&) {
             if (const auto tb = s.try_as<TextBox>())
@@ -249,7 +252,7 @@ namespace winrt::TerminalApp::implementation
         _sessFilterChip.HorizontalAlignment(HorizontalAlignment::Right);
         _sessFilterChip.VerticalAlignment(VerticalAlignment::Center);
         _sessFilterChip.Padding(Thickness{ 8, 2, 8, 2 });
-        SessSetTip(_sessFilterChip, L"Active row filter \x2014 click to clear it.");
+        SessSetTip(_sessFilterChip, L"Active filter", L"The filters you picked from a row's right-click \x2192 Filter menu (same folder, same branch, same day, same fork family). They narrow the list on top of whatever the search box and the toggles already do. Click to clear all of them.");
         _sessFilterChip.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                 if (auto self = weak.get())
@@ -283,17 +286,17 @@ namespace winrt::TerminalApp::implementation
         // a semantics toggle (subsequence matching is noisy as a default, and its `.*?`-joined
         // rg patterns inflate the slow phase's candidate set). IsChecked is set BEFORE Click is
         // wired — and programmatic IsChecked never raises Click anyway (no spurious search).
-        _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Also match inside user messages \x2014 the prompts you typed. Scans transcript text (slower).");
+        _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Search your messages", L"Also look inside the prompts you typed. This reads the conversations themselves, so it is slower than the other scopes \x2014 off by default; results arrive as they are found.");
         _sessScopeUserBtn.Click(onToggle);
         bar.Children().Append(_sessScopeUserBtn);
-        _sessScopeAgentBtn = SessToggle(L"\U0001F916", L"Also match inside Claude's replies and tool calls/results \x2014 everything except your messages. Scans transcript text (slower).");
+        _sessScopeAgentBtn = SessToggle(L"\U0001F916", L"Search the agent's output", L"Also look inside the agent's replies, its thinking, and everything its tools sent or got back \x2014 that is, the conversation minus your own messages. The heaviest scope by far: tool output matches almost any word, so expect broad results.");
         _sessScopeAgentBtn.Click(onToggle);
         bar.Children().Append(_sessScopeAgentBtn);
-        _sessScopeDirsBtn = SessToggle(L"\U0001F4C1", L"Match the directories a session worked in \x2014 its working dir plus folders its tools touched. On by default (instant, no transcript scan).");
+        _sessScopeDirsBtn = SessToggle(L"\U0001F4C1", L"Search directories", L"Match the folders a session worked in \x2014 where it was launched, plus every directory its tools reached into. On by default, and instant: it reads a small index rather than the conversation.");
         _sessScopeDirsBtn.IsChecked(true);
         _sessScopeDirsBtn.Click(onToggle);
         bar.Children().Append(_sessScopeDirsBtn);
-        _sessScopeFilesBtn = SessToggle(L"\U0001F4C4", L"Match the files a session read or edited (tool-call paths). On by default (instant, no transcript scan).");
+        _sessScopeFilesBtn = SessToggle(L"\U0001F4C4", L"Search files", L"Match the files a session read or edited, by their path. On by default, and instant: it reads a small index rather than the conversation.");
         _sessScopeFilesBtn.IsChecked(true);
         _sessScopeFilesBtn.Click(onToggle);
         bar.Children().Append(_sessScopeFilesBtn);
@@ -301,11 +304,11 @@ namespace winrt::TerminalApp::implementation
         // live tab title of an OPEN session (the liveTitle overlay), so a renamed session is found
         // by the name shown. Fast-phase-only (in-memory, no transcript IO). DEFAULT ON — titles were
         // always matched before, so this keeps current results; uncheck to leave titles out.
-        _sessScopeTitleBtn = SessToggle(L"\U0001F3F7", L"Match the session title \x2014 its conversation title and the live tab name of an open session. On by default; uncheck to leave titles out of the search.");
+        _sessScopeTitleBtn = SessToggle(L"\U0001F3F7", L"Search titles", L"Match a session's name \x2014 the title shown in the list, and the live tab name if it is open \x2014 so a session you renamed is found by the name you gave it. On by default; uncheck to search everything but the names.");
         _sessScopeTitleBtn.IsChecked(true);
         _sessScopeTitleBtn.Click(onToggle);
         bar.Children().Append(_sessScopeTitleBtn);
-        _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy matching \x2014 the query's characters must appear in order, with gaps allowed (\"agmst\" matches \"agentmaster\").");
+        _sessFuzzyBtn = SessToggle(L"F", L"Fuzzy matching", L"Loosen every scope: the letters you type only have to appear in order, with anything in between \x2014 \"agmst\" then finds \"agentmaster\". Words in \"quotes\" stay exact either way.");
         _sessFuzzyBtn.Click(onToggle);
         bar.Children().Append(_sessFuzzyBtn);
 
@@ -317,7 +320,7 @@ namespace winrt::TerminalApp::implementation
         _sessOpenOnlyBtn.Content(winrt::box_value(winrt::hstring{ L"Open" }));
         _sessOpenOnlyBtn.MinWidth(0);
         _sessOpenOnlyBtn.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(_sessOpenOnlyBtn, L"Show only sessions open in an Agentmaster window right now (the solid color chip) \x2014 hides archived / on-disk ones.");
+        SessSetTip(_sessOpenOnlyBtn, L"Open only", L"Show only the sessions that have a tab open in an Agentmaster window right now \x2014 the ones with a solid color chip. Everything closed or never opened here is hidden.");
         _sessOpenOnlyBtn.Click(onToggle);
         bar.Children().Append(_sessOpenOnlyBtn);
 
@@ -331,7 +334,7 @@ namespace winrt::TerminalApp::implementation
         _sessHiddenBtn.Content(winrt::box_value(winrt::hstring{ L"Hidden" }));
         _sessHiddenBtn.MinWidth(0);
         _sessHiddenBtn.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(_sessHiddenBtn, L"Reveal sessions hidden from the list \x2014 the ones you hid (their files are kept on disk). Off by default.");
+        SessSetTip(_sessHiddenBtn, L"Show hidden", L"Bring back the sessions you hid from this list. They return dimmed, with Unhide on their right-click menu \x2014 so a hidden session is still findable and resumable without clearing the whole hidden set from Settings. Hiding never touches anything on disk.");
         _sessHiddenBtn.Click(onToggle);
         bar.Children().Append(_sessHiddenBtn);
 
@@ -342,14 +345,14 @@ namespace winrt::TerminalApp::implementation
         _sessFavOnlyBtn.Content(winrt::box_value(winrt::hstring{ L"Favorite" }));
         _sessFavOnlyBtn.MinWidth(0);
         _sessFavOnlyBtn.VerticalAlignment(VerticalAlignment::Center);
-        SessSetTip(_sessFavOnlyBtn, L"Show only favorited sessions (the \x2605 star). Click a row's star on the left to favorite it.");
+        SessSetTip(_sessFavOnlyBtn, L"Favorites only", L"Show only the sessions you starred. Click the star at the left of any row to favorite it \x2014 that is the mark that survives closing a session, so it's how you keep the ones worth finding again. Favorites still obey the time window.");
         _sessFavOnlyBtn.Click(onToggle);
         bar.Children().Append(_sessFavOnlyBtn);
 
         // [1 month] — click cycles the presets; hover opens the From/To range popup (Q4).
         _sessWindowBtn = Button{};
         _sessWindowBtn.Content(winrt::box_value(winrt::hstring{ kSessPresets[_sessionsWindowPreset].label }));
-        SessSetTip(_sessWindowBtn, L"Time window \x2014 only list sessions active within this span. Click to cycle 1d \x2192 3d \x2192 7d \x2192 14d \x2192 1mo \x2192 3mo \x00B7 hover to set a custom From/To range.");
+        SessSetTip(_sessWindowBtn, L"Time window", L"List only the sessions active within this span \x2014 the bound on how far back the browser looks. Click to cycle 1d \x2192 3d \x2192 7d \x2192 14d \x2192 1mo \x2192 3mo, or just hover to set an exact From/To range instead.");
         _sessWindowBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Defer — the cycle re-gathers + re-renders the table (tree mutation).
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
@@ -396,7 +399,7 @@ namespace winrt::TerminalApp::implementation
         // The _sessionsIndexing flag dedupes against an in-flight pass, so a double-click is safe.
         _sessRefreshBtn = Button{};
         _sessRefreshBtn.Content(winrt::box_value(winrt::hstring{ L"\x21BB" }));
-        SessSetTip(_sessRefreshBtn, L"Refresh \x2014 rescan the folder for new or changed sessions and re-index them.");
+        SessSetTip(_sessRefreshBtn, L"Refresh", L"Look again for sessions that are new, or that have grown, since this page opened, and fold their latest content into the search index. Safe to click twice \x2014 a scan already running isn't restarted.");
         _sessRefreshBtn.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
             // Defer off the click tick (the page's pointer-handler discipline); the gather itself
             // runs on a background pass and re-renders when it lands.
@@ -468,19 +471,19 @@ namespace winrt::TerminalApp::implementation
             _sessFromBox = TextBox{};
             _sessFromBox.PlaceholderText(L"from: 2026-05-10");
             _sessFromBox.Width(180);
-            SessSetTip(_sessFromBox, L"Range start \x2014 list sessions active on or after this date (YYYY-MM-DD). Overrides the time-window preset.");
+            SessSetTip(_sessFromBox, L"Range start", L"List sessions last active on or after this date, written YYYY-MM-DD. Setting a range takes over from the time-window preset until you clear it.");
             card.Children().Append(_sessFromBox);
             _sessToBox = TextBox{};
             _sessToBox.PlaceholderText(L"to: 2026-06-10 (empty = now)");
             _sessToBox.Width(180);
-            SessSetTip(_sessToBox, L"Range end \x2014 list sessions last active on or before this date (YYYY-MM-DD); leave empty for now.");
+            SessSetTip(_sessToBox, L"Range end", L"List sessions last active on or before this date, written YYYY-MM-DD. Leave it empty to run the range up to now.");
             card.Children().Append(_sessToBox);
             StackPanel actions;
             actions.Orientation(Orientation::Horizontal);
             actions.Spacing(6);
             Button apply;
             apply.Content(winrt::box_value(winrt::hstring{ L"Apply" }));
-            SessSetTip(apply, L"Apply the custom From/To range \x2014 re-lists the sessions active within it.");
+            SessSetTip(apply, L"Apply", L"Re-list the sessions active within the From/To dates above, in place of the time-window preset.");
             apply.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                     if (auto self = weak.get())
@@ -492,7 +495,7 @@ namespace winrt::TerminalApp::implementation
             actions.Children().Append(apply);
             Button clear;
             clear.Content(winrt::box_value(winrt::hstring{ L"Preset" }));
-            SessSetTip(clear, L"Clear the custom range and go back to the time-window preset.");
+            SessSetTip(clear, L"Preset", L"Drop the custom From/To range and go back to the time-window preset the button shows.");
             clear.Click([this](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak()]() {
                     if (auto self = weak.get())
@@ -1183,11 +1186,13 @@ namespace winrt::TerminalApp::implementation
         _sessionsHeaderRow.ColumnDefinitions().Clear();
         SessAddColumns(_sessionsHeaderRow, showHits);
         _sessionsHeaderRow.Margin(Thickness{ 8, 0, 8, 4 });
-        const auto addHeader = [this](int col, winrt::hstring label, bool sortable, winrt::hstring tip = L"") {
+        // `title` names the column for the tip panel: a header's content is a TextBlock (not a plain
+        // string), and the sortable ones carry a ▲/▼ arrow, so neither derives a usable heading.
+        const auto addHeader = [this](int col, winrt::hstring label, bool sortable, winrt::hstring title = L"", winrt::hstring tip = L"") {
             if (!sortable)
             {
                 auto t = SessText(label, 11, true, 0.5);
-                SessSetTip(t, tip);
+                SessSetTip(t, title, tip);
                 Grid::SetColumn(t, col);
                 _sessionsHeaderRow.Children().Append(t);
                 return;
@@ -1207,7 +1212,7 @@ namespace winrt::TerminalApp::implementation
             b.HorizontalAlignment(HorizontalAlignment::Stretch);
             b.HorizontalContentAlignment(leftAlign ? HorizontalAlignment::Left : HorizontalAlignment::Center);
             b.Content(SessText(label + arrow, 11, true, 0.7));
-            SessSetTip(b, tip);
+            SessSetTip(b, title, tip);
             b.Click([this, col](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), col]() {
                     auto self = weak.get();
@@ -1232,17 +1237,20 @@ namespace winrt::TerminalApp::implementation
         };
         // Tags (col 0, leftmost): NO header text (like the star + chip columns) — a headerless, fixed
         // 4-ribbon adornment. The tip is inert (an empty header cell has no hit area); the ribbons carry the hover.
-        addHeader(0, L"", false, L"");
-        addHeader(1, L"", false, L"Favorite \x2014 click the star to keep / find a session (the star column).");
-        addHeader(2, L"", false, L"Working-directory color \x00B7 solid = open now, dim = on disk");
-        addHeader(3, L"Title", true, L"Session title \x2014 its first prompt, or a custom/AI title. Click to sort.");
-        addHeader(4, L"Directory", true, L"The session's working directory. Click to sort.");
-        addHeader(5, L"Branch", true, L"Git branch the session was on. Click to sort.");
-        addHeader(6, L"Created", true, L"When the session was first created. Click to sort.");
-        addHeader(7, L"Active", true, L"When the session was last active. Click to sort.");
-        addHeader(8, L"Msgs\x00B7Tools", true, L"User messages \x00B7 tool calls. Click to sort.");
-        addHeader(9, L"Ctx", true, L"Context \x2014 tokens in the session's newest turn (input + cache + output), the same value the Triage Board shows as \x201C" L"ctx N\x201D. Blank until the first assistant reply. Click to sort.");
-        addHeader(10, showHits ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, showHits ? winrt::hstring{ L"Number of content matches (\U0001F464/\U0001F916 scopes) in this session" } : winrt::hstring{ L"" });
+        // Cols 0-2 are headerless by design (tags / star / color chip). Their tips never open — an empty
+        // TextBlock has no hit area — so the cells below carry the hover instead; they are kept only so
+        // the columns read consistently here.
+        addHeader(0, L"", false, L"", L"");
+        addHeader(1, L"", false, L"Favorite", L"Click the star to keep / find a session (the star column).");
+        addHeader(2, L"", false, L"Directory color", L"Working-directory color \x00B7 solid = open now, dim = on disk");
+        addHeader(3, L"Title", true, L"Title", L"What the session is called: the name you gave it, else one Claude titled it, else its first prompt. Click to sort by it.");
+        addHeader(4, L"Directory", true, L"Directory", L"The folder the session was launched in. Click to sort by it.");
+        addHeader(5, L"Branch", true, L"Branch", L"The git branch the session's folder was on when it started \x2014 a snapshot, not the branch checked out there now. Click to sort by it.");
+        addHeader(6, L"Created", true, L"Created", L"When the conversation was first written. A fork counts from when the fork itself was made, not from its parent. Click to sort by it.");
+        addHeader(7, L"Active", true, L"Last active", L"When the session last actually said something \x2014 read from the conversation itself rather than the file's timestamp, which drifts (a resume or a /model switch touches the file without being activity). The default sort.");
+        addHeader(8, L"Msgs\x00B7Tools", true, L"Messages \x00B7 tools", L"How many messages you sent, and how many tool calls the agent made \x2014 a rough sense of how much work a session holds. Click to sort by it.");
+        addHeader(9, L"Ctx", true, L"Context", L"Tokens carried by the session's newest turn (input + cache + output) \x2014 the same figure the Triage Board shows as \x201C" L"ctx N\x201D. Blank until something has replied. Click to sort by it.");
+        addHeader(10, showHits ? winrt::hstring{ L"Hits" } : winrt::hstring{ L"" }, false, L"Hits", showHits ? winrt::hstring{ L"How many matches this session's conversation holds. Only counted while a \U0001F464 or \U0001F916 scope is on \x2014 those are the scopes that read conversations, so the column is hidden otherwise." } : winrt::hstring{ L"" });
 
         // --- the visible set: window rows ∩ the current search result (fast ∪ content hits),
         // minus the user's "Hide from list" set. This render is the single chokepoint both the
@@ -1493,7 +1501,9 @@ namespace winrt::TerminalApp::implementation
                 starCell.Child(starGlyph);
                 starCell.HorizontalAlignment(HorizontalAlignment::Stretch);
                 starCell.VerticalAlignment(VerticalAlignment::Stretch);
-                SessSetTip(starCell, winrt::hstring{ fav ? L"Favorited \x2014 click to unfavorite" : L"Click to favorite (keep / find this session)" });
+                SessSetTip(starCell,
+                           fav ? L"Favorited" : L"Favorite",
+                           fav ? L"Starred. Click to unstar it." : L"Click to star this session. The star sticks to it \x2014 through closing, across restarts \x2014 so it is how you keep the ones worth finding again; filter down to them with the Favorite checkbox above.");
                 const std::wstring sid = r.id;
                 starCell.PointerPressed([this, sid](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
                     e.Handled(true); // toggle only — don't fall through to the row's select handler
@@ -1747,12 +1757,14 @@ namespace winrt::TerminalApp::implementation
             // single (child-free, clickthrough-content) row Border, hovering anywhere on the row shows the
             // full picture at once and never flickers.
             {
-                std::wstring rowTip{ r.title };
+                // The session's name is the tip's TITLE (the row trims it; the panel wraps it in full),
+                // leaving the body to be the record — every field the per-cell tips used to carry.
+                std::wstring rowTip;
                 if (r.fork)
                 {
-                    rowTip += L"\n\x2442 fork of " + r.forkedFromId.substr(0, 8);
+                    rowTip += L"\x2442 fork of " + r.forkedFromId.substr(0, 8) + L"\n";
                 }
-                rowTip += L"\nSession id: " + r.id;
+                rowTip += L"Session id: " + r.id;
                 rowTip += L"\n" + r.dir;
                 if (!r.branch.empty())
                 {
@@ -1778,7 +1790,8 @@ namespace winrt::TerminalApp::implementation
                 {
                     rowTip += L"\nClaude is " + pres->status;
                 }
-                SessSetTip(rowB, winrt::hstring{ rowTip });
+                rowTip += L"\n\nDouble-click to open it: one already running jumps to its tab, otherwise you are asked whether to resume or fork it. Right-click for the rest; click the name again to rename it.";
+                SessSetTip(rowB, winrt::hstring{ r.title }, winrt::hstring{ rowTip });
             }
             rowB.PointerPressed([this, titleCellEl, dirWrap](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
                 const auto b = s.try_as<Border>();
@@ -2239,7 +2252,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button jump;
             jump.Content(winrt::box_value(winrt::hstring{ L"Jump to tab" }));
-            SessSetTip(jump, L"Switch to this session's open tab.");
+            SessSetTip(jump, L"Jump to tab", L"This session is already open \x2014 switch to its tab, hopping to its window first if it lives in another one.");
             jump.Click([this, id](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id]() {
                     if (auto self = weak.get())
@@ -2254,7 +2267,7 @@ namespace winrt::TerminalApp::implementation
         {
             Button resume;
             resume.Content(winrt::box_value(winrt::hstring{ L"Resume here" }));
-            SessSetTip(resume, L"Resume this conversation in a managed tab \x2014 continue where it left off, with Auto Testing + Tests Autorunner (claude --resume).");
+            SessSetTip(resume, L"Resume here", L"Continue this conversation in a tab of its own, picking up where it left off with its full history. It comes back fully managed \x2014 tracked on the Triage Board, with its queue restored.");
             resume.Click([this, id, dir, title](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), id, dir, title]() {
                     if (auto self = weak.get())
@@ -2273,7 +2286,7 @@ namespace winrt::TerminalApp::implementation
         {
             winrt::Microsoft::UI::Xaml::Controls::SplitButton forkBtn;
             forkBtn.Content(winrt::box_value(winrt::hstring{ L"Fork here" }));
-            SessSetTip(forkBtn, winrt::hstring{ L"Fork a NEW conversation from this one \x2014 a copy you can diverge freely; the original transcript is untouched (--fork-session). The \x25BE picks the model the fork starts on. " } + AgentModelEditHint());
+            SessSetTip(forkBtn, L"Fork here", winrt::hstring{ L"Branch a new conversation off this one \x2014 it starts with the same history but writes its own from there, so the original is left exactly as it is. Safe even while the session is running. The \x25BE picks which model the fork starts on. " } + AgentModelEditHint());
             // A never-prompted row's display title is the page's placeholder — pass empty so the
             // fork seam derives a smart name instead of "(no prompt yet) (fork)".
             const std::wstring forkTitle = row->msgs > 0 ? title : std::wstring{};
@@ -2301,7 +2314,7 @@ namespace winrt::TerminalApp::implementation
         // the detail pane and the row menu can never drift.
         winrt::Microsoft::UI::Xaml::Controls::SplitButton fresh;
         fresh.Content(winrt::box_value(winrt::hstring{ L"Open New Session Here" }));
-        SessSetTip(fresh, winrt::hstring{ L"Start a fresh Claude session in this session's working directory. The \x25BE picks the model it starts on. " } + AgentModelEditHint());
+        SessSetTip(fresh, L"Open New Session Here", winrt::hstring{ L"Start a brand-new Claude session in this session's working directory \x2014 same folder, no shared history. The \x25BE picks which model it starts on. " } + AgentModelEditHint());
         const auto spawnFreshHere = [this, dir](winrt::hstring model) {
             Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), dir, model]() {
                 if (auto self = weak.get())
@@ -2359,7 +2372,9 @@ namespace winrt::TerminalApp::implementation
             toggleStrip.Orientation(Orientation::Horizontal);
             toggleStrip.HorizontalAlignment(HorizontalAlignment::Right);
             toggleStrip.Spacing(2);
-            const auto makeToggle = [this](const wchar_t* glyph, bool on, const std::wstring& tip, bool isWrap) -> Button {
+            // The title is explicit: the button's content is a bare "…" / "↵" glyph — no label to derive
+            // a heading from (and the glyph itself would make a nonsense one).
+            const auto makeToggle = [this](const wchar_t* glyph, bool on, const std::wstring& title, const std::wstring& tip, bool isWrap) -> Button {
                 auto g = SessText(winrt::hstring{ glyph }, 13, false, on ? 0.95 : 0.4); // bright when ON, dim when OFF
                 // NB: fully-qualify the type — TerminalPage is a XAML Page, so unqualified `FontFamily` in a
                 // member (or a [this] lambda) binds to the inherited Control.FontFamily PROPERTY, not the type.
@@ -2371,7 +2386,7 @@ namespace winrt::TerminalApp::implementation
                 b.MinWidth(0);
                 b.MinHeight(0);
                 b.Content(g);
-                SessSetTip(b, winrt::hstring{ tip });
+                SessSetTip(b, winrt::hstring{ title }, winrt::hstring{ tip });
                 b.Click([this, isWrap](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), isWrap]() {
                         if (auto self = weak.get())
@@ -2389,8 +2404,8 @@ namespace winrt::TerminalApp::implementation
                 });
                 return b;
             };
-            toggleStrip.Children().Append(makeToggle(L"\x2026", _appSettings.summaryPanelTruncate, L"Truncate long messages \x2014 cap each to a short preview (on), or show them in full (off). Applies wherever the summary renders.", /*isWrap*/ false));
-            toggleStrip.Children().Append(makeToggle(L"\x21B5", _appSettings.summaryPanelWrapNewlines, L"Wrap messages \x2014 keep each message's real line breaks (on), or collapse them to a literal \\n (off).", /*isWrap*/ true));
+            toggleStrip.Children().Append(makeToggle(L"\x2026", _appSettings.summaryPanelTruncate, L"Truncate long messages", L"On: cap each message to a short preview, so a long conversation stays skimmable. Off: show every message in full. Bright means on. This applies everywhere the summary is drawn, not just here.", /*isWrap*/ false));
+            toggleStrip.Children().Append(makeToggle(L"\x21B5", _appSettings.summaryPanelWrapNewlines, L"Keep line breaks", L"On: show each message's real line breaks, over several lines. Off: fold it onto one line, with the breaks written out as \\n. Bright means on. This applies everywhere the summary is drawn, not just here.", /*isWrap*/ true));
             // Agentmaster: a REFRESH button (rightmost) -- drop this session's cached summary + re-render so
             // the box re-reads the transcript NOW (the cache is keyed by mtime, which can lag a change, or you
             // just want a fresh pull). Steady-colored (not a toggle); same transparent-button styling.
@@ -2405,7 +2420,7 @@ namespace winrt::TerminalApp::implementation
                 rb.MinWidth(0);
                 rb.MinHeight(0);
                 rb.Content(rg);
-                SessSetTip(rb, L"Refresh the summary \x2014 re-read the transcript and rebuild it now");
+                SessSetTip(rb, L"Refresh the summary", L"Throw away this session's cached summary and build it again from the conversation as it stands now. The cache normally follows the file's timestamp, which can lag a change by a moment.");
                 rb.Click([this, rid](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                     Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [weak = get_weak(), rid]() {
                         if (auto self = weak.get())

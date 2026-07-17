@@ -829,7 +829,11 @@ namespace winrt::TerminalApp::implementation
             add(L"tag \x201C" + t + L"\x201D"); // bookmark tags: each selected chip reads here too
         }
         _sessFilterChip.Content(winrt::box_value(winrt::hstring{ L"\x2715 " + parts }));
-        SessSetTip(_sessFilterChip, winrt::hstring{ L"Active row filter (AND-ed with the search) \x2014 " + parts + L". Click to clear it." });
+        // Re-titled here as well as at build, so the chip's live tip is self-contained (the panel
+        // leads with the title; the text is the facet list this render produced).
+        SessSetTip(_sessFilterChip,
+                   L"Active filter",
+                   winrt::hstring{ L"Showing only sessions matching " + parts + L".\n\nThese narrow the list on top of the search box and the toggles \x2014 everything has to match at once. Click to clear them all." });
         _sessFilterChip.Visibility(Visibility::Visible);
     }
 
@@ -938,10 +942,13 @@ namespace winrt::TerminalApp::implementation
                 chipContent.Children().Append(chipLabel);
                 chip.Content(chipContent);
             }
-            SessSetTip(chip, winrt::hstring{ (on ? L"Stop filtering by tag \x201C" + info.name + L"\x201D" :
-                                                   L"Show only sessions tagged \x201C" + info.name + L"\x201D") +
-                                             L" \x2014 " + std::to_wstring(info.sessionCount) +
-                                             L" session(s) carry it. Chips stack (AND) with each other and the search; active tags also read in the \x2715 filter chip on the right." });
+            SessSetTip(chip,
+                       winrt::hstring{ L"Tag \x201C" + info.name + L"\x201D" },
+                       winrt::hstring{ (on ? std::wstring{ L"Click to stop filtering by this tag. " } :
+                                             std::wstring{ L"Click to show only the sessions carrying it. " }) +
+                                       (info.sessionCount == 1 ? std::wstring{ L"1 session carries it." } :
+                                                                 std::to_wstring(info.sessionCount) + L" sessions carry it.") +
+                                       L"\n\nTags stack with each other and with the search \x2014 a session has to carry every tag you pick. Whatever is picked also reads in the \x2715 filter chip on the right." });
             const winrt::hstring tagName{ info.name };
             chip.Click([this, tagName](const winrt::Windows::Foundation::IInspectable&, const RoutedEventArgs&) {
                 // Defer — the toggle rebuilds this very chips row + the table (the page's

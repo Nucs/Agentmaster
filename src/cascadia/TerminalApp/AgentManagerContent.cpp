@@ -77,6 +77,7 @@ using namespace Agentmaster;
 // The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
 // helpers below (e.g. TimingText) can call it unqualified too.
 using winrt::TerminalApp::implementation::AgentSetTip;
+using winrt::TerminalApp::implementation::AgentSetTitledTip;
 #include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
 
 namespace winrt::TerminalApp::implementation
@@ -736,7 +737,7 @@ namespace winrt::TerminalApp::implementation
             _launchAgentBtn = Button{};
             _launchAgentBtn.FontSize(11);
             _launchAgentBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_launchAgentBtn, L"Agent to launch \x2014 click to toggle between Claude and Codex (the Launch button and box retarget to match).");
+            AgentSetTitledTip(_launchAgentBtn, L"Agent to launch", L"Click to toggle between Claude and Codex. The box and the Launch button beside it retarget to match \x2014 a Codex launch is directory-only (no session id to resume or fork).");
             _launchAgentBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _launchCodex = !_launchCodex;
                 _UpdateLaunchAgentButton();
@@ -758,7 +759,9 @@ namespace winrt::TerminalApp::implementation
             _cwdBox.MaxWidth(504); // seed; _ReflowLaunchBar (re)computes Min/Max per stage on first layout
             _cwdBox.HorizontalAlignment(HorizontalAlignment::Left);
             _cwdBox.PlaceholderText(L"working directory (the M axis)");
-            AgentSetTip(_cwdBox, L"Where to launch: a working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders."); // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork)
+            // Agentmaster: the box accepts EITHER a working dir (new session) OR a session id (Resume / Fork).
+            // The underline + the Launch button's label track what you type — the tip names all three states.
+            AgentSetTitledTip(_cwdBox, L"Where to launch", L"A working directory for a new session, or a Claude session id to resume or fork. Start typing to pick from recent and matching folders.\n\nThe underline reads back what you typed: green = a session id found on disk (Launch becomes Resume, with a Fork twin) \x00B7 amber = a folder that doesn't exist yet (Launch creates it) \x00B7 red = an id with no conversation on disk, or a path that can't be created (Launch is disabled).");
             {
                 wchar_t up[MAX_PATH];
                 const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
@@ -968,7 +971,7 @@ namespace winrt::TerminalApp::implementation
                 cog.FontSize(13);
                 _settingsBtn.Content(cog);
             }
-            AgentSetTip(_settingsBtn, L"Settings \x2014 model & launch options, Tests Autorunner defaults, notifications, the Claude binary, the active profile, and app behavior.");
+            AgentSetTitledTip(_settingsBtn, L"Settings", L"Model and launch options, tab titles and colors, notifications, Tests Autorunner defaults, the Claude binary, the active profile, and app behavior.");
             _settingsBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ShowSettings(); });
             actionsRow.Children().Append(_settingsBtn);
 
@@ -978,7 +981,9 @@ namespace winrt::TerminalApp::implementation
             _pauseBtn.FontSize(11);
             _pauseBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _pauseBtn.Content(winrt::box_value(L"Pause Tests Autorunning"));
-            AgentSetTip(_pauseBtn, L"Global Tests Autorunning backstop \x2014 pauses or resumes auto-sending across ALL sessions at once.");
+            // (Content is the label, so the tip panel derives its heading from the button itself —
+            // which is what you want here: it tracks the Pause/Resume state.)
+            AgentSetTip(_pauseBtn, L"The global backstop: stop auto-sending across ALL sessions at once, whatever each one's Tests Autorunner is set to. Click again to resume; per-session modes are untouched either way.");
             _pauseBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _globalPaused = !_globalPaused;
                 ::Agentmaster::LogNav(_globalPaused ? L"pause-all on (global Autorunner backstop)" : L"pause-all off (global Autorunner resumed)");
@@ -1014,7 +1019,7 @@ namespace winrt::TerminalApp::implementation
             _keepAwakeBtn = Button{};
             _keepAwakeBtn.FontSize(11);
             _keepAwakeBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_keepAwakeBtn, L"Keep this PC (and display) awake. Click to cycle: Off \x2192 Always \x2192 While Running (holds only while a session is actively working, so the machine can still sleep once every agent is idle). Released when set Off or the window closes.");
+            AgentSetTitledTip(_keepAwakeBtn, L"Keep awake", L"Stop this PC (and its display) from sleeping through a long unattended run. Click to cycle: Off \x2192 Always \x2192 While Running \x2014 While Running holds only while a session is actively working, so the machine can still sleep once every agent goes idle. The hold is released when you set it Off or close the window.");
             _keepAwakeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleKeepAwake(); });
             actionsRow.Children().Append(_keepAwakeBtn);
             _UpdateKeepAwakeButton();
@@ -1061,7 +1066,7 @@ namespace winrt::TerminalApp::implementation
             _boardScopeBtn.FontSize(11);
             _boardScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
             EmphasizeScopeButton(_boardScopeBtn); // Agentmaster: the primary header toggle — louder than sort/refresh/Clear
-            AgentSetTip(_boardScopeBtn, L"Which sessions the board shows \x2014 LOCAL (this window) or GLOBAL (all windows). Shares one setting with the Explorer Tree's scope; remembered per window.");
+            AgentSetTitledTip(_boardScopeBtn, L"Board scope", L"Which sessions the board shows: LOCAL (this window's) or GLOBAL (every window's). One setting shared with the Explorer Tree's scope, remembered per window. The External column ignores it \x2014 an external session belongs to no window.");
             _boardScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _SetTreeScope(_treeScope == TreeScope::Local ? TreeScope::Global : TreeScope::Local);
             });
@@ -1077,7 +1082,7 @@ namespace winrt::TerminalApp::implementation
             _boardSortBtn = Button{};
             _boardSortBtn.FontSize(11);
             _boardSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-            AgentSetTip(_boardSortBtn, L"Sort the cards within each column \x2014 MOST ACTIVE (most recent activity first \x2014 the default) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Global across windows; saved.");
+            AgentSetTitledTip(_boardSortBtn, L"Card sort", L"Order the cards within each column. Click to cycle: MOST ACTIVE (most recent activity first \x2014 the default) \xB7 NEWEST \xB7 OLDEST \xB7 A\x2013Z. Saved, and shared by every window; separate from the Explorer Tree's own sort.");
             _boardSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleBoardSort(); });
             header.Children().Append(_boardSortBtn);
             _UpdateBoardSortButton();
@@ -1090,7 +1095,7 @@ namespace winrt::TerminalApp::implementation
             _boardRefreshBtn.FontSize(11);
             _boardRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _boardRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
-            AgentSetTip(_boardRefreshBtn, L"Refresh now \x2014 re-scan and redraw the whole tab (also re-detects external sessions).");
+            AgentSetTitledTip(_boardRefreshBtn, L"Refresh now", L"Redraw the board, the tree and the Auto Testing pane from current data, and make the observer re-survey right away instead of waiting for its next tick \x2014 so new and external sessions show up now.");
             _boardRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                 _Refresh(); // immediate redraw from current data (board + tree + auto testing; recomputes the "ago" timing)
                 if (_refreshHandler)
@@ -1107,7 +1112,7 @@ namespace winrt::TerminalApp::implementation
             _clearSelBtn.FontSize(11);
             _clearSelBtn.Padding(Thickness{ 8, 1, 8, 1 });
             _clearSelBtn.Visibility(Visibility::Collapsed); // nothing selected at build; _RebuildBoard syncs
-            AgentSetTip(_clearSelBtn, L"Deselect the current card / row \x2014 nothing stays selected and the Auto Testing empties.");
+            AgentSetTitledTip(_clearSelBtn, L"Clear selection", L"Deselect the current card or row \x2014 nothing stays selected and the pane on the right goes back to reading nothing-selected. Shown only while something is selected.");
             _clearSelBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ClearSelection(); });
             header.Children().Append(_clearSelBtn);
             // The directory-scope label appears ONLY while a directory is scoped ("[scope: <dir>]"
@@ -1119,7 +1124,7 @@ namespace winrt::TerminalApp::implementation
             _showAllBtn = Button{};
             _showAllBtn.Content(winrt::box_value(L"Show all"));
             _showAllBtn.Padding(Thickness{ 6, 0, 6, 0 });
-            AgentSetTip(_showAllBtn, L"Show sessions from every directory again \x2014 clears the directory filter.");
+            AgentSetTitledTip(_showAllBtn, L"Show all directories", L"Clear the directory filter \x2014 show sessions from every directory again. Shown only while one directory is scoped (click a folder in the Explorer Tree to scope it).");
             // Hidden while we ARE showing all (the default scope is "" == all directories); it
             // reappears once a directory is scoped. _RebuildBoard keeps this in sync on every refresh.
             _showAllBtn.Visibility(_scopeDir.empty() ? Visibility::Collapsed : Visibility::Visible);
@@ -1176,7 +1181,7 @@ namespace winrt::TerminalApp::implementation
                 _treeScopeBtn.FontSize(11);
                 _treeScopeBtn.Padding(Thickness{ 8, 1, 8, 1 });
                 EmphasizeScopeButton(_treeScopeBtn); // Agentmaster: the primary header toggle — louder than sort/refresh
-                AgentSetTip(_treeScopeBtn, L"Which sessions the tree shows \x2014 LOCAL (this window), GLOBAL (all windows), or EXTERNAL (claudes running outside Agentmaster, observe-only). Right-click an EXTERNAL row to Adopt it, start a session, or bring its window forward.");
+                AgentSetTitledTip(_treeScopeBtn, L"Tree scope", L"Which sessions the tree shows: LOCAL (this window's) \xB7 GLOBAL (every window's) \xB7 EXTERNAL (agents running outside Agentmaster \x2014 observed, never driven). Click an EXTERNAL row to read its conversation; right-click to Adopt it, start a session in its folder, or bring its window forward. LOCAL and GLOBAL are shared with the board's scope and remembered per window.");
                 _treeScopeBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _ToggleTreeScope(); });
                 hdrow.Children().Append(_treeScopeBtn);
                 _UpdateTreeScopeButton();
@@ -1188,7 +1193,7 @@ namespace winrt::TerminalApp::implementation
                 _treeSortBtn = Button{};
                 _treeSortBtn.FontSize(11);
                 _treeSortBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTip(_treeSortBtn, L"Sort order for directories and the sessions in them \x2014 NEWEST \xB7 OLDEST \xB7 MOST ACTIVE (running first) \xB7 A\x2013Z \xB7 BY PID (group by host window). Applies to every scope and is saved across windows.");
+                AgentSetTitledTip(_treeSortBtn, L"Sort order", L"Order both the directory groups and the sessions inside them. Click to cycle: NEWEST \xB7 OLDEST \xB7 MOST ACTIVE (running sessions first) \xB7 A\x2013Z \xB7 BY PID (group rows by the terminal window hosting them). Applies to every scope; saved, and shared by every window.");
                 _treeSortBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleTreeSort(); });
                 hdrow.Children().Append(_treeSortBtn);
                 _UpdateTreeSortButton();
@@ -1202,7 +1207,7 @@ namespace winrt::TerminalApp::implementation
                 _treeRefreshBtn.FontSize(11);
                 _treeRefreshBtn.Padding(Thickness{ 8, 1, 8, 1 });
                 _treeRefreshBtn.Content(winrt::box_value(L"\x21BB")); // ↻ refresh glyph
-                AgentSetTip(_treeRefreshBtn, L"Refresh now \x2014 re-scan and redraw the current view (also re-detects external sessions).");
+                AgentSetTitledTip(_treeRefreshBtn, L"Refresh now", L"Reload the data behind the current scope and redraw \x2014 and make the observer re-survey right away instead of waiting for its next tick, so a session started elsewhere (or an EXTERNAL one) shows up now.");
                 _treeRefreshBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
                     _Refresh(); // immediate redraw from current data (recomputes the "ago" timing)
                     if (_refreshHandler)
@@ -1280,12 +1285,14 @@ namespace winrt::TerminalApp::implementation
                     fi.FontWeight(FontWeights::Bold());
                     return fi;
                 };
-                auto mkIconBtn = [&](const winrt::hstring& tip, const IInspectable& glyph, std::function<void()> fn) {
+                // The title is explicit: the button's content is a FontIcon, so there is no label for the
+                // tip panel to derive a heading from (an eye / "!" / envelope has to say its own name).
+                auto mkIconBtn = [&](const winrt::hstring& title, const winrt::hstring& tip, const IInspectable& glyph, std::function<void()> fn) {
                     auto btn = Button{};
                     btn.Content(glyph);
                     btn.Padding(Thickness{ 9, 6, 9, 6 });
                     btn.VerticalAlignment(VerticalAlignment::Top);
-                    AgentSetTip(btn, tip);
+                    AgentSetTitledTip(btn, title, tip);
                     btn.Click([fn](const IInspectable&, const RoutedEventArgs&) { fn(); });
                     return btn;
                 };
@@ -1301,16 +1308,16 @@ namespace winrt::TerminalApp::implementation
                 iconCol.VerticalAlignment(VerticalAlignment::Top); // stay at the top as the box grows
                 iconCol.Margin(Thickness{ 0, 0, 6, 0 });
                 // Eye = Focus the session (jump to its live tab).
-                iconCol.Children().Append(mkIconBtn(L"Jump to this session's live terminal tab", fluentGlyph(L"\xE7B3"), [this]() {
+                iconCol.Children().Append(mkIconBtn(L"Jump to tab", L"Switch to the selected session's live terminal tab \x2014 hopping to its window first if it lives in another one.", fluentGlyph(L"\xE7B3"), [this]() {
                     if (_activateHandler && !_selectedId.empty())
                     {
                         _activateHandler(winrt::hstring{ _selectedId });
                     }
                 }));
                 // Exclamation point = Send now (a literal bold "!"; confirmed before it fires).
-                iconCol.Children().Append(mkIconBtn(L"Send the composed prompt now \x2014 confirms first, and skips the queue", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
+                iconCol.Children().Append(mkIconBtn(L"Send now", L"Type the composed prompt straight into the session, ahead of anything queued, whatever its Tests Autorunner mode is. Asks you to confirm first.", textIconGlyph(L"!"), [this]() { _OnSendNow(); }));
                 // Envelope = Add the composed prompt to the queue.
-                iconCol.Children().Append(mkIconBtn(L"Add the composed prompt to this session's queue", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
+                iconCol.Children().Append(mkIconBtn(L"Add to queue", L"Append the composed prompt to the end of the selected session's queue. It is sent when the Tests Autorunner reaches it \x2014 or by Send now.", fluentGlyph(L"\xE715"), [this]() { _OnAddPrompt(); }));
                 Grid::SetColumn(iconCol, 0);
                 composeRow.Children().Append(iconCol);
 
@@ -1424,7 +1431,7 @@ namespace winrt::TerminalApp::implementation
                     }
                 });
                 // Discoverability: surface the keyboard affordances (they have no on-screen control).
-                AgentSetTip(_addPromptBox, L"Compose a prompt for the selected session.\n\x2191 / \x2193  recall previously sent prompts");
+                AgentSetTitledTip(_addPromptBox, L"Compose a prompt", L"Write a prompt for the selected session, then queue it (envelope) or send it straight away (!).\n\nEnter inserts a line break \x2014 prompts can be multi-line.\n\x2191 / \x2193 recall prompts this session already got, once the caret is on the first line; Esc goes back to what you were typing.");
                 Grid::SetColumn(_addPromptBox, 1);
                 composeRow.Children().Append(_addPromptBox);
 
@@ -1432,7 +1439,7 @@ namespace winrt::TerminalApp::implementation
                 // Templates row open/closed (Agentmaster). Kept inline (not a Flyout) so its
                 // TextBox keeps receiving keypresses — a text box in a popup/ContentDialog gets
                 // none in XAML Islands (see Gotchas).
-                auto paperBtn = mkIconBtn(L"Test Templates \x2014 save the current queue as a plan, or apply a saved one", fluentGlyph(L"\xE8A5"), [this]() {
+                auto paperBtn = mkIconBtn(L"Test templates", L"Show or hide the templates row: save this session's queue as a reusable plan, or apply a saved one to this session (or to every session in its directory).", fluentGlyph(L"\xE8A5"), [this]() {
                     if (_templatesRow)
                     {
                         _templatesRow.Visibility(_templatesRow.Visibility() == Visibility::Visible ? Visibility::Collapsed : Visibility::Visible);
@@ -1463,15 +1470,16 @@ namespace winrt::TerminalApp::implementation
                 _templateNameBox = TextBox{};
                 _templateNameBox.Width(150);
                 _templateNameBox.PlaceholderText(L"test template name");
-                AgentSetTip(_templateNameBox, L"Name to save the current queue under as a reusable test template");
+                AgentSetTitledTip(_templateNameBox, L"Template name", L"The name to save the current queue under. Leave it empty to name the template after the session (\x201C<session>-plan\x201D). Saving always adds a new template \x2014 reusing a name gives you two with that name, it does not replace the old one.");
                 _templatesRow.Children().Append(_templateNameBox);
-                _templatesRow.Children().Append(mkBtn(L"Save as test template", L"Save the selected session's current queue as a reusable plan, under the name on the left", [this]() { _OnSaveTemplate(); }));
+                // (mkBtn's content IS the label, so the tip panel derives these headings from the buttons.)
+                _templatesRow.Children().Append(mkBtn(L"Save as test template", L"Save the selected session's current queue as a reusable plan, under the name on the left.", [this]() { _OnSaveTemplate(); }));
                 _templateCombo = ComboBox{};
                 _templateCombo.MinWidth(140);
-                AgentSetTip(_templateCombo, L"Pick a saved test template to apply");
+                AgentSetTitledTip(_templateCombo, L"Saved templates", L"The template that Apply / Apply to dir will use.");
                 _templatesRow.Children().Append(_templateCombo);
-                _templatesRow.Children().Append(mkBtn(L"Apply", L"Append the selected template's prompts to this session's queue", [this]() { _OnApplyTemplate(false); }));
-                _templatesRow.Children().Append(mkBtn(L"Apply to dir", L"Append the selected template's prompts to EVERY session in this directory", [this]() { _OnApplyTemplate(true); }));
+                _templatesRow.Children().Append(mkBtn(L"Apply", L"Append the selected template's prompts to this session's queue.", [this]() { _OnApplyTemplate(false); }));
+                _templatesRow.Children().Append(mkBtn(L"Apply to dir", L"Append the selected template's prompts to the queue of EVERY session in this directory \x2014 not just the selected one.", [this]() { _OnApplyTemplate(true); }));
                 actions.Children().Append(_templatesRow);
                 _RefreshTemplateCombo();
 
@@ -1486,8 +1494,9 @@ namespace winrt::TerminalApp::implementation
                 // filled (holds through hover/press via PaintHoldButton — the scope-toggle accent) + bold;
                 // the other reads as the inactive segment. Summary is the default and the choice is GLOBAL
                 // (AppSettings::autoTestingShowsSummary), so it persists + syncs across every window (see
-                // _SelectPlanPaneTab / _UpdatePlanPaneTab). The Summary tab is empty for now; the Flight
-                // Plan tab holds the existing pane (Autorunner + queue + compose box).
+                // _SelectPlanPaneTab / _UpdatePlanPaneTab). Summary renders the session-summary box off the
+                // transcript (_RefreshSummaryTab, Claude-only); Auto Testing holds the Autorunner + queue +
+                // compose box.
                 auto tabBar = Grid{};
                 tabBar.HorizontalAlignment(HorizontalAlignment::Left); // compact — size to the two segments, don't stretch the pane width
                 tabBar.ColumnDefinitions().Append(autoCol()); // Summary segment (fixed symmetric width)
@@ -1521,8 +1530,9 @@ namespace winrt::TerminalApp::implementation
                     btn.Click([this, summary](const IInspectable&, const RoutedEventArgs&) { _SelectPlanPaneTab(summary); });
                     return btn;
                 };
-                _summaryTabBtn = mkTabBtn(L"Summary", L"Summary \x2014 a per-session overview (coming soon).", CornerRadius{ 6, 0, 0, 6 }, true);
-                _autoTestTabBtn = mkTabBtn(L"Auto Testing", L"Auto Testing \x2014 the selected session's prompt queue, Tests Autorunner, and compose box.", CornerRadius{ 0, 6, 6, 0 }, false);
+                // (mkTabBtn's content IS the label, so the tip panel derives these headings from the buttons.)
+                _summaryTabBtn = mkTabBtn(L"Summary", L"A read-only overview of the selected session, read from its transcript: its messages, the files it read and edited, its tasks and plan. Claude sessions only.", CornerRadius{ 6, 0, 0, 6 }, true);
+                _autoTestTabBtn = mkTabBtn(L"Auto Testing", L"The selected session's prompt queue, its Tests Autorunner mode, and the box to compose the next prompt.", CornerRadius{ 0, 6, 6, 0 }, false);
                 Grid::SetColumn(_summaryTabBtn, 0);
                 tabBar.Children().Append(_summaryTabBtn);
                 Grid::SetColumn(_autoTestTabBtn, 1);
@@ -1535,7 +1545,7 @@ namespace winrt::TerminalApp::implementation
                 _autorunnerBtn = Button{};
                 _autorunnerBtn.FontSize(11);
                 _autorunnerBtn.Padding(Thickness{ 8, 1, 8, 1 });
-                AgentSetTip(_autorunnerBtn, L"Tests Autorunner for the selected session \x2014 click to cycle: Off (manual) \xB7 Semi-auto (you confirm each send) \xB7 Full (auto-send the queue when a turn completes).");
+                AgentSetTitledTip(_autorunnerBtn, L"Tests Autorunner", L"How the selected session's queue is sent. Click to cycle: Off (nothing auto-sends \x2014 queue and use Send now) \xB7 Semi-auto (each send waits for you to confirm) \xB7 Full (the next prompt goes out on its own as soon as a turn completes). One prompt per turn either way, and a turn ending in a question holds the queue.");
                 _autorunnerBtn.Click([this](const IInspectable&, const RoutedEventArgs&) { _CycleAutorunner(); });
                 _UpdateAutorunnerButton(AutorunnerMode::Off, false);
                 auto apStrip = StackPanel{};

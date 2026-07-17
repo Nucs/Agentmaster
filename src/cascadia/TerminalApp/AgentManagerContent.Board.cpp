@@ -78,6 +78,7 @@ using namespace Agentmaster;
 // The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
 // helpers below (e.g. TimingText) can call it unqualified too.
 using winrt::TerminalApp::implementation::AgentSetTip;
+using winrt::TerminalApp::implementation::AgentSetTitledTip;
 #include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
 
 namespace winrt::TerminalApp::implementation
@@ -203,13 +204,17 @@ namespace winrt::TerminalApp::implementation
         // onto SessionInfo.recap by the scanner), append it below the title \x2014 so a hover tells the
         // sessions apart at a glance (the whole point of the recap), not just by name. Shown in FULL \x2014
         // never length-capped (the tooltip wraps / grows as needed).
-        std::wstring bandTip{ fullTitle };
+        // The FULL name is the tip's TITLE (the panel wraps it, so nothing is lost); the recap follows
+        // as the body. With no recap the body still has to say something — the tip renders only when it
+        // has text — so it explains why hovering the band was worth it in the first place.
+        std::wstring bandTip{ L"The session's full name \x2014 the card trims it to fit." };
         if (!s.recap.empty())
         {
-            bandTip += L"\n\n";
+            bandTip += L"\n\nRecap \x2014 Claude Code's own \x201C";
+            bandTip += L"what we did / what's next\x201D note, written after this session sat idle:\n";
             bandTip += s.recap;
         }
-        AgentSetTip(band, winrt::hstring{ bandTip }, kCardTipDelay);
+        AgentSetTitledTip(band, winrt::hstring{ fullTitle }, winrt::hstring{ bandTip }, kCardTipDelay);
 
         // Agentmaster (bookmark tags): the session's bookmark ribbons hang out of the TITLE BAND's
         // bottom edge — the tab badges' "bookmark out of the book" look (~30% riding ON the colored
@@ -287,14 +292,14 @@ namespace winrt::TerminalApp::implementation
                                                        _appSettings.pendingDotsLightColor,
                                                        _appSettings.pendingDotsDarkColor);
             auto dots = BuildPendingDots(5.0, dotsColor);
-            std::wstring tip = L"Unsent draft \x2014 a message is typed into this session's input box but hasn't been sent yet.";
+            std::wstring tip = L"A message is typed into this session's input box but hasn't been sent yet \x2014 the same dots ride its tab. It stays waiting until you (or Send now) submit it.";
             auto firstLine = s.pendingInput.substr(0, s.pendingInput.find(L'\n'));
             if (firstLine.size() > 120)
             {
                 firstLine = firstLine.substr(0, 120) + L"\x2026";
             }
             tip += L"\n\n\x201C" + firstLine + L"\x201D";
-            AgentSetTip(dots, winrt::hstring{ tip }, kCardTipDelay);
+            AgentSetTitledTip(dots, L"Unsent draft", winrt::hstring{ tip }, kCardTipDelay);
             stack.Children().Append(dots);
         }
 
@@ -305,7 +310,7 @@ namespace winrt::TerminalApp::implementation
             auto cp = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             cp.Opacity(0.9);
             cp.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(cp, L"Codex agent \x2014 this managed session runs the OpenAI Codex CLI instead of Claude.", kCardTipDelay);
+            AgentSetTitledTip(cp, L"Codex agent", L"This managed session runs the OpenAI Codex CLI instead of Claude. Agentmaster launches, resumes and tracks it like any session, but cannot drive its prompts \x2014 there is no queue or Tests Autorunner for Codex, and it reports only Running / Waiting / Idle.", kCardTipDelay);
             stack.Children().Append(cp);
         }
         {
@@ -317,10 +322,11 @@ namespace winrt::TerminalApp::implementation
             const std::wstring effDir = _WorkDirOf(s);
             auto dirText = Text(winrt::hstring{ effDir }, 11, false, 0.6);
             const bool diverged = !PathEq(effDir, s.workingDir);
-            AgentSetTip(dirText,
-                        diverged ? winrt::hstring{ L"Inferred working directory \x2014 detected from the files this session touches (it launched in " + s.workingDir + L"). Every session in this folder shares the title-band color." } :
-                                   winrt::hstring{ L"Working directory \x2014 where this session runs. Every session in this folder shares the title-band color." },
-                        kCardTipDelay);
+            AgentSetTitledTip(dirText,
+                              diverged ? L"Inferred working directory" : L"Working directory",
+                              diverged ? winrt::hstring{ L"Where this session actually works, judged by the files it touches \x2014 it was launched in " + s.workingDir + L". Every session sharing this folder wears the same color, on its card and on its tab." } :
+                                         winrt::hstring{ L"Where this session runs. Every session sharing this folder wears the same color, on its card and on its tab." },
+                              kCardTipDelay);
             stack.Children().Append(dirText);
         }
 
@@ -358,7 +364,8 @@ namespace winrt::TerminalApp::implementation
             {
                 tip = L"HTTP " + std::to_wstring(s.errorStatus) + L"\n\n" + tip;
             }
-            AgentSetTip(errText, winrt::hstring{ tip }, kCardTipDelay);
+            tip += L"\n\nThe card line is trimmed \x2014 this is the full text. The session leaves Error on its next turn; right-click \x2192 Move to Idle / Done to dismiss it now.";
+            AgentSetTitledTip(errText, L"Why the turn failed", winrt::hstring{ tip }, kCardTipDelay);
             stack.Children().Append(errText);
         }
 
@@ -388,24 +395,24 @@ namespace winrt::TerminalApp::implementation
             if (const std::wstring shortModel = ::Agentmaster::ShortModelName(::Agentmaster::SessionDisplayModel(s), ::Agentmaster::ParseModelFamilies(_appSettings.modelFamilies)); !shortModel.empty())
             {
                 auto modelText = Text(winrt::hstring{ shortModel }, 10, false, 0.45);
-                std::wstring mtip = L"Model \x2014 what this session's last reply actually ran on (read from the transcript; a /model switch shows here on the next reply).";
+                std::wstring mtip = L"What this session's last reply actually ran on, read from its transcript \x2014 so a mid-session /model switch shows up here on the next reply, not before.";
                 if (!s.currentModel.empty())
                 {
                     mtip += L"\n\n" + s.currentModel; // the full id behind the short form
                 }
                 else if (!s.model.empty())
                 {
-                    mtip += L"\n\nRequested at launch: " + s.model; // no reply yet — the --model ask is all we know
+                    mtip += L"\n\nNothing has replied yet, so this is only what was asked for at launch: " + s.model;
                 }
-                AgentSetTip(modelText, winrt::hstring{ mtip }, kCardTipDelay);
+                AgentSetTitledTip(modelText, L"Model", winrt::hstring{ mtip }, kCardTipDelay);
                 modelCtxRow.Children().Append(modelText);
             }
             if (s.contextTokens > 0)
             {
                 auto ctxText = Text(winrt::hstring{ L"ctx " } + winrt::hstring{ FormatTokenCount(s.contextTokens) }, 10, false, 0.45);
-                const auto tip = std::wstring{ L"Context: " } + GroupDigits(s.contextTokens) +
-                                 L" tokens in the session (newest turn: input + cache + output).";
-                AgentSetTip(ctxText, winrt::hstring{ tip }, kCardTipDelay);
+                const auto tip = GroupDigits(s.contextTokens) +
+                                 std::wstring{ L" tokens carried by this session's newest turn (input + cache + output) \x2014 the same figure Claude Code reports. Shown as a raw count, not a percentage: the context window depends on the model variant in use, which can't be read reliably from its id." };
+                AgentSetTitledTip(ctxText, L"Context", winrt::hstring{ tip }, kCardTipDelay);
                 modelCtxRow.Children().Append(ctxText);
             }
             if (modelCtxRow.Children().Size() > 0)
@@ -441,7 +448,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     bt.Foreground(SolidColorBrush{ Colors::DodgerBlue() });
                 }
-                AgentSetTip(bt, L"Auto Testing queue \x2014 prompts sent / total queued (\x2699). Shown in blue while Tests Autorunner is on for this session.", kCardTipDelay);
+                AgentSetTitledTip(bt, L"Auto Testing queue", L"Prompts already sent / total queued for this session. Blue means its Tests Autorunner is on, so the rest will go out on their own as turns complete; gray means they wait for you.", kCardTipDelay);
                 metaRow.Children().Append(bt);
             }
 
@@ -464,7 +471,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     auto cacheGlyph = Text(L"\x26A1", 11, false, 0.95); // ⚡ warm cache
                     cacheGlyph.Foreground(Fill(0xFF, 0xFF, 0xC1, 0x07)); // amber
-                    AgentSetTip(cacheGlyph, winrt::hstring{ L"Still server-cached \x2014 Claude's prompt cache stays warm for ~" } + winrt::to_hstring(static_cast<int>(cacheMin)) + L" min after the last turn, so a follow-up now reuses the cached context (cheaper & faster).", kCardTipDelay);
+                    AgentSetTitledTip(cacheGlyph, L"Still server-cached", winrt::hstring{ L"Claude's prompt cache stays warm for about " } + winrt::to_hstring(static_cast<int>(cacheMin)) + L" minutes after a real API turn, so a follow-up sent now reuses this session's cached context \x2014 cheaper and faster than starting cold. The glyph clears itself once the window lapses (set the span in Settings \x2192 Behavior).", kCardTipDelay);
                     metaRow.Children().Append(cacheGlyph);
                 }
             }
@@ -508,7 +515,7 @@ namespace winrt::TerminalApp::implementation
             st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
             dotsBtn.OpacityTransition(st); // genuine fade on any Opacity change
         }
-        AgentSetTip(dotsBtn, L"More \x2014 session actions (same as right-click)", kCardTipDelay);
+        AgentSetTitledTip(dotsBtn, L"More", L"This session's actions \x2014 jump to its tab, rename, tag, fork, restart, close, copy its details, or start a new session in its folder. Exactly what right-clicking the card gives you.", kCardTipDelay);
         dotsBtn.Flyout(_MakeSessionMenu(s.id, _WorkDirOf(s), dotsBtn)); // a click opens the session menu (the button anchors its Tags panel); Open-New-Here targets the effective work dir
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -758,9 +765,9 @@ namespace winrt::TerminalApp::implementation
         bar.Child(grip);
         // Agentmaster: the grab bar is draggable but easy to miss (it is near-invisible at rest);
         // name what it resizes so the affordance is discoverable beyond the hover cursor change.
-        AgentSetTip(bar, vertical ?
-                             winrt::hstring{ L"Drag to resize \x2014 the Explorer Tree and the Auto Testing share this divider." } :
-                             winrt::hstring{ L"Drag to resize \x2014 the Triage Board and the panels below it share this divider." });
+        AgentSetTitledTip(bar, L"Resize", vertical ?
+                                              winrt::hstring{ L"Drag to give the Explorer Tree or the pane on its right more room \x2014 they share this divider. The split is remembered per window." } :
+                                              winrt::hstring{ L"Drag to give the Triage Board or the panes below it more room \x2014 they share this divider. The split is remembered per window." });
 
         const auto cursorType = vertical ? CoreCursorType::SizeWestEast : CoreCursorType::SizeNorthSouth;
 
@@ -1109,14 +1116,22 @@ namespace winrt::TerminalApp::implementation
             hdr.Children().Append(Text(col.title, 12, true, 0.9));
             hdr.Children().Append(Text(winrt::to_hstring(static_cast<int>(matches.size())), 12, false, 0.6));
             // Agentmaster: explain what each Triage state means — the board's five columns ARE the
-            // state model, so naming them on hover is the core learning-curve aid.
+            // state model, so naming them on hover is the core learning-curve aid. The state's name is
+            // the tip's TITLE (the header is a StackPanel, so nothing derives one), which leaves the
+            // body free to say what actually puts a session here and what gets it out again.
+            const wchar_t* colTipTitle =
+                col.state == SessionState::Running         ? L"Running" :
+                col.state == SessionState::WaitingForInput ? L"Waiting-for-you" :
+                col.state == SessionState::NeedsApproval   ? L"Needs-approval" :
+                col.state == SessionState::Error           ? L"Error" :
+                                                             L"Idle / Done";
             const wchar_t* colTip =
-                col.state == SessionState::Running        ? L"Running \x2014 the agent is actively working on a turn." :
-                col.state == SessionState::WaitingForInput ? L"Waiting-for-you \x2014 the turn is complete; the agent is waiting for your next prompt. With Tests Autorunner on, the next queued prompt sends automatically." :
-                col.state == SessionState::NeedsApproval  ? L"Needs-approval \x2014 the agent is paused on a tool-permission prompt or a question and needs your response to continue." :
-                col.state == SessionState::Error          ? L"Error \x2014 the agent's last turn ended in an error." :
-                                                            L"Idle / Done \x2014 no turn in progress: freshly launched, just resumed, or finished.";
-            AgentSetTip(hdr, colTip);
+                col.state == SessionState::Running         ? L"The agent is working on a turn right now. Work that outlives the turn \x2014 a background shell, a subagent, a teammate \x2014 keeps a session here too, rather than letting it read as finished while it is still going." :
+                col.state == SessionState::WaitingForInput ? L"The turn is finished and the agent is waiting for your next prompt. With Tests Autorunner on, the next queued prompt goes out on its own. A card you haven't looked at yet stays here \x2014 it only drops to Idle / Done once you have read it and the unread timeout has passed." :
+                col.state == SessionState::NeedsApproval   ? L"The agent stopped part-way through a turn on a tool-permission prompt or a question, and cannot continue until you answer. Nothing is auto-sent into it \x2014 the queue is held so a queued prompt can never answer the question for you." :
+                col.state == SessionState::Error           ? L"The agent's last turn died \x2014 a rate or usage limit, a prompt too long for the context, an auth failure, a dropped connection. The card carries the reason. A session leaves Error on its next turn; right-click \x2192 Move to Idle / Done dismisses it now." :
+                                                             L"No turn in progress \x2014 freshly launched, just resumed, or done. A queued prompt still starts from here: a session that has never run emits no turn to wait for.";
+            AgentSetTitledTip(hdr, colTipTitle, colTip);
             // colStack holds the cards only; _MakeBoardColumn pins the header above a vertically
             // scrolling card list so a tall column scrolls within the board height instead of
             // clipping past the bottom edge (the board ScrollViewer's vertical scroll is disabled).
@@ -1254,7 +1269,7 @@ namespace winrt::TerminalApp::implementation
         hdrBtn.HorizontalAlignment(HorizontalAlignment::Stretch);
         hdrBtn.HorizontalContentAlignment(HorizontalAlignment::Left);
         hdrBtn.Margin(Thickness{ 0, 0, 0, 6 });
-        AgentSetTip(hdrBtn, L"Agents running outside Agentmaster (observe-only census) \x2014 click to collapse or expand this column.");
+        AgentSetTitledTip(hdrBtn, L"External", L"Claude and Codex sessions running outside Agentmaster \x2014 in a plain console, in Windows Terminal, or in another install. They are found and read, never driven, and no window scope applies to them. Click a card to read its conversation, or right-click to Adopt it. Click this header to collapse or expand the column.");
         hdrBtn.Click([this](const IInspectable&, const RoutedEventArgs&) {
             _externalCollapsed = !_externalCollapsed;
             _Refresh();
@@ -1320,7 +1335,7 @@ namespace winrt::TerminalApp::implementation
             titleRow.VerticalAlignment(VerticalAlignment::Center);
             auto sd = Text(L"\x25CF", 11, false, 1.0);
             sd.Foreground(SolidColorBrush{ CodexStateColor(ex.codexState) });
-            AgentSetTip(sd, winrt::hstring{ L"Codex turn state \x2014 " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", derived from its rollout transcript" }, kCardTipDelay);
+            AgentSetTitledTip(sd, L"Codex turn state", winrt::hstring{ L"Currently " } + CodexStateLabel(ex.codexState) + winrt::hstring{ L", read from this session's rollout transcript. Codex reports only Running, Waiting and Idle \x2014 its rollout records no approval or error event, so it has no needs-you or error state to show." }, kCardTipDelay);
             titleRow.Children().Append(sd);
             titleRow.Children().Append(Text(winrt::hstring{ title }, 13, true, 0.9));
             stack.Children().Append(titleRow);
@@ -1336,13 +1351,13 @@ namespace winrt::TerminalApp::implementation
             auto p = Pill(L"codex", Color{ 0xFF, 0x4E, 0xC9, 0xB0 });
             p.Opacity(0.9);
             p.HorizontalAlignment(HorizontalAlignment::Left);
-            AgentSetTip(p, L"Codex agent \x2014 this external session runs the OpenAI Codex CLI (observed, not managed by Agentmaster).", kCardTipDelay);
+            AgentSetTitledTip(p, L"Codex agent", L"This external session runs the OpenAI Codex CLI. It is observed, not managed \x2014 right-click to fork a copy of its rollout, or resume it, into a tab here.", kCardTipDelay);
             stack.Children().Append(p);
         }
         if (!ex.cwd.empty())
         {
             auto cwdText = Text(winrt::hstring{ ex.cwd }, 11, false, 0.55);
-            AgentSetTip(cwdText, L"Working directory of this external session.", kCardTipDelay);
+            AgentSetTitledTip(cwdText, L"Working directory", L"Where this external session runs \x2014 read from the process itself, so it follows a cd. Right-click the card to start a managed session of your own here.", kCardTipDelay);
             stack.Children().Append(cwdText);
         }
 
@@ -1375,7 +1390,7 @@ namespace winrt::TerminalApp::implementation
                 hb += L"  \x00B7  [" + ex.gitBranch + L"]";
             }
             auto hbText = Text(winrt::hstring{ hb }, 10, false, 0.5);
-            AgentSetTip(hbText, L"The terminal application hosting this external session, and \x2014 in [brackets] \x2014 its current git branch.", kCardTipDelay);
+            AgentSetTitledTip(hbText, L"Host \x00B7 branch", L"The terminal application this session runs in \x2014 Windows Terminal, a plain console, or another Agentmaster install \x2014 and, in [brackets], the git branch its folder is on right now. Right-click the card to bring that window to the front.", kCardTipDelay);
             stack.Children().Append(hbText);
         }
 
@@ -1407,7 +1422,7 @@ namespace winrt::TerminalApp::implementation
             }
             me += (me.empty() ? L"pid " : L"  \x00B7  pid ") + std::to_wstring(ex.pid);
             auto meText = Text(winrt::hstring{ me }, 10, false, 0.5);
-            AgentSetTip(meText, L"Model \xB7 reasoning effort \xB7 (Codex: sandbox \xB7 approval) \xB7 bg = running in the background \xB7 pid = OS process id.", kCardTipDelay);
+            AgentSetTitledTip(meText, L"How this session was started", L"Its model \xB7 reasoning effort \xB7 (for Codex, its sandbox and approval policy) \xB7 bg if it runs in the background \xB7 pid, its process id. Read from the running process, not from a config file.", kCardTipDelay);
             stack.Children().Append(meText);
         }
 
@@ -1456,7 +1471,7 @@ namespace winrt::TerminalApp::implementation
             st.Duration(winrt::Windows::Foundation::TimeSpan{ std::chrono::milliseconds{ 140 } });
             dotsBtn.OpacityTransition(st);
         }
-        AgentSetTip(dotsBtn, L"More \x2014 actions (same as right-click)", kCardTipDelay);
+        AgentSetTitledTip(dotsBtn, L"More", L"What you can do with a session you don't own \x2014 adopt its conversation into a tab here, start a new session in its folder, or bring its window to the front. Exactly what right-clicking the card gives you.", kCardTipDelay);
         dotsBtn.Flyout(_MakeExternalTreeMenu(ex)); // a click opens the external menu
         const auto dotsWeak = winrt::make_weak(dotsBtn);
 
@@ -1487,12 +1502,14 @@ namespace winrt::TerminalApp::implementation
         // (ExternalClaudeRow.recap; see ProcessObserver) — append it below the base hint so a hover tells
         // the external sessions apart by what they were last doing, exactly like the managed card band
         // tooltip does with SessionInfo.recap. Shown in FULL (the tooltip wraps); no recap == base hint only.
-        std::wstring cardTip{ L"An agent running outside Agentmaster (observe-only). Click to view its conversation read-only; right-click to Adopt it, start a session, or bring its window forward." };
+        std::wstring cardTip{ L"An agent running outside Agentmaster \x2014 found and read, never driven. Click to read its conversation; right-click to adopt it into a tab here, start a session in its folder, or bring its window forward." };
         if (!ex.recap.empty())
         {
-            cardTip += L"\n\nRecap: " + ex.recap;
+            cardTip += L"\n\nRecap \x2014 its own \x201C";
+            cardTip += L"what we did / what's next\x201D note, written after it sat idle:\n";
+            cardTip += ex.recap;
         }
-        AgentSetTip(card, winrt::hstring{ cardTip }, kCardTipDelay);
+        AgentSetTitledTip(card, winrt::hstring{ exTitle }, winrt::hstring{ cardTip }, kCardTipDelay);
         // Fade the "\x22EF" more-button in (and arm its hit-testing) while the card is hovered; fade it
         // out on exit. dotsWeak is a weak_ref so the handler never strong-captures the button it lives
         // under. (No _ReportHover here — an external has no managed tab for the page to pill.)

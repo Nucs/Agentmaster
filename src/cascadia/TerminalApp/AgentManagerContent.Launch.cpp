@@ -77,6 +77,7 @@ using namespace Agentmaster;
 // The shared tooltip recipe (AgentTipHelpers.h) — a using-DECLARATION so the file-scope
 // helpers below (e.g. TimingText) can call it unqualified too.
 using winrt::TerminalApp::implementation::AgentSetTip;
+using winrt::TerminalApp::implementation::AgentSetTitledTip;
 #include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
 
 namespace winrt::TerminalApp::implementation

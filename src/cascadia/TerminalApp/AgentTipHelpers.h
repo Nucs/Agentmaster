@@ -535,6 +535,27 @@ namespace winrt::TerminalApp::implementation
         el.SetValue(agent_tip_details::TipTitleProperty(), winrt::box_value(title));
     }
 
+    // AgentSetTip + AgentSetTipTitle in ONE call — the LocalTooltip panel's "title + description"
+    // shape written the way it renders (title first, then the text). The Settings cog needs neither
+    // (its rows are labelled controls whose Header/Content the panel derives a title from), but the
+    // Manager tab and the Sessions page are mostly GLYPH buttons (↻ / ⚙ / 👤), plain Borders (board
+    // cards, table rows) and STATE-labelled toggles ("LOCAL", "1 month") — elements whose own label
+    // is absent, a glyph, or the current *value* rather than the control's name — so nearly every
+    // tip there names itself explicitly. Empty tip == no-op (AgentSetTip's contract): a title with
+    // no text would never render (the panel routes on the text) and would leave a stale heading.
+    inline void AgentSetTitledTip(const winrt::Windows::UI::Xaml::UIElement& el,
+                                  const winrt::hstring& title,
+                                  const winrt::hstring& tip,
+                                  std::optional<std::chrono::milliseconds> openDelayOverride = std::nullopt)
+    {
+        if (tip.empty())
+        {
+            return;
+        }
+        AgentSetTip(el, tip, openDelayOverride);
+        AgentSetTipTitle(el, title);
+    }
+
     // Force-close every AgentSetTip tooltip under root — for hosts about to be HIDDEN
     // (Visibility toggles do NOT unload, so no Unloaded/watchdog close fires for a collapsed
     // page — and a collapsed host does not hide a popup) or Clear()ed synchronously before
