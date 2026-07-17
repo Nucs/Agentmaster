@@ -413,7 +413,10 @@ namespace Agentmaster
         // launch cwd then keys the color) and always empty for Codex (its rollout isn't
         // path-parsed). PERSISTED (sessions.json) — a derived CACHE, like the title — so a
         // reopened session wears its inferred color immediately instead of flipping from the cwd
-        // color after the first scan. Only consulted while tabColorMode is InferredWorkingDirectory.
+        // color after the first scan. Consulted while the session INFERS (SessionInfersWorkingDir,
+        // Persistence.h): tabColorMode == InferredWorkingDirectory — or, in EVERY mode, a session
+        // LAUNCHED in the user's home dir (%USERPROFILE%, the default launch dir), whose cwd is
+        // meaningless, so the inference is forced on for that tab.
         std::wstring inferredWorkingDir;
         // Agentmaster (Codex managed-session support): which coding agent this session is. Default
         // Claude, so every existing record/path is byte-for-byte unchanged. A Codex session rides the

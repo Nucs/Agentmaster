@@ -1630,16 +1630,57 @@ namespace Agentmaster
         return ChooseDirColor(sessionId, liveSessionColors, activeColors, g_colorSeed);
     }
 
+    // The user's home directory (%USERPROFILE%) as a NormDirKey — the "default launch dir" the
+    // Launch cwd box falls back to when AppSettings::defaultLaunchDir is empty. Resolved ONCE (the
+    // env is process-stable) so the predicate below stays effectively pure; empty when the env is
+    // unresolvable, which fails OPEN to the classic cwd behavior (no forcing).
+    static const std::wstring& HomeDirNormKey()
+    {
+        static const std::wstring key = [] {
+            const DWORD need = ::GetEnvironmentVariableW(L"USERPROFILE", nullptr, 0);
+            if (need == 0)
+            {
+                return std::wstring{};
+            }
+            std::wstring buf(need, L'\0');
+            const DWORD got = ::GetEnvironmentVariableW(L"USERPROFILE", buf.data(), need);
+            if (got == 0 || got >= need)
+            {
+                return std::wstring{};
+            }
+            buf.resize(got);
+            return NormDirKey(buf);
+        }();
+        return key;
+    }
+
+    bool SessionInfersWorkingDir(TabColorMode mode, const SessionInfo& s)
+    {
+        if (mode == TabColorMode::InferredWorkingDirectory)
+        {
+            return true; // the global cog opt-in — every session infers
+        }
+        // The HOME-DIR forcing (Persistence.h): a session LAUNCHED in %USERPROFILE% — the launch
+        // box's default when the user didn't pick a directory — almost never WORKS there, so the
+        // inference is enabled for that tab in EVERY mode. Exact-dir match only (NormDirKey folds
+        // case/slash/trailing variants); a deliberate subfolder launch (~/Desktop) never forces.
+        const auto& home = HomeDirNormKey();
+        return !home.empty() && NormDirKey(s.workingDir) == home;
+    }
+
     std::wstring EffectiveWorkingDir(TabColorMode mode, const SessionInfo& s)
     {
-        // The session's EFFECTIVE working directory — where it semantically WORKS. Only
-        // InferredWorkingDirectory diverges — and only once an inference EXISTS (until then the
+        // The session's EFFECTIVE working directory — where it semantically WORKS. Only an
+        // INFERRING session diverges (SessionInfersWorkingDir: the InferredWorkingDirectory mode,
+        // or — in every mode — a session launched in the user's home dir, whose cwd is
+        // meaningless) — and only once an inference EXISTS (until then the
         // launch cwd answers, so a fresh session behaves exactly like WorkingDirectory mode).
-        // Individual and NoColor modes return the working dir too: their color callers branch on
-        // the mode BEFORE any dir grouping, and the inference scan runs only while the mode is
-        // Inferred, so a dormant (stale) inference from a previous mode never leaks into
-        // grouping/display.
-        if (mode == TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty())
+        // Individual and NoColor modes return the working dir for a deliberately-chosen cwd:
+        // their color callers branch on the mode BEFORE any dir grouping, and the inference scan
+        // admits exactly the sessions the predicate does, so a dormant (stale) inference from a
+        // previous mode never leaks into grouping/display — while a home-dir launch keeps its
+        // (still-scanned, fresh) inference in every mode.
+        if (!s.inferredWorkingDir.empty() && SessionInfersWorkingDir(mode, s))
         {
             return s.inferredWorkingDir;
         }

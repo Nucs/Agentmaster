@@ -378,12 +378,15 @@ namespace winrt::TerminalApp::implementation
         // kPendingClearConfirmTicks consecutive scans, so a single mid-repaint frame can't flicker the
         // indicator off. Keyed by sessionId; entries are pruned with their tab in the liveness sweep.
         std::unordered_map<std::wstring, int> _pendingClearStreak;
-        // Agentmaster (tab color modes — InferredWorkingDirectory): per-session state for the
+        // Agentmaster (tab color modes — InferredWorkingDirectory + the home-dir forcing): per-session
+        // state for the
         // inferred-workdir scan (_ScanInferredTabColors): the resolved transcript path (globbed once,
         // cached), the transcript mtime the last inference ran at (re-infer only when it GREW), and a
         // per-session next-run throttle (a busy transcript grows every tick — the sidecar accumulate is
         // incremental, but there's no need to re-infer more than every ~15s). Touched UI-thread only;
-        // entries pruned with their tab. Sized like _claudeTabs (a handful).
+        // entries pruned with their tab; holds ONLY admitted sessions (SessionInfersWorkingDir — the
+        // whole fleet under the Inferred mode, just %USERPROFILE%-launched ones in the other modes).
+        // Sized like _claudeTabs (a handful).
         struct InferredColorScan
         {
             std::wstring transcriptPath; // resolved once (empty => not on disk yet — retry next pass)
@@ -1002,7 +1005,7 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::Foundation::IAsyncAction _ScanPendingInputImpl(); // Agentmaster (terminate-net): the body of _ScanPendingInput, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _ScanPendingInput(); // Agentmaster (PENDING_INPUT.md): read each bound Claude tab's unsent input-box draft from its buffer + record it on the session (scanner-ticked)
         winrt::Windows::Foundation::IAsyncAction _ScanInferredTabColorsImpl(); // Agentmaster (terminate-net): the body of _ScanInferredTabColors, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
-        winrt::fire_and_forget _ScanInferredTabColors(); // Agentmaster (tab color modes — InferredWorkingDirectory): mtime-gated, throttled off-thread re-inference of each hosted Claude session's ACTUAL working dir from its tool-touched paths (the sessions-index sidecar), recoloring the tab when the inference changes (scanner-ticked; no-op in the other modes)
+        winrt::fire_and_forget _ScanInferredTabColors(); // Agentmaster (tab color modes — InferredWorkingDirectory + the home-dir forcing): mtime-gated, throttled off-thread re-inference of each ADMITTED (SessionInfersWorkingDir) hosted Claude session's ACTUAL working dir from its tool-touched paths (the sessions-index sidecar), recoloring the tab when the inference changes (scanner-ticked; every session under the Inferred mode, only %USERPROFILE%-launched ones in the other modes)
         winrt::Windows::Foundation::IAsyncAction _RefreshObserverDataImpl(); // Agentmaster (terminate-net): the body of _RefreshObserverData, awaited inside its try/catch (see _SweepClaudeLivenessImpl)
         winrt::fire_and_forget _RefreshObserverData(); // Agentmaster: the Explorer Tree "refresh" button's action — Wake the observer (force a survey now) + re-probe + force a Manager redraw once it lands
         void _BindClaudeSessionToTab(const TerminalApp::Tab& hostTab, const winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection& conn, const std::wstring& id, const std::wstring& cwd, const std::wstring& origin); // Agentmaster: shared bind tail for adoption + discovery

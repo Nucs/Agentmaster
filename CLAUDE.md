@@ -1537,7 +1537,18 @@ What works, by area:
   cwd) so a reopened session wears its color immediately; `[infer-dir]` logs each change; a
   mode/`inferGitRoot` change (cog Save AND the cross-window broadcast) CLEARS `_inferredColorScan` +
   kicks one pass, so every hosted session re-infers under the new rule instead of waiting out its
-  mtime gate; **the rich tab TOOLTIP surfaces a non-empty inference** as a dim full-path
+  mtime gate. **HOME-DIR forcing — a session LAUNCHED in the user's home directory (`%USERPROFILE%`,
+  the launch box's empty-`defaultLaunchDir` fallback) INFERS in EVERY tab-color mode, not only this
+  one** (`SessionInfersWorkingDir`, Persistence — the ONE predicate gating both the producer
+  [`_ScanInferredTabColors` admits per-session: the whole fleet under Inferred, ONLY home-dir
+  launches in the other modes — the state map stays empty otherwise] and the consumers
+  [`EffectiveWorkingDir`/`SessionColorKeyDir`/the paint seam's inferred override/the tooltip+subline
+  "inferred/launched in" flip]): a claude started in the home dir almost never WORKS there (a fresh
+  tab + `claude` with no `cd`), so its meaningless cwd is replaced by where its tool calls
+  concentrate for grouping/color/every semantic surface in all four modes — while a
+  deliberately-chosen cwd (incl. a home SUBfolder — exact-`NormDirKey` match only) keeps the
+  classic mode gate, and a dormant inference from a past Inferred-mode run still never leaks;
+  **the rich tab TOOLTIP surfaces a non-empty inference** as a dim full-path
   `inferred → <dir>` row under the meta line (it's stored only when ≠ cwd, so "present" already means
   "working somewhere else"). **Fork
   lineage:** a fork INHERITS its source's inference at launch (registry copy in `_LaunchClaudeSession`

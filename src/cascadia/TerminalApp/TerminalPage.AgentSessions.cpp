@@ -391,8 +391,9 @@ namespace winrt::TerminalApp::implementation
             // branched from (the reported fork-color mismatch) until the first message + the next
             // inference pass. The fork's transcript is a verbatim copy of the parent's at fork point,
             // so the parent's inference IS the fork's correct starting inference; the scan re-derives
-            // it from the fork's own history once one exists. Mode-agnostic data copy (consulted only
-            // while tabColorMode is InferredWorkingDirectory). A source unknown to the registry (an
+            // it from the fork's own history once one exists. Mode-agnostic data copy (consulted
+            // while the session INFERS — SessionInfersWorkingDir: the Inferred mode, or a home-dir
+            // launch in any mode). A source unknown to the registry (an
             // adopt-external fork) is covered by the scan's parent-transcript fallback instead.
             if (info.inferredWorkingDir.empty() && _sessionRegistry)
             {
@@ -1991,9 +1992,10 @@ namespace winrt::TerminalApp::implementation
         {
             // The currently-open dirs (across all windows — the registry is process-wide) whose colors
             // an auto pick must avoid. Archived (non-live) sessions don't show, so they don't count.
-            // Mode-aware key (tab color modes): under InferredWorkingDirectory an open session "shows"
+            // Mode-aware key (tab color modes): an INFERRING open session (the Inferred mode, or a
+            // home-dir launch in any mode — SessionInfersWorkingDir) "shows"
             // its INFERRED dir's color, so that is the key the avoid-set must carry (SessionColorKeyDir
-            // == plain workingDir in the default mode — byte-identical to the prior behavior).
+            // == plain workingDir for the deliberately-chosen cwds of the default mode).
             std::vector<std::wstring> openDirKeys;
             if (_sessionRegistry)
             {
@@ -2022,7 +2024,10 @@ namespace winrt::TerminalApp::implementation
     //   * WorkingDirectory (default) — the classic Rule-#12 per-dir paint, verbatim.
     //   * InferredWorkingDirectory — the same per-dir machinery, but KEYED by the session's inferred
     //     working dir once one exists (SessionColorKeyDir; until then the launch cwd — identical to
-    //     the default mode, so a fresh session never flashes an interim color).
+    //     the default mode, so a fresh session never flashes an interim color). A session LAUNCHED
+    //     in the user's home dir (%USERPROFILE% — the default launch dir) gets this inferred keying
+    //     in EVERY dir-keyed mode, not just this one (the SessionInfersWorkingDir forcing: its cwd
+    //     is meaningless, so it keys by where it actually works).
     //   * Individual — the session's OWN persisted color (SessionInfo::tabColorHex); a session with
     //     none yet is DEALT one collision-free against the other OPEN sessions' colors
     //     (ChooseSessionAutoColor) and the pick is persisted on the record FIRST (registry Update ->
@@ -2097,11 +2102,14 @@ namespace winrt::TerminalApp::implementation
             }
             return;
         }
-        // Dir-keyed modes: the classic paint, keyed by the mode's dir (cwd, or the inferred dir).
+        // Dir-keyed modes: the classic paint, keyed by the mode's dir (cwd, or the inferred dir —
+        // which applies while the session INFERS: the Inferred mode, or a HOME-DIR launch in any
+        // mode, the SessionInfersWorkingDir forcing — so a claude started in %USERPROFILE% keys
+        // its color by where it actually works even under the default per-dir mode).
         std::wstring keyDir = dir;
-        if (mode == ::Agentmaster::TabColorMode::InferredWorkingDirectory && _sessionRegistry)
+        if (_sessionRegistry)
         {
-            if (const auto info = _sessionRegistry->Get(sessionId); info && !info->inferredWorkingDir.empty())
+            if (const auto info = _sessionRegistry->Get(sessionId); info && !info->inferredWorkingDir.empty() && ::Agentmaster::SessionInfersWorkingDir(mode, *info))
             {
                 keyDir = info->inferredWorkingDir;
             }
@@ -2182,7 +2190,8 @@ namespace winrt::TerminalApp::implementation
     // Agentmaster: recolor every live Claude tab whose session shares `dir` (filesystem-aware match)
     // to `colorHex`, or reset them when nullopt. Fans a user's color change across the directory.
     // Mode-aware (tab color modes): a session matches by its color-KEY dir — the plain workingDir in
-    // the default mode (byte-identical to before), the INFERRED dir under InferredWorkingDirectory —
+    // the default mode, the INFERRED dir while the session infers (the Inferred mode, or a home-dir
+    // launch in any mode — SessionInfersWorkingDir) —
     // so a user pick fans out to exactly the tabs that genuinely share the picked color's key. Never
     // called in Individual mode (its _OnClaudeTabColorChanged branch has no fan-out).
     void TerminalPage::_ApplyDirColorToTabs(const std::wstring& dir, const std::optional<std::wstring>& colorHex)
@@ -2308,7 +2317,8 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         // Dir-keyed modes: color is ONE value per KEY dir — the working dir (default), or the
-        // session's inferred dir under InferredWorkingDirectory (SessionColorKeyDir) — persisted in
+        // session's inferred dir while it infers (the Inferred mode, or a home-dir launch in any
+        // mode — SessionColorKeyDir via SessionInfersWorkingDir) — persisted in
         // dir-colors.json and fanned out to every live tab sharing that key.
         const std::wstring dir = ::Agentmaster::SessionColorKeyDir(_appSettings.tabColorMode, *info);
         if (::Agentmaster::GetDirColor(dir) == newHex)

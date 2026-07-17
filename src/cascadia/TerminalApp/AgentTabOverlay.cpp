@@ -425,13 +425,14 @@ namespace winrt::TerminalApp::implementation
 
         // Row 2: "<root workdir folder>/<branch>" — the leaf of the session's working dir joined with
         // its git branch (e.g. C:/folder/myworkdir + "feature/issue123" -> "myworkdir/feature/issue123").
-        // Shows the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir under the
-        // Inferred tab-color mode when the scan detected the session working OUTSIDE its launch cwd,
+        // Shows the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir when the
+        // session infers (SessionInfersWorkingDir: the Inferred tab-color mode, or a home-dir launch
+        // in ANY mode) and the scan detected it working OUTSIDE its launch cwd,
         // else the persisted M-axis workingDir); fall back to the live PEB cwd. Hidden when neither a
         // folder nor a branch is known.
         if (_subline)
         {
-            const bool inferredShown = static_cast<::Agentmaster::TabColorMode>(_tabColorMode) == ::Agentmaster::TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty();
+            const bool inferredShown = !s.inferredWorkingDir.empty() && ::Agentmaster::SessionInfersWorkingDir(static_cast<::Agentmaster::TabColorMode>(_tabColorMode), s);
             const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(static_cast<::Agentmaster::TabColorMode>(_tabColorMode), s);
             std::wstring dir = !effDir.empty() ? effDir : s.liveCwd;
             while (!dir.empty() && (dir.back() == L'/' || dir.back() == L'\\'))

@@ -2072,10 +2072,11 @@ namespace winrt::TerminalApp::implementation
 
         // Header (right side): the leaf working-dir folder + "/" + git branch (the overlay subline) -- the
         // full path is too long to read at a glance, so show only the folder name and the branch. The
-        // dir is the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir under the
-        // Inferred tab-color mode, else the launch cwd), matching the overlay subline / board card /
+        // dir is the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir while the
+        // session infers: the Inferred tab-color mode, or a home-dir launch in ANY mode; else the
+        // launch cwd), matching the overlay subline / board card /
         // tree group; the dim detail line below carries whichever dir the header leaf can't.
-        const bool inferredActive = _appSettings.tabColorMode == ::Agentmaster::TabColorMode::InferredWorkingDirectory && !s.inferredWorkingDir.empty();
+        const bool inferredActive = !s.inferredWorkingDir.empty() && ::Agentmaster::SessionInfersWorkingDir(_appSettings.tabColorMode, s);
         const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s);
         std::wstring dir = !effDir.empty() ? effDir : s.liveCwd;
         while (!dir.empty() && (dir.back() == L'/' || dir.back() == L'\\'))
@@ -2095,9 +2096,10 @@ namespace winrt::TerminalApp::implementation
 
         // The directory DETAIL line — non-empty only when the scan detected the session working
         // somewhere OTHER than its launch cwd (SessionInfo::inferredWorkingDir is stored empty when
-        // they agree), so "present" already means "worth showing". Under the Inferred mode the header
-        // already names the inferred dir, so the detail carries the LAUNCH cwd ("launched in → …");
-        // in the other modes it keeps the classic "inferred → …" full inferred path.
+        // they agree), so "present" already means "worth showing". While the inference is SHOWN as
+        // the header dir (inferredActive — the Inferred mode, or a home-dir launch in any mode) the
+        // detail carries the LAUNCH cwd ("launched in → …");
+        // otherwise (a dormant inference) it keeps the classic "inferred → …" full inferred path.
         std::wstring dirDetailLine;
         if (inferredActive && !s.workingDir.empty())
         {
@@ -5142,12 +5144,17 @@ namespace winrt::TerminalApp::implementation
         co_return;
     }
 
-    // Agentmaster (tab color modes — InferredWorkingDirectory): the inferred-workdir scan. While the
-    // GLOBAL tabColorMode is InferredWorkingDirectory, periodically re-infer each hosted Claude
-    // session's ACTUAL working directory from the paths its tool calls touch (files read / edited /
-    // created + searched dirs) and re-key its tab color when the inference changes — so a session
-    // launched at a repo root that settles into one subtree wears THAT subtree's color, and two
-    // sessions sharing a cwd but working in different areas become tellable apart.
+    // Agentmaster (tab color modes — InferredWorkingDirectory): the inferred-workdir scan.
+    // Periodically re-infer each ADMITTED hosted Claude session's ACTUAL working directory from the
+    // paths its tool calls touch (files read / edited / created + searched dirs) and re-key its tab
+    // color when the inference changes — so a session launched at a repo root that settles into one
+    // subtree wears THAT subtree's color, and two sessions sharing a cwd but working in different
+    // areas become tellable apart. ADMISSION is the shared SessionInfersWorkingDir predicate: while
+    // the GLOBAL tabColorMode is InferredWorkingDirectory every session infers; in EVERY OTHER mode
+    // only the sessions LAUNCHED in the user's home dir do (%USERPROFILE% — the default launch dir,
+    // a meaningless cwd, so their inference is FORCED on; the rest of the fleet idles exactly as
+    // before). The producer and the consumers (EffectiveWorkingDir) gate on the SAME predicate, so
+    // an admitted session's inference is always fresh and a non-admitted one's stays dormant.
     //
     // Cost discipline: scanner-ticked (~2s) but each session is throttled to one inference per
     // kInferredScanThrottleMs AND gated on the transcript mtime actually GROWING; the paths come
@@ -5178,10 +5185,15 @@ namespace winrt::TerminalApp::implementation
     {
         auto strongThis{ get_strong() };
         co_await wil::resume_foreground(Dispatcher());
-        if (_appSettings.tabColorMode != ::Agentmaster::TabColorMode::InferredWorkingDirectory || !_sessionRegistry || _claudeTabs.empty())
+        if (!_sessionRegistry || _claudeTabs.empty())
         {
-            co_return; // scan only in the inferred mode (the state map idles empty otherwise)
+            co_return;
         }
+        // The mode no longer gates the WHOLE scan (home-dir launches infer in every mode — the
+        // SessionInfersWorkingDir forcing); each session is admitted per-candidate below, so in a
+        // non-Inferred mode with no home-dir session the pass costs a µs map walk and the state
+        // map idles empty exactly as before.
+        const auto colorMode = _appSettings.tabColorMode;
         constexpr int64_t kInferredScanThrottleMs = 15000; // per-session floor between inferences (~15s latency is plenty for a color)
         const int64_t now = static_cast<int64_t>(::GetTickCount64());
 
@@ -5211,6 +5223,10 @@ namespace winrt::TerminalApp::implementation
             if (!info || !info->live || info->kind != ::Agentmaster::AgentKind::Claude)
             {
                 continue; // Codex rollouts aren't path-parsed — its color keys on the cwd
+            }
+            if (!::Agentmaster::SessionInfersWorkingDir(colorMode, *info))
+            {
+                continue; // not admitted under this mode (only home-dir launches infer outside the Inferred mode) — BEFORE the state map, so non-inferring sessions never accrete entries
             }
             auto& st = _inferredColorScan[id];
             if (st.nextRunMs > now)

@@ -224,11 +224,27 @@ namespace Agentmaster
     std::wstring ChooseSessionAutoColor(const std::wstring& sessionId,
                                         const std::vector<std::pair<std::wstring, std::wstring>>& liveSessionColors,
                                         const std::unordered_set<std::wstring>& activeColors);
+    // Agentmaster (inferred working dir — the HOME-DIR forcing): whether the inferred-working-dir
+    // machinery applies to THIS session under `mode`. TRUE while the GLOBAL mode is
+    // InferredWorkingDirectory (the cog opt-in — every session infers), and ALSO — in EVERY mode —
+    // for a session LAUNCHED in the user's home directory (%USERPROFILE%, the launch box's
+    // empty-`defaultLaunchDir` fallback): a claude started there almost never WORKS there (the
+    // user just opened a tab and ran `claude` without cd-ing), so its cwd is meaningless for
+    // grouping/color and the inference is FORCED ON for that tab regardless of the mode. This one
+    // predicate gates BOTH the consumers (EffectiveWorkingDir answers the inferred dir only while
+    // it holds — a dormant inference from a past Inferred-mode run still never leaks for a
+    // deliberately-chosen cwd) AND the producer (_ScanInferredTabColors scans exactly the sessions
+    // it admits, so a forced session's inference stays fresh in every mode). Pure apart from the
+    // one-time %USERPROFILE% read (cached process-wide; unresolvable env ⇒ no forcing — fails
+    // open to the classic cwd behavior).
+    bool SessionInfersWorkingDir(TabColorMode mode, const SessionInfo& s);
     // Agentmaster (inferred working dir): THE one answer to "which directory does this session
-    // WORK in" — the session's EFFECTIVE working directory. Under InferredWorkingDirectory with a
-    // known inference it is the INFERRED dir (SessionInfo::inferredWorkingDir — where the session's
-    // tool calls actually concentrate); every other case (default/Individual mode, or no inference
-    // yet) it is the launch cwd (SessionInfo::workingDir). Every SEMANTIC "where does this session
+    // WORK in" — the session's EFFECTIVE working directory. When the session INFERS
+    // (SessionInfersWorkingDir — the InferredWorkingDirectory mode, or a home-dir launch in ANY
+    // mode) and an inference is known, it is the INFERRED dir (SessionInfo::inferredWorkingDir —
+    // where the session's tool calls actually concentrate); every other case (a non-inferring
+    // mode on a deliberately-chosen cwd, or no inference yet) it is the launch cwd
+    // (SessionInfo::workingDir). Every SEMANTIC "where does this session
     // belong" surface routes through this — Explorer-Tree grouping + dir scope, the board card's
     // dir line + scope filter, the Auto-Testing header + apply-template-to-dir broadcast, the
     // launch-box pre-aim, Open New Session Here, the overlay subline/Open Path/Copy Path — so they
@@ -238,8 +254,9 @@ namespace Agentmaster
     // Callers NormDirKey/PathEq it where a canonical key is needed. Pure.
     std::wstring EffectiveWorkingDir(TabColorMode mode, const SessionInfo& s);
     // Agentmaster (tab color modes): the DIR that keys a session's color under `mode` — the
-    // grouping/fan-out key. InferredWorkingDirectory with a known inference => the inferred dir;
-    // everything else (incl. Individual, whose callers branch on the mode BEFORE any dir grouping)
+    // grouping/fan-out key. An INFERRING session (SessionInfersWorkingDir — the Inferred mode, or
+    // a home-dir launch in any mode) with a known inference => the inferred dir; everything else
+    // (incl. Individual, whose callers branch on the mode BEFORE any dir grouping)
     // => the session's working dir. Callers NormDirKey it where a canonical key is needed. Pure.
     // DELEGATES to EffectiveWorkingDir — the color key IS the effective work dir, one truth, so a
     // card/row can never sit in one directory group while its tab wears another group's color.

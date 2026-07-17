@@ -741,7 +741,7 @@ namespace winrt::TerminalApp::implementation
                     self->_SweepClaudeLiveness(); // then archive dead tabs (all self-marshal to the UI thread)
                     self->_ScanPendingInput(); // PENDING_INPUT.md: record each live Claude tab's unsent input-box draft
                     self->_SweepAgentPendingToasts(); // System notifications: fire/drop the HELD completion toasts (spurious-toast suppression — SessionScanner's DecideHeldToast)
-                    self->_ScanInferredTabColors(); // tab color modes: re-infer each Claude tab's ACTUAL workdir + recolor (no-op unless the mode is InferredWorkingDirectory; throttled + mtime-gated inside)
+                    self->_ScanInferredTabColors(); // tab color modes: re-infer each Claude tab's ACTUAL workdir + recolor (every session under InferredWorkingDirectory; ONLY home-dir launches — forced inference, SessionInfersWorkingDir — in the other modes; throttled + mtime-gated inside)
                 }
             });
         }
@@ -1090,7 +1090,9 @@ namespace winrt::TerminalApp::implementation
                 // Inferred-workdir inputs changed (the mode, or "Use .git folder to infer"): drop the
                 // per-session scan gates (lastMtime/throttle) so every hosted session RE-INFERS under
                 // the new rule now — a quiet transcript would otherwise keep its old inference until
-                // its next write — and kick one scan pass immediately (it self-gates on the mode).
+                // its next write — and kick one scan pass immediately (it self-gates per session:
+                // SessionInfersWorkingDir admits the whole fleet under the Inferred mode, home-dir
+                // launches in every mode).
                 if (inferInputsChanged)
                 {
                     self->_inferredColorScan.clear();

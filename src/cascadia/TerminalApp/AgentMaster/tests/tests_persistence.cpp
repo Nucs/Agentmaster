@@ -765,8 +765,8 @@ void TestTabColorModes()
         s.inferredWorkingDir = L"Q:\\other\\repo";
         CHECK(EffectiveWorkingDir(TabColorMode::InferredWorkingDirectory, s) == L"Q:\\other\\repo", "effective dir: inferred mode + an inference -> the INFERRED dir (where the session actually works)");
         CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, s) == L"K:\\launchcwd", "effective dir: default mode ignores a dormant inference (mode switch restores cwd semantics)");
-        CHECK(EffectiveWorkingDir(TabColorMode::Individual, s) == L"K:\\launchcwd", "effective dir: Individual mode ignores the inference too (its scan never runs there)");
-        CHECK(EffectiveWorkingDir(TabColorMode::NoColor, s) == L"K:\\launchcwd", "effective dir: NoColor mode ignores the inference too (colors off, semantics classic)");
+        CHECK(EffectiveWorkingDir(TabColorMode::Individual, s) == L"K:\\launchcwd", "effective dir: Individual mode ignores the inference too (deliberate cwd — the dormant inference never leaks)");
+        CHECK(EffectiveWorkingDir(TabColorMode::NoColor, s) == L"K:\\launchcwd", "effective dir: NoColor mode ignores the inference too (colors off, deliberate-cwd semantics classic)");
         // The never-drift contract: the color key IS the effective dir, in every mode x inference state.
         for (const auto mode : { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory, TabColorMode::NoColor })
         {
@@ -774,6 +774,71 @@ void TestTabColorModes()
             SessionInfo bare = s;
             bare.inferredWorkingDir.clear();
             CHECK(SessionColorKeyDir(mode, bare) == EffectiveWorkingDir(mode, bare), "never-drift: SessionColorKeyDir == EffectiveWorkingDir (no inference)");
+        }
+    }
+
+    // --- SessionInfersWorkingDir + the HOME-DIR forcing: a session LAUNCHED in the user's home
+    // directory (%USERPROFILE% — the Launch box's empty-`defaultLaunchDir` fallback) INFERS in
+    // EVERY mode (its cwd is meaningless — the user just opened a tab and ran claude), while a
+    // deliberately-chosen cwd infers only under InferredWorkingDirectory. Uses the REAL
+    // %USERPROFILE% (the predicate's cached env read), so this exercises the live resolution. ---
+    {
+        wchar_t homeBuf[2048]{};
+        const DWORD homeLen = ::GetEnvironmentVariableW(L"USERPROFILE", homeBuf, 2048);
+        CHECK(homeLen > 0 && homeLen < 2048, "home-dir forcing: %USERPROFILE% resolvable on this machine (the predicate's input)");
+        if (homeLen > 0 && homeLen < 2048)
+        {
+            const std::wstring home{ homeBuf };
+            const auto allModes = { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory, TabColorMode::NoColor };
+
+            SessionInfo athome;
+            athome.id = L"sid-home";
+            athome.workingDir = home;
+            for (const auto mode : allModes)
+            {
+                CHECK(SessionInfersWorkingDir(mode, athome), "home-dir forcing: a %USERPROFILE% launch infers in EVERY mode");
+            }
+            // Consumers, no inference yet: the launch cwd answers (a fresh home session behaves classic).
+            CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, athome) == home, "home-dir forcing: no inference yet -> the home cwd answers (fresh session classic)");
+            // Consumers, inference known: the INFERRED dir answers in EVERY mode — grouping, color
+            // key, and every semantic surface follow where the session actually works.
+            athome.inferredWorkingDir = L"K:\\source\\Agentmaster";
+            for (const auto mode : allModes)
+            {
+                CHECK(EffectiveWorkingDir(mode, athome) == L"K:\\source\\Agentmaster", "home-dir forcing: effective dir == the INFERRED dir in every mode");
+                CHECK(SessionColorKeyDir(mode, athome) == EffectiveWorkingDir(mode, athome), "home-dir forcing: never-drift holds (color key == effective dir)");
+            }
+            // NormDirKey folding: case / slash / trailing variants of the home dir still force.
+            SessionInfo variant = athome;
+            std::wstring shouty = home;
+            for (auto& c : shouty)
+            {
+                if (c >= L'a' && c <= L'z')
+                {
+                    c = static_cast<wchar_t>(c - L'a' + L'A');
+                }
+            }
+            std::wstring slashy = shouty + L"/";
+            for (auto& c : slashy)
+            {
+                if (c == L'\\')
+                {
+                    c = L'/';
+                }
+            }
+            variant.workingDir = slashy;
+            CHECK(SessionInfersWorkingDir(TabColorMode::WorkingDirectory, variant), "home-dir forcing: case/slash/trailing variants of %USERPROFILE% still force (NormDirKey folding)");
+            CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, variant) == L"K:\\source\\Agentmaster", "home-dir forcing: the variant-cwd session answers its inferred dir too");
+            // A deliberate launch — a SUBfolder of home, or any other dir — never forces: exact-dir
+            // match only, so ~/Desktop keeps classic per-cwd semantics outside the Inferred mode.
+            SessionInfo sub = athome;
+            sub.workingDir = home + L"\\Desktop";
+            CHECK(!SessionInfersWorkingDir(TabColorMode::WorkingDirectory, sub), "home-dir forcing: a SUBfolder of home is a deliberate cwd -> no forcing");
+            CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, sub) == home + L"\\Desktop", "home-dir forcing: the subfolder session keeps its cwd (dormant inference stays dormant)");
+            SessionInfo elsewhere = athome;
+            elsewhere.workingDir = L"K:\\repo";
+            CHECK(!SessionInfersWorkingDir(TabColorMode::WorkingDirectory, elsewhere), "home-dir forcing: a deliberately-chosen cwd does not force outside the Inferred mode");
+            CHECK(SessionInfersWorkingDir(TabColorMode::InferredWorkingDirectory, elsewhere), "home-dir forcing: the Inferred mode still admits every session (the global opt-in)");
         }
     }
 
