@@ -265,10 +265,10 @@ namespace
     }
 
     // Build the whole tab-tooltip card: a dark, rounded Border (summary-panel chrome) holding the header
-    // (state dot + title on the left, folder/branch on the right), a state line (colored to match the tab
-    // dot), a dim kind/model/effort/perm line, and -- once the Summary body has loaded -- a divider + the
-    // numbered Summary box, height-capped by LINE TRUNCATION + a plain clipping Grid (the full, scrollable
-    // view is the pencil-toggled summary panel).
+    // (state dot + a wrapping title, which owns the full card width), then one dim line each for the
+    // folder/branch and the state (colored to match the tab dot) and the kind/model/effort/perm, and --
+    // once the Summary body has loaded -- a divider + the numbered Summary box, height-capped by LINE
+    // TRUNCATION + a plain clipping Grid (the full, scrollable view is the pencil-toggled summary panel).
     //
     // NO ScrollViewer -- this is a hard rule, learned from a proven fail-fast (2026-07-02, full-dump stowed
     // backtrace): when the ToolTip popup opens, its content tree ENTERs the live tree, and a ScrollViewer's
@@ -296,55 +296,64 @@ namespace
         col.Orientation(Orientation::Vertical);
         col.Spacing(1);
 
-        Grid header;
+        // Header: the state dot + the title, which WRAPS -- a title is a few words, sometimes a few
+        // lines, so it gets the card's whole width and the folder/branch sits on its own line below.
+        //
+        // A Grid, NOT a horizontal StackPanel: a StackPanel measures its children with INFINITE width in
+        // the stacking direction and arranges them at their DESIRED size, so a TextBlock inside one can
+        // never wrap NOR ellipsize -- it just overruns its slot and renders straight THROUGH whatever
+        // sits beside it (that, plus an Auto folder/branch column outbidding a 1* title column, is how
+        // the title used to collide with the folder/branch). A star column hands the title a finite
+        // width, so Wrap + MaxLines + CharacterEllipsis all behave.
         {
-            ColumnDefinition c0;
-            c0.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
-            ColumnDefinition c1;
-            c1.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
-            header.ColumnDefinitions().Append(c0);
-            header.ColumnDefinitions().Append(c1);
+            Grid header;
+            ColumnDefinition cDot;
+            cDot.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto));
+            ColumnDefinition cTitle;
+            cTitle.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            header.ColumnDefinitions().Append(cDot);
+            header.ColumnDefinitions().Append(cTitle);
 
-            StackPanel left;
-            left.Orientation(Orientation::Horizontal);
-            left.Spacing(6);
-            left.VerticalAlignment(VerticalAlignment::Center);
             winrt::Windows::UI::Xaml::Shapes::Ellipse dot;
             dot.Width(9);
             dot.Height(9);
             dot.Fill(SolidColorBrush{ accent });
             dot.Stroke(TtFill(0xFF, 0x00, 0x00, 0x00));
             dot.StrokeThickness(1);
-            dot.VerticalAlignment(VerticalAlignment::Center);
-            left.Children().Append(dot);
+            // Pinned to the FIRST line's optical center -- centering it against the whole block would
+            // drift the dot down the side of a multi-line title.
+            dot.VerticalAlignment(VerticalAlignment::Top);
+            dot.Margin(ThicknessHelper::FromLengths(0, 4, 0, 0));
+            Grid::SetColumn(dot, 0);
+            header.Children().Append(dot);
+
             TextBlock titleTb;
             titleTb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
             titleTb.FontSize(13);
             titleTb.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
             titleTb.Foreground(TtFill(0xFF, 0xF2, 0xF2, 0xF2));
-            titleTb.TextWrapping(TextWrapping::NoWrap);
+            titleTb.TextWrapping(TextWrapping::Wrap);
+            titleTb.MaxLines(3); // a pathological title can't grow a tall header; line 3 ellipsizes
             titleTb.TextTrimming(TextTrimming::CharacterEllipsis);
-            titleTb.VerticalAlignment(VerticalAlignment::Center);
+            titleTb.Margin(ThicknessHelper::FromLengths(6, 0, 0, 0));
             titleTb.Text(winrt::hstring{ title });
-            left.Children().Append(titleTb);
-            Grid::SetColumn(left, 0);
-            header.Children().Append(left);
-
-            if (!folderBranch.empty())
-            {
-                TextBlock fb;
-                fb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
-                fb.FontSize(11);
-                fb.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
-                fb.TextWrapping(TextWrapping::NoWrap);
-                fb.TextTrimming(TextTrimming::CharacterEllipsis);
-                fb.VerticalAlignment(VerticalAlignment::Center);
-                fb.Margin(ThicknessHelper::FromLengths(12, 0, 0, 0));
-                fb.Text(winrt::hstring{ folderBranch });
-                Grid::SetColumn(fb, 1);
-                header.Children().Append(fb);
-            }
+            Grid::SetColumn(titleTb, 1);
+            header.Children().Append(titleTb);
             col.Children().Append(header);
+        }
+
+        // The leaf working-dir folder + "/" + git branch, on its OWN dim line UNDER the title (it used to
+        // share the header row, where it starved a multi-word title of room and got overrun by it). It
+        // wraps rather than ellipsizing: it is short, and a line break costs less than hiding the branch.
+        if (!folderBranch.empty())
+        {
+            TextBlock fb;
+            fb.FontFamily(Media::FontFamily{ L"Cascadia Mono" });
+            fb.FontSize(11);
+            fb.Foreground(TtFill(0xFF, 0xB0, 0xB0, 0xB0));
+            fb.TextWrapping(TextWrapping::Wrap);
+            fb.Text(winrt::hstring{ folderBranch });
+            col.Children().Append(fb);
         }
 
         if (!stateText.empty())
@@ -2070,12 +2079,12 @@ namespace winrt::TerminalApp::implementation
         }
         const std::wstring metaText = TtJoin(metaParts, L"  \x00B7  ");
 
-        // Header (right side): the leaf working-dir folder + "/" + git branch (the overlay subline) -- the
-        // full path is too long to read at a glance, so show only the folder name and the branch. The
-        // dir is the session's EFFECTIVE work dir (EffectiveWorkingDir — the INFERRED dir while the
-        // session infers: the Inferred tab-color mode, or a home-dir launch in ANY mode; else the
-        // launch cwd), matching the overlay subline / board card /
-        // tree group; the dim detail line below carries whichever dir the header leaf can't.
+        // The folder/branch line (its own dim line under the title): the leaf working-dir folder + "/" +
+        // git branch (the overlay subline) -- the full path is too long to read at a glance, so show only
+        // the folder name and the branch. The dir is the session's EFFECTIVE work dir
+        // (EffectiveWorkingDir — the INFERRED dir while the session infers: the Inferred tab-color mode,
+        // or a home-dir launch in ANY mode; else the launch cwd), matching the overlay subline / board
+        // card / tree group; the dim detail line below carries whichever dir this leaf can't.
         const bool inferredActive = !s.inferredWorkingDir.empty() && ::Agentmaster::SessionInfersWorkingDir(_appSettings.tabColorMode, s);
         const std::wstring effDir = ::Agentmaster::EffectiveWorkingDir(_appSettings.tabColorMode, s);
         std::wstring dir = !effDir.empty() ? effDir : s.liveCwd;
