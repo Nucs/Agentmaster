@@ -390,6 +390,11 @@ namespace winrt::TerminalApp::implementation
             grip.PointerCaptureLost(endHandler);
         };
 
+        // The three grips are thin (6px edges / 14px corner). Their tooltips pin PLACEMENT to Top
+        // (AgentSetTipPlacement) so the tip is offset ABOVE the bar rather than popping right over it:
+        // the shared tip's default is near-pointer (Mouse), which landed the tip ON the grip and — when
+        // dragging the BOTTOM grip downward — sat squarely in the drag path, blocking the grab. Top puts
+        // it over the panel body, clear of the down/left drag directions; it stays click-through.
         Border leftGrip{};
         leftGrip.Width(6);
         leftGrip.HorizontalAlignment(HorizontalAlignment::Left);
@@ -398,6 +403,7 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(leftGrip, winrt::hstring{
             L"Drag to resize the panel width (shared across tabs).\n"
             L"Hold Shift to size this tab only." });
+        AgentSetTipPlacement(leftGrip, Primitives::PlacementMode::Top);
 
         Border bottomGrip{};
         bottomGrip.Height(6);
@@ -407,6 +413,7 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(bottomGrip, winrt::hstring{
             L"Drag to resize the panel height (shared across tabs).\n"
             L"Hold Shift to size this tab only." });
+        AgentSetTipPlacement(bottomGrip, Primitives::PlacementMode::Top);
 
         Border cornerGrip{};
         cornerGrip.Width(14);
@@ -417,6 +424,7 @@ namespace winrt::TerminalApp::implementation
         AgentSetTip(cornerGrip, winrt::hstring{
             L"Drag to resize the panel width and height at once (shared across tabs).\n"
             L"Hold Shift to size this tab only." });
+        AgentSetTipPlacement(cornerGrip, Primitives::PlacementMode::Top);
 
         Grid layout{};
         layout.Children().Append(contentBorder);

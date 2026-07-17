@@ -93,6 +93,23 @@ namespace winrt::TerminalApp::implementation
             return prop;
         }
 
+        // Optional per-element tooltip PLACEMENT (Agentmaster): an int PlacementMode value, or -1 (the
+        // default) meaning "leave the ToolTip's own default placement (unset)". Opt-in via
+        // AgentSetTipPlacement. Used by the summary panel's thin (6px) resize grips (Top) so the tip is
+        // offset OFF the bar instead of popping right over it — the near-pointer tip landed on the grip
+        // and, dragging it downward, sat in the drag path and blocked the grab. Plain property-store
+        // value; dies with the element (same zero-registration contract as TipDelayMs — never touch
+        // ToolTipService at build).
+        inline winrt::Windows::UI::Xaml::DependencyProperty TipPlacementProperty()
+        {
+            static const auto prop = winrt::Windows::UI::Xaml::DependencyProperty::RegisterAttached(
+                L"AgentmasterTipPlacement",
+                winrt::xaml_typename<int32_t>(),
+                winrt::xaml_typename<winrt::Windows::UI::Xaml::FrameworkElement>(),
+                winrt::Windows::UI::Xaml::PropertyMetadata{ winrt::box_value(static_cast<int32_t>(-1)) });
+            return prop;
+        }
+
         // The open delay DEFAULTS to 1/3 of the system tooltip hover time (process-global; read
         // once); a caller may OVERRIDE it per element via the delay attached property.
         inline std::chrono::milliseconds DefaultOpenDelay()
@@ -226,6 +243,24 @@ namespace winrt::TerminalApp::implementation
                 h.tip = t;
             }
             h.tip.Content(winrt::box_value(text));
+            // Per-element PLACEMENT (Agentmaster): most tips keep the framework default (unset); an element
+            // may OPT IN (AgentSetTipPlacement) to an explicit placement — the summary panel's resize grips
+            // pin Top so the tip is offset ABOVE the thin bar instead of popping over it and blocking the
+            // drag. Applied on EVERY open (before IsOpen so the first layout is placed): the ToolTip is
+            // shared + reused, so a grip's Top must be CLEARED for the next element — and cleared by
+            // ClearValue (restore the UNSET default), NOT by setting a value, so a non-opt-in tip behaves
+            // byte-identically to before this change (whatever the framework's untouched default placement is).
+            {
+                const auto placeVal = winrt::unbox_value_or<int32_t>(el.GetValue(TipPlacementProperty()), -1);
+                if (placeVal >= 0)
+                {
+                    h.tip.Placement(static_cast<winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode>(placeVal));
+                }
+                else
+                {
+                    h.tip.ClearValue(winrt::Windows::UI::Xaml::Controls::ToolTip::PlacementProperty());
+                }
+            }
             // Attach to the owner ONLY for the duration of the open — SetToolTip is what gives the
             // tip its placement (relative to the owner; the shipping MinMaxCloseControl pattern:
             // no PlacementTarget, so the tip holds no reference back to the element).
@@ -411,6 +446,17 @@ namespace winrt::TerminalApp::implementation
         el.PointerExited([](const winrt::Windows::Foundation::IInspectable& s, const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs&) {
             atd::OnTipPointerExited(s);
         });
+    }
+
+    // Opt `el`'s AgentSetTip tooltip into an explicit PLACEMENT (else the shared near-pointer default).
+    // Used by the summary panel's thin resize grips (Top) so the tip is offset ABOVE the bar instead of
+    // popping over it — a mouse-placed tip on a 6px grip covered the target and blocked the drag. The tip
+    // stays click-through (IsHitTestVisible(false)), so this only moves it out of the way. Read fresh at
+    // open time, so the call order vs AgentSetTip does not matter (records only an attached-property value).
+    inline void AgentSetTipPlacement(const winrt::Windows::UI::Xaml::UIElement& el,
+                                     winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode placement)
+    {
+        el.SetValue(agent_tip_details::TipPlacementProperty(), winrt::box_value(static_cast<int32_t>(placement)));
     }
 
     // Force-close every AgentSetTip tooltip under root — for hosts about to be HIDDEN
