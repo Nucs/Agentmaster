@@ -390,11 +390,12 @@ namespace winrt::TerminalApp::implementation
             grip.PointerCaptureLost(endHandler);
         };
 
-        // The three grips are thin (6px edges / 14px corner). Their tooltips pin PLACEMENT to Top
-        // (AgentSetTipPlacement) so the tip is offset ABOVE the bar rather than popping right over it:
-        // the shared tip's default is near-pointer (Mouse), which landed the tip ON the grip and — when
-        // dragging the BOTTOM grip downward — sat squarely in the drag path, blocking the grab. Top puts
-        // it over the panel body, clear of the down/left drag directions; it stays click-through.
+        // The grips are thin (6px edges / 14px corner). The left + corner tips pin PLACEMENT to Top
+        // (AgentSetTipPlacement) so the tip is offset ABOVE the bar rather than popping over it (the
+        // shared tip's default is near-pointer). The BOTTOM grip gets NO tooltip at all: it sits at the
+        // panel's bottom edge and you resize by dragging DOWN, so any tip — even Top-placed — still lands
+        // over the thin bar and blocks the grab (Top wasn't enough there). The resize cursor already
+        // signals the action; the left/corner tips carry the shared-vs-Shift explanation.
         Border leftGrip{};
         leftGrip.Width(6);
         leftGrip.HorizontalAlignment(HorizontalAlignment::Left);
@@ -410,10 +411,7 @@ namespace winrt::TerminalApp::implementation
         bottomGrip.HorizontalAlignment(HorizontalAlignment::Stretch);
         bottomGrip.VerticalAlignment(VerticalAlignment::Bottom);
         wireGrip(bottomGrip, false, true, CoreCursorType::SizeNorthSouth);
-        AgentSetTip(bottomGrip, winrt::hstring{
-            L"Drag to resize the panel height (shared across tabs).\n"
-            L"Hold Shift to size this tab only." });
-        AgentSetTipPlacement(bottomGrip, Primitives::PlacementMode::Top);
+        // (no AgentSetTip on bottomGrip — see the comment above: the tip covered the drag-down bar.)
 
         Border cornerGrip{};
         cornerGrip.Width(14);
