@@ -1942,9 +1942,22 @@ Milestones tracked in `doc/agentmaster/IMPLEMENTATION.md`.
     Islands), shared by `AgentManagerContent` + the Sessions page + the per-tab overlay + the tab
     strip (thin TU-local wrappers like `SessSetTip` delegate here). Architecture: ONE
     per-UI-thread tip HOST (one shared `ToolTip` + one one-shot open timer + a 1s while-open
-    watchdog); per element only two attached DPs (text + delay) + three capture-less pointer
-    handlers, and `SetToolTip` is attached only for the duration of a real hover-open — see the
-    per-element-ToolTip LEAK gotcha (the 68 GB prod freeze) before touching this.
+    watchdog); per element only attached DPs (text + delay + optional placement/title) + three
+    capture-less pointer handlers, and `SetToolTip` is attached only for the duration of a real
+    hover-open — see the per-element-ToolTip LEAK gotcha (the 68 GB prod freeze) before touching
+    this.
+  - `src/cascadia/TerminalApp/AgentLocalTooltip.h` — **LocalTooltip**: a DESIGNATED-AREA tooltip
+    surface — the hovered element's `AgentSetTip` text renders in ONE fixed panel (title auto-derived
+    from the control's Header/Content, `AgentSetTipTitle` overrides) instead of a floating ToolTip
+    chasing the pointer. `AttachScope(root)` = ONE bubbling PointerMoved per SCOPE (never per element
+    — the 68 GB lesson), immediate + STICKY (gaps between controls don't strobe it), and marks the
+    root so the floating host's open tick YIELDS inside (`LocalTipScopeProperty`, a live switch);
+    `AnchorTopLeftOutside(host, anchor)` pins the panel outside the anchor's top-LEFT (same top,
+    right edge glued to the anchor's left edge, growing only leftward), change-gated re-anchoring on
+    host/anchor SizeChanged. First consumer: the **Settings cog** (`_settingsLocalTip` — the 60+
+    per-control tips inside the card render left-outside it, untouched at their call sites); a window
+    too narrow to host the panel falls back to the classic floating tips automatically. Reusable by
+    any page/component at any designated area.
   - `src/cascadia/TerminalApp/AgentCopyActions.h` — the ONE shared `CopySessionField` action
     (Session Id · working-dir Path · Branch · Claude/Codex Launch CLI · Transcript · Summary) behind
     BOTH the per-tab overlay's copy menu (`AgentTabOverlay`) AND the Triage Board / Explorer-tree

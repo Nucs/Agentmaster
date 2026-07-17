@@ -110,6 +110,37 @@ namespace winrt::TerminalApp::implementation
             return prop;
         }
 
+        // Optional per-element tooltip TITLE (Agentmaster, LocalTooltip): a heading shown above the tip
+        // text when the tip renders in a designated-area LocalTooltip panel (AgentLocalTooltip.h). The
+        // panel usually DERIVES a title from the element itself (its Header / string Content); this is
+        // the explicit override for elements with none (or a wrong one). The floating tip ignores it.
+        // Plain property-store value; dies with the element (the TipDelayMs contract).
+        inline winrt::Windows::UI::Xaml::DependencyProperty TipTitleProperty()
+        {
+            static const auto prop = winrt::Windows::UI::Xaml::DependencyProperty::RegisterAttached(
+                L"AgentmasterTipTitle",
+                winrt::xaml_typename<winrt::hstring>(),
+                winrt::xaml_typename<winrt::Windows::UI::Xaml::FrameworkElement>(),
+                winrt::Windows::UI::Xaml::PropertyMetadata{ winrt::box_value(winrt::hstring{}) });
+            return prop;
+        }
+
+        // LocalTooltip SCOPE marker (Agentmaster, AgentLocalTooltip.h): boxed true on a scope ROOT whose
+        // descendants' AgentSetTip texts render in a designated-area panel instead of the floating tip —
+        // the open tick suppresses the shared ToolTip for any element under a marked ancestor. The value
+        // is a live SWITCH, not a one-shot: the LocalTooltip's anchor logic flips it false while the
+        // window is too narrow to host the panel (no room left of the anchor), restoring the classic
+        // floating tips, and back true when room returns. Plain property-store value on the scope root.
+        inline winrt::Windows::UI::Xaml::DependencyProperty LocalTipScopeProperty()
+        {
+            static const auto prop = winrt::Windows::UI::Xaml::DependencyProperty::RegisterAttached(
+                L"AgentmasterLocalTipScope",
+                winrt::xaml_typename<bool>(),
+                winrt::xaml_typename<winrt::Windows::UI::Xaml::FrameworkElement>(),
+                winrt::Windows::UI::Xaml::PropertyMetadata{ winrt::box_value(false) });
+            return prop;
+        }
+
         // The open delay DEFAULTS to 1/3 of the system tooltip hover time (process-global; read
         // once); a caller may OVERRIDE it per element via the delay attached property.
         inline std::chrono::milliseconds DefaultOpenDelay()
@@ -145,6 +176,12 @@ namespace winrt::TerminalApp::implementation
             // hover's ToolTipService registration — the very thing the islands leak class never
             // tears down — would be left attached forever.
             winrt::Windows::UI::Xaml::UIElement openOwner{ nullptr };
+            // LocalTooltip (Agentmaster): how many local-tip SCOPES ever attached on this UI thread
+            // (AgentLocalTooltip::AttachScope) — the fast-path gate that keeps the open tick's
+            // suppression walk-up (InsideLocalTipScope) at literally zero cost for a window that
+            // never created one. Never decremented: a scope root lives for its content's lifetime,
+            // and a stale positive count only costs the µs ancestor walk, never a wrong answer.
+            int localTipScopes{ 0 };
         };
 
         inline TipHost& Host()
@@ -174,6 +211,25 @@ namespace winrt::TerminalApp::implementation
         inline winrt::hstring TipTextOf(const winrt::Windows::UI::Xaml::UIElement& el)
         {
             return winrt::unbox_value_or<winrt::hstring>(el.GetValue(TipTextProperty()), winrt::hstring{});
+        }
+
+        // LocalTooltip (Agentmaster): true when `el` sits under an ACTIVE local-tip scope root
+        // (LocalTipScopeProperty boxed true on an ancestor, incl. el itself) — the floating tip
+        // yields there; the scope's designated-area panel renders the text instead
+        // (AgentLocalTooltip.h). A bounded parent walk of plain property reads (µs), and the open
+        // tick only pays it at all once a scope EXISTS on the thread (TipHost::localTipScopes).
+        inline bool InsideLocalTipScope(const winrt::Windows::UI::Xaml::UIElement& el)
+        {
+            winrt::Windows::UI::Xaml::DependencyObject node = el;
+            for (int i = 0; i < 32 && node; ++i)
+            {
+                if (winrt::unbox_value_or<bool>(node.GetValue(LocalTipScopeProperty()), false))
+                {
+                    return true;
+                }
+                node = winrt::Windows::UI::Xaml::Media::VisualTreeHelper::GetParent(node);
+            }
+            return false;
         }
 
         // Close the currently-open shared tip (if any) and detach it from its owner. The service
@@ -223,6 +279,17 @@ namespace winrt::TerminalApp::implementation
             }
             const auto text = TipTextOf(el);
             if (text.empty())
+            {
+                return;
+            }
+            // LocalTooltip (Agentmaster): inside an ACTIVE local-tip scope the floating tip never
+            // opens — the scope's designated-area panel (AgentLocalTooltip.h) is already rendering
+            // this element's text from its own scope-level PointerMoved (immediately, no rest
+            // delay). Gated on the thread ever having a scope so every other surface's open pays
+            // nothing. Suppress-only: the arm/re-arm plumbing above is untouched, so a scope that
+            // deactivates (the cramped-window fallback flips the marker false) serves floating
+            // tips again with zero re-wiring.
+            if (h.localTipScopes > 0 && InsideLocalTipScope(el))
             {
                 return;
             }
@@ -457,6 +524,15 @@ namespace winrt::TerminalApp::implementation
                                      winrt::Windows::UI::Xaml::Controls::Primitives::PlacementMode placement)
     {
         el.SetValue(agent_tip_details::TipPlacementProperty(), winrt::box_value(static_cast<int32_t>(placement)));
+    }
+
+    // LocalTooltip (Agentmaster, AgentLocalTooltip.h): give `el`'s tip an explicit TITLE for when it
+    // renders in a designated-area LocalTooltip panel. The panel auto-derives a title from the element
+    // (its Header / string Content), so this is only for elements with none — or a misleading one. The
+    // floating tip ignores it; read fresh at hover time, so call order vs AgentSetTip does not matter.
+    inline void AgentSetTipTitle(const winrt::Windows::UI::Xaml::UIElement& el, const winrt::hstring& title)
+    {
+        el.SetValue(agent_tip_details::TipTitleProperty(), winrt::box_value(title));
     }
 
     // Force-close every AgentSetTip tooltip under root — for hosts about to be HIDDEN

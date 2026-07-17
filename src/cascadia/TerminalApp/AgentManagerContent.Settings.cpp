@@ -1662,6 +1662,19 @@ namespace winrt::TerminalApp::implementation
         card.Child(outer);
 
         _settingsOverlay.Children().Append(card);
+
+        // Agentmaster (LocalTooltip, AgentLocalTooltip.h): the cog's tooltips are LOCAL — hovering
+        // any control renders its description in a fixed panel OUTSIDE the card (top-left side,
+        // sharing the card's top edge, growing only to the left) instead of a floating ToolTip
+        // popping over the very control you're about to click. AttachScope(card) routes every
+        // AgentSetTip text inside the card there (the 60+ per-control tips above are untouched)
+        // and suppresses their floating twin; the anchor keeps the panel's right edge glued to
+        // the card's left edge across window resizes and per-tab card-height changes. A window
+        // too narrow to host the panel falls back to the classic floating tips automatically.
+        _settingsLocalTip.Initialize();
+        _settingsLocalTip.AttachScope(card);
+        _settingsLocalTip.AnchorTopLeftOutside(_settingsOverlay, card, 12.0);
+
         _root.Children().Append(_settingsOverlay);
 
         _SwitchSettingsTab(0); // seed the strip styling + show the first tab
@@ -2044,6 +2057,7 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _SwitchSettingsTab(0); // always reopen on the first tab (Sessions)
+        _settingsLocalTip.Hide(); // fresh open: the description panel stays hidden until the first hover
         _settingsOverlay.Visibility(Visibility::Visible);
         // Updater: a silent check on open — if a newer release exists, the label next to "Check for
         // updates" reads "vX.Y.Z available!" in dark green. Quiet on no-update / no-network (the
@@ -2061,6 +2075,9 @@ namespace winrt::TerminalApp::implementation
         {
             _settingsOverlay.Visibility(Visibility::Collapsed);
         }
+        // Drop the sticky description (and its hover throttle) with the card — the next open
+        // starts hidden-until-hover and re-hovering the same control re-renders.
+        _settingsLocalTip.Hide();
     }
 
     void AgentManagerContent::_SaveSettings()

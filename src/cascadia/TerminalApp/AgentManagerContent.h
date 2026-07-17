@@ -14,6 +14,7 @@
 #include "winrt/TerminalApp.h"
 #include "BasicPaneEvents.h"
 #include "AgentMaster/SessionModels.h"
+#include "AgentLocalTooltip.h" // Agentmaster (LocalTooltip): the cog's designated-area tooltip panel (left-outside the card)
 
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h> // Popup (the path-picker drop-down)
@@ -781,6 +782,11 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::UI::Xaml::Controls::TextBlock _claudeMissingStatus{ nullptr }; // the live detection status line (updated by Browse / Re-check)
         // ---- Settings overlay (the cog dialog) ----
         winrt::Windows::UI::Xaml::Controls::Grid _settingsOverlay{ nullptr }; // dimmed modal layer over _root
+        // Agentmaster (LocalTooltip, AgentLocalTooltip.h): the cog's hover-description panel — every
+        // AgentSetTip text inside the card renders HERE (outside the card at its top-left: same top,
+        // right edge glued to the card's left edge, growing only leftward) instead of as a floating
+        // ToolTip (suppressed inside the card's scope; a too-narrow window falls back to floating).
+        AgentLocalTooltip _settingsLocalTip;
         // Agentmaster: the cog's TOP TABS. The strip buttons + their content panels are parallel-indexed
         // (button i <-> panel i); _SwitchSettingsTab SWAPS panel i into the single _settingsScroll (the
         // ContentPresenter-swap idiom) and restyles the strip. Each section in _BuildSettingsOverlay fills
