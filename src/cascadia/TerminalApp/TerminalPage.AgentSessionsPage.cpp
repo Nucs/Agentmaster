@@ -280,13 +280,16 @@ namespace winrt::TerminalApp::implementation
         };
         // Defaults: 📁/📄 ON — they ride the FAST phase only (in-memory match over the sidecar
         // index's pathsAccessed: no rg, no transcript IO — effectively free at the debounce),
-        // so path queries "just work". 👤/🤖 OFF — either one flips on the SLOW phase (rg across
-        // every transcript in the window + in-process rescans per search; 🤖 is the heaviest:
-        // tool dumps raw-match almost any query, so the prefilter passes most files). (F) OFF —
+        // so path queries "just work". 👤 ON too (requested default) — it flips on the SLOW phase
+        // (rg across every transcript in the window + in-process rescans per search), so a search
+        // now looks inside your own prompts by default; results still arrive as they are found.
+        // 🤖 OFF — the heaviest scope: tool dumps raw-match almost any query, so the prefilter
+        // passes most files. (F) OFF —
         // a semantics toggle (subsequence matching is noisy as a default, and its `.*?`-joined
         // rg patterns inflate the slow phase's candidate set). IsChecked is set BEFORE Click is
         // wired — and programmatic IsChecked never raises Click anyway (no spurious search).
-        _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Search your messages", L"Also look inside the prompts you typed. This reads the conversations themselves, so it is slower than the other scopes \x2014 off by default; results arrive as they are found.");
+        _sessScopeUserBtn = SessToggle(L"\U0001F464", L"Search your messages", L"Also look inside the prompts you typed. This reads the conversations themselves, so it is slower than the path scopes \x2014 on by default; results arrive as they are found.");
+        _sessScopeUserBtn.IsChecked(true);
         _sessScopeUserBtn.Click(onToggle);
         bar.Children().Append(_sessScopeUserBtn);
         _sessScopeAgentBtn = SessToggle(L"\U0001F916", L"Search the agent's output", L"Also look inside the agent's replies, its thinking, and everything its tools sent or got back \x2014 that is, the conversation minus your own messages. The heaviest scope by far: tool output matches almost any word, so expect broad results.");
@@ -1162,11 +1165,12 @@ namespace winrt::TerminalApp::implementation
         }
         const int64_t now = SessNowMs();
         const bool searching = !_sessionsQueryText.empty();
-        // The Hits column counts CONTENT matches (the slow 👤/🤖 phase). Those scopes default OFF, so a
-        // plain title/dir/path search runs the fast phase only and produces NO hit counts — leaving the
-        // column header with empty cells under it ("Hits appears not working"). So show the Hits column
-        // ONLY when a content scope is active (== the only time it has data); otherwise it's hidden and
-        // Ctx is the rightmost column.
+        // The Hits column counts CONTENT matches (the slow 👤/🤖 phase). With both content scopes OFF
+        // (👤 defaults ON, 🤖 OFF — so unchecking 👤 turns them both off), a plain title/dir/path search
+        // runs the fast phase only and produces NO hit counts — which would leave the column header with
+        // empty cells under it ("Hits appears not working"). So show the Hits column ONLY when a content
+        // scope is active (== the only time it has data); otherwise it's hidden and Ctx is the rightmost
+        // column.
         const bool contentScope =
             (_sessScopeUserBtn && _sessScopeUserBtn.IsChecked() && _sessScopeUserBtn.IsChecked().Value()) ||
             (_sessScopeAgentBtn && _sessScopeAgentBtn.IsChecked() && _sessScopeAgentBtn.IsChecked().Value());

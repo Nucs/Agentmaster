@@ -49,9 +49,11 @@
       and the in-process matcher).
   - **Defaults:** `📁` + `📄` start **ON** — they ride the FAST phase only (in-memory match
     over the sidecar index's `pathsAccessed`; no rg, no transcript IO — effectively free), so
-    path queries work out of the box. `👤` / `🤖` start **OFF** (either one enables the SLOW
-    rg-prefiltered transcript content scan per search; `🤖` is the heaviest — agent/tool text
-    raw-matches almost any query, so the file prefilter passes most of the window). `(F)`
+    path queries work out of the box. `👤` also starts **ON** — it enables the SLOW
+    rg-prefiltered transcript content scan for your own typed prompts, so a search reads the
+    conversations by default (slower than the path scopes; results arrive as found). `🤖` starts
+    **OFF** — the heaviest scope: agent/tool text raw-matches almost any query, so the file
+    prefilter passes most of the window. `(F)`
     starts **OFF** (a semantics toggle — subsequence matches are noisy as a default and its
     `.*?` patterns inflate the slow phase's candidate set).
   - **Query grammar** (`ParseSessionQuery`, `SessionSearch.h`): the text splits into

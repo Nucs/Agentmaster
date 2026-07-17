@@ -299,7 +299,8 @@ in-process** (👤 typed prompts vs 🤖 assistant text/thinking + tool inputs/r
 them apart, `ClassifyTranscriptLine` can), generation-cancelled on re-type. Both message scopes
 OFF ⇒ title + directory + the sidecar's cached first prompt (message *bodies* still need a 👤/🤖 scope); 📁/📄 match the **directories/files a session's tool calls touched**
 (`TranscriptStats::pathsAccessed`) and **default ON** (fast-phase-only — in-memory over the
-sidecar, no rg/transcript IO; 👤/🤖/(F) default OFF — either message scope flips on the SLOW
+sidecar, no rg/transcript IO; 👤 also **default ON** — it flips on the SLOW content scan for your
+own typed prompts by default; 🤖/(F) default OFF — 🤖 also flips on the SLOW
 content scan); (F) fuzzy has identical rg/in-process semantics
 (`BuildSearchRegex`/`MatchesQueryText`, tested as a pair). The query parses into
 **whitespace-split AND terms** (`ParseSessionQuery` — every term must hit, each may hit a
