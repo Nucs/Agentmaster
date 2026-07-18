@@ -80,6 +80,49 @@ using winrt::TerminalApp::implementation::AgentSetTip;
 using winrt::TerminalApp::implementation::AgentSetTitledTip;
 #include "AgentManagerContent.Internal.h" // the shared file-local helpers (StateColor/Pill/Text/...)
 
+namespace
+{
+    // Agentmaster (Settings cog): a styled SECTION SEPARATOR — an optional uppercase title on the left
+    // followed by a thin horizontal hairline that fills the rest of the row. It replaces the bare
+    // Text(L"HEADER", 11, true, 0.6) section labels (same 11pt SemiBold 60%-opacity type, now carrying the
+    // dividing rule the flat stacks lacked) AND subdivides the crowded tabs (e.g. Tabs & Overlay) into
+    // labeled groups, so related settings read as one block instead of one long stack. Built as a 2-column
+    // Grid (Auto title | Star rule) so the rule always stretches to the panel's right edge regardless of
+    // title length or window width. A blank / nullptr title yields a plain full-width rule — an UNLABELED
+    // divider within a group. `leading` (the FIRST separator in a panel) drops the extra top margin so the
+    // opening group isn't pushed down from the card's top; every later separator gets it, so a group break
+    // reads ~20px (the panel's own 10px item spacing + this 10px) against the 10px between in-group rows.
+    winrt::Windows::UI::Xaml::UIElement SettingsSeparator(const wchar_t* title, bool leading = false)
+    {
+        auto grid = Grid{};
+        grid.Margin(Thickness{ 0, leading ? 0.0 : 10.0, 0, 0 });
+
+        ColumnDefinition cLabel;
+        cLabel.Width(GridLengthHelper::FromValueAndType(0, GridUnitType::Auto)); // the title hugs its text
+        ColumnDefinition cRule;
+        cRule.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star)); // the rule fills the rest
+        grid.ColumnDefinitions().Append(cLabel);
+        grid.ColumnDefinitions().Append(cRule);
+
+        if (title && *title)
+        {
+            auto label = Text(winrt::hstring{ title }, 11, true, 0.6); // the prior section-header type look
+            label.Margin(Thickness{ 0, 0, 8, 0 }); // gap between the title and the rule
+            Grid::SetColumn(label, 0);
+            grid.Children().Append(label);
+        }
+
+        auto rule = Border{};
+        rule.Height(1);
+        rule.VerticalAlignment(VerticalAlignment::Center); // centered on the title's row
+        rule.Background(Fill(0x24, 0xFF, 0xFF, 0xFF)); // a subtle white hairline (the tab-strip divider tone)
+        Grid::SetColumn(rule, 1);
+        grid.Children().Append(rule);
+
+        return grid;
+    }
+}
+
 namespace winrt::TerminalApp::implementation
 {
     void AgentManagerContent::_CycleKeepAwake()
@@ -669,7 +712,7 @@ namespace winrt::TerminalApp::implementation
         // (the same prompt the startup check shows) + the pre-release opt-in. The status label
         // beside the button shows "vX.Y.Z available!" in dark green when a newer release exists
         // (filled by a silent check kicked when the cog opens — see _ShowSettings/_CheckForUpdates).
-        panel.Children().Append(Text(L"UPDATES", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"UPDATES"));
         {
             auto row = StackPanel{};
             row.Orientation(Orientation::Horizontal);
@@ -735,8 +778,7 @@ namespace winrt::TerminalApp::implementation
 
         // === SESSIONS tab ===
         panel = sessionsPanel;
-        // CLAUDE SESSIONS
-        panel.Children().Append(Text(L"CLAUDE SESSIONS", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"CLAUDE SESSIONS", true)); // leading section
         _setSkipPermissions = ToggleSwitch{};
         _setSkipPermissions.Header(winrt::box_value(L"Skip permission prompts (bypass)"));
         AgentSetTip(_setSkipPermissions, L"Launch new sessions with --dangerously-skip-permissions \x2014 auto-accepts tool prompts and the per-folder trust dialog so an unattended session never wedges. Off pins normal prompts instead.");
@@ -800,7 +842,7 @@ namespace winrt::TerminalApp::implementation
         // ClaudeUserSettings repository (a managed layer that preserves every other key in that file). 36500
         // (~100y) ships by default so Claude never purges global history; blank removes our key (Claude's
         // 30-day default). A separate field from the env area on purpose — it's a Claude settings key, not env.
-        panel.Children().Append(Text(L"CLAUDE HISTORY", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"CLAUDE HISTORY", true)); // leading section
         _setCleanupDays = TextBox{};
         _setCleanupDays.Header(winrt::box_value(L"Keep Claude history (days)"));
         _setCleanupDays.PlaceholderText(L"e.g. 36500 (~never) \x2014 blank = Claude default (30 days)");
@@ -810,7 +852,7 @@ namespace winrt::TerminalApp::implementation
         // CLAUDE BINARY (native-exe-only policy): the auto-detected native claude.exe + an optional
         // explicit override. The whole app gates launch/fork/resume on resolving one (ResolveClaudeExe);
         // the override must be a real *.exe (a .cmd/.bat or the Node CLI is rejected).
-        panel.Children().Append(Text(L"CLAUDE BINARY (native build required)", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"CLAUDE BINARY (native build required)"));
         _setClaudeDetected = TextBlock{};
         _setClaudeDetected.TextWrapping(TextWrapping::Wrap);
         _setClaudeDetected.Opacity(0.85);
@@ -832,8 +874,7 @@ namespace winrt::TerminalApp::implementation
 
         // === TESTS AUTORUNNER tab ===
         panel = autorunnerPanel;
-        // TESTS AUTORUNNER
-        panel.Children().Append(Text(L"TESTS AUTORUNNER (defaults for new sessions)", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"TESTS AUTORUNNER (defaults for new sessions)", true)); // leading section
         _setDefaultMode = ComboBox{};
         _setDefaultMode.Header(winrt::box_value(L"New-session mode"));
         _setDefaultMode.Items().Append(winrt::box_value(L"Off"));
@@ -863,8 +904,7 @@ namespace winrt::TerminalApp::implementation
 
         // === BEHAVIOR tab ===
         panel = behaviorPanel;
-        // BEHAVIOR
-        panel.Children().Append(Text(L"BEHAVIOR", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"GENERAL", true)); // leading section (the tab itself is "Behavior")
         _setConfirmKill = ToggleSwitch{};
         _setConfirmKill.Header(winrt::box_value(L"Confirm before closing a session"));
         AgentSetTip(_setConfirmKill, L"When on, closing a session (tab X, the tree's Del, or the Close menu) first asks to confirm. Off closes without the prompt. Closing always keeps the session in Sessions, resumable \x2014 nothing on disk is deleted either way.");
@@ -883,6 +923,7 @@ namespace winrt::TerminalApp::implementation
         // toggle (stay Waiting until read), else a slider 1m .. 3d (default 1h). This is the "unread
         // inbox" lifetime; it was split from Claude's ~5-min server cache, which is now the separate
         // "Server-side cache lifetime" below (driving only the card's ⚡ hint).
+        panel.Children().Append(SettingsSeparator(L"SESSION STATE"));
         _setWaitingNever = ToggleSwitch{};
         _setWaitingNever.Header(winrt::box_value(L"Never decay Waiting-for-you (keep until read)"));
         AgentSetTip(_setWaitingNever, L"When on, a Waiting-for-you session never auto-demotes to Idle by time \x2014 it stays until you read (visit) its tab. When off, it decays after the timeout below (and only once you've read it).");
@@ -1008,6 +1049,7 @@ namespace winrt::TerminalApp::implementation
         // The Launch box's directory settings belong with SESSIONS (they shape launching), so append them
         // there even though they sit inside the BEHAVIOR section in source.
         panel = sessionsPanel;
+        panel.Children().Append(SettingsSeparator(L"LAUNCH DIRECTORY"));
         _setLaunchDir = TextBox{};
         _setLaunchDir.Header(winrt::box_value(L"Default Launch directory"));
         _setLaunchDir.PlaceholderText(L"blank \x2014 defaults to %USERPROFILE%");
@@ -1025,6 +1067,7 @@ namespace winrt::TerminalApp::implementation
         // "Hide from list". The list lives in AppSettings.hiddenSessionIds, owned by the page
         // (TerminalPage), so this fires the handler there rather than reading a count the cog
         // doesn't track; the button gives inline confirmation. Re-enabled/relabeled per _ShowSettings.
+        panel.Children().Append(SettingsSeparator(L"SESSIONS BROWSER"));
         _setResetHidden = Button{};
         _setResetHidden.Content(winrt::box_value(L"Reset hidden sessions"));
         AgentSetTip(_setResetHidden, L"Un-hide every session you removed from the Sessions browser with \x201CHide from list\x201D");
@@ -1053,7 +1096,7 @@ namespace winrt::TerminalApp::implementation
         // registry-observer push (TerminalPage::_EvaluateAgentNotification), so exactly one toast per
         // transition; clicking the toast jumps to the session's tab while the app is running.
         panel = notificationsPanel;
-        panel.Children().Append(Text(L"SYSTEM NOTIFICATIONS", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"SYSTEM NOTIFICATIONS", true)); // leading section
         _setNotifyEnabled = ToggleSwitch{};
         _setNotifyEnabled.Header(winrt::box_value(L"Show Windows notifications"));
         AgentSetTip(_setNotifyEnabled, L"Raise a Windows notification when a session's status changes from Running to another state \x2014 \x201C<title>: Has completed after 2h30m and is waiting for you\x201D. The checkboxes below pick which states notify. Default on.");
@@ -1103,6 +1146,7 @@ namespace winrt::TerminalApp::implementation
             mkStateBox(_setNotifyDone, L"Done", L"Notify on Running \x2192 Done \x2014 the session ended and claude exited.");
             mkStateBox(_setNotifyError, L"Error", L"Notify on Running \x2192 Error \x2014 the turn died on an API failure (rate limit, overloaded, prompt too long, \x2026).");
         }
+        panel.Children().Append(SettingsSeparator(L"DELIVERY"));
         _setNotifySuppressFocused = ToggleSwitch{};
         _setNotifySuppressFocused.Header(winrt::box_value(L"Skip when the tab is focused"));
         AgentSetTip(_setNotifySuppressFocused, L"Don't notify when the session's tab is the one you're looking at (the focused tab of the active window) \x2014 you already saw it finish. Off notifies regardless. Default on.");
@@ -1116,7 +1160,7 @@ namespace winrt::TerminalApp::implementation
         panel = tabsPanel;
         // TABS — close affordances on the terminal tab strip (GLOBAL across windows, applied live
         // on Save via TerminalPage::_updateAllTabCloseButtons + the cross-window broadcast).
-        panel.Children().Append(Text(L"TABS", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"TAB STRIP", true)); // leading section (the tab itself is "Tabs & Overlay")
         _setShowTabCloseButton = ToggleSwitch{};
         _setShowTabCloseButton.Header(winrt::box_value(L"Show close (\x00D7) button on tabs"));
         AgentSetTip(_setShowTabCloseButton, L"When off, the close (\x00D7) button is hidden on every tab (you can still close with the tab's right-click menu, the middle-mouse button below, or Ctrl+Shift+W). The pinned Manager tab is always X-less. Default on.");
@@ -1144,6 +1188,7 @@ namespace winrt::TerminalApp::implementation
         // (AppSettings::tabTitleNaming / tabTitleCase / tabTitleSpacesToUnderscores); applied at the
         // NEXT launch/adopt of an untitled session — existing and renamed titles never re-derive
         // (Rule #11).
+        panel.Children().Append(SettingsSeparator(L"TAB TITLES"));
         _setTitleNaming = ComboBox{};
         _setTitleNaming.Header(winrt::box_value(L"Tab title naming"));
         _setTitleNaming.Items().Append(winrt::box_value(L"Last word in folder name")); // index 0 == TabTitleNaming::LastWord (default)
@@ -1181,6 +1226,7 @@ namespace winrt::TerminalApp::implementation
         // FAVORITES.md §5a: which glyph marks a FAVORITE (starred) session on its live tab — Crown
         // (default, a gold crown at the status dot's NW) or Star (the status dot foregrounded on a white,
         // golden-tipped star). GLOBAL across windows; applied live on Save + cross-window broadcast.
+        panel.Children().Append(SettingsSeparator(L"FAVORITES & TAGS"));
         _setFavoriteIcon = ComboBox{};
         _setFavoriteIcon.Header(winrt::box_value(L"Favorite marker"));
         _setFavoriteIcon.Items().Append(winrt::box_value(L"Crown")); // index 0 == FavoriteIcon::Crown (default)
@@ -1224,6 +1270,7 @@ namespace winrt::TerminalApp::implementation
         // tab color" is disabled on every tab; saved colors are kept, just not loaded). GLOBAL
         // (AppSettings::tabColorMode);
         // applied live on Save + cross-window broadcast (TerminalPage::_ReapplyManagedTabColors).
+        panel.Children().Append(SettingsSeparator(L"TAB COLORS"));
         _setTabColorMode = ComboBox{};
         _setTabColorMode.Header(winrt::box_value(L"Tab coloring"));
         _setTabColorMode.Items().Append(winrt::box_value(L"Shared per working directory")); // index 0 == TabColorMode::WorkingDirectory (default)
@@ -1258,6 +1305,7 @@ namespace winrt::TerminalApp::implementation
         // idiom). The picker's ALPHA slider IS the OPACITY control (one control sets hue + opacity).
         // GLOBAL (AppSettings::flashRingColor, "#AARRGGBB"); applied live on Save + cross-window
         // broadcast (TerminalPage::_RefreshFlashRingBrush). Default red at 80% opacity (#CCFF0000).
+        panel.Children().Append(SettingsSeparator(L"STATUS & OVERLAY"));
         {
             auto row = StackPanel{};
             row.Orientation(Orientation::Horizontal);
@@ -1560,7 +1608,7 @@ namespace winrt::TerminalApp::implementation
         // the choice file / env, never inside the profile it selects). Read-only display +
         // "Change…", which re-runs the same picker the first launch shows and applies on the
         // NEXT start (the running engine cannot re-home its state mid-run).
-        panel.Children().Append(Text(L"PROFILE", 11, true, 0.6));
+        panel.Children().Append(SettingsSeparator(L"PROFILE"));
         _setProfileDir = TextBlock{};
         _setProfileDir.TextWrapping(TextWrapping::Wrap);
         _setProfileDir.Opacity(0.85);
@@ -1604,6 +1652,23 @@ namespace winrt::TerminalApp::implementation
             }
         });
         panel.Children().Append(changeProfile);
+
+        // DEVELOPER — the debug escape hatch (ProfileBootstrap.h IsDebugPackage). "Enable Debug Mode" is the
+        // durable, in-UI twin of the --debug / AGENTMASTER_DEBUG launch flag: it unlocks the DEV-only Auto
+        // Testing / Tests Autorunner subsystem (queue prompts + auto-send on turn-complete, the pane toggle,
+        // the board queue badge, the cog's Tests Autorunner tab, the per-tab autorunner control) in THIS
+        // Release install. The gates + the scheduler are wired ONCE at startup (Engine.cpp /
+        // Profiles::ApplyPersistedDebugMode), so a change applies on the NEXT start — matching the flag's own
+        // "relaunch to persist" behaviour. On a Dev build these tools are always on: _ShowSettings shows the
+        // toggle ON + disabled with a note, and OnSave skips writing it (so the forced display can't persist).
+        panel.Children().Append(Text(L"DEVELOPER", 11, true, 0.6));
+        _setDebugMode = ToggleSwitch{};
+        _setDebugMode.Header(winrt::box_value(L"Enable Debug Mode"));
+        AgentSetTip(_setDebugMode, L"Unlock the developer Auto Testing / Tests Autorunner tools \x2014 queue prompts, auto-send them on turn-complete, the per-tab autorunner control, and the cog's Tests Autorunner tab \x2014 in this build. The durable equivalent of launching with --debug (or setting the AGENTMASTER_DEBUG environment variable). Applies after you restart Agentmaster.");
+        panel.Children().Append(_setDebugMode);
+        _setDebugModeNote = Text(L"Applies after restart.", 11, false, 0.6);
+        _setDebugModeNote.TextWrapping(TextWrapping::Wrap);
+        panel.Children().Append(_setDebugModeNote);
 
         // "Uninstall Agentmaster…" — removes THIS install (the current package family) via the same
         // embedded am-update.ps1 (-Uninstall). Shown only for packaged installs (gated in _ShowSettings);
@@ -2038,6 +2103,34 @@ namespace winrt::TerminalApp::implementation
         {
             _setAllowPrerelease.IsOn(_appSettings.allowUpdatePrerelease);
         }
+        if (_setDebugMode)
+        {
+            // DEVELOPER (debug escape hatch): reflect the persisted setting, EXCEPT on a Dev build where the
+            // developer tools are always on (IsDevPackage) and can't be turned off — show ON + disabled with a
+            // note. Otherwise it is user-controllable, and the caption reflects whether debug is ALREADY active
+            // this session (persisted-on + applied at startup, or --debug / AGENTMASTER_DEBUG) so a live vs
+            // pending change reads unambiguously.
+            if (::Agentmaster::Profiles::IsDevPackage())
+            {
+                _setDebugMode.IsOn(true);
+                _setDebugMode.IsEnabled(false);
+                if (_setDebugModeNote)
+                {
+                    _setDebugModeNote.Text(L"Dev build \x2014 developer tools are always on.");
+                }
+            }
+            else
+            {
+                _setDebugMode.IsEnabled(true);
+                _setDebugMode.IsOn(_appSettings.debugMode);
+                if (_setDebugModeNote)
+                {
+                    _setDebugModeNote.Text(::Agentmaster::Profiles::IsDebugPackage()
+                                               ? winrt::hstring{ L"Active now. A change applies after restart." }
+                                               : winrt::hstring{ L"Applies after restart." });
+                }
+            }
+        }
         if (_setUpdateChangelog)
         {
             // Hide "Update's changelog" until THIS open's check confirms an update is available
@@ -2417,6 +2510,13 @@ namespace winrt::TerminalApp::implementation
         {
             _appSettings.allowUpdatePrerelease = _setAllowPrerelease.IsOn(); // UPDATES: the form OWNS this field
         }
+        if (_setDebugMode && !::Agentmaster::Profiles::IsDevPackage())
+        {
+            // DEVELOPER: the form owns debugMode — but only when it is user-controllable. On a Dev build the
+            // toggle is a disabled always-on indicator (see _ShowSettings), so never write its forced value
+            // back (that would spuriously persist debugMode=true). The durable --debug twin; applies next start.
+            _appSettings.debugMode = _setDebugMode.IsOn();
+        }
         // Preserve fields owned by out-of-cog UI actions, freshest from disk (the page's settings handler
         // does the same for hiddenSessionIds/showSummaryPanel): the summary panel SIZE (width/height
         // fractions, TAB_OVERLAY.md) is written by the panel's resize grips, not this form, so a form Save
@@ -2456,8 +2556,8 @@ namespace winrt::TerminalApp::implementation
 
     void AgentManagerContent::_BuildEnvVarsArea(const StackPanel& panel)
     {
-        // Section header (matches the "CLAUDE SESSIONS" style above it).
-        panel.Children().Append(Text(L"ENVIRONMENT VARIABLES", 11, true, 0.6));
+        // Section header (a styled separator, matching the other sections in the tab).
+        panel.Children().Append(SettingsSeparator(L"ENVIRONMENT VARIABLES"));
 
         // Tab toggle: [ Global ][ Per-directory ] — two Buttons swapping the two panels (the LOCAL/GLOBAL
         // scope-toggle idiom; not a Pivot, which themes unreliably under XAML Islands).
