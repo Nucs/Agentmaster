@@ -754,6 +754,38 @@ namespace Agentmaster
         return out;
     }
 
+    // Agentmaster: the MAIN repo root of a LINKED worktree containing `dir` (see ProcessInspect.h) —
+    // so a repo + all its worktrees can share one tab color. Reuses the same .git-file / commondir
+    // parsing as ListGitWorktrees; empty when `dir` isn't inside a linked worktree.
+    std::wstring ResolveWorktreeMainRoot(const std::wstring& dir)
+    {
+        const std::wstring gitDir = FindGitDirForPath(dir);
+        if (gitDir.empty())
+        {
+            return {}; // not under a repo
+        }
+        if (GitLeafEq(gitDir, L".git"))
+        {
+            return {}; // a real ".git" DIR == the MAIN checkout (not a linked worktree) — keep `dir` as-is
+        }
+        // A linked worktree's gitDir is <common>\worktrees\<id>, carrying a "commondir" file (usually
+        // "../..") that names the main repo's .git. A submodule's own git dir (<parent>\.git\modules\
+        // <name>) has NO commondir — so an absent/unresolvable commondir means "not a worktree", and
+        // `dir` is kept unchanged (a submodule is a distinct repo — it keeps its own color).
+        std::wstring cd = GitTrim(Utf8ToWide(ReadFileHead(gitDir + L"\\commondir", 4096)));
+        if (cd.empty())
+        {
+            return {};
+        }
+        GitFlipSeps(cd);
+        const std::wstring commonDir = GitIsAbsolute(cd) ? cd : GitFullPath(gitDir + L"\\" + cd);
+        if (!GitLeafEq(commonDir, L".git"))
+        {
+            return {}; // unexpected shape (e.g. a bare repo) — no safe main-checkout root to key on
+        }
+        return GitParent(commonDir); // the primary checkout root == the parent of the common .git dir
+    }
+
     // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
     // File-local helpers (internal linkage). They reuse the anon-namespace primitives above
     // (GlobTranscripts / ReadFileHead / Utf8ToWide / FileTimeToUnixMs / FirstLineTrim) and the

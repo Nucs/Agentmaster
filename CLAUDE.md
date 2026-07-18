@@ -1629,7 +1629,10 @@ What works, by area:
   `ResolveSessionColorHex(mode, s)` so cards/chips always match the tab. **The inferred dir is the
   session's EFFECTIVE working dir everywhere the UI asks "where does this session belong", not just
   its color** (`EffectiveWorkingDir(mode, s)` in Persistence — the ONE semantic resolver;
-  `SessionColorKeyDir` DELEGATES to it so grouping and color can never drift): the Explorer-Tree
+  `SessionColorKeyDir` builds on it, diverging ONLY to canonicalize a git **WORKTREE** effective dir
+  to its **main repo root** (`ResolveWorktreeMainRoot`, memoized) so a repo + all its worktrees share
+  ONE color while grouping/mechanics stay worktree-granular; a non-worktree dir is unchanged so color
+  key == effective dir everywhere else): the Explorer-Tree
   **grouping** + dir **scope** + rename-uncollapse, the board card's **dir line** (tip carries
   `launched in <cwd>` when divergent) + scope filter, the Auto-Testing **header dir** +
   **apply-template-to-dir broadcast**, the **selection pre-aim** into the Launch box, every
@@ -2827,6 +2830,11 @@ build **binlog uploads as an artifact** to diagnose the first run.
     working dir** (`InferredWorkingDirectory` — the SAME dir machinery keyed by
     `SessionInfo::inferredWorkingDir` when known, else the cwd; `SessionColorKeyDir` is the one key
     resolver, `ResolveSessionColorHex` the one read-side resolution every display surface shares).
+    **Across the dir-keyed modes a git WORKTREE keys its MAIN repo's color** (`SessionColorKeyDir` →
+    `ResolveWorktreeMainRoot`, memoized): a repo and all its worktrees resolve to ONE color key, so
+    they wear one color — the SINGLE place the color key diverges from `EffectiveWorkingDir` (which
+    stays worktree-granular for grouping + mechanics: a new session still spawns in the worktree, the
+    Explorer tree still lists it there); a main-checkout / submodule / non-git dir is unchanged.
     The fourth mode, **Remove colors** (`NoColor`), SUSPENDS painting rather than re-keying it,
     STRIP-WIDE: a managed tab is reset (re-derivable from the maps), every NON-managed tab's
     runtime color — ex-claude shell tabs, user-colored/restored pwsh tabs, the Manager tab — is

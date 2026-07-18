@@ -2128,16 +2128,18 @@ namespace winrt::TerminalApp::implementation
             }
             return;
         }
-        // Dir-keyed modes: the classic paint, keyed by the mode's dir (cwd, or the inferred dir —
-        // which applies while the session INFERS: the Inferred mode, or a HOME-DIR launch in any
-        // mode, the SessionInfersWorkingDir forcing — so a claude started in %USERPROFILE% keys
-        // its color by where it actually works even under the default per-dir mode).
+        // Dir-keyed modes: the classic paint, keyed by the mode's color-key dir — the cwd, or the
+        // inferred dir while the session INFERS (the Inferred mode, or a HOME-DIR launch in any mode,
+        // the SessionInfersWorkingDir forcing), then canonicalized so a git WORKTREE keys its MAIN
+        // repo's color. Route through SessionColorKeyDir — the SAME resolver the avoid-set/fan-out
+        // and ResolveSessionColorHex's board/chip/pending surfaces use — so the painted tab and its
+        // cards can never disagree. No registry/info (rare) falls back to the raw dir passed in.
         std::wstring keyDir = dir;
         if (_sessionRegistry)
         {
-            if (const auto info = _sessionRegistry->Get(sessionId); info && !info->inferredWorkingDir.empty() && ::Agentmaster::SessionInfersWorkingDir(mode, *info))
+            if (const auto info = _sessionRegistry->Get(sessionId))
             {
-                keyDir = info->inferredWorkingDir;
+                keyDir = ::Agentmaster::SessionColorKeyDir(mode, *info);
             }
         }
         _ApplyDirColorToTab(tab, keyDir);

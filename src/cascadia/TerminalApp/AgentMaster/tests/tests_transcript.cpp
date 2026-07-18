@@ -3680,6 +3680,57 @@ void TestInferWorkingDirectory()
             }
         }
     }
+
+    // --- ResolveWorktreeMainRoot (tab color — worktree sharing): a LINKED worktree resolves to its
+    // MAIN repo root; a main checkout / submodule / non-git dir does NOT remap. Builds a minimal
+    // git-worktree admin layout under %TEMP% (what `git worktree add` produces) so the .git-file +
+    // commondir parse is exercised on the real filesystem. ---
+    {
+        CHECK(ResolveWorktreeMainRoot(L"relative\\x").empty(), "ResolveWorktreeMainRoot: relative input -> none");
+        CHECK(ResolveWorktreeMainRoot(L"K:\\").empty(), "ResolveWorktreeMainRoot: a bare drive root -> none");
+
+        wchar_t tmp[MAX_PATH]{};
+        const DWORD tn = ::GetTempPathW(MAX_PATH, tmp);
+        if (tn > 0 && tn < MAX_PATH)
+        {
+            const std::wstring base = std::wstring(tmp, tn) + L"am-wt-colortest";
+            const std::wstring mainRoot = base + L"\\main";
+            const std::wstring mainGit = mainRoot + L"\\.git";
+            const std::wstring wtAdmin = mainGit + L"\\worktrees\\wt";
+            const std::wstring wtRoot = base + L"\\wt";
+            const std::wstring subRoot = base + L"\\sub"; // a submodule (own git dir, NO commondir)
+
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(wtAdmin), ec); // makes main\.git\worktrees\wt
+            std::filesystem::create_directories(std::filesystem::path(wtRoot), ec);
+            std::filesystem::create_directories(std::filesystem::path(subRoot), ec);
+
+            const auto writeFile = [](const std::wstring& path, const std::string& content) {
+                const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h != INVALID_HANDLE_VALUE)
+                {
+                    DWORD wrote = 0;
+                    ::WriteFile(h, content.data(), static_cast<DWORD>(content.size()), &wrote, nullptr);
+                    ::CloseHandle(h);
+                }
+            };
+            const auto narrow = [](const std::wstring& w) { return std::string(w.begin(), w.end()); }; // ASCII temp paths
+            writeFile(wtAdmin + L"\\commondir", "../..\n"); // -> main\.git
+            writeFile(wtRoot + L"\\.git", "gitdir: " + narrow(wtAdmin) + "\n"); // worktree checkout points at its admin dir
+            writeFile(subRoot + L"\\.git", "gitdir: " + narrow(mainGit) + "\\modules\\sub\n"); // submodule: no commondir
+
+            const auto sameDir = [](const std::wstring& a, const std::wstring& b) { return NormDirKey(a) == NormDirKey(b); };
+
+            CHECK(sameDir(ResolveWorktreeMainRoot(wtRoot), mainRoot), "ResolveWorktreeMainRoot: a linked worktree -> the MAIN repo root");
+            CHECK(sameDir(ResolveWorktreeMainRoot(wtRoot + L"\\src\\deep"), mainRoot), "ResolveWorktreeMainRoot: a (deep, unmade) subdir of a worktree -> the MAIN repo root");
+            CHECK(ResolveWorktreeMainRoot(mainRoot).empty(), "ResolveWorktreeMainRoot: the MAIN checkout (.git DIR) -> none (no remap)");
+            CHECK(ResolveWorktreeMainRoot(mainRoot + L"\\src").empty(), "ResolveWorktreeMainRoot: a subdir of the MAIN checkout -> none");
+            CHECK(ResolveWorktreeMainRoot(subRoot).empty(), "ResolveWorktreeMainRoot: a submodule (.git file, no commondir) -> none (distinct repo)");
+
+            // Best-effort cleanup (temp — never fatal to the run).
+            std::filesystem::remove_all(std::filesystem::path(base), ec);
+        }
+    }
 }
 
 // Agentmaster (analyze footprint): ScrubLargeBase64Payloads + the AnalyzeSessionTranscript cache —

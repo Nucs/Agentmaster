@@ -15,6 +15,7 @@
 #include <fstream>
 #include <mutex>
 #include <random>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
@@ -1900,12 +1901,50 @@ namespace Agentmaster
         return s.workingDir;
     }
 
+    // Agentmaster (tab color — worktree sharing): canonicalize a color-key dir so a git WORKTREE keys
+    // the SAME color as its MAIN repo. If the effective dir sits inside a linked worktree, this returns
+    // the primary checkout root (ProcessInspect::ResolveWorktreeMainRoot); otherwise the dir is kept
+    // unchanged. Memoized process-wide: the worktree<->repo mapping is a stable property of the on-disk
+    // layout (worktrees don't relocate), so it never needs invalidation — the per-dir git walk runs
+    // once and every later color resolve is a hash lookup, keeping SessionColorKeyDir cheap on the
+    // board/tree rebuild + avoid-set paths that call it across the whole fleet.
+    static std::wstring CanonicalWorktreeColorDir(const std::wstring& dir)
+    {
+        if (dir.empty())
+        {
+            return dir;
+        }
+        static std::mutex mtx;
+        static std::unordered_map<std::wstring, std::wstring> memo; // NormDirKey(dir) -> main-repo root, or "" == no remap
+        const std::wstring key = NormDirKey(dir);
+        {
+            std::lock_guard guard{ mtx };
+            if (const auto it = memo.find(key); it != memo.end())
+            {
+                return it->second.empty() ? dir : it->second; // "" sentinel -> keep the caller's spelling
+            }
+        }
+        const std::wstring resolved = ResolveWorktreeMainRoot(dir); // "" == not a linked worktree (keep dir)
+        {
+            std::lock_guard guard{ mtx };
+            memo[key] = resolved;
+        }
+        return resolved.empty() ? dir : resolved;
+    }
+
     std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s)
     {
-        // The dir that KEYS a session's color under `mode` (grouping + user-pick fan-out) == the
-        // effective work dir — ONE truth (Persistence.h), so the Manager's directory grouping and
-        // the tab's color key can never drift apart.
-        return EffectiveWorkingDir(mode, s);
+        // The dir that KEYS a session's color under `mode` (grouping-color + user-pick fan-out). It is
+        // the session's EFFECTIVE work dir, with ONE deliberate transform: a git WORKTREE is
+        // canonicalized to its MAIN repo root (CanonicalWorktreeColorDir), so a repo and all its
+        // worktrees share ONE color. This is the SINGLE place the color key diverges from
+        // EffectiveWorkingDir — which stays worktree-granular for the Explorer-Tree grouping + mechanics
+        // (a new session still spawns in the worktree, the tree still lists it under the worktree). A
+        // non-worktree dir (main checkout / non-git) is returned unchanged, so the color key ==
+        // EffectiveWorkingDir for every non-worktree case (the never-drift property holds there). Every
+        // color surface (the tab paint, the avoid-set + fan-out, ResolveSessionColorHex's board/chip/
+        // pending) routes through here, so a repo's worktree tabs + cards all agree on the one color.
+        return CanonicalWorktreeColorDir(EffectiveWorkingDir(mode, s));
     }
 
     std::wstring ResolveSessionColorHex(TabColorMode mode, const SessionInfo& s)

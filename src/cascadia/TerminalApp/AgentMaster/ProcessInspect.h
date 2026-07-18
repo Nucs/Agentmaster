@@ -571,6 +571,15 @@ namespace Agentmaster
     // enough to call inline on the path-picker's per-keystroke rebuild.
     std::vector<GitWorktreeInfo> ListGitWorktrees(const std::wstring& dir);
 
+    // Agentmaster (tab color — worktree sharing): the MAIN worktree root of the repo that contains
+    // `dir`, returned ONLY when `dir` sits inside a LINKED worktree (a `.git` FILE whose gitdir names
+    // a `<common>\worktrees\<id>` admin dir with a "commondir"). Returns EMPTY when `dir` is in the
+    // MAIN checkout, a submodule, or not under git at all — the caller then keeps `dir` unchanged.
+    // So a repo and ALL its worktrees resolve to ONE path and can share a single tab color while
+    // their EffectiveWorkingDir (grouping / mechanics) stays worktree-granular. Pure filesystem —
+    // reuses the exact .git-file + commondir parsing ListGitWorktrees uses.
+    std::wstring ResolveWorktreeMainRoot(const std::wstring& dir);
+
     // ===== Codex (OpenAI Codex CLI) — observe-only enrichment (OBSERVER.md §19-Q3, Phase C1) ====
     // Codex is the Claude analog with three divergences: its config home is CODEX_HOME (else
     // ~/.codex); it can't pin a session id at launch (the id is auto-minted, embedded in the

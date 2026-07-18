@@ -274,12 +274,17 @@ namespace Agentmaster
     // Callers NormDirKey/PathEq it where a canonical key is needed. Pure.
     std::wstring EffectiveWorkingDir(TabColorMode mode, const SessionInfo& s);
     // Agentmaster (tab color modes): the DIR that keys a session's color under `mode` — the
-    // grouping/fan-out key. An INFERRING session (SessionInfersWorkingDir — the Inferred mode, or
+    // color/fan-out key. An INFERRING session (SessionInfersWorkingDir — the Inferred mode, or
     // a home-dir launch in any mode) with a known inference => the inferred dir; everything else
     // (incl. Individual, whose callers branch on the mode BEFORE any dir grouping)
-    // => the session's working dir. Callers NormDirKey it where a canonical key is needed. Pure.
-    // DELEGATES to EffectiveWorkingDir — the color key IS the effective work dir, one truth, so a
-    // card/row can never sit in one directory group while its tab wears another group's color.
+    // => the session's working dir. Callers NormDirKey it where a canonical key is needed.
+    // Builds on EffectiveWorkingDir, with ONE deliberate transform: a git WORKTREE effective dir is
+    // canonicalized to its MAIN repo root (ProcessInspect::ResolveWorktreeMainRoot, memoized), so a
+    // repo and ALL its worktrees share ONE color. This is the SINGLE divergence from
+    // EffectiveWorkingDir — which stays worktree-granular for the Explorer-Tree GROUPING + mechanics
+    // (a new session still spawns in the worktree; the tree still lists it under the worktree). A
+    // non-worktree effective dir is returned unchanged, so color key == EffectiveWorkingDir for every
+    // non-worktree case. NOT pure (a one-time, cached git-layout probe per unseen dir).
     std::wstring SessionColorKeyDir(TabColorMode mode, const SessionInfo& s);
     // Agentmaster (tab color modes): READ a session's tab color under `mode` — the one resolution
     // every display surface shares (board title band, Sessions-page chip, pending-dots contrast),

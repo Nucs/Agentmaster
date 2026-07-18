@@ -883,8 +883,10 @@ void TestTabColorModes()
 
     // --- EffectiveWorkingDir: the ONE "which directory does this session WORK in" answer, shared
     // by every semantic surface (tree grouping / dir scope / board card / launch pre-aim /
-    // Open-New-Here / overlay subline+Open Path+Copy Path). SessionColorKeyDir DELEGATES to it,
-    // so a card/row can never sit in one directory group while its tab wears another group's color. ---
+    // Open-New-Here / overlay subline+Open Path+Copy Path). SessionColorKeyDir builds on it, adding
+    // ONLY a git-worktree -> main-repo canonicalization for COLOR (see the worktree test below), so
+    // for every NON-worktree dir the color key == the effective dir — a card/row can't sit in one
+    // directory group while its tab wears another group's color. ---
     {
         SessionInfo s;
         s.id = L"sid-eff";
@@ -896,13 +898,73 @@ void TestTabColorModes()
         CHECK(EffectiveWorkingDir(TabColorMode::WorkingDirectory, s) == L"K:\\launchcwd", "effective dir: default mode ignores a dormant inference (mode switch restores cwd semantics)");
         CHECK(EffectiveWorkingDir(TabColorMode::Individual, s) == L"K:\\launchcwd", "effective dir: Individual mode ignores the inference too (deliberate cwd — the dormant inference never leaks)");
         CHECK(EffectiveWorkingDir(TabColorMode::NoColor, s) == L"K:\\launchcwd", "effective dir: NoColor mode ignores the inference too (colors off, deliberate-cwd semantics classic)");
-        // The never-drift contract: the color key IS the effective dir, in every mode x inference state.
+        // The never-drift contract for NON-worktree dirs (these paths aren't linked worktrees): the
+        // color key IS the effective dir, in every mode x inference state. (The one deliberate
+        // divergence — a git worktree keying its main repo's color — is exercised below.)
         for (const auto mode : { TabColorMode::WorkingDirectory, TabColorMode::Individual, TabColorMode::InferredWorkingDirectory, TabColorMode::NoColor })
         {
             CHECK(SessionColorKeyDir(mode, s) == EffectiveWorkingDir(mode, s), "never-drift: SessionColorKeyDir == EffectiveWorkingDir (with an inference)");
             SessionInfo bare = s;
             bare.inferredWorkingDir.clear();
             CHECK(SessionColorKeyDir(mode, bare) == EffectiveWorkingDir(mode, bare), "never-drift: SessionColorKeyDir == EffectiveWorkingDir (no inference)");
+        }
+    }
+
+    // --- SessionColorKeyDir worktree sharing (the tab-color change): a git WORKTREE cwd/inferred dir
+    // keys the MAIN repo's COLOR, while EffectiveWorkingDir (grouping + mechanics) stays the worktree
+    // — the SINGLE deliberate divergence. So a repo and all its worktrees land on ONE color key and
+    // wear ONE color. Builds the minimal git-worktree admin layout under %TEMP% (the shape `git
+    // worktree add` writes) so the .git-file + commondir resolution runs on the real filesystem. ---
+    {
+        wchar_t tmp[MAX_PATH]{};
+        const DWORD tn = ::GetTempPathW(MAX_PATH, tmp);
+        if (tn > 0 && tn < MAX_PATH)
+        {
+            const std::wstring base = std::wstring(tmp, tn) + L"am-wt-keytest";
+            const std::wstring mainRoot = base + L"\\main";
+            const std::wstring wtAdmin = mainRoot + L"\\.git\\worktrees\\wt";
+            const std::wstring wtRoot = base + L"\\wt";
+
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(wtAdmin), ec);
+            std::filesystem::create_directories(std::filesystem::path(wtRoot), ec);
+            const auto writeFile = [](const std::wstring& path, const std::string& content) {
+                const HANDLE h = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h != INVALID_HANDLE_VALUE)
+                {
+                    DWORD w = 0;
+                    ::WriteFile(h, content.data(), static_cast<DWORD>(content.size()), &w, nullptr);
+                    ::CloseHandle(h);
+                }
+            };
+            const auto narrow = [](const std::wstring& w) { return std::string(w.begin(), w.end()); }; // ASCII temp paths
+            writeFile(wtAdmin + L"\\commondir", "../..\n"); // -> main\.git
+            writeFile(wtRoot + L"\\.git", "gitdir: " + narrow(wtAdmin) + "\n");
+
+            // A session whose cwd IS the worktree: grouping stays the worktree, color remaps to main.
+            SessionInfo wt;
+            wt.id = L"sid-wt";
+            wt.workingDir = wtRoot;
+            CHECK(NormDirKey(EffectiveWorkingDir(TabColorMode::WorkingDirectory, wt)) == NormDirKey(wtRoot), "worktree color: EffectiveWorkingDir stays the WORKTREE (grouping/mechanics unchanged)");
+            CHECK(NormDirKey(SessionColorKeyDir(TabColorMode::WorkingDirectory, wt)) == NormDirKey(mainRoot), "worktree color: SessionColorKeyDir remaps the worktree cwd -> the MAIN repo root");
+            CHECK(NormDirKey(SessionColorKeyDir(TabColorMode::WorkingDirectory, wt)) != NormDirKey(EffectiveWorkingDir(TabColorMode::WorkingDirectory, wt)), "worktree color: the color key DIVERGES from the effective dir (the deliberate exception)");
+
+            // A session in the MAIN checkout keeps its own cwd as the key -> it MATCHES the worktree's
+            // color key, so the repo and its worktree wear ONE color.
+            SessionInfo mn;
+            mn.id = L"sid-main";
+            mn.workingDir = mainRoot;
+            CHECK(NormDirKey(SessionColorKeyDir(TabColorMode::WorkingDirectory, mn)) == NormDirKey(mainRoot), "worktree color: the MAIN checkout keeps its own cwd as the color key");
+            CHECK(NormDirKey(SessionColorKeyDir(TabColorMode::WorkingDirectory, wt)) == NormDirKey(SessionColorKeyDir(TabColorMode::WorkingDirectory, mn)), "worktree color: repo + worktree share ONE color key");
+
+            // Inferred mode: an INFERRED worktree dir remaps the same way (cwd is elsewhere).
+            SessionInfo inf;
+            inf.id = L"sid-inf";
+            inf.workingDir = L"K:\\elsewhere";
+            inf.inferredWorkingDir = wtRoot;
+            CHECK(NormDirKey(SessionColorKeyDir(TabColorMode::InferredWorkingDirectory, inf)) == NormDirKey(mainRoot), "worktree color: an INFERRED worktree dir also remaps to the main repo root");
+
+            std::filesystem::remove_all(std::filesystem::path(base), ec); // best-effort temp cleanup
         }
     }
 
