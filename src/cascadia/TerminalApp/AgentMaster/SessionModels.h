@@ -1350,6 +1350,16 @@ namespace Agentmaster
         bool allowUpdatePrerelease{ false };
         std::wstring updateSkippedVersion{};
         int64_t updatePostponedUntilUnixMs{ 0 };
+        // Agentmaster (debug escape hatch; ProfileBootstrap.h IsDebugPackage): the Settings cog's
+        // About-tab "Enable Debug Mode" toggle. The DURABLE, in-UI twin of the --debug /
+        // AGENTMASTER_DEBUG launch flag — when ON it unlocks the DEV-only Auto Testing / Tests
+        // Autorunner subsystem (the autorunner, the pane toggle, the board queue badge, the cog's
+        // Tests Autorunner tab, the per-tab autorunner control) in a RELEASE install. Read ONCE at
+        // startup (WindowEmperor -> Profiles::ApplyPersistedDebugMode -> a process-local one-way
+        // override that IsDebugPackage() consults), so it takes effect on the NEXT start — exactly
+        // like handing --debug to a fresh launch. Default OFF; a missing key => the normal
+        // release behaviour (Auto Testing hidden + inert). The FORM owns this field.
+        bool debugMode{ false };
         // Agentmaster (Sessions page; SESSIONS.md): the session ids the user chose to HIDE from the
         // global Sessions browser ("Hide from list" on a row's right-click menu). Persisted here so
         // a hide sticks across restarts; cleared from the Settings cog's "Reset hidden sessions"

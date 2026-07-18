@@ -48,11 +48,15 @@
 #include <commctrl.h>
 #include <shobjidl.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <string_view>
+
+#include "Json.h" // Agentmaster::json — read the persisted "Enable Debug Mode" setting (PersistedDebugModeEnabled); tiny + header-only
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -153,6 +157,46 @@ namespace Agentmaster::Profiles
                 }
             }
             return false;
+        }
+
+        // Read a UTF-8 file (our settings.json is written UTF-8 by the engine AND the updater's RMW) to a
+        // wide string, tolerating a leading UTF-8 BOM. Empty on any failure/missing file. Kept tiny + local
+        // so ProfileBootstrap can read the persisted "Enable Debug Mode" flag WITHOUT the engine link (the
+        // EXE includes this header) — the same "header-only reads settings.json" pattern Updater::ReadPrefs uses.
+        inline std::wstring ReadUtf8File(const std::wstring& path)
+        {
+            std::ifstream f(std::filesystem::path{ path }, std::ios::binary);
+            if (!f)
+            {
+                return {};
+            }
+            std::string bytes{ std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>() };
+            if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB && static_cast<unsigned char>(bytes[2]) == 0xBF)
+            {
+                bytes.erase(0, 3); // strip the UTF-8 BOM
+            }
+            if (bytes.empty())
+            {
+                return {};
+            }
+            const int need = ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+            if (need <= 0)
+            {
+                return {};
+            }
+            std::wstring w(static_cast<size_t>(need), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), w.data(), need);
+            return w;
+        }
+
+        // Process-local, one-way DEBUG override. Set once at startup from the persisted "Enable Debug Mode"
+        // setting (Profiles::ApplyPersistedDebugMode), BEFORE any gate reads IsDebugPackage(). Additive — it
+        // can only turn debug ON, so it never clobbers an ad-hoc --debug / AGENTMASTER_DEBUG enable. Atomic
+        // because the startup write is later read from the engine/UI threads (write happens-before all reads).
+        inline std::atomic<bool>& DebugForced()
+        {
+            static std::atomic<bool> forced{ false };
+            return forced;
         }
 
         inline std::string WideToUtf8(std::wstring_view s)
@@ -260,6 +304,10 @@ namespace Agentmaster::Profiles
         return pfn;
     }
 
+    // Forward declaration — the cached profile resolver is defined further down (it depends on the
+    // choice-file/mutex machinery below), but PersistedDebugModeEnabled needs to name it above that point.
+    inline const std::wstring& ResolveProfileDir();
+
     // True for the AgentmasterDev_* package (the local dev loose layout). The release package is
     // Agentmaster_* — order matters everywhere this prefix pair is tested (Dev first).
     inline bool IsDevPackage()
@@ -267,11 +315,14 @@ namespace Agentmaster::Profiles
         return detail::StartsWith(PackageFamilyName(), L"AgentmasterDev");
     }
 
-    // True when the DEBUG escape hatch is active: the AGENTMASTER_DEBUG env var is set (any non-empty
-    // value) OR a `--debug` / `-debug` token is on the process commandline. This unlocks the DEV-only
-    // Auto Testing / Tests Autorunner surfaces in a RELEASE (or unpackaged) build — the same "force a
-    // package-gated feature on for QA" escape hatch Updater::IsUpdaterChannel exposes via
-    // AGENTMASTER_UPDATE_STARTUP. WindowEmperor::_dispatchCommandlineCommon strips the `--debug` token
+    // True when the DEBUG escape hatch is active, from ANY of three sources: the persisted "Enable Debug
+    // Mode" setting (Settings cog -> About, applied at startup by ApplyPersistedDebugMode) OR the
+    // AGENTMASTER_DEBUG env var set (any non-empty value) OR a `--debug` / `-debug` token on the process
+    // commandline. This unlocks the DEV-only Auto Testing / Tests Autorunner surfaces in a RELEASE (or
+    // unpackaged) build — the same "force a package-gated feature on for QA" escape hatch
+    // Updater::IsUpdaterChannel exposes via AGENTMASTER_UPDATE_STARTUP. The persisted setting is the
+    // durable, discoverable twin of the launch flag (no env/commandline needed).
+    // WindowEmperor::_dispatchCommandlineCommon strips the `--debug` token
     // from the WT commandline (it is NOT a Windows Terminal option) BEFORE the args are parsed, but
     // GetCommandLineW() still returns the original string, so this scan stays valid regardless.
     //
@@ -280,6 +331,15 @@ namespace Agentmaster::Profiles
     // UI gates cache their verdict) — relaunch, or set AGENTMASTER_DEBUG in the environment, to persist.
     inline bool IsDebugPackage()
     {
+        // The persisted "Enable Debug Mode" setting (Settings cog -> About) forces this on via a
+        // process-local, one-way override applied at startup (ApplyPersistedDebugMode). Checked LIVE
+        // (before the cache) so it composes with the env/commandline sources without disturbing their
+        // one-time scan — and so a caller that ran before the startup apply still sees the right verdict
+        // on its next call.
+        if (detail::DebugForced().load(std::memory_order_relaxed))
+        {
+            return true;
+        }
         // Process-lifetime constant (env + commandline never change mid-run) — cache so the hot gate
         // sites (per-card board rebuilds, per-settings-push) don't rescan the commandline every call.
         static const bool debug = []() {
@@ -290,6 +350,37 @@ namespace Agentmaster::Profiles
             return detail::CommandLineHasFlag(L"debug");
         }();
         return debug;
+    }
+
+    // True when the persisted "Enable Debug Mode" setting is ON in the ACTIVE profile's settings.json
+    // (the AppSettings `debugMode` field the Settings cog's About tab writes). A header-only read — the
+    // EXE cannot link the engine's LoadAppSettings, so this parses the one key directly, mirroring how
+    // Updater::ReadPrefs reads its own settings.json keys. Any missing file / parse failure => false.
+    inline bool PersistedDebugModeEnabled()
+    {
+        const std::wstring path = ResolveProfileDir() + L"\\settings.json";
+        const auto parsed = json::Parse(detail::ReadUtf8File(path));
+        return parsed && parsed->type == json::Value::Type::Obj && parsed->BoolAt(L"debugMode", false);
+    }
+
+    // Turn the DEBUG escape hatch ON for this process (idempotent, one-way — never disables). Feeds
+    // IsDebugPackage()/IsDevOrDebugPackage() through the process-local override, so it is the programmatic
+    // equivalent of passing --debug. Used by ApplyPersistedDebugMode; not otherwise called.
+    inline void ForceDebugMode()
+    {
+        detail::DebugForced().store(true, std::memory_order_relaxed);
+    }
+
+    // Apply the persisted "Enable Debug Mode" setting: if settings.json turns it on, force the escape
+    // hatch for this process. Call ONCE at startup — AFTER the profile is resolved and BEFORE engine init
+    // or any UI reads IsDebugPackage() (WindowEmperor::HandleCommandlineArgs is the single caller). This
+    // is what makes the cog toggle take effect on the NEXT start, exactly like relaunching with --debug.
+    inline void ApplyPersistedDebugMode()
+    {
+        if (PersistedDebugModeEnabled())
+        {
+            ForceDebugMode();
+        }
     }
 
     // Dev package OR the debug escape hatch — the predicate every Auto Testing / Tests Autorunner

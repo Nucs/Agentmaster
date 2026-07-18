@@ -567,6 +567,14 @@ void WindowEmperor::HandleCommandlineArgs(int nCmdShow)
         }
     }
 
+    // Agentmaster (Enable Debug Mode; ProfileBootstrap.h): with the profile resolved — and BEFORE engine
+    // init or any UI reads IsDebugPackage() — apply the persisted "Enable Debug Mode" setting (the
+    // Settings cog's About toggle). It is the durable twin of the --debug / AGENTMASTER_DEBUG launch flag:
+    // when settings.json turns it on, this forces the same escape hatch (a process-local one-way override)
+    // that unlocks the DEV-only Auto Testing / Tests Autorunner surfaces in a Release install. A no-op when
+    // off / on first launch (no settings.json yet). Kept off the env block, so nothing leaks to child shells.
+    ::Agentmaster::Profiles::ApplyPersistedDebugMode();
+
     // Agentmaster ([startup] timing): the profile is resolved — safe to log now. This anchors the
     // exe prelude (single-instance handoff + profile resolution) since process creation; the dll-side
     // _OnFirstLayout lines (later, larger +Nms) continue the same timeline in the same hooks.log.

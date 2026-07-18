@@ -688,6 +688,7 @@ namespace Agentmaster
         o.Set(L"summaryPanelWidthFraction", json::Value::MkNum(s.summaryPanelWidthFraction));
         o.Set(L"summaryPanelHeightFraction", json::Value::MkNum(s.summaryPanelHeightFraction));
         o.Set(L"allowUpdatePrerelease", json::Value::MkBool(s.allowUpdatePrerelease));
+        o.Set(L"debugMode", json::Value::MkBool(s.debugMode)); // About-tab "Enable Debug Mode" — the durable --debug twin (ProfileBootstrap.h IsDebugPackage)
         o.Set(L"updateSkippedVersion", json::Value::MkStr(s.updateSkippedVersion));
         o.Set(L"updatePostponedUntilUnixMs", json::Value::MkNum(static_cast<double>(s.updatePostponedUntilUnixMs)));
         // System notifications (the cog's "Notifications" tab): the Running -> X toast switches.
@@ -835,6 +836,9 @@ namespace Agentmaster
         // Updater (Updater.h): the prerelease opt-in + the skip/postpone state (the latter two are
         // written OUTSIDE the cog form by the updater's JSON RMW; the cog's Save preserves them).
         s.allowUpdatePrerelease = v.BoolAt(L"allowUpdatePrerelease", false);
+        // Agentmaster (debug escape hatch; ProfileBootstrap.h): the About-tab "Enable Debug Mode" toggle —
+        // the durable twin of --debug. Applied at startup via Profiles::ApplyPersistedDebugMode; default OFF.
+        s.debugMode = v.BoolAt(L"debugMode", false);
         s.updateSkippedVersion = v.StrAt(L"updateSkippedVersion");
         s.updatePostponedUntilUnixMs = v.I64At(L"updatePostponedUntilUnixMs", 0);
         // System notifications (the cog's "Notifications" tab). Every switch defaults ON so a
